@@ -11,7 +11,11 @@ Routes:
   GET /api/covers/caa/{rg_mbid}          — a phantom album's Cover Art
                                             Archive front image, fronted
                                             with a cache policy the browser
-                                            can use (see _caa_fetch).
+                                            can use (see _art_lookup).
+  GET /api/covers/art?url=…              — any other outside cover the
+                                            browser was handed (a streamed
+                                            track's provider art), fetched
+                                            only from _ART_SOURCES.
 
 Resolved covers carry an `immutable` Cache-Control. The sentinel 404 is
 served with a short max-age so a manual rescan / new disk file can
@@ -20,13 +24,14 @@ unblock the next request.
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections import OrderedDict
-from typing import Dict
+from typing import Dict, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, Path as FPath
+from fastapi import APIRouter, HTTPException, Path as FPath, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from sqlalchemy import text
@@ -74,99 +79,185 @@ _PHOTO_WAIT_BUDGET = 2.5
 _photo_last_call = 0.0
 
 
-# Cover Art Archive front images for phantom albums (albums.cover_url is a
-# CAA hotlink for the whole phantom layer). Hotlinked from the browser, CAA
-# answers 307 → archive.org 302 → 200 with no Cache-Control (heuristic
-# freshness only) and its 404s carry none either — so a shelf of phantom
-# albums re-walked the redirects on every render and re-asked CAA for every
-# artless release group. Fronted here, the browser keeps a cover for a month
-# and a miss for a day. The bytes stay in a bounded process cache — the art
-# is CAA's, no covers row is minted for it.
+# Covers from outside the node: a phantom album's Cover Art Archive front
+# (albums.cover_url is a CAA hotlink for the whole phantom layer) and a
+# streamed track's provider art (playback.queue.resolved_artwork). The
+# browser asks the node for every one of them, never the image host: a
+# browser on the LAN would tell that host its address, and an app's web view
+# loads only the node's origin. Hotlinked, CAA also answers 307 →
+# archive.org 302 → 200 with no Cache-Control (heuristic freshness only) and
+# its 404s carry none either — so a shelf of phantom albums re-walked the
+# redirects on every render and re-asked CAA for every artless release
+# group. Fronted here, the browser keeps a cover for a month and a miss for
+# a day. The bytes stay in a bounded process cache — the art is its
+# source's, no covers row is minted for it.
 _CAA_FRONT = "https://coverartarchive.org/release-group/{rg}/front-500"
-_CAA_MAX_AGE = 30 * 86400       # the URL is not content-addressed: no `immutable`
-_CAA_MISS_MAX_AGE = 86400
-_CAA_CACHE_ENTRIES = 256        # ≈ 15 MB of JPEG at CAA's front-500 size
-_caa_cache: "OrderedDict[str, tuple[int, str, bytes]]" = OrderedDict()
-_caa_inflight: Dict[str, asyncio.Future] = {}
+_ART_MAX_AGE = 30 * 86400       # CAA's URL is not content-addressed: no `immutable`
+_ART_MISS_MAX_AGE = 86400
+_ART_CACHE_ENTRIES = 512
+_ART_CACHE_BYTES = 24 * 2**20   # ≈ 400 covers at CAA's front-500 and Deezer's 1000 px
+_ART_MAX_BYTES = 2 * 2**20      # one image; a provider's largest is ~0.3 MB
+_ART_MAX_HOPS = 3               # CAA takes two: archive.org, then one of its data nodes
+_RASTER = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"})
 
-# Circuit breaker for the upstream. The images live on archive.org, which
-# goes offline for hours at a time (2026-09-12: 503 "Temporarily Offline",
-# 30 s connect stalls). Without a breaker every phantom cover on a cold
-# node cost a 10 s upstream timeout, held one of the browser's ~6
-# connections to the origin meanwhile (artist photos share that pool), and
-# was retried a minute later. Tripped by _CAA_TRIP_FAILURES failures in a
-# row — archive.org throws sporadic 503s while healthy, one proves nothing
-# — the breaker lets ONE request through at a time as the probe and answers
-# every other miss at once with the deferred 404; the first definite answer
-# closes it. No timer and no api_cooldown row: a probe is the recovery
-# signal here, whereas a rate-limit ban is what api_cooldown waits out.
-_CAA_TRIP_FAILURES = 3
-_caa_failures = 0               # consecutive upstream failures; a definite answer resets
-_caa_open = False
+# What the node fetches outside art from: each source by the one URL shape it
+# hands out, matched whole, and the hosts its redirects may lead to (None: a
+# redirect is no art — Deezer's leads to its own blank placeholder). The
+# browser can make the node fetch nothing else: no open proxy. A provider
+# plugin whose art lives elsewhere shows no cover until its host is added
+# here.
+_ART_SOURCES = {
+    "caa": (re.compile(r"https://coverartarchive\.org/release-group/[0-9a-f]{8}-[0-9a-f]{4}-"
+                       r"[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/front-500"),
+            re.compile(r"(?:[a-z0-9-]+\.)*archive\.org")),
+    # Deezer's catalog art (cover_xl / cover_big off its public API), for the
+    # core resolve and the bring-your-own lossless provider alike; the CDN's
+    # older name is in phantoms minted before 2026-06-12.
+    "deezer": (re.compile(r"https://(?:cdn-images|e-cdns-images)\.dzcdn\.net/images/cover/"
+                          r"[0-9a-f]{32}/\d{2,4}x\d{2,4}-\d{6}-\d{1,3}-\d-\d\.jpg"), None),
+    # The demo channel's matched video (streaming/youtube.py builds the URL).
+    "youtube": (re.compile(r"https://i\.ytimg\.com/vi/[A-Za-z0-9_-]{11}/hqdefault\.jpg"), None),
+}
+
+_art_cache: "OrderedDict[str, tuple[int, str, bytes]]" = OrderedDict()
+_art_cache_bytes = 0
+_art_inflight: Dict[str, tuple[str, asyncio.Task]] = {}   # url -> (source, its fetch)
+_refused_hosts: set = set()     # logged once each; capped — the route is open to the LAN
+
+# Circuit breaker per source. CAA's images live on archive.org, which goes
+# offline for hours at a time (2026-09-12: 503 "Temporarily Offline", 30 s
+# connect stalls). Without a breaker every phantom cover on a cold node cost
+# a 10 s upstream timeout, held one of the browser's ~6 connections to the
+# origin meanwhile (artist photos share that pool), and was retried a minute
+# later. Tripped by _ART_TRIP_FAILURES failures in a row — archive.org
+# throws sporadic 503s while healthy, one proves nothing — the breaker lets
+# ONE request through at a time as the probe and answers every other miss
+# at once with the deferred 404; the first definite answer closes it. No
+# timer and no api_cooldown row: a probe is the recovery signal here,
+# whereas a rate-limit ban is what api_cooldown waits out.
+_ART_TRIP_FAILURES = 3
+_art_failures: Dict[str, int] = {}  # source -> consecutive upstream failures; a definite answer resets
+_art_open: set = set()              # sources whose breaker is open
 
 
-async def _caa_fetch(rg: str) -> tuple[int, str, bytes]:
-    """(status, mime, body): 200 with the image, 404 for a release group
-    without art, 502 for anything else (unreachable, a 5xx) — never raises.
-    While the breaker is open every probe fails the same way: the state
-    change is the warning, the probes are debug noise."""
+def _art_source(url: str) -> Optional[str]:
+    """The source whose URL shape this is, or None — not one the node fetches."""
+    for name, (shape, _hops) in _ART_SOURCES.items():
+        if shape.fullmatch(url):
+            return name
+    return None
+
+
+async def _art_fetch(source: str, url: str) -> tuple[int, str, bytes]:
+    """(status, mime, body): 200 with the image; 404 for no art at that URL —
+    the host's 404, a redirect off the source's hosts, a body that is no
+    raster image or is over the size cap; 502 for anything else
+    (unreachable, a 5xx) — never raises. Nothing of the person goes
+    upstream: the node asks with no cookie, no referrer and its own
+    address. While the source's breaker is open every probe fails the same
+    way: the state change is the warning, the probes are debug noise."""
+    hops = _ART_SOURCES[source][1]
+    quiet = logging.DEBUG if source in _art_open else logging.WARNING
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(_CAA_FRONT.format(rg=rg))
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for _ in range(_ART_MAX_HOPS + 1):
+                async with client.stream("GET", url) as resp:
+                    nxt = resp.next_request
+                    if nxt is not None:
+                        if (hops is None or nxt.url.scheme != "https"
+                                or not hops.fullmatch(nxt.url.host)):
+                            logger.debug("%s redirects %s off its hosts, to %s", source, url, nxt.url)
+                            return 404, "", b""
+                        url = str(nxt.url)
+                        continue
+                    if resp.status_code in (404, 410):
+                        return 404, "", b""
+                    if resp.status_code != 200:
+                        logger.log(quiet, "%s answered %s for %s", source, resp.status_code, url)
+                        return 502, "", b""
+                    mime = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if mime not in _RASTER:
+                        logger.warning("%s served %r, not an image, for %s", source, mime, url)
+                        return 404, "", b""
+                    body = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        body += chunk
+                        if len(body) > _ART_MAX_BYTES:
+                            logger.warning("%s cover over %d bytes: %s", source, _ART_MAX_BYTES, url)
+                            return 404, "", b""
+                    return (200, mime, bytes(body)) if body else (404, "", b"")
     except httpx.HTTPError as e:
-        logger.log(logging.DEBUG if _caa_open else logging.WARNING,
-                   "CAA fetch failed for %s: %s %s", rg, type(e).__name__, e)
+        logger.log(quiet, "%s fetch failed for %s: %s %s", source, url, type(e).__name__, e)
         return 502, "", b""
-    if resp.status_code == 200 and resp.content:
-        return 200, resp.headers.get("content-type", "image/jpeg"), resp.content
-    if resp.status_code == 404:
-        return 404, "", b""
-    logger.log(logging.DEBUG if _caa_open else logging.WARNING,
-               "CAA answered %s for %s", resp.status_code, rg)
-    return 502, "", b""
+    logger.warning("%s redirects more than %d times for %s", source, _ART_MAX_HOPS, url)
+    return 404, "", b""
 
 
-def _caa_settle(status: int) -> None:
-    """Feed one upstream outcome to the breaker."""
-    global _caa_failures, _caa_open
+def _art_settle(source: str, status: int) -> None:
+    """Feed one upstream outcome to the source's breaker."""
     if status in (200, 404):
-        if _caa_open:
-            logger.info("CAA reachable again after %d failed fetches", _caa_failures)
-        _caa_failures = 0
-        _caa_open = False
+        if source in _art_open:
+            logger.info("%s reachable again after %d failed fetches", source, _art_failures[source])
+            _art_open.discard(source)
+        _art_failures[source] = 0
         return
-    _caa_failures += 1
-    if not _caa_open and _caa_failures >= _CAA_TRIP_FAILURES:
-        _caa_open = True
-        logger.warning("CAA unreachable (%d fetches failed in a row) — "
-                       "probing one request at a time", _caa_failures)
+    failures = _art_failures[source] = _art_failures.get(source, 0) + 1
+    if source not in _art_open and failures >= _ART_TRIP_FAILURES:
+        _art_open.add(source)
+        logger.warning("%s unreachable (%d fetches failed in a row) — "
+                       "probing one request at a time", source, failures)
 
 
-async def _caa_lookup(rg: str) -> tuple[int, str, bytes]:
-    """Cached, single-flight: a shelf on two devices asks CAA once per
-    release group. Only definite answers (200/404) are remembered."""
-    hit = _caa_cache.get(rg)
-    if hit is not None:
-        _caa_cache.move_to_end(rg)
-        return hit
-    fut = _caa_inflight.get(rg)
-    if fut is not None:
-        return await fut
-    if _caa_open and _caa_inflight:
-        return 503, "", b""     # the probe is already in flight
-    fut = asyncio.get_running_loop().create_future()
-    _caa_inflight[rg] = fut
+def _art_remember(url: str, result: tuple[int, str, bytes]) -> None:
+    global _art_cache_bytes
+    _art_cache[url] = result
+    _art_cache_bytes += len(result[2])
+    while len(_art_cache) > _ART_CACHE_ENTRIES or _art_cache_bytes > _ART_CACHE_BYTES:
+        _art_cache_bytes -= len(_art_cache.popitem(last=False)[1][2])
+
+
+async def _art_fetch_settled(source: str, url: str) -> tuple[int, str, bytes]:
     try:
-        result = await _caa_fetch(rg)
+        result = await _art_fetch(source, url)
     finally:
-        del _caa_inflight[rg]
-    _caa_settle(result[0])
+        del _art_inflight[url]
+    _art_settle(source, result[0])
     if result[0] in (200, 404):
-        _caa_cache[rg] = result
-        while len(_caa_cache) > _CAA_CACHE_ENTRIES:
-            _caa_cache.popitem(last=False)
-    fut.set_result(result)
+        _art_remember(url, result)
     return result
+
+
+async def _art_lookup(source: str, url: str) -> tuple[int, str, bytes]:
+    """Cached, single-flight: a shelf on two devices asks the source once per
+    cover. Only definite answers (200/404) are remembered. The fetch is a
+    task of its own, so a browser that goes away mid-fetch strands no one
+    waiting on the same cover."""
+    hit = _art_cache.get(url)
+    if hit is not None:
+        _art_cache.move_to_end(url)
+        return hit
+    pending = _art_inflight.get(url)
+    if pending is None:
+        if source in _art_open and any(s == source for s, _ in _art_inflight.values()):
+            return 503, "", b""     # the probe is already in flight
+        pending = _art_inflight[url] = (source, asyncio.create_task(_art_fetch_settled(source, url)))
+    return await asyncio.shield(pending[1])
+
+
+def _art_response(result: tuple[int, str, bytes]) -> Response:
+    status, mime, body = result
+    if status == 200:
+        return Response(content=body, media_type=mime,
+                        headers={"Cache-Control": f"public, max-age={_ART_MAX_AGE}",
+                                 "X-Content-Type-Options": "nosniff"})
+    if status == 404:
+        return _no_art()
+    return _defer_cover()   # upstream trouble: the lazy <img> retries on a later render
+
+
+def _no_art() -> Response:
+    return Response(status_code=404, content=b"",
+                    headers={"Cache-Control": f"public, max-age={_ART_MISS_MAX_AGE}"})
 
 
 @router.get("/caa/{rg_mbid}")
@@ -175,14 +266,23 @@ async def get_cover_caa(rg_mbid: str = FPath(..., min_length=36, max_length=36))
         rg = str(uuid.UUID(rg_mbid))
     except ValueError:
         raise HTTPException(status_code=404, detail="not a release group id")
-    status, mime, body = await _caa_lookup(rg)
-    if status == 200:
-        return Response(content=body, media_type=mime,
-                        headers={"Cache-Control": f"public, max-age={_CAA_MAX_AGE}"})
-    if status == 404:
-        return Response(status_code=404, content=b"",
-                        headers={"Cache-Control": f"public, max-age={_CAA_MISS_MAX_AGE}"})
-    return _defer_cover()   # upstream trouble: the lazy <img> retries on a later render
+    return _art_response(await _art_lookup("caa", _CAA_FRONT.format(rg=rg)))
+
+
+@router.get("/art")
+async def get_cover_art(url: str = Query(...)):
+    """An outside cover the browser was handed — a streamed track's provider
+    art, any phantom cover — fetched by the node if its URL has one of
+    _ART_SOURCES' shapes; any other is no art, and nothing is fetched."""
+    source = _art_source(url)
+    if source is None:
+        host = re.match(r"[a-z]+://([a-z0-9.-]{1,100})", url, re.IGNORECASE)
+        host = host.group(1).lower() if host else "?"
+        if host not in _refused_hosts and len(_refused_hosts) < 32:
+            _refused_hosts.add(host)
+            logger.info("cover refused: %s is not an image host the node fetches from", host)
+        return _no_art()
+    return _art_response(await _art_lookup(source, url))
 
 
 def _defer_cover() -> Response:

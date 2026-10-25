@@ -40,6 +40,7 @@ code disagree, the code is what this file records and § 14 names the doc.
 - [UI] Optional AI tier that picks among real MusicBrainz candidates for what the rules left — `canon/ai_canon.py: ai_canonize_stream`; `PUT /api/settings/ai/canonization`, `POST …/canonization/run`
 - [auto] Covers: embedded picture → image file in the folder → Last.fm album image; stored as WebP ≤ 1024 px — `covers.py: resolve_cover_for_folder`, `TARGET_MAX_DIM`
 - [auto] Phantom and HQPlayer-held albums take the Cover Art Archive front — `caa.py: fill_held_album_covers`; `GET /api/covers/caa/{rg_mbid}`
+- [auto] Every outside cover the Web UI shows — a Cover Art Archive front, a streamed track's provider art — is fetched and served by the node, from a fixed list of image hosts only; the browser asks no image host itself — `routers/covers.py: _ART_SOURCES`; `GET /api/covers/art?url=`; `static/app-shell.js: artSrc`
 - [auto] Artist photos from the Deezer public API, namesakes settled by album titles — `deezer_photos.py: fetch_deezer_photo_url`
 - [auto] Lyrics: LRCLIB (plain and synced), Genius (plain, with the owner's token) as fallback — `lrclib.py: LrclibService`; `genius.py: GeniusService`
 - [API][AI] Lyrics are served parsed (`synced_lyrics` as time + text) for owned files and read by the assistant; the Web UI shows none — `GET /api/player/lyrics/{media_file_id}`; `mcp/assistant_server.py: get_lyrics`

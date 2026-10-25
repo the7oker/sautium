@@ -108,8 +108,9 @@ A. Outbound destinations. List every host the software can connect to, with
        tailnet peers), backend/hqp_library.py, backend/hqplayer_client.py,
        backend/playback/ (HQPlayer and DLNA renderers on the LAN: control,
        and an HQPlayer's library read over its control port),
-     backend/static/index.html (requests the BROWSER makes when it opens the
-       Web UI page).
+     backend/static/index.html and artSrc in backend/static/app-shell.js
+       (requests the BROWSER makes when it opens the Web UI page; a cover
+       from outside the node is asked of the node).
    Then run `git grep -nE 'https?://[a-zA-Z0-9.-]+' -- backend desktop worker mcp ':!mcp/uv.lock'`
    and account for every host you did not already list.
 
@@ -256,6 +257,12 @@ and by design; the report should list them as matches, not discrepancies:
   the directory (with the address the edge saw); boxed envelopes for the
   master's mailbox; a peppered hash of the requesting address beside each
   timestamped root.
+- The **cover routes take no signature** (`/api/covers/*`: an `<img>`
+  cannot sign one), so anyone on the LAN can make the node fetch an outside
+  cover: only a Cover Art Archive front, Deezer's catalog art or a YouTube
+  thumbnail, each by its exact URL shape (`_ART_SOURCES` in
+  `backend/routers/covers.py`), redirects only into the Internet Archive for
+  Cover Art Archive, raster images up to 2 MiB.
 - The audition downloader (yt-dlp) **updates itself from PyPI** at every
   backend start (`backend/streaming/service.py`) — a supply-chain channel
   the project accepts knowingly, because the tool breaks weekly otherwise.

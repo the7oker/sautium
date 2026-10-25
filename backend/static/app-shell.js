@@ -149,20 +149,30 @@
      caches the result in covers.id. Returns "" when neither is available
      so callers fall back to a gradient placeholder. */
 
-  // A phantom album's Cover Art Archive hotlink → our /api/covers/caa/{rg}
-  // front: CAA's redirect chain is uncacheable and its images carry no
-  // Cache-Control, so the browser re-walked it on every render; the route
-  // answers with a month of cache (a day for "no art").
+  // A cover from outside the node — a phantom album's Cover Art Archive
+  // front, a streamed track's provider art — is the node's to fetch and
+  // serve: a browser on the LAN would tell the image host its address, and an
+  // app's web view loads only the node's origin. A CAA hotlink goes to its
+  // release group's /api/covers/caa/{rg} (CAA's redirect chain is uncacheable
+  // and its images carry no Cache-Control; the route answers with a month of
+  // cache, a day for "no art"), any other URL to /api/covers/art, which
+  // fetches only the image hosts the node knows and says "no art" for the
+  // rest. encodeURIComponent leaves ' as it is, and these URLs land in quoted
+  // inline handlers (artistAvatarInner).
   const CAA_FRONT = /^https:\/\/coverartarchive\.org\/release-group\/([0-9a-f-]{36})\/front-500$/;
-  function caaSrc(url) {
-    const m = CAA_FRONT.exec(url || '');
-    return m ? '/api/covers/caa/' + m[1] : url;
+  function artSrc(url) {
+    if (!url) return '';
+    if (/^\/(?!\/)/.test(url)) return url;     // the node's own already
+    const m = CAA_FRONT.exec(url);
+    return m ? '/api/covers/caa/' + m[1]
+      : '/api/covers/art?url=' + encodeURIComponent(url).replace(/'/g, '%27');
   }
+  window.artSrc = artSrc;   // player.js: the Media Session's artwork
 
   function coverUrl(item) {
     if (!item) return '';
     // External cover (Cover Art Archive) for phantom albums with no local file.
-    if (item.cover_url) return caaSrc(item.cover_url);
+    if (item.cover_url) return artSrc(item.cover_url);
     if (item.cover_id) return '/api/covers/' + encodeURIComponent(item.cover_id);
     if (item.media_file_id != null) {
       return '/api/covers/by-media/' + encodeURIComponent(item.media_file_id);
@@ -171,12 +181,13 @@
   }
 
   // Paint an <img> from the first URL that actually loads, then hide so the
-  // gradient placeholder shows. The provider (Deezer) art is the fallback for a
-  // phantom CAA cover — ~a quarter of phantom release-groups have no front art in
+  // gradient placeholder shows. The provider art is the fallback for a phantom
+  // CAA cover — ~a quarter of phantom release-groups have no front art in
   // MusicBrainz, so the CAA URL 404s and we swap to the streamed source's cover.
+  // Callers hand the provider's own URL: artSrc makes each one the node's.
   function paintCoverImg(img, ...urls) {
     if (!img) return;
-    const list = urls.filter(Boolean);
+    const list = urls.map(artSrc).filter(Boolean);
     let i = 0;
     const tryNext = () => {
       if (i >= list.length) { img.onerror = null; img.hidden = true; return; }
@@ -1737,7 +1748,7 @@
       // sheet's <img>, where assigning src aborts the load in flight, nothing
       // here cancels a probe, so it carries the generation it belongs to.
       const gen = this.coverGen;
-      const urls = [coverUrl(detail), detail && detail.provider_cover_url].filter(Boolean);
+      const urls = [coverUrl(detail), artSrc(detail && detail.provider_cover_url)].filter(Boolean);
       let i = 0;
       const tryNext = () => {
         if (i >= urls.length || gen !== this.coverGen) return;
@@ -4593,7 +4604,7 @@
       items.map(a => {
         const c = coverPlaceholderColors(a.title || '');
         const cover = a.cover_url
-          ? `<img src="${escapeHtml(caaSrc(a.cover_url))}" alt="" loading="lazy" onerror="this.style.display='none'">`
+          ? `<img src="${escapeHtml(artSrc(a.cover_url))}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : '';
         const yr = a.year ? ` · ${a.year}` : '';
         return `

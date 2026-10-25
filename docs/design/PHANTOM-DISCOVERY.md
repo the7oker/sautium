@@ -363,7 +363,10 @@ Deezer-era phantom rows purged), discography now derives from
 - **Covers: Cover Art Archive, zero server-side fetching.** The CAA
   image API is explicitly unlimited, so `cover_url` stores the canonical
   `…/release-group/{mbid}/front-500` URL and the browser resolves it
-  (tile `onerror` hides a 404). No throttle apparatus at all.
+  (tile `onerror` hides a 404). No throttle apparatus at all. (Since
+  2026-08-30 the node fronts it for the browser's cache,
+  `/api/covers/caa/{rg}`; since 2026-10-25 the browser asks no image host
+  at all — a provider's art comes through `/api/covers/art` too.)
 - **Background step re-enabled** (`_step_sync_discographies`): pure
   local-DB work now, 50 canonized artists per batch, oldest-stale first.
   `python /app/discography.py` backfills the whole canonized set.

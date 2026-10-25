@@ -899,7 +899,9 @@
         artwork.push({ src: '/api/covers/' + meta.cover_id,
                        sizes: '500x500', type: 'image/webp' });
       } else if (meta.cover_url) {
-        artwork.push({ src: meta.cover_url });
+        // The browser (and the OS's media controls) fetch this themselves:
+        // an outside cover goes through the node like every other (artSrc).
+        artwork.push({ src: window.artSrc(meta.cover_url) });
       }
       navigator.mediaSession.metadata = new MediaMetadata({
         title: meta.title || '',
