@@ -137,12 +137,17 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
         return out, set()
     logger.debug("%d of %d texts on the CPU: over %s's share alone, or refused by it", len(cpu),
                  len(texts), device)
-    # One at a time: these are the call's longest texts, and a padded batch of
-    # them builds its mask at texts x length² (XLM-R's attention path)
-    vectors, left = _encode_on(_cpu_copy(name), [texts[i] for i in cpu], 1, "cpu")
-    for j, i in enumerate(cpu):
-        out[i] = vectors[j]
-    return out, {cpu[j] for j in left}
+    # One at a time, each its own try: these are the call's longest texts — a
+    # padded batch of them builds its mask at texts x length² (XLM-R's
+    # attention path) — and one the CPU cannot take costs none before it
+    model = _cpu_copy(name)
+    left_out: Set[int] = set()
+    for i in cpu:
+        vectors, left = _encode_on(model, [texts[i]], 1, "cpu")
+        out[i] = vectors[0]
+        if left:
+            left_out.add(i)
+    return out, left_out
 
 
 # The devices whose refusal was said, until a pass encodes on them without

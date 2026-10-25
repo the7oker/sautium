@@ -27,8 +27,8 @@ _load_events: dict[str, threading.Event] = {}
 # thread-safe — two concurrent from_pretrained calls can hand one loader
 # meta tensors ("Cannot copy out of meta tensor" on .to(device)). The
 # passes' loads take it too — the text encoder's (a pass's CPU copy among
-# them), the instrument pair's — and a factory that loads the text encoder
-# takes it again: re-entrant.
+# them), CLAP's, the instrument pair's — and a factory that loads one of
+# them takes it again: re-entrant.
 _factory_lock = threading.RLock()
 # The startup pre-warm chain (main.lifespan), from its first load to its
 # last — the gaps between two loads included.

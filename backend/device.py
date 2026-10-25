@@ -19,6 +19,7 @@ Tiers:
 
 import collections
 import contextlib
+import errno
 import logging
 import functools
 import os
@@ -98,15 +99,19 @@ def empty_cache(device: Optional[str] = None) -> None:
 
 # What torch's RuntimeErrors say of memory it could not have (torch 2.12): CUDA
 # and MPS out of memory, an MPS buffer over the device's largest, cuBLAS's
-# workspace, the CPU allocator on POSIX and on Windows
+# workspace, the CPU allocator on POSIX and on Windows, a weights file's mmap
+# (ENOMEM's own words)
 _OUT_OF_MEMORY = ("out of memory", "invalid buffer size", "cublas_status_alloc_failed",
-                  "can't allocate memory", "not enough memory")
+                  "can't allocate memory", "cannot allocate memory", "not enough memory")
 
 
 def out_of_memory(exc: BaseException) -> bool:
     """Whether `exc` is the device out of memory for what was asked: CUDA's
-    own error, Python's, or one of torch's RuntimeErrors that says so."""
+    own error, Python's, the system's (ENOMEM), or one of torch's
+    RuntimeErrors that says so."""
     if isinstance(exc, (torch.cuda.OutOfMemoryError, MemoryError)):
+        return True
+    if isinstance(exc, OSError) and exc.errno == errno.ENOMEM:
         return True
     text = str(exc).lower()
     return isinstance(exc, RuntimeError) and any(s in text for s in _OUT_OF_MEMORY)
@@ -290,9 +295,8 @@ def _leave(lane: _Lane) -> None:
 
 
 def _give_back() -> None:
-    for fn in _at_end:
+    for fn in (*_at_end, empty_cache):
         _call(fn)
-    empty_cache()
 
 
 def _call(fn: Callable[[], None]) -> None:

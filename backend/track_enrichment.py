@@ -145,6 +145,8 @@ def run_parallel_enrichment(
 
     def _seam():
         from device import give_way
+        if cancel_flag():           # a cancelled run ends here, giving nothing way
+            return True
         if not left_the_lane and not give_way():
             left_the_lane.append(True)
         return _halted()

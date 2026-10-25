@@ -304,7 +304,7 @@ class LyricsEmbeddingGenerator:
                 sa_text("DELETE FROM lyrics_embeddings WHERE track_id = ANY(:ids)"),
                 {"ids": track_ids_to_delete},
             )
-            db.flush()
+            db.commit()     # a seam holds no write (device.give_way)
 
         from text_embedder import OutOfMemory
         stopped = None

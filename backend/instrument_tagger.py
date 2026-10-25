@@ -15,46 +15,31 @@ logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _cache: dict[str, object] = {}
-_load_events: dict[str, threading.Event] = {}
 
 
 def get_instrument_tagger(device: str):
     """Acquire process-wide singleton InstrumentEnsembleTagger on device.
 
-    Loads on first call; subsequent calls return the same instance. Single-
-    flight: concurrent callers for the same device collapse onto one load.
+    Loads on first call; subsequent calls return the same instance. A load
+    holds model_cache._factory_lock: transformers' loading patches
+    process-wide state, so no other load of the process runs beside it — and
+    a caller for the same device waits on it and finds the pair loaded.
     """
-    key = device
-    while True:
+    import model_cache
+    with _lock:
+        entry = _cache.get(device)
+    if entry is not None:
+        return entry
+    with model_cache._factory_lock:
         with _lock:
-            entry = _cache.get(key)
-            if entry is not None:
-                return entry
-            evt = _load_events.get(key)
-            if evt is None:
-                evt = threading.Event()
-                _load_events[key] = evt
-                break
-        evt.wait()
-
-    try:
-        import model_cache
+            entry = _cache.get(device)
+        if entry is not None:
+            return entry
         from ensemble_instruments import InstrumentEnsembleTagger
         tagger = InstrumentEnsembleTagger(device=device)
-        # transformers' loading patches process-wide state: not beside a
-        # search's load (no factory loads the pair, so none waits on this one)
-        with model_cache._factory_lock:
-            tagger.load()
-    except BaseException:
+        tagger.load()
         with _lock:
-            _load_events.pop(key, None)
-        evt.set()
-        raise
-
-    with _lock:
-        _cache[key] = tagger
-        _load_events.pop(key, None)
-    evt.set()
+            _cache[device] = tagger
     return tagger
 
 

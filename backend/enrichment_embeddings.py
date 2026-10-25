@@ -174,7 +174,7 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
                 sa_text("DELETE FROM artist_bio_embeddings WHERE artist_id = ANY(:ids)"),
                 {"ids": artist_ids},
             )
-            db.flush()
+            db.commit()     # a seam holds no write (device.give_way)
 
         from text_embedder import OutOfMemory
         stopped = None
@@ -311,7 +311,7 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
                 sa_text("DELETE FROM genre_desc_embeddings WHERE genre_id = ANY(:ids)"),
                 {"ids": genre_ids},
             )
-            db.flush()
+            db.commit()     # a seam holds no write (device.give_way)
 
         from text_embedder import OutOfMemory
         stopped = None

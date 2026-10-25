@@ -22,29 +22,29 @@ logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _cache: dict[Tuple[str, str], Tuple] = {}
-_load_events: dict[Tuple[str, str], threading.Event] = {}
 
 
 def get_clap_model(model_name: str, device: str):
     """Acquire process-wide singleton (ClapProcessor, ClapModel) on device.
 
-    Loads on first call; subsequent calls return the same instance. Single-
-    flight: concurrent callers for the same key collapse onto one load.
+    Loads on first call; subsequent calls return the same instance. A load
+    holds model_cache._factory_lock: transformers' loading patches
+    process-wide state, so no other load of the process runs beside it — the
+    search's CLAP factory, which loads this model holding that lock already,
+    takes it again — and a caller for the same key waits on it and finds the
+    model loaded.
     """
+    import model_cache
     key = (model_name, device)
-    while True:
+    with _lock:
+        entry = _cache.get(key)
+    if entry is not None:
+        return entry
+    with model_cache._factory_lock:
         with _lock:
             entry = _cache.get(key)
-            if entry is not None:
-                return entry
-            evt = _load_events.get(key)
-            if evt is None:
-                evt = threading.Event()
-                _load_events[key] = evt
-                break
-        evt.wait()
-
-    try:
+        if entry is not None:
+            return entry
         from device import get_model_dtype
         dtype = get_model_dtype(device)
         logger.info(f"Loading CLAP model: {model_name} on {device} ({dtype})")
@@ -55,14 +55,6 @@ def get_clap_model(model_name: str, device: str):
             import torch
             mem = torch.cuda.memory_allocated() / 1e9
             logger.info(f"CLAP loaded, GPU memory: {mem:.2f} GB")
-    except BaseException:
         with _lock:
-            _load_events.pop(key, None)
-        evt.set()
-        raise
-
-    with _lock:
-        _cache[key] = (processor, model)
-        _load_events.pop(key, None)
-    evt.set()
+            _cache[key] = (processor, model)
     return processor, model

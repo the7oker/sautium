@@ -268,7 +268,7 @@ class TextEmbeddingGenerator:
                 sa_text("DELETE FROM text_embeddings WHERE track_id = ANY(:ids)"),
                 {"ids": pending_track_ids},
             )
-            db.flush()
+            db.commit()     # a seam holds no write (device.give_way)
 
         from text_embedder import OutOfMemory
         stopped = None

@@ -359,7 +359,8 @@ def run(monkeypatch):
     monkeypatch.setattr(enrichment_embeddings, "generate_all_enrichment_embeddings",
                         step("bios and genres"))
     return types.SimpleNamespace(
-        go=lambda: track_enrichment.run_parallel_enrichment(skip_lastfm=True, skip_lyrics=True),
+        go=lambda cancel=None: track_enrichment.run_parallel_enrichment(
+            skip_lastfm=True, skip_lyrics=True, cancel_flag=cancel),
         seen=seen, steps=steps)
 
 
@@ -411,6 +412,41 @@ def test_a_stopping_node_ends_the_run_at_its_next_batch(run):
     run.go()
     assert events == ["batch 1"]
     assert run.seen == [("embeddings", AUDIO)]
+
+
+def test_a_cancelled_run_ends_at_its_next_batch_and_gives_the_pair_back(run):
+    """Cancelled, the run still holds the accelerator: no seam gives way, no
+    stage after it begins, and the pair goes inside the audio half."""
+    events, cancelled = [], []
+    run.steps["embeddings"] = _batches(events, 3, after_first=lambda: cancelled.append(True))
+    run.go(cancel=lambda: bool(cancelled))
+    assert events == ["batch 1"]
+    assert run.seen == [("embeddings", AUDIO), ("AST+PaSST released", AUDIO)]
+
+
+def test_what_runs_at_once_for_an_idle_accelerator_is_guarded_as_the_rest(caplog):
+    caplog.set_level(logging.ERROR, logger="device")
+
+    def fails():
+        raise ValueError("a callback's own failure")
+
+    device.call_when_idle(fails)        # no pass holds it: at once, nothing raised here
+    assert [r.exc_info is not None for r in caplog.records if r.name == "device"] == [True]
+
+
+def test_a_cache_that_fails_to_return_keeps_neither_the_lane_nor_the_callbacks(monkeypatch,
+                                                                             caplog):
+    caplog.set_level(logging.ERROR, logger="device")
+
+    def fails(dev=None):
+        raise RuntimeError("the allocator's own failure")
+
+    monkeypatch.setattr(device, "empty_cache", fails)
+    calls = []
+    with device.heavy_pass("a pass"):
+        device.call_when_idle(lambda: calls.append("idle"))
+    assert calls == ["idle"] and _holder() is None
+    assert len([r for r in caplog.records if r.name == "device"]) == 1
 
 
 # ── a stream's analysis and its lyrics ─────────────────────────────────────
@@ -498,6 +534,24 @@ def test_a_stopped_enricher_takes_no_job_and_drops_the_queued(monkeypatch):
     release.set()
     enricher._pool.shutdown(wait=True)
     assert began == ["under way"]
+
+
+def test_a_streams_job_is_handed_to_its_worker_under_the_lock_its_stop_takes(monkeypatch):
+    """A stop between the check and the hand-over would have the pool refuse
+    the job into the media proxy's hook."""
+    from streaming import enrichment
+    handed = []
+    enricher = enrichment.PreviewEnricher()
+    enricher._fpcalc, enricher._max_pending = True, None
+    monkeypatch.setattr(enricher, "_pool", types.SimpleNamespace(
+        submit=lambda *a: handed.append(enricher._lock.locked())))
+    enricher.submit("a track", b"stream", (60.0,), True, "youtube")
+    lyrics = enrichment.PreviewLyricsEnricher()
+    monkeypatch.setattr(lyrics, "_pool", types.SimpleNamespace(
+        submit=lambda *a: handed.append(lyrics._lock.locked())))
+    lyrics.submit(types.SimpleNamespace(track_id=uuid.uuid4(), title="a title", artist="an artist",
+                                        album=None, duration=None))
+    assert handed == [True, True]
 
 
 def test_a_streams_analyser_takes_the_instrument_pair_anew_for_every_job(monkeypatch):

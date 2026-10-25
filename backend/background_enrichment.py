@@ -627,7 +627,9 @@ def _run_local_model_steps() -> Tuple[Dict[str, Any], bool]:
     Model-bound rather than network-bound, but the same drain contract: a
     full batch means more behind it, and the encoder is a process-wide
     singleton (text_embedder.get_text_embedder), so consecutive passes pay
-    the load once. A node with no ML runtime has nothing to run at all."""
+    the load once — on MPS each pass that sends texts to the CPU loads that
+    copy again (text_embedder.encode). A node with no ML runtime has nothing
+    to run at all."""
     summary: Dict[str, Any] = {}
     import hardware_profile
     profile = hardware_profile.resolve()

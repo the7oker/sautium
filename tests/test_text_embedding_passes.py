@@ -621,15 +621,17 @@ def test_a_pass_whose_cpu_cannot_take_a_few_tokens_either_stops(db, caplog, cpu_
 
 def test_on_mps_the_cpu_takes_its_texts_one_at_a_time(cpu_copy):
     """They are the call's longest: padded together they would build their
-    mask at texts x length², with no seam in minutes of CPU work."""
+    mask at texts x length². And one the CPU cannot take costs none of those
+    before it: each is its own try."""
     import text_embedder
-    texts = [_words(101 + i, i) for i in range(3)] + ["A short one."]
+    texts = [_words(101 + i, i) for i in range(3)] + ["A short one.", _words(104, 9) + " " + LONG]
+    cpu_copy.full = lambda texts, batch_size: any(LONG in t for t in texts)
     vectors, left_out = text_embedder.encode(Tokenized(), texts, batch_size=4, device="mps",
                                              name=NAME)
-    assert left_out == set()
-    assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
-    assert [batch_size for _, batch_size in cpu_copy.calls] == [1]
-    assert cpu_copy.forwards == [(3, 103)]       # one call of the three, a text a forward
+    assert left_out == {4} and vectors[4] is None
+    assert [float(v[0]) for v in vectors[:4]] == pytest.approx([_mark(t) for t in texts[:4]])
+    # the longest first, each alone; the one that failed tried once, then a text of a few tokens
+    assert cpu_copy.forwards == [(1, 105), (1, 3), (1, 103), (1, 102), (1, 101)]
 
 
 def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch):
@@ -664,17 +666,84 @@ def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch):
     assert seen == [(NAME, "cpu", True, True)]
 
     # a search's factory holds the lock while it loads; a pass asks meanwhile
-    passes = []
-    with model_cache._factory_lock:
-        asking = threading.Thread(target=lambda: passes.append(
-            text_embedder.get_text_embedder(NAME, "cpu")), daemon=True)
-        asking.start()
-        asking.join(0.2)
-        assert asking.is_alive()               # waiting on the lock, holding nothing
-        searched = text_embedder.get_text_embedder(NAME, "cpu")
+    passes, searched, factory_in = [], [], threading.Event()
+    asking = threading.Thread(target=lambda: passes.append(
+        text_embedder.get_text_embedder(NAME, "cpu")), daemon=True)
+
+    def factory():
+        with model_cache._factory_lock:
+            factory_in.set()
+            asking.start()
+            asking.join(0.2)
+            searched.append((asking.is_alive(), text_embedder.get_text_embedder(NAME, "cpu")))
+
+    loading = threading.Thread(target=factory, daemon=True)
+    loading.start()
+    loading.join(10)
     asking.join(10)
-    assert not asking.is_alive() and passes == [searched]
+    # neither waits for the other: the pass waited on the lock, holding nothing
+    assert not loading.is_alive() and not asking.is_alive()
+    assert searched[0][0] and passes == [searched[0][1]]
     assert seen[1:] == [(NAME, "cpu", None, True)]    # one load, the lock held
+
+
+@pytest.mark.parametrize("which", ["clap", "instruments"])
+def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, which):
+    """Loaded from a pass (a stream's analysis, the run) beside a search's
+    load, they would race it as the text encoder would; the search's CLAP
+    factory takes the lock again."""
+    import model_cache
+    held = []
+
+    def note_held():
+        got = []
+        t = threading.Thread(target=lambda: got.append(
+            model_cache._factory_lock.acquire(blocking=False)))
+        t.start()
+        t.join()
+        if got[0]:
+            model_cache._factory_lock.release()
+        held.append(not got[0])
+        return object()
+
+    if which == "clap":
+        import clap_model
+        monkeypatch.setattr(clap_model, "_cache", {})
+        monkeypatch.setattr(clap_model, "ClapProcessor", types.SimpleNamespace(
+            from_pretrained=lambda name: note_held()))
+        monkeypatch.setattr(clap_model, "ClapModel", types.SimpleNamespace(
+            from_pretrained=lambda name, torch_dtype: types.SimpleNamespace(
+                to=lambda device: types.SimpleNamespace(eval=lambda: None))))
+        with model_cache._factory_lock:            # the search's CLAP factory
+            first = clap_model.get_clap_model("clap", "cpu")
+        assert clap_model.get_clap_model("clap", "cpu") == first     # the same pair
+    else:
+        import ensemble_instruments
+        import instrument_tagger
+        monkeypatch.setattr(instrument_tagger, "_cache", {})
+
+        class Pair:
+            def __init__(self, device):
+                pass
+
+            def load(self):
+                note_held()
+
+        monkeypatch.setattr(ensemble_instruments, "InstrumentEnsembleTagger", Pair)
+        first = instrument_tagger.get_instrument_tagger("cpu")
+        assert instrument_tagger.get_instrument_tagger("cpu") is first
+    assert held == [True]                           # one load, the lock held
+
+
+def test_the_systems_own_out_of_memory_is_out_of_memory():
+    """A weights file's mmap that ENOMEM refuses — the CPU copy's load on a
+    Mac out of memory — is no other failure."""
+    import errno
+    import device
+    assert device.out_of_memory(OSError(errno.ENOMEM, "Cannot allocate memory"))
+    assert device.out_of_memory(RuntimeError(
+        "unable to mmap 2271064456 bytes from file </x>: Cannot allocate memory (12)"))
+    assert not device.out_of_memory(OSError(errno.ENOENT, "No such file or directory"))
 
 
 @pytest.mark.parametrize("kind", [*PASSES, "audio"])
