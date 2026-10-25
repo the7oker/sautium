@@ -3333,9 +3333,10 @@ Lesson: a switch moves the listening, not just the list.
   chat's reply ends at its `done`, and a reply a stop cut short goes to
   the reattach (the run gone, the messages say whether it was kept). The
   listener's handlers fail on their own — a database error in one is said
-  with its traceback, its connection kept — and it waits through the
-  selectors module, as every wait on HQPlayer does: `select.select`
-  refuses a descriptor past 1023.
+  with its traceback, its connection kept; the reconnect's sweep, which
+  makes the connect whole, is made again on a new connection — and it
+  waits through the selectors module, as every wait on HQPlayer does:
+  `select.select` refuses a descriptor past 1023.
 
 - **A range past the end is 416, never the whole file.** HQPlayer resumes
   a stream cut short with `Range: bytes=<offset>-` and appends what comes

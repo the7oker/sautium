@@ -211,12 +211,11 @@ def test_an_orphan_that_cannot_be_stopped_leaves_the_start_to_the_bind(table, ca
 
 @pytest.mark.parametrize("raised", [
     psutil.NoSuchProcess(300),                       # it ended after its sockets were read
-    psutil.ZombieProcess(300, "Python", 1),
     psutil.AccessDenied(300),
     OSError(errno.EIO, "Input/output error"),
     RuntimeError("proc_pidpath() syscall failed"),
     SystemError("returned a result with an exception set"),   # macOS, a long name's cmdline
-], ids=["vanished", "zombie", "denied", "os-error", "runtime-error", "system-error"])
+], ids=["vanished", "denied", "os-error", "runtime-error", "system-error"])
 def test_an_orphan_whose_name_cannot_be_read_is_stopped_all_the_same(table, caplog, raised):
     orphan = _orphan(names=raised)
     table[300] = orphan

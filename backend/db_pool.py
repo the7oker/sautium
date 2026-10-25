@@ -161,7 +161,8 @@ class Listener:
     an RST would swallow every later NOTIFY. A connection that fails is said
     once, then quietly retried every RETRY_S until it holds; a handler that
     fails is said with its traceback, and the connection, which did nothing
-    wrong, listens on.
+    wrong, listens on — but for the sweep, which is retried on a connection
+    made again.
     """
 
     RETRY_S = 2
@@ -216,27 +217,35 @@ class Listener:
                             failing = False
                         if sel.select(0):            # stopped while it connected
                             return
-                        self._call(self.on_connect)
-                        # By its number: a connection psycopg2 found broken
-                        # refuses fileno(), and the key would stay behind
-                        fd = conn.fileno()
-                        sel.register(fd, selectors.EVENT_READ)
-                        try:
-                            while not any(key.fileobj is wake for key, _ in sel.select()):
-                                conn.poll()
-                                if conn.notifies:
-                                    notifies = list(conn.notifies)
-                                    conn.notifies.clear()
-                                    self._call(self.on_notify, notifies)
-                        finally:
-                            sel.unregister(fd)
-                        return
+                        # The sweep is the connect's last step: one that
+                        # failed is made again on a new connection, or what
+                        # came while it was down waits for the next NOTIFY
+                        if self._call(f"its sweep failed — swept again on a connection made in "
+                                      f"{self.RETRY_S:g} s", self.on_connect):
+                            # By its number: a connection psycopg2 found broken
+                            # refuses fileno(), and the key would stay behind
+                            fd = conn.fileno()
+                            sel.register(fd, selectors.EVENT_READ)
+                            try:
+                                while not any(key.fileobj is wake for key, _ in sel.select()):
+                                    conn.poll()
+                                    if conn.notifies:
+                                        notifies = list(conn.notifies)
+                                        conn.notifies.clear()
+                                        self._call("its handler failed", self.on_notify, notifies)
+                            finally:
+                                sel.unregister(fd)
+                            return
                     except psycopg2.Error as e:
+                        if sel.select(0):            # stopped meanwhile: nothing to retry or say
+                            return
                         if not failing:
                             logger.warning("%s: %s — retried every %g s", self.name,
                                            str(e).strip(), self.RETRY_S)
                         failing = True
                     except Exception:
+                        if sel.select(0):
+                            return
                         logger.exception("%s failed — listening again in %g s", self.name,
                                          self.RETRY_S)
                     finally:
@@ -247,10 +256,13 @@ class Listener:
             finally:
                 wake.close()
 
-    def _call(self, handler, *args) -> None:
+    def _call(self, failed: str, handler, *args) -> bool:
+        """`handler(*args)`, its failure said with its traceback: False then."""
         if handler is None:
-            return
+            return True
         try:
             handler(*args)
+            return True
         except Exception:
-            logger.exception("%s: its handler failed", self.name)
+            logger.exception("%s: %s", self.name, failed)
+            return False

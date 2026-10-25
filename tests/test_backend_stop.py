@@ -115,15 +115,15 @@ def test_what_the_backend_left_that_ignores_its_terminate_is_killed_and_reaped(m
 
 class FakeProc:
     """A row of a faked process table, its calls kept in `log` in the order
-    they came. `gone` is what terminate() raises: a process that ended just
-    before its turn; `stays` outlives even its kill; `names` is what
-    reading its name raises."""
+    they came. `gone`: terminate() finds it ended just before its turn;
+    `refuses` is what its terminate() raises instead; `stays` outlives even
+    its kill; `names` is what reading its name raises."""
 
-    def __init__(self, pid, log, gone=False, stays=False, names=None):
+    def __init__(self, pid, log, gone=False, stays=False, names=None, refuses=None):
         self.pid = pid
         self.ended = False
         self.log = log
-        self._gone, self._stays, self._names = gone, stays, names
+        self._gone, self._stays, self._names, self._refuses = gone, stays, names, refuses
         self._children = []
 
     def terminate(self):
@@ -131,6 +131,8 @@ class FakeProc:
         if self._gone:
             self.ended = True
             raise psutil.NoSuchProcess(self.pid)
+        if self._refuses is not None:
+            raise self._refuses
         self.ended = not self._stays
 
     def kill(self):
@@ -182,6 +184,21 @@ def test_on_windows_the_parent_is_terminated_first_then_its_tree_past_a_gone_chi
     assert table.log == [(100, "terminate"), (101, "terminate"), (102, "terminate")]
 
 
+@pytest.mark.parametrize("raised", [OSError(errno.EIO, "TerminateProcess"), psutil.AccessDenied(101)],
+                         ids=["os-error", "denied"])
+def test_on_windows_a_child_that_refuses_its_terminate_leaves_the_rest_stopped(table, monkeypatch, caplog,
+                                                                               raised):
+    _platform(monkeypatch, "win32")
+    table._children = [FakeProc(101, table.log, refuses=raised), FakeProc(102, table.log)]
+    with caplog.at_level(logging.WARNING):
+        ServiceManager({})._stop_process(_proc(), "Backend")
+    assert table.log[:3] == [(100, "terminate"), (101, "terminate"), (102, "terminate")]
+    assert (101, "kill") in table.log                    # what it left, stopped after it
+    said = [r.getMessage() for r in caplog.records]
+    assert f"PID 101 (worker) refused its terminate: {raised!r}" in said
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
 def test_what_the_backend_left_is_stopped_past_one_gone_before_its_turn(table, monkeypatch):
     _platform(monkeypatch, "linux")
     table._children = [FakeProc(101, table.log, gone=True), FakeProc(102, table.log)]
@@ -189,7 +206,7 @@ def test_what_the_backend_left_is_stopped_past_one_gone_before_its_turn(table, m
     assert table.log == [(100, "signal"), (101, "terminate"), (102, "terminate")]
 
 
-@pytest.mark.parametrize("raised", [psutil.AccessDenied(100), PermissionError(errno.EACCES, "/proc/1/stat")],
+@pytest.mark.parametrize("raised", [psutil.AccessDenied(100), PermissionError(errno.EPERM, "/proc/1/stat")],
                          ids=["hidepid", "hidepid-psutil-6"])
 def test_a_backend_whose_processes_cannot_be_listed_is_stopped_all_the_same(table, monkeypatch, caplog,
                                                                              raised):

@@ -50,11 +50,15 @@ _KILLED_SECONDS = 5
 
 def _tell(proc: psutil.Process, how: str, *args) -> None:
     """proc.terminate(), kill() or send_signal(sig), to a process that may
-    have ended meanwhile: then it is as it was told to be."""
+    have ended meanwhile: then it is as it was told to be. One that refuses
+    — another user's, or an errno psutil passes on as it is (Windows'
+    TerminateProcess) — is said, and the rest of the stop goes on."""
     try:
         getattr(proc, how)(*args)
     except psutil.NoSuchProcess:
         pass
+    except (psutil.AccessDenied, OSError) as e:
+        logger.warning(f"PID {_named(proc)} refused its {how}: {e!r}")
 
 
 def _named(proc: psutil.Process) -> str:

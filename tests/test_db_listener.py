@@ -299,3 +299,53 @@ def test_a_stop_waits_for_a_busy_handler_only_so_long(channel, notify, monkeypat
         release.set()
     thread.join(5)
     assert not thread.is_alive()                 # it ends by itself once the handler returns
+
+
+def test_a_sweep_that_fails_is_made_again_on_a_new_connection(channel, notify, caplog):
+    """The sweep is the connect's last step: one that failed — the pool's
+    connections stale after a PostgreSQL restart — and was left so, would
+    leave what came meanwhile waiting for the next NOTIFY of its kind."""
+    heard = Heard()
+
+    def on_connect():
+        heard.on_connect()
+        if heard.connects == 1:
+            raise psycopg2.OperationalError("server closed the connection unexpectedly")
+    listener = Listener("test-listener", (channel,), heard.on_notify, on_connect)
+    with caplog.at_level(logging.INFO, logger="db_pool"):
+        listener.start()
+        try:
+            _until(lambda: heard.connects == 2)
+            _until(lambda: len(_listening(channel)) == 1)
+            notify("after")
+            _until(lambda: heard.payloads == ["after"])
+        finally:
+            listener.stop()
+    failed = [r for r in caplog.records if r.name == "db_pool" and r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in failed] == [
+        "test-listener: its sweep failed — swept again on a connection made in 0.1 s"]
+    assert failed[0].exc_info[0] is psycopg2.OperationalError
+
+
+@pytest.mark.parametrize("raised", [psycopg2.OperationalError("the database is going away"),
+                                    ValueError("not psycopg2's")], ids=["psycopg2", "other"])
+def test_a_stop_during_a_connect_that_fails_says_nothing_after_it(channel, monkeypatch, caplog, raised):
+    monkeypatch.setattr(Listener, "STOP_WAIT_S", 0.3)
+    connecting, release = threading.Event(), threading.Event()
+
+    def failing_connect(*a, **kw):
+        connecting.set()
+        assert release.wait(10)
+        raise raised
+    monkeypatch.setattr(psycopg2, "connect", failing_connect)
+    listener = Listener("test-listener", (channel,), lambda notifies: None)
+    listener.start()
+    thread = listener._thread
+    assert connecting.wait(10)
+    with caplog.at_level(logging.WARNING, logger="db_pool"):
+        listener.stop()
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    said = [r.getMessage() for r in caplog.records if r.name == "db_pool" and r.levelno >= logging.WARNING]
+    assert said == ["test-listener: still busy 0.3 s after the stop"]
