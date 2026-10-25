@@ -635,8 +635,11 @@ def test_a_cover_the_node_could_not_fetch_is_no_cover(tmp_path, proxy, renderers
     fetchable = "https://covers.example.invalid/a.jpg"
     unfetchable = "https://covers.example.invalid/b.jpg"
     jpeg = DlnaBackend._to_jpeg(_tiny_png(), "test")
-    monkeypatch.setattr(DlnaBackend, "_fetch_cover_jpeg",
-                        staticmethod(lambda url: jpeg if url == fetchable else None))
+
+    async def fetch(url):
+        return jpeg if url == fetchable else None
+
+    monkeypatch.setattr(DlnaBackend, "_fetch_cover_jpeg", staticmethod(fetch))
     r = renderers(sink=AK_CONNECT_SINK)
     q = CanonicalQueue()
     q.replace([streamed(proxy, 1, cover_url=unfetchable), streamed(proxy, 2, cover_url=fetchable)])
@@ -649,6 +652,29 @@ def test_a_cover_the_node_could_not_fetch_is_no_cover(tmp_path, proxy, renderers
     assert _hosts(first) == {"127.0.0.1"}
     assert re.search(r"<upnp:albumArtURI>http://127\.0\.0\.1:\d+/art/", second)
     assert _hosts(second) == {"127.0.0.1"}
+
+
+def test_a_renderers_cover_is_fetched_by_the_rule_of_every_outside_cover(monkeypatch):
+    """The renderer's /art/ asks only what the Web UI's covers ask
+    (covers.ART_SOURCES): a URL of a source's shape is fetched and made JPEG;
+    any other — a cover_url a share file carried, an address the node was
+    never handed — is no cover, and nothing is fetched for it."""
+    import httpx
+    deezer = ("https://cdn-images.dzcdn.net/images/cover/5718f7c81c27e0b2417e2a4c45224f8a/"
+              "1000x1000-000000-80-0-0.jpg")
+    asked = []
+
+    def handle(request):
+        asked.append(str(request.url))
+        return httpx.Response(200, headers={"content-type": "image/png"}, content=_tiny_png())
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handle), **kw))
+    assert asyncio.run(DlnaBackend._fetch_cover_jpeg(deezer))[:2] == b"\xff\xd8"
+    for url in ("http://192.0.2.1/cover.jpg", "https://covers.example.invalid/a.jpg"):
+        assert asyncio.run(DlnaBackend._fetch_cover_jpeg(url)) is None
+    assert asked == [deezer]
 
 
 def _tiny_png() -> bytes:

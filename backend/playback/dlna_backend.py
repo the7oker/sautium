@@ -21,6 +21,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
+from functools import partial
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -1105,26 +1106,22 @@ class DlnaBackend(PlayerBackend):
         return DlnaBackend._to_jpeg(bytes(row["data"]), cover_id)
 
     @staticmethod
-    def _fetch_cover_jpeg(url: str) -> Optional[bytes]:
+    async def _fetch_cover_jpeg(url: str) -> Optional[bytes]:
         """A phantom's provider/CAA cover as JPEG, fetched by the backend:
         renderers were handed the external URL and showed nothing — it is
         HTTPS, and Cover Art Archive answers with a 307 to archive.org on
-        top, neither of which a DAP's UPnP stack follows. Runs in a worker
-        thread (blocking HTTP + PIL)."""
-        import httpx
-        try:
-            with httpx.Client(timeout=8.0, follow_redirects=True) as client:
-                resp = client.get(url)
-                resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            # Cover Art Archive 404s for every release group nobody has
-            # uploaded art for — the ordinary case for a phantom, not a fault.
-            logger.debug("no cover at %s: %s", url, e.response.status_code)
+        top, neither of which a DAP's UPnP stack follows. Fetched by the rule
+        of every outside cover the node shows (covers.fetch_art: the URL
+        shapes and hosts of ART_SOURCES, the size cap); a URL of no source's
+        shape is no cover, and nothing is fetched for it."""
+        from covers import art_source, fetch_art
+        source = art_source(url)
+        if source is None:
             return None
-        except Exception as e:
-            logger.warning("phantom cover fetch failed %s: %s", url, e)
+        status, _mime, body = await fetch_art(source, url)
+        if status != 200:
             return None
-        return DlnaBackend._to_jpeg(resp.content, url) if resp.content else None
+        return await asyncio.to_thread(DlnaBackend._to_jpeg, body, url)
 
     async def _art_url(self, item: QueueItem) -> Optional[str]:
         """Renderer-fetchable cover URL: art is re-served as JPEG on the
@@ -1136,10 +1133,10 @@ class DlnaBackend(PlayerBackend):
         from streaming import service as streaming_service
         proxy = streaming_service.ensure_proxy()
         if item.cover_id:
-            sources = [(item.cover_id, self._load_cover_jpeg)]
+            sources = [(item.cover_id, partial(asyncio.to_thread, self._load_cover_jpeg))]
         elif item.preview:
             from playback.queue import resolved_artwork
-            # Same order as the web UI's coverUrl(): the queued album's own
+            # Same order as the web UI's coverUrls(): the queued album's own
             # art first, the provider's matched release only as a fallback.
             # A provider resolves a track to whichever release carries it — a
             # compilation, another edition — so its cover can be the same
@@ -1153,7 +1150,7 @@ class DlnaBackend(PlayerBackend):
         for key, loader in sources:
             tok = proxy.blob_token_for(key)
             if tok is None:
-                data = await asyncio.to_thread(loader, key)
+                data = await loader(key)
                 if data is None:
                     if loader is self._fetch_cover_jpeg:
                         self._art_misses.add(key)

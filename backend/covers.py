@@ -24,10 +24,12 @@ Public entry points:
   resolve_cover_for_media_file(db, media_file_id) -> Optional[UUID]
   resolve_cover_for_folder(db, media_file_id) -> Optional[UUID]
   process_pending(db, media_file_id) -> Optional[UUID]   # + marks row processed
+  art_source(url) / fetch_art(source, url)   # outside art, by ART_SOURCES only
 """
 
 import hashlib
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from io import BytesIO
@@ -42,6 +44,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 import api_cooldown
+from caa import CAA_FRONT_URL
 from config import settings
 from uuid_utils import NAMESPACE
 
@@ -427,6 +430,90 @@ def ingest_cover_from_url(
         source_path=source_path or url,
         source_mtime=None,
     )
+
+
+# Outside art, fetched by the node for whichever client shows it — the Web UI
+# through /api/covers/caa and /api/covers/art (routers/covers.py), a DLNA
+# renderer through its /art/ (playback/dlna_backend.py): a phantom album's
+# Cover Art Archive front, a streamed track's provider art. Each source by
+# the one URL shape the node hands out, matched whole, and the hosts its
+# redirects may lead to (None: a redirect is no art — Deezer's leads to its
+# own blank placeholder). Nothing else is fetched, whoever asks: no open
+# proxy. A provider plugin whose art lives elsewhere shows no cover until its
+# host is added here.
+_caa_prefix, _caa_suffix = CAA_FRONT_URL.split("{rg}")
+ART_SOURCES = {
+    # The URL the node mints for a phantom (caa.CAA_FRONT_URL). Cover Art
+    # Archive is a redirector to its storage at the Internet Archive: a 307
+    # to archive.org, a 302 to one of its data nodes.
+    "caa": (re.compile(re.escape(_caa_prefix)
+                       + r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                       + re.escape(_caa_suffix)),
+            re.compile(r"coverartarchive\.org|(?:[a-z0-9-]+\.)*archive\.org")),
+    # Deezer's catalog art (cover_xl / cover_big off its public API), for the
+    # core resolve and the bring-your-own lossless provider alike; the CDN's
+    # older name is in phantoms minted before 2026-06-12.
+    "deezer": (re.compile(r"https://(?:cdn-images|e-cdns-images)\.dzcdn\.net/images/cover/[0-9a-f]{32}/"
+                          r"[0-9]{2,4}x[0-9]{2,4}-[0-9]{6}-[0-9]{1,3}-[0-9]-[0-9]\.jpg"), None),
+    # The demo channel's matched video (streaming/youtube.py builds the URL).
+    "youtube": (re.compile(r"https://i\.ytimg\.com/vi/[A-Za-z0-9_-]{11}/hqdefault\.jpg"), None),
+}
+_ART_MAX_BYTES = 2 * 2**20      # one image; a provider's largest is ~0.3 MB
+_ART_MAX_HOPS = 3               # CAA takes two
+_RASTER = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"})
+
+
+def art_source(url: str) -> Optional[str]:
+    """The source whose URL shape this is, or None — not one the node fetches."""
+    for name, (shape, _hops) in ART_SOURCES.items():
+        if shape.fullmatch(url):
+            return name
+    return None
+
+
+async def fetch_art(source: str, url: str, quiet: bool = False) -> Tuple[int, str, bytes]:
+    """(status, mime, body) for a URL of `source`'s shape: 200 with the
+    image; 404 for no art at that URL — the host's 404, a redirect off the
+    source's hosts, an image over the size cap; 502 for anything else
+    (unreachable, a 5xx, a body that is no raster image) — never raises.
+    Nothing of the client goes upstream: the node asks with no cookie, no
+    referrer and its own address. `quiet` logs the upstream's failures at
+    debug: the caller's breaker is open, its opening was the warning."""
+    hops = ART_SOURCES[source][1]
+    level = logging.DEBUG if quiet else logging.WARNING
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for _ in range(_ART_MAX_HOPS + 1):
+                async with client.stream("GET", url) as resp:
+                    nxt = resp.next_request
+                    if nxt is not None:
+                        if hops is None or nxt.url.scheme != "https" or not hops.fullmatch(nxt.url.host):
+                            logger.log(logging.DEBUG if hops is None else logging.WARNING,
+                                       "%s redirects %s off its hosts, to %s", source, url, nxt.url)
+                            return 404, "", b""
+                        url = str(nxt.url)
+                        continue
+                    if resp.status_code in (404, 410):
+                        return 404, "", b""
+                    mime = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if resp.status_code != 200 or mime not in _RASTER:
+                        logger.log(level, "%s answered %s %r for %s", source, resp.status_code, mime, url)
+                        return 502, "", b""
+                    body = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        body += chunk
+                        if len(body) > _ART_MAX_BYTES:
+                            logger.warning("%s cover over %d bytes: %s", source, _ART_MAX_BYTES, url)
+                            return 404, "", b""
+                    if not body:
+                        logger.log(level, "%s answered an empty image for %s", source, url)
+                        return 502, "", b""
+                    return 200, mime, bytes(body)
+    except httpx.HTTPError as e:
+        logger.log(level, "%s fetch failed for %s: %s %s", source, url, type(e).__name__, e)
+        return 502, "", b""
+    logger.warning("%s redirects more than %d times for %s", source, _ART_MAX_HOPS, url)
+    return 404, "", b""
 
 
 def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:

@@ -155,17 +155,18 @@
   // app's web view loads only the node's origin. A CAA hotlink goes to its
   // release group's /api/covers/caa/{rg} (CAA's redirect chain is uncacheable
   // and its images carry no Cache-Control; the route answers with a month of
-  // cache, a day for "no art"), any other URL to /api/covers/art, which
-  // fetches only the image hosts the node knows and says "no art" for the
-  // rest. encodeURIComponent leaves ' as it is, and these URLs land in quoted
-  // inline handlers (artistAvatarInner).
+  // cache, a day for "no art"); any other value, whatever it holds, travels
+  // whole and encoded to /api/covers/art, which fetches only the image hosts
+  // the node knows and says "no art" for the rest. encodeURIComponent leaves
+  // ' ( ) as they are, and these URLs land in quoted inline handlers
+  // (artistAvatarInner) and the mini-player's unquoted CSS url().
   const CAA_FRONT = /^https:\/\/coverartarchive\.org\/release-group\/([0-9a-f-]{36})\/front-500$/;
   function artSrc(url) {
     if (!url) return '';
-    if (/^\/(?!\/)/.test(url)) return url;     // the node's own already
     const m = CAA_FRONT.exec(url);
     return m ? '/api/covers/caa/' + m[1]
-      : '/api/covers/art?url=' + encodeURIComponent(url).replace(/'/g, '%27');
+      : '/api/covers/art?url=' + encodeURIComponent(url)
+          .replace(/['()]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
   }
   window.artSrc = artSrc;   // player.js: the Media Session's artwork
 
@@ -180,14 +181,19 @@
     return '';
   }
 
-  // Paint an <img> from the first URL that actually loads, then hide so the
-  // gradient placeholder shows. The provider art is the fallback for a phantom
-  // CAA cover — ~a quarter of phantom release-groups have no front art in
-  // MusicBrainz, so the CAA URL 404s and we swap to the streamed source's cover.
-  // Callers hand the provider's own URL: artSrc makes each one the node's.
-  function paintCoverImg(img, ...urls) {
+  // The covers to try for an item, in order: its own, then the provider's
+  // art of a streamed track — the fallback for a phantom CAA cover: ~a quarter
+  // of phantom release-groups have no front art in MusicBrainz, so the CAA URL
+  // 404s and we swap to the streamed source's cover.
+  function coverUrls(item) {
+    return [coverUrl(item), artSrc(item && item.provider_cover_url)].filter(Boolean);
+  }
+
+  // Paint an <img> from the first of the item's covers that actually loads,
+  // then hide so the gradient placeholder shows.
+  function paintCoverImg(img, item) {
     if (!img) return;
-    const list = urls.map(artSrc).filter(Boolean);
+    const list = coverUrls(item);
     let i = 0;
     const tryNext = () => {
       if (i >= list.length) { img.onerror = null; img.hidden = true; return; }
@@ -1387,12 +1393,12 @@
           // Paint the big cover immediately from the SSE payload so opening the
           // sheet during a detail fetch doesn't flash blank. cover_url covers
           // streamed phantom tracks; provider art is the CAA-404 fallback.
-          const eagerUrl = coverUrl({
+          paintCoverImg(this.coverImg, {
             cover_id: data.cover_id,
             media_file_id: data.media_file_id,
             cover_url: data.cover_url,
+            provider_cover_url: data.provider_cover_url,
           });
-          paintCoverImg(this.coverImg, eagerUrl, data.provider_cover_url);
         }
         if (this.coverFallback) {
           const c = coverPlaceholderColors(data.song || data.album || '');
@@ -1508,7 +1514,7 @@
       if (!d) return;
 
       // Cover — prefer resolved cover_id; fall back to lazy by-media URL.
-      paintCoverImg(this.coverImg, coverUrl(d), d.provider_cover_url);
+      paintCoverImg(this.coverImg, d);
       if (this.coverFallback) {
         const c = coverPlaceholderColors(d.title || d.album_title || '');
         this.coverFallback.style.setProperty('--cover-bg-1', c.bg1);
@@ -1748,7 +1754,7 @@
       // sheet's <img>, where assigning src aborts the load in flight, nothing
       // here cancels a probe, so it carries the generation it belongs to.
       const gen = this.coverGen;
-      const urls = [coverUrl(detail), artSrc(detail && detail.provider_cover_url)].filter(Boolean);
+      const urls = coverUrls(detail);
       let i = 0;
       const tryNext = () => {
         if (i >= urls.length || gen !== this.coverGen) return;

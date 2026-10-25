@@ -71,7 +71,7 @@ A. Outbound destinations. List every host the software can connect to, with
        backend/lastfm_auth.py and backend/lastfm_history.py (the owner's
        Last.fm sign-in and the import of their own scrobble history),
        backend/musicbrainz.py,
-       backend/caa.py, backend/routers/covers.py,
+       backend/caa.py, backend/covers.py, backend/routers/covers.py,
        backend/deezer_photos.py, backend/streaming/deezer_catalog.py,
        backend/streaming/deezer_preview.py (metadata, artwork, 30 s excerpts),
      backend/streaming/ — the demo channel: the provider whose manifest sets
@@ -260,9 +260,10 @@ and by design; the report should list them as matches, not discrepancies:
 - The **cover routes take no signature** (`/api/covers/*`: an `<img>`
   cannot sign one), so anyone on the LAN can make the node fetch an outside
   cover: only a Cover Art Archive front, Deezer's catalog art or a YouTube
-  thumbnail, each by its exact URL shape (`_ART_SOURCES` in
-  `backend/routers/covers.py`), redirects only into the Internet Archive for
-  Cover Art Archive, raster images up to 2 MiB.
+  thumbnail, each by its exact URL shape (`ART_SOURCES` in
+  `backend/covers.py`, which the DLNA output's covers follow too), redirects
+  only within Cover Art Archive and the Internet Archive, raster images up to
+  2 MiB, at most 32 fetches at once.
 - The audition downloader (yt-dlp) **updates itself from PyPI** at every
   backend start (`backend/streaming/service.py`) — a supply-chain channel
   the project accepts knowingly, because the tool breaks weekly otherwise.

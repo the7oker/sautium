@@ -39,10 +39,11 @@ def test_every_typeface_the_page_asks_for_is_served_with_its_licence():
     assert '<link rel="stylesheet" href="/static/fonts.css' in (STATIC / "index.html").read_text()
 
 
-# app-shell.js's cover builders (the block between its banners) and the
-# mini-player's, then player.js whole, under Node: every cover URL they give
-# the page — an <img>, the mini-player's probe, the Media Session's artwork,
-# which the browser and the OS fetch themselves — for every kind of cover.
+# app-shell.js's cover builders, the Now Playing sheet and the mini-player
+# (each block cut between its banners), then player.js whole, under Node:
+# every cover URL they give the page — an <img>, the mini-player's probe, the
+# Media Session's artwork, which the browser and the OS fetch themselves —
+# for every kind of cover, and where a browser's URL parser says each goes.
 _COVERS = r"""
 const fs = require('node:fs'), vm = require('node:vm');
 const [shellPath, playerPath] = process.argv.slice(-2);
@@ -64,17 +65,22 @@ const ctx = vm.createContext({
   console: { warn() {}, log() {}, error() {} }, setTimeout, clearTimeout,
 });
 vm.runInContext(cut('  /* ---------- Cover URL builder', '  /* ---------- Lightweight markdown')
+  + cut('  /* ---------- Now Playing sheet', '  /* ---------- Mini-player adapter')
   + cut('  /* ---------- Mini-player adapter', '  /* ---------- Queue sheet')
-  + '\n;this.coverUrl = coverUrl; this.paintCoverImg = paintCoverImg;'
-  + ' this.artistAvatarInner = artistAvatarInner; this.mp = mp;', ctx);
+  + '\n;this.coverUrl = coverUrl; this.artistAvatarInner = artistAvatarInner;'
+  + ' this.sheet = sheet; this.mp = mp;', ctx);
 vm.runInContext(fs.readFileSync(playerPath, 'utf8'), ctx);
 
 const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = { cover: spec.items.map(it => ctx.coverUrl(it)) };
 const img = { srcs: [], set src(u) { this.srcs.push(u); } };
-ctx.paintCoverImg(img, ctx.coverUrl({ cover_url: spec.caa }), ...spec.provider);
-while (img.onerror) img.onerror();                 // each load fails: the next is tried
-out.paint = img.srcs;
+ctx.sheet.coverImg = img;
+out.paint = spec.provider.map(url => {
+  img.srcs = [];
+  ctx.sheet.renderDetail({ cover_url: spec.caa, provider_cover_url: url });
+  while (img.onerror) img.onerror();               // each load fails: the next is tried
+  return img.srcs;
+});
 out.avatar = ctx.artistAvatarInner('a1', '<i></i>', ctx.coverUrl({ cover_url: spec.odd }));
 ctx.mp.cover = { style: {} };
 ctx.mp.setCover({ cover_url: spec.caa, provider_cover_url: spec.provider[0] });
@@ -84,6 +90,11 @@ out.session = [spec.caa, ...spec.provider].map(url => {
   window.browserRenderer._mediaSession({ cover_url: url });
   return navigator.mediaSession.metadata.artwork[0].src;
 });
+const shown = [...out.cover, ...out.paint.flat(), ...out.mini, ...out.session,
+               ...[...out.avatar.matchAll(/src="([^"]+)"|this\.src='([^']+)'/g)].map(m => m[1] || m[2])];
+const base = 'http://node.test:8800/';
+out.elsewhere = shown.filter(u => new URL(u, base).origin !== new URL(base).origin);
+out.shown = shown;
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -97,12 +108,17 @@ _YOUTUBE = "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_every_cover_the_page_shows_comes_from_the_node():
     """Owned covers are the node's; an outside one — a Cover Art Archive
-    front, a provider's art, any URL a phantom carries — is asked of the node
-    too (/api/covers/caa, /api/covers/art), never of its host."""
-    odd = "https://images.example.com/it's.jpg"
+    front, a provider's art, whatever a phantom's cover_url holds — is asked
+    of the node too (/api/covers/caa, /api/covers/art), never of its host,
+    and travels encoded whatever it carries: a cover_url comes from data a
+    share file can bring."""
+    odd = "https://images.example.com/it's (1).jpg"
+    hostile = ["/\\images.example.com/pixel.gif", "/\t/images.example.com/pixel.gif",
+               '/x" onerror="alert(1)', "/x';alert(1);'", "javascript:alert(1)",
+               "//images.example.com/x.jpg", f"/api/covers/caa/{_RG}"]
     spec = {"caa": _CAA, "provider": [_DEEZER, _YOUTUBE], "odd": odd, "items": [
         {"cover_url": _CAA}, {"cover_url": _DEEZER}, {"cover_url": odd},
-        {"cover_url": "//images.example.com/x.jpg"}, {"cover_url": f"/api/covers/caa/{_RG}"},
+        *({"cover_url": h} for h in hostile),
         {"cover_id": "c0ffee00-0000-4000-8000-000000000001"}, {"media_file_id": 7}]}
     proc = subprocess.run(
         [NODE, "-e", _COVERS, "--", str(STATIC / "app-shell.js"), str(STATIC / "player.js")],
@@ -113,14 +129,14 @@ def test_every_cover_the_page_shows_comes_from_the_node():
         return "/api/covers/art?url=" + quote(url, safe="")
 
     caa = f"/api/covers/caa/{_RG}"
-    assert out["cover"] == [caa, art(_DEEZER), art(odd), art("//images.example.com/x.jpg"), caa,
+    assert out["cover"] == [caa, art(_DEEZER), art(odd), *map(art, hostile),
                             "/api/covers/c0ffee00-0000-4000-8000-000000000001", "/api/covers/by-media/7"]
-    assert out["paint"] == [caa, art(_DEEZER), art(_YOUTUBE)]
+    assert out["paint"] == [[caa, art(_DEEZER)], [caa, art(_YOUTUBE)]]
     assert out["mini"] == [caa, art(_DEEZER)]
     assert out["session"] == [caa, art(_DEEZER), art(_YOUTUBE)]
     # The avatar's fallback sits in a quoted inline handler: the quote in the
     # URL travels encoded, or it would end the handler's string.
-    avatar = [a or b for a, b in re.findall(r"""src="([^"]+)"|this\.src='([^']+)'""", out["avatar"])]
-    assert avatar == ["/api/covers/by-artist/a1", art(odd)]
-    shown = [*out["cover"], *out["paint"], *out["mini"], *out["session"], *avatar]
-    assert [u for u in shown if not re.match(r"/(?!/)", u)] == []
+    assert out["shown"][-2:] == ["/api/covers/by-artist/a1", art(odd)]
+    assert out["elsewhere"] == []
+    # Nothing that could end an attribute, a handler's string or a CSS url().
+    assert [u for u in out["shown"] if not re.fullmatch(r"/api/covers/[A-Za-z0-9_.~!*%/?=-]+", u)] == []

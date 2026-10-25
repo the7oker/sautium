@@ -1,18 +1,21 @@
 """Outside covers — a phantom album's Cover Art Archive front, a streamed
-track's provider art — fetched and served by the node (routers/covers.py).
-The image hosts are scripted: httpx.MockTransport behind the routes, a stub
-of _art_fetch for the breaker. No DB, no network. Run:
+track's provider art — fetched by the node (covers.fetch_art, by
+covers.ART_SOURCES) and served by it (routers/covers.py). The image hosts are
+scripted: httpx.MockTransport behind the routes, a stub of fetch_art for the
+breaker. No DB, no network. Run:
 
     python -m pytest test_covers_outside_art.py -q
 """
 
 import asyncio
+import time
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from covers import _ART_MAX_BYTES
 from routers import covers
 
 RG = "f5093c06-23e3-404f-aeaa-40f72885ee3a"
@@ -29,6 +32,7 @@ DEFERRED = "public, max-age=60"
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     covers._art_cache.clear()
+    covers._art_misses.clear()
     covers._art_inflight.clear()
     covers._refused_hosts.clear()
     monkeypatch.setattr(covers, "_art_cache_bytes", 0)
@@ -68,13 +72,17 @@ def _image(content=JPEG, mime="image/jpeg"):
     return httpx.Response(200, headers={"content-type": mime}, content=content)
 
 
+def _art(node, url):
+    return node.get("/api/covers/art", params={"url": url})
+
+
 @pytest.mark.parametrize("url", [DEEZER, YOUTUBE], ids=["deezer", "youtube"])
 def test_a_provider_cover_comes_through_the_node_and_keeps_a_month(node, hosts, url):
     hosts.answer[url] = _image()
     browser = {"Cookie": "session=1", "Referer": "http://192.0.2.7:8800/",
                "User-Agent": "Browser/1", "X-Forwarded-For": "192.0.2.7"}
     first = node.get("/api/covers/art", params={"url": url}, headers=browser)
-    again = node.get("/api/covers/art", params={"url": url})
+    again = _art(node, url)
     assert first.status_code == again.status_code == 200
     assert first.content == again.content == JPEG
     assert first.headers["content-type"] == "image/jpeg"
@@ -91,14 +99,16 @@ def test_a_provider_cover_comes_through_the_node_and_keeps_a_month(node, hosts, 
     DEEZER.replace("https://", "http://"),
     "https://cdnt-preview.dzcdn.net/api/1/1/d/6/b/0/d6bc80aadfa1d7625d59a6620f229371.mp3",
     DEEZER.replace("dzcdn.net", "dzcdn.net.example.com"),
+    DEEZER.replace("1000x1000", "١٠٠٠x١٠٠٠"),
     YOUTUBE.replace("i.ytimg.com", "i.ytimg.com@example.com"),
     YOUTUBE + "?w=1",
     f"https://coverartarchive.org/release/{RG}/front",
     "http://localhost:8800/api/settings",
-], ids=["another host", "not https", "the provider's audio", "a lookalike host", "userinfo",
-        "a query", "another caa form", "the node itself"])
+    "/\\images.example.com/pixel.gif",
+], ids=["another host", "not https", "the provider's audio", "a lookalike host", "other digits",
+        "userinfo", "a query", "another caa form", "the node itself", "a backslash"])
 def test_a_url_off_the_list_is_no_art_and_nothing_is_fetched(node, hosts, url):
-    r = node.get("/api/covers/art", params={"url": url})
+    r = _art(node, url)
     assert r.status_code == 404
     assert r.headers["cache-control"] == DAY
     assert hosts.asked == []
@@ -113,67 +123,95 @@ def test_a_caa_front_follows_its_own_chain_through_archive_org(node, hosts):
     r = node.get(f"/api/covers/caa/{RG}")
     assert (r.status_code, r.content, r.headers["cache-control"]) == (200, JPEG, MONTH)
     assert hosts.asked == [CAA, store, data_node]
-    by_url = node.get("/api/covers/art", params={"url": CAA})
-    assert by_url.content == JPEG and len(hosts.asked) == 3    # one cover, one entry
+    assert _art(node, CAA).content == JPEG and len(hosts.asked) == 3    # one cover, one entry
+
+
+def test_a_caa_redirect_within_cover_art_archive_is_followed(node, hosts):
+    release = "https://coverartarchive.org/release/0f0e0d0c-0000-4000-8000-000000000001/1-500.jpg"
+    hosts.answer[CAA] = httpx.Response(307, headers={"location": release.removeprefix(
+        "https://coverartarchive.org")})
+    hosts.answer[release] = _image()
+    assert _art(node, CAA).content == JPEG
+    assert hosts.asked == [CAA, release]
 
 
 def test_a_redirect_off_the_sources_hosts_is_no_art(node, hosts):
     """Deezer redirects a cover it has not to its own blank placeholder; a
-    CAA redirect may lead only into the Internet Archive."""
+    CAA redirect may lead only to Cover Art Archive or the Internet Archive."""
     blank = "/images/cover/d41d8cd98f00b204e9800998ecf8427e/1000x1000-000000-80-0-0.jpg"
     hosts.answer[DEEZER] = httpx.Response(302, headers={"location": blank})
     hosts.answer[CAA] = httpx.Response(307, headers={"location": "https://images.example.com/x.jpg"})
     for url in (DEEZER, CAA):
-        r = node.get("/api/covers/art", params={"url": url})
+        r = _art(node, url)
         assert (r.status_code, r.headers["cache-control"]) == (404, DAY)
     assert hosts.asked == [DEEZER, CAA]           # neither redirect was followed
 
 
-@pytest.mark.parametrize("reply", [
-    _image(b"<script>alert(1)</script>", "text/html"),
-    _image(b"<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'/>", "image/svg+xml"),
-    _image(b"\xff" * (covers._ART_MAX_BYTES + 1)),
-], ids=["html", "svg", "over the cap"])
-def test_only_a_raster_image_within_the_cap_is_served(node, hosts, reply):
+@pytest.mark.parametrize("reply, kept", [
+    (_image(b"<script>alert(1)</script>", "text/html"), DEFERRED),
+    (_image(b"<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'/>", "image/svg+xml"), DEFERRED),
+    (_image(b""), DEFERRED),
+    (_image(b"\xff" * (_ART_MAX_BYTES + 1)), DAY),
+], ids=["html", "svg", "empty", "over the cap"])
+def test_only_a_raster_image_within_the_cap_is_served(node, hosts, reply, kept):
+    """Anything but an image is the host's trouble (an interstitial, a
+    captive portal) and is asked again; an image over the cap is no art."""
     hosts.answer[DEEZER] = reply
-    r = node.get("/api/covers/art", params={"url": DEEZER})
-    assert (r.status_code, r.content, r.headers["cache-control"]) == (404, b"", DAY)
+    r = _art(node, DEEZER)
+    assert (r.status_code, r.content, r.headers["cache-control"]) == (404, b"", kept)
 
 
 def test_a_cover_the_host_has_not_is_no_art_for_a_day(node, hosts):
     hosts.answer[YOUTUBE] = httpx.Response(404, headers={"content-type": "image/jpeg"}, content=b"grey")
     for _ in range(2):
-        r = node.get("/api/covers/art", params={"url": YOUTUBE})
+        r = _art(node, YOUTUBE)
         assert (r.status_code, r.content, r.headers["cache-control"]) == (404, b"", DAY)
     assert hosts.asked == [YOUTUBE]
 
 
 def test_upstream_trouble_defers_a_minute_and_is_asked_again(node, hosts):
     hosts.answer[YOUTUBE] = [httpx.Response(503), _image()]
-    r = node.get("/api/covers/art", params={"url": YOUTUBE})
+    r = _art(node, YOUTUBE)
     assert (r.status_code, r.headers["cache-control"]) == (404, DEFERRED)
-    assert node.get("/api/covers/art", params={"url": YOUTUBE}).status_code == 200
+    assert _art(node, YOUTUBE).status_code == 200
     assert hosts.asked == [YOUTUBE, YOUTUBE]
 
 
-def test_the_cache_keeps_to_its_byte_budget(monkeypatch):
+def test_the_node_keeps_a_miss_a_day_and_a_cover_a_month(node, hosts):
+    hosts.answer[YOUTUBE] = [httpx.Response(404), _image()]
+    hosts.answer[DEEZER] = [_image(), _image(b"\xff\xd8 new")]
+    assert _art(node, YOUTUBE).status_code == 404
+    assert _art(node, DEEZER).content == JPEG
+    covers._art_misses[YOUTUBE] = time.monotonic() - 1           # its day is over
+    until, mime, body = covers._art_cache[DEEZER]
+    covers._art_cache[DEEZER] = (time.monotonic() - 1, mime, body)   # and its month
+    assert _art(node, YOUTUBE).content == JPEG
+    assert _art(node, DEEZER).content == b"\xff\xd8 new"
+    assert hosts.asked == [YOUTUBE, DEEZER, YOUTUBE, DEEZER]
+    assert covers._art_cache_bytes == len(JPEG) + len(b"\xff\xd8 new")
+
+
+def test_the_cache_keeps_to_its_byte_budget_and_misses_apart(monkeypatch):
     monkeypatch.setattr(covers, "_ART_CACHE_BYTES", 25)
+    monkeypatch.setattr(covers, "_ART_MISS_ENTRIES", 3)
     for url in "abc":
         covers._art_remember(url, (200, "image/jpeg", b"x" * 10))
-    covers._art_remember("d", (404, "", b""))
-    assert list(covers._art_cache) == ["b", "c", "d"]
+    for n in range(10):
+        covers._art_remember(f"miss{n}", (404, "", b""))
+    assert list(covers._art_cache) == ["b", "c"]          # the budget, not the misses, evicted "a"
     assert covers._art_cache_bytes == 20
+    assert list(covers._art_misses) == ["miss7", "miss8", "miss9"]
 
 
 class _Upstream:
-    """Scripted stand-in for _art_fetch: `outcomes` is consumed per call (an
+    """Scripted stand-in for fetch_art: `outcomes` is consumed per call (an
     int status, or (asyncio.Event, status) to hold the call until released)."""
 
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes)
         self.calls = []
 
-    async def __call__(self, source, url):
+    async def __call__(self, source, url, quiet=False):
         self.calls.append(url)
         step = self.outcomes.pop(0)
         if isinstance(step, tuple):
@@ -194,7 +232,7 @@ def test_trips_after_consecutive_failures_then_probes_one_at_a_time(monkeypatch)
     async def scenario():
         gate = asyncio.Event()
         up = _Upstream(502, 502, 502, (gate, 502))
-        monkeypatch.setattr(covers, "_art_fetch", up)
+        monkeypatch.setattr(covers, "fetch_art", up)
 
         for url in ("a", "b"):
             assert (await covers._art_lookup("caa", url))[0] == 502
@@ -219,7 +257,7 @@ def test_burst_settles_then_first_definite_answer_closes(monkeypatch):
     async def scenario():
         gate = asyncio.Event()
         up = _Upstream(*[(gate, 502)] * 6, (asyncio.Event(), 200), 404)
-        monkeypatch.setattr(covers, "_art_fetch", up)
+        monkeypatch.setattr(covers, "fetch_art", up)
 
         burst = [asyncio.create_task(covers._art_lookup("caa", url)) for url in "abcdef"]
         await asyncio.sleep(0)
@@ -235,7 +273,7 @@ def test_burst_settles_then_first_definite_answer_closes(monkeypatch):
         probe_gate.set()
         assert (await probe)[0] == 200
         assert not covers._art_open
-        assert covers._art_cache["g"][0] == 200
+        assert "g" in covers._art_cache
 
         assert (await covers._art_lookup("caa", "h"))[0] == 404   # closed again: fetched
         assert up.calls[-1] == "h"
@@ -246,7 +284,7 @@ def test_burst_settles_then_first_definite_answer_closes(monkeypatch):
 def test_sporadic_failures_do_not_trip(monkeypatch):
     async def scenario():
         up = _Upstream(502, 200, 502, 502, 404, 502, 502)
-        monkeypatch.setattr(covers, "_art_fetch", up)
+        monkeypatch.setattr(covers, "fetch_art", up)
         for url in "abcdefg":
             await covers._art_lookup("caa", url)
         assert not covers._art_open
@@ -259,7 +297,7 @@ def test_cached_answers_are_served_while_open(monkeypatch):
     async def scenario():
         gate = asyncio.Event()
         up = _Upstream(200, 502, 502, 502, (gate, 502))
-        monkeypatch.setattr(covers, "_art_fetch", up)
+        monkeypatch.setattr(covers, "fetch_art", up)
         assert (await covers._art_lookup("caa", "cached"))[0] == 200
         for url in "abc":
             await covers._art_lookup("caa", url)
@@ -277,7 +315,7 @@ def test_a_source_down_holds_back_no_other(monkeypatch):
     async def scenario():
         gate = asyncio.Event()
         up = _Upstream(502, 502, 502, (gate, 502), 200)
-        monkeypatch.setattr(covers, "_art_fetch", up)
+        monkeypatch.setattr(covers, "fetch_art", up)
         for url in "abc":
             await covers._art_lookup("caa", url)
         probe = asyncio.create_task(covers._art_lookup("caa", "d"))
@@ -291,11 +329,29 @@ def test_a_source_down_holds_back_no_other(monkeypatch):
     _run(scenario())
 
 
+def test_the_node_fetches_so_many_covers_at_once_and_defers_the_rest(monkeypatch):
+    async def scenario():
+        gate = asyncio.Event()
+        up = _Upstream(*[(gate, 200)] * covers._ART_MAX_FETCHES)
+        monkeypatch.setattr(covers, "fetch_art", up)
+        held = [asyncio.create_task(covers._art_lookup("youtube", f"v{n}"))
+                for n in range(covers._ART_MAX_FETCHES)]
+        await asyncio.sleep(0)
+        assert (await covers._art_lookup("youtube", "one more"))[0] == 503
+        await asyncio.sleep(0)                   # the held fetches reach the host
+        assert len(up.calls) == covers._ART_MAX_FETCHES
+        gate.set()
+        assert {r[0] for r in await asyncio.gather(*held)} == {200}
+        assert not covers._art_failures.get("youtube")           # deferring is no failure of the host
+
+    _run(scenario())
+
+
 def test_a_browser_that_leaves_mid_fetch_strands_no_one(monkeypatch):
     async def scenario():
         gate = asyncio.Event()
         up = _Upstream((gate, 200))
-        monkeypatch.setattr(covers, "_art_fetch", up)
+        monkeypatch.setattr(covers, "fetch_art", up)
         first = asyncio.create_task(covers._art_lookup("deezer", "a"))
         await asyncio.sleep(0)
         second = asyncio.create_task(covers._art_lookup("deezer", "a"))
@@ -303,7 +359,7 @@ def test_a_browser_that_leaves_mid_fetch_strands_no_one(monkeypatch):
         first.cancel()
         gate.set()
         assert (await asyncio.wait_for(second, 2))[0] == 200
-        assert covers._art_cache["a"][0] == 200
+        assert "a" in covers._art_cache
         assert up.calls == ["a"]
         with pytest.raises(asyncio.CancelledError):
             await first

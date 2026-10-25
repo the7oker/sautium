@@ -229,7 +229,9 @@ class ResolvedSource:
     metadata the resolve already saw. ``duration`` (seconds) backfills phantom
     track lengths MusicBrainz left blank — see player._backfill_phantom_durations.
     A provider's ``_resolve`` may return a bare source-id str (back-compat) or
-    this richer object; the host normalises both in ``resolve()``."""
+    this richer object; the host normalises both in ``resolve()``.
+    ``artwork_url`` is shown only if its shape is one of covers.ART_SOURCES:
+    the node fetches every outside cover itself, and nothing else."""
     source_id: str
     duration: Optional[float] = None
     artwork_url: Optional[str] = None   # provider album art — fallback when the CAA cover 404s

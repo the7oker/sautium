@@ -15,7 +15,7 @@ Routes:
   GET /api/covers/art?url=…              — any other outside cover the
                                             browser was handed (a streamed
                                             track's provider art), fetched
-                                            only from _ART_SOURCES.
+                                            only from covers.ART_SOURCES.
 
 Resolved covers carry an `immutable` Cache-Control. The sentinel 404 is
 served with a short max-age so a manual rescan / new disk file can
@@ -28,17 +28,19 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from typing import Dict, Optional
+from typing import Dict
 
-import httpx
 from fastapi import APIRouter, HTTPException, Path as FPath, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from sqlalchemy import text
 
 from api_cooldown import cooling_down
+from caa import CAA_FRONT_URL
 from covers import (
     SENTINEL_COVER_ID,
+    art_source,
+    fetch_art,
     resolve_cover_for_folder,
     resolve_artist_photo,
     _split_folder,
@@ -89,37 +91,21 @@ _photo_last_call = 0.0
 # its 404s carry none either — so a shelf of phantom albums re-walked the
 # redirects on every render and re-asked CAA for every artless release
 # group. Fronted here, the browser keeps a cover for a month and a miss for
-# a day. The bytes stay in a bounded process cache — the art is its
-# source's, no covers row is minted for it.
-_CAA_FRONT = "https://coverartarchive.org/release-group/{rg}/front-500"
+# a day, and so does the node. The bytes stay in a bounded process cache —
+# the art is its source's, no covers row is minted for it. What the node
+# fetches at all is covers.ART_SOURCES.
 _ART_MAX_AGE = 30 * 86400       # CAA's URL is not content-addressed: no `immutable`
 _ART_MISS_MAX_AGE = 86400
 _ART_CACHE_ENTRIES = 512
 _ART_CACHE_BYTES = 24 * 2**20   # ≈ 400 covers at CAA's front-500 and Deezer's 1000 px
-_ART_MAX_BYTES = 2 * 2**20      # one image; a provider's largest is ~0.3 MB
-_ART_MAX_HOPS = 3               # CAA takes two: archive.org, then one of its data nodes
-_RASTER = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"})
+_ART_MISS_ENTRIES = 4096        # kept apart from the covers: misses never evict one
+# Upstream fetches at once, every source together. The routes take no
+# signature (an <img> cannot sign), so this bounds what anyone on the LAN can
+# make the node open; a cover beyond it defers like upstream trouble.
+_ART_MAX_FETCHES = 32
 
-# What the node fetches outside art from: each source by the one URL shape it
-# hands out, matched whole, and the hosts its redirects may lead to (None: a
-# redirect is no art — Deezer's leads to its own blank placeholder). The
-# browser can make the node fetch nothing else: no open proxy. A provider
-# plugin whose art lives elsewhere shows no cover until its host is added
-# here.
-_ART_SOURCES = {
-    "caa": (re.compile(r"https://coverartarchive\.org/release-group/[0-9a-f]{8}-[0-9a-f]{4}-"
-                       r"[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/front-500"),
-            re.compile(r"(?:[a-z0-9-]+\.)*archive\.org")),
-    # Deezer's catalog art (cover_xl / cover_big off its public API), for the
-    # core resolve and the bring-your-own lossless provider alike; the CDN's
-    # older name is in phantoms minted before 2026-06-12.
-    "deezer": (re.compile(r"https://(?:cdn-images|e-cdns-images)\.dzcdn\.net/images/cover/"
-                          r"[0-9a-f]{32}/\d{2,4}x\d{2,4}-\d{6}-\d{1,3}-\d-\d\.jpg"), None),
-    # The demo channel's matched video (streaming/youtube.py builds the URL).
-    "youtube": (re.compile(r"https://i\.ytimg\.com/vi/[A-Za-z0-9_-]{11}/hqdefault\.jpg"), None),
-}
-
-_art_cache: "OrderedDict[str, tuple[int, str, bytes]]" = OrderedDict()
+_art_cache: "OrderedDict[str, tuple[float, str, bytes]]" = OrderedDict()   # url -> (until, mime, body)
+_art_misses: "OrderedDict[str, float]" = OrderedDict()                    # url -> until
 _art_cache_bytes = 0
 _art_inflight: Dict[str, tuple[str, asyncio.Task]] = {}   # url -> (source, its fetch)
 _refused_hosts: set = set()     # logged once each; capped — the route is open to the LAN
@@ -140,59 +126,6 @@ _art_failures: Dict[str, int] = {}  # source -> consecutive upstream failures; a
 _art_open: set = set()              # sources whose breaker is open
 
 
-def _art_source(url: str) -> Optional[str]:
-    """The source whose URL shape this is, or None — not one the node fetches."""
-    for name, (shape, _hops) in _ART_SOURCES.items():
-        if shape.fullmatch(url):
-            return name
-    return None
-
-
-async def _art_fetch(source: str, url: str) -> tuple[int, str, bytes]:
-    """(status, mime, body): 200 with the image; 404 for no art at that URL —
-    the host's 404, a redirect off the source's hosts, a body that is no
-    raster image or is over the size cap; 502 for anything else
-    (unreachable, a 5xx) — never raises. Nothing of the person goes
-    upstream: the node asks with no cookie, no referrer and its own
-    address. While the source's breaker is open every probe fails the same
-    way: the state change is the warning, the probes are debug noise."""
-    hops = _ART_SOURCES[source][1]
-    quiet = logging.DEBUG if source in _art_open else logging.WARNING
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for _ in range(_ART_MAX_HOPS + 1):
-                async with client.stream("GET", url) as resp:
-                    nxt = resp.next_request
-                    if nxt is not None:
-                        if (hops is None or nxt.url.scheme != "https"
-                                or not hops.fullmatch(nxt.url.host)):
-                            logger.debug("%s redirects %s off its hosts, to %s", source, url, nxt.url)
-                            return 404, "", b""
-                        url = str(nxt.url)
-                        continue
-                    if resp.status_code in (404, 410):
-                        return 404, "", b""
-                    if resp.status_code != 200:
-                        logger.log(quiet, "%s answered %s for %s", source, resp.status_code, url)
-                        return 502, "", b""
-                    mime = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-                    if mime not in _RASTER:
-                        logger.warning("%s served %r, not an image, for %s", source, mime, url)
-                        return 404, "", b""
-                    body = bytearray()
-                    async for chunk in resp.aiter_bytes():
-                        body += chunk
-                        if len(body) > _ART_MAX_BYTES:
-                            logger.warning("%s cover over %d bytes: %s", source, _ART_MAX_BYTES, url)
-                            return 404, "", b""
-                    return (200, mime, bytes(body)) if body else (404, "", b"")
-    except httpx.HTTPError as e:
-        logger.log(quiet, "%s fetch failed for %s: %s %s", source, url, type(e).__name__, e)
-        return 502, "", b""
-    logger.warning("%s redirects more than %d times for %s", source, _ART_MAX_HOPS, url)
-    return 404, "", b""
-
-
 def _art_settle(source: str, status: int) -> None:
     """Feed one upstream outcome to the source's breaker."""
     if status in (200, 404):
@@ -209,16 +142,29 @@ def _art_settle(source: str, status: int) -> None:
 
 
 def _art_remember(url: str, result: tuple[int, str, bytes]) -> None:
+    """Keep a definite answer — a cover for a month, a miss for a day — each
+    in its own bounded store, in place of what the URL had."""
     global _art_cache_bytes
-    _art_cache[url] = result
-    _art_cache_bytes += len(result[2])
-    while len(_art_cache) > _ART_CACHE_ENTRIES or _art_cache_bytes > _ART_CACHE_BYTES:
-        _art_cache_bytes -= len(_art_cache.popitem(last=False)[1][2])
+    status, mime, body = result
+    old = _art_cache.pop(url, None)
+    if old is not None:
+        _art_cache_bytes -= len(old[2])
+    _art_misses.pop(url, None)
+    now = time.monotonic()
+    if status == 200:
+        _art_cache[url] = (now + _ART_MAX_AGE, mime, body)
+        _art_cache_bytes += len(body)
+        while len(_art_cache) > _ART_CACHE_ENTRIES or _art_cache_bytes > _ART_CACHE_BYTES:
+            _art_cache_bytes -= len(_art_cache.popitem(last=False)[1][2])
+    else:
+        _art_misses[url] = now + _ART_MISS_MAX_AGE
+        while len(_art_misses) > _ART_MISS_ENTRIES:
+            _art_misses.popitem(last=False)
 
 
 async def _art_fetch_settled(source: str, url: str) -> tuple[int, str, bytes]:
     try:
-        result = await _art_fetch(source, url)
+        result = await fetch_art(source, url, quiet=source in _art_open)
     finally:
         del _art_inflight[url]
     _art_settle(source, result[0])
@@ -232,12 +178,17 @@ async def _art_lookup(source: str, url: str) -> tuple[int, str, bytes]:
     cover. Only definite answers (200/404) are remembered. The fetch is a
     task of its own, so a browser that goes away mid-fetch strands no one
     waiting on the same cover."""
+    now = time.monotonic()
     hit = _art_cache.get(url)
-    if hit is not None:
+    if hit is not None and hit[0] > now:
         _art_cache.move_to_end(url)
-        return hit
+        return 200, hit[1], hit[2]
+    if _art_misses.get(url, 0.0) > now:
+        return 404, "", b""
     pending = _art_inflight.get(url)
     if pending is None:
+        if len(_art_inflight) >= _ART_MAX_FETCHES:
+            return 503, "", b""     # enough is being fetched: defer
         if source in _art_open and any(s == source for s, _ in _art_inflight.values()):
             return 503, "", b""     # the probe is already in flight
         pending = _art_inflight[url] = (source, asyncio.create_task(_art_fetch_settled(source, url)))
@@ -266,17 +217,17 @@ async def get_cover_caa(rg_mbid: str = FPath(..., min_length=36, max_length=36))
         rg = str(uuid.UUID(rg_mbid))
     except ValueError:
         raise HTTPException(status_code=404, detail="not a release group id")
-    return _art_response(await _art_lookup("caa", _CAA_FRONT.format(rg=rg)))
+    return _art_response(await _art_lookup("caa", CAA_FRONT_URL.format(rg=rg)))
 
 
 @router.get("/art")
 async def get_cover_art(url: str = Query(...)):
     """An outside cover the browser was handed — a streamed track's provider
     art, any phantom cover — fetched by the node if its URL has one of
-    _ART_SOURCES' shapes; any other is no art, and nothing is fetched."""
-    source = _art_source(url)
+    covers.ART_SOURCES' shapes; any other is no art, and nothing is fetched."""
+    source = art_source(url)
     if source is None:
-        host = re.match(r"[a-z]+://([a-z0-9.-]{1,100})", url, re.IGNORECASE)
+        host = re.match(r"[a-z]+://([a-z0-9.-]{1,100})", url, re.IGNORECASE | re.ASCII)
         host = host.group(1).lower() if host else "?"
         if host not in _refused_hosts and len(_refused_hosts) < 32:
             _refused_hosts.add(host)
