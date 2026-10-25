@@ -10,8 +10,8 @@ driver across load/unload cycles, which surfaced as growing nvidia-smi
 VRAM with each enrichment trigger.
 
 On MPS a pass also takes a copy of the model on the CPU for the texts whose
-attention the device should not hold (encode), and gives it back at the pass's
-end (device.at_pass_end).
+attention the device should not hold or that it refuses (encode), and gives it
+back at the pass's end (device.at_pass_end).
 """
 
 import logging
@@ -92,8 +92,8 @@ def _load(model_name: str, device: str):
 
 class OutOfMemory(RuntimeError):
     """The device is full for the text encoder: a text of a few tokens did not
-    fit either. The pass stops there, and what it did not embed is selected
-    again by the next one."""
+    fit either. The pass stops there — on MPS only when the CPU is full too —
+    and what it did not embed is selected again by the next one."""
 
 
 # Tried alone after a text that did not fit alone: whether the device can take
@@ -123,29 +123,44 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
     """`texts` embedded and normalized, as every pass of the text encoder
     asks, and the indices of the texts left out (None in their place). On a
     device that keeps its attention, the texts go in forwards within its
-    share, and a text over the share alone goes to `name` on the CPU. Out of
-    device memory, a forward's texts go one at a time (_encode_on)."""
+    share, and to `name` on the CPU go a text over the share alone, a text the
+    device cannot take alone, and every text after it refused a text of a few
+    tokens. Out of memory, a forward's texts go one at a time (_encode_on)."""
     if device not in _KEEPS_ITS_ATTENTION:
         return _encode_on(model, texts, batch_size, device)
     out: List[Optional[np.ndarray]] = [None] * len(texts)
-    left_out: Set[int] = set()
-    forwards, too_long = _forwards(model, texts, batch_size)
-    for group in forwards:
-        vectors, left = _encode_on(model, [texts[i] for i in group], len(group), device)
-        _place(out, left_out, group, vectors, left)
-    if too_long:
-        logger.debug("%d of %d texts take more attention than %s's share alone: encoded on the "
-                     "CPU", len(too_long), len(texts), device)
-        vectors, left = _encode_on(_cpu_copy(name), [texts[i] for i in too_long], batch_size,
-                                   "cpu")
-        _place(out, left_out, too_long, vectors, left)
-    return out, left_out
-
-
-def _place(out, left_out, indices, vectors, left) -> None:
-    for j, i in enumerate(indices):
+    forwards, cpu = _forwards(model, texts, batch_size)
+    for n, group in enumerate(forwards):
+        try:
+            vectors, left = _encode_on(model, [texts[i] for i in group], len(group), device)
+        except OutOfMemory as e:
+            _refused(device, e)
+            cpu += [i for later in forwards[n:] for i in later]
+            break
+        _refusing.discard(device)
+        for j, i in enumerate(group):
+            out[i] = vectors[j]
+        cpu += [group[j] for j in sorted(left)]
+    if not cpu:
+        return out, set()
+    logger.debug("%d of %d texts on the CPU: over %s's share alone, or refused by it", len(cpu),
+                 len(texts), device)
+    vectors, left = _encode_on(_cpu_copy(name), [texts[i] for i in cpu], batch_size, "cpu")
+    for j, i in enumerate(cpu):
         out[i] = vectors[j]
-    left_out.update(indices[j] for j in left)
+    return out, {cpu[j] for j in left}
+
+
+# The devices whose refusal was said, until they take a forward again: one
+# that stays full refuses every pass, and one line says so
+_refusing: set = set()
+
+
+def _refused(device: str, why: OutOfMemory) -> None:
+    if device not in _refusing:
+        _refusing.add(device)
+        logger.warning("Text encoder: %s refused a text of a few tokens (%s) — its texts are "
+                       "encoded on the CPU until it takes them again", device, why)
 
 
 def _forwards(model, texts: List[str], batch_size: int) -> Tuple[List[List[int]], List[int]]:
@@ -205,8 +220,7 @@ def _encode_on(model, texts: List[str], batch_size: int,
             empty_cache(device)
             raise OutOfMemory(f"out of memory on {device}: {full}")
         left_out.add(i)
-        logger.debug("A text of %d characters does not fit on %s alone: left out", len(text),
-                     device)
+        logger.debug("A text of %d characters does not fit on %s alone", len(text), device)
     return out, left_out
 
 

@@ -239,6 +239,7 @@ def _lines(caplog, kind, level):
 def said_afresh(monkeypatch):
     import text_embedder
     monkeypatch.setattr(text_embedder, "_one_at_a_time", set())
+    monkeypatch.setattr(text_embedder, "_refusing", set())
 
 
 @pytest.mark.parametrize("kind", PASSES)
@@ -402,9 +403,12 @@ def test_an_analysis_run_whose_text_pass_stopped_is_no_success(monkeypatch):
 @pytest.fixture
 def cpu_copy(monkeypatch):
     """A working set whose share is 10,000 (SHARE_GB), and the encoder's copy
-    on the CPU a fake that says what it took and how often it was loaded."""
+    on the CPU a fake that says what it took and how often it was loaded. No
+    MPS here to free a cache of."""
+    import device
     import text_embedder
     monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", SHARE_GB)
+    monkeypatch.setattr(device, "empty_cache", lambda dev=None: None)
     cpu = Tokenized()
     cpu.loads = []
     monkeypatch.setattr(text_embedder, "_load",
@@ -458,3 +462,68 @@ def test_a_bio_pass_on_mps_writes_the_bio_over_the_share_from_the_cpu(db, cpu_co
     assert (stats["success"], stats["failed"], "stopped" in stats) == (10, 0, False), stats
     assert _embedded(db, "artist bios") == set(range(10))
     assert cpu_copy.forwards == [(1, 152)]      # that bio alone, with its "Artist: …." words
+
+
+def _refusals(caplog):
+    return [r for r in caplog.records
+            if r.name == "text_embedder" and r.getMessage().startswith("Text encoder: mps refused")]
+
+
+def test_what_mps_refuses_goes_to_the_cpu_said_once_until_it_takes_texts_again(cpu_copy, caplog):
+    import text_embedder
+    caplog.set_level(logging.DEBUG, logger="text_embedder")
+    refusing = Tokenized(lambda texts, batch_size: True)      # not a text of a few tokens either
+    texts = [_words(10, i) for i in range(3)]
+    for _ in range(2):
+        vectors, left_out = text_embedder.encode(refusing, texts, batch_size=4, device="mps",
+                                                 name=NAME)
+        assert left_out == set()
+        assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
+    said = _refusals(caplog)
+    assert [r.levelno for r in said] == [logging.WARNING]
+    assert said[0].getMessage().startswith(
+        "Text encoder: mps refused a text of a few tokens (out of memory on mps: MPS backend out "
+        "of memory")
+    # it takes texts again, then refuses again: said again
+    text_embedder.encode(Tokenized(), texts, batch_size=4, device="mps", name=NAME)
+    text_embedder.encode(refusing, texts, batch_size=4, device="mps", name=NAME)
+    assert len(_refusals(caplog)) == 2
+
+
+def test_a_text_mps_cannot_take_alone_goes_to_the_cpu(cpu_copy):
+    import text_embedder
+    tight = Tokenized(lambda texts, batch_size: any(LONG in t for t in texts))
+    texts = ["A short one.", " ".join([LONG] * 8), "Another short one."]
+    vectors, left_out = text_embedder.encode(tight, texts, batch_size=4, device="mps", name=NAME)
+    assert left_out == set()
+    assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
+    assert cpu_copy.forwards == [(1, 10)]       # that one alone; MPS still took a few tokens
+
+
+@pytest.mark.parametrize("kind", PASSES)
+def test_a_pass_on_a_refusing_mps_is_done_on_the_cpu(db, caplog, cpu_copy, kind):
+    """The Mac's case: every allocation on MPS refused. The pass is done, not
+    stopped every half hour."""
+    PASSES[kind][0](db, _texts())
+    db.commit()
+    caplog.set_level(logging.DEBUG)
+    gen = PASSES[kind][1](db)
+    gen.device, gen.model = "mps", Tokenized(lambda texts, batch_size: True)
+    stats = gen.generate_all(db)
+    assert (stats["success"], stats["failed"], "stopped" in stats, _embedded(db, kind)) == (
+        10, 0, False, set(range(10)))
+    assert not _lines(caplog, kind, logging.ERROR)
+    done = [m for m in _lines(caplog, kind, logging.INFO) if m.startswith(PASSES[kind][6])]
+    assert len(done) == 1 and done[0].startswith(PASSES[kind][7]), done
+    assert len(_refusals(caplog)) == 1
+
+
+def test_a_pass_whose_cpu_cannot_take_a_few_tokens_either_stops(db, caplog, cpu_copy):
+    _bios(db, _texts())
+    db.commit()
+    cpu_copy.full = lambda texts, batch_size: True
+    gen = PASSES["artist bios"][1](db)
+    gen.device, gen.model = "mps", Tokenized(lambda texts, batch_size: True)
+    stats = gen.generate_all(db)
+    assert stats["stopped"].startswith("out of memory on cpu: MPS backend out of memory")
+    assert (stats["success"], stats["failed"], _embedded(db, "artist bios")) == (0, 4, set())
