@@ -8,7 +8,6 @@ import asyncio
 import base64
 import json
 import logging
-import select
 import ssl
 import threading
 import uuid
@@ -24,7 +23,7 @@ from pydantic import BaseModel, Field
 import psycopg2
 import psycopg2.extensions
 from config import settings
-from db_pool import db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute, get_conn as _get_conn
+from db_pool import Listener, db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute, get_conn as _get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +59,6 @@ class SetEmailRequest(BaseModel):
 
 _chat_sse_clients: list = []  # list of (asyncio.Event, asyncio.AbstractEventLoop)
 _chat_sse_lock = threading.Lock()
-_chat_listener_thread: Optional[threading.Thread] = None
-_chat_listener_running = False
 
 
 def _wake_chat_sse_clients():
@@ -87,77 +84,37 @@ def chat_sse_unregister(evt: asyncio.Event, loop) -> None:
             pass
 
 
-def _chat_db_listener():
-    """Background thread: LISTEN for PostgreSQL chat notifications."""
-    while _chat_listener_running:
-        conn = None
-        try:
-            conn = psycopg2.connect(settings.database_url)
-            conn.set_isolation_level(
-                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
-            )
-            with conn.cursor() as cur:
-                cur.execute("LISTEN sautium_chat")
+def _on_chat_notify(notifies: list) -> None:
+    """sautium_chat: every chat stream re-fetches. An 'out' insert — the
+    trg_p2p_messages_notify payload msg:{friend_id}:{direction} — is a reply
+    for that friend: their relay wake stream is pinged so they pull
+    immediately."""
+    out_friend_ids = set()
+    for note in notifies:
+        parts = (note.payload or "").split(":")
+        if len(parts) == 3 and parts[0] == "msg" and parts[2] == "out":
+            try:
+                out_friend_ids.add(int(parts[1]))
+            except ValueError:
+                pass
+    _wake_chat_sse_clients()
+    if out_friend_ids:
+        from routers.peer_chat import ping_wake_by_friend_id
+        for fid in out_friend_ids:
+            ping_wake_by_friend_id(fid)
 
-            while _chat_listener_running:
-                ready = select.select([conn], [], [], 1)
-                if ready[0]:
-                    conn.poll()
-                    if conn.notifies:
-                        out_friend_ids = set()
-                        while conn.notifies:
-                            note = conn.notifies.pop(0)
-                            # trg_p2p_messages_notify payload:
-                            # msg:{friend_id}:{direction}. An 'out' insert
-                            # means a reply for that friend — ping their
-                            # relay wake stream so they pull immediately.
-                            parts = (note.payload or "").split(":")
-                            if (len(parts) == 3 and parts[0] == "msg"
-                                    and parts[2] == "out"):
-                                try:
-                                    out_friend_ids.add(int(parts[1]))
-                                except ValueError:
-                                    pass
-                        _wake_chat_sse_clients()
-                        if out_friend_ids:
-                            from routers.peer_chat import (
-                                ping_wake_by_friend_id,
-                            )
-                            for fid in out_friend_ids:
-                                ping_wake_by_friend_id(fid)
-        except Exception as e:
-            logger.debug(f"Chat DB listener error: {e}")
-            if _chat_listener_running:
-                import time
-                time.sleep(1)
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+
+_chat_listener = Listener("chat-sse-listener", ("sautium_chat",), _on_chat_notify)
 
 
 def start_chat_listener():
     """Start the background DB listener thread for chat SSE."""
-    global _chat_listener_thread, _chat_listener_running
-    if _chat_listener_thread and _chat_listener_thread.is_alive():
-        return
-    _chat_listener_running = True
-    _chat_listener_thread = threading.Thread(
-        target=_chat_db_listener, daemon=True, name="chat-sse-listener"
-    )
-    _chat_listener_thread.start()
+    _chat_listener.start()
 
 
 def stop_chat_listener():
     """Stop the background DB listener thread."""
-    global _chat_listener_running
-    _chat_listener_running = False
-    if _chat_listener_thread:
-        _chat_listener_thread.join(timeout=3)
-
-
+    _chat_listener.stop()
 
 
 # Cache identity to avoid re-deriving (Argon2id is slow)

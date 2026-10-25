@@ -16,16 +16,13 @@ the gear sheet renders the "Awaiting research" panel.
 
 import asyncio
 import logging
-import select
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-import psycopg2
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from config import settings
-from db_pool import db_execute, db_query, db_query_one
+from db_pool import Listener, db_execute, db_query, db_query_one
 
 logger = logging.getLogger(__name__)
 
@@ -242,8 +239,6 @@ def retry_research(model_id: str) -> Dict[str, Any]:
 
 _state_sse_clients: list = []  # (asyncio.Event, loop)
 _state_sse_lock = threading.Lock()
-_state_listener_thread: Optional[threading.Thread] = None
-_state_listener_running = False
 
 
 def _wake_state_clients():
@@ -252,50 +247,16 @@ def _wake_state_clients():
             loop.call_soon_threadsafe(evt.set)
 
 
-def _state_db_listener():
-    while _state_listener_running:
-        conn = None
-        try:
-            conn = psycopg2.connect(settings.database_url)
-            conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-            with conn.cursor() as cur:
-                cur.execute("LISTEN sautium_gear_state")
-            while _state_listener_running:
-                ready = select.select([conn], [], [], 1)
-                if ready[0]:
-                    conn.poll()
-                    if conn.notifies:
-                        conn.notifies.clear()
-                        _wake_state_clients()
-        except Exception as e:
-            logger.debug(f"gear state listener error: {e}")
-            if _state_listener_running:
-                import time
-                time.sleep(1)
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+_state_listener = Listener("gear-state-sse", ("sautium_gear_state",),
+                           lambda notifies: _wake_state_clients())
 
 
 def start_gear_state_listener():
-    global _state_listener_thread, _state_listener_running
-    if _state_listener_thread and _state_listener_thread.is_alive():
-        return
-    _state_listener_running = True
-    _state_listener_thread = threading.Thread(
-        target=_state_db_listener, daemon=True, name="gear-state-sse"
-    )
-    _state_listener_thread.start()
+    _state_listener.start()
 
 
 def stop_gear_state_listener():
-    global _state_listener_running
-    _state_listener_running = False
-    if _state_listener_thread:
-        _state_listener_thread.join(timeout=3)
+    _state_listener.stop()
 
 
 def research_sse_register(evt: asyncio.Event, loop) -> None:

@@ -26,13 +26,14 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 import invite_tokens
 from config import settings
 from db_pool import db_query_one, get_conn
 from p2p_chat import MAX_ENCRYPTED_CHARS, get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity, verify_invite_code
+from serving import EventStream
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
@@ -642,11 +643,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     except Exception as e:
                         logger.warning("client withdraw failed: %s", e)
 
-    return StreamingResponse(gen(), media_type="text/event-stream", headers={
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",
-    })
+    return EventStream(gen())
 
 
 @relay_router.get("/voucher")

@@ -17,19 +17,15 @@ tells the client the semantic channels weren't all live yet.
 
 import logging
 import random
-import select
 import threading
-import time
 from typing import Any, Optional
 
-import psycopg2
 from fastapi import APIRouter, Body, HTTPException, Query
 from sqlalchemy import text
 
 import model_cache
-from config import settings
 from database import get_db_context
-from db_pool import db_query
+from db_pool import Listener, db_query
 from discovery_engine import RETRIEVE_K
 
 logger = logging.getLogger(__name__)
@@ -44,8 +40,6 @@ logger = logging.getLogger(__name__)
 
 _mb_sse_clients: list = []
 _mb_sse_lock = threading.Lock()
-_mb_listener_thread: Optional[threading.Thread] = None
-_mb_listener_running = False
 
 
 def mb_sse_register(evt, loop) -> None:
@@ -94,54 +88,24 @@ def _wake_lb_clients() -> None:
         loop.call_soon_threadsafe(evt.set)
 
 
-def _mb_db_listener() -> None:
-    while _mb_listener_running:
-        conn = None
-        try:
-            conn = psycopg2.connect(settings.database_url)
-            conn.set_isolation_level(
-                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-            with conn.cursor() as cur:
-                cur.execute("LISTEN sautium_mb_sources")
-                cur.execute("LISTEN sautium_lb_done")
-            while _mb_listener_running:
-                ready = select.select([conn], [], [], 1)
-                if ready[0]:
-                    conn.poll()
-                    fired = set()
-                    while conn.notifies:
-                        fired.add(conn.notifies.pop(0).channel)
-                    if "sautium_mb_sources" in fired:
-                        _wake_mb_clients()
-                    if "sautium_lb_done" in fired:
-                        _wake_lb_clients()
-        except Exception as e:
-            logger.debug(f"mb sources listener error: {e}")
-            if _mb_listener_running:
-                time.sleep(1)
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+def _on_mb_notify(notifies: list) -> None:
+    fired = {note.channel for note in notifies}
+    if "sautium_mb_sources" in fired:
+        _wake_mb_clients()
+    if "sautium_lb_done" in fired:
+        _wake_lb_clients()
+
+
+_mb_listener = Listener("mb-sources-sse", ("sautium_mb_sources", "sautium_lb_done"),
+                        _on_mb_notify)
 
 
 def start_mb_sources_listener() -> None:
-    global _mb_listener_thread, _mb_listener_running
-    if _mb_listener_thread and _mb_listener_thread.is_alive():
-        return
-    _mb_listener_running = True
-    _mb_listener_thread = threading.Thread(
-        target=_mb_db_listener, daemon=True, name="mb-sources-sse")
-    _mb_listener_thread.start()
+    _mb_listener.start()
 
 
 def stop_mb_sources_listener() -> None:
-    global _mb_listener_running
-    _mb_listener_running = False
-    if _mb_listener_thread:
-        _mb_listener_thread.join(timeout=3)
+    _mb_listener.stop()
 
 
 router = APIRouter(prefix="/api/discovery", tags=["discovery"])

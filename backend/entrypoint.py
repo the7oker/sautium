@@ -99,12 +99,14 @@ def main() -> int:
     _wait_for_database()
     print(f"[entrypoint] uvicorn HTTP on {HOST}:{PORT} (reload={RELOAD})", flush=True)
     served()
-    # The Web UI's event streams never end on their own: without a limit
-    # uvicorn waits on them until Docker kills the process, and the
-    # lifespan's shutdown — a benchmark run putting the owner's HQPlayer
-    # back — never runs (exit 137, 2026-10-03). The compose files give the
-    # stop 10 s (stop_grace_period); these 2 are the open requests' share,
-    # after the peer surface's 1 (main._PEER_GRACE_S: SIGTERM reaches it first).
+    # Without a limit uvicorn waits on open requests until Docker kills the
+    # process, and the lifespan's shutdown — a benchmark run putting the
+    # owner's HQPlayer back — never runs (exit 137, 2026-10-03: the Web UI's
+    # event streams, which serving.Server ends as its stop begins since
+    # 2026-10-25; the reload path's own server does not). The compose files
+    # give the stop 10 s (stop_grace_period); these 2 are the open requests'
+    # share, after the peer surface's 1 (main._PEER_GRACE_S: SIGTERM reaches
+    # it first).
     if RELOAD:
         # The development path: the reload supervisor runs the server in a
         # process of its own

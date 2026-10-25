@@ -849,7 +849,9 @@ def _keep_awake(enabled: bool) -> None:
         except OSError as e:
             logger.warning("Could not inhibit sleep (caffeinate): %s", e)
             return
-        threading.Thread(target=lambda: (release.wait(), proc.terminate()),
+        # Waited for once terminated: a child never waited for stays a zombie
+        # until the launcher's next subprocess happens to reap it
+        threading.Thread(target=lambda: (release.wait(), proc.terminate(), proc.wait()),
                          name="stay-awake", daemon=True).start()
         logger.info("Idle sleep inhibited while services run (caffeinate)")
     else:

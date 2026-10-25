@@ -20,18 +20,14 @@ from) leads with the seed-pick rotation, then newest-by-file_modified_at.
 """
 
 import logging
-import select
 import threading
 import time
 from datetime import datetime
 from typing import Any
 
-import psycopg2
-import psycopg2.extensions
 from fastapi import APIRouter, HTTPException, Query
 
-from config import settings
-from db_pool import db_query, db_query_one, db_query_with_ef_search
+from db_pool import Listener, db_query, db_query_one, db_query_with_ef_search
 
 logger = logging.getLogger(__name__)
 
@@ -413,57 +409,18 @@ class _Ranking:
 
 
 _ranking = _Ranking()
-_listener_thread: threading.Thread | None = None
-_listener_running = False
-
-
-def _listens_listener() -> None:
-    """Rebuild the ranking on sautium_listens. A burst — the scrobble canon
-    places thousands of listens — folds into few rebuilds: whatever lands
-    during one waits on the socket and is cleared together. Every
-    (re)connect rebuilds too, since a NOTIFY only reaches a live listener.
-    Keepalives as in gear_research_worker: an idle socket reaped without an
-    RST would swallow every later NOTIFY."""
-    while _listener_running:
-        conn = None
-        try:
-            conn = psycopg2.connect(
-                settings.database_url,
-                keepalives=1, keepalives_idle=30,
-                keepalives_interval=10, keepalives_count=3,
-            )
-            conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-            with conn.cursor() as cur:
-                cur.execute("LISTEN sautium_listens")
-            _ranking.rebuild()
-            while _listener_running:
-                if select.select([conn], [], [], 5)[0]:
-                    conn.poll()
-                    if conn.notifies:
-                        conn.notifies.clear()
-                        _ranking.rebuild()
-        except Exception as e:
-            logger.warning(f"Recommendations listener error: {e}")
-            if _listener_running:
-                time.sleep(2)
-        finally:
-            if conn:
-                conn.close()
+# Rebuilds the ranking on sautium_listens and on every (re)connect. A burst —
+# the scrobble canon places thousands of listens — folds into few rebuilds.
+_listener = Listener("recommendations-listener", ("sautium_listens",),
+                     on_notify=lambda notifies: _ranking.rebuild(), on_connect=_ranking.rebuild)
 
 
 def start_recommendations_listener() -> None:
-    global _listener_thread, _listener_running
-    if _listener_thread and _listener_thread.is_alive():
-        return
-    _listener_running = True
-    _listener_thread = threading.Thread(
-        target=_listens_listener, daemon=True, name="recommendations-listener")
-    _listener_thread.start()
+    _listener.start()
 
 
 def stop_recommendations_listener() -> None:
-    global _listener_running
-    _listener_running = False
+    _listener.stop()
 
 
 def _rank_recommendations() -> list[str] | None:

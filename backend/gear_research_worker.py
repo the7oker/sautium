@@ -42,16 +42,13 @@ CLI (inside the backend container):
 import json
 import logging
 import re
-import select
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
-import psycopg2
-
 import claude_code
 from config import settings
-from db_pool import db_execute, db_query, db_query_one
+from db_pool import Listener, db_execute, db_query, db_query_one
 from uuid_utils import (gear_caveat_uuid, gear_pair_uuid,
                         gear_spec_attribute_uuid, gear_technology_uuid)
 
@@ -128,7 +125,6 @@ class ResearchSignedOut(Exception):
 
 
 _consumer_thread: Optional[threading.Thread] = None
-_listener_thread: Optional[threading.Thread] = None
 _worker_running = False
 
 
@@ -764,51 +760,17 @@ def _consumer_loop() -> None:
             logger.exception("gear research: drain crashed; will re-drain on next wake")
 
 
-def _listener_loop() -> None:
-    """Bridge cross-process / P2P NOTIFY into the wake Event. In-process
-    producers set the Event directly via request_drain(); this thread exists
-    so a NOTIFY fired from another process still wakes the consumer.
-
-    Aggressive keepalives so a silently-dropped LISTEN socket (an idle TCP
-    conn reaped by Docker/WSL NAT with no RST) surfaces as a poll error and
-    forces a reconnect. Without them the thread keeps select()-ing a dead
-    socket, no exception fires, and every later NOTIFY is lost."""
-    while _worker_running:
-        conn = None
-        try:
-            conn = psycopg2.connect(
-                settings.database_url,
-                keepalives=1, keepalives_idle=30,
-                keepalives_interval=10, keepalives_count=3,
-            )
-            conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-            with conn.cursor() as cur:
-                cur.execute("LISTEN gear_research")
-            # Re-sweep on every (re)connect: a NOTIFY only reaches a live
-            # listener, so anything queued while the socket was down would
-            # otherwise wait for the next producer.
-            _drain_wake.set()
-            while _worker_running:
-                ready = select.select([conn], [], [], 5)
-                if ready[0]:
-                    conn.poll()
-                    if conn.notifies:
-                        conn.notifies.clear()
-                        _drain_wake.set()
-        except Exception as e:
-            logger.warning(f"gear research listener error: {e}")
-            if _worker_running:
-                time.sleep(2)
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+# Bridges cross-process / P2P NOTIFY into the wake Event. In-process
+# producers set the Event directly via request_drain(); this listener exists
+# so a NOTIFY fired from another process still wakes the consumer. Every
+# (re)connect re-sweeps: anything queued while the socket was down would
+# otherwise wait for the next producer.
+_listener = Listener("gear-research-listener", ("gear_research",),
+                     on_notify=lambda notifies: _drain_wake.set(), on_connect=_drain_wake.set)
 
 
 def start_gear_research_worker() -> None:
-    global _consumer_thread, _listener_thread, _worker_running
+    global _consumer_thread, _worker_running
     if _consumer_thread and _consumer_thread.is_alive():
         return
     _worker_running = True
@@ -816,10 +778,7 @@ def start_gear_research_worker() -> None:
         target=_consumer_loop, daemon=True, name="gear-research-worker"
     )
     _consumer_thread.start()
-    _listener_thread = threading.Thread(
-        target=_listener_loop, daemon=True, name="gear-research-listener"
-    )
-    _listener_thread.start()
+    _listener.start()
     logger.info("gear research worker started")
 
 
@@ -829,8 +788,7 @@ def stop_gear_research_worker() -> None:
     _drain_wake.set()  # unblock the consumer's wait() so it can observe the flag
     if _consumer_thread:
         _consumer_thread.join(timeout=3)
-    if _listener_thread:
-        _listener_thread.join(timeout=3)
+    _listener.stop()
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────

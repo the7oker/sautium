@@ -20,17 +20,13 @@ mirror leaves (a replace that plays) goes once it is let go
 """
 
 import logging
-import select
 import threading
-import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from typing import Any, Callable, Iterator, Optional
 
-import psycopg2
-import psycopg2.extensions
-
 from config import settings, ui_build
+from db_pool import Listener
 from hqplayer_client import STATUS_READINGS, format_time
 
 from playback import sessions, tracker
@@ -1146,59 +1142,20 @@ class PlaybackManager:
 
 manager = PlaybackManager()
 
-_files_listener: Optional[threading.Thread] = None
-_files_listener_running = False
-
-
-def _files_removed_listener() -> None:
-    """Re-bind the queue on sautium_files_removed (the media_files delete
-    trigger). A burst — a CUE reconcile commits per image — folds into few
-    passes: whatever lands during one waits on the socket and is cleared
-    together. Every (re)connect re-binds too, since a NOTIFY only reaches a
-    live listener. Keepalives as in gear_research_worker: an idle socket
-    reaped without an RST would swallow every later NOTIFY."""
-    while _files_listener_running:
-        conn = None
-        try:
-            conn = psycopg2.connect(
-                settings.database_url,
-                keepalives=1, keepalives_idle=30,
-                keepalives_interval=10, keepalives_count=3,
-            )
-            conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-            with conn.cursor() as cur:
-                cur.execute("LISTEN sautium_files_removed")
-            manager.rebind_files()
-            while _files_listener_running:
-                if select.select([conn], [], [], 5)[0]:
-                    conn.poll()
-                    if conn.notifies:
-                        conn.notifies.clear()
-                        manager.rebind_files()
-        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            logger.warning("queue files listener: %s — reconnecting", e)
-        except Exception:
-            logger.exception("queue re-bind failed")
-        finally:
-            if conn:
-                conn.close()
-        if _files_listener_running:
-            time.sleep(2)
+# Re-binds the queue on sautium_files_removed (the media_files delete
+# trigger) and on every (re)connect. A burst — a CUE reconcile commits per
+# image — folds into few passes. The manager is looked up at each call.
+_files_listener = Listener("queue-files-listener", ("sautium_files_removed",),
+                           on_notify=lambda notifies: manager.rebind_files(),
+                           on_connect=lambda: manager.rebind_files())
 
 
 def start_files_listener() -> None:
-    global _files_listener, _files_listener_running
-    if _files_listener and _files_listener.is_alive():
-        return
-    _files_listener_running = True
-    _files_listener = threading.Thread(
-        target=_files_removed_listener, daemon=True, name="queue-files-listener")
     _files_listener.start()
 
 
 def stop_files_listener() -> None:
-    global _files_listener_running
-    _files_listener_running = False
+    _files_listener.stop()
 
 
 def active_hqp_endpoint():

@@ -350,4 +350,3 @@ def test_the_listener_rebinds_on_the_delete(conn, dsn, mgr, monkeypatch):
         assert passes == [old, moved]
     finally:
         manager_mod.stop_files_listener()
-        manager_mod._files_listener.join(timeout=10)

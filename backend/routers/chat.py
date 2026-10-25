@@ -13,19 +13,19 @@ providers emit raw `TextDelta`s, the router runs them through
 payload is redirected into a separate event.
 """
 
+import asyncio
 import json
 import logging
-import queue
 import threading
-from typing import Iterator, Optional
+from typing import AsyncIterator, Iterator, Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from db_pool import db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute
 from entity_hydration import hydrate_artists, hydrate_albums, hydrate_tracks
 from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
+from serving import EventStream
 from tools.block_parser import (
     BlocksFilter,
     extract_blocks_with_fallback,
@@ -372,49 +372,54 @@ class _LiveRun:
     everything emitted so far, then live events. The run outlives the
     HTTP connection that started it, so a dropped client never kills
     the generation.
+
+    A subscriber is a queue on its stream's event loop, handed each event
+    from the producer's thread: the stream awaits it, so the stop of the
+    server — or a client leaving — ends the stream at once. A queue
+    waited on in a worker thread held a stop until its keepalive came.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._history: list[str] = []
-        self._subscribers: list[queue.Queue] = []
+        self._subscribers: list[tuple[asyncio.Queue, asyncio.AbstractEventLoop]] = []
         self._closed = False
 
     def publish(self, sse: str):
         with self._lock:
             self._history.append(sse)
-            for q in self._subscribers:
-                q.put(sse)
+            for q, loop in self._subscribers:
+                loop.call_soon_threadsafe(q.put_nowait, sse)
 
     def close(self):
         with self._lock:
             self._closed = True
-            for q in self._subscribers:
-                q.put(_RUN_CLOSED)
+            for q, loop in self._subscribers:
+                loop.call_soon_threadsafe(q.put_nowait, _RUN_CLOSED)
             self._subscribers.clear()
 
-    def subscribe(self) -> "queue.Queue":
-        q: "queue.Queue" = queue.Queue()
+    def subscribe(self) -> asyncio.Queue:
+        """From the stream's own loop."""
+        q: asyncio.Queue = asyncio.Queue()
         with self._lock:
             for sse in self._history:
-                q.put(sse)
+                q.put_nowait(sse)
             if self._closed:
-                q.put(_RUN_CLOSED)
+                q.put_nowait(_RUN_CLOSED)
             else:
-                self._subscribers.append(q)
+                self._subscribers.append((q, asyncio.get_running_loop()))
         return q
 
-    def unsubscribe(self, q: "queue.Queue"):
+    def unsubscribe(self, q: asyncio.Queue):
         with self._lock:
-            if q in self._subscribers:
-                self._subscribers.remove(q)
+            self._subscribers = [(s, loop) for s, loop in self._subscribers if s is not q]
 
 
 _active_runs: dict[int, _LiveRun] = {}
 _active_runs_lock = threading.Lock()
 
 
-def _run_event_stream(run: _LiveRun) -> Iterator[str]:
+async def _run_event_stream(run: _LiveRun) -> AsyncIterator[str]:
     """SSE feed for one subscriber: replayed history, then live events,
     with keepalive comments while the producer is inside a long tool
     call so proxies/browsers don't drop the idle connection."""
@@ -422,8 +427,8 @@ def _run_event_stream(run: _LiveRun) -> Iterator[str]:
     try:
         while True:
             try:
-                item = q.get(timeout=KEEPALIVE_INTERVAL_SEC)
-            except queue.Empty:
+                item = await asyncio.wait_for(q.get(), timeout=KEEPALIVE_INTERVAL_SEC)
+            except asyncio.TimeoutError:
                 yield ": keepalive\n\n"
                 continue
             if item is _RUN_CLOSED:
@@ -1039,14 +1044,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
         target=producer, args=(run,), daemon=True, name="chat-stream-worker",
     ).start()
 
-    return StreamingResponse(
-        _run_event_stream(run),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(_run_event_stream(run))
 
 
 @router.get("/sessions/{session_id}/stream")
@@ -1061,14 +1059,7 @@ async def reattach_stream(session_id: int):
         run = _active_runs.get(session_id)
     if run is None:
         raise HTTPException(status_code=404, detail="No generation in progress")
-    return StreamingResponse(
-        _run_event_stream(run),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(_run_event_stream(run))
 
 
 # ---------------------------------------------------------------------------

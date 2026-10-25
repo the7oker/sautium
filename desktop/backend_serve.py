@@ -60,9 +60,12 @@ def main() -> None:
 
     served()
     # The app's logging from the start, not from main.py's import: a stop
-    # the server hears during the import is said too
+    # the server hears during the import is said too. Open requests get two
+    # of the ten seconds the launcher waits (service_manager), as in Docker
+    # (entrypoint.py): the event streams end as the stop begins, and the
+    # lifespan's longest wait — a benchmark putting HQPlayer back — is six
     config = uvicorn.Config("main:app", host="0.0.0.0", port=int(sys.argv[1]),
-                            timeout_graceful_shutdown=5, log_config=LOGGING_CONFIG)
+                            timeout_graceful_shutdown=2, log_config=LOGGING_CONFIG)
     try:
         AnnouncingServer(config).run()
     except KeyboardInterrupt:

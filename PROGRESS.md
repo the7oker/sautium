@@ -3300,6 +3300,29 @@ Lesson: a switch moves the listening, not just the list.
   table, not the process; one that outlives its kill) is said and left to
   the backend's bind; one killed is waited for; a sweep that could read no
   process says so once.
+- **The backend's stop fits the launcher's wait** (2026-10-25). On that
+  Mac the stop before the failed start took the launcher's whole 10 s and
+  ended in its kill: uvicorn waited out its 5 s grace on the Web UI's two
+  open event streams, then cancelled them (a traceback each in
+  backend.log), and the lifespan's shutdown took five more — four LISTEN
+  threads, joined one after another, each saw its stop flag only at its
+  1–5 s select timeout. The launcher's backend command and its own stop,
+  run on Linux with two streams open: 8.9–10.0 s in five runs, every
+  stream cut short. Now the event streams end as a server's stop begins
+  (`serving.EventStream`, ended by `serving.Server.shutdown`), each a
+  completed response the client reconnects to — a chat generation's
+  stream too, whose queue was waited on in a worker thread for up to its
+  15 s keepalive; the seven LISTEN loops are one `db_pool.Listener`,
+  blocked on its connection and on a wake socket its stop closes; and the
+  lifespan's waits run side by side (a benchmark putting HQPlayer back,
+  the notary's stamp, a gear research call). The same five runs: 0.72–0.83
+  s, every stream complete within 0.1 s. The launcher's backend gives open
+  requests 2 s, as Docker does, and the launcher still waits 10 s: the
+  backend's stop is bounded below it, its longest wait the benchmark's 6
+  s. After the backend has ended, the launcher stops what it left running
+  — a decode, an agent's call, which held the old wait for the whole tree
+  — and waits for each process it kills, the macOS sleep hold's
+  caffeinate included.
 
 - **A range past the end is 416, never the whole file.** HQPlayer resumes
   a stream cut short with `Range: bytes=<offset>-` and appends what comes

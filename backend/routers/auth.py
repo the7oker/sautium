@@ -17,11 +17,11 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 import device_auth
 from auth_hmac import ensure_secret
+from serving import EventStream
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +222,7 @@ async def get_pin() -> dict:
 
 
 @router.get("/pin/stream")
-async def pin_stream() -> StreamingResponse:
+async def pin_stream() -> EventStream:
     """SSE wake channel for the host displaying the code.
 
     The host knows when the code expires — it was told — so expiry needs no
@@ -249,12 +249,4 @@ async def pin_stream() -> StreamingResponse:
         finally:
             device_auth.pin_unsubscribe(entry)
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(event_generator())

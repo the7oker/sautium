@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import track_similarity
@@ -36,6 +35,7 @@ from playback.manager import OutputHeld, QueueChanged, active_hqp_endpoint, mana
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
+from serving import EventStream
 from sql_queries import ALBUM_FILES, TRACK_FILES, best_rip_order, owned_rank, rip_quality
 
 logger = logging.getLogger(__name__)
@@ -976,15 +976,7 @@ async def browser_channel(tab: str):
         finally:
             backend.detach_tab(tab)
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(event_generator())
 
 
 @router.post("/browser/event")
@@ -1045,15 +1037,7 @@ async def status_stream():
         finally:
             manager.sse_unregister(evt)
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(event_generator())
 
 
 events_router = APIRouter(prefix="/api", tags=["events"])
@@ -1209,15 +1193,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
             if meter is not None:
                 hqp_meter.unregister(meter)
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(event_generator())
 
 
 @router.get("/status")

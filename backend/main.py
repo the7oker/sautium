@@ -220,8 +220,10 @@ def _default_gateway() -> Optional[str]:
 
 # uvicorn hands SIGTERM to the server that captured it last — this one,
 # started inside the main app's lifespan — and passes it on only once this
-# one has stopped: its open streams (a wake stream every launcher holds to
-# the master) would hold the main app's shutdown back until Docker kills.
+# one has stopped: its open requests hold the main app's shutdown back. Its
+# streams (a wake stream every launcher holds to the master) end as its stop
+# begins (serving.EventStream); without the limit they held it until Docker
+# killed.
 _PEER_GRACE_S = 1
 
 
@@ -876,16 +878,33 @@ async def lifespan(app: FastAPI):
     # thread closes its socket, an idle socket is closed by the close.
     from playback import hqp_link
     hqp_link.close_all("the node is stopping")
-    # A benchmark run drives HQPlayer on its own connection: cancelled, and
+    # The stops that wait, side by side on threads of their own: the stop
+    # takes the longest of them, never their sum. The longest is a benchmark
+    # run's, which drives HQPlayer on its own connection: cancelled, and
     # given the seconds to put HQPlayer back (its volume, its settings)
-    # before anything else stops — the compose files give a stop ten in all,
-    # the first two to open requests (entrypoint.py).
+    # before the output is let go — the launcher and the compose files give
+    # a stop ten in all, the first two to open requests (backend_serve.py,
+    # entrypoint.py). Beside it: the notary's stamp in flight, a gear
+    # research call, the load meter; the listeners end at once
+    # (db_pool.Listener). Run one after another, the listeners' joins alone
+    # took five seconds of a Mac's stop (2026-10-25).
     from playback import hqp_benchmark
-    await asyncio.to_thread(hqp_benchmark.shutdown, 6.0)
-    if _load_meter is not None:
-        _load_meter.stop()
-    if _playback_signal is not None:
-        _playback_signal.close()
+    import notary
+
+    def _stop_playback() -> None:
+        hqp_benchmark.shutdown(6.0)
+        stop_status_poller()
+
+    def _stop_load_meter() -> None:
+        if _load_meter is not None:
+            _load_meter.stop()
+        if _playback_signal is not None:
+            _playback_signal.close()
+
+    waits = [asyncio.create_task(asyncio.to_thread(stop)) for stop in (
+        _stop_playback, _stop_load_meter, notary.stop, stop_gear_research_worker,
+        stop_files_listener, stop_chat_listener, stop_sync_listener,
+        stop_gear_state_listener, stop_mb_sources_listener, stop_recommendations_listener)]
     if _identity_stop:
         _identity_stop.set()
     if _identity_task:
@@ -928,24 +947,13 @@ async def lifespan(app: FastAPI):
     if _dht_service:
         await _dht_service.stop()
         _dht_service = None
-
-    stop_status_poller()
-    stop_files_listener()
-    stop_chat_listener()
-    stop_sync_listener()
-    stop_gear_research_worker()
-    stop_gear_state_listener()
-    stop_mb_sources_listener()
-    stop_recommendations_listener()
+    await asyncio.gather(*waits)
 
     try:
         import background_enrichment
         background_enrichment.stop()
     except Exception:
         pass
-
-    import notary
-    notary.stop()
 
     # Cleanup resources
     import model_cache

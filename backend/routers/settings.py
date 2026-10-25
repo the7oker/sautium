@@ -14,16 +14,11 @@ need to know about them directly.
 import asyncio
 import json
 import logging
-import select
 import shutil
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
-import psycopg2
-import psycopg2.extensions
-
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -32,7 +27,8 @@ import codex_cli
 import gear_research_worker
 from config import settings as app_settings
 from database import get_db_context
-from db_pool import db_execute, db_query, db_query_one, get_conn
+from db_pool import Listener, db_execute, db_query, db_query_one, get_conn
+from serving import EventStream
 from sql_queries import ARTIST_OWNED
 
 logger = logging.getLogger(__name__)
@@ -231,64 +227,28 @@ codex_cli.auth.on_change(_codex_signin_changed)
 # after each P2P sync. We listen here, then wake
 # library subscribers so the Settings screen re-fetches and shows
 # the new last_sync_at / items_received. Same NOTIFY pattern used
-# by chat (routers/p2p.py); no polling.
+# by chat (routers/p2p.py); no polling. Beside it: sautium_identity
+# (identity proof progress) and sautium_notices (a condition began or
+# ended).
 
-_sync_listener_thread: Optional[threading.Thread] = None
-_sync_listener_running = False
+
+def _on_sync_notify(notifies: list) -> None:
+    if any(note.channel == "sautium_notices" for note in notifies):
+        notify_notice_subscribers()
+    notify_library_subscribers()
 
 
-def _sync_db_listener() -> None:
-    """Background thread: LISTEN sautium_sync_done, wake library SSE."""
-    while _sync_listener_running:
-        conn = None
-        try:
-            conn = psycopg2.connect(app_settings.database_url)
-            conn.set_isolation_level(
-                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
-            )
-            with conn.cursor() as cur:
-                cur.execute("LISTEN sautium_sync_done")
-                cur.execute("LISTEN sautium_identity")     # identity proof progress
-                cur.execute("LISTEN sautium_notices")      # a condition began or ended
-
-            while _sync_listener_running:
-                ready = select.select([conn], [], [], 5)
-                if ready[0]:
-                    conn.poll()
-                    if conn.notifies:
-                        channels = set()
-                        while conn.notifies:
-                            channels.add(conn.notifies.pop(0).channel)
-                        if "sautium_notices" in channels:
-                            notify_notice_subscribers()
-                        notify_library_subscribers()
-        except Exception as e:
-            logger.debug(f"Sync DB listener error: {e}")
-            if _sync_listener_running:
-                import time
-                time.sleep(1)
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+_sync_listener = Listener("sync-sse-listener",
+                          ("sautium_sync_done", "sautium_identity", "sautium_notices"),
+                          _on_sync_notify)
 
 
 def start_sync_listener() -> None:
-    global _sync_listener_thread, _sync_listener_running
-    if _sync_listener_thread and _sync_listener_thread.is_alive():
-        return
-    _sync_listener_running = True
-    _sync_listener_thread = threading.Thread(
-        target=_sync_db_listener, daemon=True, name="sync-sse-listener"
-    )
-    _sync_listener_thread.start()
+    _sync_listener.start()
 
 
 def stop_sync_listener() -> None:
-    global _sync_listener_running
-    _sync_listener_running = False
+    _sync_listener.stop()
 
 
 # ============================================================
@@ -1358,7 +1318,7 @@ async def get_library_state() -> Dict[str, Any]:
 
 
 @router.get("/library/stream")
-async def library_stream() -> StreamingResponse:
+async def library_stream() -> EventStream:
     """SSE channel. Emits a wake event whenever scan / enrich workers
     transition state. The client receives "data: {}" and pulls fresh
     state via GET /api/settings/library. Replaces 1.5s polling.
@@ -1391,15 +1351,7 @@ async def library_stream() -> StreamingResponse:
                     (e, l) for e, l in _library_sse_clients if e is not evt
                 ]
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(event_generator())
 
 
 @router.get("/ai")
@@ -1570,7 +1522,7 @@ def run_ai_canonization() -> Dict[str, Any]:
 
 
 @router.get("/ai/canonization/stream")
-async def ai_canonization_stream() -> StreamingResponse:
+async def ai_canonization_stream() -> EventStream:
     """SSE wake channel for the AI canonization run — client re-pulls GET /ai on
     each event. Same wake-event pattern as the library/claude channels."""
     loop = asyncio.get_event_loop()
@@ -1597,12 +1549,7 @@ async def ai_canonization_stream() -> StreamingResponse:
                     (e, l) for e, l in _aicanon_sse_clients if e is not evt
                 ]
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
-                 "X-Accel-Buffering": "no"},
-    )
+    return EventStream(event_generator())
 
 
 # The registry's pick ids (providers/__init__.py). DEFAULT_PROVIDER may
@@ -1668,7 +1615,7 @@ _claude_install_state: Dict[str, Any] = {
 
 
 @router.get("/ai/claude/stream")
-async def claude_stream() -> StreamingResponse:
+async def claude_stream() -> EventStream:
     """SSE channel for the AI > Claude Code screen. Wakes whenever the
     install worker mutates `_claude_install_state` or the signin
     endpoint is invoked, so the client re-fetches /api/settings/ai/claude/state
@@ -1700,15 +1647,7 @@ async def claude_stream() -> StreamingResponse:
                     (e, l) for e, l in _claude_sse_clients if e is not evt
                 ]
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(event_generator())
 
 
 @router.get("/ai/claude/state")
@@ -1846,7 +1785,7 @@ _codex_install_state: Dict[str, Any] = {
 
 
 @router.get("/ai/codex/stream")
-async def codex_stream() -> StreamingResponse:
+async def codex_stream() -> EventStream:
     """SSE wake channel for the AI > Codex screen — same pattern as
     /ai/claude/stream."""
     loop = asyncio.get_event_loop()
@@ -1873,15 +1812,7 @@ async def codex_stream() -> StreamingResponse:
                     (e, l) for e, l in _codex_sse_clients if e is not evt
                 ]
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(event_generator())
 
 
 @router.get("/ai/codex/state")

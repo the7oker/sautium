@@ -33,6 +33,25 @@ _MAX_CRASH_RESTARTS = 3
 # The backend announces itself bound (desktop/backend_serve.py). The window
 # hears "down" after this patience, but the wait goes on (_await_ready).
 _READY_PATIENCE_SECONDS = 120
+# The wait for the backend's own stop, which is bounded below it: open
+# requests get two seconds (desktop/backend_serve.py), the event streams end
+# at once (backend/serving.py), and the lifespan's waits run side by side,
+# the longest a benchmark putting HQPlayer back, six (backend/main.py).
+_STOP_SECONDS = 10
+# What the backend left running when it ended: a terminate, this long, a kill
+_LEFT_SECONDS = 2
+# A process killed is waited for, this long: a child never waited for is left
+# a zombie
+_KILLED_SECONDS = 5
+
+
+def _tell(proc: psutil.Process, how: str, *args) -> None:
+    """proc.terminate(), kill() or send_signal(sig), to a process that may
+    have ended meanwhile: then it is as it was told to be."""
+    try:
+        getattr(proc, how)(*args)
+    except psutil.NoSuchProcess:
+        pass
 
 
 class ServiceManager:
@@ -806,7 +825,12 @@ class ServiceManager:
     # ================================================================
 
     def _stop_process(self, proc: Optional[subprocess.Popen], name: str) -> None:
-        """Gracefully stop a subprocess (process tree)."""
+        """Stop a process and what it started. The process first, given its
+        own stop's time: SIGINT, which uvicorn takes in order — on Windows,
+        where SIGINT is unreliable, the whole tree is terminated. Then what
+        it left running, its work with no one left to read it: a decode or
+        an agent's call outlived the backend and held the old wait for the
+        whole tree until its kill. Every process stopped is waited for."""
         if proc is None or proc.poll() is not None:
             return
 
@@ -816,26 +840,32 @@ class ServiceManager:
             parent = psutil.Process(proc.pid)
             children = parent.children(recursive=True)
 
-            # On Unix, send SIGINT (Ctrl+C) to parent — uvicorn handles it cleanly.
-            # On Windows, terminate the whole tree (SIGINT is unreliable).
             if sys.platform != "win32":
-                parent.send_signal(signal.SIGINT)
+                _tell(parent, "send_signal", signal.SIGINT)
             else:
-                for child in children:
-                    child.terminate()
-                parent.terminate()
+                for p in children + [parent]:
+                    _tell(p, "terminate")
 
-            # Wait for the whole process tree
-            gone, alive = psutil.wait_procs([parent] + children, timeout=10)
+            if psutil.wait_procs([parent], timeout=_STOP_SECONDS)[1]:
+                logger.warning(f"{name} didn't stop in {_STOP_SECONDS} s, killing it...")
+                _tell(parent, "kill")
+                psutil.wait_procs([parent], timeout=_KILLED_SECONDS)
 
-            if alive:
-                logger.warning(f"{name} didn't stop gracefully, killing {len(alive)} process(es)...")
+            left = [p for p in children if p.is_running()]
+            if left:
+                logger.warning(f"{name} left {len(left)} process(es) running, stopping them: "
+                               + ", ".join(map(str, left)))
+                for p in left:
+                    _tell(p, "terminate")
+                alive = psutil.wait_procs(left, timeout=_LEFT_SECONDS)[1]
                 for p in alive:
-                    try:
-                        p.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-                psutil.wait_procs(alive, timeout=5)
+                    _tell(p, "kill")
+                psutil.wait_procs(alive, timeout=_KILLED_SECONDS)
+
+            survivors = [p for p in [parent] + children if p.is_running()]
+            if survivors:
+                logger.error(f"{name}: still running after the kill: "
+                             + ", ".join(map(str, survivors)))
         except psutil.NoSuchProcess:
             pass
         except Exception as e:

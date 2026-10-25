@@ -39,11 +39,12 @@ from urllib.parse import urlencode, urlsplit
 
 import pylast
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import auth_hmac
 from config import settings
+from serving import EventStream
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +357,7 @@ async def auth_status() -> Dict[str, Any]:
 
 
 @router.get("/stream")
-async def auth_stream() -> StreamingResponse:
+async def auth_stream() -> EventStream:
     """SSE wake channel for the sheet or dialog that opened the browser: a
     frame whenever the callback landed, either way — the state itself is
     read back over /status, the pattern of every wake channel here."""
@@ -379,15 +380,7 @@ async def auth_stream() -> StreamingResponse:
         finally:
             unsubscribe(entry)
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return EventStream(event_generator())
 
 
 def _page(title: str, body_html: str) -> str:

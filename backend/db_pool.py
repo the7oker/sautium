@@ -4,14 +4,21 @@ Thread-safe database connection pool for raw SQL queries.
 Replaces per-module psycopg2 singleton connections with a shared
 ThreadedConnectionPool. Each call gets its own connection from the pool,
 ensuring thread safety across concurrent requests and background threads.
+
+And Listener, the one way a backend module hears NOTIFY: a thread of its
+own on a connection of its own, stopped at once.
 """
 
 import atexit
 import logging
+import select
+import socket
+import threading
 from contextlib import contextmanager
-from typing import Optional
+from typing import Callable, Optional
 
 import psycopg2
+import psycopg2.extensions
 import psycopg2.extras
 import psycopg2.pool
 
@@ -135,3 +142,93 @@ def db_execute(sql: str, params=None) -> Optional[dict]:
                 row = cur.fetchone()
                 return dict(row) if row else None
             return None
+
+
+class Listener:
+    """A thread LISTENing on `channels` until stop(). `on_notify(notifies)`
+    runs on it with every NOTIFY that arrived since its last call — a burst
+    that lands during one call is cleared together — and `on_connect()` on
+    each (re)connect, since a NOTIFY reaches only a live listener: what was
+    sent while the connection was down is swept there.
+
+    It blocks on its connection and on a wake socket, never on a timeout:
+    stop() closes the socket's other end and the thread ends at once. The
+    flag each listener used to look at between 1-5 s selects kept the
+    backend's stop waiting on them in turn, five seconds in all on a Mac
+    (2026-10-25). Keepalives on the connection: an idle socket reaped
+    without an RST would swallow every later NOTIFY. A connection that
+    fails is said once, then quietly retried every RETRY_S until it holds.
+    """
+
+    RETRY_S = 2
+    # A handler still busy when its stop comes: the stop waits this long, then
+    # leaves it to end (the thread is a daemon) and says so
+    STOP_WAIT_S = 2
+
+    def __init__(self, name: str, channels: tuple, on_notify: Callable[[list], None],
+                 on_connect: Optional[Callable[[], None]] = None) -> None:
+        self.name = name
+        self.channels = channels
+        self.on_notify = on_notify
+        self.on_connect = on_connect
+        self._thread: Optional[threading.Thread] = None
+        self._wake: Optional[socket.socket] = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._wake, heard = socket.socketpair()
+        self._thread = threading.Thread(target=self._run, args=(heard,), daemon=True,
+                                        name=self.name)
+        self._thread.start()
+
+    def stop(self) -> None:
+        thread, wake = self._thread, self._wake
+        if thread is None:
+            return
+        self._thread = self._wake = None
+        wake.close()
+        thread.join(self.STOP_WAIT_S)
+        if thread.is_alive():
+            logger.warning("%s: its handler still runs %g s after the stop", self.name,
+                           self.STOP_WAIT_S)
+
+    def _run(self, wake: socket.socket) -> None:
+        failing = False
+        try:
+            while True:
+                conn = None
+                try:
+                    conn = psycopg2.connect(settings.database_url, keepalives=1,
+                                            keepalives_idle=30, keepalives_interval=10,
+                                            keepalives_count=3)
+                    conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+                    with conn.cursor() as cur:
+                        for channel in self.channels:
+                            cur.execute(f"LISTEN {channel}")
+                    if failing:
+                        logger.info("%s: listening again", self.name)
+                        failing = False
+                    if self.on_connect is not None:
+                        self.on_connect()
+                    while wake not in select.select([conn, wake], [], [])[0]:
+                        conn.poll()
+                        if conn.notifies:
+                            notifies = list(conn.notifies)
+                            conn.notifies.clear()
+                            self.on_notify(notifies)
+                    return
+                except psycopg2.Error as e:
+                    if not failing:
+                        logger.warning("%s: %s — retried every %g s", self.name,
+                                       str(e).strip(), self.RETRY_S)
+                    failing = True
+                except Exception:
+                    logger.exception("%s failed — listening again in %g s", self.name, self.RETRY_S)
+                finally:
+                    if conn is not None:
+                        conn.close()
+                if select.select([wake], [], [], self.RETRY_S)[0]:
+                    return
+        finally:
+            wake.close()
