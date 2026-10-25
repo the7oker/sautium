@@ -549,7 +549,26 @@ def test_the_cpu_copy_given_back_at_the_end_of_a_pass_is_freed_then(cpu_copy, mo
     assert loaded[0]() is None and len(collections) == collected
 
 
-def test_a_cpu_with_no_memory_for_the_copy_stops_the_pass(db, caplog, cpu_copy, monkeypatch):
+def _a_bin_load_refused(tmp_path, monkeypatch):
+    """The CPU copy's load as BGE-M3 ships it, a .bin read by transformers'
+    load_state_dict, whose torch.load the system refuses the mmap of its
+    2.27 GB (ENOMEM): what reaches the loader is transformers' own OSError."""
+    import torch
+    from transformers.modeling_utils import load_state_dict
+    path = tmp_path / "pytorch_model.bin"
+    torch.save({"w": torch.zeros(1)}, path)
+
+    def refused(*a, **kw):
+        raise RuntimeError(f"unable to mmap 2271064456 bytes from file <{path}>: "
+                           "Cannot allocate memory (12)")
+
+    monkeypatch.setattr(torch, "load", refused)
+    return lambda name, device, **kw: load_state_dict(str(path))
+
+
+@pytest.mark.parametrize("load", ["the allocator", "a .bin's mmap"])
+def test_a_cpu_with_no_memory_for_the_copy_stops_the_pass(db, caplog, cpu_copy, monkeypatch,
+                                                          tmp_path, load):
     import text_embedder
     _bios(db, _texts())
     db.commit()
@@ -558,11 +577,15 @@ def test_a_cpu_with_no_memory_for_the_copy_stops_the_pass(db, caplog, cpu_copy, 
         raise RuntimeError("DefaultCPUAllocator: not enough memory: you tried to allocate "
                            "1048576 bytes.")
 
-    monkeypatch.setattr(text_embedder, "_load", no_room)
+    monkeypatch.setattr(text_embedder, "_load", no_room if load == "the allocator"
+                        else _a_bin_load_refused(tmp_path, monkeypatch))
     gen = PASSES["artist bios"][1](db)
     gen.device, gen.model = "mps", Tokenized(lambda texts, batch_size: True)
     stats = gen.generate_all(db)
-    assert stats["stopped"].startswith(f"out of memory loading {gen.model_name} on the cpu")
+    # in the words of the error that says so, not transformers' of a checkpoint
+    said = {"the allocator": "DefaultCPUAllocator: not enough memory",
+            "a .bin's mmap": "unable to mmap 2271064456 bytes"}[load]
+    assert stats["stopped"].startswith(f"out of memory loading {gen.model_name} on the cpu: {said}")
     assert (stats["success"], _embedded(db, "artist bios")) == (0, set())
     # one stop, not an error and a new load for every batch
     assert len(_lines(caplog, "artist bios", logging.ERROR)) == 1
@@ -634,29 +657,45 @@ def test_on_mps_the_cpu_takes_its_texts_one_at_a_time(cpu_copy):
     assert cpu_copy.forwards == [(1, 105), (1, 3), (1, 103), (1, 102), (1, 101)]
 
 
-def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch):
+def _held(lock) -> bool:
+    """Whether a thread holds `lock`: another cannot take it. What the probe
+    takes it gives back itself — a lock left owned by a thread that ended
+    would hang every later test that takes it."""
+    free = []
+
+    def probe():
+        if lock.acquire(blocking=False):
+            lock.release()
+            free.append(True)
+
+    t = threading.Thread(target=probe)
+    t.start()
+    t.join()
+    return not free
+
+
+@pytest.fixture
+def factory_lock(monkeypatch):
+    """model_cache._factory_lock, a lock of the test's own: should the waits
+    the test is about come back, the threads they leave keep that one, and
+    the tests after it fail on their own."""
+    import model_cache
+    monkeypatch.setattr(model_cache, "_factory_lock", threading.RLock())
+    return model_cache._factory_lock
+
+
+def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch, factory_lock):
     """transformers' loading patches process-wide state: the encoder's loads
     take the search models' lock (model_cache._factory_lock) — the CPU copy,
     loaded every pass, without a hub check — and a pass asking for the model a
     search's factory is loading waits on that lock and finds it loaded, where
     a single-flight event of its own had left the two waiting on each other."""
-    import model_cache
     import text_embedder
     seen = []
 
-    def held_elsewhere():
-        got = []
-        t = threading.Thread(target=lambda: got.append(
-            model_cache._factory_lock.acquire(blocking=False)))
-        t.start()
-        t.join()
-        if got[0]:
-            model_cache._factory_lock.release()
-        return not got[0]
-
     class Loaded:
         def __init__(self, name, device, **kw):
-            seen.append((name, device, kw.get("local_files_only"), held_elsewhere()))
+            seen.append((name, device, kw.get("local_files_only"), _held(factory_lock)))
 
     monkeypatch.setattr(text_embedder, "SentenceTransformer", Loaded)
     monkeypatch.setattr(text_embedder, "_cpu", None)
@@ -666,13 +705,12 @@ def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch):
     assert seen == [(NAME, "cpu", True, True)]
 
     # a search's factory holds the lock while it loads; a pass asks meanwhile
-    passes, searched, factory_in = [], [], threading.Event()
+    passes, searched = [], []
     asking = threading.Thread(target=lambda: passes.append(
         text_embedder.get_text_embedder(NAME, "cpu")), daemon=True)
 
     def factory():
-        with model_cache._factory_lock:
-            factory_in.set()
+        with factory_lock:
             asking.start()
             asking.join(0.2)
             searched.append((asking.is_alive(), text_embedder.get_text_embedder(NAME, "cpu")))
@@ -688,35 +726,26 @@ def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch):
 
 
 @pytest.mark.parametrize("which", ["clap", "instruments"])
-def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, which):
+def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, factory_lock, which):
     """Loaded from a pass (a stream's analysis, the run) beside a search's
-    load, they would race it as the text encoder would; the search's CLAP
-    factory takes the lock again."""
-    import model_cache
+    load, they would race it as the text encoder would: a pass's load holds
+    the lock, and a search's factory, which holds it already, takes it
+    again."""
     held = []
 
-    def note_held():
-        got = []
-        t = threading.Thread(target=lambda: got.append(
-            model_cache._factory_lock.acquire(blocking=False)))
-        t.start()
-        t.join()
-        if got[0]:
-            model_cache._factory_lock.release()
-        held.append(not got[0])
+    def loading():
+        held.append(_held(factory_lock))
         return object()
 
     if which == "clap":
         import clap_model
         monkeypatch.setattr(clap_model, "_cache", {})
         monkeypatch.setattr(clap_model, "ClapProcessor", types.SimpleNamespace(
-            from_pretrained=lambda name: note_held()))
+            from_pretrained=lambda name: loading()))
         monkeypatch.setattr(clap_model, "ClapModel", types.SimpleNamespace(
             from_pretrained=lambda name, torch_dtype: types.SimpleNamespace(
                 to=lambda device: types.SimpleNamespace(eval=lambda: None))))
-        with model_cache._factory_lock:            # the search's CLAP factory
-            first = clap_model.get_clap_model("clap", "cpu")
-        assert clap_model.get_clap_model("clap", "cpu") == first     # the same pair
+        get, drop = lambda: clap_model.get_clap_model("clap", "cpu"), clap_model._cache.clear
     else:
         import ensemble_instruments
         import instrument_tagger
@@ -727,23 +756,62 @@ def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, whic
                 pass
 
             def load(self):
-                note_held()
+                loading()
 
         monkeypatch.setattr(ensemble_instruments, "InstrumentEnsembleTagger", Pair)
-        first = instrument_tagger.get_instrument_tagger("cpu")
-        assert instrument_tagger.get_instrument_tagger("cpu") is first
-    assert held == [True]                           # one load, the lock held
+        get = lambda: instrument_tagger.get_instrument_tagger("cpu")
+        drop = instrument_tagger._cache.clear
+    first = get()                                   # a pass's, holding no lock
+    assert get() == first                           # the same
+    drop()
+    searched = []
+
+    def search():
+        with factory_lock:                          # the search's factory
+            searched.append(get())
+
+    t = threading.Thread(target=search, daemon=True)
+    t.start()
+    t.join(10)
+    assert not t.is_alive() and len(searched) == 1
+    assert held == [True, True]                     # a load each, the lock held
 
 
-def test_the_systems_own_out_of_memory_is_out_of_memory():
+def test_the_systems_own_out_of_memory_is_out_of_memory(tmp_path, monkeypatch):
     """A weights file's mmap that ENOMEM refuses — the CPU copy's load on a
-    Mac out of memory — is no other failure."""
+    Mac out of memory — is no other failure, re-raised by transformers too:
+    the error that says so is read down the chain its traceback shows."""
     import errno
     import device
-    assert device.out_of_memory(OSError(errno.ENOMEM, "Cannot allocate memory"))
-    assert device.out_of_memory(RuntimeError(
-        "unable to mmap 2271064456 bytes from file </x>: Cannot allocate memory (12)"))
-    assert not device.out_of_memory(OSError(errno.ENOENT, "No such file or directory"))
+    enomem = OSError(errno.ENOMEM, "Cannot allocate memory")
+    mmap = RuntimeError("unable to mmap 2271064456 bytes from file </x>: Cannot allocate "
+                        "memory (12)")
+    assert device.out_of_memory(enomem) is enomem and device.out_of_memory(mmap) is mmap
+    assert device.out_of_memory(OSError(errno.ENOENT, "No such file or directory")) is None
+    with pytest.raises(OSError) as raised:
+        _a_bin_load_refused(tmp_path, monkeypatch)(NAME, "cpu")
+    assert raised.value.errno is None
+    assert str(device.out_of_memory(raised.value)).startswith("unable to mmap 2271064456 bytes")
+
+    def raised_over(over, then):
+        try:
+            try:
+                raise over
+            except Exception:
+                then()
+        except Exception as e:
+            return e
+
+    def plain():
+        raise ValueError("another failure")
+
+    def from_none():
+        raise ValueError("another failure") from None
+
+    full = MemoryError()
+    assert device.out_of_memory(raised_over(full, plain)) is full
+    assert device.out_of_memory(raised_over(MemoryError(), from_none)) is None
+    assert device.out_of_memory(raised_over(KeyError("a key"), plain)) is None
 
 
 @pytest.mark.parametrize("kind", [*PASSES, "audio"])

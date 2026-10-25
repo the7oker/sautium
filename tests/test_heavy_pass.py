@@ -415,13 +415,28 @@ def test_a_stopping_node_ends_the_run_at_its_next_batch(run):
 
 
 def test_a_cancelled_run_ends_at_its_next_batch_and_gives_the_pair_back(run):
-    """Cancelled, the run still holds the accelerator: no seam gives way, no
-    stage after it begins, and the pair goes inside the audio half."""
+    """Cancelled, the run still holds the accelerator: its seam gives no way
+    to the stream's analysis that waits, no stage after it begins, and the
+    pair goes inside the audio half, before that analysis is let in."""
     events, cancelled = [], []
-    run.steps["embeddings"] = _batches(events, 3, after_first=lambda: cancelled.append(True))
+
+    def stream():
+        with device.heavy_pass("a stream's analysis"):
+            run.seen.append(("a stream's analysis", _holder()))
+
+    job = threading.Thread(target=stream, daemon=True)
+
+    def cancelled_with_a_stream_waiting():
+        cancelled.append(True)
+        job.start()
+        _until(device.heavy_pass_wanted)
+
+    run.steps["embeddings"] = _batches(events, 3, after_first=cancelled_with_a_stream_waiting)
     run.go(cancel=lambda: bool(cancelled))
+    job.join(WAIT)
     assert events == ["batch 1"]
-    assert run.seen == [("embeddings", AUDIO), ("AST+PaSST released", AUDIO)]
+    assert run.seen == [("embeddings", AUDIO), ("AST+PaSST released", AUDIO),
+                        ("a stream's analysis", "a stream's analysis")]
 
 
 def test_what_runs_at_once_for_an_idle_accelerator_is_guarded_as_the_rest(caplog):

@@ -238,9 +238,10 @@ def _encoded(model, texts: List[str], batch_size: int) -> Tuple[Optional[np.ndar
         return model.encode(texts, batch_size=batch_size, show_progress_bar=False,
                             normalize_embeddings=True), None
     except Exception as e:
-        if not out_of_memory(e):
+        said = out_of_memory(e)
+        if said is None:
             raise
-        return None, str(e)
+        return None, str(said)
 
 
 # The devices whose fall-back to one text at a time was said: once a process,
@@ -266,9 +267,10 @@ def _cpu_copy(name: str):
                 with model_cache._factory_lock:
                     _cpu = (name, _load(name, "cpu", local_files_only=True))
             except Exception as e:
-                if not out_of_memory(e):
+                said = out_of_memory(e)
+                if said is None:
                     raise
-                raise OutOfMemory(f"out of memory loading {name} on the cpu: {e}") from None
+                raise OutOfMemory(f"out of memory loading {name} on the cpu: {said}") from None
         return _cpu[1]
 
 
