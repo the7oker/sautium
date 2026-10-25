@@ -11,7 +11,7 @@ own on a connection of its own, stopped at once.
 
 import atexit
 import logging
-import select
+import selectors
 import socket
 import threading
 from contextlib import contextmanager
@@ -155,14 +155,18 @@ class Listener:
     stop() closes the socket's other end and the thread ends at once. The
     flag each listener used to look at between 1-5 s selects kept the
     backend's stop waiting on them in turn, five seconds in all on a Mac
-    (2026-10-25). Keepalives on the connection: an idle socket reaped
-    without an RST would swallow every later NOTIFY. A connection that
-    fails is said once, then quietly retried every RETRY_S until it holds.
+    (2026-10-25). Through the selectors module's default, as every wait on
+    HQPlayer (hqplayer_client.wait_on): select.select refuses a descriptor
+    past 1023. Keepalives on the connection: an idle socket reaped without
+    an RST would swallow every later NOTIFY. A connection that fails is said
+    once, then quietly retried every RETRY_S until it holds; a handler that
+    fails is said with its traceback, and the connection, which did nothing
+    wrong, listens on.
     """
 
     RETRY_S = 2
-    # A handler still busy when its stop comes: the stop waits this long, then
-    # leaves it to end (the thread is a daemon) and says so
+    # Busy when its stop comes — in a handler, or in a connect: the stop waits
+    # this long, then leaves it to end (the thread is a daemon) and says so
     STOP_WAIT_S = 2
 
     def __init__(self, name: str, channels: tuple, on_notify: Callable[[list], None],
@@ -190,45 +194,63 @@ class Listener:
         wake.close()
         thread.join(self.STOP_WAIT_S)
         if thread.is_alive():
-            logger.warning("%s: its handler still runs %g s after the stop", self.name,
-                           self.STOP_WAIT_S)
+            logger.warning("%s: still busy %g s after the stop", self.name, self.STOP_WAIT_S)
 
     def _run(self, wake: socket.socket) -> None:
         failing = False
+        with selectors.DefaultSelector() as sel:
+            sel.register(wake, selectors.EVENT_READ)
+            try:
+                while True:
+                    conn = None
+                    try:
+                        conn = psycopg2.connect(settings.database_url, keepalives=1,
+                                                keepalives_idle=30, keepalives_interval=10,
+                                                keepalives_count=3)
+                        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+                        with conn.cursor() as cur:
+                            for channel in self.channels:
+                                cur.execute(f"LISTEN {channel}")
+                        if failing:
+                            logger.info("%s: listening again", self.name)
+                            failing = False
+                        if sel.select(0):            # stopped while it connected
+                            return
+                        self._call(self.on_connect)
+                        # By its number: a connection psycopg2 found broken
+                        # refuses fileno(), and the key would stay behind
+                        fd = conn.fileno()
+                        sel.register(fd, selectors.EVENT_READ)
+                        try:
+                            while not any(key.fileobj is wake for key, _ in sel.select()):
+                                conn.poll()
+                                if conn.notifies:
+                                    notifies = list(conn.notifies)
+                                    conn.notifies.clear()
+                                    self._call(self.on_notify, notifies)
+                        finally:
+                            sel.unregister(fd)
+                        return
+                    except psycopg2.Error as e:
+                        if not failing:
+                            logger.warning("%s: %s — retried every %g s", self.name,
+                                           str(e).strip(), self.RETRY_S)
+                        failing = True
+                    except Exception:
+                        logger.exception("%s failed — listening again in %g s", self.name,
+                                         self.RETRY_S)
+                    finally:
+                        if conn is not None:
+                            conn.close()
+                    if sel.select(self.RETRY_S):
+                        return
+            finally:
+                wake.close()
+
+    def _call(self, handler, *args) -> None:
+        if handler is None:
+            return
         try:
-            while True:
-                conn = None
-                try:
-                    conn = psycopg2.connect(settings.database_url, keepalives=1,
-                                            keepalives_idle=30, keepalives_interval=10,
-                                            keepalives_count=3)
-                    conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-                    with conn.cursor() as cur:
-                        for channel in self.channels:
-                            cur.execute(f"LISTEN {channel}")
-                    if failing:
-                        logger.info("%s: listening again", self.name)
-                        failing = False
-                    if self.on_connect is not None:
-                        self.on_connect()
-                    while wake not in select.select([conn, wake], [], [])[0]:
-                        conn.poll()
-                        if conn.notifies:
-                            notifies = list(conn.notifies)
-                            conn.notifies.clear()
-                            self.on_notify(notifies)
-                    return
-                except psycopg2.Error as e:
-                    if not failing:
-                        logger.warning("%s: %s — retried every %g s", self.name,
-                                       str(e).strip(), self.RETRY_S)
-                    failing = True
-                except Exception:
-                    logger.exception("%s failed — listening again in %g s", self.name, self.RETRY_S)
-                finally:
-                    if conn is not None:
-                        conn.close()
-                if select.select([wake], [], [], self.RETRY_S)[0]:
-                    return
-        finally:
-            wake.close()
+            handler(*args)
+        except Exception:
+            logger.exception("%s: its handler failed", self.name)

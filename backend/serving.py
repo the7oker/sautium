@@ -37,7 +37,10 @@ class EventStream(StreamingResponse):
     completed response, one the client reconnects to — when the server's
     stop begins: the stop cancels what the generator waits on, as a
     client's leaving does, and the response is closed in order. A stop
-    that meets it mid-send leaves the generator at its yield, closed here."""
+    that meets it mid-send leaves the generator at its yield, closed here.
+    A client that knows a stream's end by its own words reads a close
+    before them as a drop: the chat's reply ends at its `done`
+    (app-shell.js `_pumpStream`)."""
 
     def __init__(self, content, headers=None) -> None:
         super().__init__(content, media_type="text/event-stream",

@@ -3094,12 +3094,15 @@
     },
 
     // Reads one SSE connection into `ctx` until the server closes it.
-    // Throws on transport failure (caller reconnects) and on backend
-    // failure marked `fatal` (caller surfaces it).
+    // Throws on transport failure and on a close before the reply's
+    // `done` (caller reconnects), and on backend failure marked `fatal`
+    // (caller surfaces it). A backend that stops ends its streams in
+    // order, so a clean close is not a finished reply: only `done` is.
     async _pumpStream(resp, ctx) {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let replied = false;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -3126,6 +3129,7 @@
           } else if (evt.event === 'tool') {
             ctx.showPip(toolPipLabel(evt.data.name || ''));
           } else if (evt.event === 'done') {
+            replied = true;
             // Authoritative model name from the provider — overrides
             // the optimistic one we set on `meta`. Both usually agree
             // but `done` is canonical (matches what's persisted).
@@ -3165,6 +3169,7 @@
           }
         }
       }
+      if (!replied) throw new Error('the stream closed before its reply ended');
     },
 
     // A reply was still generating on the backend when this session

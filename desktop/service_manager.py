@@ -33,10 +33,13 @@ _MAX_CRASH_RESTARTS = 3
 # The backend announces itself bound (desktop/backend_serve.py). The window
 # hears "down" after this patience, but the wait goes on (_await_ready).
 _READY_PATIENCE_SECONDS = 120
-# The wait for the backend's own stop, which is bounded below it: open
-# requests get two seconds (desktop/backend_serve.py), the event streams end
-# at once (backend/serving.py), and the lifespan's waits run side by side,
-# the longest a benchmark putting HQPlayer back, six (backend/main.py).
+# The wait for the backend's own stop. Its shutdown is bounded below it:
+# open requests get two seconds (desktop/backend_serve.py), the event streams
+# end at once (backend/serving.py), and the lifespan's waits run side by
+# side, the longest a benchmark putting HQPlayer back, six (backend/main.py).
+# What the shutdown does not bound is the process's exit after it, which
+# waits for work still running on its threads — a model a restart caught
+# loading: past this, the kill.
 _STOP_SECONDS = 10
 # What the backend left running when it ended: a terminate, this long, a kill
 _LEFT_SECONDS = 2
@@ -52,6 +55,18 @@ def _tell(proc: psutil.Process, how: str, *args) -> None:
         getattr(proc, how)(*args)
     except psutil.NoSuchProcess:
         pass
+
+
+def _named(proc: psutil.Process) -> str:
+    """A process for a log line: its pid and, where it can be read, its name.
+    Only the line's: whatever reading the name raises — on macOS psutil
+    passes on RuntimeError, OSError and, for a long name it completes from
+    the command line, a SystemError — what is done to the process is not
+    changed by it."""
+    try:
+        return f"{proc.pid} ({proc.name()})"
+    except Exception:
+        return str(proc.pid)
 
 
 class ServiceManager:
@@ -838,12 +853,20 @@ class ServiceManager:
 
         try:
             parent = psutil.Process(proc.pid)
-            children = parent.children(recursive=True)
+            try:
+                children = parent.children(recursive=True)
+            except (psutil.AccessDenied, OSError) as e:
+                # A table psutil cannot walk (Linux's hidepid; psutil 6 says
+                # it as PermissionError): the process is stopped all the
+                # same, what it started left to itself
+                logger.warning(f"{name}'s processes could not be listed: {e!r}")
+                children = []
 
             if sys.platform != "win32":
                 _tell(parent, "send_signal", signal.SIGINT)
             else:
-                for p in children + [parent]:
+                # The parent first: a live one could start again what it lost
+                for p in [parent] + children:
                     _tell(p, "terminate")
 
             if psutil.wait_procs([parent], timeout=_STOP_SECONDS)[1]:
@@ -854,7 +877,7 @@ class ServiceManager:
             left = [p for p in children if p.is_running()]
             if left:
                 logger.warning(f"{name} left {len(left)} process(es) running, stopping them: "
-                               + ", ".join(map(str, left)))
+                               + ", ".join(map(_named, left)))
                 for p in left:
                     _tell(p, "terminate")
                 alive = psutil.wait_procs(left, timeout=_LEFT_SECONDS)[1]
@@ -865,7 +888,7 @@ class ServiceManager:
             survivors = [p for p in [parent] + children if p.is_running()]
             if survivors:
                 logger.error(f"{name}: still running after the kill: "
-                             + ", ".join(map(str, survivors)))
+                             + ", ".join(map(_named, survivors)))
         except psutil.NoSuchProcess:
             pass
         except Exception as e:
@@ -1001,44 +1024,58 @@ class ServiceManager:
         processes this user owns, which the orphan always is.
 
         A process whose sockets cannot be read is not the orphan, whatever
-        psutil says: AccessDenied for another user's, NoSuchProcess for one
-        that ended (a zombie's ZombieProcess among them — it holds no socket),
-        an OSError for an errno it passes on, and on macOS a RuntimeError for
-        a live process of this user's whose descriptors the kernel will not
-        list. Xcode's DTServiceHub raised it on every read (psutil 7.2.2,
-        macOS 27, 2026-10-25), and every start failed while it ran. The
-        Process is made inside the same guard: a process gone between the
-        table and the read is not the orphan either.
+        psutil says: AccessDenied for another user's — and on Linux for a
+        zombie, whose /proc/<pid>/fd is root's once it has no memory —
+        NoSuchProcess for one that ended (on macOS a zombie's ZombieProcess
+        among them: it holds no socket), an OSError for an errno psutil
+        passes on, and on macOS a RuntimeError for a live process of this
+        user's whose descriptors the kernel will not list. Xcode's
+        DTServiceHub raised it on every read (psutil 7.2.2, macOS 27,
+        2026-10-25), and every start failed while it ran. The Process is
+        made inside the same guard: a process gone between the table and the
+        read is not the orphan either. Neither pid 0 nor the launcher itself
+        can be the orphan, and neither counts as a process read: a sweep that
+        read no other says so. An orphan backend is given the stop's whole
+        time, as the launcher's own stop gives it (_STOP_SECONDS).
         """
+        try:
+            pids = psutil.pids()
+        except (RuntimeError, OSError) as e:
+            logger.warning(f"Orphan sweep: the process table could not be read ({e!r}) — "
+                           f"nothing on port {port} was checked")
+            return
+        own = os.getpid()
         readable = 0
-        for pid in psutil.pids():
+        for pid in pids:
+            if pid in (0, own):
+                continue
             try:
                 proc = psutil.Process(pid)
                 conns = proc.net_connections(kind="tcp")
-            except (psutil.NoSuchProcess, psutil.AccessDenied, RuntimeError, OSError):
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            except (RuntimeError, OSError) as e:
+                logger.debug(f"Orphan sweep: PID {pid} not read: {e!r}")
                 continue
             readable += 1
             if not any(conn.status == psutil.CONN_LISTEN and conn.laddr.port == port
                        for conn in conns):
                 continue
-            try:
-                name = proc.name()
-            except (psutil.Error, RuntimeError, OSError):
-                name = "name unreadable"        # only the log line's: the orphan is stopped all the same
-            logger.warning(f"Killing orphan process on port {port}: PID {pid} ({name})")
+            logger.warning(f"Killing orphan process on port {port}: PID {_named(proc)}")
             try:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=_STOP_SECONDS)
                 except psutil.TimeoutExpired:
                     proc.kill()
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=_KILLED_SECONDS)
             except psutil.NoSuchProcess:
                 pass
-            except (psutil.AccessDenied, psutil.TimeoutExpired) as e:
+            except (psutil.AccessDenied, psutil.TimeoutExpired, OSError) as e:
                 # Another user's process, which Windows lists with the rest
                 # (its sockets come from the system's table, not the
-                # process), or one that outlives its kill
+                # process); one that outlives its kill; an errno psutil
+                # passes on as it is (Windows' TerminateProcess, its wait)
                 logger.warning(f"Orphan PID {pid} on port {port} not stopped: {e!r}")
         if not readable:
             logger.warning(f"Orphan sweep: no process's sockets could be read — "

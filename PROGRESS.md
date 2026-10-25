@@ -3294,12 +3294,15 @@ Lesson: a switch moves the listening, not just the list.
   NoSuchProcess and then ZombieProcess, the user's setuid `login`
   processes AccessDenied. Now whatever psutil raises for one process — a
   RuntimeError and an OSError among it, and a Process that cannot be made
-  — means "not this one"; the orphan's name is read for the log line
-  alone; an orphan that cannot be stopped (another user's service, which
+  — means "not this one" (on Linux a zombie raises AccessDenied: its
+  `/proc/<pid>/fd` is root's once it has no memory); the orphan's name is
+  read for the log line alone; an orphan backend is given the stop's whole
+  time; an orphan that cannot be stopped (another user's service, which
   Windows lists with the rest because its sockets come from the system's
-  table, not the process; one that outlives its kill) is said and left to
-  the backend's bind; one killed is waited for; a sweep that could read no
-  process says so once.
+  table, not the process; one that outlives its kill; an errno psutil
+  passes on) is said and left to the backend's bind; one killed is waited
+  for; a process table that cannot be read, or a sweep that read no
+  process but pid 0 and the launcher itself, says so once.
 - **The backend's stop fits the launcher's wait** (2026-10-25). On that
   Mac the stop before the failed start took the launcher's whole 10 s and
   ended in its kill: uvicorn waited out its 5 s grace on the Web UI's two
@@ -3318,11 +3321,21 @@ Lesson: a switch moves the listening, not just the list.
   the notary's stamp, a gear research call). The same five runs: 0.72–0.83
   s, every stream complete within 0.1 s. The launcher's backend gives open
   requests 2 s, as Docker does, and the launcher still waits 10 s: the
-  backend's stop is bounded below it, its longest wait the benchmark's 6
-  s. After the backend has ended, the launcher stops what it left running
-  — a decode, an agent's call, which held the old wait for the whole tree
-  — and waits for each process it kills, the macOS sleep hold's
-  caffeinate included.
+  backend's shutdown is bounded below it, its longest wait the
+  benchmark's 6 s. Not bounded is the process's exit after it, which
+  waits for work still on its threads (a model a restart caught loading;
+  on a Docker node, the walk's and the slice cycles' LISTEN selects, up to
+  5 s): there the kill stays the bound. After the backend has ended, the
+  launcher stops what it left running — a decode, an agent's call, which
+  held the old wait for the whole tree — and waits for each process it
+  kills, the macOS sleep hold's caffeinate included. A client that knows a
+  stream's end by its own words takes a close before them for a drop: the
+  chat's reply ends at its `done`, and a reply a stop cut short goes to
+  the reattach (the run gone, the messages say whether it was kept). The
+  listener's handlers fail on their own — a database error in one is said
+  with its traceback, its connection kept — and it waits through the
+  selectors module, as every wait on HQPlayer does: `select.select`
+  refuses a descriptor past 1023.
 
 - **A range past the end is 416, never the whole file.** HQPlayer resumes
   a stream cut short with `Range: bytes=<offset>-` and appends what comes

@@ -8,7 +8,9 @@ it at once. Real PostgreSQL (the test cluster) and real threads.
 """
 
 import logging
+import os
 import secrets
+import sys
 import threading
 import time
 
@@ -163,28 +165,113 @@ def test_a_connection_that_keeps_failing_is_said_once(channel, monkeypatch, capl
     assert _messages(caplog, logging.INFO) == ["test-listener: listening again"]
 
 
-def test_a_handler_that_fails_is_said_and_the_listener_goes_on(channel, notify, caplog):
+@pytest.mark.parametrize("raised", [RuntimeError("a handler's own bug"),
+                                    psycopg2.OperationalError("its own query's database error")],
+                         ids=["a-bug", "a-database-error"])
+def test_a_handler_that_fails_is_said_and_its_connection_listens_on(channel, notify, caplog, raised):
+    """A database error in a handler is the handler's, not the listening
+    connection's: dropped and made again, the connection would lose what was
+    sent meanwhile on a channel with no sweep."""
     heard = Heard()
 
     def on_notify(notifies):
         heard.on_notify(notifies)
         if len(heard.calls) == 1:
-            raise RuntimeError("a handler's own bug")
+            raise raised
     listener = Listener("test-listener", (channel,), on_notify, heard.on_connect)
     with caplog.at_level(logging.INFO, logger="db_pool"):
         listener.start()
         try:
             _until(lambda: heard.connects == 1)
             notify("first")
-            _until(lambda: heard.connects == 2)
-            _until(lambda: len(_listening(channel)) == 1)
+            _until(lambda: heard.calls)
             notify("second")
             _until(lambda: heard.payloads == ["first", "second"])
         finally:
             listener.stop()
+    assert heard.connects == 1
+    failed = [r for r in caplog.records if r.name == "db_pool" and r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in failed] == ["test-listener: its handler failed"]
+    assert failed[0].exc_info[1] is raised
+    assert _messages(caplog, logging.WARNING) == []
+
+
+def test_a_failure_beside_the_connection_and_its_handlers_is_said_and_retried(channel, monkeypatch,
+                                                                            caplog):
+    heard = Heard()
+    real_connect, calls = psycopg2.connect, []
+
+    def connect(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("not psycopg2's")
+        return real_connect(*a, **kw)
+    monkeypatch.setattr(psycopg2, "connect", connect)
+    listener = Listener("test-listener", (channel,), heard.on_notify, heard.on_connect)
+    with caplog.at_level(logging.INFO, logger="db_pool"):
+        listener.start()
+        try:
+            _until(lambda: heard.connects == 1)
+        finally:
+            listener.stop()
     failed = [r for r in caplog.records if r.name == "db_pool" and r.levelno == logging.ERROR]
     assert [r.getMessage() for r in failed] == ["test-listener failed — listening again in 0.1 s"]
-    assert failed[0].exc_info[0] is RuntimeError
+    assert failed[0].exc_info[0] is ValueError
+
+
+def test_a_stop_during_a_connect_runs_no_on_connect(channel, monkeypatch, caplog):
+    monkeypatch.setattr(Listener, "STOP_WAIT_S", 0.3)
+    connecting, release = threading.Event(), threading.Event()
+    real_connect = psycopg2.connect
+
+    def slow_connect(*a, **kw):
+        connecting.set()
+        assert release.wait(10)
+        return real_connect(*a, **kw)
+    monkeypatch.setattr(psycopg2, "connect", slow_connect)
+    heard = Heard()
+    listener = Listener("test-listener", (channel,), heard.on_notify, heard.on_connect)
+    listener.start()
+    thread = listener._thread
+    assert connecting.wait(10)
+    with caplog.at_level(logging.WARNING, logger="db_pool"):
+        listener.stop()
+    release.set()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert heard.connects == 0                   # nothing runs after the stop has returned
+    assert _messages(caplog, logging.WARNING) == ["test-listener: still busy 0.3 s after the stop"]
+    _until(lambda: not _listening(channel))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX descriptors")
+def test_a_connection_past_descriptor_1023_is_heard(channel, notify):
+    """select.select refuses a descriptor past 1023: the listener would have
+    gone deaf on a process holding that many."""
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 1200
+    if soft < want:
+        if hard != resource.RLIM_INFINITY and hard < want:
+            pytest.skip(f"the descriptor limit stops at {hard}")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    held = []
+    try:
+        while not held or held[-1] < 1030:
+            held.append(os.open(os.devnull, os.O_RDONLY))
+        heard = Heard()
+        listener = Listener("test-listener", (channel,), heard.on_notify, heard.on_connect)
+        listener.start()
+        try:
+            _until(lambda: heard.connects == 1)
+            notify("high")
+            _until(lambda: heard.payloads == ["high"])
+        finally:
+            listener.stop()
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
 def test_a_stop_waits_for_a_busy_handler_only_so_long(channel, notify, monkeypatch, caplog):
@@ -207,8 +294,7 @@ def test_a_stop_waits_for_a_busy_handler_only_so_long(channel, notify, monkeypat
         took = time.monotonic() - began
     try:
         assert 0.3 <= took < 1
-        assert _messages(caplog, logging.WARNING) == ["test-listener: its handler still runs 0.3 s "
-                                                      "after the stop"]
+        assert _messages(caplog, logging.WARNING) == ["test-listener: still busy 0.3 s after the stop"]
     finally:
         release.set()
     thread.join(5)
