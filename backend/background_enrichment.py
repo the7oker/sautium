@@ -33,7 +33,9 @@ the one part of this loop heavy enough to be heard, and HQPlayer wants the
 machine more than we do. What the meter cannot see is load from OUTSIDE
 this process tree — a game, a compile, HQPlayer's own CPU on the host side
 of a Docker install. Playback is the signal that stands in for it, because
-it is the one the product can observe on every runtime.
+it is the one the product can observe on every runtime. They give way to
+another heavy pass on the accelerator too — the analysis run, a stream's
+analysis (device.heavy_pass) — and follow it when it ends.
 
 Two cadences. The network and model steps DRAIN: a step that came back with
 a full batch has a longer queue behind it, so the next pass follows at once
@@ -168,6 +170,11 @@ def wake(reason: str = "") -> None:
     """Run the next pass now instead of at the interval (any thread)."""
     logger.info(f"Background enrichment wake: {reason or 'requested'}")
     _pass_wake.set()
+
+
+def _wake_on_idle() -> None:
+    """The text half gave the accelerator way: its pass follows the others'."""
+    wake("the accelerator is free")
 
 
 # The DB-only steps run on the interval timer — except when something just
@@ -519,10 +526,12 @@ def _playback_hold() -> Optional[str]:
 
 
 def _model_cancel() -> bool:
-    """Stop signal for the model steps: the loop's own cancel, or playback
-    starting mid-batch. The generators stamp every batch they finish, so
-    yielding here costs the current batch's tail and nothing else."""
-    return _cancel_flag() or _playback_hold() is not None
+    """Stop signal for the model steps: the loop's own cancel, playback
+    starting mid-batch, or another heavy pass waiting for the accelerator (the
+    analysis run, a stream's analysis). The generators stamp every batch they
+    finish, so yielding here costs the current batch's tail and nothing else."""
+    import device
+    return _cancel_flag() or _playback_hold() is not None or device.heavy_pass_wanted()
 
 
 def _step_text_embeddings(limit: int) -> Dict[str, Any]:
@@ -636,16 +645,28 @@ def _run_local_model_steps() -> Tuple[Dict[str, Any], bool]:
     # usable while it drains.
     scale = _LOCAL_MODEL_SCALE.get(profile.name, 1)
 
-    backlog = False
-    for key, step, cap in _LOCAL_MODEL_STEPS:
-        if _cancel_flag():
-            break
-        limit = max(20, cap // scale)
-        _set(current_step=key)
-        stats = step(limit)
-        summary[key] = stats
-        _bump("embeddings", stats.get("success", 0))
-        backlog = backlog or _wants_more(stats, limit, ("failed",))
+    # The accelerator is one heavy pass's at a time, and this half is the one
+    # that gives way: it never waits behind the analysis run, and it stops at
+    # its next batch when another pass asks (_model_cancel). Either way the
+    # pass after the others is woken, not timed.
+    import device
+    with device.heavy_pass("the background text half", wait=False) as held:
+        if not held:
+            device.call_when_idle(_wake_on_idle)
+            logger.debug("text half yields: the accelerator is busy")
+            return {"text_half": {"held": "accelerator"}}, False
+        backlog = False
+        for key, step, cap in _LOCAL_MODEL_STEPS:
+            if _model_cancel():
+                break
+            limit = max(20, cap // scale)
+            _set(current_step=key)
+            stats = step(limit)
+            summary[key] = stats
+            _bump("embeddings", stats.get("success", 0))
+            backlog = backlog or _wants_more(stats, limit, ("failed",))
+        if device.heavy_pass_wanted():
+            device.call_when_idle(_wake_on_idle)
     return summary, backlog
 
 

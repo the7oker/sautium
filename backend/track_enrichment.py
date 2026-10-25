@@ -23,11 +23,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, exists, select, func, cast, String, text
 from tqdm import tqdm
 
-try:
-    import torch
-except ImportError:
-    torch = None
-
 from api_cooldown import cooling_down
 from config import settings
 from database import get_db_context
@@ -145,7 +140,25 @@ def run_parallel_enrichment(
     def _run_gpu_pipeline():
         logger.info("Pipeline A (GPU): starting audio embeddings + features")
         combined = {}
+        if not (skip_embeddings and skip_audio_analysis):
+            from device import get_device, heavy_pass
+            with heavy_pass("the analysis run's audio half"):
+                try:
+                    _audio_half(combined)
+                finally:
+                    # Nothing after this half needs AST+PaSST: on the profiles that
+                    # want the memory back more than an instant next run, the pair
+                    # goes before the accelerator is free, a cancelled run's too
+                    if _hw().unload_instruments_after_run:
+                        from instrument_tagger import release_instrument_tagger
+                        release_instrument_tagger(get_device())
+            if cancel_flag():
+                return combined
+        pipeline_progress["gpu"] = "GPU: done"
+        _update_progress()
+        return combined
 
+    def _audio_half(combined):
         if not skip_embeddings:
             from embeddings import AudioEmbeddingGenerator
             pipeline_progress["gpu"] = "GPU: embeddings..."
@@ -158,7 +171,7 @@ def run_parallel_enrichment(
             _update_progress()
 
         if cancel_flag():
-            return combined
+            return
 
         if not skip_audio_analysis:
             from audio_analysis import AudioAnalyzer
@@ -171,10 +184,6 @@ def run_parallel_enrichment(
             combined["audio_features"] = af_stats
             pipeline_progress["gpu"] = f"GPU: {af_stats.get('success', 0)} features"
             _update_progress()
-
-        pipeline_progress["gpu"] = "GPU: done"
-        _update_progress()
-        return combined
 
     # --- Pipeline B: Last.fm enrichment (by artist + album, not per-track) ---
     def _run_lastfm_pipeline():
@@ -311,21 +320,6 @@ def run_parallel_enrichment(
         result_parts["note"] = "cancelled during phase 1"
         return result_parts
 
-    # Phase 1's CLAP/instrument tensors are finished; hand their cached blocks
-    # back to the driver before Phase 2 so the text encoder isn't squeezed into
-    # a full allocator arena on the 16 GB laptop GPU. Singleton model weights
-    # stay resident — only the allocator's free cache is returned. On the
-    # standard/lite profiles the AST+PaSST pair is released entirely: nothing
-    # after Phase 1 needs it, and those machines want the memory back more
-    # than they want an instant next run.
-    if torch is not None:
-        if _hw().unload_instruments_after_run:
-            from device import get_device
-            from instrument_tagger import release_instrument_tagger
-            release_instrument_tagger(get_device())
-        from device import empty_cache
-        empty_cache()
-
     # === Phase 2: Text embeddings (sentence-transformers, needs GPU) ===
     # Runs on lite too — the tier turns off the audio pipeline, not the text
     # encoders, and lite's semantic search reads exactly these vectors
@@ -335,52 +329,53 @@ def run_parallel_enrichment(
         return result_parts
 
     logger.info("=== Phase 2: text embeddings ===")
+    from device import heavy_pass
+    with heavy_pass("the analysis run's text half"):
+        # Text embeddings
+        try:
+            from text_embeddings import generate_text_embeddings
+            if progress_cb:
+                progress_cb("Phase 2: text embeddings...")
+            text_stats = generate_text_embeddings(limit=None, cancel_flag=cancel_flag)
+            result_parts["text_embeddings"] = text_stats
+            logger.info(f"Text embeddings: {text_stats}")
+        except Exception as e:
+            logger.error(f"Text embeddings failed: {e}", exc_info=True)
+            result_parts["text_embeddings"] = {"error": str(e)}
 
-    # Text embeddings
-    try:
-        from text_embeddings import generate_text_embeddings
-        if progress_cb:
-            progress_cb("Phase 2: text embeddings...")
-        text_stats = generate_text_embeddings(limit=None, cancel_flag=cancel_flag)
-        result_parts["text_embeddings"] = text_stats
-        logger.info(f"Text embeddings: {text_stats}")
-    except Exception as e:
-        logger.error(f"Text embeddings failed: {e}", exc_info=True)
-        result_parts["text_embeddings"] = {"error": str(e)}
+        if cancel_flag():
+            result_parts["note"] = "cancelled during phase 2"
+            return result_parts
 
-    if cancel_flag():
-        result_parts["note"] = "cancelled during phase 2"
-        return result_parts
+        # Lyrics embeddings
+        try:
+            from lyrics_embeddings import generate_lyrics_embeddings
+            if progress_cb:
+                progress_cb("Phase 2: lyrics embeddings...")
+            lyrics_emb_stats = generate_lyrics_embeddings(limit=None, cancel_flag=cancel_flag)
+            result_parts["lyrics_embeddings"] = lyrics_emb_stats
+            logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
+        except Exception as e:
+            logger.error(f"Lyrics embeddings failed: {e}", exc_info=True)
+            result_parts["lyrics_embeddings"] = {"error": str(e)}
 
-    # Lyrics embeddings
-    try:
-        from lyrics_embeddings import generate_lyrics_embeddings
-        if progress_cb:
-            progress_cb("Phase 2: lyrics embeddings...")
-        lyrics_emb_stats = generate_lyrics_embeddings(limit=None, cancel_flag=cancel_flag)
-        result_parts["lyrics_embeddings"] = lyrics_emb_stats
-        logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
-    except Exception as e:
-        logger.error(f"Lyrics embeddings failed: {e}", exc_info=True)
-        result_parts["lyrics_embeddings"] = {"error": str(e)}
+        if cancel_flag():
+            result_parts["note"] = "cancelled during phase 2"
+            return result_parts
 
-    if cancel_flag():
-        result_parts["note"] = "cancelled during phase 2"
-        return result_parts
-
-    # Enrichment embeddings (artist bios, album info, genre descriptions)
-    try:
-        from enrichment_embeddings import generate_all_enrichment_embeddings
-        if progress_cb:
-            progress_cb("Phase 2: enrichment embeddings...")
-        enrich_emb_stats = generate_all_enrichment_embeddings(
-            limit=None, progress_cb=progress_cb, cancel_flag=cancel_flag,
-        )
-        result_parts["enrichment_embeddings"] = enrich_emb_stats
-        logger.info(f"Enrichment embeddings: {enrich_emb_stats}")
-    except Exception as e:
-        logger.error(f"Enrichment embeddings failed: {e}", exc_info=True)
-        result_parts["enrichment_embeddings"] = {"error": str(e)}
+        # Enrichment embeddings (artist bios, album info, genre descriptions)
+        try:
+            from enrichment_embeddings import generate_all_enrichment_embeddings
+            if progress_cb:
+                progress_cb("Phase 2: enrichment embeddings...")
+            enrich_emb_stats = generate_all_enrichment_embeddings(
+                limit=None, progress_cb=progress_cb, cancel_flag=cancel_flag,
+            )
+            result_parts["enrichment_embeddings"] = enrich_emb_stats
+            logger.info(f"Enrichment embeddings: {enrich_emb_stats}")
+        except Exception as e:
+            logger.error(f"Enrichment embeddings failed: {e}", exc_info=True)
+            result_parts["enrichment_embeddings"] = {"error": str(e)}
 
     return result_parts
 

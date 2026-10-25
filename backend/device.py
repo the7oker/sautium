@@ -21,7 +21,8 @@ import contextlib
 import logging
 import functools
 import os
-from typing import Optional
+import threading
+from typing import Callable, List, Optional
 
 import torch
 
@@ -164,3 +165,76 @@ def audio_batch_budget_seconds() -> int:
     minutes = usable / p["cost_per_min"] if usable > 0 else 0.0
     minutes = max(p["min_min"], min(p["max_min"], minutes))
     return int(minutes * 60)
+
+
+# ── One heavy pass at a time ────────────────────────────────────────────────
+# The analysis run, the background text half and a stream's analysis each size
+# their work as if the accelerator were theirs alone — the audio budget above is
+# a share of the whole working set — and on MPS the framework keeps what a
+# forward took for itself past its end. Two passes at once share memory neither
+# planned for. So a heavy pass holds the accelerator, and its end gives back
+# what it took before the next one begins.
+
+_lane = threading.Condition()
+_holder: Optional[str] = None       # the pass that holds the accelerator
+_waiting = 0                         # passes blocked until it is free
+_when_idle: List[Callable[[], None]] = []
+
+
+@contextlib.contextmanager
+def heavy_pass(name: str, *, wait: bool = True):
+    """Hold the accelerator for one heavy model pass: True inside once held.
+    While a pass holds it or waits for it, the next one waits — or, with
+    `wait=False`, does not hold it and is False inside at once. The end returns
+    the allocator's free blocks, then frees the accelerator."""
+    global _holder, _waiting
+    with _lane:
+        held = _holder is None and not _waiting
+        if not held and wait:
+            logger.info("%s waits for the accelerator: %s holds it", name,
+                        _holder or "a waiting pass")
+            _waiting += 1
+            try:
+                while _holder is not None:
+                    _lane.wait()
+            finally:
+                _waiting -= 1
+            held = True
+        if held:
+            _holder = name
+    if not held:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        try:
+            empty_cache()
+        finally:
+            with _lane:
+                _holder = None
+                _lane.notify_all()
+                idle = []
+                if not _waiting:
+                    idle, _when_idle[:] = _when_idle[:], []
+            for fn in idle:
+                fn()
+
+
+def heavy_pass_wanted() -> bool:
+    """A pass waits for the accelerator: one that yields to the others stops
+    at its next batch."""
+    with _lane:
+        return _waiting > 0
+
+
+def call_when_idle(fn: Callable[[], None]) -> None:
+    """fn() once no pass holds the accelerator or waits for it: at once if
+    none does, else in the thread of the last of them to end — once, however
+    often it was asked for meanwhile."""
+    with _lane:
+        if _holder is not None or _waiting:
+            if fn not in _when_idle:
+                _when_idle.append(fn)
+            return
+    fn()

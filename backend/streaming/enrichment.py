@@ -26,8 +26,11 @@ audio that actually arrived.
 Full-track methodology, same as owned scans (balanced-grid segments, whole-track
 amplitude block), so vectors land in the same embedding space.
 
-GPU work is serialised on a single worker and reuses the process-wide CLAP and
-AST/PaSST singletons (no duplicate model load — VRAM)."""
+GPU work is serialised on a single worker, is a heavy pass of the accelerator
+(device.heavy_pass: it waits for the analysis run, never shares memory with
+it) and reuses the process-wide CLAP and AST/PaSST singletons (no duplicate
+model load — VRAM). It waits rather than drops: on a demo-limited provider the
+track may never stream in full again."""
 from __future__ import annotations
 
 import io
@@ -53,8 +56,8 @@ class PreviewEnricher:
 
     def __init__(self) -> None:
         # One worker: serialise GPU passes. Previews trickle in per album, so a
-        # single lane is plenty and keeps VRAM contention with the bulk
-        # analysers off.
+        # single lane is plenty; the bulk analysers are kept off by the
+        # accelerator's own (device.heavy_pass).
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="preview-enrich")
         self._inflight: set[str] = set()
         self._lock = threading.Lock()
@@ -133,18 +136,27 @@ class PreviewEnricher:
     def _do_idle_unload(self) -> None:
         """One-shot idle timeout (event-scheduled after the last completion,
         cancelled by new work — not a poll). Drops the analyzer so its
-        AST+PaSST reference dies, then releases the singleton weights."""
+        AST+PaSST reference dies, then releases the singleton weights — as a
+        pass of the accelerator: the analysis run tags with the same pair, and
+        a release under its batches would leave them without instruments. A
+        busy accelerator puts the release after its passes."""
         with self._lock:
             if self._inflight:
                 return
             self._idle_timer = None
-            analyzer, self._analyzer = self._analyzer, None
-        if analyzer is not None:
-            from device import get_device
-            from instrument_tagger import release_instrument_tagger
-            release_instrument_tagger(get_device())
-            self._empty_cache()
-            logger.info("preview enrich idle — instrument models released")
+        from device import call_when_idle, get_device, heavy_pass
+        with heavy_pass("the preview's idle release", wait=False) as held:
+            if not held:
+                call_when_idle(self._do_idle_unload)
+                return
+            with self._lock:
+                if self._inflight:
+                    return
+                analyzer, self._analyzer = self._analyzer, None
+            if analyzer is not None:
+                from instrument_tagger import release_instrument_tagger
+                release_instrument_tagger(get_device())
+                logger.info("preview enrich idle — instrument models released")
 
     def _enrich(self, track_id: str, flac: bytes, lengths: tuple,
                 lossless: bool, provider_id: str) -> None:
@@ -201,20 +213,23 @@ class PreviewEnricher:
                 return
             db.commit()
 
-        embedder, analyzer = self._models()
-        # Full-track methodology, same as owned scans: amplitude block +
-        # windowed instruments over the whole streamed audio, bpm/key from
-        # its middle (analyze_from_array slices that itself).
-        feats = analyzer.analyze_from_array(audio, sr=48000)   # dict | None
+        from device import heavy_pass
+        with heavy_pass("a stream's analysis"):
+            embedder, analyzer = self._models()
+            # Full-track methodology, same as owned scans: amplitude block +
+            # windowed instruments over the whole streamed audio, bpm/key from
+            # its middle (analyze_from_array slices that itself).
+            feats = analyzer.analyze_from_array(audio, sr=48000)   # dict | None
+            # Balanced-grid segments from the full streamed audio; the track
+            # vector is their normalized mean.
+            computed = embedder._compute_segments(audio)
 
         with SessionLocal() as db:
             model = embedder._get_or_create_embedding_model(db)
-            # Balanced-grid segments from the full streamed audio; the track
-            # vector is their normalized mean. _persist_analysis decides the
-            # overwrite by material rank BEFORE writing, so a preview never
-            # touches a real-file analysis (segments included).
+            # _persist_analysis decides the overwrite by material rank BEFORE
+            # writing, so a preview never touches a real-file analysis
+            # (segments included).
             saved = False
-            computed = embedder._compute_segments(audio)
             if computed is not None:
                 idxs, vecs, portrait = computed
                 saved = embedder._persist_analysis(
@@ -228,7 +243,6 @@ class PreviewEnricher:
         if saved or feats:
             import notary
             notary.wake("preview analysis")
-        self._empty_cache()
         preview_events.ping()   # features committed → open album page re-fetches key·bpm
         logger.info("preview enriched %s (embedding=%s features=%s)",
                     track_id, saved, bool(feats))
@@ -278,18 +292,12 @@ class PreviewEnricher:
             an = AudioAnalyzer()
             an.load_model()
             self._analyzer = an
+        else:
+            # The analysis run releases AST+PaSST at its end where the profile
+            # wants the memory back: the pair is taken anew, loaded again if so
+            from instrument_tagger import get_instrument_tagger
+            self._analyzer.ensemble = get_instrument_tagger(self._analyzer.device)
         return self._embedder, self._analyzer
-
-    @staticmethod
-    def _empty_cache() -> None:
-        try:
-            # device.empty_cache handles MPS too — the direct cuda call
-            # was a no-op on Mac nodes and left the preview-enrichment
-            # pool parked in unified memory.
-            from device import empty_cache
-            empty_cache()
-        except Exception:
-            pass
 
 
 class PreviewLyricsEnricher:
@@ -365,6 +373,9 @@ class PreviewLyricsEnricher:
                 return   # instrumental / not_found / error — nothing to embed
 
         # Embed the stored lyrics (no-ops if already embedded, or if the text
-        # cleans to nothing / exceeds the junk-length cap).
+        # cleans to nothing / exceeds the junk-length cap) — a heavy pass of the
+        # accelerator like any text pass.
+        from device import heavy_pass
         from lyrics_embeddings import generate_lyrics_embeddings
-        generate_lyrics_embeddings(track_ids=[tid])
+        with heavy_pass("a stream's lyrics"):
+            generate_lyrics_embeddings(track_ids=[tid])
