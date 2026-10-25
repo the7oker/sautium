@@ -35,6 +35,10 @@
  * forever. A route counts as rendered when fonts are ready and the DOM has
  * been quiet for 500 ms (mini-player progress ticks excluded), capped at
  * 8 s. Screens are captured full-page, overlays at viewport size.
+ *
+ * Every Content-Security-Policy violation a screen meets — refused, or only
+ * reported under a report-only policy — goes to csp.log beside errors.log,
+ * the first load's (the sign-in gate, then the app) included.
  */
 
 import { execFileSync, spawn } from 'node:child_process';
@@ -145,6 +149,13 @@ const GO_TO = hash => `new Promise(resolve => {
 })`;
 
 const TWO_FRAMES = 'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))';
+
+// Evaluated by DevTools in every new document before the page's own scripts
+// (and outside the page's policy): the violations it meets, kept until read.
+const CSP_WATCH = `addEventListener('securitypolicyviolation', e => {
+  (window.__cspViolations = window.__cspViolations || []).push([e.disposition, e.effectiveDirective,
+    e.blockedURI || '-', (e.sourceFile || '?') + ':' + e.lineNumber].join(' '));
+});`;
 
 function parseArgs(argv) {
   const opts = { ...DEFAULTS, compare: null };
@@ -274,6 +285,8 @@ class Page {
   }
 
   takeErrors() { const list = this.errors; this.errors = []; return list; }
+
+  takeViolations() { return this.eval('(window.__cspViolations || []).splice(0)'); }
 
   send(method, params) { return this.cdp.send(method, params, this.sessionId); }
 
@@ -485,18 +498,24 @@ async function main() {
     page.inject = opts.inject ? readFileSync(resolve(opts.inject), 'utf8') : '';
     await page.send('Page.enable');
     await page.send('Runtime.enable');
+    await page.send('Page.addScriptToEvaluateOnNewDocument', { source: CSP_WATCH });
     for (const vp of widths) {
       await page.setViewport(vp);
       await page.navigate(`${opts.url}/`);
+      await page.settle();
+      results.push({ route: '(first load)', vp, note: 'no shot', violations: await page.takeViolations() });
       await page.eval(`localStorage.setItem(${JSON.stringify(TOKEN_KEY)}, ${JSON.stringify(token)})`);
       await page.reload();
       await page.settle();
       page.takeErrors();
+      results.push({ route: '(signed in)', vp, note: 'no shot', violations: await page.takeViolations() });
       for (const route of routes) {
         const result = await shootRoute(page, route, vp, out);
+        result.violations = await page.takeViolations();
         results.push(result);
         const errs = result.errors?.length ? `  !! ${result.errors.length} js error(s)` : '';
-        console.log(`${vp.width}x${vp.height}  ${route.padEnd(28)} ${result.note || `${result.ms} ms`}${errs}`);
+        const csp = result.violations.length ? `  !! ${result.violations.length} CSP violation(s)` : '';
+        console.log(`${vp.width}x${vp.height}  ${route.padEnd(28)} ${result.note || `${result.ms} ms`}${errs}${csp}`);
       }
     }
   } finally {
@@ -516,13 +535,18 @@ async function main() {
   const errorLog = results.filter(r => r.errors?.length)
     .map(r => `## ${r.route} @ ${r.vp.width}x${r.vp.height}\n${r.errors.join('\n')}\n`).join('\n');
   writeFileSync(join(out, 'errors.log'), errorLog);
+  const cspLog = results.filter(r => r.violations?.length)
+    .map(r => `## ${r.route} @ ${r.vp.width}x${r.vp.height}\n${r.violations.join('\n')}\n`).join('\n');
+  writeFileSync(join(out, 'csp.log'), cspLog);
   console.log(`${results.filter(r => !r.note).length} shots in ${out} — open ${join(out, 'index.html')}`
-    + (errorLog ? `\nJS errors were thrown — see ${join(out, 'errors.log')}` : '\nno JS errors'));
+    + (errorLog ? `\nJS errors were thrown — see ${join(out, 'errors.log')}` : '\nno JS errors')
+    + (cspLog ? `\nthe Content-Security-Policy was violated — see ${join(out, 'csp.log')}`
+      : '\nno Content-Security-Policy violation'));
 }
 
 // Importable as a library for ad-hoc probes (the CDP plumbing, Chrome
 // launch, token derivation); runs the CLI only when executed directly.
-export { Cdp, Page, launchChrome, findChrome, deriveToken, GO_TO, IMAGES_READY, TWO_FRAMES, decodePng, pixelDiff };
+export { Cdp, Page, launchChrome, findChrome, deriveToken, GO_TO, IMAGES_READY, TWO_FRAMES, CSP_WATCH, decodePng, pixelDiff };
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(err => { console.error(err.stack || err); process.exit(1); });

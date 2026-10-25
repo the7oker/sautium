@@ -325,6 +325,19 @@ tap scrolls that body, not the document.
 The guided control needs an opaque background for the tuck to read
 (see `.btn-secondary.is-guided`).
 
+### What the page may load
+
+Every page the node serves carries a Content-Security-Policy
+(`backend/csp.py`) naming the node's own origin alone. So every load is the
+node's: a script, sheet or typeface under `/static/`, a cover through
+`coverUrl`/`artSrc` (an outside one is fetched by the node), an API call or
+event stream by its node path. A new kind of load — a `data:` or `blob:`
+image, a worker, a frame, `eval` — changes the policy in the same commit,
+with `tests/test_csp.py`; `scripts/ui-shots.mjs` lists what each screen
+violates in `csp.log`. Inline `on*` handlers and `style` attributes are
+still allowed (`'unsafe-inline'`), and each one more is one more to move
+when that goes: prefer a listener and a class.
+
 ### Native dialogs are an anti-pattern
 
 **Never call `alert()`, `confirm()`, or `prompt()`.** Browsers

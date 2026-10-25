@@ -28,14 +28,19 @@ Whitelisted paths (no signature required):
 
     /health              (Docker healthcheck)
     /                    (HTML root — the page carries no key)
+    /favicon.ico         (asked by the browser itself; no route serves it)
     /static/*            (CSS, JS, fonts)
     /api/covers/*        (album cover art — loaded via <img src>,
                           which cannot attach custom headers)
     /api/sync/*          (P2P sync from remote launchers — has its
                           own Ed25519 auth in sync_server.py)
+    /api/mb/*            (MusicBrainz slices for peers, like /api/sync/*)
     /sync/*              (legacy P2P sync)
     /api/p2p/chat/wake   (loopback-only "ping" from sync_server)
     /api/auth/*          (the credential checks themselves — see below)
+    /api/player/media/*  (<audio> bytes, behind their own signed query)
+    /lastfm/auth/callback/*  (Last.fm's redirect back, on its nonce)
+    /api/csp-report      (the browser's own Content-Security-Policy reports)
 
 Replay window: ±60 seconds. A request older than 60s or 60s in the
 future is rejected even with a valid signature.
@@ -83,6 +88,9 @@ WHITELIST_EXACT = {
     "/api/auth/login",
     "/api/auth/pair",
     "/api/auth/create-account",
+    # The browser posts a policy violation on its own, unsigned (csp.py):
+    # the route bounds the body and logs each kind once, so many at most.
+    "/api/csp-report",
 }
 
 # -- Host guard ---------------------------------------------------------------

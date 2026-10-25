@@ -3234,6 +3234,40 @@ the switch's press met that at once — now they wait on it as the browser did
 (`slot_ready`), told also when it turns out unplayable, so the wait walks on.
 Lesson: a switch moves the listening, not just the list.
 
+### The page says what it may load (2026-10-25)
+
+Since every outside cover comes through the node (`artSrc`, `covers.ART_SOURCES`)
+the browser asks no third party for anything — but only the code kept it so,
+and a later hotlink would have loaded without a sign. Every HTML document the
+node sends now carries a Content-Security-Policy (`backend/csp.py`, one
+middleware: the shell at `/`, the same file under `/static/`, the Last.fm
+callback page, any page added later) that names the node's own origin and
+nothing else.
+
+- **What it allows is what the pages hold.** `blob:` and `data:` for media
+  only (the browser output's prefetched track and its silent unlock clip; no
+  image is either); no form the browser sends (`form-action 'none'`: every
+  submit is the page's script); no frame around a page, no `<base>`, no
+  plugin. Inline script and style stay allowed, for 23 `on*` handlers in
+  `app-shell.js`'s templates (14 hide a cover that failed, 3 remove one, one
+  falls back to an album cover, 5 are Back buttons), about 190 `style`
+  attributes, the build stamp `root()` writes as an inline script and the
+  callback page's `<style>`. Dropping `'unsafe-inline'` takes the handlers as
+  listeners, the stamp as a `<meta>` and the attributes as classes.
+- **`report-uri`, not `report-to`.** The Reporting API delivers only to a
+  potentially trustworthy endpoint, which a plain-HTTP LAN address is not,
+  and a policy naming `report-to` has its `report-uri` ignored. The route
+  takes no signature (the browser posts on its own): it reads 16 KiB at most
+  and logs each kind — the directive and the origin or keyword it refused —
+  once, 32 kinds at most.
+- **Report-only first,** so a load the inventory missed shows in the log
+  instead of breaking a screen. `scripts/ui-shots.mjs` records the violations
+  each screen meets (`csp.log`); `scripts/csp-probe.mjs` plants a load of
+  every kind from another origin and checks the browser did what the header
+  says, against a control with the policy bypassed.
+- FastAPI's interactive `/docs` went: their pages load their scripts from a
+  CDN, and only a signed caller could open them.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

@@ -244,8 +244,9 @@ docker compose logs -f backend     # wait for "Application startup complete"
 
 - **Web UI:** `http://localhost:8800/`
 
-(`/docs` and `/openapi.json` sit behind the request signing like the rest
-of the API, so a bare browser tab gets 401 there.)
+(`/openapi.json` sits behind the request signing like the rest of the API,
+so a bare browser tab gets 401 there. FastAPI's interactive `/docs` pages
+are not served: they load their scripts from a CDN.)
 
 The backend is also reachable from phones/tablets on the same Wi-Fi at
 `http://<host-LAN-IP>:8800/` — list that address in `SAUTIUM_HOST_IPS`.

@@ -30,6 +30,7 @@ from auth_hmac import HMACAuthMiddleware, ensure_secret
 from auth_hmac import secret_path as _secret_path
 from config import settings, get_settings, ui_build, build_identity, LOGGING_CONFIG
 from db_pool import db_query_one
+import csp
 import device_auth
 import lastfm_auth
 from dht_service import DHTService, HAS_LIBTORRENT
@@ -983,12 +984,18 @@ app = FastAPI(
     version=settings.app_version,
     description="Self-hosted music companion — library, playback, assistant and the collectors' network",
     lifespan=lifespan,
+    # No interactive docs: their pages load their scripts from a CDN, and
+    # only a signed caller could open them. /openapi.json stays.
+    docs_url=None, redoc_url=None,
 )
 
 # HMAC signature check on every privileged request. Whitelist for
 # /health, /, /static/*, /api/sync/*, /sync/*, /api/p2p/chat/wake
 # is hardcoded inside the middleware. See backend/auth_hmac.py.
 app.add_middleware(HMACAuthMiddleware, secret_path=_API_SECRET_PATH)
+
+# Every HTML page the node serves says what it may load (csp.py).
+app.add_middleware(csp.PolicyMiddleware)
 
 # Enable gzip compression for sync API responses
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -1842,6 +1849,7 @@ app.include_router(mb_sync_router)
 from routers.auth import router as auth_router
 app.include_router(auth_router)
 app.include_router(lastfm_auth.router)
+app.include_router(csp.router)
 
 from routers.p2p import router as p2p_router
 app.include_router(p2p_router)
