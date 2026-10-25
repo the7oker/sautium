@@ -328,18 +328,19 @@ The guided control needs an opaque background for the tuck to read
 ### What the page may load
 
 Every page of the Web UI carries a Content-Security-Policy
-(`backend/csp.py`, report-only since 2026-10-25) naming the node's own origin
-alone. Every load must be the node's: a script, sheet or typeface under
-`/static/`, a cover through `coverUrl`/`artSrc` (an outside one is fetched by
-the node), an API call or event stream by its node path. A new kind of load
-— a `data:` or `blob:` image, a worker, a frame, `eval` — changes the policy
-in the same commit, with `tests/test_csp.py`; `scripts/ui-shots.mjs` lists
-what each screen violates in `csp.log`. Inline `on*` handlers and `style`
-attributes are still allowed (`'unsafe-inline'`), and each one more is one
-more to move when that goes: prefer a listener and a class. The policy
-leaves alone `preconnect`, `dns-prefetch`, `prerender`, speculation rules and
-every navigation: the page carries no such hint (`tests/test_web_page.py`),
-and a link or `window.open` to another site is a person's click.
+(`backend/csp.py`, enforced after a report-only stage) naming the node's own
+origin alone: the browser refuses any other load it governs. Every load must be
+the node's: a script, sheet or typeface under `/static/`, a cover through
+`coverUrl`/`artSrc` (an outside one is fetched by the node), an API call or
+event stream by its node path. A new kind of load — a `data:` or `blob:`
+image, a worker, a frame, `eval` — changes the policy in the same commit,
+with `tests/test_csp.py`; `scripts/ui-shots.mjs` lists what each screen
+violates in `csp.log`. Inline `on*` handlers and `style` attributes are
+still allowed (`'unsafe-inline'`), and each one more is one more to move
+when that goes: prefer a listener and a class. The policy leaves alone
+`preconnect`, `dns-prefetch`, `prerender`, speculation rules and every
+navigation: the page carries no such hint (`tests/test_web_page.py`), and a
+link or `window.open` to another site is a person's click.
 
 ### Native dialogs are an anti-pattern
 

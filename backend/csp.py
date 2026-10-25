@@ -20,7 +20,8 @@ It allows what the pages hold today and no more:
 - no form the browser sends (every submit is the page's script), no frame
   around a page, no <base>, no plugin.
 
-Report-only: a violation is reported and logged, nothing is refused.
+Enforced, after a report-only stage: a load the policy does not name is
+refused, reported and logged.
 """
 
 import json
@@ -37,7 +38,7 @@ import auth_hmac
 logger = logging.getLogger(__name__)
 
 REPORT_PATH = "/api/csp-report"
-HEADER = "Content-Security-Policy-Report-Only"
+HEADER = "Content-Security-Policy"
 POLICY = "; ".join((
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline'",

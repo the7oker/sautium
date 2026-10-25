@@ -80,7 +80,8 @@ def test_every_page_the_node_serves_carries_the_policy(node):
                            ("/static/index.html", node.get("/static/index.html")),
                            ("/lastfm/auth/callback/<nonce>", stale)):
         assert response.headers["content-type"].startswith("text/html"), path
-        assert response.headers[csp.HEADER] == csp.POLICY, path
+        assert response.headers["content-security-policy"] == csp.POLICY, path     # enforced
+        assert "content-security-policy-report-only" not in response.headers, path
         assert response.headers["x-dns-prefetch-control"] == "off", path
     # FastAPI's interactive docs are no page of the node's: theirs load from a CDN
     assert node.app.docs_url is None and node.app.redoc_url is None
@@ -159,7 +160,7 @@ def test_a_report_of_the_older_form_is_read(reports, caplog):
     _post(reports, _report(**{"effective-directive": None, "disposition": None, "source-file": None,
                               "violated-directive": "img-src 'self'"}))
     assert _logged(caplog) == [
-        f"Content-Security-Policy (report only): img-src does not allow https://images.example; page {NODE}/"]
+        f"Content-Security-Policy (enforced): img-src does not allow https://images.example; page {NODE}/"]
 
 
 def test_a_frame_around_the_page_is_said_as_such(reports, caplog):

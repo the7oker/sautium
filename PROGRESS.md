@@ -3420,8 +3420,9 @@ of its links looked up ahead of any click otherwise.
   its own pages' reports. It reads 16 KiB at most and logs each kind — the
   directive and the origin or keyword it refused — once, 32 kinds at most; a
   browser extension's own resources are not the page's and count for nothing.
-- **Report-only first,** so a load the inventory missed shows in the log
-  instead of breaking a screen. `scripts/ui-shots.mjs` records the violations
+- **Report-only first, then enforced** — the header's name (`csp.HEADER`)
+  is all that differs: a load the inventory missed showed in the log instead
+  of breaking a screen. `scripts/ui-shots.mjs` records the violations
   each screen meets (`csp.log`); `scripts/csp-probe.mjs` plants eight kinds of
   load from another origin (an image, a CSS background, a fetch, a script, a
   stylesheet, a font, a sound, a frame) and checks the browser did what the
