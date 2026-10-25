@@ -8,11 +8,17 @@ is written, a batch of long texts only included. On 2026-10-18
 one pass wrote an error line per batch, 314 of them, then "Genre desc
 embeddings done: 0 genres, 0 chunks".
 
+On MPS, which keeps the attention a forward takes (a 24 GB Mac held 32 GiB
+of it after four batches of bios on 2026-10-25), a forward's texts fit a
+share of the device's working set, and a text over the share alone goes to
+a copy of the encoder on the CPU, given back at the end of the pass.
+
 The encoder is a fake that fails as MPS fails; the database is real.
 """
 
 import logging
 import sys
+import types
 import uuid
 import zlib
 from pathlib import Path
@@ -28,6 +34,10 @@ FULL = ("MPS backend out of memory (MPS allocated: 18.13 GB, other allocations: 
         "allowed: 20.13 GB). Tried to allocate 256.00 MB on private pool.")
 # A word in the one text too long for what the device has free
 LONG = "zylophant"
+NAME = "a/text-encoder"
+# The working set, in GB, whose share is 10,000 for a forward's texts times its
+# padded length squared, 16 heads: one text of 100 tokens, four of 50, sixteen of 25
+SHARE_GB = "0.1024"
 
 
 class Encoder:
@@ -42,6 +52,39 @@ class Encoder:
         if self.full(texts, batch_size):
             raise RuntimeError(FULL)
         return np.stack([np.full(1024, _mark(t), dtype=np.float32) for t in texts])
+
+
+class Tokenized(Encoder):
+    """The encoder as a device that keeps its attention sees it: its tokenizer
+    counts a word a token and two for the ends, it has 16 heads, and it says
+    each forward's texts and padded length."""
+
+    max_seq_length = 8192
+
+    def __init__(self, full=lambda texts, batch_size: False):
+        super().__init__(full)
+        self.forwards = []
+
+    @staticmethod
+    def tokenizer(texts, truncation, max_length):
+        return {"input_ids": [[0] * _tokens(t) for t in texts]}
+
+    def __getitem__(self, i):
+        return types.SimpleNamespace(auto_model=types.SimpleNamespace(
+            config=types.SimpleNamespace(num_attention_heads=16)))
+
+    def encode(self, texts, batch_size, show_progress_bar, normalize_embeddings):
+        self.forwards.append((len(texts), max(_tokens(t) for t in texts)))
+        return super().encode(texts, batch_size, show_progress_bar, normalize_embeddings)
+
+
+def _tokens(text: str) -> int:
+    return len(text.split()) + 2
+
+
+def _words(n: int, i: int = 0) -> str:
+    """A text of n tokens (n - 2 words), its own by i."""
+    return " ".join([f"w{i}"] * (n - 2))
 
 
 def _mark(text: str) -> float:
@@ -281,7 +324,7 @@ def test_a_batch_of_one_text_that_does_not_fit_is_tried_alone_once():
     import text_embedder
     tight = Encoder(lambda texts, batch_size: any(LONG in t for t in texts))
     vectors, left_out = text_embedder.encode(tight, [" ".join([LONG] * 40)], batch_size=4,
-                                             device="cpu")
+                                             device="cpu", name=NAME)
     assert (vectors, left_out) == ([None], {0})
     assert tight.calls == [(1, 4), (1, 1)]          # the text, then a text of a few tokens
 
@@ -301,7 +344,7 @@ def test_a_batch_of_one_text_on_a_full_device_stops_in_the_few_tokens_own_words(
             raise RuntimeError(f"{FULL} [{texts[0]}]")
 
     with pytest.raises(text_embedder.OutOfMemory) as stop:
-        text_embedder.encode(Naming(), ["A short one."], batch_size=4, device="cpu")
+        text_embedder.encode(Naming(), ["A short one."], batch_size=4, device="cpu", name=NAME)
     assert events == ["A short one.", "freed", text_embedder._CANARY, "freed"]
     assert str(stop.value).endswith(f"[{text_embedder._CANARY}]"), stop.value
 
@@ -319,7 +362,7 @@ def test_the_devices_cache_is_freed_before_every_try_after_a_failed_one(monkeypa
 
     tight = Logged(lambda texts, batch_size: any(LONG in t for t in texts))
     text_embedder.encode(tight, [" ".join([LONG] * 40), "A short one."], batch_size=2,
-                         device="cpu")
+                         device="cpu", name=NAME)
     assert events == [2, "freed", 1, "freed", 1, 1]
 
 
@@ -329,7 +372,7 @@ def test_the_fall_back_to_one_text_at_a_time_is_said_once_a_process(caplog):
     tight = Encoder(lambda texts, batch_size: len(texts) > 1)     # every text fits alone
     for _ in range(2):
         vectors, left_out = text_embedder.encode(tight, ["A first.", "A second."], batch_size=2,
-                                                 device="cpu")
+                                                 device="cpu", name=NAME)
         assert left_out == set() and [float(v[0]) for v in vectors] == pytest.approx(
             [_mark("A first."), _mark("A second.")])
     said = [r.levelno for r in caplog.records if r.name == "text_embedder"]
@@ -352,3 +395,66 @@ def test_an_analysis_run_whose_text_pass_stopped_is_no_success(monkeypatch):
     assert main._enrich_state["result"]["success"] is False
     assert main._enrich_state["progress"].endswith(
         "| Bio emb: 3 | not finished: genre emb stopped (out of memory)")
+
+
+# ── on a device that keeps its attention ───────────────────────────────────
+
+@pytest.fixture
+def cpu_copy(monkeypatch):
+    """A working set whose share is 10,000 (SHARE_GB), and the encoder's copy
+    on the CPU a fake that says what it took and how often it was loaded."""
+    import text_embedder
+    monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", SHARE_GB)
+    cpu = Tokenized()
+    cpu.loads = []
+    monkeypatch.setattr(text_embedder, "_load",
+                        lambda name, device: cpu.loads.append((name, device)) or cpu)
+    monkeypatch.setattr(text_embedder, "_cpu", None)
+    return cpu
+
+
+def test_on_mps_a_forward_takes_no_more_attention_than_its_share(cpu_copy):
+    import text_embedder
+    mps = Tokenized()
+    texts = ([_words(50, i) for i in range(5)] + [_words(100)] + [_words(20, i) for i in range(6)]
+             + [_words(101)])
+    vectors, left_out = text_embedder.encode(mps, texts, batch_size=4, device="mps", name=NAME)
+    # the longest first, each forward's texts times its padded length squared within 10,000:
+    # 1 × 100², 4 × 50², 50² with three of 20, the three of 20 left
+    assert mps.forwards == [(1, 100), (4, 50), (4, 50), (3, 20)]
+    # the one over the share alone went to the CPU
+    assert cpu_copy.forwards == [(1, 101)] and cpu_copy.loads == [(NAME, "cpu")]
+    assert left_out == set()
+    assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
+
+
+def test_the_cpu_copy_is_loaded_once_a_pass_and_given_back_at_its_end(cpu_copy, caplog):
+    import device
+    import text_embedder
+    caplog.set_level(logging.INFO, logger="text_embedder")
+    mps = Tokenized()
+    with device.heavy_pass("a text pass"):
+        for i in range(2):
+            text_embedder.encode(mps, [_words(101, i), _words(10, i)], batch_size=4, device="mps",
+                                 name=NAME)
+        assert cpu_copy.loads == [(NAME, "cpu")]
+    assert text_embedder._cpu is None
+    assert [r.getMessage() for r in caplog.records if r.name == "text_embedder"] == [
+        f"Text embedding model on the CPU released: {NAME}"]
+    with device.heavy_pass("the next text pass"):
+        text_embedder.encode(mps, [_words(101)], batch_size=4, device="mps", name=NAME)
+    assert cpu_copy.loads == [(NAME, "cpu"), (NAME, "cpu")]
+
+
+def test_a_bio_pass_on_mps_writes_the_bio_over_the_share_from_the_cpu(db, cpu_copy):
+    from enrichment_embeddings import ArtistBioEmbeddingGenerator
+    texts = _texts()
+    texts[3] = _words(150, 3)
+    _bios(db, texts)
+    db.commit()
+    gen = ArtistBioEmbeddingGenerator(batch_size=4, device="mps")
+    gen.model = Tokenized()
+    stats = gen.generate_all(db)
+    assert (stats["success"], stats["failed"], "stopped" in stats) == (10, 0, False), stats
+    assert _embedded(db, "artist bios") == set(range(10))
+    assert cpu_copy.forwards == [(1, 152)]      # that bio alone, with its "Artist: …." words

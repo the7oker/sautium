@@ -59,7 +59,8 @@ class TextEmbeddingGenerator:
         """
         self.load_model()
         from text_embedder import encode
-        return encode(self.model, texts, batch_size=self.batch_size, device=self.device)
+        return encode(self.model, texts, batch_size=self.batch_size, device=self.device,
+                      name=self.model_name)
 
     def query_to_embedding(self, query: str) -> np.ndarray:
         """Encode a search query into a 1024d embedding vector."""

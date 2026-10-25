@@ -104,7 +104,8 @@ class _BaseEnrichmentGenerator:
     def encode(self, texts: List[str]) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
         self.load_model()
         from text_embedder import encode
-        return encode(self.model, texts, batch_size=self.batch_size, device=self.device)
+        return encode(self.model, texts, batch_size=self.batch_size, device=self.device,
+                      name=self.model_name)
 
     def _get_or_create_model_record(self, db: Session) -> EmbeddingModel:
         mid = embedding_model_uuid(self.model_name)

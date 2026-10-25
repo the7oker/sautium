@@ -179,14 +179,22 @@ _lane = threading.Condition()
 _holder: Optional[str] = None       # the pass that holds the accelerator
 _waiting = 0                         # passes blocked until it is free
 _when_idle: List[Callable[[], None]] = []
+_at_end: List[Callable[[], None]] = []
+
+
+def at_pass_end(fn: Callable[[], None]) -> None:
+    """fn() at the end of every heavy pass, before the next may begin: what a
+    pass takes for itself alone is given back there."""
+    _at_end.append(fn)
 
 
 @contextlib.contextmanager
 def heavy_pass(name: str, *, wait: bool = True):
     """Hold the accelerator for one heavy model pass: True inside once held.
     While a pass holds it or waits for it, the next one waits — or, with
-    `wait=False`, does not hold it and is False inside at once. The end returns
-    the allocator's free blocks, then frees the accelerator."""
+    `wait=False`, does not hold it and is False inside at once. The end runs
+    what `at_pass_end` asked for and returns the allocator's free blocks, then
+    frees the accelerator."""
     global _holder, _waiting
     with _lane:
         held = _holder is None and not _waiting
@@ -209,6 +217,8 @@ def heavy_pass(name: str, *, wait: bool = True):
         yield True
     finally:
         try:
+            for fn in _at_end:
+                fn()
             empty_cache()
         finally:
             with _lane:
