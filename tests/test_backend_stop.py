@@ -124,6 +124,8 @@ class FakeProc:
         self.ended = False
         self.log = log
         self._gone, self._stays, self._names, self._refuses = gone, stays, names, refuses
+        # Windows: a process that denies its terminate denies its wait too
+        self.refuses_wait = isinstance(refuses, psutil.AccessDenied)
         self._children = []
 
     def terminate(self):
@@ -163,9 +165,12 @@ def table(monkeypatch):
     log = []
     parent = FakeProc(100, log)
     monkeypatch.setattr(service_manager.psutil, "Process", lambda pid: parent)
-    monkeypatch.setattr(service_manager.psutil, "wait_procs",
-                        lambda procs, timeout=None: ([p for p in procs if p.ended],
-                                                     [p for p in procs if not p.ended]))
+    def wait_procs(procs, timeout=None):
+        for p in procs:
+            if p.refuses_wait:
+                raise psutil.AccessDenied(p.pid)       # as psutil's Windows wait does
+        return [p for p in procs if p.ended], [p for p in procs if not p.ended]
+    monkeypatch.setattr(service_manager.psutil, "wait_procs", wait_procs)
     return parent
 
 
@@ -192,11 +197,12 @@ def test_on_windows_a_child_that_refuses_its_terminate_leaves_the_rest_stopped(t
     table._children = [FakeProc(101, table.log, refuses=raised), FakeProc(102, table.log)]
     with caplog.at_level(logging.WARNING):
         ServiceManager({})._stop_process(_proc(), "Backend")
-    assert table.log[:3] == [(100, "terminate"), (101, "terminate"), (102, "terminate")]
-    assert (101, "kill") in table.log                    # what it left, stopped after it
+    # told again with what it left, then neither waited on nor killed: it refuses those too
+    assert table.log == [(100, "terminate"), (101, "terminate"), (102, "terminate"), (101, "terminate")]
     said = [r.getMessage() for r in caplog.records]
     assert f"PID 101 (worker) refused its terminate: {raised!r}" in said
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == [
+        "Backend: still running after the kill: 101 (worker)"]
 
 
 def test_what_the_backend_left_is_stopped_past_one_gone_before_its_turn(table, monkeypatch):

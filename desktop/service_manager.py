@@ -48,17 +48,21 @@ _LEFT_SECONDS = 2
 _KILLED_SECONDS = 5
 
 
-def _tell(proc: psutil.Process, how: str, *args) -> None:
+def _tell(proc: psutil.Process, how: str, *args) -> bool:
     """proc.terminate(), kill() or send_signal(sig), to a process that may
     have ended meanwhile: then it is as it was told to be. One that refuses
     — another user's, or an errno psutil passes on as it is (Windows'
-    TerminateProcess) — is said, and the rest of the stop goes on."""
+    TerminateProcess) — is said, and False: the waits after it leave it
+    out, as Windows refuses its wait too (a process above the launcher's
+    integrity level), and the rest of the stop goes on."""
     try:
         getattr(proc, how)(*args)
     except psutil.NoSuchProcess:
         pass
     except (psutil.AccessDenied, OSError) as e:
         logger.warning(f"PID {_named(proc)} refused its {how}: {e!r}")
+        return False
+    return True
 
 
 def _named(proc: psutil.Process) -> str:
@@ -882,12 +886,10 @@ class ServiceManager:
             if left:
                 logger.warning(f"{name} left {len(left)} process(es) running, stopping them: "
                                + ", ".join(map(_named, left)))
-                for p in left:
-                    _tell(p, "terminate")
-                alive = psutil.wait_procs(left, timeout=_LEFT_SECONDS)[1]
-                for p in alive:
-                    _tell(p, "kill")
-                psutil.wait_procs(alive, timeout=_KILLED_SECONDS)
+                told = [p for p in left if _tell(p, "terminate")]
+                alive = psutil.wait_procs(told, timeout=_LEFT_SECONDS)[1]
+                killed = [p for p in alive if _tell(p, "kill")]
+                psutil.wait_procs(killed, timeout=_KILLED_SECONDS)
 
             survivors = [p for p in [parent] + children if p.is_running()]
             if survivors:

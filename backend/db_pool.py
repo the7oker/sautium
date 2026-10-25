@@ -160,9 +160,9 @@ class Listener:
     past 1023. Keepalives on the connection: an idle socket reaped without
     an RST would swallow every later NOTIFY. A connection that fails is said
     once, then quietly retried every RETRY_S until it holds; a handler that
-    fails is said with its traceback, and the connection, which did nothing
-    wrong, listens on — but for the sweep, which is retried on a connection
-    made again.
+    fails is said (the database's trouble as a warning, a bug with its
+    traceback), and the connection, which did nothing wrong, listens on —
+    but for the sweep, which is retried on a connection made again.
     """
 
     RETRY_S = 2
@@ -257,12 +257,17 @@ class Listener:
                 wake.close()
 
     def _call(self, failed: str, handler, *args) -> bool:
-        """`handler(*args)`, its failure said with its traceback: False then."""
+        """`handler(*args)`; False when it failed, said: the database's
+        trouble as a warning — a connection the pool held went with a
+        PostgreSQL restart — any other with its traceback."""
         if handler is None:
             return True
         try:
             handler(*args)
             return True
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            logger.warning("%s: %s: %s", self.name, failed, str(e).strip())
+            return False
         except Exception:
             logger.exception("%s: %s", self.name, failed)
             return False

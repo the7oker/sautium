@@ -190,10 +190,15 @@ def test_a_handler_that_fails_is_said_and_its_connection_listens_on(channel, not
         finally:
             listener.stop()
     assert heard.connects == 1
-    failed = [r for r in caplog.records if r.name == "db_pool" and r.levelno == logging.ERROR]
-    assert [r.getMessage() for r in failed] == ["test-listener: its handler failed"]
-    assert failed[0].exc_info[1] is raised
-    assert _messages(caplog, logging.WARNING) == []
+    if isinstance(raised, psycopg2.Error):       # the database's trouble: a warning, no traceback
+        assert _messages(caplog, logging.WARNING) == [
+            "test-listener: its handler failed: its own query's database error"]
+        assert _messages(caplog, logging.ERROR) == []
+    else:
+        failed = [r for r in caplog.records if r.name == "db_pool" and r.levelno == logging.ERROR]
+        assert [r.getMessage() for r in failed] == ["test-listener: its handler failed"]
+        assert failed[0].exc_info[1] is raised
+        assert _messages(caplog, logging.WARNING) == []
 
 
 def test_a_failure_beside_the_connection_and_its_handlers_is_said_and_retried(channel, monkeypatch,
@@ -321,10 +326,10 @@ def test_a_sweep_that_fails_is_made_again_on_a_new_connection(channel, notify, c
             _until(lambda: heard.payloads == ["after"])
         finally:
             listener.stop()
-    failed = [r for r in caplog.records if r.name == "db_pool" and r.levelno == logging.ERROR]
-    assert [r.getMessage() for r in failed] == [
-        "test-listener: its sweep failed — swept again on a connection made in 0.1 s"]
-    assert failed[0].exc_info[0] is psycopg2.OperationalError
+    assert _messages(caplog, logging.WARNING) == [
+        "test-listener: its sweep failed — swept again on a connection made in 0.1 s: "
+        "server closed the connection unexpectedly"]
+    assert _messages(caplog, logging.ERROR) == []
 
 
 @pytest.mark.parametrize("raised", [psycopg2.OperationalError("the database is going away"),
