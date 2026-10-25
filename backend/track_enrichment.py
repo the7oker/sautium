@@ -138,11 +138,19 @@ def run_parallel_enrichment(
 
     # The run's halves hold the accelerator for hours on a fresh library: at
     # each batch seam - its generators ask the cancel flag before every batch -
-    # a stream's analysis or lyrics waiting for it go first (device.give_way),
-    # and a node that stops ends the run there
+    # a stream's analysis or lyrics waiting for it go first (device.give_way).
+    # A node that stops ends the run there, the accelerator no longer its own:
+    # no stage after it begins, and what the run would release is not its own
+    left_the_lane = []
+
     def _seam():
         from device import give_way
-        return not give_way() or cancel_flag()
+        if not left_the_lane and not give_way():
+            left_the_lane.append(True)
+        return _halted()
+
+    def _halted():
+        return bool(left_the_lane) or cancel_flag()
 
     # --- Pipeline A: GPU (audio embeddings + audio features) ---
     def _run_gpu_pipeline():
@@ -159,10 +167,10 @@ def run_parallel_enrichment(
                     # Nothing after this half needs AST+PaSST: on the profiles that
                     # want the memory back more than an instant next run, the pair
                     # goes before the accelerator is free, a cancelled run's too
-                    if _hw().unload_instruments_after_run:
+                    if _hw().unload_instruments_after_run and not left_the_lane:
                         from instrument_tagger import release_instrument_tagger
                         release_instrument_tagger(get_device())
-            if cancel_flag():
+            if _halted():
                 return combined
         pipeline_progress["gpu"] = "GPU: done"
         _update_progress()
@@ -180,7 +188,7 @@ def run_parallel_enrichment(
             pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
             _update_progress()
 
-        if cancel_flag():
+        if _halted():
             return
 
         if not skip_audio_analysis:
@@ -326,7 +334,7 @@ def run_parallel_enrichment(
                 logger.error(f"Pipeline {name} failed: {e}", exc_info=True)
                 result_parts[name] = {"error": str(e)}
 
-    if cancel_flag():
+    if _halted():
         result_parts["note"] = "cancelled during phase 1"
         return result_parts
 
@@ -355,7 +363,7 @@ def run_parallel_enrichment(
             logger.error(f"Text embeddings failed: {e}", exc_info=True)
             result_parts["text_embeddings"] = {"error": str(e)}
 
-        if cancel_flag():
+        if _halted():
             result_parts["note"] = "cancelled during phase 2"
             return result_parts
 
@@ -371,7 +379,7 @@ def run_parallel_enrichment(
             logger.error(f"Lyrics embeddings failed: {e}", exc_info=True)
             result_parts["lyrics_embeddings"] = {"error": str(e)}
 
-        if cancel_flag():
+        if _halted():
             result_parts["note"] = "cancelled during phase 2"
             return result_parts
 

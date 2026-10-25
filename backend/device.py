@@ -260,8 +260,9 @@ def give_way() -> bool:
     """At a batch seam of the pass that holds the accelerator: the passes
     waiting for it go first — given back what this one took, as at its end —
     and this one holds it again after them. False once the node stops: the
-    pass ends there, holding nothing. A thread that holds no pass (the CLI's
-    run) has nothing to give."""
+    pass ends there, holding nothing (asked again, it has nothing to give).
+    A seam must not hold a write open: a pass that goes meanwhile may wait
+    for it, and this one for that pass."""
     lane = _lane
     with lane.cv:
         if lane.thread != threading.get_ident() or (not lane.queue and not lane.closed):
@@ -313,7 +314,7 @@ def heavy_pass_wanted() -> bool:
 def call_when_idle(fn: Callable[[], None]) -> None:
     """fn() once no pass holds the accelerator or waits for it: at once if
     none does, else in the thread of the last of them to end — once, however
-    often it was asked for meanwhile. Never once the node stops."""
+    often it was asked for meanwhile. Not asked once the node stops."""
     with _lane.cv:
         if _lane.closed:
             return
@@ -321,7 +322,7 @@ def call_when_idle(fn: Callable[[], None]) -> None:
             if fn not in _lane.idle:
                 _lane.idle.append(fn)
             return
-    fn()
+    _call(fn)
 
 
 def close_heavy_passes() -> None:

@@ -18,6 +18,7 @@ The encoder is a fake that fails as MPS fails; the database is real.
 
 import logging
 import sys
+import threading
 import types
 import uuid
 import zlib
@@ -242,6 +243,7 @@ def said_afresh(monkeypatch):
     import text_embedder
     monkeypatch.setattr(text_embedder, "_one_at_a_time", set())
     monkeypatch.setattr(text_embedder, "_refusing", set())
+    monkeypatch.setattr(text_embedder, "_took_now", set())
     monkeypatch.setattr(text_embedder, "_refused_now", set())
 
 
@@ -414,8 +416,8 @@ def cpu_copy(monkeypatch):
     monkeypatch.setattr(device, "empty_cache", lambda dev=None: None)
     cpu = Tokenized()
     cpu.loads = []
-    monkeypatch.setattr(text_embedder, "_load",
-                        lambda name, device: cpu.loads.append((name, device)) or cpu)
+    monkeypatch.setattr(text_embedder, "_load", lambda name, device, **kw: cpu.loads.append(
+        (name, device, kw.get("local_files_only"))) or cpu)
     monkeypatch.setattr(text_embedder, "_cpu", None)
     return cpu
 
@@ -430,7 +432,7 @@ def test_on_mps_a_forward_takes_no_more_attention_than_its_share(cpu_copy):
     # 1 × 100², 4 × 50², 50² with three of 20, the three of 20 left
     assert mps.forwards == [(1, 100), (4, 50), (4, 50), (3, 20)]
     # the one over the share alone went to the CPU
-    assert cpu_copy.forwards == [(1, 101)] and cpu_copy.loads == [(NAME, "cpu")]
+    assert cpu_copy.forwards == [(1, 101)] and cpu_copy.loads == [(NAME, "cpu", True)]
     assert left_out == set()
     assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
 
@@ -444,13 +446,13 @@ def test_the_cpu_copy_is_loaded_once_a_pass_and_given_back_at_its_end(cpu_copy, 
         for i in range(2):
             text_embedder.encode(mps, [_words(101, i), _words(10, i)], batch_size=4, device="mps",
                                  name=NAME)
-        assert cpu_copy.loads == [(NAME, "cpu")]
+        assert cpu_copy.loads == [(NAME, "cpu", True)]
     assert text_embedder._cpu is None
     assert [r.getMessage() for r in caplog.records if r.name == "text_embedder"] == [
         f"Text embedding model on the CPU released: {NAME}"]
     with device.heavy_pass("the next text pass"):
         text_embedder.encode(mps, [_words(101)], batch_size=4, device="mps", name=NAME)
-    assert cpu_copy.loads == [(NAME, "cpu"), (NAME, "cpu")]
+    assert cpu_copy.loads == [(NAME, "cpu", True), (NAME, "cpu", True)]
 
 
 def test_a_bio_pass_on_mps_writes_the_bio_over_the_share_from_the_cpu(db, cpu_copy):
@@ -497,7 +499,10 @@ def test_what_mps_refuses_goes_to_the_cpu_said_once_until_a_pass_goes_by_without
         "of memory")
     a_pass(refusing, taking, refusing)      # the same episode, however it alternates
     assert len(_refusals(caplog)) == 1
-    a_pass(taking)                          # a pass without a refusal ends it
+    a_pass()                                # a pass that encodes no text (a stream's analysis)
+    a_pass(refusing)
+    assert len(_refusals(caplog)) == 1
+    a_pass(taking)                          # a pass that encodes without a refusal ends it
     a_pass(refusing)
     assert len(_refusals(caplog)) == 2
 
@@ -513,29 +518,35 @@ def test_a_text_the_cpu_leaves_out_is_the_one_left_out(cpu_copy):
                                                                     _mark(texts[2])])
 
 
-def test_the_cpu_copy_given_back_at_the_end_of_a_pass_is_freed_then(cpu_copy, monkeypatch):
+@pytest.mark.parametrize("cycle, collected", [("model_card_data", 0), ("another", 1)])
+def test_the_cpu_copy_given_back_at_the_end_of_a_pass_is_freed_then(cpu_copy, monkeypatch,
+                                                                    cycle, collected):
+    """sentence-transformers' model and its model card refer to each other:
+    parted, the copy goes with its last reference; another cycle is collected."""
+    import gc
     import weakref
     import device
     import text_embedder
 
     class Cyclic(Tokenized):
-        """As sentence-transformers' model, which its model card refers back to."""
         def __init__(self):
             super().__init__()
-            self.card = types.SimpleNamespace(model=self)
+            setattr(self, cycle, types.SimpleNamespace(model=self))
 
-    loaded = []
+    loaded, collections = [], []
 
-    def load(name, device):
+    def load(name, device, **kw):
         model = Cyclic()
         loaded.append(weakref.ref(model))
         return model
 
     monkeypatch.setattr(text_embedder, "_load", load)
+    real_collect = gc.collect
+    monkeypatch.setattr(gc, "collect", lambda *a: collections.append(1) or real_collect(*a))
     with device.heavy_pass("a text pass"):
         text_embedder.encode(Tokenized(), [_words(101)], batch_size=4, device="mps", name=NAME)
         assert loaded[0]() is not None
-    assert loaded[0]() is None
+    assert loaded[0]() is None and len(collections) == collected
 
 
 def test_a_cpu_with_no_memory_for_the_copy_stops_the_pass(db, caplog, cpu_copy, monkeypatch):
@@ -543,7 +554,7 @@ def test_a_cpu_with_no_memory_for_the_copy_stops_the_pass(db, caplog, cpu_copy, 
     _bios(db, _texts())
     db.commit()
 
-    def no_room(name, device):
+    def no_room(name, device, **kw):
         raise RuntimeError("DefaultCPUAllocator: not enough memory: you tried to allocate "
                            "1048576 bytes.")
 
@@ -606,3 +617,81 @@ def test_a_pass_whose_cpu_cannot_take_a_few_tokens_either_stops(db, caplog, cpu_
     stats = gen.generate_all(db)
     assert stats["stopped"].startswith("out of memory on cpu: MPS backend out of memory")
     assert (stats["success"], stats["failed"], _embedded(db, "artist bios")) == (0, 4, set())
+
+
+def test_on_mps_the_cpu_takes_its_texts_one_at_a_time(cpu_copy):
+    """They are the call's longest: padded together they would build their
+    mask at texts x length², with no seam in minutes of CPU work."""
+    import text_embedder
+    texts = [_words(101 + i, i) for i in range(3)] + ["A short one."]
+    vectors, left_out = text_embedder.encode(Tokenized(), texts, batch_size=4, device="mps",
+                                             name=NAME)
+    assert left_out == set()
+    assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
+    assert [batch_size for _, batch_size in cpu_copy.calls] == [1]
+    assert cpu_copy.forwards == [(3, 103)]       # one call of the three, a text a forward
+
+
+def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch):
+    """transformers' loading patches process-wide state: the encoder's loads
+    take the search models' lock (model_cache._factory_lock) — the CPU copy,
+    loaded every pass, without a hub check — and a pass asking for the model a
+    search's factory is loading waits on that lock and finds it loaded, where
+    a single-flight event of its own had left the two waiting on each other."""
+    import model_cache
+    import text_embedder
+    seen = []
+
+    def held_elsewhere():
+        got = []
+        t = threading.Thread(target=lambda: got.append(
+            model_cache._factory_lock.acquire(blocking=False)))
+        t.start()
+        t.join()
+        if got[0]:
+            model_cache._factory_lock.release()
+        return not got[0]
+
+    class Loaded:
+        def __init__(self, name, device, **kw):
+            seen.append((name, device, kw.get("local_files_only"), held_elsewhere()))
+
+    monkeypatch.setattr(text_embedder, "SentenceTransformer", Loaded)
+    monkeypatch.setattr(text_embedder, "_cpu", None)
+    monkeypatch.setattr(text_embedder, "_cache", {})
+    text_embedder._cpu_copy(NAME)
+    text_embedder._end_pass()
+    assert seen == [(NAME, "cpu", True, True)]
+
+    # a search's factory holds the lock while it loads; a pass asks meanwhile
+    passes = []
+    with model_cache._factory_lock:
+        asking = threading.Thread(target=lambda: passes.append(
+            text_embedder.get_text_embedder(NAME, "cpu")), daemon=True)
+        asking.start()
+        asking.join(0.2)
+        assert asking.is_alive()               # waiting on the lock, holding nothing
+        searched = text_embedder.get_text_embedder(NAME, "cpu")
+    asking.join(10)
+    assert not asking.is_alive() and passes == [searched]
+    assert seen[1:] == [(NAME, "cpu", None, True)]    # one load, the lock held
+
+
+@pytest.mark.parametrize("kind", [*PASSES, "audio"])
+def test_a_new_model_record_is_committed_at_once(db, scratch_dsn, kind):
+    """The run gives way at its seams: a record left uncommitted there would
+    hold another pass's insert of the same id, while the run waits for that
+    pass (device.give_way)."""
+    import database
+    from sqlalchemy import text
+    if kind == "audio":
+        from embeddings import AudioEmbeddingGenerator
+        AudioEmbeddingGenerator(device="cpu")._get_or_create_embedding_model(db)
+    else:
+        PASSES[kind][1](db)._get_or_create_model_record(db)
+    other = database.make_engine(scratch_dsn)
+    try:
+        with other.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM embedding_models")).scalar() == 1
+    finally:
+        other.dispose()

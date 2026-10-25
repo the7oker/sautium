@@ -204,7 +204,10 @@ class AudioEmbeddingGenerator:
                 dimension=settings.embedding_dimension,
             )
             db.add(em)
-            db.flush()
+            # Committed at once: the run gives way at its seams
+            # (device.give_way), and another pass inserting the same id would
+            # wait for this transaction while this one waits for that pass
+            db.commit()
             logger.info(f"Created embedding model record: {self.model_name}")
         return em
 

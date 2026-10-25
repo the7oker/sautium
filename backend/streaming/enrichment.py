@@ -115,8 +115,10 @@ class PreviewEnricher:
             if self._idle_timer is not None:
                 self._idle_timer.cancel()
                 self._idle_timer = None
-        self._pool.submit(self._run, track_id, flac, lengths, lossless,
-                          provider_id)
+            # under the lock: a stop between the check and the pool's shutdown
+            # would refuse it there
+            self._pool.submit(self._run, track_id, flac, lengths, lossless,
+                              provider_id)
 
     # ---- worker ----------------------------------------------------------
     def _run(self, track_id: str, flac: bytes, lengths: tuple, lossless: bool,
@@ -352,8 +354,8 @@ class PreviewLyricsEnricher:
             if self._stopped or tid in self._inflight:
                 return
             self._inflight.add(tid)
-        self._pool.submit(self._run, tid, query.title, query.artist,
-                          query.album or None, query.duration)
+            self._pool.submit(self._run, tid, query.title, query.artist,
+                              query.album or None, query.duration)
 
     def _run(self, track_id: str, title: str, artist: str,
              album: Optional[str], duration: Optional[float]) -> None:

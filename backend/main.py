@@ -1685,17 +1685,8 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
         state["result"] = {"success": False, "detail": str(e)}
         state["progress"] = f"Error: {str(e)[:100]}"
     finally:
-        # Models stay resident by design (clap_model/instrument_tagger/
-        # text_embedder singletons), but the per-batch tensors enrichment
-        # allocated linger in PyTorch's caching allocator — nvidia-smi /
-        # Activity Monitor keep reporting them as held memory long after
-        # the run. Return the free blocks at the session boundary via
-        # device.empty_cache — the old direct torch.cuda call was a NO-OP
-        # on MPS, so Mac nodes kept the whole enrichment high-water pool
-        # in unified memory forever. Weights are untouched.
-        if torch is not None:
-            from device import empty_cache as _empty_cache
-            _empty_cache()
+        # The allocator's free blocks went back at the end of each half
+        # (device.heavy_pass)
         state["running"] = False
         state["step"] = "done"
         _notify_library_subs_safe()

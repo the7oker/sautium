@@ -17,6 +17,7 @@ back at the pass's end (device.at_pass_end).
 import gc
 import logging
 import threading
+import weakref
 from typing import List, Optional, Set, Tuple
 
 import numpy as np
@@ -33,46 +34,36 @@ logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _cache: dict[Tuple[str, str], object] = {}
-_load_events: dict[Tuple[str, str], threading.Event] = {}
 
 
 def get_text_embedder(model_name: str, device: str):
     """Acquire process-wide singleton SentenceTransformer.
 
-    Loads on first call; subsequent calls return the same instance. Single-
-    flight: concurrent callers for the same key collapse onto one load. The
-    model load runs OUTSIDE the lock so unrelated keys are not blocked while
-    a multi-second cold load is in flight.
+    Loads on first call; subsequent calls return the same instance. A load
+    holds model_cache._factory_lock: transformers' loading patches
+    process-wide state, so no other load of the process runs beside it — a
+    search's factory, which loads this model holding that lock already,
+    takes it again — and a caller for the same key waits on it and finds
+    the model loaded.
     """
+    import model_cache
     key = (model_name, device)
-    while True:
-        with _lock:
-            entry = _cache.get(key)
-            if entry is not None:
-                return entry
-            evt = _load_events.get(key)
-            if evt is None:
-                evt = threading.Event()
-                _load_events[key] = evt
-                break
-        evt.wait()
-
-    try:
-        model = _load(model_name, device)
-    except BaseException:
-        with _lock:
-            _load_events.pop(key, None)
-        evt.set()
-        raise
-
     with _lock:
-        _cache[key] = model
-        _load_events.pop(key, None)
-    evt.set()
+        model = _cache.get(key)
+    if model is not None:
+        return model
+    with model_cache._factory_lock:
+        with _lock:
+            model = _cache.get(key)
+        if model is None:
+            model = _load(model_name, device)
+            with _lock:
+                _cache[key] = model
     return model
 
 
-def _load(model_name: str, device: str):
+def _load(model_name: str, device: str, **kwargs):
+    """The model loaded, its caller holding model_cache._factory_lock."""
     from device import get_model_dtype
     import torch
     dtype = get_model_dtype(device)
@@ -86,7 +77,7 @@ def _load(model_name: str, device: str):
     load_kwargs = {}
     if dtype in (torch.float16, torch.bfloat16):
         load_kwargs["model_kwargs"] = {"torch_dtype": dtype}
-    model = SentenceTransformer(model_name, device=device, **load_kwargs)
+    model = SentenceTransformer(model_name, device=device, **load_kwargs, **kwargs)
     logger.info(f"Text embedding model loaded ({dtype})")
     return model
 
@@ -138,6 +129,7 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
             _refused(device, e)
             cpu += [i for later in forwards[n:] for i in later]
             break
+        _took_now.add(device)
         for j, i in enumerate(group):
             out[i] = vectors[j]
         cpu += [group[j] for j in sorted(left)]
@@ -145,16 +137,19 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
         return out, set()
     logger.debug("%d of %d texts on the CPU: over %s's share alone, or refused by it", len(cpu),
                  len(texts), device)
-    vectors, left = _encode_on(_cpu_copy(name), [texts[i] for i in cpu], batch_size, "cpu")
+    # One at a time: these are the call's longest texts, and a padded batch of
+    # them builds its mask at texts x length² (XLM-R's attention path)
+    vectors, left = _encode_on(_cpu_copy(name), [texts[i] for i in cpu], 1, "cpu")
     for j, i in enumerate(cpu):
         out[i] = vectors[j]
     return out, {cpu[j] for j in left}
 
 
-# The devices whose refusal was said, until a pass goes by without one: a
-# device that stays full refuses every pass, and one line says so
+# The devices whose refusal was said, until a pass encodes on them without
+# one: a device that stays full refuses every pass, and one line says so
 _refusing: set = set()
-# The devices that refused in the pass under way
+# The devices the pass under way encoded on, and those that refused it
+_took_now: set = set()
 _refused_now: set = set()
 
 
@@ -255,12 +250,16 @@ def _cpu_copy(name: str):
     """The encoder `name` on the CPU for what the accelerator should not hold:
     loaded at the pass's first such text, given back at its end. A CPU with no
     memory for it is a full device: OutOfMemory, not a load tried every batch."""
+    import model_cache
     from device import out_of_memory
     global _cpu
     with _cpu_lock:
         if _cpu is None or _cpu[0] != name:
             try:
-                _cpu = (name, _load(name, "cpu"))
+                # The device's model's own snapshot (no hub check every pass),
+                # loaded as every load of the process: one at a time
+                with model_cache._factory_lock:
+                    _cpu = (name, _load(name, "cpu", local_files_only=True))
             except Exception as e:
                 if not out_of_memory(e):
                     raise
@@ -269,20 +268,29 @@ def _cpu_copy(name: str):
 
 
 def _end_pass() -> None:
-    """A heavy pass ends or gives way: the CPU copy is given back, and a
-    device's refusal no pass repeated is forgotten."""
+    """A heavy pass ends or gives way: the CPU copy is given back, and the
+    refusal of a device the pass encoded on without one is forgotten."""
     global _cpu
     with _cpu_lock:
         dropped, _cpu = _cpu, None
-    _refusing.intersection_update(_refused_now)
+    _refusing.difference_update(_took_now - _refused_now)
+    _took_now.clear()
     _refused_now.clear()
-    if dropped is not None:
-        name = dropped[0]
-        del dropped
-        # sentence-transformers' model and its model card refer to each other:
-        # without a collection now, dropping it frees nothing until the next one
+    if dropped is None:
+        return
+    name, model = dropped
+    del dropped
+    # sentence-transformers' model and its model card refer to each other:
+    # parted, the model goes with its last reference; a cycle of another kind
+    # waits for no full collection either
+    card = getattr(model, "model_card_data", None)
+    if card is not None:
+        card.model = None
+    gone = weakref.ref(model)
+    del model
+    if gone() is not None:
         gc.collect()
-        logger.info("Text embedding model on the CPU released: %s", name)
+    logger.info("Text embedding model on the CPU released: %s", name)
 
 
 at_pass_end(_end_pass)

@@ -285,12 +285,13 @@ implementation details live in the code, DB and git history.
   allocations" in torch's message is MPS's and MPSGraph's own. Now on MPS
   a forward's texts fit 1/8 of the working set (at ~40 bytes a score), and
   a text over it alone, or one MPS refuses, goes to a CPU copy of the
-  encoder, loaded for the pass and given back at its end (collected at
-  once: the model and its model card refer to each other); a CPU that
-  cannot take a text of a few tokens still stops the pass. And the heavy
-  passes take turns (`device.heavy_pass`), since each sizes its work to
-  the whole device: the analysis run's two halves, which give way at
-  their batch seams; the background text half, which gives way and is
+  encoder, loaded for the pass (under the factory lock every load of the
+  process takes) and given back at its end (parted from its model card,
+  which refers back to it, or nothing frees it until a full collection);
+  a CPU that cannot take a text of a few tokens still stops the pass. And
+  the heavy passes take turns (`device.heavy_pass`), since each sizes its
+  work to the whole device: the analysis run's two halves, which give way
+  at their batch seams; the background text half, which gives way and is
   woken when the accelerator is idle; a stream's analysis and lyrics,
   which wait rather than drop (a demo-limited provider streams a track in
   full once). The node's stop closes the lane.

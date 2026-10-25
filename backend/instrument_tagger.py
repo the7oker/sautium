@@ -38,9 +38,13 @@ def get_instrument_tagger(device: str):
         evt.wait()
 
     try:
+        import model_cache
         from ensemble_instruments import InstrumentEnsembleTagger
         tagger = InstrumentEnsembleTagger(device=device)
-        tagger.load()
+        # transformers' loading patches process-wide state: not beside a
+        # search's load (no factory loads the pair, so none waits on this one)
+        with model_cache._factory_lock:
+            tagger.load()
     except BaseException:
         with _lock:
             _load_events.pop(key, None)

@@ -403,13 +403,14 @@ def test_a_streams_analysis_waits_one_batch_of_the_run_not_the_run(run):
 
 
 def test_a_stopping_node_ends_the_run_at_its_next_batch(run):
+    """Its seam gave the accelerator up: no stage after it begins, and the
+    instrument pair, which a stream's analysis let in at that seam may be
+    using, is not the run's to release."""
     events = []
     run.steps["embeddings"] = _batches(events, 3, after_first=device.close_heavy_passes)
-    run.steps["features"] = _batches(events, 3)
     run.go()
     assert events == ["batch 1"]
-    # the run's text half never began: the node stops
-    assert [what for what, _ in run.seen] == ["embeddings", "features", "AST+PaSST released"]
+    assert run.seen == [("embeddings", AUDIO)]
 
 
 # ── a stream's analysis and its lyrics ─────────────────────────────────────
