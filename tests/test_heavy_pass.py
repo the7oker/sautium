@@ -3,10 +3,12 @@ heavy_pass) and the passes that take it: the analysis run's audio and text
 halves, the background text half, a stream's analysis and its lyrics, and the
 idle release of the stream analyser's instrument pair. On 2026-10-25 a 24 GB
 Mac's backend held 32 GiB of Metal memory after one text pass alone; passes
-that each size their work to the whole device must not share it. The models
-are fakes; the lane, the loop, the run and the stream's jobs are the real
-ones."""
+that each size their work to the whole device must not share it. The passes
+wait their turn in the order they asked, the run gives way at its batch seams,
+and a stopping node tells whatever waits. The models are fakes; the lane, the
+loop, the run and the stream's jobs are the real ones."""
 
+import logging
 import shutil
 import sys
 import threading
@@ -32,15 +34,22 @@ TEXT = "the analysis run's text half"
 
 @pytest.fixture(autouse=True)
 def lane(monkeypatch):
-    """A lane of the test's own; the allocator's cache is counted, never asked
-    of torch: the pass that held the accelerator at each return of it."""
-    monkeypatch.setattr(device, "_lane", threading.Condition())
-    monkeypatch.setattr(device, "_holder", None)
-    monkeypatch.setattr(device, "_waiting", 0)
-    monkeypatch.setattr(device, "_when_idle", [])
+    """A lane of the test's own and no subscriber of another module's; the
+    allocator's cache is counted, never asked of torch: the pass that held
+    the accelerator at each return of it."""
+    monkeypatch.setattr(device, "_lane", device._Lane())
+    monkeypatch.setattr(device, "_at_end", [])
     freed = []
-    monkeypatch.setattr(device, "empty_cache", lambda dev=None: freed.append(device._holder))
+    monkeypatch.setattr(device, "empty_cache", lambda dev=None: freed.append(_holder()))
     return freed
+
+
+def _holder():
+    return device._lane.holder
+
+
+def _waiting():
+    return len(device._lane.queue)
 
 
 def _until(cond):
@@ -51,17 +60,20 @@ def _until(cond):
 
 
 class Pass(threading.Thread):
-    """A heavy pass in a thread of its own: in the accelerator until `finish`."""
+    """A heavy pass in a thread of its own: in the accelerator until `finish`,
+    or out at once when it was not let in."""
 
     def __init__(self, label):
         super().__init__(daemon=True)
-        self.label = label
+        self.label, self.held = label, None
         self.inside, self.end = threading.Event(), threading.Event()
 
     def run(self):
-        with device.heavy_pass(self.label):
+        with device.heavy_pass(self.label) as held:
+            self.held = held
             self.inside.set()
-            assert self.end.wait(WAIT)
+            if held:
+                assert self.end.wait(WAIT)
 
     def begin(self):
         self.start()
@@ -85,7 +97,21 @@ def test_a_pass_waits_until_the_one_that_holds_the_accelerator_has_ended(lane):
     # the first one gave its cache back while the accelerator was still its own
     assert lane == ["first"]
     second.finish()
-    assert lane == ["first", "second"] and device._holder is None
+    assert lane == ["first", "second"] and _holder() is None
+
+
+def test_the_passes_that_wait_go_in_the_order_they_asked():
+    holder = Pass("holder").begin()
+    first, second = Pass("first"), Pass("second")
+    first.start()
+    _until(lambda: _waiting() == 1)
+    second.start()
+    _until(lambda: _waiting() == 2)
+    holder.finish()
+    assert first.inside.wait(WAIT) and not second.inside.is_set()
+    first.finish()
+    assert second.inside.wait(WAIT)
+    second.finish()
 
 
 def test_a_pass_that_does_not_wait_is_turned_away_while_one_holds_the_accelerator(lane):
@@ -93,27 +119,36 @@ def test_a_pass_that_does_not_wait_is_turned_away_while_one_holds_the_accelerato
     with device.heavy_pass("eager", wait=False) as held:
         assert held is False
     # nothing given back for a pass that never held it, and the holder keeps it
-    assert lane == [] and device._holder == "holder"
+    assert lane == [] and _holder() == "holder"
     holder.finish()
     with device.heavy_pass("eager", wait=False) as held:
         assert held is True
 
 
-def test_a_pass_that_waits_comes_before_one_that_does_not(monkeypatch):
+def test_a_pass_that_waits_comes_before_one_that_does_not():
     # the moment between a pass's end and the start of the one that waited for it
-    monkeypatch.setattr(device, "_waiting", 1)
+    device._lane.queue.append(object())
     with device.heavy_pass("eager", wait=False) as held:
         assert held is False
-    assert device._holder is None
+    assert _holder() is None
 
 
 def test_the_end_of_a_pass_that_failed_gives_back_and_frees_the_accelerator(lane):
     with pytest.raises(RuntimeError):
         with device.heavy_pass("failing"):
             raise RuntimeError("a failed batch")
-    assert lane == ["failing"] and device._holder is None
+    assert lane == ["failing"] and _holder() is None
     with device.heavy_pass("next", wait=False) as held:
         assert held is True
+
+
+def test_a_thread_that_holds_the_accelerator_cannot_take_it_again():
+    with device.heavy_pass("outer"):
+        with pytest.raises(RuntimeError, match="holds the accelerator already"):
+            with device.heavy_pass("inner"):
+                pass
+        assert _holder() == "outer"
+    assert _holder() is None
 
 
 def test_what_waits_for_an_idle_accelerator_runs_at_once_when_it_is():
@@ -141,6 +176,95 @@ def test_what_waits_for_an_idle_accelerator_runs_once_after_the_last_pass():
     assert calls == [second.name]       # once, at the end of the last pass, in its thread
 
 
+def test_a_subscriber_that_fails_is_said_and_keeps_neither_the_pass_nor_the_others(caplog):
+    caplog.set_level(logging.ERROR, logger="device")
+    calls = []
+
+    def fails():
+        raise ValueError("a subscriber's own failure")
+
+    device.at_pass_end(fails)
+    device.at_pass_end(lambda: calls.append("at the end"))
+    with device.heavy_pass("a pass"):
+        device.call_when_idle(fails)
+        device.call_when_idle(lambda: calls.append("idle"))
+    assert calls == ["at the end", "idle"] and _holder() is None
+    said = [r for r in caplog.records if r.name == "device"]
+    assert len(said) == 2 and all(r.exc_info for r in said)
+
+
+def test_a_pass_with_nothing_waiting_gives_nothing_at_its_seam(lane):
+    with device.heavy_pass("long"):
+        assert device.give_way() is True
+        assert lane == [] and _holder() == "long"
+
+
+def test_a_long_pass_gives_way_at_its_seam_and_holds_the_accelerator_again(lane):
+    events, idle = [], []
+    short = Pass("short")
+
+    def long_pass():
+        with device.heavy_pass("long"):
+            short.start()
+            _until(device.heavy_pass_wanted)
+            device.call_when_idle(lambda: idle.append("idle"))
+            events.append(("gave way", device.give_way()))
+            events.append(("holds again", _holder()))
+
+    long = threading.Thread(target=long_pass, daemon=True)
+    long.start()
+    assert short.inside.wait(WAIT)      # the waiting pass went at the seam
+    assert lane == ["long"]             # given back first
+    assert idle == []
+    short.finish()
+    long.join(WAIT)
+    assert events == [("gave way", True), ("holds again", "long")]
+    # idle only once the long one ended, not while it waited its turn again
+    assert lane == ["long", "short", "long"] and idle == ["idle"]
+
+
+def test_a_stopping_node_tells_the_waiting_and_lets_none_begin(lane):
+    calls = []
+    holder = Pass("holder").begin()
+    waiting = Pass("waiting")
+    waiting.start()
+    _until(device.heavy_pass_wanted)
+    device.call_when_idle(lambda: calls.append("idle"))
+    device.close_heavy_passes()
+    assert waiting.inside.wait(WAIT) and waiting.held is False
+    waiting.join(WAIT)
+    for wait in (True, False):
+        with device.heavy_pass("late", wait=wait) as held:
+            assert held is False
+    assert device.heavy_pass_wanted()            # a pass that yields stops
+    device.call_when_idle(lambda: calls.append("after the stop"))
+    holder.finish()
+    assert _holder() is None and calls == [] and lane == ["holder"]
+
+
+def test_a_pass_that_gives_way_while_the_node_stops_ends_holding_nothing():
+    events = []
+    short = Pass("short")
+
+    def long_pass():
+        with device.heavy_pass("long"):
+            short.start()
+            _until(device.heavy_pass_wanted)
+            events.append(device.give_way())
+            events.append(device.give_way())
+
+    long = threading.Thread(target=long_pass, daemon=True)
+    long.start()
+    assert short.inside.wait(WAIT)
+    device.close_heavy_passes()
+    long.join(WAIT)
+    assert not long.is_alive() and events == [False, False]
+    # the long one's end left the short one's hold alone
+    assert _holder() == "short"
+    short.finish()
+    assert _holder() is None
+
+
 # ── the background text half ───────────────────────────────────────────────
 
 @pytest.fixture
@@ -160,7 +284,7 @@ def test_the_background_text_half_gives_way_to_a_busy_accelerator_and_follows_it
                                                                                   monkeypatch):
     ran = []
     monkeypatch.setattr(loop, "_LOCAL_MODEL_STEPS", (
-        ("text_emb", lambda limit: ran.append(device._holder) or {"processed": 0}, 500),))
+        ("text_emb", lambda limit: ran.append(_holder()) or {"processed": 0}, 500),))
     run = Pass(AUDIO).begin()
     assert loop._run_local_model_steps() == ({"text_half": {"held": "accelerator"}}, False)
     assert ran == [] and not loop._pass_wake.is_set()
@@ -195,7 +319,10 @@ def test_a_pass_that_asks_for_the_accelerator_stops_the_text_half_at_its_next_ba
 
 # ── the analysis run ───────────────────────────────────────────────────────
 
-def test_the_analysis_run_holds_the_accelerator_for_each_of_its_halves(monkeypatch, lane):
+@pytest.fixture
+def run(monkeypatch):
+    """run_parallel_enrichment with every model step a fake that says which
+    pass held the accelerator when it ran; `steps` says what each step does."""
     import audio_analysis
     import embeddings
     import enrichment_embeddings
@@ -208,10 +335,13 @@ def test_the_analysis_run_holds_the_accelerator_for_each_of_its_halves(monkeypat
     from canon import migrations
 
     seen = []
+    steps = {}
 
-    def at(what):
-        seen.append((what, device._holder))
-        return {"success": 1}
+    def step(what):
+        def call(**kw):
+            seen.append((what, _holder()))
+            return steps.get(what, lambda cancel: {"success": 1})(kw.get("cancel_flag"))
+        return call
 
     monkeypatch.setattr(hardware_profile, "resolve", lambda: types.SimpleNamespace(
         ml_available=True, unload_instruments_after_run=True))
@@ -219,18 +349,67 @@ def test_the_analysis_run_holds_the_accelerator_for_each_of_its_halves(monkeypat
     monkeypatch.setattr(migrations, "normalize_artists", lambda db, pass1: {})
     monkeypatch.setattr(notary, "wake", lambda *a, **kw: None)
     monkeypatch.setattr(embeddings, "AudioEmbeddingGenerator", lambda: types.SimpleNamespace(
-        generate_embeddings=lambda **kw: at("embeddings")))
+        generate_embeddings=step("embeddings")))
     monkeypatch.setattr(audio_analysis, "AudioAnalyzer", lambda: types.SimpleNamespace(
-        analyze_all=lambda **kw: at("features")))
-    monkeypatch.setattr(instrument_tagger, "release_instrument_tagger", lambda dev: at("AST+PaSST released"))
-    monkeypatch.setattr(text_embeddings, "generate_text_embeddings", lambda **kw: at("titles"))
-    monkeypatch.setattr(lyrics_embeddings, "generate_lyrics_embeddings", lambda **kw: at("lyrics"))
+        analyze_all=step("features")))
+    monkeypatch.setattr(instrument_tagger, "release_instrument_tagger",
+                        lambda dev: seen.append(("AST+PaSST released", _holder())))
+    monkeypatch.setattr(text_embeddings, "generate_text_embeddings", step("titles"))
+    monkeypatch.setattr(lyrics_embeddings, "generate_lyrics_embeddings", step("lyrics"))
     monkeypatch.setattr(enrichment_embeddings, "generate_all_enrichment_embeddings",
-                        lambda **kw: at("bios and genres"))
-    track_enrichment.run_parallel_enrichment(skip_lastfm=True, skip_lyrics=True)
-    assert seen == [("embeddings", AUDIO), ("features", AUDIO), ("AST+PaSST released", AUDIO),
-                    ("titles", TEXT), ("lyrics", TEXT), ("bios and genres", TEXT)]
-    assert lane == [AUDIO, TEXT] and device._holder is None
+                        step("bios and genres"))
+    return types.SimpleNamespace(
+        go=lambda: track_enrichment.run_parallel_enrichment(skip_lastfm=True, skip_lyrics=True),
+        seen=seen, steps=steps)
+
+
+def test_the_analysis_run_holds_the_accelerator_for_each_of_its_halves(run, lane):
+    run.go()
+    assert run.seen == [("embeddings", AUDIO), ("features", AUDIO), ("AST+PaSST released", AUDIO),
+                        ("titles", TEXT), ("lyrics", TEXT), ("bios and genres", TEXT)]
+    assert lane == [AUDIO, TEXT] and _holder() is None
+
+
+def _batches(events, n, after_first=None):
+    """A generator's batches, each asked of its cancel flag first."""
+    def generate(cancel):
+        for b in range(1, n + 1):
+            if cancel():
+                break
+            events.append(f"batch {b}")
+            if b == 1 and after_first:
+                after_first()
+        return {"success": 1}
+    return generate
+
+
+def test_a_streams_analysis_waits_one_batch_of_the_run_not_the_run(run):
+    events = []
+
+    def stream():
+        with device.heavy_pass("a stream's analysis") as held:
+            events.append(("stream", held, _holder()))
+
+    job = threading.Thread(target=stream, daemon=True)
+
+    def asked_mid_run():
+        job.start()
+        _until(device.heavy_pass_wanted)
+
+    run.steps["embeddings"] = _batches(events, 3, after_first=asked_mid_run)
+    run.go()
+    job.join(WAIT)
+    assert events == ["batch 1", ("stream", True, "a stream's analysis"), "batch 2", "batch 3"]
+
+
+def test_a_stopping_node_ends_the_run_at_its_next_batch(run):
+    events = []
+    run.steps["embeddings"] = _batches(events, 3, after_first=device.close_heavy_passes)
+    run.steps["features"] = _batches(events, 3)
+    run.go()
+    assert events == ["batch 1"]
+    # the run's text half never began: the node stops
+    assert [what for what, _ in run.seen] == ["embeddings", "features", "AST+PaSST released"]
 
 
 # ── a stream's analysis and its lyrics ─────────────────────────────────────
@@ -245,8 +424,10 @@ def stream_db(scratch_dsn, monkeypatch):
     engine.dispose()
 
 
-def test_a_streams_analysis_waits_for_the_accelerator_and_works_inside_it(stream_db,
-                                                                         monkeypatch, lane):
+@pytest.fixture
+def stream(monkeypatch):
+    """A stream's analysis with every model a fake that says which pass held
+    the accelerator when it ran, its audio a minute of silence."""
     import librosa
     import provenance
     from streaming import enrichment
@@ -255,10 +436,10 @@ def test_a_streams_analysis_waits_for_the_accelerator_and_works_inside_it(stream
 
     class Models:
         def analyze_from_array(self, audio, sr):
-            seen.append(("features", device._holder))
+            seen.append(("features", _holder()))
 
         def _compute_segments(self, audio):
-            seen.append(("segments", device._holder))
+            seen.append(("segments", _holder()))
 
         def _get_or_create_embedding_model(self, db):
             return None
@@ -268,17 +449,54 @@ def test_a_streams_analysis_waits_for_the_accelerator_and_works_inside_it(stream
     monkeypatch.setattr(provenance, "create_stream_source", lambda *a: 1)
     enricher = enrichment.PreviewEnricher()
     monkeypatch.setattr(enricher, "_models", lambda: (Models(), Models()))
-    run = Pass(AUDIO).begin()
     job = threading.Thread(target=enricher._enrich, daemon=True,
                            args=(str(uuid.uuid4()), b"stream", (60.0,), True, "youtube"))
-    job.start()
+    return types.SimpleNamespace(enricher=enricher, seen=seen, job=job)
+
+
+def test_a_streams_analysis_waits_for_the_accelerator_and_works_inside_it(stream_db, stream,
+                                                                         lane):
+    analysis = Pass(AUDIO).begin()
+    stream.job.start()
     _until(device.heavy_pass_wanted)
-    assert seen == []                   # it waits: the track may never stream in full again
-    run.finish()
-    job.join(WAIT)
-    assert not job.is_alive()
-    assert seen == [("features", "a stream's analysis"), ("segments", "a stream's analysis")]
+    assert stream.seen == []            # it waits: the track may never stream in full again
+    analysis.finish()
+    stream.job.join(WAIT)
+    assert not stream.job.is_alive()
+    assert stream.seen == [("features", "a stream's analysis"),
+                           ("segments", "a stream's analysis")]
     assert lane == [AUDIO, "a stream's analysis"]
+
+
+def test_a_streams_analysis_waiting_when_the_node_stops_ends_without_it(stream_db, stream):
+    analysis = Pass(AUDIO).begin()
+    stream.job.start()
+    _until(device.heavy_pass_wanted)
+    device.close_heavy_passes()
+    stream.job.join(WAIT)
+    assert not stream.job.is_alive() and stream.seen == []
+    analysis.finish()
+
+
+def test_a_stopped_enricher_takes_no_job_and_drops_the_queued(monkeypatch):
+    from streaming import enrichment
+    enricher = enrichment.PreviewEnricher()
+    enricher._fpcalc, enricher._max_pending = True, None
+    began, release = [], threading.Event()
+
+    def enrich(track_id, *a):
+        began.append(track_id)
+        assert release.wait(WAIT)
+
+    monkeypatch.setattr(enricher, "_enrich", enrich)
+    enricher.submit("under way", b"stream", (60.0,), True, "youtube")
+    _until(lambda: began == ["under way"])
+    enricher.submit("queued", b"stream", (60.0,), True, "youtube")
+    enricher.stop()
+    enricher.submit("after the stop", b"stream", (60.0,), True, "youtube")
+    release.set()
+    enricher._pool.shutdown(wait=True)
+    assert began == ["under way"]
 
 
 def test_a_streams_analyser_takes_the_instrument_pair_anew_for_every_job(monkeypatch):
@@ -294,34 +512,60 @@ def test_a_streams_analyser_takes_the_instrument_pair_anew_for_every_job(monkeyp
     assert analyzer.ensemble == "the pair as it is now on cpu"
 
 
-def test_the_idle_release_of_the_instrument_pair_comes_after_the_accelerators_passes(
-        monkeypatch, lane):
+@pytest.fixture
+def released(monkeypatch):
     import instrument_tagger
-    from streaming import enrichment
-    released = []
+    seen = []
     monkeypatch.setattr(instrument_tagger, "release_instrument_tagger",
-                        lambda dev: released.append(device._holder))
+                        lambda dev: seen.append(_holder()))
+    return seen
+
+
+def _enricher_holding_the_pair():
+    from streaming import enrichment
     enricher = enrichment.PreviewEnricher()
     enricher._analyzer = object()
-    run = Pass(AUDIO).begin()            # the run tags with the same pair
-    enricher._do_idle_unload()
+    return enricher
+
+
+def test_the_idle_release_of_the_instrument_pair_comes_after_the_accelerators_passes(released):
+    enricher = _enricher_holding_the_pair()
+    analysis = Pass(AUDIO).begin()       # the run tags with the same pair
+    enricher._idle_release()
     assert released == [] and enricher._analyzer is not None
-    run.finish()
+    analysis.finish()
     assert released == ["the preview's idle release"] and enricher._analyzer is None
 
 
-def test_the_idle_release_that_waited_leaves_the_pair_to_a_job_that_came_meanwhile(monkeypatch):
-    import instrument_tagger
-    from streaming import enrichment
-    released = []
-    monkeypatch.setattr(instrument_tagger, "release_instrument_tagger", released.append)
-    enricher = enrichment.PreviewEnricher()
-    enricher._analyzer = object()
-    run = Pass(AUDIO).begin()
-    enricher._do_idle_unload()
+def test_an_idle_release_that_waited_leaves_the_pair_to_a_job_that_came_meanwhile(released):
+    enricher = _enricher_holding_the_pair()
+    analysis = Pass(AUDIO).begin()
+    enricher._idle_release()
     enricher._inflight.add("a track streamed meanwhile")
-    run.finish()
+    analysis.finish()
     assert released == [] and enricher._analyzer is not None
+
+
+def test_an_idle_release_that_waited_leaves_the_pair_to_a_newer_timer(released):
+    enricher = _enricher_holding_the_pair()
+    analysis = Pass(AUDIO).begin()
+    enricher._idle_release()
+    # a job came and went meanwhile: its own timer counts from its end
+    enricher._idle_timer = threading.Timer(600, enricher._on_idle_timer)
+    analysis.finish()
+    assert released == [] and enricher._analyzer is not None
+    # and a timer that is not the one armed last releases nothing either
+    enricher._on_idle_timer()
+    assert released == [] and enricher._idle_timer is not None
+
+
+def test_an_idle_release_with_nothing_loaded_asks_nothing_of_torch(monkeypatch):
+    """A torch-less node runs no analysis, but its idle timer is armed after
+    every stream all the same."""
+    from streaming import enrichment
+    enricher = enrichment.PreviewEnricher()
+    monkeypatch.setitem(sys.modules, "device", None)     # no torch: no device module
+    enricher._idle_release()
 
 
 def test_a_streams_lyrics_are_embedded_as_a_heavy_pass(stream_db, monkeypatch, lane):
@@ -335,7 +579,11 @@ def test_a_streams_lyrics_are_embedded_as_a_heavy_pass(stream_db, monkeypatch, l
                           "VALUES (:id, 'lrclib', 'A synthetic line.')"), {"id": track})
     seen = []
     monkeypatch.setattr(lyrics_embeddings, "generate_lyrics_embeddings",
-                        lambda track_ids: seen.append((track_ids, device._holder)))
-    enrichment.PreviewLyricsEnricher()._enrich(str(track), "demo-track", "demo-artist", None, None)
+                        lambda track_ids: seen.append((track_ids, _holder())))
+    lyrics = enrichment.PreviewLyricsEnricher()
+    lyrics._enrich(str(track), "demo-track", "demo-artist", None, None)
     assert seen == [([track], "a stream's lyrics")]
     assert lane == ["a stream's lyrics"]
+    device.close_heavy_passes()
+    lyrics._enrich(str(track), "demo-track", "demo-artist", None, None)
+    assert len(seen) == 1                # the node stops: not embedded

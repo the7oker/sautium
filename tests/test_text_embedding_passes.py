@@ -35,9 +35,10 @@ FULL = ("MPS backend out of memory (MPS allocated: 18.13 GB, other allocations: 
 # A word in the one text too long for what the device has free
 LONG = "zylophant"
 NAME = "a/text-encoder"
-# The working set, in GB, whose share is 10,000 for a forward's texts times its
-# padded length squared, 16 heads: one text of 100 tokens, four of 50, sixteen of 25
-SHARE_GB = "0.1024"
+# The working set, in GB, whose share (1/8, 40 bytes a score, 16 heads) is
+# 10,000 for a forward's texts times its padded length squared: one text of 100
+# tokens, four of 50, sixteen of 25
+SHARE_GB = "0.0512"
 
 
 class Encoder:
@@ -55,19 +56,20 @@ class Encoder:
 
 
 class Tokenized(Encoder):
-    """The encoder as a device that keeps its attention sees it: its tokenizer
-    counts a word a token and two for the ends, it has 16 heads, and it says
-    each forward's texts and padded length."""
-
-    max_seq_length = 8192
+    """The encoder as a device that keeps its attention sees it: it tokenizes
+    a word a token and two for the ends — only as sentence-transformers'
+    encode does (no tokenizer of its own to call otherwise) — it has 16 heads,
+    and it says each forward's texts and padded length."""
 
     def __init__(self, full=lambda texts, batch_size: False):
         super().__init__(full)
         self.forwards = []
 
     @staticmethod
-    def tokenizer(texts, truncation, max_length):
-        return {"input_ids": [[0] * _tokens(t) for t in texts]}
+    def preprocess(texts):
+        longest = max(map(_tokens, texts), default=0)
+        return {"attention_mask": np.array([[1] * _tokens(t) + [0] * (longest - _tokens(t))
+                                            for t in texts]).reshape(len(texts), longest)}
 
     def __getitem__(self, i):
         return types.SimpleNamespace(auto_model=types.SimpleNamespace(
@@ -240,6 +242,7 @@ def said_afresh(monkeypatch):
     import text_embedder
     monkeypatch.setattr(text_embedder, "_one_at_a_time", set())
     monkeypatch.setattr(text_embedder, "_refusing", set())
+    monkeypatch.setattr(text_embedder, "_refused_now", set())
 
 
 @pytest.mark.parametrize("kind", PASSES)
@@ -469,25 +472,101 @@ def _refusals(caplog):
             if r.name == "text_embedder" and r.getMessage().startswith("Text encoder: mps refused")]
 
 
-def test_what_mps_refuses_goes_to_the_cpu_said_once_until_it_takes_texts_again(cpu_copy, caplog):
+def test_what_mps_refuses_goes_to_the_cpu_said_once_until_a_pass_goes_by_without(cpu_copy,
+                                                                                  caplog):
+    import device
     import text_embedder
     caplog.set_level(logging.DEBUG, logger="text_embedder")
     refusing = Tokenized(lambda texts, batch_size: True)      # not a text of a few tokens either
+    taking = Tokenized()
     texts = [_words(10, i) for i in range(3)]
-    for _ in range(2):
-        vectors, left_out = text_embedder.encode(refusing, texts, batch_size=4, device="mps",
-                                                 name=NAME)
-        assert left_out == set()
-        assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
+
+    def a_pass(*models):
+        with device.heavy_pass("a text pass"):
+            for model in models:
+                vectors, left_out = text_embedder.encode(model, texts, batch_size=4,
+                                                         device="mps", name=NAME)
+                assert left_out == set()
+                assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
+
+    a_pass(refusing, refusing)
     said = _refusals(caplog)
     assert [r.levelno for r in said] == [logging.WARNING]
     assert said[0].getMessage().startswith(
         "Text encoder: mps refused a text of a few tokens (out of memory on mps: MPS backend out "
         "of memory")
-    # it takes texts again, then refuses again: said again
-    text_embedder.encode(Tokenized(), texts, batch_size=4, device="mps", name=NAME)
-    text_embedder.encode(refusing, texts, batch_size=4, device="mps", name=NAME)
+    a_pass(refusing, taking, refusing)      # the same episode, however it alternates
+    assert len(_refusals(caplog)) == 1
+    a_pass(taking)                          # a pass without a refusal ends it
+    a_pass(refusing)
     assert len(_refusals(caplog)) == 2
+
+
+def test_a_text_the_cpu_leaves_out_is_the_one_left_out(cpu_copy):
+    import text_embedder
+    cpu_copy.full = lambda texts, batch_size: any(LONG in t for t in texts)
+    texts = ["A short one.", " ".join([LONG] * 8), "Another short one."]
+    vectors, left_out = text_embedder.encode(Tokenized(lambda texts, batch_size: True), texts,
+                                             batch_size=4, device="mps", name=NAME)
+    assert left_out == {1} and vectors[1] is None
+    assert [float(vectors[i][0]) for i in (0, 2)] == pytest.approx([_mark(texts[0]),
+                                                                    _mark(texts[2])])
+
+
+def test_the_cpu_copy_given_back_at_the_end_of_a_pass_is_freed_then(cpu_copy, monkeypatch):
+    import weakref
+    import device
+    import text_embedder
+
+    class Cyclic(Tokenized):
+        """As sentence-transformers' model, which its model card refers back to."""
+        def __init__(self):
+            super().__init__()
+            self.card = types.SimpleNamespace(model=self)
+
+    loaded = []
+
+    def load(name, device):
+        model = Cyclic()
+        loaded.append(weakref.ref(model))
+        return model
+
+    monkeypatch.setattr(text_embedder, "_load", load)
+    with device.heavy_pass("a text pass"):
+        text_embedder.encode(Tokenized(), [_words(101)], batch_size=4, device="mps", name=NAME)
+        assert loaded[0]() is not None
+    assert loaded[0]() is None
+
+
+def test_a_cpu_with_no_memory_for_the_copy_stops_the_pass(db, caplog, cpu_copy, monkeypatch):
+    import text_embedder
+    _bios(db, _texts())
+    db.commit()
+
+    def no_room(name, device):
+        raise RuntimeError("DefaultCPUAllocator: not enough memory: you tried to allocate "
+                           "1048576 bytes.")
+
+    monkeypatch.setattr(text_embedder, "_load", no_room)
+    gen = PASSES["artist bios"][1](db)
+    gen.device, gen.model = "mps", Tokenized(lambda texts, batch_size: True)
+    stats = gen.generate_all(db)
+    assert stats["stopped"].startswith(f"out of memory loading {gen.model_name} on the cpu")
+    assert (stats["success"], _embedded(db, "artist bios")) == (0, set())
+    # one stop, not an error and a new load for every batch
+    assert len(_lines(caplog, "artist bios", logging.ERROR)) == 1
+
+
+def test_an_mps_node_caps_the_threads_of_its_cpu_inference():
+    import hardware_profile
+
+    def threads(device, name="full"):
+        return hardware_profile.HardwareProfile(
+            name=name, source="auto", device=device, accel_name=None, accel_memory_gb=24.0,
+            ram_gb=24.0, cores=10, ml_available=True).torch_cpu_threads
+
+    assert (threads("mps"), threads("mps", "lite"), threads("cpu"), threads("cuda")) == (
+        8, 5, 8, None)
 
 
 def test_a_text_mps_cannot_take_alone_goes_to_the_cpu(cpu_copy):

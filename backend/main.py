@@ -9,6 +9,7 @@ faulthandler.enable()   # native crashes (PortAudio/ASIO AVs) leave a traceback 
 import asyncio
 import logging
 import logging.config
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -368,7 +369,8 @@ async def lifespan(app: FastAPI):
     _profile = hardware_profile.resolve()
     if _profile.torch_cpu_threads and torch:
         # Without a cap torch claims every core for intra-op parallelism and
-        # starves the decode pool + event loop on small CPU-only machines.
+        # starves the decode pool + event loop: CPU-only machines, and an MPS
+        # node's CPU copy of the text encoder.
         torch.set_num_threads(_profile.torch_cpu_threads)
         logger.info(f"torch CPU threads capped at {_profile.torch_cpu_threads}")
 
@@ -878,6 +880,16 @@ async def lifespan(app: FastAPI):
     # thread closes its socket, an idle socket is closed by the close.
     from playback import hqp_link
     hqp_link.close_all("the node is stopping")
+    # The accelerator's heavy passes as well (device.heavy_pass): none goes
+    # from now on, a stream's analysis waiting for the run is told so, the
+    # run ends at its next batch, and the queued streams go with the process.
+    if torch is not None:
+        import device
+        device.close_heavy_passes()
+    # Imported at the start unless that failed (said there): never again here
+    streaming_service = sys.modules.get("streaming.service")
+    if streaming_service is not None:
+        streaming_service.stop_enrichers()
     # The stops that wait, side by side on threads of their own: the stop
     # takes the longest of them, never their sum. The longest is a benchmark
     # run's, which drives HQPlayer on its own connection: cancelled, and

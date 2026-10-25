@@ -136,13 +136,23 @@ def run_parallel_enrichment(
     if cancel_flag():
         return result_parts
 
+    # The run's halves hold the accelerator for hours on a fresh library: at
+    # each batch seam - its generators ask the cancel flag before every batch -
+    # a stream's analysis or lyrics waiting for it go first (device.give_way),
+    # and a node that stops ends the run there
+    def _seam():
+        from device import give_way
+        return not give_way() or cancel_flag()
+
     # --- Pipeline A: GPU (audio embeddings + audio features) ---
     def _run_gpu_pipeline():
         logger.info("Pipeline A (GPU): starting audio embeddings + features")
         combined = {}
         if not (skip_embeddings and skip_audio_analysis):
             from device import get_device, heavy_pass
-            with heavy_pass("the analysis run's audio half"):
+            with heavy_pass("the analysis run's audio half") as held:
+                if not held:        # the node stops
+                    return combined
                 try:
                     _audio_half(combined)
                 finally:
@@ -164,7 +174,7 @@ def run_parallel_enrichment(
             pipeline_progress["gpu"] = "GPU: embeddings..."
             _update_progress()
             emb_stats = AudioEmbeddingGenerator().generate_embeddings(
-                **gpu_kwargs, cancel_flag=cancel_flag, force=force_embeddings
+                **gpu_kwargs, cancel_flag=_seam, force=force_embeddings
             )
             combined["embeddings"] = emb_stats
             pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
@@ -178,7 +188,7 @@ def run_parallel_enrichment(
             pipeline_progress["gpu"] = "GPU: audio analysis..."
             _update_progress()
             af_stats = AudioAnalyzer().analyze_all(
-                force=force_audio_analysis, cancel_flag=cancel_flag,
+                force=force_audio_analysis, cancel_flag=_seam,
                 **gpu_kwargs
             )
             combined["audio_features"] = af_stats
@@ -330,13 +340,15 @@ def run_parallel_enrichment(
 
     logger.info("=== Phase 2: text embeddings ===")
     from device import heavy_pass
-    with heavy_pass("the analysis run's text half"):
+    with heavy_pass("the analysis run's text half") as held:
+        if not held:                # the node stops
+            return result_parts
         # Text embeddings
         try:
             from text_embeddings import generate_text_embeddings
             if progress_cb:
                 progress_cb("Phase 2: text embeddings...")
-            text_stats = generate_text_embeddings(limit=None, cancel_flag=cancel_flag)
+            text_stats = generate_text_embeddings(limit=None, cancel_flag=_seam)
             result_parts["text_embeddings"] = text_stats
             logger.info(f"Text embeddings: {text_stats}")
         except Exception as e:
@@ -352,7 +364,7 @@ def run_parallel_enrichment(
             from lyrics_embeddings import generate_lyrics_embeddings
             if progress_cb:
                 progress_cb("Phase 2: lyrics embeddings...")
-            lyrics_emb_stats = generate_lyrics_embeddings(limit=None, cancel_flag=cancel_flag)
+            lyrics_emb_stats = generate_lyrics_embeddings(limit=None, cancel_flag=_seam)
             result_parts["lyrics_embeddings"] = lyrics_emb_stats
             logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
         except Exception as e:
@@ -369,7 +381,7 @@ def run_parallel_enrichment(
             if progress_cb:
                 progress_cb("Phase 2: enrichment embeddings...")
             enrich_emb_stats = generate_all_enrichment_embeddings(
-                limit=None, progress_cb=progress_cb, cancel_flag=cancel_flag,
+                limit=None, progress_cb=progress_cb, cancel_flag=_seam,
             )
             result_parts["enrichment_embeddings"] = enrich_emb_stats
             logger.info(f"Enrichment embeddings: {enrich_emb_stats}")

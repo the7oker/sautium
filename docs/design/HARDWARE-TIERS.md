@@ -353,8 +353,9 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
 6. ✅ Prewarm list is profile-driven (full = all 4; standard leaves the
    translator lazy — since §6.17 it loads on the first non-ASCII Sound
    query, not on a Cyrillic trigger; lite warms nothing).
-7. ✅ `torch.set_num_threads` on CPU device + I/O pool (was hardcoded 16)
-   and analysis prefetch sized from profile × cores.
+7. ✅ `torch.set_num_threads` on CPU device (MPS too since 2026-10-25: the text
+   encoder's CPU copy) + I/O pool (was hardcoded 16) and analysis prefetch sized
+   from profile × cores.
 8. ✅ `release_instrument_tagger()` after bulk runs on standard/lite.
 9. ✅ `python cli.py bench` — tracks/hour + library ETA + slower-than-realtime
    warning. UI surfacing of the number still TODO.

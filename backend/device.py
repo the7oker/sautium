@@ -17,6 +17,7 @@ Tiers:
 - CPU: fp32. fp16 is software-emulated and slower than fp32 on x86/ARM.
 """
 
+import collections
 import contextlib
 import logging
 import functools
@@ -172,79 +173,162 @@ def audio_batch_budget_seconds() -> int:
 # their work as if the accelerator were theirs alone — the audio budget above is
 # a share of the whole working set — and on MPS the framework keeps what a
 # forward took for itself past its end. Two passes at once share memory neither
-# planned for. So a heavy pass holds the accelerator, and its end gives back
-# what it took before the next one begins.
+# planned for. So a heavy pass holds the accelerator, the others wait their
+# turn in the order they asked, a long pass gives way at its batch seams, and
+# what a pass took is given back before the next one goes.
 
-_lane = threading.Condition()
-_holder: Optional[str] = None       # the pass that holds the accelerator
-_waiting = 0                         # passes blocked until it is free
-_when_idle: List[Callable[[], None]] = []
+
+class _Lane:
+    """The accelerator's heavy passes: the one that holds it, and the tickets
+    of those that wait, first first."""
+
+    def __init__(self) -> None:
+        self.cv = threading.Condition()
+        self.holder: Optional[str] = None
+        self.thread: Optional[int] = None
+        self.queue: collections.deque = collections.deque()
+        self.idle: List[Callable[[], None]] = []
+        self.closed = False
+
+    def wait_turn(self, name: str) -> bool:
+        """Under cv: wait behind the passes that asked first; False when the
+        node stops meanwhile."""
+        ticket = object()
+        self.queue.append(ticket)
+        try:
+            while not self.closed and (self.holder is not None or self.queue[0] is not ticket):
+                self.cv.wait()
+        finally:
+            self.queue.remove(ticket)
+            self.cv.notify_all()
+        if self.closed:
+            return False
+        self.holder, self.thread = name, threading.get_ident()
+        return True
+
+    def mine(self) -> bool:
+        with self.cv:
+            return self.thread == threading.get_ident()
+
+
+_lane = _Lane()
 _at_end: List[Callable[[], None]] = []
 
 
 def at_pass_end(fn: Callable[[], None]) -> None:
-    """fn() at the end of every heavy pass, before the next may begin: what a
-    pass takes for itself alone is given back there."""
+    """fn() at the end of every heavy pass and at every seam where it gives
+    way, before the next one goes: what a pass takes for itself alone is given
+    back there."""
     _at_end.append(fn)
 
 
 @contextlib.contextmanager
 def heavy_pass(name: str, *, wait: bool = True):
     """Hold the accelerator for one heavy model pass: True inside once held.
-    While a pass holds it or waits for it, the next one waits — or, with
-    `wait=False`, does not hold it and is False inside at once. The end runs
-    what `at_pass_end` asked for and returns the allocator's free blocks, then
+    While a pass holds it or waits for it, the next one waits its turn — or,
+    with `wait=False`, does not hold it and is False inside at once. Once the
+    node stops (close_heavy_passes) every pass is False inside. The end gives
+    back what the pass took (at_pass_end, the allocator's free blocks), then
     frees the accelerator."""
-    global _holder, _waiting
-    with _lane:
-        held = _holder is None and not _waiting
-        if not held and wait:
-            logger.info("%s waits for the accelerator: %s holds it", name,
-                        _holder or "a waiting pass")
-            _waiting += 1
-            try:
-                while _holder is not None:
-                    _lane.wait()
-            finally:
-                _waiting -= 1
+    lane = _lane
+    with lane.cv:
+        if lane.thread == threading.get_ident():
+            raise RuntimeError(f"{name}: this thread holds the accelerator already ({lane.holder})")
+        if lane.closed:
+            held = False
+        elif lane.holder is None and not lane.queue:
+            lane.holder, lane.thread = name, threading.get_ident()
             held = True
-        if held:
-            _holder = name
+        elif not wait:
+            held = False
+        else:
+            logger.info("%s waits for the accelerator: %s holds it, %d before it", name,
+                        lane.holder or "none", len(lane.queue))
+            held = lane.wait_turn(name)
     if not held:
         yield False
         return
     try:
         yield True
     finally:
-        try:
-            for fn in _at_end:
-                fn()
-            empty_cache()
-        finally:
-            with _lane:
-                _holder = None
-                _lane.notify_all()
-                idle = []
-                if not _waiting:
-                    idle, _when_idle[:] = _when_idle[:], []
-            for fn in idle:
-                fn()
+        # A pass that gave way and found the node stopping holds nothing now
+        if lane.mine():
+            _leave(lane)
+
+
+def give_way() -> bool:
+    """At a batch seam of the pass that holds the accelerator: the passes
+    waiting for it go first — given back what this one took, as at its end —
+    and this one holds it again after them. False once the node stops: the
+    pass ends there, holding nothing. A thread that holds no pass (the CLI's
+    run) has nothing to give."""
+    lane = _lane
+    with lane.cv:
+        if lane.thread != threading.get_ident() or (not lane.queue and not lane.closed):
+            return not lane.closed
+        name = lane.holder
+    _give_back()
+    with lane.cv:
+        lane.holder = lane.thread = None
+        lane.cv.notify_all()
+        return lane.wait_turn(name)
+
+
+def _leave(lane: _Lane) -> None:
+    try:
+        _give_back()
+    finally:
+        with lane.cv:
+            lane.holder = lane.thread = None
+            lane.cv.notify_all()
+            idle = []
+            if not lane.queue:
+                idle, lane.idle[:] = lane.idle[:], []
+    for fn in idle:
+        _call(fn)
+
+
+def _give_back() -> None:
+    for fn in _at_end:
+        _call(fn)
+    empty_cache()
+
+
+def _call(fn: Callable[[], None]) -> None:
+    # A subscriber's failure is said with its traceback, and neither passed
+    # on to the pass that happened to end nor kept from the subscribers after it
+    try:
+        fn()
+    except Exception:
+        logger.exception("After a heavy pass, %s failed", getattr(fn, "__qualname__", fn))
 
 
 def heavy_pass_wanted() -> bool:
-    """A pass waits for the accelerator: one that yields to the others stops
-    at its next batch."""
-    with _lane:
-        return _waiting > 0
+    """A pass waits for the accelerator, or the node stops: a pass that
+    yields to the others stops at its next batch."""
+    with _lane.cv:
+        return bool(_lane.queue) or _lane.closed
 
 
 def call_when_idle(fn: Callable[[], None]) -> None:
     """fn() once no pass holds the accelerator or waits for it: at once if
     none does, else in the thread of the last of them to end — once, however
-    often it was asked for meanwhile."""
-    with _lane:
-        if _holder is not None or _waiting:
-            if fn not in _when_idle:
-                _when_idle.append(fn)
+    often it was asked for meanwhile. Never once the node stops."""
+    with _lane.cv:
+        if _lane.closed:
+            return
+        if _lane.holder is not None or _lane.queue:
+            if fn not in _lane.idle:
+                _lane.idle.append(fn)
             return
     fn()
+
+
+def close_heavy_passes() -> None:
+    """The node stops: no heavy pass goes from now on, a waiting one is told
+    so (False inside heavy_pass) instead of waiting out the one ahead, and the
+    one that holds the accelerator ends at its next seam (give_way)."""
+    with _lane.cv:
+        _lane.closed = True
+        _lane.idle.clear()
+        _lane.cv.notify_all()

@@ -14,6 +14,7 @@ attention the device should not hold or that it refuses (encode), and gives it
 back at the pass's end (device.at_pass_end).
 """
 
+import gc
 import logging
 import threading
 from typing import List, Optional, Set, Tuple
@@ -112,7 +113,7 @@ _CANARY = "a"
 # a forward is cut to a share of the device's working set, and a text whose
 # attention exceeds it alone goes to the CPU, whose attention streams (flash).
 _KEEPS_ITS_ATTENTION = {"mps"}
-_ATTENTION_SHARE = 1 / 16       # of the device's working set, for one forward
+_ATTENTION_SHARE = 1 / 8        # of the device's working set, for one forward
 # What one score of a forward's B x H x L x L attention takes there: eight fp32
 # buffers and the bf16 ones (the Mac's eight 3.0 GiB for 16 x 16 x 1.8k² scores)
 _BYTES_PER_SCORE = 40
@@ -137,7 +138,6 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
             _refused(device, e)
             cpu += [i for later in forwards[n:] for i in later]
             break
-        _refusing.discard(device)
         for j, i in enumerate(group):
             out[i] = vectors[j]
         cpu += [group[j] for j in sorted(left)]
@@ -151,16 +151,19 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
     return out, {cpu[j] for j in left}
 
 
-# The devices whose refusal was said, until they take a forward again: one
-# that stays full refuses every pass, and one line says so
+# The devices whose refusal was said, until a pass goes by without one: a
+# device that stays full refuses every pass, and one line says so
 _refusing: set = set()
+# The devices that refused in the pass under way
+_refused_now: set = set()
 
 
 def _refused(device: str, why: OutOfMemory) -> None:
+    _refused_now.add(device)
     if device not in _refusing:
         _refusing.add(device)
-        logger.warning("Text encoder: %s refused a text of a few tokens (%s) — its texts are "
-                       "encoded on the CPU until it takes them again", device, why)
+        logger.warning("Text encoder: %s refused a text of a few tokens (%s) — what it refuses "
+                       "is encoded on the CPU", device, why)
 
 
 def _forwards(model, texts: List[str], batch_size: int) -> Tuple[List[List[int]], List[int]]:
@@ -168,8 +171,10 @@ def _forwards(model, texts: List[str], batch_size: int) -> Tuple[List[List[int]]
     indices, the longest first, each padded to its first text's length and
     within the share — and the texts whose attention alone exceeds it."""
     from device import available_accel_memory_gb
-    lengths = [len(ids) for ids in model.tokenizer(
-        texts, truncation=True, max_length=model.max_seq_length)["input_ids"]]
+    # Tokenized as sentence-transformers does it: a call with other settings
+    # would change the tokenizer's, which another thread's search may be
+    # using that moment ("Already borrowed")
+    lengths = [int(n) for n in model.preprocess(texts)["attention_mask"].sum(1)]
     heads = model[0].auto_model.config.num_attention_heads
     # a forward's texts times its padded length squared
     share = available_accel_memory_gb() * 1e9 * _ATTENTION_SHARE / (_BYTES_PER_SCORE * heads)
@@ -248,20 +253,36 @@ _cpu: Optional[Tuple[str, object]] = None     # (model name, the model on the CP
 
 def _cpu_copy(name: str):
     """The encoder `name` on the CPU for what the accelerator should not hold:
-    loaded at the pass's first such text, given back at its end."""
+    loaded at the pass's first such text, given back at its end. A CPU with no
+    memory for it is a full device: OutOfMemory, not a load tried every batch."""
+    from device import out_of_memory
     global _cpu
     with _cpu_lock:
         if _cpu is None or _cpu[0] != name:
-            _cpu = (name, _load(name, "cpu"))
+            try:
+                _cpu = (name, _load(name, "cpu"))
+            except Exception as e:
+                if not out_of_memory(e):
+                    raise
+                raise OutOfMemory(f"out of memory loading {name} on the cpu: {e}") from None
         return _cpu[1]
 
 
 def _end_pass() -> None:
+    """A heavy pass ends or gives way: the CPU copy is given back, and a
+    device's refusal no pass repeated is forgotten."""
     global _cpu
     with _cpu_lock:
-        if _cpu is not None:
-            logger.info("Text embedding model on the CPU released: %s", _cpu[0])
-        _cpu = None
+        dropped, _cpu = _cpu, None
+    _refusing.intersection_update(_refused_now)
+    _refused_now.clear()
+    if dropped is not None:
+        name = dropped[0]
+        del dropped
+        # sentence-transformers' model and its model card refer to each other:
+        # without a collection now, dropping it frees nothing until the next one
+        gc.collect()
+        logger.info("Text embedding model on the CPU released: %s", name)
 
 
 at_pass_end(_end_pass)

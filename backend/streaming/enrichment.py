@@ -84,6 +84,7 @@ class PreviewEnricher:
         # unified memory (see hardware_profile.unload_instruments_after_run).
         self._idle_unload = profile.unload_instruments_after_run
         self._idle_timer: Optional[threading.Timer] = None
+        self._stopped = False
 
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
                lengths: tuple, lossless: bool, provider_id: str,
@@ -103,7 +104,7 @@ class PreviewEnricher:
             logger.debug("preview enrich skip %s: excerpt, not the recording", track_id)
             return
         with self._lock:
-            if track_id in self._inflight:
+            if self._stopped or track_id in self._inflight:
                 return
             if self._max_pending is not None and len(self._inflight) >= self._max_pending:
                 logger.info(
@@ -127,36 +128,53 @@ class PreviewEnricher:
         finally:
             with self._lock:
                 self._inflight.discard(track_id)
-                if self._idle_unload and not self._inflight:
+                if self._idle_unload and not self._inflight and not self._stopped:
                     self._idle_timer = threading.Timer(
-                        self._IDLE_UNLOAD_SECONDS, self._do_idle_unload)
+                        self._IDLE_UNLOAD_SECONDS, self._on_idle_timer)
                     self._idle_timer.daemon = True
                     self._idle_timer.start()
 
-    def _do_idle_unload(self) -> None:
+    def _on_idle_timer(self) -> None:
         """One-shot idle timeout (event-scheduled after the last completion,
-        cancelled by new work — not a poll). Drops the analyzer so its
-        AST+PaSST reference dies, then releases the singleton weights — as a
-        pass of the accelerator: the analysis run tags with the same pair, and
-        a release under its batches would leave them without instruments. A
-        busy accelerator puts the release after its passes."""
+        cancelled by new work — not a poll)."""
         with self._lock:
-            if self._inflight:
+            if self._idle_timer is not threading.current_thread() or self._inflight:
                 return
             self._idle_timer = None
+        self._idle_release()
+
+    def _idle_release(self) -> None:
+        """Drops the analyzer so its AST+PaSST reference dies, then releases
+        the singleton weights — as a pass of the accelerator: the analysis run
+        tags with the same pair, and a release under its batches would leave
+        them without instruments. A busy accelerator puts the release after
+        its passes; a job or a newer timer that came meanwhile takes it over."""
+        if self._analyzer is None:      # nothing loaded: a torch-less node's every timer
+            return
         from device import call_when_idle, get_device, heavy_pass
         with heavy_pass("the preview's idle release", wait=False) as held:
             if not held:
-                call_when_idle(self._do_idle_unload)
+                call_when_idle(self._idle_release)
                 return
             with self._lock:
-                if self._inflight:
+                if self._inflight or self._idle_timer is not None:
                     return
                 analyzer, self._analyzer = self._analyzer, None
             if analyzer is not None:
                 from instrument_tagger import release_instrument_tagger
                 release_instrument_tagger(get_device())
                 logger.info("preview enrich idle — instrument models released")
+
+    def stop(self) -> None:
+        """The node stops: no job is taken, the queued ones go with the
+        process, and the one under way ends at the closed accelerator
+        (device.close_heavy_passes) unless its analysis has begun."""
+        with self._lock:
+            self._stopped = True
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _enrich(self, track_id: str, flac: bytes, lengths: tuple,
                 lossless: bool, provider_id: str) -> None:
@@ -214,7 +232,9 @@ class PreviewEnricher:
             db.commit()
 
         from device import heavy_pass
-        with heavy_pass("a stream's analysis"):
+        with heavy_pass("a stream's analysis") as held:
+            if not held:        # the node stops
+                return
             embedder, analyzer = self._models()
             # Full-track methodology, same as owned scans: amplitude block +
             # windowed instruments over the whole streamed audio, bpm/key from
@@ -319,6 +339,7 @@ class PreviewLyricsEnricher:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="preview-lyrics")
         self._inflight: set[str] = set()
         self._lock = threading.Lock()
+        self._stopped = False
 
     def submit(self, query) -> None:
         """Queue a streamed track's lyrics fetch+embed. No-ops without the identity
@@ -328,7 +349,7 @@ class PreviewLyricsEnricher:
             return
         tid = str(tid)
         with self._lock:
-            if tid in self._inflight:
+            if self._stopped or tid in self._inflight:
                 return
             self._inflight.add(tid)
         self._pool.submit(self._run, tid, query.title, query.artist,
@@ -377,5 +398,12 @@ class PreviewLyricsEnricher:
         # accelerator like any text pass.
         from device import heavy_pass
         from lyrics_embeddings import generate_lyrics_embeddings
-        with heavy_pass("a stream's lyrics"):
-            generate_lyrics_embeddings(track_ids=[tid])
+        with heavy_pass("a stream's lyrics") as held:
+            if held:            # else the node stops
+                generate_lyrics_embeddings(track_ids=[tid])
+
+    def stop(self) -> None:
+        """The node stops: no job is taken, the queued ones go with the process."""
+        with self._lock:
+            self._stopped = True
+        self._pool.shutdown(wait=False, cancel_futures=True)

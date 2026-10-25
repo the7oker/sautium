@@ -108,8 +108,10 @@ class HardwareProfile:
     def torch_cpu_threads(self) -> int | None:
         """Intra-op thread cap for CPU inference; None = leave torch alone.
         Without it torch grabs every core and starves the decode pool +
-        the event loop on small machines."""
-        if self.device != "cpu":
+        the event loop on small machines. An MPS node infers on the CPU
+        too: the text encoder's copy there takes what MPS should not hold
+        (text_embedder.encode)."""
+        if self.device == "cuda":
             return None
         if self.name == "lite":
             return max(2, self.cores // 2)

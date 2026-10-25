@@ -129,6 +129,15 @@ def init(settings) -> bool:
     return True
 
 
+def stop_enrichers() -> None:
+    """The node stops: a stream's analysis and lyrics take no new job, and the
+    queued ones go with the process rather than hold its exit (their workers
+    are joined there)."""
+    for enricher in (_enricher, _lyrics_enricher):
+        if enricher is not None:
+            enricher.stop()
+
+
 # yt-dlp is perishable: YouTube changes its side every few weeks and upstream's
 # stable channel lags behind the breakage, so every runtime keeps it on the
 # NIGHTLY channel. Refreshing only at start is not enough — this node runs for
