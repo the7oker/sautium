@@ -111,8 +111,9 @@ A. Outbound destinations. List every host the software can connect to, with
      backend/static/index.html and artSrc in backend/static/app-shell.js
        (requests the BROWSER makes when it opens the Web UI page; a cover
        from outside the node is asked of the node), and backend/csp.py (the
-       Content-Security-Policy every page carries: the origins the browser
-       itself will load from).
+       Content-Security-Policy every Web UI page carries: the origins it
+       names, and by its HEADER whether a browser enforces it or only
+       reports).
    Then run `git grep -nE 'https?://[a-zA-Z0-9.-]+' -- backend desktop worker mcp ':!mcp/uv.lock'`
    and account for every host you did not already list.
 
@@ -267,9 +268,11 @@ and by design; the report should list them as matches, not discrepancies:
   only within Cover Art Archive and the Internet Archive, raster images up to
   2 MiB, at most 16 fetches at once from each source.
 - The **policy report route takes no signature** (`/api/csp-report`: a
-  browser posts a Content-Security-Policy violation on its own), so anyone on
-  the LAN can post to it: it reads 16 KiB at most and logs each kind of
-  violation once, 32 kinds at most (`backend/csp.py`).
+  browser posts a Content-Security-Policy violation on its own). It takes only
+  a report's media type, which a script on another site cannot send without a
+  CORS preflight the node never answers, about a page on one of the node's
+  own hosts; it reads 16 KiB at most and logs each kind of violation once, 32
+  kinds at most (`backend/csp.py`). A device on the LAN can still post its own.
 - The audition downloader (yt-dlp) **updates itself from PyPI** at every
   backend start (`backend/streaming/service.py`) — a supply-chain channel
   the project accepts knowingly, because the tool breaks weekly otherwise.

@@ -1,12 +1,14 @@
-"""The Content-Security-Policy of the pages the node serves (backend/csp.py):
-on the shell, the same file under /static/ and the Last.fm callback page,
-naming the node's own origin alone; and the route a browser reports a
-violation to — unsigned, bounded, each kind logged once.
+"""The Content-Security-Policy of the Web UI's pages (backend/csp.py): on the
+shell, the same file under /static/ and the Last.fm callback page, naming
+the node's own origin alone; and the route a browser reports a violation
+to — unsigned, taking only a browser's report about a page of the node's,
+bounded, each kind logged once.
 
-What a browser does with the policy is scripts/csp-probe.mjs (a planted
-third-party load, refused) and scripts/ui-shots.mjs (every screen, no
-violation)."""
+What a browser does with the policy is scripts/csp-probe.mjs (third-party
+loads planted on the page, refused) and scripts/ui-shots.mjs (every screen,
+no violation)."""
 
+import asyncio
 import json
 import logging
 import sys
@@ -22,7 +24,7 @@ if str(BACKEND) not in sys.path:
 
 import csp  # noqa: E402
 
-NODE = "http://192.0.2.10:8800"
+NODE = "http://localhost:8800"
 
 
 @pytest.fixture(autouse=True)
@@ -41,11 +43,15 @@ def node():
         yield TestClient(main.app, base_url="http://localhost")
 
 
-@pytest.fixture
-def reports():
+def _reporting_app():
     app = FastAPI()
     app.include_router(csp.router)
-    return TestClient(app)
+    return app
+
+
+@pytest.fixture
+def reports():
+    return TestClient(_reporting_app())
 
 
 def _report(**fields):
@@ -59,9 +65,8 @@ def _report(**fields):
     return json.dumps({"csp-report": {k: v for k, v in body.items() if v is not None}})
 
 
-def _post(client, body):
-    return client.post(csp.REPORT_PATH, content=body,
-                       headers={"Content-Type": "application/csp-report"})
+def _post(client, body, content_type="application/csp-report"):
+    return client.post(csp.REPORT_PATH, content=body, headers={"Content-Type": content_type})
 
 
 def _logged(caplog):
@@ -76,6 +81,7 @@ def test_every_page_the_node_serves_carries_the_policy(node):
                            ("/lastfm/auth/callback/<nonce>", stale)):
         assert response.headers["content-type"].startswith("text/html"), path
         assert response.headers[csp.HEADER] == csp.POLICY, path
+        assert response.headers["x-dns-prefetch-control"] == "off", path
     # FastAPI's interactive docs are no page of the node's: theirs load from a CDN
     assert node.app.docs_url is None and node.app.redoc_url is None
 
@@ -103,7 +109,8 @@ def test_the_report_route_takes_no_signature_and_keeps_the_host_guard(node, capl
     caplog.set_level(logging.WARNING, logger="csp")
     assert _post(node, _report()).status_code == 204
     assert len(_logged(caplog)) == 1
-    refused = node.post(csp.REPORT_PATH, content=_report(), headers={"Host": "rebound.example"})
+    refused = node.post(csp.REPORT_PATH, content=_report(),
+                        headers={"Host": "rebound.example", "Content-Type": "application/csp-report"})
     assert refused.status_code == 421
 
 
@@ -121,7 +128,8 @@ def test_a_kind_is_logged_once(reports, caplog):
     _post(reports, _report(**{"blocked-uri": "https://cdn.example/a.png"}))
     _post(reports, _report(**{"blocked-uri": "data", "effective-directive": "img-src"}))
     _post(reports, _report(**{"blocked-uri": "eval", "effective-directive": "script-src",
-                              "disposition": "enforce", "script-sample": "return this"}))
+                              "disposition": "enforce", "script-sample": "return this"}),
+          content_type="application/json")
     assert [m.split(":", 1)[1].split(";")[0] for m in _logged(caplog)[1:]] == [
         " style-src-elem does not allow https://cdn.example",
         " img-src does not allow https://cdn.example",
@@ -142,6 +150,15 @@ def test_a_report_of_the_older_form_is_read(reports, caplog):
         f"Content-Security-Policy (report only): img-src does not allow https://images.example; page {NODE}/"]
 
 
+def test_a_frame_around_the_page_is_said_as_such(reports, caplog):
+    """The report names the framed page, never the site around it."""
+    caplog.set_level(logging.WARNING, logger="csp")
+    _post(reports, _report(**{"effective-directive": "frame-ancestors", "blocked-uri": f"{NODE}/",
+                              "source-file": None}))
+    assert _logged(caplog) == [
+        f"Content-Security-Policy (report only): frame-ancestors does not allow a frame around it; page {NODE}/"]
+
+
 def test_the_kinds_logged_are_bounded(reports, caplog):
     caplog.set_level(logging.WARNING, logger="csp")
     for i in range(csp._KINDS_LOGGED + 5):
@@ -153,13 +170,46 @@ def test_the_kinds_logged_are_bounded(reports, caplog):
     assert len(_logged(caplog)) == csp._KINDS_LOGGED + 1
 
 
+def test_a_browser_extensions_own_loads_are_not_the_pages(reports, caplog):
+    caplog.set_level(logging.WARNING, logger="csp")
+    for i in range(csp._KINDS_LOGGED + 5):
+        scheme = ("moz-extension", "chrome-extension", "safari-web-extension")[i % 3]
+        assert _post(reports, _report(**{"blocked-uri": f"{scheme}://{i:08x}/inject.css"})).status_code == 204
+    assert _logged(caplog) == []
+    _post(reports, _report())                        # the budget is the page's still
+    assert len(_logged(caplog)) == 1
+
+
+@pytest.mark.parametrize("content_type", ["text/plain", "application/x-www-form-urlencoded",
+                                          "multipart/form-data; boundary=x", ""])
+def test_only_a_reports_media_type_is_taken(reports, caplog, content_type):
+    """What a script on another site can post to the node without a CORS
+    preflight is none of a report's types."""
+    caplog.set_level(logging.DEBUG, logger="csp")
+    assert _post(reports, _report(), content_type=content_type).status_code == 415
+    assert _logged(caplog) == []
+
+
+@pytest.mark.parametrize("page", ["https://elsewhere.example/", "http://localhost.elsewhere.example:8800/",
+                                  "about:blank", "data:text/html,x", "http:///", "//localhost/"])
+def test_a_report_about_no_page_of_the_nodes_is_refused(reports, caplog, page):
+    """Another site's own policy may name this route for its pages' reports;
+    the browser sends them with a report's type."""
+    caplog.set_level(logging.DEBUG, logger="csp")
+    assert _post(reports, _report(**{"document-uri": page})).status_code == 400
+    assert _logged(caplog) == []
+
+
 @pytest.mark.parametrize("body, status", [
     ("x" * (csp._REPORT_MAX_BYTES + 1), 413),
     ("not json", 400),
     (json.dumps({"something": "else"}), 400),
     (json.dumps({"csp-report": ["a", "list"]}), 400),
-    (json.dumps({"csp-report": {"blocked-uri": "https://images.example/"}}), 400),
-    (json.dumps({"csp-report": {"violated-directive": ""}}), 400),
+    (json.dumps({"csp-report": {"document-uri": f"{NODE}/", "blocked-uri": "https://images.example/"}}), 400),
+    (json.dumps({"csp-report": {"document-uri": f"{NODE}/", "violated-directive": ""}}), 400),
+    (json.dumps({"csp-report": {"document-uri": 8800, "effective-directive": "img-src"}}), 400),
+    (json.dumps({"csp-report": {"effective-directive": "img-src", "blocked-uri": "https://images.example/"}}),
+     400),
     ("[" * 8000, 400),                         # deeper than the JSON parser goes
 ])
 def test_a_report_the_route_cannot_read_logs_nothing(reports, caplog, body, status):
@@ -168,11 +218,35 @@ def test_a_report_the_route_cannot_read_logs_nothing(reports, caplog, body, stat
     assert _logged(caplog) == []
 
 
+def test_a_sender_that_leaves_mid_body_is_answered_without_a_trace(caplog):
+    """The test client always sends a whole body: the request here is the
+    server's own events — part of a body, then the client gone."""
+    caplog.set_level(logging.DEBUG)
+    events = [{"type": "http.request", "body": b'{"csp-report": {"document-', "more_body": True},
+              {"type": "http.disconnect"}]
+    sent = []
+
+    async def receive():
+        return events.pop(0) if events else {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": csp.REPORT_PATH, "raw_path": csp.REPORT_PATH.encode(),
+             "query_string": b"", "root_path": "", "server": ("localhost", 8800), "client": ("127.0.0.1", 50000),
+             "headers": [(b"host", b"localhost:8800"), (b"content-type", b"application/csp-report"),
+                         (b"content-length", b"1000")]}
+    asyncio.run(_reporting_app()(scope, receive, send))
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [400]
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
 def test_a_report_cannot_write_a_line_of_its_own(reports, caplog):
     caplog.set_level(logging.WARNING, logger="csp")
     forged = "\r\n2026-10-25 12:00:00 - auth_hmac - WARNING - forged"
     _post(reports, _report(**{"blocked-uri": "inline" + forged, "effective-directive": "img-src" + forged,
-                              "document-uri": NODE + forged, "source-file": forged,
+                              "document-uri": f"{NODE}/{forged}", "source-file": forged,
                               "line-number": forged, "script-sample": forged}))
     _post(reports, _report(**{"blocked-uri": "https://images.example\n" + forged}))
     logged = _logged(caplog)

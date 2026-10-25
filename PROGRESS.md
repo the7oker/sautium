@@ -3239,10 +3239,11 @@ Lesson: a switch moves the listening, not just the list.
 Since every outside cover comes through the node (`artSrc`, `covers.ART_SOURCES`)
 the browser asks no third party for anything — but only the code kept it so,
 and a later hotlink would have loaded without a sign. Every HTML document the
-node sends now carries a Content-Security-Policy (`backend/csp.py`, one
+Web UI sends now carries a Content-Security-Policy (`backend/csp.py`, one
 middleware: the shell at `/`, the same file under `/static/`, the Last.fm
 callback page, any page added later) that names the node's own origin and
-nothing else.
+nothing else, and `X-DNS-Prefetch-Control: off`: an http page has the hosts
+of its links looked up ahead of any click otherwise.
 
 - **What it allows is what the pages hold.** `blob:` and `data:` for media
   only (the browser output's prefetched track and its silent unlock clip; no
@@ -3257,14 +3258,19 @@ nothing else.
 - **`report-uri`, not `report-to`.** The Reporting API delivers only to a
   potentially trustworthy endpoint, which a plain-HTTP LAN address is not,
   and a policy naming `report-to` has its `report-uri` ignored. The route
-  takes no signature (the browser posts on its own): it reads 16 KiB at most
-  and logs each kind — the directive and the origin or keyword it refused —
-  once, 32 kinds at most.
+  takes no signature (the browser posts on its own), so it takes only what a
+  browser sends about a page of the node's: a report's media type, which a
+  script on another site cannot post without a CORS preflight, and a page on
+  one of the node's own hosts — another site's policy may name the route for
+  its own pages' reports. It reads 16 KiB at most and logs each kind — the
+  directive and the origin or keyword it refused — once, 32 kinds at most; a
+  browser extension's own resources are not the page's and count for nothing.
 - **Report-only first,** so a load the inventory missed shows in the log
   instead of breaking a screen. `scripts/ui-shots.mjs` records the violations
-  each screen meets (`csp.log`); `scripts/csp-probe.mjs` plants a load of
-  every kind from another origin and checks the browser did what the header
-  says, against a control with the policy bypassed.
+  each screen meets (`csp.log`); `scripts/csp-probe.mjs` plants eight kinds of
+  load from another origin (an image, a CSS background, a fetch, a script, a
+  stylesheet, a font, a sound, a frame) and checks the browser did what the
+  header says, against a control with the policy bypassed.
 - FastAPI's interactive `/docs` went: their pages load their scripts from a
   CDN, and only a signed caller could open them.
 

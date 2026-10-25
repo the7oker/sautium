@@ -48,11 +48,13 @@ the token never travels, and the exchange that earns it is boxed; the peer
 surface writes to P2P tables only and never reveals configuration or
 secrets; a source address is a signal, never an authentication input.
 
-Every page the node serves carries a Content-Security-Policy that names the
-node's own origin alone (`backend/csp.py`): its scripts, styles, typefaces,
-images, media and API calls come from there, and no page may be framed.
-Report-only since 2026-10-25: a browser reports a load from elsewhere, or a
-frame around the page, to the node's log and refuses neither.
+Every page of the Web UI carries a Content-Security-Policy
+(`backend/csp.py`) that names the node's own origin alone — for its scripts,
+styles, typefaces, images, media and API calls — and allows no frame around
+the page; the browser is also told not to look up the hosts of the page's
+links before one is followed. Report-only since 2026-10-25: a browser
+reports a load from elsewhere, or a frame around the page, to the node's log
+and refuses neither.
 
 There is no TLS on the Web UI, by design: a certificate a stock phone trusts
 cannot exist for a private address (public CAs may not issue one, and a

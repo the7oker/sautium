@@ -1,4 +1,4 @@
-"""What a page the node serves may load: its Content-Security-Policy.
+"""What a page of the Web UI may load: its Content-Security-Policy.
 
 Every load the Web UI makes is the node's own — its scripts, sheets and
 typefaces under /static/, every cover through /api/covers/ (an outside one
@@ -6,7 +6,8 @@ too: the node fetches it), the API and its event streams, the browser
 output's media. Until this policy only the code kept it so, and a hotlink a
 later change let in would have told an image host the listener's address
 without a sign. The policy names this origin and nothing else, so that the
-browser itself refuses the rest and tells REPORT_PATH.
+browser itself refuses the rest and tells REPORT_PATH. Nor does the browser
+look up, before a click, the hosts the page's links name.
 
 It allows what the pages hold today and no more:
 - inline script and style: app-shell.js's templates carry on* handlers (a
@@ -25,9 +26,13 @@ Report-only: a violation is reported and logged, nothing is refused.
 import json
 import logging
 import re
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Request, Response
 from starlette.datastructures import MutableHeaders
+from starlette.requests import ClientDisconnect
+
+import auth_hmac
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,9 @@ POLICY = "; ".join((
     f"report-uri {REPORT_PATH}",
 ))
 
+# What a browser sends to a report-uri. Neither is a type a script on another
+# site may post without the node's leave — a CORS preflight it never answers.
+_REPORT_TYPES = ("application/csp-report", "application/json")
 _REPORT_MAX_BYTES = 16 * 1024
 _KINDS_LOGGED = 32
 _kinds: set = set()          # (directive, what it refused) — logged once each; capped: the route is open to the LAN
@@ -60,12 +68,14 @@ _kinds_full = False
 # data: or blob: URL, or CSP's own word for the rest ("inline", "eval").
 _REFUSED = re.compile(r"([a-z][a-z0-9+.-]{0,30})(?:(:)(?://([a-z0-9.:\[\]-]{1,100}))?)?",
                       re.IGNORECASE | re.ASCII)
+# A browser extension's own resources: its loads, not the page's
+_EXTENSIONS = ("chrome-extension:", "moz-extension:", "safari-extension:", "safari-web-extension:")
 
 
 class PolicyMiddleware:
-    """The policy on every HTML document the node sends — the shell at /,
+    """The policy on every HTML document the Web UI sends — the shell at /,
     the same file under /static/, the Last.fm callback page, a page added
-    later — whichever route made it. Pure ASGI: the header joins the
+    later — whichever route made it. Pure ASGI: the headers join the
     response as it starts; the body passes untouched."""
 
     def __init__(self, app):
@@ -80,6 +90,7 @@ class PolicyMiddleware:
                 headers = MutableHeaders(scope=message)
                 if headers.get("content-type", "").startswith("text/html"):
                     headers.append(HEADER, POLICY)
+                    headers.append("X-DNS-Prefetch-Control", "off")
             await send(message)
 
         await self.app(scope, receive, send_with_policy)
@@ -107,21 +118,35 @@ def _clean(value, limit: int = 200) -> str:
 async def report(request: Request) -> Response:
     """A browser's report of a load the policy refused — or, report-only,
     would refuse. Unsigned by necessity (the browser sends it on its own),
-    so it defends itself: the body is bounded, each kind — the directive
-    and what it refused — is logged once, and so many kinds at most."""
+    so it takes only what a browser sends about a page of this node's: a
+    report's media type, and a page on one of the node's own hosts — a
+    site's own policy may name this route for the reports of its pages.
+    The body is bounded, each kind — the directive and what it refused — is
+    logged once, and so many kinds at most."""
     global _kinds_full
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() not in _REPORT_TYPES:
+        return Response(status_code=415)
     body = bytearray()
-    async for chunk in request.stream():
-        body += chunk
-        if len(body) > _REPORT_MAX_BYTES:
-            return Response(status_code=413)
+    try:
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > _REPORT_MAX_BYTES:
+                return Response(status_code=413)
+    except ClientDisconnect:
+        return Response(status_code=400)        # the sender left mid-body: nothing to read
     try:
         violation = json.loads(body)["csp-report"]
-        directive = violation.get("effective-directive") or violation["violated-directive"].split()[0]
-        kind = (_clean(directive, 40), _refused(violation.get("blocked-uri") or ""))
+        page = urlsplit(violation["document-uri"])
+        directive = _clean(violation.get("effective-directive")
+                           or violation["violated-directive"].split()[0], 40)
     except (ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError):
         return Response(status_code=400)        # RecursionError: JSON nested deeper than the parser goes
-    if kind in _kinds:
+    if page.scheme not in ("http", "https") or not auth_hmac.host_allowed(page.netloc or "?"):
+        return Response(status_code=400)        # about no page of this node's
+    # A frame-ancestors report names the framed page itself, never the framer
+    kind = (directive, "a frame around it" if directive == "frame-ancestors"
+            else _refused(violation.get("blocked-uri") or ""))
+    if kind in _kinds or kind[1].startswith(_EXTENSIONS):
         return Response(status_code=204)
     if len(_kinds) >= _KINDS_LOGGED:
         if not _kinds_full:
@@ -134,7 +159,7 @@ async def report(request: Request) -> Response:
     source, line, sample = (violation.get(k) for k in ("source-file", "line-number", "script-sample"))
     logger.warning("Content-Security-Policy (%s): %s does not allow %s; page %s%s%s",
                    "report only" if disposition == "report" else "enforced", *kind,
-                   _clean(violation.get("document-uri") or "?"),
+                   _clean(violation["document-uri"]),
                    f", from {_clean(source)}" + (f":{_clean(line, 10)}" if line else "") if source else "",
                    f', sample "{_clean(sample, 60)}"' if sample else "")
     return Response(status_code=204)

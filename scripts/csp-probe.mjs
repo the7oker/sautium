@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /* scripts/csp-probe.mjs — what a browser does with the node's
- * Content-Security-Policy: loads from another origin planted on the
- * signed-in page, one of every kind the policy governs.
+ * Content-Security-Policy: eight kinds of load from another origin planted
+ * on the signed-in page (an image, a CSS background, a fetch, a script, a
+ * stylesheet, a font, a sound, a frame).
  *
  * A third party listens on another loopback address and counts what it is
  * asked. The loads are planted on the node's page as its own script would
@@ -12,10 +13,10 @@
  *
  * Under an enforced policy each planted load must be refused before it
  * leaves the browser; under report-only each must load and be reported.
- * Either way the control must reach the third party and the browser's
- * report the node's report route. Exit status 0 when the page did what its
- * header says. Options as scripts/ui-shots.mjs (--url, --token, --chrome,
- * --libs).
+ * Either way the control must reach the third party, and each kind's report
+ * the node's report route, answered 204. Exit status 0 when the page did
+ * what its header says. Options as scripts/ui-shots.mjs (--url, --token,
+ * --chrome, --libs).
  */
 
 import { rmSync } from 'node:fs';
@@ -115,12 +116,16 @@ async function main() {
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     const page = new Page(cdp, sessionId);
     page.quiet = 500;
-    const reportRequests = new Set(), reportAnswers = [];
+    // The reports the browser posts to the node: what each names, and the answer
+    const reports = new Map();      // requestId -> { blocked, status }
     cdp.on('Network.requestWillBeSent', sessionId, ({ requestId, request }) => {
-      if (request.url.startsWith(`${opts.url}/api/csp-report`)) reportRequests.add(requestId);
+      if (!request.url.startsWith(`${opts.url}/api/csp-report`)) return;
+      let blocked = '(body not seen)';
+      try { blocked = JSON.parse(request.postData)['csp-report']['blocked-uri']; } catch { /* stays unread */ }
+      reports.set(requestId, { blocked, status: null });
     });
     cdp.on('Network.responseReceived', sessionId, ({ requestId, response }) => {
-      if (reportRequests.has(requestId)) reportAnswers.push(response.status);
+      if (reports.has(requestId)) reports.get(requestId).status = response.status;
     });
     await page.send('Page.enable');
     await page.send('Runtime.enable');
@@ -136,26 +141,27 @@ async function main() {
     await plant(page, third.origin, 'control');
     await page.send('Page.setBypassCSP', { enabled: false });
 
-    console.log(`\n${'kind'.padEnd(14)} ${'page saw'.padEnd(10)} ${'third party'.padEnd(12)} ${'violation'.padEnd(24)} control: third party`);
+    console.log(`\n${'kind'.padEnd(14)} ${'page saw'.padEnd(10)} ${'third party'.padEnd(12)} `
+      + `${'violation'.padEnd(24)} ${'node: report'.padEnd(13)} control: third party`);
     for (const { kind, file } of KINDS) {
       const url = `${third.origin}/planted/${file}`;
       const asked = third.asked.get(`/planted/${file}`) || 0;
       const control = third.asked.get(`/control/${file}`) || 0;
       // [disposition, effective directive, blocked URI, source]: script-src
       // and style-src are reported as their -elem forms
-      const v = violations.find(([, directive, blocked]) => directive.startsWith(kind.split(' ')[0])
-        && (blocked === url || blocked === third.origin));
+      const v = violations.find(([, directive, blocked]) => directive.startsWith(kind.split(' ')[0]) && blocked === url);
+      const answers = [...reports.values()].filter(r => r.blocked === url).map(r => r.status);
       console.log(`${kind.padEnd(14)} ${planted[kind].padEnd(10)} ${String(asked).padEnd(12)} `
-        + `${(v ? `${v[0]} ${v[1]}` : 'none').padEnd(24)} ${control}`);
+        + `${(v ? `${v[0]} ${v[1]}` : 'none').padEnd(24)} ${(answers.join(',') || 'none').padEnd(13)} ${control}`);
       if (!v || v[0] !== mode) failures.push(`${kind}: no violation with disposition ${mode}`);
       if (mode === 'enforce' && asked) failures.push(`${kind}: the third party was asked ${asked} time(s)`);
       if (mode === 'enforce' && planted[kind] === 'load') failures.push(`${kind}: the page saw it load`);
       if (mode === 'report' && !asked) failures.push(`${kind}: report-only, and still nothing reached the third party`);
+      if (!answers.length || answers.some(s => s !== 204)) failures.push(`${kind}: its report did not reach the node (${answers.join(',') || 'none sent'})`);
       if (!control) failures.push(`${kind}: the control never reached the third party — the probe would see nothing`);
     }
-    const answered = reportAnswers.filter(s => s === 204).length;
-    console.log(`\nreports posted to ${opts.url}/api/csp-report: ${reportRequests.size}, answered 204: ${answered}`);
-    if (!answered) failures.push('no report reached the node');
+    const unread = [...reports.values()].filter(r => r.blocked === '(body not seen)').length;
+    console.log(`\nreports posted to ${opts.url}/api/csp-report: ${reports.size}${unread ? `, ${unread} whose body DevTools did not show` : ''}`);
   } finally {
     cdp.close();
     const exited = new Promise(r => proc.once('exit', r));
