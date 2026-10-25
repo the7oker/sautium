@@ -61,7 +61,8 @@ cannot exist for a private address (public CAs may not issue one, and a
 name that resolves to one is blocked by many routers), and a self-signed one
 only produced the warning. TLS for the Web UI is a front with a real name —
 Tailscale Serve, a reverse proxy — terminating in front of the plain-HTTP
-port; list that name in `SAUTIUM_ALLOWED_HOSTS`.
+port; list that name in `SAUTIUM_ALLOWED_HOSTS`, also for a front that
+rewrites `Host`: the policy's reports name the page by it.
 
 ## Threat model
 

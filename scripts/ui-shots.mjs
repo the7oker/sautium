@@ -517,8 +517,9 @@ async function main() {
         const csp = result.violations.length ? `  !! ${result.violations.length} CSP violation(s)` : '';
         console.log(`${vp.width}x${vp.height}  ${route.padEnd(28)} ${result.note || `${result.ms} ms`}${errs}${csp}`);
       }
-      // What the document met after the last route's own read: the next
-      // width's navigation drops it with the document
+      // What the document meets once the last route has settled again: the
+      // next width's navigation drops it with the document
+      await page.settle();
       results.push({ route: '(after the last route)', vp, note: 'no shot', violations: await page.takeViolations() });
     }
   } finally {

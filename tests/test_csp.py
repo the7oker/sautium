@@ -171,10 +171,13 @@ def test_the_kinds_logged_are_bounded(reports, caplog):
 
 
 def test_a_browser_extensions_own_loads_are_not_the_pages(reports, caplog):
+    """WebKit reports such a load as its URL, Firefox as the scheme alone."""
     caplog.set_level(logging.WARNING, logger="csp")
     for i in range(csp._KINDS_LOGGED + 5):
-        scheme = ("moz-extension", "chrome-extension", "safari-web-extension")[i % 3]
-        assert _post(reports, _report(**{"blocked-uri": f"{scheme}://{i:08x}/inject.css"})).status_code == 204
+        blocked = ("moz-extension", f"safari-web-extension://{i:08x}/inject.css",
+                   f"chrome-extension://{i:08x}/inject.js")[i % 3]
+        assert _post(reports, _report(**{"blocked-uri": blocked,
+                                         "effective-directive": f"img-src-{i}"})).status_code == 204
     assert _logged(caplog) == []
     _post(reports, _report())                        # the budget is the page's still
     assert len(_logged(caplog)) == 1
@@ -191,6 +194,7 @@ def test_only_a_reports_media_type_is_taken(reports, caplog, content_type):
 
 
 @pytest.mark.parametrize("page", ["https://elsewhere.example/", "http://localhost.elsewhere.example:8800/",
+                                  "http://localhost:8800@elsewhere.example/", "http://localhost:@elsewhere.example/",
                                   "about:blank", "data:text/html,x", "http:///", "//localhost/"])
 def test_a_report_about_no_page_of_the_nodes_is_refused(reports, caplog, page):
     """Another site's own policy may name this route for its pages' reports;
@@ -198,6 +202,14 @@ def test_a_report_about_no_page_of_the_nodes_is_refused(reports, caplog, page):
     caplog.set_level(logging.DEBUG, logger="csp")
     assert _post(reports, _report(**{"document-uri": page})).status_code == 400
     assert _logged(caplog) == []
+
+
+@pytest.mark.parametrize("page", ["http://localhost:8800/", "https://localhost/", "http://[::1]:8800/",
+                                  "http://user:secret@localhost:8800/"])
+def test_a_report_about_a_page_on_the_nodes_own_host_is_taken(reports, caplog, page):
+    caplog.set_level(logging.WARNING, logger="csp")
+    assert _post(reports, _report(**{"document-uri": page})).status_code == 204
+    assert len(_logged(caplog)) == 1
 
 
 @pytest.mark.parametrize("body, status", [
@@ -218,10 +230,10 @@ def test_a_report_the_route_cannot_read_logs_nothing(reports, caplog, body, stat
     assert _logged(caplog) == []
 
 
-def test_a_sender_that_leaves_mid_body_is_answered_without_a_trace(caplog):
-    """The test client always sends a whole body: the request here is the
-    server's own events — part of a body, then the client gone."""
-    caplog.set_level(logging.DEBUG)
+def _sender_leaves_mid_body(app):
+    """The server's own events for a report whose sender goes away after part
+    of its body (the test client always sends a whole body): the status
+    answered, if any."""
     events = [{"type": "http.request", "body": b'{"csp-report": {"document-', "more_body": True},
               {"type": "http.disconnect"}]
     sent = []
@@ -237,8 +249,21 @@ def test_a_sender_that_leaves_mid_body_is_answered_without_a_trace(caplog):
              "query_string": b"", "root_path": "", "server": ("localhost", 8800), "client": ("127.0.0.1", 50000),
              "headers": [(b"host", b"localhost:8800"), (b"content-type", b"application/csp-report"),
                          (b"content-length", b"1000")]}
-    asyncio.run(_reporting_app()(scope, receive, send))
-    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [400]
+    asyncio.run(app(scope, receive, send))
+    return [m["status"] for m in sent if m["type"] == "http.response.start"]
+
+
+def test_a_sender_that_leaves_mid_body_is_answered_without_a_trace(caplog):
+    caplog.set_level(logging.DEBUG)
+    assert _sender_leaves_mid_body(_reporting_app()) == [400]
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_a_sender_that_leaves_mid_body_is_answered_so_through_the_whole_app(node, caplog):
+    """Through the backend's own middlewares: the signature check and the
+    static files' cache headers wrap the stream the route reads."""
+    caplog.set_level(logging.DEBUG)
+    assert _sender_leaves_mid_body(node.app) == [400]
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 

@@ -68,8 +68,9 @@ _kinds_full = False
 # data: or blob: URL, or CSP's own word for the rest ("inline", "eval").
 _REFUSED = re.compile(r"([a-z][a-z0-9+.-]{0,30})(?:(:)(?://([a-z0-9.:\[\]-]{1,100}))?)?",
                       re.IGNORECASE | re.ASCII)
-# A browser extension's own resources: its loads, not the page's
-_EXTENSIONS = ("chrome-extension:", "moz-extension:", "safari-extension:", "safari-web-extension:")
+# A browser extension's own resources: its loads, not the page's. Reported as
+# a URL or, by Firefox, as the scheme alone
+_EXTENSIONS = {"chrome-extension", "moz-extension", "safari-extension", "safari-web-extension"}
 
 
 class PolicyMiddleware:
@@ -141,12 +142,14 @@ async def report(request: Request) -> Response:
                            or violation["violated-directive"].split()[0], 40)
     except (ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError):
         return Response(status_code=400)        # RecursionError: JSON nested deeper than the parser goes
-    if page.scheme not in ("http", "https") or not auth_hmac.host_allowed(page.netloc or "?"):
+    # The host alone, as the Host guard reads it: a netloc carries userinfo too
+    host = page.hostname or "?"
+    if page.scheme not in ("http", "https") or not auth_hmac.host_allowed(f"[{host}]" if ":" in host else host):
         return Response(status_code=400)        # about no page of this node's
     # A frame-ancestors report names the framed page itself, never the framer
     kind = (directive, "a frame around it" if directive == "frame-ancestors"
             else _refused(violation.get("blocked-uri") or ""))
-    if kind in _kinds or kind[1].startswith(_EXTENSIONS):
+    if kind in _kinds or kind[1].split(":", 1)[0] in _EXTENSIONS:
         return Response(status_code=204)
     if len(_kinds) >= _KINDS_LOGGED:
         if not _kinds_full:

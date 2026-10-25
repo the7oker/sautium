@@ -29,7 +29,8 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 
 // One load of each kind, by the directive that governs it: the expression
 // plants it and resolves to what the page saw — 'load', 'error', or 'sent'
-// where the page is told nothing.
+// where the page is told nothing. A refused frame is reported by its origin
+// alone (every engine strips a cross-origin frame's URL so); the rest by URL.
 const KINDS = [
   { kind: 'img-src', file: 'image.png',
     plant: u => `new Promise(r => { const i = new Image(); i.onload = () => r('load'); i.onerror = () => r('error'); i.src = '${u}'; document.body.append(i); })` },
@@ -45,7 +46,7 @@ const KINDS = [
     plant: u => `new FontFace('csp-probe', 'url(${u})').load().then(() => 'load', () => 'error')` },
   { kind: 'media-src', file: 'audio.wav',
     plant: u => `(Object.assign(new Audio(), { src: '${u}' }).load(), 'sent')` },
-  { kind: 'frame-src', file: 'frame.html',
+  { kind: 'frame-src', file: 'frame.html', reportedAs: 'origin',
     plant: u => `(document.body.append(Object.assign(document.createElement('iframe'), { src: '${u}', hidden: true })), 'sent')` },
 ];
 
@@ -143,8 +144,8 @@ async function main() {
 
     console.log(`\n${'kind'.padEnd(14)} ${'page saw'.padEnd(10)} ${'third party'.padEnd(12)} `
       + `${'violation'.padEnd(24)} ${'node: report'.padEnd(13)} control: third party`);
-    for (const { kind, file } of KINDS) {
-      const url = `${third.origin}/planted/${file}`;
+    for (const { kind, file, reportedAs } of KINDS) {
+      const url = reportedAs === 'origin' ? third.origin : `${third.origin}/planted/${file}`;
       const asked = third.asked.get(`/planted/${file}`) || 0;
       const control = third.asked.get(`/control/${file}`) || 0;
       // [disposition, effective directive, blocked URI, source]: script-src
