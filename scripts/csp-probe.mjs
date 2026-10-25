@@ -118,12 +118,15 @@ async function main() {
     const page = new Page(cdp, sessionId);
     page.quiet = 500;
     // The reports the browser posts to the node: what each names, and the answer
-    const reports = new Map();      // requestId -> { blocked, status }
+    const reports = new Map();      // requestId -> { directive, blocked, status }
     cdp.on('Network.requestWillBeSent', sessionId, ({ requestId, request }) => {
       if (!request.url.startsWith(`${opts.url}/api/csp-report`)) return;
-      let blocked = '(body not seen)';
-      try { blocked = JSON.parse(request.postData)['csp-report']['blocked-uri']; } catch { /* stays unread */ }
-      reports.set(requestId, { blocked, status: null });
+      let directive = '', blocked = '(body not seen)';
+      try {
+        const r = JSON.parse(request.postData)['csp-report'];
+        [directive, blocked] = [r['effective-directive'] || r['violated-directive'] || '', r['blocked-uri']];
+      } catch { /* stays unread */ }
+      reports.set(requestId, { directive, blocked, status: null });
     });
     cdp.on('Network.responseReceived', sessionId, ({ requestId, response }) => {
       if (reports.has(requestId)) reports.get(requestId).status = response.status;
@@ -150,8 +153,9 @@ async function main() {
       const control = third.asked.get(`/control/${file}`) || 0;
       // [disposition, effective directive, blocked URI, source]: script-src
       // and style-src are reported as their -elem forms
-      const v = violations.find(([, directive, blocked]) => directive.startsWith(kind.split(' ')[0]) && blocked === url);
-      const answers = [...reports.values()].filter(r => r.blocked === url).map(r => r.status);
+      const governs = directive => directive.startsWith(kind.split(' ')[0]);
+      const v = violations.find(([, directive, blocked]) => governs(directive) && blocked === url);
+      const answers = [...reports.values()].filter(r => governs(r.directive) && r.blocked === url).map(r => r.status);
       console.log(`${kind.padEnd(14)} ${planted[kind].padEnd(10)} ${String(asked).padEnd(12)} `
         + `${(v ? `${v[0]} ${v[1]}` : 'none').padEnd(24)} ${(answers.join(',') || 'none').padEnd(13)} ${control}`);
       if (!v || v[0] !== mode) failures.push(`${kind}: no violation with disposition ${mode}`);
