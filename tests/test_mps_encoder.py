@@ -1,10 +1,14 @@
 """What the real MPS keeps. test_text_embedding_passes.py's encoder is a fake;
 here it is the model, on the device, and the device's own account of its
-memory. The encoder and AST meet a new attention shape nearly every forward,
-and nothing may be kept per shape: SDPA there kept 8 bytes a score for each of
-them until the process ended — 32 GiB after four batches of bios on
-2026-10-25 — and past torch's limit the process could allocate nothing on the
-device.
+memory. MPS keeps something for every shape a forward has had, and nothing
+gives it back until the process ends: SDPA's graphs held 8 bytes a score on
+the Metal side — 32 GiB after four batches of bios on 2026-10-25, and past
+torch's limit the process could allocate nothing on the device — and every
+attention leaves graphs of its ops on the host heap, 4 to 7 MB and some 60,000
+allocations a shape (10.8 GB over the 1,746 shapes of 28 passes of a node,
+2026-10-26). So the text encoder meets a closed set of shapes, and these tests
+read both sides: the Metal side as driver - current, the host's as the live
+malloc of the process (mps_probe.live_malloc).
 
 Skipped where there is no MPS, or none of the models in the hub's cache. Every
 reading is of `driver - current` once PyTorch's cache is given back
@@ -69,28 +73,35 @@ def test_a_text_is_as_many_tokens_as_it_says(encoder):
         assert int(encoder.model.preprocess([text])["attention_mask"].sum()) == tokens
 
 
+SHARE_GB = "2"          # a machine's working set whose share makes the forwards a few texts
+
+
+def _closed_set(share_gb: float) -> set:
+    """The shapes the encoder may have at a working set of `share_gb`: a rung
+    of its ladder, a power of two of texts of up to 16 that the share admits."""
+    import text_embedder
+    share = share_gb * 1e9 * text_embedder._ATTENTION_SHARE / (text_embedder._BYTES_PER_SCORE * 16)
+    return {(rows, rung) for rung in text_embedder._rungs(share)
+            for rows in (1, 2, 4, 8, 16) if rows * rung ** 2 <= share}
+
+
 @pytest.fixture(scope="module")
-def a_pass_of_new_shapes(encoder):
-    """A pass whose forwards are new shapes nearly every time: 40 calls of 16
-    texts of 20 tokens up, at the share of a machine of 2 GB (the forwards are
-    a few texts, as on a smaller Mac). Every text is within what the encoder
-    takes alone there, so none goes to the CPU copy: the pass is the device's
-    alone. What it read after each call: the memory beyond tensors in use as
-    the call left it, and once the cache is given back — set against the
-    start."""
+def a_run_of_fresh_lengths(encoder):
+    """A pass's kind of work at a machine of 2 GB's share (the forwards are a
+    few texts, as on a smaller Mac): 40 calls of 16 texts of lengths nobody has
+    met, 20 tokens up to what the encoder takes alone there, so none goes to
+    the CPU copy. What it read: every forward's shape (a hook); after each call
+    the Metal memory beyond tensors in use, as the call left it and once the
+    cache is given back, against the start; and at four calls the live malloc
+    of the process — the host's share of what MPS keeps."""
     import torch
     import text_embedder
     patch = pytest.MonkeyPatch()
-    shapes, left, floors, at_ten, stopped, hook = set(), [], [], None, None, None
-
-    def met(module, args):
-        features = args[0]
-        shapes.add((tuple(features["input_ids"].shape), bool((features["attention_mask"] == 0).any())))
-
+    shapes = mps_probe.Shapes(encoder.model)
+    left, floors, host, at_ten, stopped = [], [], [], None, None
     try:
-        patch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "2")
+        patch.setenv("SAUTIUM_ACCEL_MEMORY_GB", SHARE_GB)
         copies = mps_probe.count_cpu_copies(patch)
-        hook = encoder.model[0].register_forward_pre_hook(met)
         longest = int(0.95 * mps_probe.single_text_limit(encoder.model))
         start = mps_probe.floor()
         rng = random.Random(3)
@@ -100,36 +111,96 @@ def a_pass_of_new_shapes(encoder):
             left.append(torch.mps.driver_allocated_memory() - torch.mps.current_allocated_memory()
                         - start)
             floors.append(mps_probe.floor() - start)
-            if at_ten is None and len(shapes) >= 10:
+            if at_ten is None and len(set(shapes.seen)) >= 10:
                 at_ten = floors[-1]
+            if call in (0, 13, 26, 39):
+                host.append((call + 1, set(shapes.seen), mps_probe.live_malloc()["mb"]))
             if floors[-1] > GIB:
-                stopped = f"{floors[-1] / GIB:.2f} GiB kept after {len(shapes)} shapes, call {call}"
+                stopped = f"{floors[-1] / GIB:.2f} GiB kept after {len(set(shapes.seen))} shapes, call {call}"
                 break
     finally:
-        if hook is not None:
-            hook.remove()
+        shapes.remove()
         patch.undo()
         text_embedder._end_pass()
-    return types.SimpleNamespace(shapes=len(shapes), left=left, floors=floors, at_ten=at_ten,
-                                 stopped=stopped, cpu_copies=len(copies))
+    return types.SimpleNamespace(shapes=set(shapes.seen), left=left, floors=floors, at_ten=at_ten,
+                                 stopped=stopped, cpu_copies=len(copies), host=host)
 
 
-def test_a_pass_of_new_shapes_keeps_nothing_per_shape(a_pass_of_new_shapes):
-    """The invariant: after 150 shapes the device holds what it held after 10."""
-    p = a_pass_of_new_shapes
+def test_the_forwards_of_a_run_of_fresh_lengths_are_the_closed_set(a_run_of_fresh_lengths):
+    """Every forward is a rung of the ladder by a power of two of texts, and the
+    run met most of them: fresh lengths are not fresh shapes."""
+    p = a_run_of_fresh_lengths
     assert p.stopped is None, p.stopped
     assert p.cpu_copies == 0
-    assert p.shapes >= 150, p.shapes
+    reachable = _closed_set(float(SHARE_GB))
+    assert p.shapes <= reachable, sorted(p.shapes - reachable)
+    assert len(p.shapes) >= len(reachable) // 2, (len(p.shapes), len(reachable))
+
+
+def test_the_host_keeps_nothing_more_once_the_set_is_warm(a_run_of_fresh_lengths):
+    """At most the graphs of the shapes of the set that the run had not met
+    yet (12 MB each is above the 7 measured) and a little else: between any two
+    of the checkpoints, and from the start to the end. It is the invariant, not
+    a count of what happened: forwards of lengths that make shapes of their own
+    grow the host by 50 MB a call here."""
+    p = a_run_of_fresh_lengths
+    assert p.stopped is None, p.stopped
+    reachable = len(_closed_set(float(SHARE_GB)))
+    for (_, met, before), (_, _, after) in zip(p.host, p.host[1:]):
+        assert after - before <= 12 * (reachable - len(met)) + 20, (before, after, len(met))
+    assert p.host[-1][2] - p.host[0][2] <= 12 * reachable + 20, p.host
+
+
+def test_the_metal_side_keeps_nothing_per_shape_either(a_run_of_fresh_lengths):
+    """The invariant: after the shapes of the whole run the device holds what it
+    held after 10."""
+    p = a_run_of_fresh_lengths
+    assert p.stopped is None, p.stopped
+    assert p.cpu_copies == 0
+    assert len(p.shapes) >= 10, len(p.shapes)
     assert p.floors[-1] - p.at_ten <= 64 * MIB, (p.floors[-1] - p.at_ten) / MIB
     assert max(p.floors) <= 256 * MIB, max(p.floors) / MIB
 
 
-def test_the_cache_is_given_back_between_forwards(a_pass_of_new_shapes):
+def test_the_cache_is_given_back_between_forwards(a_run_of_fresh_lengths):
     """Without the encoder's empty_cache after each forward the cache of a
     pass stands at 1 GiB and more between them."""
-    p = a_pass_of_new_shapes
+    p = a_run_of_fresh_lengths
     assert p.stopped is None, p.stopped
     assert max(p.left) <= 256 * MIB, max(p.left) / MIB
+
+
+def test_queries_of_every_length_are_one_shape_and_the_callers_meet_the_set(encoder, monkeypatch):
+    """A search query is a forward of the set like a pass's text: 1 to 64 tokens
+    are one shape, (1, 64), and the three callers that encode a query — the bio
+    search, the lyrics search, the track-text search — reach the encoder through
+    the same function, so the host keeps no graph for a length of a query."""
+    import model_cache
+    import search
+    import text_embedder
+    from lyrics_embeddings import LyricsEmbeddingGenerator
+    from text_embeddings import TextEmbeddingGenerator
+    gen = types.SimpleNamespace(model=encoder.model, device="mps", model_name=MODEL)
+    monkeypatch.setattr(model_cache, "get_model", lambda key, factory: gen)
+    shapes = mps_probe.Shapes(encoder.model)
+    rng = random.Random(8)
+    try:
+        before = mps_probe.live_malloc()["mb"]
+        for tokens in range(1, 65):
+            query = mps_probe.text(max(tokens, 3), rng)     # a text is 3 tokens at the least
+            vector = text_embedder.encode_query(encoder.model, query, device="mps", name=MODEL)
+            assert vector.shape == (1024,) and abs(float(np.linalg.norm(vector)) - 1) < 0.01
+        assert set(shapes.seen) == {(1, 64)}
+        search._encode_enrichment_query(mps_probe.text(30, rng))
+        for generator in (LyricsEmbeddingGenerator, TextEmbeddingGenerator):
+            g = generator(device="mps")
+            g.model = encoder.model
+            g.query_to_embedding(mps_probe.text(40, rng))
+        assert set(shapes.seen) == {(1, 64)}
+        assert mps_probe.live_malloc()["mb"] - before <= 12 + 20       # that shape's graphs, if new
+    finally:
+        shapes.remove()
+        text_embedder._end_pass()
 
 
 def test_the_vectors_are_the_cpus_to_within_bf16(encoder, monkeypatch):
@@ -170,6 +241,28 @@ def test_the_vectors_are_the_cpus_to_within_bf16(encoder, monkeypatch):
             cpu.release()
 
 
+def test_padding_to_a_rung_changes_the_vectors_by_no_more_than_bf16(encoder):
+    """The attention mask makes the padded tokens count for nothing, so a text
+    padded up to its rung is the text alone: the same encoder's vectors for the
+    exact length, a text a forward, differ by the noise of a bf16 matmul over
+    another shape — 1 for the short, 0.9993 at the longest of these, where MPS
+    itself is 0.9992 from the CPU's fp32."""
+    import text_embedder
+    limit = mps_probe.single_text_limit(encoder.model)
+    rng = random.Random(12)
+    lengths = [n for n in (3, 14, 25, 63, 64, 65, 120, 256, 257, 400, 700, 1100, 1500, 1730) if n <= limit]
+    texts = [mps_probe.text(n, rng) for n in lengths]
+    exact = np.concatenate([encoder.model.encode([t], batch_size=1, normalize_embeddings=True,
+                                                 show_progress_bar=False) for t in texts])
+    padded, left_out = text_embedder.encode(encoder.model, texts, batch_size=16, device="mps", name=MODEL)
+    assert left_out == set()
+    got = np.stack(padded)
+    cosine = (got * exact).sum(1) / (np.linalg.norm(got, axis=1) * np.linalg.norm(exact, axis=1))
+    assert cosine.min() >= 0.998, dict(zip(lengths, cosine))
+    assert cosine.mean() >= 0.9995, cosine.mean()
+    text_embedder._end_pass()
+
+
 @pytest.fixture(scope="module")
 def instruments():
     """AST and PaSST as the analysis run loads them."""
@@ -185,13 +278,18 @@ def instruments():
     tagger.unload()
 
 
-def test_ast_keeps_nothing_per_batch_size(instruments):
+def test_ast_keeps_nothing_per_batch_size_on_the_metal_side_and_little_on_the_host(instruments):
     """tag_full_track's batches are 12 windows and a tail of 1 to 11: SDPA
     kept 0.14 GB a window for each size (1.7 GB for the 12; 11 GB over the
-    twelve, added up)."""
+    twelve, added up). The twelve sizes are all there are — a closed set
+    already, not worth a ladder: ~3 MB of graphs on the host each (37 MB for AST,
+    56 for PaSST, measured), where padding the tail up to {1, 2, 4, 8, 12}
+    would save a few tens of MB and spend windows of a forward of 0.1 to 1.1 s."""
     assert instruments.ast.config._attn_implementation == "eager"
     rng = np.random.default_rng(0)
     base = mps_probe.floor()
+    instruments._ast_probs([rng.standard_normal(16000 * 10).astype(np.float32) * 0.05])
+    host = mps_probe.live_malloc()["mb"]
     floors = []
     for windows in range(1, 13):
         instruments._ast_probs([rng.standard_normal(16000 * 10).astype(np.float32) * 0.05
@@ -199,6 +297,7 @@ def test_ast_keeps_nothing_per_batch_size(instruments):
         floors.append(mps_probe.floor() - base)
         assert floors[-1] <= GIB, f"{floors[-1] / GIB:.2f} GiB kept after batches of 1 to {windows}"
     assert floors[-1] - floors[0] <= 64 * MIB, (floors[-1] - floors[0]) / MIB
+    assert mps_probe.live_malloc()["mb"] - host <= 100
 
 
 def test_ast_scores_are_the_cpus_to_within_bf16(instruments):

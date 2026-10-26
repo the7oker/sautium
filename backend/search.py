@@ -401,7 +401,8 @@ def _encode_enrichment_query(query_text: str) -> "np.ndarray":
         return gen
 
     gen = model_cache.get_model("enrichment", _load_enrichment)
-    return gen.model.encode(query_text, normalize_embeddings=True)
+    from text_embedder import encode_query
+    return encode_query(gen.model, query_text, device=gen.device, name=gen.model_name)
 
 
 def _to_vector_param(vector) -> str:

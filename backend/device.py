@@ -71,11 +71,15 @@ def attn_implementation(device: str) -> Optional[str]:
     memory, refuses every allocation past 30.19 GiB on a 24 GB Mac (measured
     2026-10-26, torch 2.12: 8.0 bytes a score on every shape; the refusal
     reproduced at a lowered limit). Eager attention builds the scores as
-    PyTorch tensors, which come back with empty_cache; what it still caches
-    per shape, small per-op graphs, is ~50 KB, and the shapes are finite: the
-    text encoder's are those its share admits, AST's the batch sizes up to 12.
-    It is no slower there (a forward 21-25 % faster). CUDA's and the CPU's
-    SDPA stream (flash, memory-efficient kernels) and keep nothing per shape.
+    PyTorch tensors, which come back with empty_cache. Every attention still
+    leaves a graph per shape on the host heap — 4 to 7 MB and ~60,000
+    allocations for the text encoder, SDPA's more — which nothing gives back
+    (a node, 2026-10-26: 1,746 shapes, ~10.8 GB, in 28 passes), so the
+    shapes must be finite: the text encoder's are a closed set
+    (text_embedder._LENGTH_RUNGS), AST's and PaSST's the batch sizes up to 12
+    (37 and 56 MB for all twelve, measured). Eager is no slower than SDPA
+    there (a forward 21-25 % faster). CUDA's and the CPU's SDPA stream
+    (flash, memory-efficient kernels) and keep nothing per shape.
     CLAP's attention is eager already at transformers 4.57, and PaSST's is its
     own."""
     return "eager" if device == "mps" else None
@@ -117,9 +121,9 @@ def empty_cache(device: Optional[str] = None) -> None:
     seams on MPS; how much of that was this pool, and how much the SDPA graphs
     below, was not separated). Call at batch seams. Model weights stay
     resident — only the free cache is released, and on MPS only PyTorch's own:
-    what the MPS graphs of past SDPA attention shapes hold is not in that pool
-    (see attn_implementation). No-op on CPU; `device` defaults to the detected
-    accelerator."""
+    what the MPS graphs of past shapes hold, on the Metal side or the host's,
+    is not in that pool (see attn_implementation). No-op on CPU; `device`
+    defaults to the detected accelerator."""
     dev = device or get_device()
     if dev == "cuda":
         torch.cuda.empty_cache()

@@ -12,14 +12,18 @@ VRAM with each enrichment trigger.
 On MPS the model loads with eager attention (device.attn_implementation), and
 a pass also takes a copy of the model on the CPU for the texts whose attention
 the device should not materialize or that it refuses (encode), and gives it
-back at the pass's end (device.at_pass_end).
+back at the pass's end (device.at_pass_end). Every forward there runs a shape
+of a closed set — a rung of lengths, a power of two of texts (_LENGTH_RUNGS),
+and every caller, the search queries too, goes through encode.
 """
 
 import gc
 import logging
+import math
 import threading
 import weakref
-from typing import List, Optional, Set, Tuple
+from bisect import bisect_left
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -120,29 +124,46 @@ _MATERIALIZES_ATTENTION = {"mps"}
 _ATTENTION_SHARE = 1 / 8        # of the device's working set, for one forward
 _BYTES_PER_SCORE = 40
 
+# MPS also keeps, for every (batch, length) a forward has had, the graphs of its
+# ops on the HOST heap: 4 to 7 MB and some 60,000 allocations a shape for this
+# encoder (torch 2.12, measured 2026-10-26), none of it ever given back — torch
+# has no way to evict that cache, and empty_cache does not touch it. A forward
+# padded to its own longest text is a new shape at nearly every turn: 1,746
+# shapes, ~10.8 GB, in 28 passes of a node. So a forward on MPS has only a shape
+# of a closed set: its length a rung of this list (a text is padded up to the
+# first rung at or above its own, and the attention mask leaves its vector as it
+# was, to bf16), its batch a power of two. The list ends at the longest text the
+# share admits alone, which the machine decides (_rungs): at most 39 shapes on a
+# 24 GB Mac, ~0.3 GB for good. A rung's texts are of one length, where a forward
+# used to pack a short text after a long one, so a pass is no slower for it: 10 %
+# faster, 55 s against 61 s a pass of 500 bios. Steps of 128 tokens were no
+# faster, and of 192 or in nine rungs 8 to 19 % slower (measured).
+_LENGTH_RUNGS = (64, 128, 256, 416, 576, 736, 896, 1056, 1216, 1376, 1536, 1696, 1856)
+
 
 def encode(model, texts: List[str], *, batch_size: int, device: str,
            name: str) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
     """`texts` embedded and normalized, as every pass of the text encoder
     asks, and the indices of the texts left out (None in their place). On a
     device that materializes its attention (MPS), the texts go in forwards
-    within its share and each forward's cache is given back, and to `name` on
-    the CPU go a text over the share alone, a text the device cannot take
-    alone, and every text after it refused a text of a few tokens. Out of
-    memory, a forward's texts go one at a time (_encode_on)."""
+    of the closed set of shapes (_LENGTH_RUNGS) within its share and each
+    forward's cache is given back, and to `name` on the CPU go a text over the
+    share alone, a text the device cannot take alone, and every text after it
+    refused a text of a few tokens. Out of memory, a forward's texts go one at
+    a time (_encode_on)."""
     from device import empty_cache
     if device not in _MATERIALIZES_ATTENTION:
         return _encode_on(model, texts, batch_size, device)
     out: List[Optional[np.ndarray]] = [None] * len(texts)
     forwards, cpu = _forwards(model, texts, batch_size)
-    for n, group in enumerate(forwards):
+    for n, (rung, group) in enumerate(forwards):
         try:
-            vectors, left = _encode_on(model, [texts[i] for i in group], len(group), device)
+            vectors, left = _encode_on(model, [texts[i] for i in group], len(group), device, rung)
         except OutOfMemory as e:
             # its words: a log handler that keeps its records would keep the
             # error, and through its frames the CPU copy this call loads below
             _refused(device, str(e))
-            cpu += [i for later in forwards[n:] for i in later]
+            cpu += [i for _, later in forwards[n:] for i in later]
             break
         # The forward's scores are in PyTorch's cache now, none in use: across
         # forwards of different sizes that cache grew to 12 GiB inside one pass
@@ -169,6 +190,16 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
     return out, left_out
 
 
+def encode_query(model, text: str, *, device: str, name: str) -> np.ndarray:
+    """A search query's normalized vector, through the forwards of a pass's
+    texts: on MPS a query is a shape of the closed set like any other, not one
+    more for the host to keep until the process ends."""
+    vectors, left_out = encode(model, [text], batch_size=1, device=device, name=name)
+    if left_out:
+        raise OutOfMemory(f"a query of {len(text)} characters does not fit on {device} alone")
+    return vectors[0]
+
+
 # The devices whose refusal was said, until a pass encodes on them without
 # one: a device that stays full refuses every pass, and one line says so
 _refusing: set = set()
@@ -185,10 +216,20 @@ def _refused(device: str, why: str) -> None:
                        "is encoded on the CPU", device, why)
 
 
-def _forwards(model, texts: List[str], batch_size: int) -> Tuple[List[List[int]], List[int]]:
-    """The texts' forwards on a device that materializes its attention — groups
-    of indices, the longest first, each padded to its first text's length and
-    within the share — and the texts whose attention alone exceeds it."""
+def _rungs(share: float) -> Tuple[int, ...]:
+    """The lengths a forward may have on this machine: the list, cut where the
+    share ends it — its last rung is the longest text the share admits alone."""
+    top = math.isqrt(int(share))
+    return tuple(r for r in _LENGTH_RUNGS if r < top) + (top,)
+
+
+def _forwards(model, texts: List[str],
+              batch_size: int) -> Tuple[List[Tuple[int, List[int]]], List[int]]:
+    """The texts' forwards on a device that materializes its attention —
+    (rung, indices), the longest rung first: the texts of a rung in forwards of
+    a power of two of them, as many as the batch size and the share allow, a
+    remainder split (11 = 8 + 2 + 1) so that no forward needs a row of nothing —
+    and the texts whose attention alone exceeds the share."""
     from device import available_accel_memory_gb
     # Tokenized as sentence-transformers does it: a call with other settings
     # would change the tokenizer's, which another thread's search may be
@@ -197,30 +238,42 @@ def _forwards(model, texts: List[str], batch_size: int) -> Tuple[List[List[int]]
     heads = model[0].auto_model.config.num_attention_heads
     # a forward's texts times its padded length squared
     share = available_accel_memory_gb() * 1e9 * _ATTENTION_SHARE / (_BYTES_PER_SCORE * heads)
-    forwards: List[List[int]] = []
+    rungs = _rungs(share)
+    by_rung: Dict[int, List[int]] = {}
     too_long: List[int] = []
     for i in sorted(range(len(texts)), key=lambda i: -lengths[i]):
-        if lengths[i] ** 2 > share:
+        if lengths[i] > rungs[-1]:
             too_long.append(i)
-        elif (forwards and len(forwards[-1]) < batch_size
-              and (len(forwards[-1]) + 1) * lengths[forwards[-1][0]] ** 2 <= share):
-            forwards[-1].append(i)
         else:
-            forwards.append([i])
+            by_rung.setdefault(rungs[bisect_left(rungs, lengths[i])], []).append(i)
+    forwards: List[Tuple[int, List[int]]] = []
+    for rung in sorted(by_rung, reverse=True):
+        left = by_rung[rung]
+        cap = _power_of_two_within(min(batch_size, int(share // rung ** 2)))
+        while left:
+            size = min(cap, _power_of_two_within(len(left)))
+            forwards.append((rung, left[:size]))
+            left = left[size:]
     return forwards, too_long
 
 
-def _encode_on(model, texts: List[str], batch_size: int,
-               device: str) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
-    """`texts` on `model`, which runs on `device`. Out of device memory, the
-    device's cache is freed and the texts go one at a time: one that does not
-    fit alone is left out — too long for what the device has free; its row
-    fails, the rest are written — unless a text of a few tokens does not fit
-    either: a full device, OutOfMemory, which every later batch would meet the
-    same (one error line each, 314 in one pass on 2026-10-18, which then said
-    it was done)."""
+def _power_of_two_within(n: int) -> int:
+    return 1 << (n.bit_length() - 1)
+
+
+def _encode_on(model, texts: List[str], batch_size: int, device: str,
+               rung: Optional[int] = None) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
+    """`texts` on `model`, which runs on `device`, padded to `rung` tokens when
+    it is given (the closed set of MPS: every try below, the text of a few
+    tokens too, is a shape of it). Out of device memory, the device's cache is
+    freed and the texts go one at a time: one that does not fit alone is left
+    out — too long for what the device has free; its row fails, the rest are
+    written — unless a text of a few tokens does not fit either: a full
+    device, OutOfMemory, which every later batch would meet the same (one
+    error line each, 314 in one pass on 2026-10-18, which then said it was
+    done)."""
     from device import empty_cache
-    vectors, full = _encoded(model, texts, batch_size)
+    vectors, full = _encoded(model, texts, batch_size, rung)
     if full is None:
         return list(vectors), set()
     empty_cache(device)
@@ -232,14 +285,15 @@ def _encode_on(model, texts: List[str], batch_size: int,
             "a time", device, batch_size)
     out: List[Optional[np.ndarray]] = [None] * len(texts)
     left_out: Set[int] = set()
+    canary_rung = None if rung is None else min(_LENGTH_RUNGS[0], rung)     # the smallest rung
     for i, text in enumerate(texts):
         if len(texts) > 1:          # a batch of one was its text alone
-            one, _ = _encoded(model, [text], 1)
+            one, _ = _encoded(model, [text], 1, rung)
             if one is not None:
                 out[i] = one[0]
                 continue
             empty_cache(device)
-        _, full = _encoded(model, [_CANARY], 1)
+        _, full = _encoded(model, [_CANARY], 1, canary_rung)
         if full is not None:
             empty_cache(device)
             raise OutOfMemory(f"out of memory on {device}: {full}")
@@ -248,12 +302,15 @@ def _encode_on(model, texts: List[str], batch_size: int,
     return out, left_out
 
 
-def _encoded(model, texts: List[str], batch_size: int) -> Tuple[Optional[np.ndarray], Optional[str]]:
+def _encoded(model, texts: List[str], batch_size: int,
+             rung: Optional[int] = None) -> Tuple[Optional[np.ndarray], Optional[str]]:
     """(the vectors, None), or (None, why) when the device ran out of memory.
     Only the message is kept: the exception's traceback holds the tensors the
     try allocated, which the retry needs freed."""
     from device import out_of_memory
     try:
+        if rung is not None:
+            return _padded(model, texts, rung), None
         return model.encode(texts, batch_size=batch_size, show_progress_bar=False,
                             normalize_embeddings=True), None
     except Exception as e:
@@ -261,6 +318,28 @@ def _encoded(model, texts: List[str], batch_size: int) -> Tuple[Optional[np.ndar
         if said is None:
             raise
         return None, said
+
+
+def _padded(model, texts: List[str], rung: int) -> np.ndarray:
+    """`texts` in ONE forward of len(texts) x `rung` tokens: what
+    sentence-transformers' encode does for a batch, with the batch padded to
+    the rung after the tokenizer. The tokenizer keeps its default settings
+    for every call of every thread — a pass's and a search's meet on this one,
+    and a per-call padding length would change it under the other."""
+    import torch
+    import torch.nn.functional as F
+    with torch.inference_mode():
+        features = model.preprocess(texts)
+        pad = rung - features["input_ids"].shape[1]
+        if pad < 0:         # cropped, not refused, by pad(): the vectors would be of fewer tokens
+            raise ValueError(f"a text of {features['input_ids'].shape[1]} tokens is over its rung, {rung}")
+        padding = {"input_ids": model.tokenizer.pad_token_id}
+        features = {k: F.pad(v, (0, pad), value=padding.get(k, 0)) if torch.is_tensor(v) and v.dim() == 2
+                    else v for k, v in features.items()}
+        features = {k: v.to(model.device) if torch.is_tensor(v) else v for k, v in features.items()}
+        model.eval()
+        vectors = F.normalize(model(features)["sentence_embedding"], p=2, dim=1)
+        return vectors.cpu().float().numpy()
 
 
 # The devices whose fall-back to one text at a time was said: once a process,

@@ -12,6 +12,8 @@ import json
 import math
 import os
 import random
+import re
+import subprocess
 import sys
 import weakref
 from pathlib import Path
@@ -62,6 +64,35 @@ def floor() -> int:
     torch.mps.empty_cache()
     torch.mps.synchronize()
     return torch.mps.driver_allocated_memory() - torch.mps.current_allocated_memory()
+
+
+def live_malloc() -> dict:
+    """What this process holds in malloc, live: the default zone's allocations
+    and bytes (vmmap --summary, ~2 s; macOS). It is the host side of what MPS
+    keeps per shape — the graphs of a forward's ops, 4 to 7 MB and some 60,000
+    allocations a shape, never given back — whatever the kernel does with the
+    pages: footprint's Malloc Small follows those, and a graph can land on pages
+    a pass left free."""
+    done = subprocess.run(["vmmap", "--summary", str(os.getpid())], capture_output=True, text=True)
+    found = re.search(r"^DefaultMallocZone\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+)\s+([\d.]+)([KMG])",
+                      done.stdout, re.M)
+    scale = {"K": 1 / 1024, "M": 1.0, "G": 1024.0}[found.group(3)]
+    return {"count": int(found.group(1)), "mb": float(found.group(2)) * scale}
+
+
+class Shapes:
+    """The (rows, tokens) of every forward of a sentence-transformers model,
+    through a hook on its Transformer module (sentence-transformers 5.5 calls
+    that module's forward directly, so a hook on the Hugging Face model under
+    it never fires)."""
+
+    def __init__(self, model):
+        self.seen = []
+        self._hook = model[0].register_forward_pre_hook(
+            lambda module, args: self.seen.append(tuple(args[0]["input_ids"].shape)))
+
+    def remove(self) -> None:
+        self._hook.remove()
 
 
 def cached(repo: str, filename: str = "config.json") -> bool:
@@ -151,11 +182,12 @@ def refusal() -> dict:
     rng = random.Random(0)
     left = 0
     seen = set()
-    model[0].register_forward_pre_hook(lambda module, args: seen.add(tuple(args[0]["input_ids"].shape)))
+    shapes = Shapes(model)
     for _ in range(12):             # a call of the pass: 16 chunks, 49 tokens up
         texts = [text(min(longest, max(49, int(rng.lognormvariate(math.log(470), 0.8)))), rng)
                  for _ in range(16)]
         left += len(text_embedder.encode(model, texts, batch_size=16, device="mps", name=MODEL)[1])
+    seen = set(shapes.seen)
     return {"limit_in_force": in_force, "attention": model[0].auto_model.config._attn_implementation,
             "shapes": len(seen), "refusals": len(refused), "cpu_copies": len(copies),
             "left_out": left, "floor_gib": round(floor() / GIB, 2)}

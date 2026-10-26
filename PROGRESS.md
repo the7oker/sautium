@@ -270,8 +270,9 @@ implementation details live in the code, DB and git history.
   row as tried: each pass selects what is still unembedded, so what a
   stopped pass left comes back at the next one, and a stopped pass holds
   `failed`, which `_wants_more` reads as waiting out the interval.
-- **MPS keeps 8 bytes a score for every attention shape it has run; one
-  heavy pass at a time (2026-10-25, the cause corrected 2026-10-26).** On a
+- **MPS keeps something for every shape it has run — 8 bytes a score on the
+  Metal side, ~7 MB of graphs on the host; one heavy pass at a time, and a
+  closed set of shapes (2026-10-25; the host side 2026-10-26).** On a
   24 GB Mac a fresh backend's first background bio pass took 32 GiB of Metal
   memory in 47 s, and from then on the process could allocate nothing on
   MPS: the passes stopped every half hour, and anything else on the device
@@ -295,12 +296,12 @@ implementation details live in the code, DB and git history.
   shape every forward must not run SDPA. Now the text encoder and AST load
   with eager attention there (`device.attn_implementation`): its scores are
   PyTorch tensors, which come back with `empty_cache`; the small per-op
-  graphs it still caches are ~50 KB a shape (measured over 800), at most
-  about 0.7 GB over the ~13k shapes that batches of 16 and the share admit
-  on a 24 GB Mac (an estimate). A forward is faster, and the encoder gives
-  PyTorch's cache back after each forward. A forward's texts still fit 1/8
-  of the working set (at ~40 bytes a score: a larger share made a pass
-  slower), and a text over it alone, or one MPS refuses, goes to a CPU copy
+  graphs it still caches on the Metal side are ~50 KB a shape (measured over
+  800), and that was the Metal side only: see the last paragraph. A forward
+  is faster, and the encoder gives PyTorch's cache back after each forward.
+  A forward's texts still fit 1/8 of the working set (at ~40 bytes a
+  score: a larger share made a pass slower), and a text over it alone, or
+  one MPS refuses, goes to a CPU copy
   of the encoder, loaded for the pass (under the factory lock every load of
   the process takes) and given back at its end (parted from its model card,
   which refers back to it, or nothing frees it until a full collection); a
@@ -310,7 +311,37 @@ implementation details live in the code, DB and git history.
   their batch seams; the background text half, which gives way and is woken
   when the accelerator is idle; a stream's analysis and lyrics, which wait
   rather than drop (a demo-limited provider streams a track in full once).
-  The node's stop closes the lane.
+  The node's stop closes the lane. **The host side (a node's passes read
+  over an hour, 2026-10-26).** Every attention, eager's and SDPA's alike, also leaves the
+  graphs of the ops of each shape on the HOST heap — 4 to 7 MB and some
+  60,000 allocations a shape for the text encoder (8.7 MB under SDPA), none
+  of it returned by `empty_cache`, unloading or time, and torch 2.12 has no
+  call to evict it. The Metal side's 51 KB had been measured with the
+  driver's counter, which does not see the host; the gate ran one pass,
+  where a cumulative cache is a few hundred MB among the rest. A node
+  drained 13.4k bios in 28 passes: 2,827 forwards were 1,746 distinct
+  shapes, 10.8 GB of `Malloc Small`, 17 GB for the backend, 99 % of it in
+  swap, and the growth of a pass followed its NEW shapes (r = 0.97), not its
+  forwards. A forward padded to its own longest text is a new shape at
+  nearly every turn, so the text encoder on MPS now runs only shapes of a
+  closed set (`_LENGTH_RUNGS`): the length of a text padded up to the first
+  of 64, 128, 256 and then steps of 160 tokens up to what the share admits
+  alone, the texts of a rung in forwards of a power of two (a remainder
+  split, 11 = 8 + 2 + 1, no padded row), and every caller goes through
+  `text_embedder.encode` — the search queries too (`encode_query`). At most
+  39 shapes on a 24 GB Mac, ~0.3 GB for good, and a pass 10 % FASTER than
+  before (55 s against 61 s for 500 bios): a rung's texts are of one length,
+  where a forward used to pack a short text after a long one. The padding is
+  done after the tokenizer, which keeps its default settings for every
+  thread (a per-call padding length would change it under a search running
+  beside the pass). The vectors are the unpadded ones to bf16 (cosine 1.0
+  for the short texts, 0.9993 at 1,700 tokens, where MPS is 0.9992 from the
+  CPU's fp32). AST's and PaSST's batch sizes are a closed set already (1 to
+  12: 37 and 56 MB on the host for all of them), and not worth a ladder. The
+  lesson: a cache keyed by shape that nothing evicts is a leak by another
+  name, wherever the framework keeps it — bound the shapes you hand it, and
+  read the host's memory (live malloc, not the driver's counter) over many
+  passes, not one.
 - **A failed Last.fm fetch means one of three things (2026-09-22).** The
   source's verdict about the entity (a `WSError` that reaches the caller:
   not found, or another per-entity refusal) is cached in

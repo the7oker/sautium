@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 BACKEND = Path(__file__).resolve().parent.parent / "backend"
 if str(BACKEND) not in sys.path:
@@ -56,32 +57,65 @@ class Encoder:
         self.calls.append((len(texts), batch_size))
         if self.full(texts, batch_size):
             raise RuntimeError(FULL)
-        return np.stack([np.full(1024, _mark(t), dtype=np.float32) for t in texts])
+        return np.stack([_vector(_mark(t)) for t in texts])
+
+
+PAD = 1
 
 
 class Tokenized(Encoder):
-    """The encoder as a device that materializes its attention sees it: it tokenizes
-    a word a token and two for the ends — only as sentence-transformers'
-    encode does (no tokenizer of its own to call otherwise) — it has 16 heads,
-    and it says each forward's texts and padded length."""
+    """The encoder as a device that materializes its attention sees it: it
+    tokenizes a word a token and two for the ends — as sentence-transformers'
+    preprocess does — it has 16 heads, and a forward on it (a call of the model
+    with the features, as the closed set of shapes makes it) says its texts and
+    its padded length, and fails if a text is not whole in it: the mask of a
+    row must count the tokens of its text."""
 
     def __init__(self, full=lambda texts, batch_size: False):
         super().__init__(full)
         self.forwards = []
+        self.tokenizer = types.SimpleNamespace(pad_token_id=PAD)
+        self.device = "cpu"
+        self._texts = []
 
-    @staticmethod
-    def preprocess(texts):
+    def preprocess(self, texts):
+        self._texts = list(texts)
         longest = max(map(_tokens, texts), default=0)
-        return {"attention_mask": np.array([[1] * _tokens(t) + [0] * (longest - _tokens(t))
-                                            for t in texts]).reshape(len(texts), longest)}
+        ids = torch.full((len(texts), longest), PAD)
+        mask = torch.zeros(len(texts), longest, dtype=torch.long)
+        for row, text in enumerate(texts):
+            mask[row, :_tokens(text)] = 1
+            ids[row, :_tokens(text)] = zlib.crc32(text.encode()) % 1000 + 2      # its mark, not PAD
+        return {"input_ids": ids, "attention_mask": mask}
+
+    def eval(self):
+        return self
 
     def __getitem__(self, i):
         return types.SimpleNamespace(auto_model=types.SimpleNamespace(
             config=types.SimpleNamespace(num_attention_heads=16)))
 
+    def __call__(self, features):
+        rows, length = features["input_ids"].shape
+        self.forwards.append((rows, length))
+        assert features["attention_mask"].sum(1).tolist() == [_tokens(t) for t in self._texts], \
+            "a text was cropped or lost its mask"
+        if self.full(self._texts, rows):
+            raise RuntimeError(FULL)
+        marks = (features["input_ids"][:, 0].double() - 1) / 1000
+        return {"sentence_embedding": torch.stack([torch.from_numpy(_vector(float(m)))
+                                                   for m in marks])}
+
     def encode(self, texts, batch_size, show_progress_bar, normalize_embeddings):
         self.forwards.append((len(texts), max(_tokens(t) for t in texts)))
         return super().encode(texts, batch_size, show_progress_bar, normalize_embeddings)
+
+
+def _vector(mark: float) -> np.ndarray:
+    """A unit vector whose first component is `mark`: normalized, it stays."""
+    v = np.zeros(1024, dtype=np.float32)
+    v[0], v[1] = mark, (1 - mark ** 2) ** 0.5
+    return v
 
 
 def _tokens(text: str) -> int:
@@ -431,9 +465,10 @@ def test_on_mps_a_forward_takes_no_more_attention_than_its_share(cpu_copy):
     texts = ([_words(50, i) for i in range(5)] + [_words(100)] + [_words(20, i) for i in range(6)]
              + [_words(101)])
     vectors, left_out = text_embedder.encode(mps, texts, batch_size=4, device="mps", name=NAME)
-    # the longest first, each forward's texts times its padded length squared within 10,000:
-    # 1 × 100², 4 × 50², 50² with three of 20, the three of 20 left
-    assert mps.forwards == [(1, 100), (4, 50), (4, 50), (3, 20)]
+    # the rungs of this share are 64 and 100 (_rungs), the longest first, each forward's texts
+    # times its rung squared within 10,000: 1 × 100², then the eleven of 64 or less, two at a time
+    # (2 × 64² = 8,192) with the one left over alone
+    assert mps.forwards == [(1, 100)] + [(2, 64)] * 5 + [(1, 64)]
     # the one over the share alone went to the CPU
     assert cpu_copy.forwards == [(1, 101)] and cpu_copy.loads == [(NAME, "cpu", True)]
     assert left_out == set()
@@ -672,6 +707,10 @@ def test_on_mps_the_cache_is_given_back_where_each_forward_ends_and_only_there(c
     monkeypatch.setattr(device, "empty_cache", lambda dev=None: events.append(("freed", dev)))
 
     class Logged(Tokenized):
+        def __call__(self, features):
+            events.append(("forward", *features["input_ids"].shape))
+            return super().__call__(features)
+
         def encode(self, texts, **kw):
             events.append(("forward", len(texts), max(_tokens(t) for t in texts)))
             return super().encode(texts, **kw)
@@ -681,37 +720,71 @@ def test_on_mps_the_cache_is_given_back_where_each_forward_ends_and_only_there(c
     text_embedder.encode(Logged(), texts, batch_size=4, device="mps", name=NAME)
     # the forwards of test_on_mps_a_forward_takes_no_more_attention_than_its_share, each then
     # freed; the one text over the share went to the CPU copy, which frees nothing
-    assert events == [("forward", 1, 100), ("freed", "mps"), ("forward", 4, 50), ("freed", "mps"),
-                      ("forward", 4, 50), ("freed", "mps"), ("forward", 3, 20), ("freed", "mps")]
+    shapes = [(1, 100)] + [(2, 64)] * 5 + [(1, 64)]
+    assert events == [e for shape in shapes for e in (("forward", *shape), ("freed", "mps"))]
     assert cpu_copy.forwards == [(1, 101)]
     events.clear()
     text_embedder.encode(Logged(), [_words(10)], batch_size=4, device="cuda", name=NAME)
     assert events == [("forward", 1, 10)]
 
 
-def test_a_forward_on_mps_is_within_its_share_and_a_text_over_it_alone_is_not_taken(monkeypatch):
+def _reachable(share: float, batch_size: int) -> set:
+    """Every shape a forward may have at this share: a rung of its ladder, a
+    power of two of texts the batch size and the share allow of it."""
+    import text_embedder
+    return {(rows, rung) for rung in text_embedder._rungs(share)
+            for rows in (1, 2, 4, 8, 16, 32) if rows <= batch_size and rows * rung ** 2 <= share}
+
+
+def test_a_forward_on_mps_is_a_shape_of_the_closed_set_within_its_share(monkeypatch):
     """Whatever the lengths, the batch size and the number of texts: every
-    text is in one forward or sent to the CPU, a forward's texts times its
-    padded length squared fit the share (at the cost charged a score), and a
-    text sent to the CPU would not have fit alone."""
+    text is in one forward or sent to the CPU, a forward is a rung of the ladder
+    and a power of two of texts, its texts are whole in the rung, its texts times
+    its rung squared fit the share (at the cost charged a score), and a text sent
+    to the CPU would not have fit alone."""
     import random
     import text_embedder
     monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "1.5")
     share = 1.5e9 * text_embedder._ATTENTION_SHARE
     heads = 16                                      # Tokenized's
+    top = text_embedder._rungs(share / (text_embedder._BYTES_PER_SCORE * heads))[-1]
     rng = random.Random(7)
     for _ in range(40):
         texts = [_words(rng.randint(3, 600), i) for i in range(rng.randint(1, 40))]
         batch_size = rng.choice([1, 4, 16])
         forwards, too_long = text_embedder._forwards(Tokenized(), texts, batch_size)
         tokens = [_tokens(t) for t in texts]
-        assert sorted([i for group in forwards for i in group] + too_long) == list(range(len(texts)))
-        for group in forwards:
-            padded = max(tokens[i] for i in group)
-            assert len(group) <= batch_size
-            assert len(group) * heads * padded ** 2 * text_embedder._BYTES_PER_SCORE <= share
+        assert sorted([i for _, group in forwards for i in group] + too_long) == list(range(len(texts)))
+        ladder = text_embedder._rungs(share / (text_embedder._BYTES_PER_SCORE * heads))
+        for rung, group in forwards:
+            assert rung in ladder
+            assert len(group) <= batch_size and len(group) & (len(group) - 1) == 0
+            assert all(tokens[i] <= rung for i in group)
+            assert all(tokens[i] > ladder[ladder.index(rung) - 1] for i in group if rung != ladder[0])
+            assert len(group) * heads * rung ** 2 * text_embedder._BYTES_PER_SCORE <= share
         for i in too_long:
+            assert tokens[i] > top
             assert heads * tokens[i] ** 2 * text_embedder._BYTES_PER_SCORE > share
+
+
+def test_the_shapes_of_a_process_are_a_closed_set_whatever_the_lengths(monkeypatch):
+    """The point of the ladder: forwards of any number of calls of any lengths
+    make no shape outside the few a machine's share and batch size admit —
+    each one is a graph MPS keeps on the host until the process ends."""
+    import random
+    import text_embedder
+    monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "6")
+    share = 6e9 * text_embedder._ATTENTION_SHARE / (text_embedder._BYTES_PER_SCORE * 16)
+    rng = random.Random(11)
+    seen = set()
+    for _ in range(300):
+        texts = [_words(rng.randint(3, 1500), i) for i in range(rng.randint(1, 20))]
+        forwards, _ = text_embedder._forwards(Tokenized(), texts, 16)
+        seen |= {(len(group), rung) for rung, group in forwards}
+    reachable = _reachable(share, 16)
+    assert seen <= reachable, sorted(seen - reachable)
+    assert len(reachable) <= 8 * len(text_embedder._rungs(share))
+    assert len(seen) >= len(reachable) // 2        # the test did meet the set, not a corner of it
 
 
 def test_the_share_is_mpss_whatever_attention_it_is_loaded_with(cpu_copy, monkeypatch):
@@ -724,7 +797,94 @@ def test_the_share_is_mpss_whatever_attention_it_is_loaded_with(cpu_copy, monkey
     mps = Tokenized()
     text_embedder.encode(mps, [_words(50, i) for i in range(5)] + [_words(100)], batch_size=4,
                          device="mps", name=NAME)
-    assert mps.forwards == [(1, 100), (4, 50), (1, 50)]
+    assert mps.forwards == [(1, 100), (2, 64), (2, 64), (1, 64)]
+
+
+def test_a_query_on_mps_is_a_forward_of_the_closed_set_like_a_pass_texts(cpu_copy):
+    """A search query makes no shape of its own: one text, in the rung of its
+    length — the first, 64 tokens, for every query up to it."""
+    import text_embedder
+    mps = Tokenized()
+    for n in (3, 10, 40, 64, 70, 99):
+        vector = text_embedder.encode_query(mps, _words(n), device="mps", name=NAME)
+        assert vector.shape == (1024,) and float(vector[0]) == pytest.approx(_mark(_words(n)))
+    # this share's rungs are 64 and 100
+    assert mps.forwards == [(1, 64)] * 4 + [(1, 100)] * 2
+    # one over the share alone is the CPU's, and one nothing takes is no vector
+    assert float(text_embedder.encode_query(mps, _words(150), device="mps", name=NAME)[0]) == \
+        pytest.approx(_mark(_words(150)))
+    assert cpu_copy.forwards == [(1, 150)]
+    cpu_copy.full = lambda texts, batch_size: any(LONG in t for t in texts)
+    with pytest.raises(text_embedder.OutOfMemory):
+        text_embedder.encode_query(mps, _words(150) + " " + LONG, device="mps", name=NAME)
+
+
+def test_the_search_queries_go_through_the_closed_set(cpu_copy, monkeypatch):
+    """Discovery's bio and lyrics queries and the track-text query meet the
+    encoder the passes meet, in the same forwards."""
+    import model_cache
+    import search
+    from lyrics_embeddings import LyricsEmbeddingGenerator
+    from text_embeddings import TextEmbeddingGenerator
+    model = Tokenized()
+    monkeypatch.setattr(model_cache, "get_model", lambda key, factory: types.SimpleNamespace(
+        model=model, device="mps", model_name=NAME))
+    assert float(search._encode_enrichment_query(_words(10))[0]) == pytest.approx(_mark(_words(10)))
+    for generator in (LyricsEmbeddingGenerator, TextEmbeddingGenerator):
+        gen = generator(device="mps")
+        gen.model = model
+        assert float(gen.query_to_embedding(_words(20))[0]) == pytest.approx(_mark(_words(20)))
+    assert model.forwards == [(1, 64)] * 3
+
+
+def test_the_fall_back_to_one_text_at_a_time_stays_on_the_closed_set(cpu_copy):
+    """Out of memory, a forward's texts go one at a time, and a text of a few
+    tokens tells a full device from a text too long for it: all are shapes of
+    the set (this share's rungs are 64 and 100)."""
+    import text_embedder
+    texts = [_words(30, i) for i in range(4)] + [_words(90, 9)]
+    crowded = Tokenized(lambda texts, batch_size: len(texts) > 1)
+    vectors, left_out = text_embedder.encode(crowded, texts, batch_size=16, device="mps", name=NAME)
+    assert left_out == set()
+    assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
+    assert crowded.forwards == [(1, 100), (2, 64), (1, 64), (1, 64), (2, 64), (1, 64), (1, 64)]
+    texts = ["A short one.", " ".join([LONG] * 8)]
+    tight = Tokenized(lambda texts, batch_size: any(LONG in t for t in texts))
+    vectors, left_out = text_embedder.encode(tight, texts, batch_size=16, device="mps", name=NAME)
+    assert left_out == set()            # the CPU copy took the one MPS could not
+    # both together, that one alone, the text of a few tokens (the canary), the short one's own
+    assert tight.forwards == [(2, 64), (1, 64), (1, 64), (1, 64)]
+    assert cpu_copy.forwards == [(1, 10)]
+
+
+def test_a_text_over_its_rung_is_refused_and_never_cropped():
+    """torch's pad() with a negative width crops: the vectors would be those of
+    fewer tokens, and nothing would say so."""
+    import text_embedder
+    mps = Tokenized()
+    with pytest.raises(ValueError, match="over its rung"):
+        text_embedder._padded(mps, [_words(50)], 40)
+    assert mps.forwards == []
+
+
+def test_no_module_encodes_with_the_shared_model_off_the_seam():
+    """The closed set holds only while every forward of the text encoder goes
+    through text_embedder.encode: a model.encode of the shared encoder
+    anywhere else runs a shape of its own, and the host keeps a graph of it
+    until the process ends. Three of them did (the search queries)."""
+    import ast
+    offenders = []
+    for root in (BACKEND, BACKEND.parent / "desktop"):
+        for path in sorted(root.rglob("*.py")):
+            if path.name == "text_embedder.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "encode"
+                        and (getattr(node.func.value, "attr", None) == "model"
+                             or getattr(node.func.value, "id", None) == "model")):
+                    offenders.append(f"{path.relative_to(BACKEND.parent)}:{node.lineno}")
+    assert offenders == []
 
 
 def test_the_loaders_kwargs_ask_for_eager_attention_on_mps_alone():
