@@ -25,6 +25,15 @@ def test_the_page_names_no_other_origin():
     assert [u for u in loads if re.match(r"(?:[a-z]+:)?//", u)] == []
 
 
+def test_the_page_gives_no_resource_hint():
+    """A preconnect, a DNS prefetch or speculation rules reach another origin
+    without a word from the Content-Security-Policy, which governs none of
+    them: the page carries none."""
+    hint = re.compile(r"preconnect|dns-prefetch|prerender|modulepreload|speculationrules", re.IGNORECASE)
+    for path in [STATIC / "index.html", *STATIC.glob("*.js")]:
+        assert not hint.search(path.read_text(encoding="utf-8")), path.name
+
+
 def test_every_typeface_the_page_asks_for_is_served_with_its_licence():
     css = (STATIC / "fonts.css").read_text(encoding="utf-8")
     faces = re.findall(r'font-family: "([^"]+)";[^}]*font-weight: (\d+);[^}]*url\(([^)]+)\)', css)

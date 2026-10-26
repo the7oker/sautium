@@ -336,7 +336,11 @@ the node), an API call or event stream by its node path. A new kind of load
 in the same commit, with `tests/test_csp.py`; `scripts/ui-shots.mjs` lists
 what each screen violates in `csp.log`. Inline `on*` handlers and `style`
 attributes are still allowed (`'unsafe-inline'`), and each one more is one
-more to move when that goes: prefer a listener and a class.
+more to move when that goes: prefer a listener and a class. The policy
+governs no resource hint (`preconnect`, `dns-prefetch`), no speculation
+rules and no navigation: the page carries no hint
+(`tests/test_web_page.py`), and a link or `window.open` to another site is
+a person's click.
 
 ### Native dialogs are an anti-pattern
 

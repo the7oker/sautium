@@ -37,7 +37,8 @@ Whitelisted paths (no signature required):
     /api/mb/*            (MusicBrainz slices for peers, like /api/sync/*)
     /sync/*              (legacy P2P sync)
     /api/p2p/chat/wake   (loopback-only "ping" from sync_server)
-    /api/auth/*          (the credential checks themselves — see below)
+    /api/auth/status, /handshake, /login, /pair, /create-account
+                         (the credential checks themselves — see below)
     /api/player/media/*  (<audio> bytes, behind their own signed query)
     /lastfm/auth/callback/*  (Last.fm's redirect back, on its nonce)
     /api/csp-report      (the browser's own Content-Security-Policy reports)

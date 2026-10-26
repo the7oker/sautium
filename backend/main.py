@@ -989,9 +989,8 @@ app = FastAPI(
     docs_url=None, redoc_url=None,
 )
 
-# HMAC signature check on every privileged request. Whitelist for
-# /health, /, /static/*, /api/sync/*, /sync/*, /api/p2p/chat/wake
-# is hardcoded inside the middleware. See backend/auth_hmac.py.
+# HMAC signature check on every privileged request; the unsigned paths are
+# listed in backend/auth_hmac.py.
 app.add_middleware(HMACAuthMiddleware, secret_path=_API_SECRET_PATH)
 
 # Every HTML page the node serves says what it may load (csp.py).

@@ -105,6 +105,18 @@ def test_the_policy_names_the_nodes_origin_alone():
         assert directives[name] == "'none'", name
 
 
+def test_the_policy_allows_what_the_page_needs():
+    """The lower bound: the browser output plays a data: clip and blob: tracks
+    (player.js), and the page carries inline handlers, style attributes and
+    the build stamp — until those go, 'unsafe-inline' stays."""
+    directives = dict(d.split(" ", 1) for d in csp.POLICY.split("; "))
+    assert set(directives["media-src"].split()) == {"'self'", "blob:", "data:"}
+    for name in ("script-src", "style-src"):
+        assert set(directives[name].split()) == {"'self'", "'unsafe-inline'"}, name
+    for name in ("img-src", "font-src", "connect-src"):
+        assert directives[name] == "'self'", name
+
+
 def test_the_report_route_takes_no_signature_and_keeps_the_host_guard(node, caplog):
     caplog.set_level(logging.WARNING, logger="csp")
     assert _post(node, _report()).status_code == 204
