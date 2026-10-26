@@ -150,7 +150,7 @@ class InstrumentEnsembleTagger:
         self.ast_extractor = ASTFeatureExtractor.from_pretrained(self.AST_MODEL_NAME)
         # Eager on MPS: its SDPA keeps 8 bytes a score for every batch size a
         # forward has had (1.7 GB for the 12 windows of tag_full_track) until
-        # the process ends, unloading the model included
+        # the process ends: the graph cache is the process's, not the model's
         self.ast = ASTForAudioClassification.from_pretrained(
             self.AST_MODEL_NAME, torch_dtype=dtype,
             attn_implementation=attn_implementation(self.device),

@@ -283,19 +283,22 @@ implementation details live in the code, DB and git history.
   `empty_cache`, idle time, a "visit" and unloading the model return none
   of it (measured: 8.00 to 8.06 bytes a score on every shape from 4M
   scores up, 0 for a shape run again). A pass pads every forward to its
-  longest text, so nearly every forward is a new shape: 118 shapes were 36
-  GiB, and torch's limit, which counts the whole process's Metal memory,
-  refused every allocation past it. The first reading — eight buffers of
-  3.0 GiB in one forward, kept in MPS's heap cache until a visit — was four
-  forwards' pairs of constants; the cap on a forward's share, which that
-  reading led to, bounded one forward and not a sum over shapes. The
-  lesson: "MPS allocated" is not the process's memory — "other
-  allocations" in torch's message is the frameworks' own — and on MPS a
-  model that meets a new shape every forward must not run SDPA. Now the text
-  encoder and AST load with eager attention there
-  (`device.attn_implementation`): its scores are PyTorch tensors, nothing is
-  kept per shape (~50 KB), a forward is faster, and the encoder gives
-  PyTorch's cache back after each forward. A forward's texts still fit 1/8
+  longest text, so nearly every forward is a new shape: 118 shapes come to
+  36 GiB at that rate, and torch's limit, which counts the whole process's
+  Metal memory, refuses every allocation past 30.19 GiB (reproduced at a
+  lowered limit). The first reading — eight buffers of 3.0 GiB in one
+  forward, kept in MPS's heap cache until a visit — was four forwards' pairs
+  of constants; the cap on a forward's share, which that reading led to,
+  bounded one forward and not a sum over shapes. The lesson: "MPS
+  allocated" is not the process's memory — "other allocations" in torch's
+  message is the frameworks' own — and on MPS a model that meets a new
+  shape every forward must not run SDPA. Now the text encoder and AST load
+  with eager attention there (`device.attn_implementation`): its scores are
+  PyTorch tensors, which come back with `empty_cache`; the small per-op
+  graphs it still caches are ~50 KB a shape (measured over 800), at most
+  about 0.7 GB over the ~13k shapes the share admits on a 24 GB Mac (an
+  estimate). A forward is faster, and the encoder gives PyTorch's cache
+  back after each forward. A forward's texts still fit 1/8
   of the working set (at ~40 bytes a score: a larger share made a pass
   slower), and a text over it alone, or one MPS refuses, goes to a CPU copy
   of the encoder, loaded for the pass (under the factory lock every load of

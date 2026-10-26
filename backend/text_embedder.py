@@ -69,19 +69,19 @@ def _load(model_name: str, device: str, **kwargs):
     dtype = get_model_dtype(device)
     logger.info(f"Loading text embedding model: {model_name} on {device} ({dtype})")
     model = SentenceTransformer(model_name, device=device,
-                                model_kwargs=_model_kwargs(device, dtype) or None, **kwargs)
+                                model_kwargs=_model_kwargs(device, dtype), **kwargs)
     logger.info(f"Text embedding model loaded ({dtype})")
     return model
 
 
 def _model_kwargs(device: str, dtype) -> dict:
-    """The model_kwargs of a load on `device` at `dtype`: the tier dtype where
-    it is a half — loaded directly at it (historically fp32-always on bf16
+    """The model_kwargs of a load on `device` at `dtype`. The tier dtype where
+    it is a half: loaded directly at it (historically fp32-always on bf16
     tiers — +1.1 GB VRAM; then briefly load-fp32-then-convert, which left the
     freed fp32 weights parked in the caching allocator as ~2.3 GB of
-    reserved-but-idle VRAM until an empty_cache). ST >=5.x casts bf16 back to
+    reserved-but-idle VRAM until an empty_cache); ST >=5.x casts bf16 back to
     float32 before the numpy conversion in encode(), so callers see identical
-    output dtype — and the device's attention (device.attn_implementation)."""
+    output dtype. And the device's attention (device.attn_implementation)."""
     import torch
     from device import attn_implementation
     kwargs = {}
@@ -105,16 +105,18 @@ class OutOfMemory(RuntimeError):
 # first batch held only long texts stopped there on every pass)
 _CANARY = "a"
 
-# Where the attention is eager (device.attn_implementation: MPS) a forward's
-# B x H x L x L scores are PyTorch tensors, ~8 bytes a score while it runs (7.3
-# to 8.6 measured at 268M to 806M scores), and they stay in PyTorch's cache
-# until empty_cache (a tensor of 512 MiB or more in a heap of its own). A
-# forward is cut to a share of the device's working set, and a text whose
-# attention exceeds it alone goes to the CPU, whose attention streams (flash).
-# The cost charged a score is the generous 40 it has always been, not the 8: at
-# 10 a pass was slower (its bigger groups pad more: 0.13 -> 0.21 s a chunk)
-# and, without the empty_cache after each forward, the cache grew to 12 GiB
-# inside one pass.
+# MPS builds a forward's B x H x L x L attention scores in device memory,
+# whichever attention it runs (SDPA's graph, eager's tensors: the device's, not
+# the implementation's). Eager they are PyTorch tensors, ~8 bytes a score while
+# the forward runs (7.3 to 8.6 measured at 268M to 806M scores), and they stay
+# in PyTorch's cache until empty_cache (a tensor of 512 MiB or more in a heap
+# of its own). A forward is cut to a share of the device's working set, and a
+# text whose attention exceeds it alone goes to the CPU, whose attention
+# streams (flash). The cost charged a score is the generous 40 it has always
+# been, not the 8: at 10 a pass was slower (its bigger groups pad more: 0.13 ->
+# 0.21 s a chunk) and, without the empty_cache after each forward, the cache
+# grew to 12 GiB inside one pass.
+_MATERIALIZES_ATTENTION = {"mps"}
 _ATTENTION_SHARE = 1 / 8        # of the device's working set, for one forward
 _BYTES_PER_SCORE = 40
 
@@ -123,13 +125,13 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
            name: str) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
     """`texts` embedded and normalized, as every pass of the text encoder
     asks, and the indices of the texts left out (None in their place). On a
-    device that materialises its attention (eager: MPS), the texts go in
-    forwards within its share and each forward's cache is given back, and to
-    `name` on the CPU go a text over the share alone, a text the device
-    cannot take alone, and every text after it refused a text of a few
-    tokens. Out of memory, a forward's texts go one at a time (_encode_on)."""
-    from device import attn_implementation, empty_cache
-    if attn_implementation(device) != "eager":
+    device that materialises its attention (MPS), the texts go in forwards
+    within its share and each forward's cache is given back, and to `name` on
+    the CPU go a text over the share alone, a text the device cannot take
+    alone, and every text after it refused a text of a few tokens. Out of
+    memory, a forward's texts go one at a time (_encode_on)."""
+    from device import empty_cache
+    if device not in _MATERIALIZES_ATTENTION:
         return _encode_on(model, texts, batch_size, device)
     out: List[Optional[np.ndarray]] = [None] * len(texts)
     forwards, cpu = _forwards(model, texts, batch_size)

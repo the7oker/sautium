@@ -12,9 +12,9 @@ Tiers:
   bf16 would be emulated and slower than fp16.
 - CUDA Pascal/Volta and older: fp32. No Tensor Cores; fp16 gives no speedup
   and risks numerical issues.
-- MPS (Apple Silicon M1/M2/M3/M4/M5): bf16, with eager attention
-  (attn_implementation). Native on the Apple Neural Engine and GPU; PyTorch
-  MPS supports bf16 autocast since 2.0.
+- MPS (Apple Silicon M1/M2/M3/M4/M5): bf16. Native on the Apple Neural
+  Engine and GPU; PyTorch MPS supports bf16 autocast since 2.0. Eager
+  attention (attn_implementation).
 - CPU: fp32. fp16 is software-emulated and slower than fp32 on x86/ARM.
 """
 
@@ -57,20 +57,26 @@ def get_model_dtype(device: str) -> torch.dtype:
 
 
 def attn_implementation(device: str) -> Optional[str]:
-    """The attention a transformers model is loaded with on `device`: "eager"
-    on MPS, None (the library's own choice, SDPA) elsewhere.
+    """The attention the node's variable-shape transformers models — the text
+    encoder, AST — are loaded with on `device`: "eager" on MPS, None (the
+    library's own choice, SDPA) elsewhere.
 
     torch's MPS scaled_dot_product_attention over more than 8 tokens builds a
     graph per shape (q/k/v shape, a mask or none) that holds two fp32
     [B, H, L, L] constants — 8 bytes a score — until the process ends: the
     graph cache is never evicted, and neither empty_cache nor unloading the
     model gives them back. A text pass pads every forward to its longest text,
-    so nearly every forward is a new shape: 118 shapes were 36 GiB of Metal
-    memory, past which the process could allocate nothing (measured
-    2026-10-26, torch 2.12). Eager attention builds the scores as PyTorch
-    tensors, which come back with empty_cache and cost ~50 KB a shape, and
-    it is no slower there (a forward 21-25 % faster). CUDA's and the CPU's
-    SDPA stream (flash, memory-efficient kernels) and keep nothing per shape."""
+    so nearly every forward is a new shape: 118 shapes come to 36 GiB at that
+    rate, and torch's allocator, which counts the process's whole Metal
+    memory, refuses every allocation past 30.19 GiB on a 24 GB Mac (measured
+    2026-10-26, torch 2.12: 8.0 bytes a score on every shape; the refusal
+    reproduced at a lowered limit). Eager attention builds the scores as
+    PyTorch tensors, which come back with empty_cache; what it still caches
+    per shape, small per-op graphs, is ~50 KB, bounded by the shapes the
+    share admits. It is no slower there (a forward 21-25 % faster). CUDA's
+    and the CPU's SDPA stream (flash, memory-efficient kernels) and keep
+    nothing per shape. CLAP's attention is eager already at transformers
+    4.57, and PaSST's is its own."""
     return "eager" if device == "mps" else None
 
 
@@ -105,11 +111,13 @@ def empty_cache(device: Optional[str] = None) -> None:
 
     CUDA and MPS both keep a high-water pool of freed buffers for reuse and do
     not hand it back on their own: the process then holds the peak of its
-    batches instead of the live per-batch working set. Call at batch seams.
-    Model weights stay resident — only the free cache is released, and on MPS
-    only PyTorch's own: what the MPS graphs of past attention shapes hold is
-    not in that pool (see attn_implementation). No-op on CPU; `device`
-    defaults to the detected accelerator."""
+    batches instead of the live per-batch working set (a 24 GB Mac's
+    enrichment run peaked at 28 GB before this was called at batch seams,
+    2026-07-07). Call at batch seams. Model weights stay resident — only the
+    free cache is released, and on MPS only PyTorch's own: what the MPS graphs
+    of past SDPA attention shapes hold is not in that pool (see
+    attn_implementation). No-op on CPU; `device` defaults to the detected
+    accelerator."""
     dev = device or get_device()
     if dev == "cuda":
         torch.cuda.empty_cache()
@@ -205,8 +213,8 @@ def audio_batch_budget_seconds() -> int:
 # ── One heavy pass at a time ────────────────────────────────────────────────
 # The analysis run, the background text half and a stream's analysis each size
 # their work as if the accelerator were theirs alone — the audio budget above is
-# a share of the whole working set — and on MPS the framework keeps what a
-# forward took for itself past its end. Two passes at once share memory neither
+# a share of the whole working set — and on MPS what a forward took stays in
+# PyTorch's cache past its end. Two passes at once share memory neither
 # planned for. So a heavy pass holds the accelerator, the others wait their
 # turn in the order they asked, a long pass gives way at its batch seams, and
 # what a pass took is given back before the next one goes.

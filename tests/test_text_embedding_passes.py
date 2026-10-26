@@ -714,6 +714,19 @@ def test_a_forward_on_mps_is_within_its_share_and_a_text_over_it_alone_is_not_ta
             assert heads * tokens[i] ** 2 * text_embedder._BYTES_PER_SCORE > share
 
 
+def test_the_share_is_mpss_whatever_attention_it_is_loaded_with(cpu_copy, monkeypatch):
+    """MPS builds a forward's attention scores in device memory either way —
+    eager's are PyTorch tensors, SDPA's the graph's — so the share belongs to
+    the device and does not go with the policy that picks the implementation."""
+    import device
+    import text_embedder
+    monkeypatch.setattr(device, "attn_implementation", lambda d: None)
+    mps = Tokenized()
+    text_embedder.encode(mps, [_words(50, i) for i in range(5)] + [_words(100)], batch_size=4,
+                         device="mps", name=NAME)
+    assert mps.forwards == [(1, 100), (4, 50), (1, 50)]
+
+
 def test_the_loaders_kwargs_ask_for_eager_attention_on_mps_alone():
     """SDPA there keeps 8 bytes a score for every shape until the process ends;
     CUDA's and the CPU's keep nothing per shape, and load as they always did."""
@@ -740,14 +753,14 @@ def test_the_encoder_is_loaded_with_its_devices_kwargs(monkeypatch):
     assert seen == [
         (NAME, "mps", {"model_kwargs": {"torch_dtype": torch.bfloat16,
                                         "attn_implementation": "eager"}}),
-        (NAME, "cpu", {"model_kwargs": None, "local_files_only": True})]
+        (NAME, "cpu", {"model_kwargs": {}, "local_files_only": True})]
 
 
 @pytest.mark.parametrize("device_name, attention", [("mps", "eager"), ("cpu", None)])
 def test_ast_is_loaded_with_its_devices_attention(monkeypatch, device_name, attention):
-    """AST's SDPA kept 8 bytes a score for each batch size it ran — 1.7 GB for
-    the 12 windows of a track, and its tail of 1 to 11 another each — and
-    unloading the model gave none of it back."""
+    """AST's SDPA kept 8 bytes a score for each batch size it ran: 1.7 GB for
+    the 12 windows of a track, and its tail of 1 to 11 another each, until the
+    process ended."""
     pytest.importorskip("hear21passt")
     import hear21passt.base
     import transformers

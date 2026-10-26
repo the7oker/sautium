@@ -6,6 +6,7 @@ limit lowered for a test is lowered in a child: `python tests/mps_probe.py
 refusal`, which prints one JSON line.
 """
 
+import gc
 import json
 import math
 import random
@@ -19,19 +20,31 @@ if str(BACKEND) not in sys.path:
 MODEL = "BAAI/bge-m3"
 GIB = 1024 ** 3
 # Every word is one token for the encoder's tokenizer
+# (test_a_text_is_as_many_tokens_as_it_says)
 VOCABULARY = (
     "the of and a to in is was that for it with as his her on be at by this had not are but from or "
     "have an they which one you were all we when there can more if no out so what up their about who "
-    "get would make time first new also after band album released music formed group songs record "
-    "tour live song debut singer guitar bass drums piano vocals studio label early years later "
-    "members member played career style sound influenced critics success number chart charts single "
-    "singles featured work works world year three two second third final major local young great "
+    "get would make time first new also after band album released music group songs record tour live "
+    "song debut guitar piano studio label early years later members member played career style sound "
+    "number chart single work works world year three two second third final major local young great "
     "large small long high public national popular original modern").split()
 
 
 def text(tokens: int, rng: random.Random) -> str:
     """A text of `tokens` tokens: a word a token, and two for the ends."""
     return " ".join(rng.choices(VOCABULARY, k=tokens - 2))
+
+
+def single_text_limit(model) -> int:
+    """The longest text, in tokens, that `model` takes alone in a forward on
+    this machine: a longer one goes to the CPU copy by design, which is no
+    refusal (text_embedder._forwards)."""
+    import device
+    import text_embedder
+    heads = model[0].auto_model.config.num_attention_heads
+    share = (device.available_accel_memory_gb() * 1e9 * text_embedder._ATTENTION_SHARE
+             / (text_embedder._BYTES_PER_SCORE * heads))
+    return math.isqrt(int(share))
 
 
 def floor() -> int:
@@ -51,13 +64,44 @@ def cached(repo: str, filename: str = "config.json") -> bool:
     return isinstance(try_to_load_from_cache(repo, filename), str)
 
 
+def count_cpu_copies(patch) -> list:
+    """The names the encoder asks its CPU copy for, from here on: text_embedder's
+    _cpu_copy, counted through the pytest.MonkeyPatch given, the real one called."""
+    import text_embedder
+    taken, taken_by = [], text_embedder._cpu_copy
+    patch.setattr(text_embedder, "_cpu_copy", lambda name: taken.append(name) or taken_by(name))
+    return taken
+
+
+class Held:
+    """A model whose only reference is this one. A fixture's value stays
+    referenced until its teardown has run, and a sentence-transformers model
+    and its model card refer to each other, a cycle only a full collection
+    frees (text_embedder._end_pass parts them for the CPU copy): `release`
+    parts them, drops the model, collects and gives PyTorch's cache back."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def release(self) -> None:
+        import device
+        model, self.model = self.model, None
+        card = getattr(model, "model_card_data", None)
+        if card is not None:
+            card.model = None
+        del model, card
+        gc.collect()
+        device.empty_cache("mps")
+
+
 def refusal() -> dict:
     """The allocator's limit lowered to 0.5 of the working set (8.88 GiB on a
     24 GB Mac, for 30.19) and a pass of bio-sized chunks, which SDPA took past
     it in 23 shapes (2026-10-26): every allocation was refused from then on —
-    256 bytes included — and the encoder went to its CPU copy. What the pass
-    meets: how often the device refused, and how many times the CPU copy was
-    taken."""
+    256 bytes included — and the encoder went to its CPU copy. The chunks are
+    kept within what this machine's encoder takes alone, so a copy of the CPU
+    taken is a refusal, not a text over the share. What the pass meets: how
+    often the device refused, and how many times the CPU copy was taken."""
     import torch
     import text_embedder
 
@@ -76,12 +120,13 @@ def refusal() -> dict:
     text_embedder._refused = lambda device, why: refused.append(why) or refused_by(device, why)
     text_embedder._cpu_copy = lambda name: copies.append(name) or copy_by(name)
     model = text_embedder._load(MODEL, "mps", local_files_only=True)
+    longest = min(1730, int(0.9 * single_text_limit(model)))
     rng = random.Random(0)
     left = 0
     seen = set()
     model[0].register_forward_pre_hook(lambda module, args: seen.add(tuple(args[0]["input_ids"].shape)))
-    for _ in range(12):             # a call of the pass: 16 chunks, 49 to 1730 tokens
-        texts = [text(min(1730, max(49, int(rng.lognormvariate(math.log(470), 0.8)))), rng)
+    for _ in range(12):             # a call of the pass: 16 chunks, 49 tokens up
+        texts = [text(min(longest, max(49, int(rng.lognormvariate(math.log(470), 0.8)))), rng)
                  for _ in range(16)]
         left += len(text_embedder.encode(model, texts, batch_size=16, device="mps", name=MODEL)[1])
     return {"limit_in_force": in_force, "attention": model[0].auto_model.config._attn_implementation,
