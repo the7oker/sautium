@@ -325,28 +325,28 @@ implementation details live in the code, DB and git history.
   forwards. A forward padded to its own longest text is a new shape at
   nearly every turn, so the text encoder on MPS now runs only shapes of a
   closed set (`_rungs`): the length of a text padded up to the first of 64,
-  128, 256 and then steps of 160 tokens up to what the share admits alone,
-  the texts of a rung in forwards of a power of two (a remainder split, 11 =
-  8 + 2 + 1, no padded row), and every caller goes through
-  `text_embedder.encode` — the search queries too (`encode_query`, which
-  never takes the CPU copy: a search is no pass to give it back). At most 39
-  shapes at a 24 GB Mac's working set and a batch of 16 (68 at 64 GB's),
-  ~0.3 GB for good, and a pass 10 % FASTER than before (55 s against 61 s
-  for 500 bios): a rung's texts are of one length, where a forward used to
-  pack a short text after a long one. The padding is done after the
-  tokenizer, which keeps its default settings for every thread (a per-call
-  padding length would change it under a search running beside the pass).
-  The vectors are the unpadded ones to bf16: cosine 0.9998 on average and
-  0.9983 at the worst over 48 texts of 3 to 1,900 tokens, where the CPU's
-  fp32 is 0.9975 away at the worst (the unpadded path 0.9988). CLAP's text
-  tower, the sound search's queries, is padded the same way to a rung of 16
-  to 512 tokens: 74 query lengths were 74 shapes and 371 MB, four shapes and
-  21 MB now. AST's and PaSST's batch sizes are a closed set already (1 to
-  12: 37 and 56 MB on the host for all of them), and not worth a ladder. The
-  lesson: a cache keyed by shape that nothing evicts is a leak by another
-  name, wherever the framework keeps it — bound the shapes you hand it, and
-  read the host's memory (live malloc, not the driver's counter) over many
-  passes, not one.
+  128, 256 and then steps of 160 tokens up to what the share admits alone
+  and the encoder takes at all, the texts of a rung in forwards of a power
+  of two (a remainder split, 11 = 8 + 2 + 1, no padded row), and every
+  caller goes through `text_embedder.encode` — the search queries too
+  (`encode_query`, which never takes the CPU copy: a search is no pass to
+  give it back). At most 39 shapes at a 24 GB Mac's working set and a batch
+  of 16 (62 on a 64 GB Mac), ~0.3 GB for good, and a pass 10 % FASTER than
+  before (55 s against 61 s for 500 bios): a rung's texts are of one length,
+  where a forward used to pack a short text after a long one. The padding is
+  done after the tokenizer, which keeps its default settings for every
+  thread (a per-call padding length would change it under a search running
+  beside the pass). The vectors are the unpadded ones to bf16: cosine 0.9998
+  on average and 0.9983 at the worst over 48 texts of 3 to 1,900 tokens,
+  where the CPU's fp32 is 0.9975 away at the worst (the unpadded path
+  0.9988). CLAP's text tower, the sound search's queries, is padded the same
+  way to a rung of 16 to 512 tokens: 74 query lengths were 74 shapes and 371
+  MB, four shapes and 21 MB now. AST's and PaSST's batch sizes are a closed
+  set already (1 to 12: 37 and 56 MB on the host for all of them), and not
+  worth a ladder. The lesson: a cache keyed by shape that nothing evicts is
+  a leak by another name, wherever the framework keeps it — bound the shapes
+  you hand it, and read the host's memory (live malloc, not the driver's
+  counter) over many passes, not one.
 - **A failed Last.fm fetch means one of three things (2026-09-22).** The
   source's verdict about the entity (a `WSError` that reaches the caller:
   not found, or another per-entity refusal) is cached in

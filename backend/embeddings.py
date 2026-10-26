@@ -79,7 +79,8 @@ def segment_grid_indices(duration_seconds: float, full: bool = False) -> list:
 # words was 74 shapes: 371 MB), so a query meets a closed set of shapes — the
 # encoder of the text embeddings has the same reason (text_embedder._rungs). The
 # attention mask leaves the vector as it was: 0.9999 and over from the
-# unpadded one.
+# unpadded one. The last rung is the tower's own limit (512 tokens; its position
+# table ends at 514): a longer query keeps its length.
 _QUERY_RUNGS = (16, 32, 64, 128, 256, 512)
 
 

@@ -76,12 +76,13 @@ def test_a_text_is_as_many_tokens_as_it_says(encoder):
 SHARE_GB = "2"          # a machine's working set whose share makes the forwards a few texts
 
 
-def _closed_set(share_gb: float) -> set:
-    """The shapes the encoder may have at a working set of `share_gb`: a rung
-    of its ladder, a power of two of texts of up to 16 that the share admits."""
+def _closed_set(share_gb: float, longest: int) -> set:
+    """The shapes the encoder, which takes `longest` tokens at the most, may have
+    at a working set of `share_gb`: a rung of its ladder, a power of two of texts
+    of up to 16 that the share admits."""
     import text_embedder
     share = share_gb * 1e9 * text_embedder._ATTENTION_SHARE / (text_embedder._BYTES_PER_SCORE * 16)
-    return {(rows, rung) for rung in text_embedder._rungs(share)
+    return {(rows, rung) for rung in text_embedder._rungs(share, longest)
             for rows in (1, 2, 4, 8, 16) if rows * rung ** 2 <= share}
 
 
@@ -126,14 +127,14 @@ def a_run_of_fresh_lengths(encoder):
                                  stopped=stopped, cpu_copies=len(copies), host=host)
 
 
-def test_the_forwards_of_a_run_of_fresh_lengths_are_the_closed_set(a_run_of_fresh_lengths):
+def test_the_forwards_of_a_run_of_fresh_lengths_are_the_closed_set(a_run_of_fresh_lengths, encoder):
     """Every forward is a rung of the ladder by a power of two of texts, and the
     run met most of them: fresh lengths are not fresh shapes. There are 17 at this
     share, by count and not by the ladder under test."""
     p = a_run_of_fresh_lengths
     assert p.stopped is None, p.stopped
     assert p.cpu_copies == 0
-    reachable = _closed_set(float(SHARE_GB))
+    reachable = _closed_set(float(SHARE_GB), encoder.model.max_seq_length)
     assert len(reachable) == 17
     assert p.shapes <= reachable, sorted(p.shapes - reachable)
     assert len(p.shapes) >= 10, (len(p.shapes), len(reachable))
@@ -144,8 +145,8 @@ def test_the_host_keeps_nothing_more_once_the_set_is_warm(a_run_of_fresh_lengths
     of the shapes first met in between (12 MB each is above the 7 measured) and a
     little else; and from the first checkpoint to the last by no more than the
     graphs of all 17 there are. The second is the invariant, the first its
-    steps: forwards of lengths that make shapes of their own grow the host by 50
-    MB a call here, and 1.9 GB over the run."""
+    steps: forwards of lengths that make shapes of their own grow the host by some
+    37 MB a call here, and 1.4 GB over the run (measured on the unfixed encoder)."""
     p = a_run_of_fresh_lengths
     assert p.stopped is None, p.stopped
     for (_, met, before), (_, then, after) in zip(p.host, p.host[1:]):

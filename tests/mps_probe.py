@@ -7,13 +7,12 @@ refusal`, run with the environment of lowered_limit(), which prints one JSON
 line.
 """
 
+import ctypes
 import gc
 import json
 import math
 import os
 import random
-import re
-import subprocess
 import sys
 import weakref
 from pathlib import Path
@@ -52,7 +51,7 @@ def single_text_limit(model) -> int:
     heads = model[0].auto_model.config.num_attention_heads
     share = (device.available_accel_memory_gb() * 1e9 * text_embedder._ATTENTION_SHARE
              / (text_embedder._BYTES_PER_SCORE * heads))
-    return math.isqrt(int(share))
+    return min(math.isqrt(int(share)), model.max_seq_length)
 
 
 def floor() -> int:
@@ -66,21 +65,25 @@ def floor() -> int:
     return torch.mps.driver_allocated_memory() - torch.mps.current_allocated_memory()
 
 
+class _MallocStatistics(ctypes.Structure):
+    _fields_ = [("blocks_in_use", ctypes.c_uint), ("size_in_use", ctypes.c_size_t),
+                ("max_size_in_use", ctypes.c_size_t), ("size_allocated", ctypes.c_size_t)]
+
+
 def live_malloc() -> dict:
     """What this process holds in malloc, live: the default zone's allocations
-    and bytes (vmmap --summary, ~2 s; macOS). It is the host side of what MPS
+    and bytes (malloc_zone_statistics; macOS). It is the host side of what MPS
     keeps per shape — the graphs of a forward's ops, 4 to 7 MB and some 60,000
     allocations a shape, never given back — whatever the kernel does with the
     pages: footprint's Malloc Small follows those, and a graph can land on pages
-    a pass left free."""
-    done = subprocess.run(["vmmap", "--summary", str(os.getpid())], capture_output=True, text=True)
-    found = re.search(r"^DefaultMallocZone\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+)\s+([\d.]+)([KMG])",
-                      done.stdout, re.M)
-    if found is None:
-        raise RuntimeError(f"vmmap --summary has no default malloc zone (exit {done.returncode}): "
-                           f"{(done.stderr or done.stdout)[-300:]}")
-    scale = {"K": 1 / 1024, "M": 1.0, "G": 1024.0}[found.group(3)]
-    return {"count": int(found.group(1)), "mb": float(found.group(2)) * scale}
+    a pass left free. Exact: `vmmap --summary` prints the same bytes to one
+    decimal of its unit, which from 1 GiB up is steps of 100 MB."""
+    libc = ctypes.CDLL(None)
+    libc.malloc_default_zone.restype = ctypes.c_void_p
+    libc.malloc_zone_statistics.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MallocStatistics)]
+    statistics = _MallocStatistics()
+    libc.malloc_zone_statistics(libc.malloc_default_zone(), ctypes.byref(statistics))
+    return {"count": statistics.blocks_in_use, "mb": statistics.size_in_use / 1024 ** 2}
 
 
 class Shapes:

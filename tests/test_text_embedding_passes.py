@@ -71,6 +71,8 @@ class Tokenized(Encoder):
     its padded length, and fails if a text is not whole in it: the mask of a
     row must count the tokens of its text."""
 
+    max_seq_length = 8192           # BGE-M3's: its tokenizer cuts a text there
+
     def __init__(self, full=lambda texts, batch_size: False):
         super().__init__(full)
         self.forwards = []
@@ -732,7 +734,7 @@ def _reachable(share: float, batch_size: int) -> set:
     """Every shape a forward may have at this share: a rung of its ladder, a
     power of two of texts the batch size and the share allow of it."""
     import text_embedder
-    return {(rows, rung) for rung in text_embedder._rungs(share)
+    return {(rows, rung) for rung in text_embedder._rungs(share, Tokenized.max_seq_length)
             for rows in (1, 2, 4, 8, 16, 32) if rows <= batch_size and rows * rung ** 2 <= share}
 
 
@@ -747,7 +749,8 @@ def test_a_forward_on_mps_is_a_shape_of_the_closed_set_within_its_share(monkeypa
     monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "1.5")
     share = 1.5e9 * text_embedder._ATTENTION_SHARE
     heads = 16                                      # Tokenized's
-    top = text_embedder._rungs(share / (text_embedder._BYTES_PER_SCORE * heads))[-1]
+    ladder = text_embedder._rungs(share / (text_embedder._BYTES_PER_SCORE * heads), Tokenized.max_seq_length)
+    top = ladder[-1]
     rng = random.Random(7)
     for _ in range(40):
         texts = [_words(rng.randint(3, 600), i) for i in range(rng.randint(1, 40))]
@@ -755,7 +758,6 @@ def test_a_forward_on_mps_is_a_shape_of_the_closed_set_within_its_share(monkeypa
         forwards, too_long = text_embedder._forwards(Tokenized(), texts, batch_size)
         tokens = [_tokens(t) for t in texts]
         assert sorted([i for _, group in forwards for i in group] + too_long) == list(range(len(texts)))
-        ladder = text_embedder._rungs(share / (text_embedder._BYTES_PER_SCORE * heads))
         for rung, group in forwards:
             assert rung in ladder
             assert len(group) <= batch_size and len(group) & (len(group) - 1) == 0
@@ -794,10 +796,12 @@ def test_the_shapes_of_a_process_are_a_closed_set_whatever_the_lengths(monkeypat
 
 # The shapes a machine's forwards can ever have, at a batch of 16, by its working
 # set in GB — 39 at a 24 GB Mac's (19.07), which at the 4 to 7 MB the host keeps a
-# shape is ~0.3 GB for good. Not derived from the ladder, so that a finer one
-# (270 shapes: 1.9 GB) cannot pass: changing it is a measurement, then this table.
+# shape is ~0.3 GB for good; 62 at a 64 GB Mac's (51.54), 159 at a 512 GB Mac's
+# (412.32), where the encoder's own limit ends the ladder at 8,192. Not derived
+# from the ladder, so that a finer one (270 shapes: 1.9 GB) cannot pass: changing
+# it is a measurement, then this table.
 SHAPES_BY_WORKING_SET = {2: 17, 4: 21, 8: 28, 12: 32, 16: 37, 19.07: 39, 24: 43, 32: 50, 48: 59,
-                         64: 68, 96: 81, 128: 94, 192: 112}
+                         51.54: 62, 64: 68, 96: 81, 128: 94, 192: 112, 256: 130, 412.32: 159}
 
 
 @pytest.mark.parametrize("working_set_gb, shapes", SHAPES_BY_WORKING_SET.items())
@@ -812,18 +816,40 @@ def test_the_ladder_is_64_128_256_then_steps_of_160_up_to_the_longest_text_the_s
     there run alone and padded by up to 1,300 tokens."""
     import math
     import text_embedder
-    assert text_embedder._rungs(_share(19.07)) == (64, 128, 256, 416, 576, 736, 896, 1056, 1216,
-                                                    1376, 1536, 1696, 1856, 1929)
-    assert text_embedder._rungs(10_000) == (64, 100)            # the share of these tests
-    assert text_embedder._rungs(2_000) == (44,)                 # nothing below the top
+    longest = Tokenized.max_seq_length
+    assert text_embedder._rungs(_share(19.07), longest) == (
+        64, 128, 256, 416, 576, 736, 896, 1056, 1216, 1376, 1536, 1696, 1856, 1929)
+    assert text_embedder._rungs(10_000, longest) == (64, 100)       # the share of these tests
+    assert text_embedder._rungs(2_000, longest) == (44,)            # nothing below the top
     for working_set_gb in SHAPES_BY_WORKING_SET:
         share = _share(working_set_gb)
-        rungs = text_embedder._rungs(share)
-        assert rungs[-1] == math.isqrt(int(share))
+        rungs = text_embedder._rungs(share, longest)
+        assert rungs[-1] == min(math.isqrt(int(share)), longest)
         assert list(rungs) == sorted(set(rungs))
         steps = [b - a for a, b in zip(rungs[2:-1], rungs[3:-1])]
         assert set(steps) <= {160}, steps
         assert rungs[-1] - rungs[-2] <= 160 or rungs[-2] < 256
+
+
+def test_the_ladder_never_goes_past_what_the_encoder_takes(cpu_copy, monkeypatch):
+    """BGE-M3's position table ends at 8,194 and its tokenizer cuts every text at
+    8,192: a text padded past the table is a RuntimeError in the embeddings, not a
+    shape. From a working set of 344 GB the share alone would put the top at
+    8,195 and more (a 512 GB Mac's is 412): the ladder ends at the encoder's own
+    limit, and the longest text the tokenizer leaves is a forward of that rung."""
+    import text_embedder
+    monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "412.32")
+    mps = Tokenized()
+    rungs = text_embedder._rungs(_share(412.32), mps.max_seq_length)
+    assert rungs[-3:] == (7936, 8096, 8192)
+    texts = [_words(8192, 1), _words(8097, 2), _words(4000, 3)]
+    forwards, too_long = text_embedder._forwards(mps, texts, 16)
+    assert too_long == []
+    # the share admits one text of that length at a time; the third is in the rung of 4,096
+    assert forwards == [(8192, [0]), (8192, [1]), (4096, [2])]
+    vectors, left_out = text_embedder.encode(mps, texts, batch_size=16, device="mps", name=NAME)
+    assert left_out == set() and mps.forwards == [(1, 8192), (1, 8192), (1, 4096)]
+    assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
 
 
 def test_the_share_is_mpss_whatever_attention_it_is_loaded_with(cpu_copy, monkeypatch):
@@ -864,6 +890,23 @@ def test_a_query_the_device_cannot_take_fails_and_never_loads_the_cpu_copy(cpu_c
                                    device="mps", name=NAME)
     assert cpu_copy.loads == [] and text_embedder._cpu is None
     assert text_embedder._refusing == set()         # a failed search is no refusing episode
+
+
+def test_a_query_off_mps_is_the_encoders_vector_and_fails_when_the_device_cannot_take_it(cpu_copy):
+    """CUDA and the CPU keep nothing per shape: the query goes through
+    sentence-transformers' encode as it always did — one text, a vector — and
+    out of memory only when a text of a few tokens does not fit either, or when
+    this text does not fit alone and that one does."""
+    import text_embedder
+    vector = text_embedder.encode_query(Encoder(), _words(10), device="cuda", name=NAME)
+    assert vector.shape == (1024,) and float(vector[0]) == pytest.approx(_mark(_words(10)))
+    tight = Encoder(lambda texts, batch_size: any(LONG in t for t in texts))
+    with pytest.raises(text_embedder.OutOfMemory, match="does not fit on cuda alone"):
+        text_embedder.encode_query(tight, " ".join([LONG] * 8), device="cuda", name=NAME)
+    with pytest.raises(text_embedder.OutOfMemory, match="out of memory on cuda"):
+        text_embedder.encode_query(Encoder(lambda texts, batch_size: True), _words(10),
+                                   device="cuda", name=NAME)
+    assert cpu_copy.loads == [] and text_embedder._cpu is None
 
 
 def test_the_search_queries_go_through_the_closed_set(cpu_copy, monkeypatch):

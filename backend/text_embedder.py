@@ -124,22 +124,23 @@ _MATERIALIZES_ATTENTION = {"mps"}
 _ATTENTION_SHARE = 1 / 8        # of the device's working set, for one forward
 _BYTES_PER_SCORE = 40
 
-# MPS also keeps, for every (batch, length) a forward has had, the graphs of its
-# ops on the HOST heap: 4 to 7 MB and some 60,000 allocations a shape for this
-# encoder (torch 2.12, measured 2026-10-26), none of it ever given back — torch
-# has no way to evict that cache, and empty_cache does not touch it. A forward
-# padded to its own longest text is a new shape at nearly every turn: 1,746
-# shapes, ~10.8 GB, in 28 passes of a node. So a forward on MPS has only a shape
-# of a closed set: its length a rung of this list (a text is padded up to the
-# first rung at or above its own, and the attention mask leaves its vector as it
-# was, to bf16), its batch a power of two. The list ends at the longest text the
-# share admits alone, which the machine decides (_rungs): at most 39 shapes at
-# the working set of a 24 GB Mac and a batch of 16, ~0.3 GB for good (68 at
-# 64 GB's). A rung's texts are of one length, where a forward used to pack a
-# short text after a long one, so a pass is no slower for it: 10 % faster, 55 s
-# against 61 s a pass of 500 bios. Steps of 128 tokens were no faster, and steps
-# of 192, a ladder fitted to a node's lengths in ten rungs, and one of nine
-# coarse rungs were 8, 11 and 19 % slower (measured).
+# MPS also keeps, for every (batch, length) a forward has had, the graphs of
+# its ops on the HOST heap: 4 to 7 MB and some 60,000 allocations a shape for
+# this encoder (torch 2.12, measured 2026-10-26), none of it ever given back —
+# torch has no way to evict that cache, and empty_cache does not touch it. A
+# forward padded to its own longest text is a new shape at nearly every turn:
+# 1,746 shapes, ~10.8 GB, in 28 passes of a node. So a forward on MPS has only
+# a shape of a closed set: its length a rung of the ladder (_rungs: a text is
+# padded up to the first rung at or above its own, and the attention mask
+# leaves its vector as it was, to bf16), its batch a power of two. The ladder
+# ends at the longest text the share admits alone, or the encoder takes at all,
+# which the machine decides: at most 39 shapes at the working set of a 24 GB
+# Mac and a batch of 16, ~0.3 GB for good (62 on a 64 GB Mac). A rung's texts
+# are of one length, where a forward used to pack a short text after a long
+# one, so a pass is no slower for it: 10 % faster, 55 s against 61 s a pass of
+# 500 bios. Steps of 128 tokens were no faster, and steps of 192, a ladder
+# fitted to a node's lengths in ten rungs, and one of nine coarse rungs were 8,
+# 11 and 19 % slower (measured).
 _FIRST_RUNGS = (64, 128, 256)
 _RUNG_STEP = 160                # tokens, from the last of those up to the top
 
@@ -228,12 +229,15 @@ def _refused(device: str, why: str) -> None:
                        "is encoded on the CPU", device, why)
 
 
-def _rungs(share: float) -> Tuple[int, ...]:
+def _rungs(share: float, longest: int) -> Tuple[int, ...]:
     """The lengths a forward may have on this machine: _FIRST_RUNGS, then steps
-    of _RUNG_STEP tokens, up to the longest text the share admits alone — the
-    last rung, which the machine decides: a text between the last step and it
-    is padded to it and runs alone (as every text there did, more or less)."""
-    top = math.isqrt(int(share))
+    of _RUNG_STEP tokens, up to the longest text the share admits alone, and not
+    past `longest`, what the encoder takes at all (its max_seq_length: the
+    tokenizer cuts every text there, and a text padded beyond its position table
+    does not run) — the last rung, which the machine decides: a text between the
+    last step and it is padded to it and runs alone (as every text there did,
+    more or less)."""
+    top = min(math.isqrt(int(share)), longest)
     rungs = [r for r in _FIRST_RUNGS if r < top]
     rung = _FIRST_RUNGS[-1] + _RUNG_STEP
     while rung < top:
@@ -257,7 +261,7 @@ def _forwards(model, texts: List[str],
     heads = model[0].auto_model.config.num_attention_heads
     # a forward's texts times its padded length squared
     share = available_accel_memory_gb() * 1e9 * _ATTENTION_SHARE / (_BYTES_PER_SCORE * heads)
-    rungs = _rungs(share)
+    rungs = _rungs(share, model.max_seq_length)
     by_rung: Dict[int, List[int]] = {}
     too_long: List[int] = []
     for i in sorted(range(len(texts)), key=lambda i: -lengths[i]):
