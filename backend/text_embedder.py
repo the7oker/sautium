@@ -13,8 +13,8 @@ On MPS the model loads with eager attention (device.attn_implementation), and
 a pass also takes a copy of the model on the CPU for the texts whose attention
 the device should not materialize or that it refuses (encode), and gives it
 back at the pass's end (device.at_pass_end). Every forward there runs a shape
-of a closed set — a rung of lengths, a power of two of texts (_LENGTH_RUNGS),
-and every caller, the search queries too, goes through encode.
+of a closed set — a rung of lengths, a power of two of texts (_rungs), and every
+caller, the search queries too, goes through encode.
 """
 
 import gc
@@ -133,24 +133,29 @@ _BYTES_PER_SCORE = 40
 # of a closed set: its length a rung of this list (a text is padded up to the
 # first rung at or above its own, and the attention mask leaves its vector as it
 # was, to bf16), its batch a power of two. The list ends at the longest text the
-# share admits alone, which the machine decides (_rungs): at most 39 shapes on a
-# 24 GB Mac, ~0.3 GB for good. A rung's texts are of one length, where a forward
-# used to pack a short text after a long one, so a pass is no slower for it: 10 %
-# faster, 55 s against 61 s a pass of 500 bios. Steps of 128 tokens were no
-# faster, and of 192 or in nine rungs 8 to 19 % slower (measured).
-_LENGTH_RUNGS = (64, 128, 256, 416, 576, 736, 896, 1056, 1216, 1376, 1536, 1696, 1856)
+# share admits alone, which the machine decides (_rungs): at most 39 shapes at
+# the working set of a 24 GB Mac and a batch of 16, ~0.3 GB for good (68 at
+# 64 GB's). A rung's texts are of one length, where a forward used to pack a
+# short text after a long one, so a pass is no slower for it: 10 % faster, 55 s
+# against 61 s a pass of 500 bios. Steps of 128 tokens were no faster, and steps
+# of 192, a ladder fitted to a node's lengths in ten rungs, and one of nine
+# coarse rungs were 8, 11 and 19 % slower (measured).
+_FIRST_RUNGS = (64, 128, 256)
+_RUNG_STEP = 160                # tokens, from the last of those up to the top
 
 
-def encode(model, texts: List[str], *, batch_size: int, device: str,
-           name: str) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
+def encode(model, texts: List[str], *, batch_size: int, device: str, name: str,
+           cpu_copy: bool = True) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
     """`texts` embedded and normalized, as every pass of the text encoder
     asks, and the indices of the texts left out (None in their place). On a
     device that materializes its attention (MPS), the texts go in forwards
-    of the closed set of shapes (_LENGTH_RUNGS) within its share and each
+    of the closed set of shapes (_rungs) within its share and each
     forward's cache is given back, and to `name` on the CPU go a text over the
     share alone, a text the device cannot take alone, and every text after it
     refused a text of a few tokens. Out of memory, a forward's texts go one at
-    a time (_encode_on)."""
+    a time (_encode_on). Without `cpu_copy` what would go to the CPU is
+    OutOfMemory instead: a pass gives the copy back at its end, a search is no
+    pass."""
     from device import empty_cache
     if device not in _MATERIALIZES_ATTENTION:
         return _encode_on(model, texts, batch_size, device)
@@ -160,6 +165,8 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
         try:
             vectors, left = _encode_on(model, [texts[i] for i in group], len(group), device, rung)
         except OutOfMemory as e:
+            if not cpu_copy:
+                raise
             # its words: a log handler that keeps its records would keep the
             # error, and through its frames the CPU copy this call loads below
             _refused(device, str(e))
@@ -175,6 +182,8 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
         cpu += [group[j] for j in sorted(left)]
     if not cpu:
         return out, set()
+    if not cpu_copy:
+        raise OutOfMemory(f"{len(cpu)} of {len(texts)} texts are over what {device} takes alone")
     logger.debug("%d of %d texts on the CPU: over %s's share alone, or refused by it", len(cpu),
                  len(texts), device)
     # One at a time, each its own try: these are the call's longest texts — a
@@ -193,8 +202,11 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
 def encode_query(model, text: str, *, device: str, name: str) -> np.ndarray:
     """A search query's normalized vector, through the forwards of a pass's
     texts: on MPS a query is a shape of the closed set like any other, not one
-    more for the host to keep until the process ends."""
-    vectors, left_out = encode(model, [text], batch_size=1, device=device, name=name)
+    more for the host to keep until the process ends. Never through the CPU copy
+    — a search runs between passes, and what it loaded would stay, 2.3 GB, until
+    the next pass ends: a query the device cannot take fails, as it did."""
+    vectors, left_out = encode(model, [text], batch_size=1, device=device, name=name,
+                               cpu_copy=False)
     if left_out:
         raise OutOfMemory(f"a query of {len(text)} characters does not fit on {device} alone")
     return vectors[0]
@@ -217,10 +229,17 @@ def _refused(device: str, why: str) -> None:
 
 
 def _rungs(share: float) -> Tuple[int, ...]:
-    """The lengths a forward may have on this machine: the list, cut where the
-    share ends it — its last rung is the longest text the share admits alone."""
+    """The lengths a forward may have on this machine: _FIRST_RUNGS, then steps
+    of _RUNG_STEP tokens, up to the longest text the share admits alone — the
+    last rung, which the machine decides: a text between the last step and it
+    is padded to it and runs alone (as every text there did, more or less)."""
     top = math.isqrt(int(share))
-    return tuple(r for r in _LENGTH_RUNGS if r < top) + (top,)
+    rungs = [r for r in _FIRST_RUNGS if r < top]
+    rung = _FIRST_RUNGS[-1] + _RUNG_STEP
+    while rung < top:
+        rungs.append(rung)
+        rung += _RUNG_STEP
+    return tuple(rungs) + (top,)
 
 
 def _forwards(model, texts: List[str],
@@ -285,7 +304,7 @@ def _encode_on(model, texts: List[str], batch_size: int, device: str,
             "a time", device, batch_size)
     out: List[Optional[np.ndarray]] = [None] * len(texts)
     left_out: Set[int] = set()
-    canary_rung = None if rung is None else min(_LENGTH_RUNGS[0], rung)     # the smallest rung
+    canary_rung = None if rung is None else min(_FIRST_RUNGS[0], rung)      # the smallest rung
     for i, text in enumerate(texts):
         if len(texts) > 1:          # a batch of one was its text alone
             one, _ = _encoded(model, [text], 1, rung)

@@ -76,6 +76,9 @@ def live_malloc() -> dict:
     done = subprocess.run(["vmmap", "--summary", str(os.getpid())], capture_output=True, text=True)
     found = re.search(r"^DefaultMallocZone\S*\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+)\s+([\d.]+)([KMG])",
                       done.stdout, re.M)
+    if found is None:
+        raise RuntimeError(f"vmmap --summary has no default malloc zone (exit {done.returncode}): "
+                           f"{(done.stderr or done.stdout)[-300:]}")
     scale = {"K": 1 / 1024, "M": 1.0, "G": 1024.0}[found.group(3)]
     return {"count": int(found.group(1)), "mb": float(found.group(2)) * scale}
 
@@ -181,7 +184,6 @@ def refusal() -> dict:
     longest = min(1730, int(0.9 * single_text_limit(model)))
     rng = random.Random(0)
     left = 0
-    seen = set()
     shapes = Shapes(model)
     for _ in range(12):             # a call of the pass: 16 chunks, 49 tokens up
         texts = [text(min(longest, max(49, int(rng.lognormvariate(math.log(470), 0.8)))), rng)

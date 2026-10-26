@@ -76,7 +76,7 @@ def attn_implementation(device: str) -> Optional[str]:
     allocations for the text encoder, SDPA's more — which nothing gives back
     (a node, 2026-10-26: 1,746 shapes, ~10.8 GB, in 28 passes), so the
     shapes must be finite: the text encoder's are a closed set
-    (text_embedder._LENGTH_RUNGS), AST's and PaSST's the batch sizes up to 12
+    (text_embedder._rungs), AST's and PaSST's the batch sizes up to 12
     (37 and 56 MB for all twelve, measured). Eager is no slower than SDPA
     there (a forward 21-25 % faster). CUDA's and the CPU's SDPA stream
     (flash, memory-efficient kernels) and keep nothing per shape.

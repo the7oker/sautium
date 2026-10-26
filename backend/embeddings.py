@@ -75,9 +75,9 @@ def segment_grid_indices(duration_seconds: float, full: bool = False) -> list:
 
 # On MPS a query's tokens are padded up to the first of these: the backend keeps
 # the graphs of every shape a forward has had on the host heap until the process
-# ends, ~5 MB a length for this text tower (a query of each length from 3 to 77
-# tokens: 318 MB), so a query meets a closed set of shapes — the encoder of the
-# text embeddings has the same reason (text_embedder._LENGTH_RUNGS). The
+# ends, ~5 MB a length for this text tower (a query of each length from 1 to 77
+# words was 74 shapes: 371 MB), so a query meets a closed set of shapes — the
+# encoder of the text embeddings has the same reason (text_embedder._rungs). The
 # attention mask leaves the vector as it was: 0.9999 and over from the
 # unpadded one.
 _QUERY_RUNGS = (16, 32, 64, 128, 256, 512)

@@ -767,6 +767,11 @@ def test_a_forward_on_mps_is_a_shape_of_the_closed_set_within_its_share(monkeypa
             assert heads * tokens[i] ** 2 * text_embedder._BYTES_PER_SCORE > share
 
 
+def _share(working_set_gb: float) -> float:
+    import text_embedder
+    return working_set_gb * 1e9 * text_embedder._ATTENTION_SHARE / (text_embedder._BYTES_PER_SCORE * 16)
+
+
 def test_the_shapes_of_a_process_are_a_closed_set_whatever_the_lengths(monkeypatch):
     """The point of the ladder: forwards of any number of calls of any lengths
     make no shape outside the few a machine's share and batch size admit —
@@ -774,17 +779,51 @@ def test_the_shapes_of_a_process_are_a_closed_set_whatever_the_lengths(monkeypat
     import random
     import text_embedder
     monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "6")
-    share = 6e9 * text_embedder._ATTENTION_SHARE / (text_embedder._BYTES_PER_SCORE * 16)
     rng = random.Random(11)
     seen = set()
     for _ in range(300):
-        texts = [_words(rng.randint(3, 1500), i) for i in range(rng.randint(1, 20))]
+        top = rng.choice([100, 400, 1500])
+        texts = [_words(rng.randint(3, top), i) for i in range(rng.randint(1, 60))]
         forwards, _ = text_embedder._forwards(Tokenized(), texts, 16)
         seen |= {(len(group), rung) for rung, group in forwards}
-    reachable = _reachable(share, 16)
+    reachable = _reachable(_share(6), 16)
     assert seen <= reachable, sorted(seen - reachable)
-    assert len(reachable) <= 8 * len(text_embedder._rungs(share))
-    assert len(seen) >= len(reachable) // 2        # the test did meet the set, not a corner of it
+    assert len(reachable) == 25
+    assert len(seen) >= 22                          # the test did meet the set, not a corner of it
+
+
+# The shapes a machine's forwards can ever have, at a batch of 16, by its working
+# set in GB — 39 at a 24 GB Mac's (19.07), which at the 4 to 7 MB the host keeps a
+# shape is ~0.3 GB for good. Not derived from the ladder, so that a finer one
+# (270 shapes: 1.9 GB) cannot pass: changing it is a measurement, then this table.
+SHAPES_BY_WORKING_SET = {2: 17, 4: 21, 8: 28, 12: 32, 16: 37, 19.07: 39, 24: 43, 32: 50, 48: 59,
+                         64: 68, 96: 81, 128: 94, 192: 112}
+
+
+@pytest.mark.parametrize("working_set_gb, shapes", SHAPES_BY_WORKING_SET.items())
+def test_the_shapes_a_machine_can_ever_have_are_few_and_pinned(working_set_gb, shapes):
+    assert len(_reachable(_share(working_set_gb), 16)) == shapes
+
+
+def test_the_ladder_is_64_128_256_then_steps_of_160_up_to_the_longest_text_the_share_admits():
+    """Up to the top on any machine: a text between the last step and the top
+    is padded to the top and runs alone, so a top far above the last step
+    (the ladder of a list ended at 1,856: 3,172 on a 64 GB Mac) made the texts
+    there run alone and padded by up to 1,300 tokens."""
+    import math
+    import text_embedder
+    assert text_embedder._rungs(_share(19.07)) == (64, 128, 256, 416, 576, 736, 896, 1056, 1216,
+                                                    1376, 1536, 1696, 1856, 1929)
+    assert text_embedder._rungs(10_000) == (64, 100)            # the share of these tests
+    assert text_embedder._rungs(2_000) == (44,)                 # nothing below the top
+    for working_set_gb in SHAPES_BY_WORKING_SET:
+        share = _share(working_set_gb)
+        rungs = text_embedder._rungs(share)
+        assert rungs[-1] == math.isqrt(int(share))
+        assert list(rungs) == sorted(set(rungs))
+        steps = [b - a for a, b in zip(rungs[2:-1], rungs[3:-1])]
+        assert set(steps) <= {160}, steps
+        assert rungs[-1] - rungs[-2] <= 160 or rungs[-2] < 256
 
 
 def test_the_share_is_mpss_whatever_attention_it_is_loaded_with(cpu_copy, monkeypatch):
@@ -810,31 +849,37 @@ def test_a_query_on_mps_is_a_forward_of_the_closed_set_like_a_pass_texts(cpu_cop
         assert vector.shape == (1024,) and float(vector[0]) == pytest.approx(_mark(_words(n)))
     # this share's rungs are 64 and 100
     assert mps.forwards == [(1, 64)] * 4 + [(1, 100)] * 2
-    # one over the share alone is the CPU's, and one nothing takes is no vector
-    assert float(text_embedder.encode_query(mps, _words(150), device="mps", name=NAME)[0]) == \
-        pytest.approx(_mark(_words(150)))
-    assert cpu_copy.forwards == [(1, 150)]
-    cpu_copy.full = lambda texts, batch_size: any(LONG in t for t in texts)
+
+
+def test_a_query_the_device_cannot_take_fails_and_never_loads_the_cpu_copy(cpu_copy):
+    """A pass gives the CPU copy back at its end and a search is no pass: what
+    a query loaded would stay, 2.3 GB, until the next pass ends. The device
+    refusing it, or the query over what the share admits alone, is what it
+    was before the closed set: no vector."""
+    import text_embedder
     with pytest.raises(text_embedder.OutOfMemory):
-        text_embedder.encode_query(mps, _words(150) + " " + LONG, device="mps", name=NAME)
+        text_embedder.encode_query(Tokenized(), _words(150), device="mps", name=NAME)
+    with pytest.raises(text_embedder.OutOfMemory):
+        text_embedder.encode_query(Tokenized(lambda texts, batch_size: True), _words(10),
+                                   device="mps", name=NAME)
+    assert cpu_copy.loads == [] and text_embedder._cpu is None
+    assert text_embedder._refusing == set()         # a failed search is no refusing episode
 
 
 def test_the_search_queries_go_through_the_closed_set(cpu_copy, monkeypatch):
-    """Discovery's bio and lyrics queries and the track-text query meet the
-    encoder the passes meet, in the same forwards."""
+    """Discovery's bio and lyrics queries meet the encoder the passes meet, in
+    the same forwards."""
     import model_cache
     import search
     from lyrics_embeddings import LyricsEmbeddingGenerator
-    from text_embeddings import TextEmbeddingGenerator
     model = Tokenized()
     monkeypatch.setattr(model_cache, "get_model", lambda key, factory: types.SimpleNamespace(
         model=model, device="mps", model_name=NAME))
     assert float(search._encode_enrichment_query(_words(10))[0]) == pytest.approx(_mark(_words(10)))
-    for generator in (LyricsEmbeddingGenerator, TextEmbeddingGenerator):
-        gen = generator(device="mps")
-        gen.model = model
-        assert float(gen.query_to_embedding(_words(20))[0]) == pytest.approx(_mark(_words(20)))
-    assert model.forwards == [(1, 64)] * 3
+    gen = LyricsEmbeddingGenerator(device="mps")
+    gen.model = model
+    assert float(gen.query_to_embedding(_words(20))[0]) == pytest.approx(_mark(_words(20)))
+    assert model.forwards == [(1, 64)] * 2
 
 
 def test_the_fall_back_to_one_text_at_a_time_stays_on_the_closed_set(cpu_copy):
@@ -887,24 +932,50 @@ def test_a_clap_query_is_padded_to_a_rung_after_the_tokenizer():
     assert embeddings._padded_to_rung({"input_ids": long, "attention_mask": long}, 1)["input_ids"].shape == (1, 600)
 
 
+def _encodes_the_shared_model(tree) -> list:
+    """The lines of `tree` that call encode, encode_query or encode_document on
+    something named model, encoder or embedder, or on what get_text_embedder
+    returns."""
+    import ast
+    lines = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"encode", "encode_query", "encode_document"}):
+            continue
+        receiver = node.func.value
+        called = getattr(getattr(receiver, "func", None), "id", None) or \
+            getattr(getattr(receiver, "func", None), "attr", None)
+        names = {"model", "encoder", "embedder"}
+        if (getattr(receiver, "attr", None) in names or getattr(receiver, "id", None) in names
+                or called == "get_text_embedder"):
+            lines.append(node.lineno)
+    return lines
+
+
 def test_no_module_encodes_with_the_shared_model_off_the_seam():
     """The closed set holds only while every forward of the text encoder goes
-    through text_embedder.encode: a model.encode of the shared encoder
-    anywhere else runs a shape of its own, and the host keeps a graph of it
-    until the process ends. Three of them did (the search queries)."""
+    through text_embedder.encode: an encode of the shared encoder anywhere else
+    runs a shape of its own, and the host keeps a graph of it until the process
+    ends. Three call sites did (the search queries)."""
     import ast
     offenders = []
     for root in (BACKEND, BACKEND.parent / "desktop"):
         for path in sorted(root.rglob("*.py")):
             if path.name == "text_embedder.py":
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
-                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "encode"
-                        and (getattr(node.func.value, "attr", None) == "model"
-                             or getattr(node.func.value, "id", None) == "model")):
-                    offenders.append(f"{path.relative_to(BACKEND.parent)}:{node.lineno}")
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            offenders += [f"{path.relative_to(BACKEND.parent)}:{line}"
+                          for line in _encodes_the_shared_model(tree)]
     assert offenders == []
+
+
+def test_the_static_scan_sees_what_it_is_for():
+    """The scan above on code that does what it forbids, and not on what it
+    does not."""
+    import ast
+    source = ("gen.model.encode(q)\nself.encoder.encode_query(q)\nget_text_embedder(n, d).encode([q])\n"
+              "text.encode('utf-8')\nself.tokenizer.encode(q)\n")
+    assert _encodes_the_shared_model(ast.parse(source)) == [1, 2, 3]
 
 
 def test_the_loaders_kwargs_ask_for_eager_attention_on_mps_alone():
