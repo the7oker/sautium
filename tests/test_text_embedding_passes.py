@@ -867,6 +867,26 @@ def test_a_text_over_its_rung_is_refused_and_never_cropped():
     assert mps.forwards == []
 
 
+def test_a_clap_query_is_padded_to_a_rung_after_the_tokenizer():
+    """The text tower of the sound search meets a closed set of lengths too: a
+    query of any length up to 512 tokens is one of six shapes, its own tokens
+    first and the rest the pad token under a mask of 0."""
+    import embeddings
+    seen = set()
+    for n in range(1, 130):
+        ids = torch.arange(10, 10 + n).reshape(1, n)
+        padded = embeddings._padded_to_rung({"input_ids": ids, "attention_mask": torch.ones_like(ids)}, 1)
+        length = padded["input_ids"].shape[1]
+        seen.add(length)
+        assert padded["input_ids"][0, :n].tolist() == ids[0].tolist()
+        assert padded["input_ids"][0, n:].tolist() == [1] * (length - n)
+        assert padded["attention_mask"][0].tolist() == [1] * n + [0] * (length - n)
+        assert length == next(r for r in embeddings._QUERY_RUNGS if r >= n)
+    assert seen == {16, 32, 64, 128, 256}
+    long = torch.zeros(1, 600, dtype=torch.long)
+    assert embeddings._padded_to_rung({"input_ids": long, "attention_mask": long}, 1)["input_ids"].shape == (1, 600)
+
+
 def test_no_module_encodes_with_the_shared_model_off_the_seam():
     """The closed set holds only while every forward of the text encoder goes
     through text_embedder.encode: a model.encode of the shared encoder

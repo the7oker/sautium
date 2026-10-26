@@ -203,6 +203,46 @@ def test_queries_of_every_length_are_one_shape_and_the_callers_meet_the_set(enco
         text_embedder._end_pass()
 
 
+@pytest.fixture(scope="module")
+def clap():
+    """CLAP's text tower as the sound search loads it."""
+    if not mps_probe.cached("laion/clap-htsat-unfused"):
+        pytest.skip("CLAP is not in the hub's cache")
+    from embeddings import AudioEmbeddingGenerator
+    generator = AudioEmbeddingGenerator(device="mps")
+    generator.load_model()
+    return generator
+
+
+def test_clap_queries_of_every_length_are_a_few_shapes_and_the_same_vectors(clap):
+    """A sound query of each length from 1 to 77 words was a shape of its own
+    — 74 of them, 318 MB on the host, measured — and is one of four now,
+    16 to 128 tokens; the vectors are the unpadded ones to bf16."""
+    import torch
+    from device import autocast, cast_inputs
+    seen = []
+    hook = clap.model.text_model.register_forward_pre_hook(
+        lambda module, args, kwargs: seen.append(tuple(kwargs["input_ids"].shape)), with_kwargs=True)
+    rng = random.Random(6)
+    queries = [" ".join(rng.choices(mps_probe.VOCABULARY, k=n)) for n in range(1, 78)]
+    try:
+        clap.text_to_embedding(queries[0])          # the tower's fixed graphs
+        before = mps_probe.live_malloc()["mb"]
+        got = [clap.text_to_embedding(q) for q in queries]
+        grown = mps_probe.live_malloc()["mb"] - before
+        assert set(seen[1:]) <= {(1, 16), (1, 32), (1, 64), (1, 128)}, set(seen)
+        assert grown <= 4 * 12 + 20, grown
+        for query, vector in zip(queries[::7], got[::7]):
+            inputs = clap.processor(text=[query], return_tensors="pt", padding=True)
+            inputs = {k: v.to("mps") for k, v in cast_inputs(inputs, clap.model.dtype).items()}
+            with torch.no_grad(), autocast("mps"):
+                exact = clap.model.get_text_features(**inputs)
+            exact = torch.nn.functional.normalize(exact.float(), p=2, dim=1)[0].cpu().numpy()
+            assert float(np.dot(vector, exact)) >= 0.999
+    finally:
+        hook.remove()
+
+
 def test_the_vectors_are_the_cpus_to_within_bf16(encoder, monkeypatch):
     """CPU fp32 is the reference: the node's CPU copy encodes in it. Texts of
     49 to 1730 tokens, those this machine's encoder takes alone, each in its

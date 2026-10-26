@@ -73,6 +73,26 @@ def segment_grid_indices(duration_seconds: float, full: bool = False) -> list:
     return np.unique(np.linspace(0, n - 1, min(k, n)).round().astype(int)).tolist()
 
 
+# On MPS a query's tokens are padded up to the first of these: the backend keeps
+# the graphs of every shape a forward has had on the host heap until the process
+# ends, ~5 MB a length for this text tower (a query of each length from 3 to 77
+# tokens: 318 MB), so a query meets a closed set of shapes — the encoder of the
+# text embeddings has the same reason (text_embedder._LENGTH_RUNGS). The
+# attention mask leaves the vector as it was: 0.9999 and over from the
+# unpadded one.
+_QUERY_RUNGS = (16, 32, 64, 128, 256, 512)
+
+
+def _padded_to_rung(inputs, pad_token_id: int) -> dict:
+    """The tokenizer's output for one text, padded AFTER it to the first of
+    _QUERY_RUNGS at or above its length: the tokenizer keeps its settings for
+    every caller (the Discovery blocks of one search meet on one processor)."""
+    length = inputs["input_ids"].shape[1]
+    pad = next((r for r in _QUERY_RUNGS if r >= length), length) - length
+    return {k: torch.nn.functional.pad(v, (0, pad), value=pad_token_id if k == "input_ids" else 0)
+            for k, v in inputs.items()}
+
+
 class AudioEmbeddingGenerator:
     """Generate audio embeddings using CLAP model on GPU."""
 
@@ -118,6 +138,8 @@ class AudioEmbeddingGenerator:
         self.load_model()
 
         inputs = self.processor(text=[text], return_tensors="pt", padding=True)
+        if self.device == "mps":
+            inputs = _padded_to_rung(inputs, self.processor.tokenizer.pad_token_id)
         inputs = cast_inputs(inputs, self.model.dtype)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
