@@ -26,11 +26,11 @@ def test_the_page_names_no_other_origin():
 
 
 def test_the_page_gives_no_resource_hint():
-    """A preconnect, a DNS prefetch or speculation rules reach another origin
-    without a word from the Content-Security-Policy, which governs none of
-    them: the page carries none."""
+    """A preconnect, a DNS prefetch, a prerender or speculation rules reach
+    another origin without a word from the Content-Security-Policy, which
+    governs none of them: nothing the page is made of carries one."""
     hint = re.compile(r"preconnect|dns-prefetch|prerender|modulepreload|speculationrules", re.IGNORECASE)
-    for path in [STATIC / "index.html", *STATIC.glob("*.js")]:
+    for path in [*STATIC.rglob("*.html"), *STATIC.rglob("*.js")]:
         assert not hint.search(path.read_text(encoding="utf-8")), path.name
 
 
