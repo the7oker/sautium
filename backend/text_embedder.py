@@ -126,7 +126,9 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
         try:
             vectors, left = _encode_on(model, [texts[i] for i in group], len(group), device)
         except OutOfMemory as e:
-            _refused(device, e)
+            # its words: a log handler that keeps its records would keep the
+            # error, and through its frames the CPU copy this call loads below
+            _refused(device, str(e))
             cpu += [i for later in forwards[n:] for i in later]
             break
         _took_now.add(device)
@@ -158,7 +160,7 @@ _took_now: set = set()
 _refused_now: set = set()
 
 
-def _refused(device: str, why: OutOfMemory) -> None:
+def _refused(device: str, why: str) -> None:
     _refused_now.add(device)
     if device not in _refusing:
         _refusing.add(device)

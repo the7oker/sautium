@@ -820,11 +820,22 @@ def test_the_systems_own_out_of_memory_is_out_of_memory(tmp_path, monkeypatch):
     assert device.out_of_memory(raised_over(KeyError("a key"), plain)) is None
 
 
-def test_a_try_out_of_memory_leaves_nothing_of_itself_kept(cpu_copy, monkeypatch):
+@pytest.fixture
+def no_collection():
+    """The cyclic collector off, and as it was after: what the test lets go
+    is freed by its last reference, or kept."""
+    import gc
+    was = gc.isenabled()
+    gc.disable()
+    yield
+    if was:
+        gc.enable()
+
+
+def test_a_try_out_of_memory_leaves_nothing_of_itself_kept(cpu_copy, monkeypatch, no_collection):
     """Only the words of an out of memory are kept: the error's traceback
     holds the frames of the try that failed and what they allocated, which
     the retry after it needs freed — at once, not at a collection."""
-    import gc
     import weakref
     import text_embedder
     allocated = []
@@ -839,18 +850,38 @@ def test_a_try_out_of_memory_leaves_nothing_of_itself_kept(cpu_copy, monkeypatch
                            "allocations: 31.94 GiB, max allowed: 30.19 GiB)")
 
     monkeypatch.setattr(text_embedder, "_load", failing)
-    gc.disable()
+    vectors, why = text_embedder._encoded(types.SimpleNamespace(encode=failing), ["a"], 1)
     try:
-        vectors, why = text_embedder._encoded(types.SimpleNamespace(encode=failing), ["a"], 1)
-        try:
-            text_embedder._cpu_copy(NAME)
-        except text_embedder.OutOfMemory as e:
-            stopped = str(e)
-        assert len(allocated) == 2 and [kept() for kept in allocated] == [None, None]
-        assert vectors is None and why.startswith("MPS backend out of memory")
-        assert stopped.startswith(f"out of memory loading {NAME} on the cpu: MPS backend")
-    finally:
-        gc.enable()
+        text_embedder._cpu_copy(NAME)
+    except text_embedder.OutOfMemory as e:
+        stopped = str(e)
+    assert len(allocated) == 2 and [kept() for kept in allocated] == [None, None]
+    assert vectors is None and why.startswith("MPS backend out of memory")
+    assert stopped.startswith(f"out of memory loading {NAME} on the cpu: MPS backend")
+
+
+def test_a_refusal_said_keeps_nothing_of_the_pass(cpu_copy, monkeypatch, caplog, no_collection):
+    """The refusal's line keeps the words of the error, not the error: a log
+    handler that keeps its records (pytest's own, a buffer) would keep the
+    error's frames, and with them the CPU copy the pass gave back."""
+    import weakref
+    import device
+    import text_embedder
+    caplog.set_level(logging.WARNING, logger="text_embedder")
+    copies = []
+
+    def load(name, device, **kw):
+        copy = Tokenized()
+        copies.append(weakref.ref(copy))
+        return copy
+
+    monkeypatch.setattr(text_embedder, "_load", load)
+    with device.heavy_pass("a text pass"):
+        vectors, left_out = text_embedder.encode(Tokenized(lambda texts, batch_size: True),
+                                                 [_words(10)], batch_size=4, device="mps",
+                                                 name=NAME)
+    assert left_out == set() and len(_refusals(caplog)) == 1
+    assert len(copies) == 1 and copies[0]() is None
 
 
 @pytest.mark.parametrize("kind", [*PASSES, "audio"])
