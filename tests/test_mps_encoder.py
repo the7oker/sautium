@@ -233,9 +233,9 @@ def test_ast_scores_are_the_cpus_to_within_bf16(instruments):
 def test_a_pass_of_bio_chunks_under_the_allocators_limit_lowered_is_not_refused():
     """The failure itself, at a scale the machine takes: the limit at half the
     working set, or 8.88 GiB where that is less (the allocator reads it when it
-    starts, hence a child; mps_probe.lowered_limit), where SDPA was refused in
-    the 23rd shape — 256 bytes too — and the encoder went to its CPU copy for
-    good. The chunks are within what the machine's encoder takes alone, so the
+    starts, hence a child; mps_probe.lowered_limit), where SDPA was refused on a
+    24 GB Mac in the 23rd shape — 256 bytes too — and the encoder went to its
+    CPU copy for good. The chunks are within what the machine's encoder takes alone, so the
     copy taken at all is a refusal."""
     if not mps_probe.cached(MODEL):
         pytest.skip(f"{MODEL} is not in the hub's cache")

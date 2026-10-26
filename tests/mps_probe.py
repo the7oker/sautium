@@ -3,7 +3,8 @@ the one scenario that needs a process of its own (tests/test_mps_encoder.py).
 
 The allocator reads PYTORCH_MPS_*_WATERMARK_RATIO when it first starts, so a
 limit lowered for a test is lowered in a child: `python tests/mps_probe.py
-refusal`, which prints one JSON line.
+refusal`, run with the environment of lowered_limit(), which prints one JSON
+line.
 """
 
 import gc
@@ -107,8 +108,9 @@ def lowered_limit() -> dict:
     0.5 of the working set, or at REFUSAL_LIMIT_GIB where that is less. The
     child's pass is a fixed 12 calls, and what SDPA pins in them levels off as
     the machine grows (bigger forwards, fewer shapes) while half the working
-    set does not: on a 64 GB Mac the old code was never refused. The fixed
-    code peaks at ~3.4 GiB there, far under the limit."""
+    set does not: a replay of the old code's pins puts it short of half the
+    working set on a 64 GB Mac. The fixed code, with such a machine's share
+    emulated, peaked at ~3 GiB of Metal memory, far under the limit."""
     import torch
     high = min(0.5, REFUSAL_LIMIT_GIB * GIB / torch.mps.recommended_max_memory())
     return {"PYTORCH_MPS_HIGH_WATERMARK_RATIO": f"{high:.4f}",
@@ -117,9 +119,9 @@ def lowered_limit() -> dict:
 
 def refusal() -> dict:
     """A pass of bio-sized chunks under the allocator's limit lowered
-    (lowered_limit, in this process's environment): SDPA took it past the limit
-    in 23 shapes (2026-10-26), every allocation was refused from then on — 256
-    bytes included — and the encoder went to its CPU copy. The chunks are kept
+    (lowered_limit, in this process's environment): on a 24 GB Mac SDPA took it
+    past the limit in 23 shapes (2026-10-26), every allocation was refused from
+    then on — 256 bytes included — and the encoder went to its CPU copy. The chunks are kept
     within what this machine's encoder takes alone, so the CPU copy taken at
     all is a refusal, not a text over the share. What the pass meets: how often
     the device refused, and how many times the CPU copy was taken."""
@@ -135,7 +137,10 @@ def refusal() -> dict:
         in_force = False
     except RuntimeError as e:
         in_force = "out of memory" in str(e)
+    # Its pieces' 1 GiB heaps, left in PyTorch's cache, would take the model's
+    # weights in, and their slack could not be given back while those live
     held.clear()
+    torch.mps.empty_cache()
 
     refused, copies = [], []
     refused_by, copy_by = text_embedder._refused, text_embedder._cpu_copy

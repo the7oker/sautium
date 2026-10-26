@@ -74,10 +74,10 @@ def attn_implementation(device: str) -> Optional[str]:
     PyTorch tensors, which come back with empty_cache; what it still caches
     per shape, small per-op graphs, is ~50 KB, and the shapes are finite: the
     text encoder's are those its share admits, AST's the batch sizes up to 12.
-    It is no slower there (a forward 21-25 % faster). CUDA's
-    and the CPU's SDPA stream (flash, memory-efficient kernels) and keep
-    nothing per shape. CLAP's attention is eager already at transformers
-    4.57, and PaSST's is its own."""
+    It is no slower there (a forward 21-25 % faster). CUDA's and the CPU's
+    SDPA stream (flash, memory-efficient kernels) and keep nothing per shape.
+    CLAP's attention is eager already at transformers 4.57, and PaSST's is its
+    own."""
     return "eager" if device == "mps" else None
 
 
