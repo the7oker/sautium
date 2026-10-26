@@ -71,7 +71,9 @@ class Tokenized(Encoder):
     its padded length, and fails if a text is not whole in it: the mask of a
     row must count the tokens of its text."""
 
-    max_seq_length = 8192           # BGE-M3's: its tokenizer cuts a text there
+    # BGE-M3's: its tokenizer cuts a text there, and its position table has two entries
+    # more, which a forward fails past (as the embeddings do)
+    max_seq_length = 8192
 
     def __init__(self, full=lambda texts, batch_size: False):
         super().__init__(full)
@@ -99,6 +101,7 @@ class Tokenized(Encoder):
 
     def __call__(self, features):
         rows, length = features["input_ids"].shape
+        assert length <= self.max_seq_length + 2, f"padded to {length}, past the position table"
         self.forwards.append((rows, length))
         assert features["attention_mask"].sum(1).tolist() == [_tokens(t) for t in self._texts], \
             "a text was cropped or lost its mask"
@@ -809,7 +812,7 @@ def test_the_shapes_a_machine_can_ever_have_are_few_and_pinned(working_set_gb, s
     assert len(_reachable(_share(working_set_gb), 16)) == shapes
 
 
-def test_the_ladder_is_64_128_256_then_steps_of_160_up_to_the_longest_text_the_share_admits():
+def test_the_ladder_is_64_128_256_then_steps_of_160_up_to_the_longest_text_the_share_and_the_encoder_admit():
     """Up to the top on any machine: a text between the last step and the top
     is padded to the top and runs alone, so a top far above the last step
     (the ladder of a list ended at 1,856: 3,172 on a 64 GB Mac) made the texts

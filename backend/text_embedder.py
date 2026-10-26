@@ -133,14 +133,14 @@ _BYTES_PER_SCORE = 40
 # a shape of a closed set: its length a rung of the ladder (_rungs: a text is
 # padded up to the first rung at or above its own, and the attention mask
 # leaves its vector as it was, to bf16), its batch a power of two. The ladder
-# ends at the longest text the share admits alone, or the encoder takes at all,
-# which the machine decides: at most 39 shapes at the working set of a 24 GB
-# Mac and a batch of 16, ~0.3 GB for good (62 on a 64 GB Mac). A rung's texts
-# are of one length, where a forward used to pack a short text after a long
-# one, so a pass is no slower for it: 10 % faster, 55 s against 61 s a pass of
-# 500 bios. Steps of 128 tokens were no faster, and steps of 192, a ladder
-# fitted to a node's lengths in ten rungs, and one of nine coarse rungs were 8,
-# 11 and 19 % slower (measured).
+# ends at the lesser of the longest text the share admits alone, which the
+# machine decides, and the longest the encoder takes at all: at most 39 shapes
+# at the working set of a 24 GB Mac and a batch of 16, ~0.3 GB for good (62 on
+# a 64 GB Mac). A rung's texts are of one length, where a forward used to pack
+# a short text after a long one, so a pass is no slower for it: 10 % faster (a
+# pass of 500 bios: 55 s against 61). Steps of 128 tokens were no faster, and
+# steps of 192, a ladder fitted to a node's lengths in ten rungs, and one of
+# nine coarse rungs were 8, 11 and 19 % slower (measured).
 _FIRST_RUNGS = (64, 128, 256)
 _RUNG_STEP = 160                # tokens, from the last of those up to the top
 

@@ -71,18 +71,19 @@ class _MallocStatistics(ctypes.Structure):
 
 
 def live_malloc() -> dict:
-    """What this process holds in malloc, live: the default zone's allocations
-    and bytes (malloc_zone_statistics; macOS). It is the host side of what MPS
-    keeps per shape — the graphs of a forward's ops, 4 to 7 MB and some 60,000
-    allocations a shape, never given back — whatever the kernel does with the
-    pages: footprint's Malloc Small follows those, and a graph can land on pages
-    a pass left free. Exact: `vmmap --summary` prints the same bytes to one
-    decimal of its unit, which from 1 GiB up is steps of 100 MB."""
+    """What this process holds in malloc, live: the allocations and bytes of every
+    zone (malloc_zone_statistics; macOS). It is the host side of what MPS keeps per
+    shape — the graphs of a forward's ops, 4 to 7 MB and some 60,000 allocations a
+    shape, never given back — whatever the kernel does with the pages: footprint's
+    Malloc Small follows those, and a graph can land on pages a pass left free.
+    Exact: `vmmap --summary` prints the same bytes to one decimal of its unit,
+    which from 1 GiB up is steps of 100 MB. On this macOS the default zone holds
+    every size class; where nano malloc is in front of it, the blocks of up to 256
+    bytes — most of a graph's — are in a zone of their own, which only the sum has."""
     libc = ctypes.CDLL(None)
-    libc.malloc_default_zone.restype = ctypes.c_void_p
     libc.malloc_zone_statistics.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MallocStatistics)]
     statistics = _MallocStatistics()
-    libc.malloc_zone_statistics(libc.malloc_default_zone(), ctypes.byref(statistics))
+    libc.malloc_zone_statistics(None, ctypes.byref(statistics))
     return {"count": statistics.blocks_in_use, "mb": statistics.size_in_use / 1024 ** 2}
 
 
