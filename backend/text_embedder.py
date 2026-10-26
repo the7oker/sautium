@@ -241,7 +241,7 @@ def _encoded(model, texts: List[str], batch_size: int) -> Tuple[Optional[np.ndar
         said = out_of_memory(e)
         if said is None:
             raise
-        return None, str(said)
+        return None, said
 
 
 # The devices whose fall-back to one text at a time was said: once a process,

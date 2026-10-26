@@ -105,22 +105,23 @@ _OUT_OF_MEMORY = ("out of memory", "invalid buffer size", "cublas_status_alloc_f
                   "can't allocate memory", "cannot allocate memory", "not enough memory")
 
 
-def out_of_memory(exc: Optional[BaseException]) -> Optional[BaseException]:
-    """The error that says the device is out of memory for what was asked, or
-    None: CUDA's own, Python's, the system's (ENOMEM), or one of torch's
-    RuntimeErrors that says so — `exc` or an error it was raised from, as its
-    traceback shows them: transformers re-raises a .bin checkpoint's failed
-    load (BGE-M3 ships no other weights file) as an OSError of its own, whose
-    words are of no memory."""
+def out_of_memory(exc: Optional[BaseException]) -> Optional[str]:
+    """The words of the error that says the device is out of memory for what
+    was asked, or None: CUDA's own, Python's, the system's (ENOMEM), or one of
+    torch's RuntimeErrors that says so — `exc` or an error it was raised from,
+    as its traceback shows them: transformers re-raises a .bin checkpoint's
+    failed load (BGE-M3 ships no other weights file) as an OSError of its own,
+    whose words are of no memory. The words only: an error kept past its
+    handler keeps the failed try's frames and tensors, which a retry needs
+    freed."""
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
-        if isinstance(exc, (torch.cuda.OutOfMemoryError, MemoryError)):
-            return exc
-        if isinstance(exc, OSError) and exc.errno == errno.ENOMEM:
-            return exc
-        if isinstance(exc, RuntimeError) and any(s in str(exc).lower() for s in _OUT_OF_MEMORY):
-            return exc
+        if (isinstance(exc, (torch.cuda.OutOfMemoryError, MemoryError))
+                or (isinstance(exc, OSError) and exc.errno == errno.ENOMEM)
+                or (isinstance(exc, RuntimeError)
+                    and any(s in str(exc).lower() for s in _OUT_OF_MEMORY))):
+            return str(exc) or type(exc).__name__
         exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
     return None
 

@@ -780,18 +780,20 @@ def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, fact
 def test_the_systems_own_out_of_memory_is_out_of_memory(tmp_path, monkeypatch):
     """A weights file's mmap that ENOMEM refuses — the CPU copy's load on a
     Mac out of memory — is no other failure, re-raised by transformers too:
-    the error that says so is read down the chain its traceback shows."""
+    the words of the error that says so, read down the chain its traceback
+    shows."""
     import errno
     import device
     enomem = OSError(errno.ENOMEM, "Cannot allocate memory")
     mmap = RuntimeError("unable to mmap 2271064456 bytes from file </x>: Cannot allocate "
                         "memory (12)")
-    assert device.out_of_memory(enomem) is enomem and device.out_of_memory(mmap) is mmap
+    assert device.out_of_memory(enomem) == "[Errno 12] Cannot allocate memory"
+    assert device.out_of_memory(mmap) == str(mmap)
     assert device.out_of_memory(OSError(errno.ENOENT, "No such file or directory")) is None
     with pytest.raises(OSError) as raised:
         _a_bin_load_refused(tmp_path, monkeypatch)(NAME, "cpu")
     assert raised.value.errno is None
-    assert str(device.out_of_memory(raised.value)).startswith("unable to mmap 2271064456 bytes")
+    assert device.out_of_memory(raised.value).startswith("unable to mmap 2271064456 bytes")
 
     def raised_over(over, then):
         try:
@@ -808,10 +810,47 @@ def test_the_systems_own_out_of_memory_is_out_of_memory(tmp_path, monkeypatch):
     def from_none():
         raise ValueError("another failure") from None
 
-    full = MemoryError()
-    assert device.out_of_memory(raised_over(full, plain)) is full
+    def from_full():
+        raise ValueError("another failure") from MemoryError("Cannot allocate memory")
+
+    assert device.out_of_memory(raised_over(MemoryError(), plain)) == "MemoryError"
+    assert device.out_of_memory(raised_over(KeyError("a key"), from_full)) == (
+        "Cannot allocate memory")
     assert device.out_of_memory(raised_over(MemoryError(), from_none)) is None
     assert device.out_of_memory(raised_over(KeyError("a key"), plain)) is None
+
+
+def test_a_try_out_of_memory_leaves_nothing_of_itself_kept(cpu_copy, monkeypatch):
+    """Only the words of an out of memory are kept: the error's traceback
+    holds the frames of the try that failed and what they allocated, which
+    the retry after it needs freed — at once, not at a collection."""
+    import gc
+    import weakref
+    import text_embedder
+    allocated = []
+
+    class Activations:
+        pass
+
+    def failing(*a, **kw):
+        activations = Activations()
+        allocated.append(weakref.ref(activations))
+        raise RuntimeError("MPS backend out of memory (MPS allocated: 1.36 GiB, other "
+                           "allocations: 31.94 GiB, max allowed: 30.19 GiB)")
+
+    monkeypatch.setattr(text_embedder, "_load", failing)
+    gc.disable()
+    try:
+        vectors, why = text_embedder._encoded(types.SimpleNamespace(encode=failing), ["a"], 1)
+        try:
+            text_embedder._cpu_copy(NAME)
+        except text_embedder.OutOfMemory as e:
+            stopped = str(e)
+        assert len(allocated) == 2 and [kept() for kept in allocated] == [None, None]
+        assert vectors is None and why.startswith("MPS backend out of memory")
+        assert stopped.startswith(f"out of memory loading {NAME} on the cpu: MPS backend")
+    finally:
+        gc.enable()
 
 
 @pytest.mark.parametrize("kind", [*PASSES, "audio"])
