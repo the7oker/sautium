@@ -863,12 +863,17 @@ def test_a_try_out_of_memory_leaves_nothing_of_itself_kept(cpu_copy, monkeypatch
 def test_a_refusal_said_keeps_nothing_of_the_pass(cpu_copy, monkeypatch, caplog, no_collection):
     """The refusal's line keeps the words of the error, not the error: a log
     handler that keeps its records (pytest's own, a buffer) would keep the
-    error's frames, and with them the CPU copy the pass gave back."""
+    error's frames, and with them the CPU copy the pass gave back. The copy
+    goes by its last reference — no collection, the pass end's own included,
+    which would also free an error kept in a cycle."""
+    import gc
     import weakref
     import device
     import text_embedder
     caplog.set_level(logging.WARNING, logger="text_embedder")
-    copies = []
+    copies, collections = [], []
+    real_collect = gc.collect
+    monkeypatch.setattr(gc, "collect", lambda *a: collections.append(1) or real_collect(*a))
 
     def load(name, device, **kw):
         copy = Tokenized()
@@ -881,7 +886,7 @@ def test_a_refusal_said_keeps_nothing_of_the_pass(cpu_copy, monkeypatch, caplog,
                                                  [_words(10)], batch_size=4, device="mps",
                                                  name=NAME)
     assert left_out == set() and len(_refusals(caplog)) == 1
-    assert len(copies) == 1 and copies[0]() is None
+    assert len(copies) == 1 and copies[0]() is None and collections == []
 
 
 @pytest.mark.parametrize("kind", [*PASSES, "audio"])
