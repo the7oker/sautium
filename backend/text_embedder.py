@@ -9,8 +9,9 @@ is loaded once on first acquire and kept resident for the process lifetime
 driver across load/unload cycles, which surfaced as growing nvidia-smi
 VRAM with each enrichment trigger.
 
-On MPS a pass also takes a copy of the model on the CPU for the texts whose
-attention the device should not hold or that it refuses (encode), and gives it
+On MPS the model loads with eager attention (device.attn_implementation), and
+a pass also takes a copy of the model on the CPU for the texts whose attention
+the device should not materialise or that it refuses (encode), and gives it
 back at the pass's end (device.at_pass_end).
 """
 
@@ -65,21 +66,31 @@ def get_text_embedder(model_name: str, device: str):
 def _load(model_name: str, device: str, **kwargs):
     """The model loaded, its caller holding model_cache._factory_lock."""
     from device import get_model_dtype
-    import torch
     dtype = get_model_dtype(device)
     logger.info(f"Loading text embedding model: {model_name} on {device} ({dtype})")
-    # Load directly at the tier dtype (historically fp32-always on bf16
-    # tiers — +1.1 GB VRAM; then briefly load-fp32-then-convert, which
-    # left the freed fp32 weights parked in the caching allocator as
-    # ~2.3 GB of reserved-but-idle VRAM until an empty_cache). ST >=5.x
-    # casts bf16 back to float32 before the numpy conversion in
-    # encode(), so callers see identical output dtype.
-    load_kwargs = {}
-    if dtype in (torch.float16, torch.bfloat16):
-        load_kwargs["model_kwargs"] = {"torch_dtype": dtype}
-    model = SentenceTransformer(model_name, device=device, **load_kwargs, **kwargs)
+    model = SentenceTransformer(model_name, device=device,
+                                model_kwargs=_model_kwargs(device, dtype) or None, **kwargs)
     logger.info(f"Text embedding model loaded ({dtype})")
     return model
+
+
+def _model_kwargs(device: str, dtype) -> dict:
+    """The model_kwargs of a load on `device` at `dtype`: the tier dtype where
+    it is a half — loaded directly at it (historically fp32-always on bf16
+    tiers — +1.1 GB VRAM; then briefly load-fp32-then-convert, which left the
+    freed fp32 weights parked in the caching allocator as ~2.3 GB of
+    reserved-but-idle VRAM until an empty_cache). ST >=5.x casts bf16 back to
+    float32 before the numpy conversion in encode(), so callers see identical
+    output dtype — and the device's attention (device.attn_implementation)."""
+    import torch
+    from device import attn_implementation
+    kwargs = {}
+    if dtype in (torch.float16, torch.bfloat16):
+        kwargs["torch_dtype"] = dtype
+    attention = attn_implementation(device)
+    if attention:
+        kwargs["attn_implementation"] = attention
+    return kwargs
 
 
 class OutOfMemory(RuntimeError):
@@ -94,19 +105,17 @@ class OutOfMemory(RuntimeError):
 # first batch held only long texts stopped there on every pass)
 _CANARY = "a"
 
-# The devices whose attention keeps what it takes. torch 2.12 runs MPS's
-# scaled_dot_product_attention over more than 8 tokens as one MPSGraph
-# (sdpa_general_mps) whose B x H x L x L buffers are its own: outside PyTorch's
-# allocator and empty_cache, handed to MPS's heap cache, which frees them only
-# when it is next visited. On the 24 GB Mac (2026-10-25) one forward of 16 bio
-# chunks of ~1.8k tokens took eight such buffers of 3.0 GiB, four forwards 32
-# GiB, and the process could allocate nothing on the device after them. There
-# a forward is cut to a share of the device's working set, and a text whose
+# Where the attention is eager (device.attn_implementation: MPS) a forward's
+# B x H x L x L scores are PyTorch tensors, ~8 bytes a score while it runs (7.3
+# to 8.6 measured at 268M to 806M scores), and they stay in PyTorch's cache
+# until empty_cache (a tensor of 512 MiB or more in a heap of its own). A
+# forward is cut to a share of the device's working set, and a text whose
 # attention exceeds it alone goes to the CPU, whose attention streams (flash).
-_KEEPS_ITS_ATTENTION = {"mps"}
+# The cost charged a score is the generous 40 it has always been, not the 8: at
+# 10 a pass was slower (its bigger groups pad more: 0.13 -> 0.21 s a chunk)
+# and, without the empty_cache after each forward, the cache grew to 12 GiB
+# inside one pass.
 _ATTENTION_SHARE = 1 / 8        # of the device's working set, for one forward
-# What one score of a forward's B x H x L x L attention takes there: eight fp32
-# buffers and the bf16 ones (the Mac's eight 3.0 GiB for 16 x 16 x 1.8k² scores)
 _BYTES_PER_SCORE = 40
 
 
@@ -114,11 +123,13 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
            name: str) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
     """`texts` embedded and normalized, as every pass of the text encoder
     asks, and the indices of the texts left out (None in their place). On a
-    device that keeps its attention, the texts go in forwards within its
-    share, and to `name` on the CPU go a text over the share alone, a text the
-    device cannot take alone, and every text after it refused a text of a few
+    device that materialises its attention (eager: MPS), the texts go in
+    forwards within its share and each forward's cache is given back, and to
+    `name` on the CPU go a text over the share alone, a text the device
+    cannot take alone, and every text after it refused a text of a few
     tokens. Out of memory, a forward's texts go one at a time (_encode_on)."""
-    if device not in _KEEPS_ITS_ATTENTION:
+    from device import attn_implementation, empty_cache
+    if attn_implementation(device) != "eager":
         return _encode_on(model, texts, batch_size, device)
     out: List[Optional[np.ndarray]] = [None] * len(texts)
     forwards, cpu = _forwards(model, texts, batch_size)
@@ -131,6 +142,10 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
             _refused(device, str(e))
             cpu += [i for later in forwards[n:] for i in later]
             break
+        # The forward's scores are in PyTorch's cache now, none in use: across
+        # forwards of different sizes that cache grew to 12 GiB inside one pass
+        # at a relaxed share. Given back where the forward ends
+        empty_cache(device)
         _took_now.add(device)
         for j, i in enumerate(group):
             out[i] = vectors[j]
@@ -169,8 +184,8 @@ def _refused(device: str, why: str) -> None:
 
 
 def _forwards(model, texts: List[str], batch_size: int) -> Tuple[List[List[int]], List[int]]:
-    """The texts' forwards on a device that keeps its attention — groups of
-    indices, the longest first, each padded to its first text's length and
+    """The texts' forwards on a device that materialises its attention — groups
+    of indices, the longest first, each padded to its first text's length and
     within the share — and the texts whose attention alone exceeds it."""
     from device import available_accel_memory_gb
     # Tokenized as sentence-transformers does it: a call with other settings

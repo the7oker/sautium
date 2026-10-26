@@ -143,13 +143,17 @@ class InstrumentEnsembleTagger:
         import torch
         from transformers import ASTFeatureExtractor, ASTForAudioClassification
 
-        from device import get_model_dtype
+        from device import attn_implementation, get_model_dtype
         dtype = get_model_dtype(self.device)
 
         logger.info("Loading AST model: %s on %s (%s)", self.AST_MODEL_NAME, self.device, dtype)
         self.ast_extractor = ASTFeatureExtractor.from_pretrained(self.AST_MODEL_NAME)
+        # Eager on MPS: its SDPA keeps 8 bytes a score for every batch size a
+        # forward has had (1.7 GB for the 12 windows of tag_full_track) until
+        # the process ends, unloading the model included
         self.ast = ASTForAudioClassification.from_pretrained(
             self.AST_MODEL_NAME, torch_dtype=dtype,
+            attn_implementation=attn_implementation(self.device),
         )
         self.ast = self.ast.to(self.device).eval()
         self.id2label = self.ast.config.id2label

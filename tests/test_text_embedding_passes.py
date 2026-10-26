@@ -8,12 +8,15 @@ is written, a batch of long texts only included. On 2026-10-18
 one pass wrote an error line per batch, 314 of them, then "Genre desc
 embeddings done: 0 genres, 0 chunks".
 
-On MPS, which keeps the attention a forward takes (a 24 GB Mac held 32 GiB
-of it after four batches of bios on 2026-10-25), a forward's texts fit a
-share of the device's working set, and a text over the share alone goes to
-a copy of the encoder on the CPU, given back at the end of the pass.
+On MPS the encoder's attention is eager, its scores PyTorch tensors (SDPA
+there kept 8 bytes a score for every shape until the process ended: a 24 GB
+Mac held 32 GiB after four batches of bios on 2026-10-25): a forward's texts
+fit a share of the device's working set and its cache is given back after
+it, and a text over the share alone goes to a copy of the encoder on the
+CPU, given back at the end of the pass.
 
-The encoder is a fake that fails as MPS fails; the database is real.
+The encoder is a fake that fails as MPS fails; the database is real. What
+the real MPS keeps is tests/test_mps_encoder.py's.
 """
 
 import logging
@@ -57,7 +60,7 @@ class Encoder:
 
 
 class Tokenized(Encoder):
-    """The encoder as a device that keeps its attention sees it: it tokenizes
+    """The encoder as a device that materialises its attention sees it: it tokenizes
     a word a token and two for the ends — only as sentence-transformers'
     encode does (no tokenizer of its own to call otherwise) — it has 16 heads,
     and it says each forward's texts and padded length."""
@@ -403,7 +406,7 @@ def test_an_analysis_run_whose_text_pass_stopped_is_no_success(monkeypatch):
         "| Bio emb: 3 | not finished: genre emb stopped (out of memory)")
 
 
-# ── on a device that keeps its attention ───────────────────────────────────
+# ── on a device that materialises its attention ────────────────────────────
 
 @pytest.fixture
 def cpu_copy(monkeypatch):
@@ -655,6 +658,131 @@ def test_on_mps_the_cpu_takes_its_texts_one_at_a_time(cpu_copy):
     assert [float(v[0]) for v in vectors[:4]] == pytest.approx([_mark(t) for t in texts[:4]])
     # the longest first, each alone; the one that failed tried once, then a text of a few tokens
     assert cpu_copy.forwards == [(1, 105), (1, 3), (1, 103), (1, 102), (1, 101)]
+
+
+def test_on_mps_the_cache_is_given_back_where_each_forward_ends_and_only_there(cpu_copy,
+                                                                                monkeypatch):
+    """A forward's scores are PyTorch tensors there and its cache grew across
+    forwards of different sizes (12 GiB inside one pass at a relaxed share): it
+    is given back where the forward ends. The CPU copy's forwards and the other
+    devices' leave the cache alone."""
+    import device
+    import text_embedder
+    events = []
+    monkeypatch.setattr(device, "empty_cache", lambda dev=None: events.append(("freed", dev)))
+
+    class Logged(Tokenized):
+        def encode(self, texts, **kw):
+            events.append(("forward", len(texts), max(_tokens(t) for t in texts)))
+            return super().encode(texts, **kw)
+
+    texts = ([_words(50, i) for i in range(5)] + [_words(100)] + [_words(20, i) for i in range(6)]
+             + [_words(101)])
+    text_embedder.encode(Logged(), texts, batch_size=4, device="mps", name=NAME)
+    # the forwards of test_on_mps_a_forward_takes_no_more_attention_than_its_share, each then
+    # freed; the one text over the share went to the CPU copy, which frees nothing
+    assert events == [("forward", 1, 100), ("freed", "mps"), ("forward", 4, 50), ("freed", "mps"),
+                      ("forward", 4, 50), ("freed", "mps"), ("forward", 3, 20), ("freed", "mps")]
+    assert cpu_copy.forwards == [(1, 101)]
+    events.clear()
+    text_embedder.encode(Logged(), [_words(10)], batch_size=4, device="cuda", name=NAME)
+    assert events == [("forward", 1, 10)]
+
+
+def test_a_forward_on_mps_is_within_its_share_and_a_text_over_it_alone_is_not_taken(monkeypatch):
+    """Whatever the lengths, the batch size and the number of texts: every
+    text is in one forward or sent to the CPU, a forward's texts times its
+    padded length squared fit the share (at the cost charged a score), and a
+    text sent to the CPU would not have fit alone."""
+    import random
+    import text_embedder
+    monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "1.5")
+    share = 1.5e9 * text_embedder._ATTENTION_SHARE
+    heads = 16                                      # Tokenized's
+    rng = random.Random(7)
+    for _ in range(40):
+        texts = [_words(rng.randint(3, 600), i) for i in range(rng.randint(1, 40))]
+        batch_size = rng.choice([1, 4, 16])
+        forwards, too_long = text_embedder._forwards(Tokenized(), texts, batch_size)
+        tokens = [_tokens(t) for t in texts]
+        assert sorted([i for group in forwards for i in group] + too_long) == list(range(len(texts)))
+        for group in forwards:
+            padded = max(tokens[i] for i in group)
+            assert len(group) <= batch_size
+            assert len(group) * heads * padded ** 2 * text_embedder._BYTES_PER_SCORE <= share
+        for i in too_long:
+            assert heads * tokens[i] ** 2 * text_embedder._BYTES_PER_SCORE > share
+
+
+def test_the_loaders_kwargs_ask_for_eager_attention_on_mps_alone():
+    """SDPA there keeps 8 bytes a score for every shape until the process ends;
+    CUDA's and the CPU's keep nothing per shape, and load as they always did."""
+    import torch
+    import device
+    import text_embedder
+    assert [device.attn_implementation(d) for d in ("mps", "cuda", "cpu")] == ["eager", None, None]
+    kwargs = text_embedder._model_kwargs
+    assert kwargs("mps", torch.bfloat16) == {"torch_dtype": torch.bfloat16,
+                                             "attn_implementation": "eager"}
+    assert kwargs("cuda", torch.bfloat16) == {"torch_dtype": torch.bfloat16}
+    assert kwargs("cuda", torch.float16) == {"torch_dtype": torch.float16}
+    assert kwargs("cuda", torch.float32) == {} and kwargs("cpu", torch.float32) == {}
+
+
+def test_the_encoder_is_loaded_with_its_devices_kwargs(monkeypatch):
+    import torch
+    import text_embedder
+    seen = []
+    monkeypatch.setattr(text_embedder, "SentenceTransformer",
+                        lambda name, device, **kw: seen.append((name, device, kw)) or object())
+    text_embedder._load(NAME, "mps")
+    text_embedder._load(NAME, "cpu", local_files_only=True)        # the pass's CPU copy
+    assert seen == [
+        (NAME, "mps", {"model_kwargs": {"torch_dtype": torch.bfloat16,
+                                        "attn_implementation": "eager"}}),
+        (NAME, "cpu", {"model_kwargs": None, "local_files_only": True})]
+
+
+@pytest.mark.parametrize("device_name, attention", [("mps", "eager"), ("cpu", None)])
+def test_ast_is_loaded_with_its_devices_attention(monkeypatch, device_name, attention):
+    """AST's SDPA kept 8 bytes a score for each batch size it ran — 1.7 GB for
+    the 12 windows of a track, and its tail of 1 to 11 another each — and
+    unloading the model gave none of it back."""
+    pytest.importorskip("hear21passt")
+    import hear21passt.base
+    import transformers
+    import ensemble_instruments
+    seen = []
+
+    class Ast:
+        config = types.SimpleNamespace(id2label={0: "Guitar"})
+
+        @classmethod
+        def from_pretrained(cls, name, **kw):
+            seen.append(kw)
+            return cls()
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+    class Passt:
+        net = types.SimpleNamespace(to=lambda dtype: "net")
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(transformers, "ASTForAudioClassification", Ast)
+    monkeypatch.setattr(transformers, "ASTFeatureExtractor",
+                        types.SimpleNamespace(from_pretrained=lambda name: object()))
+    monkeypatch.setattr(hear21passt.base, "get_basic_model", lambda mode: Passt())
+    ensemble_instruments.InstrumentEnsembleTagger(device=device_name).load()
+    assert len(seen) == 1 and seen[0]["attn_implementation"] == attention
 
 
 def _held(lock) -> bool:

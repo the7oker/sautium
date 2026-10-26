@@ -270,31 +270,44 @@ implementation details live in the code, DB and git history.
   row as tried: each pass selects what is still unembedded, so what a
   stopped pass left comes back at the next one, and a stopped pass holds
   `failed`, which `_wants_more` reads as waiting out the interval.
-- **MPS keeps the attention it takes; one heavy pass at a time (2026-10-25).**
-  On a 24 GB Mac a fresh backend's first background bio pass took 32 GiB of
-  Metal memory in 47 s, and from then on the process could allocate
-  nothing on MPS: the passes stopped every half hour, and anything else on
-  the device would have failed with them. torch 2.12 runs MPS's
-  `scaled_dot_product_attention` over more than eight tokens as one
-  MPSGraph whose B×H×L×L buffers are its own — outside PyTorch's allocator
-  and `empty_cache`, kept in MPS's heap cache, which gives them back only
-  when later MPS work visits it; and PyTorch's limit counts the whole
-  process's Metal memory, so once past it no MPS work runs again. Sixteen
-  bio chunks of ~1.8k tokens made eight buffers of 3.0 GiB in one forward.
-  The lesson: "MPS allocated" is not the process's memory — "other
-  allocations" in torch's message is MPS's and MPSGraph's own. Now on MPS
-  a forward's texts fit 1/8 of the working set (at ~40 bytes a score), and
-  a text over it alone, or one MPS refuses, goes to a CPU copy of the
-  encoder, loaded for the pass (under the factory lock every load of the
-  process takes) and given back at its end (parted from its model card,
-  which refers back to it, or nothing frees it until a full collection);
-  a CPU that cannot take a text of a few tokens still stops the pass. And
-  the heavy passes take turns (`device.heavy_pass`), since each sizes its
-  work to the whole device: the analysis run's two halves, which give way
-  at their batch seams; the background text half, which gives way and is
-  woken when the accelerator is idle; a stream's analysis and lyrics,
-  which wait rather than drop (a demo-limited provider streams a track in
-  full once). The node's stop closes the lane.
+- **MPS keeps 8 bytes a score for every attention shape it has run; one
+  heavy pass at a time (2026-10-25, the cause corrected 2026-10-26).** On a
+  24 GB Mac a fresh backend's first background bio pass took 32 GiB of Metal
+  memory in 47 s, and from then on the process could allocate nothing on
+  MPS: the passes stopped every half hour, and anything else on the device
+  would have failed with them. It was not attention buffers waiting in a
+  cache. torch 2.12's MPS `scaled_dot_product_attention` over more than
+  eight tokens builds a graph per shape (q/k/v shape, a mask or none) that
+  holds two fp32 B×H×L×L constants — 8 bytes a score — in a graph cache
+  that is never evicted: they stay until the process ends, and
+  `empty_cache`, idle time, a "visit" and unloading the model return none
+  of it (measured: 8.00 to 8.06 bytes a score on every shape from 4M
+  scores up, 0 for a shape run again). A pass pads every forward to its
+  longest text, so nearly every forward is a new shape: 118 shapes were 36
+  GiB, and torch's limit, which counts the whole process's Metal memory,
+  refused every allocation past it. The first reading — eight buffers of
+  3.0 GiB in one forward, kept in MPS's heap cache until a visit — was four
+  forwards' pairs of constants; the cap on a forward's share, which that
+  reading led to, bounded one forward and not a sum over shapes. The
+  lesson: "MPS allocated" is not the process's memory — "other
+  allocations" in torch's message is the frameworks' own — and on MPS a
+  model that meets a new shape every forward must not run SDPA. Now the text
+  encoder and AST load with eager attention there
+  (`device.attn_implementation`): its scores are PyTorch tensors, nothing is
+  kept per shape (~50 KB), a forward is faster, and the encoder gives
+  PyTorch's cache back after each forward. A forward's texts still fit 1/8
+  of the working set (at ~40 bytes a score: a larger share made a pass
+  slower), and a text over it alone, or one MPS refuses, goes to a CPU copy
+  of the encoder, loaded for the pass (under the factory lock every load of
+  the process takes) and given back at its end (parted from its model card,
+  which refers back to it, or nothing frees it until a full collection); a
+  CPU that cannot take a text of a few tokens still stops the pass. And the
+  heavy passes take turns (`device.heavy_pass`), since each sizes its work
+  to the whole device: the analysis run's two halves, which give way at
+  their batch seams; the background text half, which gives way and is woken
+  when the accelerator is idle; a stream's analysis and lyrics, which wait
+  rather than drop (a demo-limited provider streams a track in full once).
+  The node's stop closes the lane.
 - **A failed Last.fm fetch means one of three things (2026-09-22).** The
   source's verdict about the entity (a `WSError` that reaches the caller:
   not found, or another per-entity refusal) is cached in

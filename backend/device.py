@@ -12,8 +12,9 @@ Tiers:
   bf16 would be emulated and slower than fp16.
 - CUDA Pascal/Volta and older: fp32. No Tensor Cores; fp16 gives no speedup
   and risks numerical issues.
-- MPS (Apple Silicon M1/M2/M3/M4/M5): bf16. Native on the Apple Neural
-  Engine and GPU; PyTorch MPS supports bf16 autocast since 2.0.
+- MPS (Apple Silicon M1/M2/M3/M4/M5): bf16, with eager attention
+  (attn_implementation). Native on the Apple Neural Engine and GPU; PyTorch
+  MPS supports bf16 autocast since 2.0.
 - CPU: fp32. fp16 is software-emulated and slower than fp32 on x86/ARM.
 """
 
@@ -55,6 +56,24 @@ def get_model_dtype(device: str) -> torch.dtype:
     return torch.float32
 
 
+def attn_implementation(device: str) -> Optional[str]:
+    """The attention a transformers model is loaded with on `device`: "eager"
+    on MPS, None (the library's own choice, SDPA) elsewhere.
+
+    torch's MPS scaled_dot_product_attention over more than 8 tokens builds a
+    graph per shape (q/k/v shape, a mask or none) that holds two fp32
+    [B, H, L, L] constants — 8 bytes a score — until the process ends: the
+    graph cache is never evicted, and neither empty_cache nor unloading the
+    model gives them back. A text pass pads every forward to its longest text,
+    so nearly every forward is a new shape: 118 shapes were 36 GiB of Metal
+    memory, past which the process could allocate nothing (measured
+    2026-10-26, torch 2.12). Eager attention builds the scores as PyTorch
+    tensors, which come back with empty_cache and cost ~50 KB a shape, and
+    it is no slower there (a forward 21-25 % faster). CUDA's and the CPU's
+    SDPA stream (flash, memory-efficient kernels) and keep nothing per shape."""
+    return "eager" if device == "mps" else None
+
+
 def autocast(device: str):
     """Forward-pass safety wrapper matching the model dtype tier."""
     if device in ("cuda", "mps"):
@@ -85,11 +104,12 @@ def empty_cache(device: Optional[str] = None) -> None:
     """Return the accelerator caching-allocator's free blocks to the OS.
 
     CUDA and MPS both keep a high-water pool of freed buffers for reuse and do
-    not hand it back on their own; over a long enrichment run the process then
-    holds its peak footprint (measured ~28 GB on MPS unified memory, 24 GB Mac)
-    instead of the live per-batch working set. Call at batch seams. Model
-    weights stay resident — only the free cache is released. No-op on CPU;
-    `device` defaults to the detected accelerator."""
+    not hand it back on their own: the process then holds the peak of its
+    batches instead of the live per-batch working set. Call at batch seams.
+    Model weights stay resident — only the free cache is released, and on MPS
+    only PyTorch's own: what the MPS graphs of past attention shapes hold is
+    not in that pool (see attn_implementation). No-op on CPU; `device`
+    defaults to the detected accelerator."""
     dev = device or get_device()
     if dev == "cuda":
         torch.cuda.empty_cache()
