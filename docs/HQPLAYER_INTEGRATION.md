@@ -314,6 +314,11 @@ sample, the output rates its comparisons went into ("Same output as sinc-Mx
 comparison for it; a same-figures twin's says "within the measurement's
 precision". The group's say stands on its card, which names any group
 without a say by its members alone (since 2026-10-23).
+A card's Sources print each source it cites that was re-read in full — who,
+where, the date, its quote — and, for a source whose terms license its copies
+(Roon's posts: CC BY-NC-SA 3.0), the licence after the date as the site prints
+it, linked to the licence's text on the screen and its address written out in
+the assistant's words (since 2026-10-26).
 A file's releases are per engine and family — the filters' PCM, the
 modulators' SDM — and a shipped file holds the dated ones alone. Each sheet
 is shown the newest engine of HQPlayer's own major that holds its family's

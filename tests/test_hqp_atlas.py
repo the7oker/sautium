@@ -367,6 +367,10 @@ def _break(doc, how):
         doc["groups"][0]["comparisons"][1]["fs_out"] = 768000.5
     elif how == "a word across the families for a name that is no member":
         doc["groups"][0]["cross_family"]["demo-sinc-z"] = "plays"
+    elif how == "a licence without its address":
+        doc["sources"][1]["license"] = "CC BY-NC-SA 3.0"
+    elif how == "a licence's address of another scheme":
+        doc["sources"][1].update({"license": "CC BY-NC-SA 3.0", "license_url": "javascript:alert(1)"})
     return doc
 
 
@@ -383,7 +387,8 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "an idle bound set by no excitation the words name", "a range without its min",
           "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine",
           "a filter pair keyed by a rate", "a modulator pair keyed by a context", "a group of two releases",
-          "a comparison into no rate", "a word across the families for a name that is no member")
+          "a comparison into no rate", "a word across the families for a name that is no member",
+          "a licence without its address", "a licence's address of another scheme")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -1146,6 +1151,22 @@ def test_a_source_not_reread_in_full_is_never_quoted_or_cited(tmp_path, atlas):
     text = _card_text(_card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM))
     assert "## The author's stated purpose" not in text and "## History" not in text
     assert not any("Fictional Author" in line for line in text)
+
+
+def test_a_licensed_sources_line_names_its_licence_linked_and_in_words_its_address(tmp_path, atlas):
+    # As Roon's rows carry CC BY-NC-SA 3.0: the licence after the date, as
+    # the site prints it, a link on the screen and its address in words
+    doc = _doc()
+    doc["sources"][1].update({"license": "Fictional Licence 9.9", "license_url": "https://licence.example.org/9.9/"})
+    card = _card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM)
+    line = next(it["line"] for it in card["sections"][-1]["items"] if "Fictional Author" in plain(it["line"]))
+    assert line == [{"t": "Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03, "},
+                    {"a": "Fictional Licence 9.9", "href": "https://licence.example.org/9.9/"},
+                    {"t": ". “A fictional sentence, quoted only by Sautium's tests.”"}]
+    assert plain(line) == ("Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03, Fictional Licence 9.9 "
+                           "(https://licence.example.org/9.9/). “A fictional sentence, quoted only by Sautium's tests.”")
+    # A source without a licence prints none
+    assert "Fictional Licence" not in json.dumps(_everything(atlas), ensure_ascii=False)
 
 
 def test_a_jussi_source_is_cited_as_the_site_cites_one(tmp_path):

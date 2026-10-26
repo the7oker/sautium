@@ -5002,6 +5002,7 @@ a.am-kind { text-decoration: none; }
   font-size: calc(13 * var(--px));
   color: var(--color-amber);
 }
+.hqp-phrase-link { color: var(--color-amber); }
 
 /* ---- Compare by ear (AB-1): the comparison sheet and its doors.
    Reference: docs/private/ab-1/compare-by-ear.html (the owner's,

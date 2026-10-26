@@ -62,6 +62,13 @@ class Num(str):
     "6.0", "-0.5" stays "-0.5". The screen shows the token."""
 
 
+class Link(NamedTuple):
+    """A text the screen draws as a link to `href`: a licence a source's
+    terms ask every copy of it to name, with the licence's own address."""
+    text: str
+    href: str
+
+
 # -- The words -------------------------------------------------------------------
 # Every string the pickers and the card say about a filter or a modulator, one
 # place: {x} is a value from HQPlayer or from the file, the rest is literal.
@@ -262,6 +269,7 @@ SOURCES = "Sources"
 MEASURED_BY = "Measured by Sautium on HQPlayer engine {engine}."
 CONTEXT_FILTER = "Measured with {filter} in both filter slots."
 SOURCE = "{who}, {where}, {date}."
+SOURCE_LICENSED = "{who}, {where}, {date}, {license}."
 QUOTE = " “{quote}”"
 CITE_MANUAL = "the manual ({section})"
 CITE_DOC = "Signalyst, {where}, {date}"
@@ -382,6 +390,8 @@ _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # raise instead of refusing the file
 _ENGINE = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+# The screen puts it in an href: https alone, no quote, space or scheme of its own
+_HTTPS = re.compile(r"https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~%/-]*)?")
 _CONTEXT = re.compile(r"(?:1x|nx)-[0-9.]+k-[0-9.]+k")
 # No leading zero: two keys must never name one rate
 _RATE = re.compile(r"[1-9][0-9]{0,9}")
@@ -521,6 +531,10 @@ def _check(doc: Any) -> None:
         _one_of(s.get("status"), ("O", "S"), f"{at}.status")
         if "quote" in s:
             _text(s["quote"], f"{at}.quote")
+        _need(("license" in s) == ("license_url" in s), "a licence without its address, or an address alone", at)
+        if "license" in s:
+            _text(s["license"], f"{at}.license")
+            _text(s["license_url"], f"{at}.license_url", _HTTPS)
         _need(sid not in sources, "a source id held twice", at)
         sources[sid] = s
 
@@ -1099,12 +1113,15 @@ def _join(phrases: List[List[Any]], sep: str) -> List[Any]:
 
 
 def wire(phrase: List[Any]) -> List[Dict[str, str]]:
-    """A phrase as the screen takes it: {"t": text} and {"n": a number's
-    token}, adjacent texts merged."""
+    """A phrase as the screen takes it: {"t": text}, {"n": a number's
+    token} and {"a": a link's text, "href": its address}, adjacent texts
+    merged."""
     out: List[Dict[str, str]] = []
     for part in phrase:
         if isinstance(part, Num):
             out.append({"n": str(part)})
+        elif isinstance(part, Link):
+            out.append({"a": part.text, "href": part.href})
         elif part:
             if out and "t" in out[-1]:
                 out[-1] = {"t": out[-1]["t"] + part}
@@ -1115,8 +1132,10 @@ def wire(phrase: List[Any]) -> List[Dict[str, str]]:
 
 def plain(parts: List[Dict[str, str]]) -> str:
     """Wire parts as text, a negative number's hyphen-minus drawn as the minus
-    sign — as the screen draws it."""
-    return "".join(p["t"] if "t" in p else _minus(p["n"]) for p in parts)
+    sign — as the screen draws it — and a link's address in brackets after
+    its text, where the screen links the text: a copy in words names it too."""
+    return "".join(p["t"] if "t" in p else f"{p['a']} ({p['href']})" if "a" in p else _minus(p["n"])
+                   for p in parts)
 
 
 def _minus(token: str) -> str:
@@ -1926,7 +1945,11 @@ def _sources(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
         s = atlas.source(sid)
         if s is None:
             continue
-        line = _phrase(SOURCE, who=s["who"], where=s["where"], date=s["date"])
+        if "license" in s:
+            line = _phrase(SOURCE_LICENSED, who=s["who"], where=s["where"], date=s["date"],
+                           license=Link(s["license"], s["license_url"]))
+        else:
+            line = _phrase(SOURCE, who=s["who"], where=s["where"], date=s["date"])
         if "quote" in s:
             line += _phrase(QUOTE, quote=s["quote"])
         items.append(_line(line))
