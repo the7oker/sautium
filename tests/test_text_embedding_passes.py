@@ -60,7 +60,7 @@ class Encoder:
 
 
 class Tokenized(Encoder):
-    """The encoder as a device that materialises its attention sees it: it tokenizes
+    """The encoder as a device that materializes its attention sees it: it tokenizes
     a word a token and two for the ends — only as sentence-transformers'
     encode does (no tokenizer of its own to call otherwise) — it has 16 heads,
     and it says each forward's texts and padded length."""
@@ -406,7 +406,7 @@ def test_an_analysis_run_whose_text_pass_stopped_is_no_success(monkeypatch):
         "| Bio emb: 3 | not finished: genre emb stopped (out of memory)")
 
 
-# ── on a device that materialises its attention ────────────────────────────
+# ── on a device that materializes its attention ────────────────────────────
 
 @pytest.fixture
 def cpu_copy(monkeypatch):

@@ -11,7 +11,7 @@ VRAM with each enrichment trigger.
 
 On MPS the model loads with eager attention (device.attn_implementation), and
 a pass also takes a copy of the model on the CPU for the texts whose attention
-the device should not materialise or that it refuses (encode), and gives it
+the device should not materialize or that it refuses (encode), and gives it
 back at the pass's end (device.at_pass_end).
 """
 
@@ -125,7 +125,7 @@ def encode(model, texts: List[str], *, batch_size: int, device: str,
            name: str) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
     """`texts` embedded and normalized, as every pass of the text encoder
     asks, and the indices of the texts left out (None in their place). On a
-    device that materialises its attention (MPS), the texts go in forwards
+    device that materializes its attention (MPS), the texts go in forwards
     within its share and each forward's cache is given back, and to `name` on
     the CPU go a text over the share alone, a text the device cannot take
     alone, and every text after it refused a text of a few tokens. Out of
@@ -186,7 +186,7 @@ def _refused(device: str, why: str) -> None:
 
 
 def _forwards(model, texts: List[str], batch_size: int) -> Tuple[List[List[int]], List[int]]:
-    """The texts' forwards on a device that materialises its attention — groups
+    """The texts' forwards on a device that materializes its attention — groups
     of indices, the longest first, each padded to its first text's length and
     within the share — and the texts whose attention alone exceeds it."""
     from device import available_accel_memory_gb

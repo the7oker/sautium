@@ -9,8 +9,10 @@ refusal`, which prints one JSON line.
 import gc
 import json
 import math
+import os
 import random
 import sys
+import weakref
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent / "backend"
@@ -19,6 +21,9 @@ if str(BACKEND) not in sys.path:
 
 MODEL = "BAAI/bge-m3"
 GIB = 1024 ** 3
+# Where SDPA was refused on a 24 GB Mac in 23 shapes (2026-10-26): half of its
+# working set
+REFUSAL_LIMIT_GIB = 8.88
 # Every word is one token for the encoder's tokenizer
 # (test_a_text_is_as_many_tokens_as_it_says)
 VOCABULARY = (
@@ -78,7 +83,8 @@ class Held:
     referenced until its teardown has run, and a sentence-transformers model
     and its model card refer to each other, a cycle only a full collection
     frees (text_embedder._end_pass parts them for the CPU copy): `release`
-    parts them, drops the model, collects and gives PyTorch's cache back."""
+    parts them, drops the model, collects what is left of it and gives
+    PyTorch's cache back."""
 
     def __init__(self, model):
         self.model = model
@@ -89,23 +95,39 @@ class Held:
         card = getattr(model, "model_card_data", None)
         if card is not None:
             card.model = None
+        gone = weakref.ref(model)
         del model, card
-        gc.collect()
+        if gone() is not None:
+            gc.collect()
         device.empty_cache("mps")
 
 
+def lowered_limit() -> dict:
+    """The environment of a child whose allocator refuses early: the limit at
+    0.5 of the working set, or at REFUSAL_LIMIT_GIB where that is less. The
+    child's pass is a fixed 12 calls, and what SDPA pins in them levels off as
+    the machine grows (bigger forwards, fewer shapes) while half the working
+    set does not: on a 64 GB Mac the old code was never refused. The fixed
+    code peaks at ~3.4 GiB there, far under the limit."""
+    import torch
+    high = min(0.5, REFUSAL_LIMIT_GIB * GIB / torch.mps.recommended_max_memory())
+    return {"PYTORCH_MPS_HIGH_WATERMARK_RATIO": f"{high:.4f}",
+            "PYTORCH_MPS_LOW_WATERMARK_RATIO": f"{0.8 * high:.4f}"}
+
+
 def refusal() -> dict:
-    """The allocator's limit lowered to 0.5 of the working set (8.88 GiB on a
-    24 GB Mac, for 30.19) and a pass of bio-sized chunks, which SDPA took past
-    it in 23 shapes (2026-10-26): every allocation was refused from then on —
-    256 bytes included — and the encoder went to its CPU copy. The chunks are
-    kept within what this machine's encoder takes alone, so a copy of the CPU
-    taken is a refusal, not a text over the share. What the pass meets: how
-    often the device refused, and how many times the CPU copy was taken."""
+    """A pass of bio-sized chunks under the allocator's limit lowered
+    (lowered_limit, in this process's environment): SDPA took it past the limit
+    in 23 shapes (2026-10-26), every allocation was refused from then on — 256
+    bytes included — and the encoder went to its CPU copy. The chunks are kept
+    within what this machine's encoder takes alone, so the CPU copy taken at
+    all is a refusal, not a text over the share. What the pass meets: how often
+    the device refused, and how many times the CPU copy was taken."""
     import torch
     import text_embedder
 
-    limit = int(0.5 * torch.mps.recommended_max_memory())
+    limit = int(float(os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"])
+                * torch.mps.recommended_max_memory())
     held = []
     try:            # in pieces past the lowered limit: refused, or the limit is not in force
         for _ in range(limit // GIB + 3):

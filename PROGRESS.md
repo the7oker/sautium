@@ -296,9 +296,9 @@ implementation details live in the code, DB and git history.
   with eager attention there (`device.attn_implementation`): its scores are
   PyTorch tensors, which come back with `empty_cache`; the small per-op
   graphs it still caches are ~50 KB a shape (measured over 800), at most
-  about 0.7 GB over the ~13k shapes the share admits on a 24 GB Mac (an
-  estimate). A forward is faster, and the encoder gives PyTorch's cache
-  back after each forward. A forward's texts still fit 1/8
+  about 0.7 GB over the ~13k shapes that batches of 16 and the share admit
+  on a 24 GB Mac (an estimate). A forward is faster, and the encoder gives
+  PyTorch's cache back after each forward. A forward's texts still fit 1/8
   of the working set (at ~40 bytes a score: a larger share made a pass
   slower), and a text over it alone, or one MPS refuses, goes to a CPU copy
   of the encoder, loaded for the pass (under the factory lock every load of

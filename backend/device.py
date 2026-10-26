@@ -72,8 +72,9 @@ def attn_implementation(device: str) -> Optional[str]:
     2026-10-26, torch 2.12: 8.0 bytes a score on every shape; the refusal
     reproduced at a lowered limit). Eager attention builds the scores as
     PyTorch tensors, which come back with empty_cache; what it still caches
-    per shape, small per-op graphs, is ~50 KB, bounded by the shapes the
-    share admits. It is no slower there (a forward 21-25 % faster). CUDA's
+    per shape, small per-op graphs, is ~50 KB, and the shapes are finite: the
+    text encoder's are those its share admits, AST's the batch sizes up to 12.
+    It is no slower there (a forward 21-25 % faster). CUDA's
     and the CPU's SDPA stream (flash, memory-efficient kernels) and keep
     nothing per shape. CLAP's attention is eager already at transformers
     4.57, and PaSST's is its own."""
@@ -111,12 +112,13 @@ def empty_cache(device: Optional[str] = None) -> None:
 
     CUDA and MPS both keep a high-water pool of freed buffers for reuse and do
     not hand it back on their own: the process then holds the peak of its
-    batches instead of the live per-batch working set (a 24 GB Mac's
-    enrichment run peaked at 28 GB before this was called at batch seams,
-    2026-07-07). Call at batch seams. Model weights stay resident — only the
-    free cache is released, and on MPS only PyTorch's own: what the MPS graphs
-    of past SDPA attention shapes hold is not in that pool (see
-    attn_implementation). No-op on CPU; `device` defaults to the detected
+    batches instead of the live per-batch working set (an enrichment run on a
+    24 GB Mac peaked at 28 GB on 2026-07-07, before this was called at batch
+    seams on MPS; how much of that was this pool, and how much the SDPA graphs
+    below, was not separated). Call at batch seams. Model weights stay
+    resident — only the free cache is released, and on MPS only PyTorch's own:
+    what the MPS graphs of past SDPA attention shapes hold is not in that pool
+    (see attn_implementation). No-op on CPU; `device` defaults to the detected
     accelerator."""
     dev = device or get_device()
     if dev == "cuda":

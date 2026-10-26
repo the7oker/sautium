@@ -81,20 +81,19 @@ def a_pass_of_new_shapes(encoder):
     import torch
     import text_embedder
     patch = pytest.MonkeyPatch()
-    patch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "2")
-    copies = mps_probe.count_cpu_copies(patch)
-    shapes = set()
+    shapes, left, floors, at_ten, stopped, hook = set(), [], [], None, None, None
 
     def met(module, args):
         features = args[0]
         shapes.add((tuple(features["input_ids"].shape), bool((features["attention_mask"] == 0).any())))
 
-    hook = encoder.model[0].register_forward_pre_hook(met)
-    longest = int(0.95 * mps_probe.single_text_limit(encoder.model))
-    start = mps_probe.floor()
-    rng = random.Random(3)
-    left, floors, at_ten, stopped = [], [], None, None
     try:
+        patch.setenv("SAUTIUM_ACCEL_MEMORY_GB", "2")
+        copies = mps_probe.count_cpu_copies(patch)
+        hook = encoder.model[0].register_forward_pre_hook(met)
+        longest = int(0.95 * mps_probe.single_text_limit(encoder.model))
+        start = mps_probe.floor()
+        rng = random.Random(3)
         for call in range(40):
             texts = [mps_probe.text(rng.randint(20, longest), rng) for _ in range(16)]
             text_embedder.encode(encoder.model, texts, batch_size=16, device="mps", name=MODEL)
@@ -107,7 +106,8 @@ def a_pass_of_new_shapes(encoder):
                 stopped = f"{floors[-1] / GIB:.2f} GiB kept after {len(shapes)} shapes, call {call}"
                 break
     finally:
-        hook.remove()
+        if hook is not None:
+            hook.remove()
         patch.undo()
         text_embedder._end_pass()
     return types.SimpleNamespace(shapes=len(shapes), left=left, floors=floors, at_ten=at_ten,
@@ -132,7 +132,7 @@ def test_the_cache_is_given_back_between_forwards(a_pass_of_new_shapes):
     assert max(p.left) <= 256 * MIB, max(p.left) / MIB
 
 
-def test_the_vectors_are_the_cpus_to_within_bf16(encoder):
+def test_the_vectors_are_the_cpus_to_within_bf16(encoder, monkeypatch):
     """CPU fp32 is the reference: the node's CPU copy encodes in it. Texts of
     49 to 1730 tokens, those this machine's encoder takes alone, each in its
     forward; and six of up to 393 in one padded forward."""
@@ -143,10 +143,10 @@ def test_the_vectors_are_the_cpus_to_within_bf16(encoder):
     texts = [mps_probe.text(n, rng) for n in (49, 142, 193, 267, 325, 393, 650, 954, 1414, 1730)
              if n <= limit]
     assert len(texts) >= 8, limit
-    patch = pytest.MonkeyPatch()
-    copies = mps_probe.count_cpu_copies(patch)
-    cpu = mps_probe.Held(SentenceTransformer(MODEL, device="cpu", local_files_only=True))
+    copies = mps_probe.count_cpu_copies(monkeypatch)
+    cpu = None
     try:
+        cpu = mps_probe.Held(SentenceTransformer(MODEL, device="cpu", local_files_only=True))
         reference = np.concatenate([cpu.model.encode([t], batch_size=1, normalize_embeddings=True,
                                                      show_progress_bar=False) for t in texts])
 
@@ -165,9 +165,9 @@ def test_the_vectors_are_the_cpus_to_within_bf16(encoder):
         assert cosines(padded, slice(0, 6)).min() >= 0.998
         assert copies == []         # else some of this compared the CPU with itself
     finally:
-        patch.undo()
         text_embedder._end_pass()
-        cpu.release()
+        if cpu is not None:
+            cpu.release()
 
 
 @pytest.fixture(scope="module")
@@ -220,7 +220,8 @@ def test_ast_scores_are_the_cpus_to_within_bf16(instruments):
     windows = [np.clip(w, -1, 1).astype(np.float32) for w in windows]
     mine = instruments._ast_probs(windows)
     cpu = ASTForAudioClassification.from_pretrained(instruments.AST_MODEL_NAME,
-                                                    torch_dtype=torch.float32).eval()
+                                                    torch_dtype=torch.float32,
+                                                    local_files_only=True).eval()
     with torch.no_grad():
         inputs = instruments.ast_extractor(windows, sampling_rate=rate, return_tensors="pt")
         reference = torch.sigmoid(cpu(**inputs).logits).numpy()
@@ -230,15 +231,15 @@ def test_ast_scores_are_the_cpus_to_within_bf16(instruments):
 
 
 def test_a_pass_of_bio_chunks_under_the_allocators_limit_lowered_is_not_refused():
-    """The failure itself, at a scale the machine takes: the limit at 0.5 of
-    the working set (the allocator reads it when it starts, hence a child),
-    where SDPA was refused in the 23rd shape — 256 bytes too — and the
-    encoder went to its CPU copy for good. The chunks are within what the
-    machine's encoder takes alone, so the copy taken at all is a refusal."""
+    """The failure itself, at a scale the machine takes: the limit at half the
+    working set, or 8.88 GiB where that is less (the allocator reads it when it
+    starts, hence a child; mps_probe.lowered_limit), where SDPA was refused in
+    the 23rd shape — 256 bytes too — and the encoder went to its CPU copy for
+    good. The chunks are within what the machine's encoder takes alone, so the
+    copy taken at all is a refusal."""
     if not mps_probe.cached(MODEL):
         pytest.skip(f"{MODEL} is not in the hub's cache")
-    env = {**os.environ, "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.5",
-           "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.4", "HF_HUB_OFFLINE": "1"}
+    env = {**os.environ, **mps_probe.lowered_limit(), "HF_HUB_OFFLINE": "1"}
     env.pop("SAUTIUM_ACCEL_MEMORY_GB", None)        # the machine's own working set
     done = subprocess.run([sys.executable, mps_probe.__file__, "refusal"], env=env,
                           capture_output=True, text=True, timeout=900)
