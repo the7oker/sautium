@@ -9450,7 +9450,7 @@
   // is decided here. A phrase is parts — {t} text, {n} a number's token as
   // the atlas wrote it, in <data> so its value reads back byte for byte, a
   // leading hyphen-minus drawn as the minus sign, {a} a link's text to its
-  // {href} (a source's licence: another site, so a new tab).
+  // {href} (a source's post or its licence: another site, so a new tab).
   function hqpPhrase(parts) {
     return (parts || []).map(p => ('n' in p
       ? `<data class="num" value="${escapeHtml(p.n)}">${escapeHtml(p.n.replace(/^-/, '−'))}</data>`

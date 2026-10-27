@@ -371,6 +371,10 @@ def _break(doc, how):
         doc["sources"][1]["license"] = "CC BY-NC-SA 3.0"
     elif how == "a licence's address of another scheme":
         doc["sources"][1].update({"license": "CC BY-NC-SA 3.0", "license_url": "javascript:alert(1)"})
+    elif how == "a source's address of another scheme":
+        doc["sources"][1]["url"] = "javascript:alert(1)"
+    elif how == "a source's address with a user":
+        doc["sources"][1]["url"] = "https://someone@forum.example.org/t/1"
     return doc
 
 
@@ -388,7 +392,8 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine",
           "a filter pair keyed by a rate", "a modulator pair keyed by a context", "a group of two releases",
           "a comparison into no rate", "a word across the families for a name that is no member",
-          "a licence without its address", "a licence's address of another scheme")
+          "a licence without its address", "a licence's address of another scheme",
+          "a source's address of another scheme", "a source's address with a user")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -423,6 +428,9 @@ def test_a_refusal_names_the_place_by_keys_that_passed_their_shape(tmp_path, cap
     caplog.clear()
     assert _read(tmp_path, _break(_doc(), "a rate no DSD rate of its source")) is None
     assert "not a DSD rate of its source, at engines.9.4.1.modulators.dmx5.rates.8467200" in caplog.text
+    caplog.clear()
+    assert _read(tmp_path, _break(_doc(), "a source's address of another scheme")) is None
+    assert "not text of its shape, at sources[1].url" in caplog.text
     caplog.clear()
     assert _read(tmp_path, _break(_doc(), "a source of no family's base")) is None
     assert "a source no rate family is based on, at engines.9.4.1.modulators.dmx5.rates.5644800.fs_in" in caplog.text
@@ -996,8 +1004,8 @@ def test_a_filters_card(atlas):
         "Only what the sources state; a missing event means not stated in the sources read.",
         "## Sources",
         "Measured by Sautium on HQPlayer engine 9.4.1.",
-        "Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03. “A fictional sentence, quoted only "
-        "by Sautium's tests.”",
+        "Fictional Author, Fictional Forum › Fictional thread #1 (https://forum.example.org/t/1), 2001-02-03. “A "
+        "fictional sentence, quoted only by Sautium's tests.”",
         "Fictional Vendor, Fictional User Manual 0.0.0, §9.9 Fictional filter table, 2001-01-01."]
 
 
@@ -1089,8 +1097,8 @@ def test_a_modulators_card(atlas):
         "## Sources",
         "Measured by Sautium on HQPlayer engine 9.4.1.",
         "Measured with demo-sinc-a in both filter slots.",
-        "Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03. “A fictional sentence, quoted only "
-        "by Sautium's tests.”"]
+        "Fictional Author, Fictional Forum › Fictional thread #1 (https://forum.example.org/t/1), 2001-02-03. “A "
+        "fictional sentence, quoted only by Sautium's tests.”"]
     # The highest stable tone and pair stay out: near full scale stands alone.
     assert "-11" not in json.dumps(_card(atlas, "modulator", "DMX7EC-a", MODULATORS, mode="sdm"))
 
@@ -1160,13 +1168,49 @@ def test_a_licensed_sources_line_names_its_licence_linked_and_in_words_its_addre
     doc["sources"][1].update({"license": "Fictional Licence 9.9", "license_url": "https://licence.example.org/9.9/"})
     card = _card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM)
     line = next(it["line"] for it in card["sections"][-1]["items"] if "Fictional Author" in plain(it["line"]))
-    assert line == [{"t": "Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03, "},
+    assert line == [{"t": "Fictional Author, "},
+                    {"a": "Fictional Forum › Fictional thread #1", "href": "https://forum.example.org/t/1"},
+                    {"t": ", 2001-02-03, "},
                     {"a": "Fictional Licence 9.9", "href": "https://licence.example.org/9.9/"},
                     {"t": ". “A fictional sentence, quoted only by Sautium's tests.”"}]
-    assert plain(line) == ("Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03, Fictional Licence 9.9 "
-                           "(https://licence.example.org/9.9/). “A fictional sentence, quoted only by Sautium's tests.”")
+    assert plain(line) == ("Fictional Author, Fictional Forum › Fictional thread #1 (https://forum.example.org/t/1), "
+                           "2001-02-03, Fictional Licence 9.9 (https://licence.example.org/9.9/). “A fictional sentence, "
+                           "quoted only by Sautium's tests.”")
     # A source without a licence prints none
     assert "Fictional Licence" not in json.dumps(_everything(atlas), ensure_ascii=False)
+
+
+def test_a_sources_line_links_where_it_was_said_to_its_address_and_one_without_prints_it_as_text(tmp_path, atlas):
+    # CC BY-NC-SA 3.0 §4(d), as Creative Commons' attribution practice reads it. The
+    # site links each source item's "where" to its post; so does the card,
+    # for every row that holds an address, and the words write it out
+    card = _card(atlas, "filter", "demo-sinc-a", PCM)
+    items = [it["line"] for it in card["sections"][-1]["items"]]
+    post = next(line for line in items if "Fictional Author" in plain(line))
+    assert post == [{"t": "Fictional Author, "},
+                    {"a": "Fictional Forum › Fictional thread #1", "href": "https://forum.example.org/t/1"},
+                    {"t": ", 2001-02-03. “A fictional sentence, quoted only by Sautium's tests.”"}]
+    # A row without an address (a manual section, read off a file) keeps its "where" as text
+    manual = next(line for line in items if "Fictional Vendor" in plain(line))
+    assert manual == [{"t": "Fictional Vendor, Fictional User Manual 0.0.0, §9.9 Fictional filter table, 2001-01-01."}]
+    # A row whose address is gone prints its "where" alone, no link and no brackets
+    doc = _doc()
+    del doc["sources"][1]["url"]
+    card = _card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM)
+    post = next(it["line"] for it in card["sections"][-1]["items"] if "Fictional Author" in plain(it["line"]))
+    assert post == [{"t": "Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03. “A fictional sentence, "
+                          "quoted only by Sautium's tests.”"}]
+    # An address the schema allows — a query, a fragment — is read and linked as written
+    doc = _doc()
+    doc["sources"][1]["url"] = "https://forum.example.org/index.php?do=findComment&comment=1#c"
+    card = _card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM)
+    post = next(it["line"] for it in card["sections"][-1]["items"] if "Fictional Author" in plain(it["line"]))
+    assert post[1] == {"a": "Fictional Forum › Fictional thread #1",
+                       "href": "https://forum.example.org/index.php?do=findComment&comment=1#c"}
+    # A row never re-read in full shows no address of its own
+    doc = _doc()
+    doc["sources"][2]["url"] = "https://forum.example.org/t/2"
+    assert "forum.example.org/t/2" not in json.dumps(_everything(_read(tmp_path, doc)))
 
 
 def test_a_jussi_source_is_cited_as_the_site_cites_one(tmp_path):

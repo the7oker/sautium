@@ -26,9 +26,10 @@ words here shows nothing and is logged by its name, once. A source not
 re-read in full (status other than O) is never quoted or cited, and no link
 is given while an entry's release has no date.
 
-What a screen gets is wire-ready: a phrase is a list of parts, {"t": text} or
-{"n": a number's token}, so a number reaches the screen as the file wrote it;
-`plain` prints the same phrase as text.
+What a screen gets is wire-ready: a phrase is a list of parts, {"t": text},
+{"n": a number's token} or {"a": a link's text, "href": its address}, so a
+number reaches the screen as the file wrote it; `plain` prints the same phrase
+as text, a link's address in brackets after its text.
 
 `rate_name` names a rate HQPlayer reports as the HQPlayer screen does, for
 every text the node words about one; it reads no atlas. `near_full_scale`
@@ -63,8 +64,9 @@ class Num(str):
 
 
 class Link(NamedTuple):
-    """A text the screen draws as a link to `href`: a licence a source's
-    terms ask every copy of it to name, with the licence's own address."""
+    """A text the screen draws as a link to `href`: where a source was said,
+    to the post or page itself, and a licence a source's terms ask every
+    copy of it to name, to the licence's own address."""
     text: str
     href: str
 
@@ -392,6 +394,10 @@ _ENGINE = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 # The screen puts it in an href: https alone, no quote, space or scheme of its own
 _HTTPS = re.compile(r"https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~%/-]*)?")
+# A source's address, as the atlas schema's common.json holds it (a query or a
+# fragment allowed): https and a host in lower case, no user, no port, no space
+# — the reader refuses no row the publish step let through
+_SOURCE_URL = re.compile(r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:[/?#][^\s@\\]*)?")
 _CONTEXT = re.compile(r"(?:1x|nx)-[0-9.]+k-[0-9.]+k")
 # No leading zero: two keys must never name one rate
 _RATE = re.compile(r"[1-9][0-9]{0,9}")
@@ -531,6 +537,8 @@ def _check(doc: Any) -> None:
         _one_of(s.get("status"), ("O", "S"), f"{at}.status")
         if "quote" in s:
             _text(s["quote"], f"{at}.quote")
+        if "url" in s:
+            _text(s["url"], f"{at}.url", _SOURCE_URL)
         _need(("license" in s) == ("license_url" in s), "a licence without its address, or an address alone", at)
         if "license" in s:
             _text(s["license"], f"{at}.license")
@@ -1945,11 +1953,15 @@ def _sources(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
         s = atlas.source(sid)
         if s is None:
             continue
+        # where it was said linked to the post itself, as the site's source
+        # items are and as Creative Commons' attribution practice asks (CC
+        # BY-NC-SA 3.0 §4(d)): on the screen and, in brackets, in words
+        where = Link(s["where"], s["url"]) if "url" in s else s["where"]
         if "license" in s:
-            line = _phrase(SOURCE_LICENSED, who=s["who"], where=s["where"], date=s["date"],
+            line = _phrase(SOURCE_LICENSED, who=s["who"], where=where, date=s["date"],
                            license=Link(s["license"], s["license_url"]))
         else:
-            line = _phrase(SOURCE, who=s["who"], where=s["where"], date=s["date"])
+            line = _phrase(SOURCE, who=s["who"], where=where, date=s["date"])
         if "quote" in s:
             line += _phrase(QUOTE, quote=s["quote"])
         items.append(_line(line))

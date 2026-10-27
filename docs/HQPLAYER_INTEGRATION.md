@@ -318,7 +318,10 @@ A card's Sources print each source it cites that was re-read in full — who,
 where, the date, its quote — and, for a source whose terms license its copies
 (Roon's posts: CC BY-NC-SA 3.0), the licence after the date as the site prints
 it, linked to the licence's text on the screen and its address written out in
-the assistant's words (since 2026-10-26).
+the assistant's words (since 2026-10-26). Where the file holds a source's
+address, its "where" links to the post or page itself, as the site's source
+items do, and the assistant's words write that address out too (since
+2026-10-27, Creative Commons' attribution practice; CC BY-NC-SA 3.0 §4(d)).
 A file's releases are per engine and family — the filters' PCM, the
 modulators' SDM — and a shipped file holds the dated ones alone. Each sheet
 is shown the newest engine of HQPlayer's own major that holds its family's
