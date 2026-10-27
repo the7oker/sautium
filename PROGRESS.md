@@ -343,8 +343,10 @@ implementation details live in the code, DB and git history.
   way to a rung of 16 to 512 tokens: 74 query lengths were 74 shapes and 371
   MB, four shapes and 21 MB now. AST's and PaSST's batch sizes are a closed
   set already (1 to 12: 37 and 56 MB on the host for all of them), and not
-  worth a ladder. The lesson: a cache keyed by shape that nothing evicts is
-  a leak by another name, wherever the framework keeps it — bound the shapes
+  worth a ladder. What is left once the grid is warm is some 1.5 KB of host
+  a text (about 0.15 GB per 100,000 texts), not a shape (measured
+  2026-10-27). The lesson: a cache keyed by shape that nothing evicts is a
+  leak by another name, wherever the framework keeps it — bound the shapes
   you hand it, and read the host's memory (live malloc, not the driver's
   counter) over many passes, not one.
 - **A failed Last.fm fetch means one of three things (2026-09-22).** The
