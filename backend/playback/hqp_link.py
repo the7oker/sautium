@@ -1288,14 +1288,16 @@ class HqpLink:
         backend told (it judges the playlist again), and every wait for it
         let go."""
         b = self.attached
-        if b is not None and owed.outcome != "dropped":
-            # Told while it is still owed: a refusal's gap is the queue's
-            # before a reconverge may run
-            b.owed_ended(owed)
-        with self._owed_cond:
-            if self.owed is owed:
-                self.owed = None
-            self._owed_cond.notify_all()
+        try:
+            if b is not None and owed.outcome != "dropped":
+                # Told while it is still owed: a refusal's gap is the queue's
+                # before a reconverge may run
+                b.owed_ended(owed)
+        finally:
+            with self._owed_cond:
+                if self.owed is owed:
+                    self.owed = None
+                self._owed_cond.notify_all()
         took = time.time() - owed.since
         what = redact_uri(owed.uri)
         if owed.outcome == "taken":

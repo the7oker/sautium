@@ -1329,7 +1329,7 @@ class HqpBackend(PlayerBackend):
         during a build — never cleared into its silence. Runs off any queue
         mutation: the output change and the play gate take the queue lock
         before the attach. Returns whether HQPlayer was found stopped and
-        took the queue."""
+        took the queue — or takes it once it answers an add it owes."""
         if self._adopt_hqp_playlist() or not len(self._queue):
             return False
         try:
