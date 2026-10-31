@@ -304,6 +304,11 @@ class DlnaBackend(PlayerBackend):
         # A start mid-track the renderer seeks itself: sent once it is seen
         # playing our load (_confirmed) — a Seek in STOPPED is refused.
         self._seek_on_start: Optional[float] = None
+        # A Seek of the node's — a start's, or the person's sent through the
+        # node — not yet seen landing, as (its second, monotonic when it was
+        # asked for): till then the renderer reads where it was before it
+        # (_adopt_reltime)
+        self._seek_due: Optional[tuple[float, float]] = None
         # A play press waiting on a slot whose stream is on its way
         # (playback.substitute): (its item — the slot follows it through
         # queue edits — and the second it starts at); slot_ready starts it.
@@ -649,11 +654,24 @@ class DlnaBackend(PlayerBackend):
         that is a seek made on the device, which the clock cannot know.
         Said in the log with what the renderer reported: a renderer started a
         track over twice on its own (live, 2026-10-31), and only its debug
-        readings could have told that from a load of the node's."""
+        readings could have told that from a load of the node's.
+        A Seek of the node's not yet seen landing (_seek_due) is no such
+        move: a renderer that plays on from where it was until its seek
+        takes effect reads that place meanwhile — taken for its word, the
+        listen an output switch carried restarted there and was scrobbled
+        twice. Its readings are the clock's until one lands at the Seek's
+        second, or the pending-play deadline after it is asked has passed:
+        a renderer that never acts on it is believed then."""
         if abs(real - self._wall_estimate()) <= _RELTIME_TOLERANCE:
             self._rebaseline(real)
-            self._rel_stray = None
+            self._rel_stray = self._seek_due = None
             return
+        due = self._seek_due
+        if due is not None and time.monotonic() - due[1] <= _PENDING_PLAY_DEADLINE:
+            self._rel_stray = None
+            self._position = self._wall_estimate()
+            return
+        self._seek_due = None
         if self._rel_stray is not None:
             held, at = self._rel_stray
             if abs(real - (held + (now - at))) <= _RELTIME_TOLERANCE:
@@ -775,8 +793,10 @@ class DlnaBackend(PlayerBackend):
         except Exception as e:
             logger.warning("DLNA: the start at %d s was refused (%s) — playing "
                            "from the top", target, _describe(e))
+            self._seek_due = None
             self._rebaseline(0.0)
             return
+        self._seek_due = (float(int(target)), time.monotonic())
         self._rebaseline(float(int(target)))
         self._emit_now()
 
@@ -867,7 +887,10 @@ class DlnaBackend(PlayerBackend):
                         # claims — KANN's wedged stack reported STOPPED
                         # through an entire playing track (2026-09-01).
                         self._confirmed()
-                        self._rebaseline(self._pos_offset + probed)
+                        if self._seek_due is None:
+                            # (with a start Seek due, the position is still where
+                            # the renderer was before it: the clock holds)
+                            self._rebaseline(self._pos_offset + probed)
                         logger.info("pending play confirmed by position "
                                     "probe (rel=%.1f, transport says %s)",
                                     probed, state)
@@ -933,7 +956,8 @@ class DlnaBackend(PlayerBackend):
                         # on our URI (the wedged-KANN signature): the
                         # position is the renderer's word — keep the session
                         # alive on it instead of closing a playing track.
-                        self._rebaseline(self._pos_offset + probed)
+                        if self._seek_due is None:
+                            self._rebaseline(self._pos_offset + probed)
                         self._emit_now("playing")
                         continue
                     # The verdict is about where the audio WAS when it stopped.
@@ -1332,6 +1356,7 @@ class DlnaBackend(PlayerBackend):
                 # meanwhile keeps or moves it
                 self._resume = start_at if start_at > 0 else None
                 self._parked = (item, start_at)
+                self._seek_due = None
                 self._position, self._length = start_at, item.duration_seconds or 0.0
                 self._error = None
                 logger.info("DLNA: slot %d waits for its stream (%s — %s)",
@@ -1369,6 +1394,7 @@ class DlnaBackend(PlayerBackend):
             self._length = item.duration_seconds or 0.0
             self._error = None      # something in the queue is playable after all
             self._awaiting_play = False   # a new load supersedes an unconfirmed Play
+            self._seek_due = None         # ...and the old load's Seek
             if play:
                 self._emit_now("loading")
             if not self._dmr.is_subscribed:
@@ -1410,8 +1436,10 @@ class DlnaBackend(PlayerBackend):
         if play:
             await self._avt_retry("Play", Speed="1")
             # The clock starts at the offset (0 for a fresh track), or at the
-            # second the start's own Seek goes to once the renderer plays
+            # second the start's own Seek goes to once the renderer plays —
+            # due from now: it plays from the top until that Seek lands
             self._seek_on_start = start_at or None
+            self._seek_due = (start_at, time.monotonic()) if start_at else None
             self._rebaseline(ss or start_at)
             # Accepted is not started: the renderer confirms by reporting
             # PLAYING (poll/GENA clear this), and until then the track is
@@ -1536,6 +1564,7 @@ class DlnaBackend(PlayerBackend):
         item = self._queue.item_at(self._index)
         self._length = (item.duration_seconds or 0.0) if item else 0.0
         self._pos_offset = 0.0    # a gapless auto-advance is always a fresh track
+        self._seek_due = None
         self._rebaseline(0.0)     # gapless auto-advance → fresh track clock
         # The poll exits on any STOPPED observation (including the brief
         # blip some renderers emit at a gapless boundary) — a track that
@@ -1706,7 +1735,7 @@ class DlnaBackend(PlayerBackend):
             # one the renderer refuses never reads as a stop of the listen.
             # No retry: a slow refusal and its retry could outlast the
             # command's window, read as the renderer gone
-            self._resume = self._seek_on_start = self._parked = None
+            self._resume = self._seek_on_start = self._parked = self._seek_due = None
             self._said = "stopped"
             await self._avt("Stop")
             self._emit_now("stopped")
@@ -1754,6 +1783,7 @@ class DlnaBackend(PlayerBackend):
         async def _s():
             await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(seconds))
             self._rebaseline(float(int(seconds)))   # clock continues from the seek target
+            self._seek_due = (float(int(seconds)), time.monotonic())
             self._emit_now()
         return self._call(_s())
 

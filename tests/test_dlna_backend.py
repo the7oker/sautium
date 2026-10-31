@@ -205,6 +205,9 @@ class FakeRenderer:
         self.volume = 50
         self.notifying = True             # False: its events stop too
         self.faults: dict[str, list] = {}  # action → UPnP error codes to answer it with, in turn
+        # Seconds after a Seek is answered until it takes effect: the renderer
+        # plays on from where it was meanwhile, and says so
+        self.seek_delay = 0.0
         self._base = 0.0                  # position at _t0
         self._t0: Optional[float] = None  # monotonic start while PLAYING
         self._subs: dict[str, tuple[str, str]] = {}   # sid → (service key, callback)
@@ -377,8 +380,16 @@ class FakeRenderer:
         elif action == "Seek":
             if self.state not in ("PLAYING", "PAUSED_PLAYBACK"):
                 raise Fault(701, "Transition not available")
-            self._base = _seconds(args["Target"]) or 0.0
-            self._t0 = time.monotonic() if self.state == "PLAYING" else None
+            target, uri = _seconds(args["Target"]) or 0.0, self.uri
+
+            def lands():
+                if self.uri == uri:
+                    self._base = target
+                    self._t0 = time.monotonic() if self.state == "PLAYING" else None
+            if self.seek_delay:
+                self._loop.call_later(self.seek_delay, lands)
+            else:
+                lands()
         elif action == "GetTransportInfo":
             return {"CurrentTransportState": self.state, "CurrentTransportStatus": self.status,
                     "CurrentSpeed": "1"}
@@ -868,6 +879,29 @@ def test_a_track_the_renderer_starts_over_by_itself_is_said(tmp_path, proxy, ren
         r._base, r._t0 = 0.0, time.monotonic()           # the renderer, from 0:00
         wait_for(lambda: n.last.position < 4, what="the node following it")
     assert "moved slot 1 from" in caplog.text and "by itself (playing" in caplog.text
+
+
+def test_a_start_seek_the_renderer_takes_late_is_no_move_of_its_own(tmp_path, proxy, renderers, nodes,
+                                                                   quality, caplog):
+    """A start at a second — an output switch's spot — that the renderer
+    seeks only seconds after it began playing from the top: what it reads
+    meanwhile is where it was before the Seek, not where the slot is. Never
+    shown, never said as a move of its own — taken for its word, the listen
+    the switch carried restarted there and was scrobbled twice."""
+    r = renderers()
+    r.seek_delay = 3.0
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=60.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    with caplog.at_level("INFO", logger="playback.dlna_backend"):
+        assert n.backend.play()
+        wait_for(lambda: r.called("Seek"), what="the start sought")
+        wait_for(lambda: r.position() >= 36, what="the Seek landed")
+        wait_for(lambda: n.last.position >= r.position() - 1, what="the node at the renderer's second")
+    playing = [s.position for s in n.statuses if s.state == "playing"]
+    assert playing and min(playing) >= 34, playing
+    assert "by itself" not in caplog.text
 
 
 @pytest.fixture
