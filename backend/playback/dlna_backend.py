@@ -458,12 +458,13 @@ class DlnaBackend(PlayerBackend):
             return
         self._index = index
         self._current_url = None     # play() loads this slot fresh
-        self._resume = position if position > 0 else None
+        self._resume = position
         self._position = position
         self._length = item.duration_seconds or 0.0
         # Nothing of ours is loaded: whatever the renderer plays is not this
-        # slot's
-        self._emit_now("paused" if self._resume else "stopped")
+        # slot's. The spot is held paused, at 0 s as at any second: said
+        # stopped, it ended the listen the switch carried
+        self._emit_now("paused")
 
     async def _create_device(self, factory):
         """Build the device from whichever known address answers.

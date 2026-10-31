@@ -70,6 +70,12 @@ class BrowserBackend(PlayerBackend):
         # That intent is an output switch's (play_on): the tab that chose
         # this output claims it a moment later — no "no playback device".
         self._handover = False
+        # The slot and second an output switch carried over (resume_at) are
+        # held until something plays there, the person stops, or a start goes
+        # elsewhere: stopped on them, the status says so (`resume`), as any
+        # output holding a spot does — the listen the switch carried goes on,
+        # and a switch away carries the spot on
+        self._holds_spot = False
 
     @property
     def renderer_attached(self) -> bool:
@@ -103,6 +109,7 @@ class BrowserBackend(PlayerBackend):
         # The tab that claims the output is primed there (attach_tab), and
         # the play press starts there
         self._position = position
+        self._holds_spot = True
         self._emit_now()
 
     def slot_ready(self, index: int) -> None:
@@ -246,6 +253,8 @@ class BrowserBackend(PlayerBackend):
             self._position = float(position)
         if duration:
             self._length = float(duration)
+        if event in ("advanced", "playing", "timeupdate"):
+            self._holds_spot = False        # it plays: a spot held is spent
         if event == "advanced":
             self._state = "playing"
             self._emit_now()
@@ -279,6 +288,7 @@ class BrowserBackend(PlayerBackend):
         only way to hand it the next track."""
         nxt_index = self._index + 1
         item = self._queue.item_at(nxt_index)
+        self._holds_spot = False
         if item is None:
             # The end of the queue: the play press starts the last track
             # over, never at its last second
@@ -393,6 +403,7 @@ class BrowserBackend(PlayerBackend):
 
     def _start_at(self, index: int, *, play: bool, position: float = 0.0) -> bool:
         first = index
+        held = (self._index, self._position) if self._holds_spot else None
         while True:
             item = self._queue.item_at(index)
             if item is None:
@@ -413,6 +424,7 @@ class BrowserBackend(PlayerBackend):
                     self._position = position if index == first else 0.0
                     self._length = item.duration_seconds or 0.0
                     self._pending_play_index = index if play else None
+                    self._holds_spot = held == (self._index, self._position)
                     self._state = "loading" if play else "stopped"
                     logger.info("browser output: slot %d waits for its stream (%s — %s)",
                                 index, item.artist, item.title)
@@ -433,6 +445,8 @@ class BrowserBackend(PlayerBackend):
         if self._channel is None:
             # No renderer tab: don't pretend to play — park the intent (the
             # next tab to claim the output starts here) and report honestly.
+            # A spot held stays held while the start waits on it.
+            self._holds_spot = held == (self._index, self._position)
             if play:
                 logger.info("play intent parked — no renderer tab yet (slot %d)", index)
                 self._pending_play_index = index
@@ -440,6 +454,7 @@ class BrowserBackend(PlayerBackend):
             self._emit_now()
             return True
         self._epoch += 1
+        self._holds_spot = False
         logger.info("renderer directive: load slot %d play=%s (%s — %s)",
                     index, play, item.artist, item.title)
         self._push(self._load_directive(index, item, play=play, position=position))
@@ -497,6 +512,7 @@ class BrowserBackend(PlayerBackend):
 
     def stop(self) -> bool:
         self._pending_play_index, self._handover = None, False
+        self._holds_spot = False
         self._push({"cmd": "stop"})
         self._state = "stopped"
         self._position = 0.0
@@ -582,6 +598,8 @@ class BrowserBackend(PlayerBackend):
                               "device that should play and press play")
         elif self._unplayable:
             extra["error"] = self._unplayable
+        if self._state == "stopped" and self._holds_spot and self._index >= 1:
+            extra["resume"] = {"index": self._index, "position": self._position}
         self._emit(PlaybackStatus(
             state=self._state,
             position=self._position,

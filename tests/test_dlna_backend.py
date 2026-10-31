@@ -1190,6 +1190,7 @@ def heard(monkeypatch):
     listened, lastfm = [], []
     monkeypatch.setattr(tracker, "track_play_event", _TRACK_PLAY_EVENT)
     monkeypatch.setattr(tracker, "_play_session", None)
+    monkeypatch.setattr(tracker, "_carried", False)
     monkeypatch.setattr(tracker, "_db_execute", lambda sql, p=None: listened.append(
         (p["tid"], round(p["pct"]))) if "INSERT INTO listening_history" in sql else None)
     monkeypatch.setattr(tracker, "_scrobble_async",
@@ -1361,6 +1362,39 @@ def test_a_switch_to_the_browser_starts_its_tab_at_the_second(tmp_path, proxy, r
         assert load["play"] is True and load["queue_index"] == 1 and 3 <= load["position"] <= 6
     finally:
         tab.close()
+
+
+def test_a_switch_to_the_browser_carries_the_listen(tmp_path, proxy, renderers, manager, switch,
+                                                    quality, heard, monkeypatch):
+    """A track scrobbled past its half on a renderer, then "This device": the
+    browser holds the spot (`resume`) until the tab that chose it claims the
+    output and plays on — one listen on both outputs: no row at the switch,
+    one now-playing, one scrobble. Its hold said as a plain stop, the listen
+    ended at the switch, and the tab's first tick past the half scrobbled
+    the track again."""
+    import media_urls
+    monkeypatch.setattr(media_urls, "signed_media_url", lambda kind, ident, q=None: f"/m/{kind}/{ident}")
+    listened, lastfm = heard
+    a = renderers()
+    _on_renderer(manager, a, [track(tmp_path, 1, seconds=60.0)])
+    _playing_at(manager, a, 1)
+    assert manager.backend().seek(31)
+    _playing_at(manager, a, 32)
+    wait_for(lambda: ("scrobble", "Track 1") in lastfm, what="scrobbled on the renderer")
+    switch(type="browser")
+    assert (manager.latest_status.get("resume") or {}).get("index") == 1, manager.latest_status
+    assert listened == []
+    browser = manager.backend()
+    tab = Tab(browser)
+    try:
+        wait_for(lambda: manager.latest_status.get("state") == "playing", what="the tab plays on")
+        load = [d for d in tab.directives() if d["cmd"] == "load"][-1]
+        browser.on_client_event("tab-1", "timeupdate", load["position"] + 1, 60.0, queue_index=1,
+                                epoch=browser._epoch)
+    finally:
+        tab.close()
+    assert listened == []
+    assert lastfm == [("update_now_playing", "Track 1"), ("scrobble", "Track 1")], lastfm
 
 
 def test_the_browser_keeps_a_carried_second_on_a_slot_whose_stream_is_coming(tmp_path, manager,
@@ -1581,6 +1615,24 @@ def test_a_stop_the_renderer_refuses_is_no_stop_of_the_listen(tmp_path, proxy, r
     assert n.last.state == "playing" and "stop failed" in n.backend._error
     assert n.backend.healthy()
     assert n.backend.stop() and r.state == "STOPPED" and n.last.state == "stopped"
+
+
+def test_a_spot_carried_at_its_first_second_is_held_as_any_other(tmp_path, proxy, renderers, nodes,
+                                                                  quality):
+    """An output switch right at a track's start carries its spot at 0 s:
+    the renderer and the built-in engine hold it paused, as at any second —
+    said stopped, it ended the listen the switch carried (a 0 % row, the
+    track announced again as it played on)."""
+    from playback.local.engine import Command, Engine
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=40.0)])
+    n = nodes(q, renderers())
+    n.backend.resume_at(1, 0.0)
+    assert (n.last.state, n.last.position, n.last.queue_index) == ("paused", 0.0, 1)
+    statuses = []
+    engine = Engine(q, statuses.append, None, False)
+    engine._handle(Command("seed", index=1, seconds=0.0))
+    assert (statuses[-1].state, statuses[-1].position) == ("paused", 0.0)
 
 
 def test_the_local_engine_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path):

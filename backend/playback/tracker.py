@@ -136,17 +136,18 @@ def _scrobbling_enabled() -> bool:
         return True
 
 
-def carry_listen() -> None:
-    """An output switch keeps the track and the second it was at, and the
-    new output plays on there or holds it paused: the listen in progress is
-    one listen on both outputs. Until the new output plays, what it says as
-    it attaches (no track yet) and while it holds the track's spot (paused,
-    or stopped there with its play press resuming it), or loads it, ends
-    nothing; its first word playing goes on with the listen (the same track
-    at its second) or ends it (any other), and any other word ends it — a
-    Stop on the new output among them."""
+def carry_listen(carried: bool) -> None:
+    """An output switch keeps the track and the second it was at
+    (`carried`), and the new output plays on there or holds it: the listen
+    in progress is one listen on both outputs. Until the new output plays,
+    what it says as it attaches (no track yet) and while it holds the
+    track's spot (paused, or stopped there with its play press resuming it
+    — `resume`), or loads it, ends nothing; its first word playing goes on
+    with the listen (the same track at its second) or ends it (any other),
+    and any other word ends it — a Stop on the new output among them. A
+    switch with nowhere to resume carries nothing."""
     global _carried
-    _carried = _play_session is not None
+    _carried = carried and _play_session is not None
 
 
 def open_listen_started_at() -> Optional[datetime]:

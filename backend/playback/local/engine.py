@@ -279,7 +279,7 @@ class Engine:
             self._index = cmd.index
             self._length = (item.duration_seconds or 0.0) if item is not None else 0.0
             self._resume = cmd.seconds or 0.0
-            self._set_state("paused" if self._resume else "stopped")
+            self._set_state("paused")       # held, at 0 s as at any second
         elif cmd.kind == "slot_ready":
             # The parked slot's stream landed, or it is unplayable here:
             # the start goes on — there, or past it

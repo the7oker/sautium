@@ -364,10 +364,12 @@ class PlaybackManager:
             # in does not.
             self._subs.reset()
             self._reresolve(backend)
-            if spot is not None and spot.slot >= 1 and self.queue.item_at(spot.slot) is not None:
-                # The track and its second go on here: so does the listen —
-                # before the new output's first word, its attach's among them
-                tracker.carry_listen()
+            # The track and its second go on here: so does the listen —
+            # before the new output's first word, its attach's among them. A
+            # switch with nowhere to resume carries none, whatever an earlier
+            # switch left carried
+            tracker.carry_listen(spot is not None and spot.slot >= 1
+                                 and self.queue.item_at(spot.slot) is not None)
             # Assigned before start() so early emits resolve their output
             # info — but a failed start MUST roll back: a half-constructed
             # backend left as "active" is a zombie that swallows every
