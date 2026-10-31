@@ -619,7 +619,12 @@ class PlaybackManager:
         enforce_budget evicts most-distant-first (behind the playhead before
         far-ahead), and an evicted track refetches transparently on demand.
         Runs on the status thread; the (slot, queue-version, start) guard
-        keeps it off the 1 Hz tick."""
+        keeps it off the 1 Hz tick. Never while a mutation is in flight: the
+        queue it would read is the one about to go, and a new queue's fetched
+        tracks are in no slot of it — first out, before the output opens
+        them; the commit's version brings the window back at the next tick."""
+        if self.queue.view()[2]:
+            return
         anchor = idx if isinstance(idx, int) and idx >= 1 else 1
         key = (anchor, self.queue.version, start)
         if key == self._preview_window_key:

@@ -1668,6 +1668,8 @@ class HqpBackend(PlayerBackend):
             start = self._link.item("start", self._link.accept("transport"),
                                     queue=self._queue, generation=self._queue.generation)
         with self._spot_lock:
+            if self._parked is not None and self._parked.start.n > start.n:
+                return True         # a newer start waits already: this one is over
             self._parked = _Parked(item, int(second), start, token)
         proxy = streaming_service.get_proxy()
         proxy.ensure_buffered([token])
@@ -1712,13 +1714,20 @@ class HqpBackend(PlayerBackend):
             index = self._queue.index_of(park.item)
             if index is None:
                 return
+            if park.press:
+                # HQPlayer holds the entry in a shape it must be handed again
+                # in: whatever the mirror, the press takes the queue afresh
+                self._move_mirror("lost", by="press")
             if park.press or self._mirror != "step" or self._live(self._pressed) is not None:
                 self._press(park.item, park.second, item=park.start)
                 return
             start = self._start_point(index, park.second)
             if start is None:
                 return
-            with self._intent("select", slot=start[0].n):
+            with self._intent("select", slot=start[0].n) as att:
+                # Aimed as it is watched: the window keeps the bytes for it
+                # until HQPlayer reads them (_start_slot)
+                att.aim(park.item, park.second)
                 self._start_entry(*start, fallback=False, item=park.start)
         background(f"HQPlayer: the start of {park.item.artist} — {park.item.title} that waited "
                    "for its stream did not go", go,
@@ -1814,9 +1823,11 @@ class HqpBackend(PlayerBackend):
                         self._parked = replace(self._parked, press=True)
             self._land(token)
 
-    def _unpark(self) -> None:
+    def _unpark(self) -> Optional[_Parked]:
+        """Let a start that waits for its stream go; returns it."""
         with self._spot_lock:
-            self._parked = None
+            park, self._parked = self._parked, None
+            return park
 
     def _first_reshaped(self, playlist: list, after: Entry) -> Optional[Entry]:
         """The first of HQPlayer's entries past `after` whose stream landed in
@@ -3895,6 +3906,8 @@ class HqpBackend(PlayerBackend):
         attempt's — or None: the media proxy keeps its bytes until HQPlayer
         reads them (PlaybackManager._maintain_preview_window), though the
         status names the slot it left until then."""
+        if self._inflight is not None:
+            return None             # its index is among what HQPlayer is handed, not the queue
         pressed = self.pressing()
         if pressed:
             return pressed.get("index")
@@ -4064,10 +4077,10 @@ class HqpBackend(PlayerBackend):
         as it is asked, holds only once it goes, so a Play that is that
         start supersedes nothing — a start owed and not yet sent goes on —
         and its attempt is watched from its turn, as a tap's is."""
-        if word is None and self._held_play():
-            return True
         if self._parked_now() is not None:
             return True                     # the start that waits for its stream is this Play
+        if word is None and self._held_play():
+            return True
         if self._mirror != "step" or self._live(self._pressed) is not None:
             return self._press_play(word)
         held, spot = self._spot, self._spot_at()
@@ -4077,7 +4090,7 @@ class HqpBackend(PlayerBackend):
                   else (None, 0))
         token = self._bytes_away(target[0])
         if token is not None:
-            return self._park(target[0], target[1], token)
+            return self._park(target[0], target[1], token, start=word)
         start = self._start_point(*spot) if spot is not None else None
         n = self._link.reserve() if word is None else None
 
@@ -4114,10 +4127,15 @@ class HqpBackend(PlayerBackend):
         return ok
 
     def stop(self) -> bool:
+        park = self._parked_now()
         self._unpark()
         if self._halt("Stop"):
             return True
         ok = self._command("Stop", lambda h: h.stop())
+        if ok and park is not None and self._queue.index_of(park.item) is not None:
+            # The start that waited for its stream did not go: Play starts its
+            # track there, as after a tap that went
+            self._set_spot(park.item, park.second)
         self.poke()
         return ok
 
@@ -4887,10 +4905,16 @@ class HqpBackend(PlayerBackend):
             # HQPlayer would open the entry and wait out the fetch on its
             # control thread: whoever made the start — a play press's, a
             # word held through a queue edit, one owed — it waits for the
-            # bytes in the node, as the intent this sequence serves
+            # bytes in the node, as the intent this sequence serves; one a
+            # newer word superseded meanwhile is dropped, as its request
+            # would be
+            serving = self._link.serving()
+            why = self._link.superseded(serving) if serving is not None else None
+            if why is not None:
+                raise Dropped(why)
             if att is not None:
                 att.request_end("superseded")
-            self._park(target, position, token, start=self._link.serving())
+            self._park(target, position, token, start=serving)
             return None
         if att is not None:
             att.aim(target, position)
@@ -4977,15 +5001,17 @@ class HqpBackend(PlayerBackend):
         return ok
 
     def seek(self, seconds: int) -> bool:
-        with self._spot_lock:
-            park = self._parked
-            if park is not None:
-                # A start that waits for its stream: it starts at the new
-                # second, and what HQPlayer plays meanwhile is not sought
-                self._parked = replace(park, second=int(seconds))
-        if park is not None and self._parked_now() is not None:
-            self.poke()
-            return True
+        park = self._parked_now()
+        if park is not None:
+            # A start that waits for its stream: it starts at the new second,
+            # and what HQPlayer plays meanwhile is not sought
+            with self._spot_lock:
+                moved = self._parked is park
+                if moved:
+                    self._parked = replace(park, second=int(seconds))
+            if moved:
+                self.poke()
+                return True
         if self._held_seek(int(seconds)) or self._seek_pressed(int(seconds)):
             self.poke()
             return True
