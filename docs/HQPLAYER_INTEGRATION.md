@@ -1488,11 +1488,13 @@ moved to was shown at the second the one left was at and the play tracker
 credited it with that second — a listen written as heard and a Last.fm
 scrobble a second after the Next. Such an answer — another take and URI
 than the last answer whose reading was its own entry's, with that answer's
-track index and length, a position running on from its or from a Seek of
-this node's sent since — hands on the entry moved to at 0, its length the
-queue's until HQPlayer gives its own; the next answer that moves the index
-is the entry's own. Answers run on for two seconds at most from the first;
-a scrub in HQPlayer's own window right before a Next is read as it stands.
+track index and length, a position running on from its or from the
+person's Seek sent through the node since — hands on the entry moved to at
+0, its length the queue's until HQPlayer gives its own; the next answer that
+moves the index is the entry's own. A start's own Seek sent since (a resume)
+makes a take of the entry it selected, never one in transit. Answers run on
+for two seconds at most from the first, and that is said when it trips; a
+scrub in HQPlayer's own window right before a Next is read as it stands.
 HQPlayer 5, which names no take, is read as it stands.
 
 HQPlayer's own advance is an attempt too (`advance`, since 2026-10-18).

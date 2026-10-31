@@ -2891,8 +2891,8 @@ class HqpBackend(PlayerBackend):
                    and lowest <= status.position <= base + (read_at - base_at) + RUN_ON_SLACK_S)
         runs_on = transit and (since is None or read_at - since <= RUN_ON_MAX_S)
         if transit and not runs_on:
-            logger.info("HQPlayer: answers naming entry %s with the entry before's position for "
-                        "%.1f s — read as they stand from now", status.track_index, read_at - since)
+            logger.info("HQPlayer: answers naming %s with the entry before's position for %.1f s "
+                        "— read as they stand from now", redact_uri(status.uri), read_at - since)
         if runs_on:
             self._run_on_since = read_at if since is None else since
         else:
