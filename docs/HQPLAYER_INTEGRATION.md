@@ -1296,10 +1296,11 @@ plays on, its fetch first in the queue, and it goes once the fetch ends —
 the bytes in, or its error met, which its attempt says. A newer word
 supersedes it; a Play while it waits is its own; a Seek moves the second it
 starts at; Pause and Stop end it (from the API and the assistant — Now
-Playing's button waits with the loading), and after a Stop, Play starts its
-track. The window ahead keeps the bytes of a start under way in RAM until
-HQPlayer reads them, and is not worked out while a queue edit is in flight. Bytes that land in another size or
-type than HQPlayer was told (another provider, the excerpt after a spent
+Playing's button waits with the loading), and after a Stop made outside a
+queue edit or a play press, Play starts its track. The window ahead keeps
+the bytes of a start under way in RAM until HQPlayer reads them, and is not
+worked out while a queue edit is in flight. Bytes that land in another size
+or type than HQPlayer was told (another provider, the excerpt after a spent
 demo listen) are handed to it again: behind the entry it plays, in step or
 on a tail mirror; afresh, resting where it rested, when it is stopped;
 otherwise by the next hand-over that reads its playlist, and a start waiting

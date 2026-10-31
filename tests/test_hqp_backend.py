@@ -6090,17 +6090,25 @@ def test_a_newer_tap_that_waits_outlasts_an_older_one_whose_turn_comes_after_it(
         with link.command():                # a sequence in flight: A waits its turn behind it
             held.set()
             release.wait(20)
+    outcome = []
+
+    def tap_a_select():
+        try:
+            outcome.append(b.select(3, "stream-3"))
+        except hl.Dropped as e:
+            outcome.append(e)
     try:
         prov.go.clear()
         threading.Thread(target=hold, daemon=True).start()
         assert held.wait(5)
-        tap_a = threading.Thread(target=b.select, args=(3, "stream-3"), daemon=True)
+        tap_a = threading.Thread(target=tap_a_select, daemon=True)
         tap_a.start()
         assert _wait(lambda: link.word_waiting(), 5)
         proxy.enforce_budget({toks[2]}, [toks[3]], 0)                     # A's bytes dropped
         assert b.select(4, "stream-4")                                    # B waits for its stream
         release.set()
         tap_a.join(10)
+        assert outcome and isinstance(outcome[0], hl.Dropped), outcome    # A's caller: it did not go
         prov.go.set()
         assert _wait(lambda: fake.track == 4 and fake.state == int(PlaybackState.PLAYING), 15), \
             (fake.track, b._parked)

@@ -1823,11 +1823,9 @@ class HqpBackend(PlayerBackend):
                         self._parked = replace(self._parked, press=True)
             self._land(token)
 
-    def _unpark(self) -> Optional[_Parked]:
-        """Let a start that waits for its stream go; returns it."""
+    def _unpark(self) -> None:
         with self._spot_lock:
-            park, self._parked = self._parked, None
-            return park
+            self._parked = None
 
     def _first_reshaped(self, playlist: list, after: Entry) -> Optional[Entry]:
         """The first of HQPlayer's entries past `after` whose stream landed in
