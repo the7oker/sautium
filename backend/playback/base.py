@@ -272,6 +272,13 @@ class PlayerBackend(ABC):
         unplayable here (playback.substitute). Default: nothing; an output
         that parked a play there starts it, or walks past it."""
 
+    def stream_landed(self, index: int, reshaped: bool) -> None:
+        """The bytes of the stream the slot `index` plays landed in the
+        media proxy — `reshaped`: in another size or type than the proxy told
+        its consumers before. Default: as slot_ready; an output that holds
+        the stream's entry with its length (HQPlayer) hands it again first."""
+        self.slot_ready(index)
+
     def gap(self, item) -> Optional[str]:
         """Why this output does not hold the queue's slot `item` — it stays
         in the queue, named with this — or None. Default: every slot is

@@ -162,6 +162,12 @@ class CanonicalQueue:
             slots = [s for s, it in enumerate(self._items, 1) if it.track_id == track_id]
             return min(slots, key=lambda s: (abs(s - index), s)) if slots else None
 
+    def slots_streaming(self, token: str) -> list[int]:
+        """The slots whose way in is the media proxy's stream `token`."""
+        with self._lock:
+            return [s for s, it in enumerate(self._items, 1)
+                    if it.opener().get("kind") == "proxy" and it.opener().get("token") == token]
+
     def refresh_proxy_items(self, token: str, *, provider: Optional[str],
                             excerpt: bool, duration_seconds: Optional[float]) -> bool:
         """Bring every slot streaming `token` up to date with what the proxy

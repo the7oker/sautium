@@ -1250,6 +1250,21 @@ http entry at ADD time, so a stream it has not buffered cannot sit there; a
 slot only a stream could serve on it (a file held at another HQPlayer with
 no rip here) stays unplayable and the stop names it. The demo ledger applies
 to a substituted stream as to any stream.
+
+A queued stream HQPlayer holds keeps its entry when the media proxy's RAM
+budget drops its bytes (since 2026-10-31; before, a tap on it, or a tail
+repair's re-add, waited out the whole refetch on HQPlayer's control thread —
+32.8 s of silence and a busy refusal of the next tap, live). HQPlayer's
+probe of such an entry is answered at once from the size and type it was
+served with; a start of it — a tap, Play at its spot, Next or Previous onto
+it — waits in the node, Now Playing "loading" the slot while what plays
+plays on, the refetch first in the fetch queue, and goes once the bytes
+land (a newer start replaces it, a Pause or a Stop ends it); bytes that land
+in another size or type than HQPlayer was told (another provider, the
+excerpt after a spent demo listen) are handed to it again behind the entry
+it plays. One wait is left, by HQPlayer's own choice: its own advance into
+an entry the window ahead has not fetched again, or one picked in its own
+window — its GET waits on the fetch while it answers its other connections.
 The library belongs to one HQPlayer, so its one block is at the bottom of
 that HQPlayer's screen (the gear on the selected picker row; since
 2026-09-28, before that a section of Settings › Library): what this node

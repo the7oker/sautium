@@ -90,6 +90,10 @@ def init(settings) -> bool:
             excerpt=excerpt,
             duration_seconds=(e.audio.seconds if excerpt and e.audio.seconds
                               else e.query.duration))
+        # The output hears of the landing with the item already true: a start
+        # it parked on the slot goes, an entry it holds in another shape is
+        # handed again
+        playback_manager.stream_landed(e.token, e.reshaped)
 
     _proxy.track_ready_hooks.append(_refresh_queue_item)
     # The demo policy: the fetch-time gate and the listen observer.

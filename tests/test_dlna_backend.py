@@ -1234,6 +1234,9 @@ def test_a_stop_on_the_renderer_a_switch_went_to_ends_the_listen(tmp_path, proxy
     assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"]
 
 
+_STREAM_5 = "10000000-0000-0000-0000-000000000005"
+
+
 def _at(manager, index: int, second: float) -> None:
     wait_for(lambda: manager.latest_status.get("state") == "playing"
              and manager.latest_status.get("track_index") == index
@@ -1247,14 +1250,31 @@ def test_a_session_across_hqplayer_a_renderer_and_back_keeps_one_listen_a_track(
     owned ones (live, 2026-10-31): HQPlayer's Next credits the track moved to
     with nothing of the one left; each switch plays the track on at its
     second, the same listen; the renderer walks into the stream, and
-    HQPlayer, picked again, resumes the stream at its second. One listen a
-    track, each announced once, none written at a switch."""
+    HQPlayer, picked again, resumes the stream at its second; a tap far
+    ahead into a stream whose bytes the RAM budget dropped waits for them in
+    the node, loading, and plays once they land. One listen a track, each
+    announced once, none written at a switch."""
+    import types
+    from streaming.base import FetchedAudio, ProviderManifest, TrackQuery
     listened, lastfm = heard
     renderer = renderers(name="Kitchen")
     fake.length, fake.takes_seek = 8, True
     _moving_transport(fake, monkeypatch, transit=2)
+    gate = threading.Event()
+    gate.set()
+    provider = types.SimpleNamespace(
+        manifest=ProviderManifest(id="test", name="Test", kind="direct_url", lossless=True),
+        fetch=lambda query: gate.wait(20) and FetchedAudio(data=b"fLaC" + b"\x00" * 4092,
+                                                           mime="audio/flac", lossless=True))
+    late = proxy.start_session([(TrackQuery(artist="Artist", title="Stream 5", album="Album",
+                                            duration=8.0, track_id=_STREAM_5), [(provider, None)])])[0]
+    assert proxy.wait_ready(late, timeout=5).audio is not None
+    proxy.track_ready_hooks.append(lambda e: manager.stream_landed(e.token, e.reshaped))
     items = [track(tmp_path, 1, seconds=8.0), track(tmp_path, 2, seconds=8.0),
-             streamed(proxy, 3, cover_url="", seconds=8.0), track(tmp_path, 4, seconds=8.0)]
+             streamed(proxy, 3, cover_url="", seconds=8.0), track(tmp_path, 4, seconds=8.0),
+             QueueItem(track_id=_STREAM_5, media_file_id=None, source={"kind": "proxy", "token": late},
+                       title="Stream 5", artist="Artist", album="Album", duration_seconds=8.0,
+                       preview=True, provider="test")]
     hqplayer = {"host": "127.0.0.1", "port": fake.port}
     switch(type="hqplayer", hqplayer=hqplayer)
     assert manager.replace_queue(items, play=True)[0] == len(items)
@@ -1277,10 +1297,22 @@ def test_a_session_across_hqplayer_a_renderer_and_back_keeps_one_listen_a_track(
     switch(type="hqplayer", hqplayer=hqplayer)
     _at(manager, 3, 3)
     assert any(c == "Seek" and float(a["position"]) >= 1 for c, a in fake.commands[n:])
-    assert [t for t, _ in listened] ==["00000000-0000-0000-0000-000000000001",
+    assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001",
                                         "00000000-0000-0000-0000-000000000002"], listened
     assert [title for call, title in lastfm if call == "update_now_playing"] == \
         ["Track 1", "Track 2", "Stream 3"], lastfm
+    # A tap far ahead, into a stream whose bytes the budget dropped
+    proxy.enforce_budget(set(), [late], 0)
+    gate.clear()
+    n = len(fake.commands)
+    assert manager.backend().select(5, _STREAM_5)
+    wait_for(lambda: manager.latest_status.get("state") == "loading"
+             and manager.latest_status.get("track_index") == 5, what="slot 5 loading")
+    assert not [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Play", "Next")]
+    gate.set()
+    _at(manager, 5, 0)
+    assert [t for t, _ in listened][-1] == "10000000-0000-0000-0000-000000000003"
+    assert [title for call, title in lastfm if call == "update_now_playing"][-1] == "Stream 5"
 
 
 class Tab:

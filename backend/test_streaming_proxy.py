@@ -392,3 +392,49 @@ def test_a_preview_counts_the_bytes_it_sends_as_they_go(tmp_path):
         time.sleep(0.05)
     hit = proxy.hits(tok)[-1]
     assert (hit["status"], hit["bytes"], hit["kind"]) == (200, 1_000_000, "preview")
+
+
+def test_a_head_for_bytes_the_budget_dropped_answers_at_once_from_what_it_told():
+    """HQPlayer probes an entry when it is added and keeps its length. Once
+    the RAM budget dropped the bytes, a probe — a tail repair's, a
+    reconverge's add — answered only after a whole refetch, on HQPlayer's
+    control thread (live, 45 s). It answers at once now, from the size and
+    type the entry was served with, and fetches nothing: the bytes come back
+    with the next GET or the window ahead of the playhead."""
+    import urllib.request
+    prov = _GatedProvider()
+    prov.release("a1")
+    proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k", bind_host="127.0.0.1")
+    proxy.start()
+    try:
+        tok = _session(proxy, prov, "a1")[0]
+        size = len(proxy.wait_ready(tok, timeout=5).audio.data)
+        proxy.enforce_budget(set(), [tok], 0)             # every byte over the budget: dropped
+        assert proxy._peek(tok).audio is None
+        prov.gates["a1"] = threading.Event()              # a refetch would hang on its gate
+        req = urllib.request.Request(f"http://127.0.0.1:{proxy._httpd.server_address[1]}/preview/{tok}",
+                                     method="HEAD")
+        with urllib.request.urlopen(req, timeout=2) as r:
+            assert (r.status, r.headers["Content-Length"], r.headers["Content-Type"]) == \
+                (200, str(size), "audio/flac")
+        assert prov.started == ["a1"] and proxy._peek(tok).audio is None   # no refetch began
+    finally:
+        prov.release("a1")
+        proxy._httpd.shutdown()
+
+
+def test_a_refetch_that_lands_in_another_shape_says_so():
+    """The demo channel's bytes dropped (its listen spent), the refetch
+    lands on the excerpt: another size and type than the consumers were
+    told — `reshaped`, for the output that holds the entry's length."""
+    demo, clip = _Instant("demo", demo_limited=True), _Instant("clip", excerpt=True, seconds=30.0)
+    clip.fetch = lambda query: FetchedAudio(data=b"y" * 9, mime="audio/ogg", lossless=False,
+                                           excerpt=True, seconds=30.0)
+    proxy = _proxy()
+    tok = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    e = proxy.wait_ready(tok, timeout=5)
+    assert (e.held, e.reshaped) == ((16, "audio/mpeg"), False)
+    proxy.drop_audio("id-a1")
+    proxy.link_admissible = lambda provider, query: not provider.manifest.demo_limited
+    e = proxy.wait_ready(tok, timeout=5)
+    assert (e.held, e.reshaped) == ((9, "audio/ogg"), True)

@@ -86,6 +86,12 @@ class _Entry:
     fetch_seconds: Optional[float] = None   # wall time of the provider fetch
     _claimed: bool = False          # a worker is (or has) prepared this entry
     evicted: bool = False           # audio dropped by the RAM budget; refetches on demand
+    # What a consumer was told of the bytes at their last fetch: (size, type).
+    # HQPlayer probes an entry when it is added and holds its length: a HEAD
+    # once the budget dropped the bytes answers from this at once, and a
+    # refetch that lands otherwise must be handed to it again (`reshaped`)
+    held: Optional[tuple] = None
+    reshaped: bool = False
     # Canonical-queue generation whose filler will place this track. None = the
     # request that made it still owns it (a start_session still pre-buffering, an
     # owned m4a transcode); a bound entry dies with its generation.
@@ -315,6 +321,14 @@ class MediaProxy:
             preview_events.ping()
         return n
 
+    def holds_bytes(self, token: str) -> Optional[bool]:
+        """Whether the stream `token` names has its bytes in RAM now — False
+        once the budget dropped them, or before they ever came; None for a
+        token this proxy does not know."""
+        with self._lock:
+            e = self._entries.get(token)
+            return None if e is None else e.audio is not None
+
     def ensure_buffered(self, keys: list) -> None:
         """Priority-(re)fetch the playback window, first key most urgent —
         window tokens go to the HEAD of the sequential fetch queue, ahead of
@@ -355,6 +369,7 @@ class MediaProxy:
                           provider=chain[0][0] if chain else None)
         e = _Entry(token, query, index, chain=chain, provider=prior.provider)
         e.audio = prior.audio
+        e.held = (len(prior.audio.data), prior.audio.mime)
         e.fetch_seconds = prior.fetch_seconds
         e._claimed = True
         e.ready.set()                    # already in hand — waiters return at once
@@ -744,6 +759,9 @@ class MediaProxy:
             logger.error("preview fetch crashed [%d]: %s", e.index, ex, exc_info=True)
         finally:
             if e.audio is not None:
+                shape = (len(e.audio.data), e.audio.mime)
+                e.reshaped = e.held is not None and e.held != shape
+                e.held = shape
                 for hook in list(self.track_ready_hooks):
                     try:
                         hook(e)
@@ -944,11 +962,25 @@ def _make_handler(proxy: MediaProxy):
             # HQPlayer HEAD-probes each URI synchronously when it is ADDED and
             # needs Content-Length to accept it (the FLAC size is only known
             # after the fetch). The session prefetches the whole album and the
-            # endpoint waits before adding, so these HEADs return immediately.
+            # endpoint waits before adding, so these HEADs return immediately —
+            # and one the RAM budget dropped since answers from what it was
+            # told then, never waiting on a refetch: HQPlayer's probe of a tail
+            # repair or a reconverge waited out whole fetches on its control
+            # thread (live, 45 s on one add).
             tok = self._token()
             if tok is None:
                 return
             self._open_hit(tok, "opus" if transcode.wants_opus(self._q()) else "preview")
+            held = proxy._peek(tok)
+            if (held is not None and held.audio is None and held.held is not None
+                    and not transcode.wants_opus(self._q())):
+                self.send_response(200)
+                self.send_header("Content-Type", held.held[1])
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(held.held[0]))
+                self._dlna_headers()
+                self.end_headers()
+                return
             try:
                 e = proxy._ensure_ready(tok, proxy._prepare_timeout, front=True)
             except KeyError:
