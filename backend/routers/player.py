@@ -1321,7 +1321,7 @@ def hqplayer_diagnostics():
     from hqplayer_client import HQPlayerClient
     from playback import hqp_diagnostics as diag
     b = manager.active
-    owed = b.link().owed if b is not None and b.id == "hqplayer" else None
+    owed = b.link.owed if b is not None and b.id == "hqplayer" else None
     return {"attempts": [diag.summary(a) for a in diag.attempts()],
             "failing": diag.failing_run(),
             "log_source": diag.log_source(settings.hqplayer_host, _hqp_info()),

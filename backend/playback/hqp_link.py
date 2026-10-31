@@ -9,7 +9,8 @@ A link owns:
     send to its answer, in the order they came: a question goes between the
     requests of a command sequence. So at most one request from this node is
     outstanding at an HQPlayer — a command, the status poller, the HQPlayer
-    screen, the play gate, the library, the assistants — and nothing reaches
+    screen, the play gate, the library, the assistants; an add whose answer it
+    owes (below) aside, on a connection of its own — and nothing reaches
     it while it builds but the request whose answer is held. HQPlayer's one
     control thread answers in order anyway: two connections only sent
     requests into each other's silences. After a command whose silence may
@@ -1281,6 +1282,11 @@ class HqpLink:
         """The owed add's answer came, or its connection ended: said, the
         backend told (it judges the playlist again), and every wait for it
         let go."""
+        b = self.attached
+        if b is not None and owed.outcome != "dropped":
+            # Told while it is still owed: a refusal's gap is the queue's
+            # before a reconverge may run
+            b.owed_ended(owed)
         with self._owed_cond:
             if self.owed is owed:
                 self.owed = None
@@ -1296,12 +1302,8 @@ class HqpLink:
             logger.warning("HQPlayer ended the connection of the add of %s %.0f s after it was sent, "
                            "unanswered (%s) — its playlist is read to see whether it took it",
                            what, took, owed.message)
-        if owed.outcome == "dropped":
-            return
-        b = self.attached
-        if b is not None:
-            b.owed_ended(owed)
-        self._poke()
+        if owed.outcome != "dropped":
+            self._poke()
 
     def refuse_edits(self) -> None:
         """A change of HQPlayer's playlist is refused while an add is owed

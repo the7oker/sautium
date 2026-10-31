@@ -1334,7 +1334,9 @@ class HqpBackend(PlayerBackend):
         except Building:
             self._verify_mirror = True
         except Owed:
-            pass                # the queue goes to HQPlayer once it answers the add it owes
+            # Found stopped: its slot is the spot, the queue goes to it once it
+            # answers the add it owes
+            return True
         except (BrokenPipeError, ConnectionError, OSError) as e:
             logger.warning("canonical mirror on attach failed: %s", e)
         return False
@@ -1928,7 +1930,7 @@ class HqpBackend(PlayerBackend):
             return status, (playlist if h.last_error is None else None)
         status, playlist = self._cmd(read)
         if status is None or playlist is None or not status.state.known:
-            self._reconverge_due = self._lost_by == "silence"
+            self._reconverge_due = self._lost_by in ("silence", "owed")
             return
         if (len(playlist) == len(layout.handed)
                 and self._first_divergence(playlist, layout.handed) is None):
@@ -2011,7 +2013,7 @@ class HqpBackend(PlayerBackend):
             self.lose_mirror("HQPlayer did not answer the repair behind the entry it reads")
         elif out in ("moved", "silent"):
             # judged again at HQPlayer's next answer
-            self._reconverge_due = self._lost_by == "silence"
+            self._reconverge_due = self._lost_by in ("silence", "owed")
         elif out is None:
             self._drifted("HQPlayer did not take a removal behind the entry it reads")
         elif self._took(items, *out, "behind the entry it reads"):
@@ -5239,6 +5241,8 @@ class HqpBackend(PlayerBackend):
         commits none — and HQPlayer is handed nothing."""
         if not items:
             return []
+        # Refused before it is numbered or watched: it supersedes nothing
+        self._link.refuse_edits()
         self._ways_in(items)
         layout = _Layout(items, self.gap)
         if items and not layout.handed:
@@ -5635,6 +5639,7 @@ class HqpBackend(PlayerBackend):
                 return took
             took = _hqp_safe(self._link, clear_it, "PlaylistClear")
             return took, unanswered, now, playing
+        self._link.refuse_edits()           # before it is numbered: it supersedes nothing
         last = self._last_tick
         seed = self._queue.item_at(last.queue_index) if last is not None else None
         with self._handing([seed] if seed is not None else [], stops=False,

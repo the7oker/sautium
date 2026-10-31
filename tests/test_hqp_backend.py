@@ -5709,6 +5709,76 @@ def test_an_attach_while_an_add_is_owed_hands_the_queue_over_once_it_is_answered
         b2.shutdown()
 
 
+def test_a_switch_back_to_a_stopped_hqplayer_while_an_add_is_owed_keeps_its_spot(fake, output,
+                                                                                monkeypatch):
+    """Switched away and back, HQPlayer found stopped while it still owes an
+    add: the switch's slot and second are the spot all the same, and the
+    switch's play press starts there once the add is answered — not the
+    queue's first track from 0:00."""
+    mgr, b = output
+    monkeypatch.setattr(b._link.client, "timeout", 0.4)
+    go = threading.Event()
+    fake.probe_holds["S/slow"] = go
+    assert mgr.append([_item("E:/Music/S/slow.flac", 9)]) == 1
+    _polls(fake, 2)
+    monkeypatch.setattr(b._link.client, "timeout", hl.COMMAND_WAIT_S)
+    b.shutdown()
+    with fake._lock:
+        fake.state, fake.position = int(PlaybackState.STOPPED), 0.0
+    b2 = _attach(mgr)
+    try:
+        b2.resume_at(2, 30.0)
+        assert b2._spot_at() == (2, 30)
+        assert b2.play()
+        go.set()
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2), \
+            (fake.state, fake.track)
+        assert ("Seek", {"position": "30"}) in fake.commands
+    finally:
+        b2.shutdown()
+
+
+def test_a_reconverge_after_an_owed_add_that_hqplayer_does_not_answer_is_due_again(fake, output,
+                                                                                 monkeypatch):
+    """The reconverge an owed add's answer brings reads a playlist HQPlayer
+    does not give: it is due again at the next answer, as after a silence —
+    never left lost for good, the appends after it the queue's alone."""
+    mgr, b = output
+    monkeypatch.setattr(b._link.client, "timeout", 0.4)
+    go = threading.Event()
+    fake.probe_holds["S/slow"] = go
+    assert mgr.append([_item("E:/Music/S/slow.flac", 9)]) == 1
+    _polls(fake, 2)
+    monkeypatch.setattr(b._link.client, "timeout", hl.COMMAND_WAIT_S)
+    fake.replies["PlaylistGet"] = '<PlaylistGet result="Error">Busy</PlaylistGet>'
+    n = len(fake.commands)
+    go.set()
+    assert _wait(lambda: any(c == "PlaylistGet" for c, _ in fake.commands[n:]))
+    _polls(fake, 1)
+    del fake.replies["PlaylistGet"]
+    assert _wait(lambda: b._mirror == "step"), b._mirror
+    assert mgr.append([_item("E:/Music/S/later.flac", 10)]) == 1
+    assert _wait(lambda: any("S/later" in u for u in fake.playlist))
+
+
+def test_the_diagnostics_name_the_add_hqplayer_owes(fake, output, monkeypatch):
+    """The HQPlayer screen's diagnostics read with HQPlayer the output: the
+    add it owes, the entry and since when — and none once it is answered."""
+    import routers.player as player_router
+    mgr, b = output
+    monkeypatch.setattr(player_router, "manager", mgr)
+    assert player_router.hqplayer_diagnostics()["owed"] is None
+    monkeypatch.setattr(b._link.client, "timeout", 0.4)
+    go = threading.Event()
+    fake.probe_holds["S/slow"] = go
+    assert mgr.append([_item("E:/Music/S/slow.flac", 9)]) == 1
+    assert _wait(lambda: b._link.owed is not None)
+    owed = player_router.hqplayer_diagnostics()["owed"]
+    assert "slow.flac" in owed["entry"] and owed["since"]
+    go.set()
+    assert _wait(lambda: player_router.hqplayer_diagnostics()["owed"] is None)
+
+
 def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_into_it(fake, output):
     mgr, b = output
     buildings = _seen(mgr, "building")
