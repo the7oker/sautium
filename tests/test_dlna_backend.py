@@ -208,6 +208,9 @@ class FakeRenderer:
         # Seconds after a Seek is answered until it takes effect: the renderer
         # plays on from where it was meanwhile, and says so
         self.seek_delay = 0.0
+        # Its transport state says STOPPED while it plays on — GetTransportInfo
+        # and its events alike (a wedged stack, live 2026-09-01)
+        self.says_stopped = False
         self._base = 0.0                  # position at _t0
         self._t0: Optional[float] = None  # monotonic start while PLAYING
         self._subs: dict[str, tuple[str, str]] = {}   # sid → (service key, callback)
@@ -327,8 +330,11 @@ class FakeRenderer:
                     self.next_uri = self.next_meta = ""
                 await self._changed()
 
+    def _transport_state(self) -> str:
+        return "STOPPED" if self.says_stopped and self.state == "PLAYING" else self.state
+
     def _avt_state(self) -> dict:
-        return {"TransportState": self.state, "TransportStatus": self.status,
+        return {"TransportState": self._transport_state(), "TransportStatus": self.status,
                 "CurrentTrackURI": self.uri, "AVTransportURI": self.uri,
                 "CurrentTrackDuration": _hms(self.reported_length() or 0),
                 "NextAVTransportURI": self.next_uri, "NumberOfTracks": "1" if self.uri else "0"}
@@ -391,7 +397,7 @@ class FakeRenderer:
             else:
                 lands()
         elif action == "GetTransportInfo":
-            return {"CurrentTransportState": self.state, "CurrentTransportStatus": self.status,
+            return {"CurrentTransportState": self._transport_state(), "CurrentTransportStatus": self.status,
                     "CurrentSpeed": "1"}
         elif action == "GetPositionInfo":
             rel = _hms(self.position()) if self.uri else "0:00:00"
@@ -887,9 +893,11 @@ def test_a_start_seek_the_renderer_takes_late_is_no_move_of_its_own(tmp_path, pr
     seeks only seconds after it began playing from the top: what it reads
     meanwhile is where it was before the Seek, not where the slot is. Never
     shown, never said as a move of its own — taken for its word, the listen
-    the switch carried restarted there and was scrobbled twice."""
+    the switch carried restarted there and was scrobbled twice. Its landing,
+    seconds late, is seen at once: the node follows the renderer from there,
+    never runs ahead of it until a deadline and then blames it."""
     r = renderers()
-    r.seek_delay = 3.0
+    r.seek_delay = 4.0
     q = CanonicalQueue()
     q.replace([track(tmp_path, 1, seconds=60.0)])
     n = nodes(q, r)
@@ -898,10 +906,59 @@ def test_a_start_seek_the_renderer_takes_late_is_no_move_of_its_own(tmp_path, pr
         assert n.backend.play()
         wait_for(lambda: r.called("Seek"), what="the start sought")
         wait_for(lambda: r.position() >= 36, what="the Seek landed")
-        wait_for(lambda: n.last.position >= r.position() - 1, what="the node at the renderer's second")
+        wait_for(lambda: abs(n.last.position - r.position()) <= 1.5, timeout=4,
+                 what="the node at the renderer's second once the Seek landed")
     playing = [s.position for s in n.statuses if s.state == "playing"]
     assert playing and min(playing) >= 34, playing
     assert "by itself" not in caplog.text
+
+
+def test_a_seek_while_paused_the_renderer_takes_late_holds_still(tmp_path, proxy, renderers, nodes,
+                                                               quality, caplog):
+    """Paused, the person seeks; the renderer acts on it seconds later. What
+    it reads meanwhile is where it paused: the slot stays at the Seek's
+    second — a paused position never runs — and the landing is no move of
+    the renderer's own."""
+    r = renderers()
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.statuses and n.last.state == "playing" and n.last.position >= 2, timeout=20,
+             what="playing past 2 s")
+    assert n.backend.pause()
+    wait_for(lambda: r.state == "PAUSED_PLAYBACK", what="paused")
+    r.seek_delay = 4.0
+    with caplog.at_level("INFO", logger="playback.dlna_backend"):
+        mark = len(n.statuses)
+        assert n.backend.seek(30)
+        wait_for(lambda: r.position() >= 30, what="the Seek landed")
+        wait_for(lambda: n.backend._seek_due is None, timeout=4, what="the landing seen")
+    paused = [s.position for s in n.statuses[mark:] if s.state == "paused"]
+    assert paused and max(paused) <= 31, paused
+    assert "by itself" not in caplog.text
+
+
+def test_a_renderer_that_says_stopped_while_it_plays_runs_on_from_a_seek_of_the_nodes(
+        tmp_path, proxy, renderers, nodes, quality):
+    """A renderer whose transport says STOPPED through a whole playing track
+    is read by its position probe. Started at a spot, its readings before
+    the Seek lands are the clock's, and the landing is its word again: the
+    slot runs on, never frozen at the spot's second for the rest of the
+    track — the listen credited up to there, a whole play written as a
+    skip."""
+    r = renderers()
+    r.notifying = False
+    r.says_stopped = True
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=60.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    assert n.backend.play()
+    wait_for(lambda: r.called("Seek"), timeout=15, what="the start sought")
+    wait_for(lambda: r.position() >= 41.5, timeout=15, what="six seconds past the Seek")
+    wait_for(lambda: n.last.state == "playing" and abs(n.last.position - r.position()) <= 1.5,
+             timeout=4, what="the node at the renderer's second")
 
 
 @pytest.fixture

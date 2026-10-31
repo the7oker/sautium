@@ -643,7 +643,37 @@ class DlnaBackend(PlayerBackend):
                 return
         self._emit_now(state)
 
-    def _adopt_reltime(self, real: float, now: float) -> None:
+    def _seek_pending(self, real: float, *, paused: bool = False) -> bool:
+        """Is `real`, a reading of the renderer's, from before a Seek of the
+        node's (_seek_due)? A renderer that plays on from where it was until
+        its seek takes effect reads that place meanwhile — taken for its
+        word, the listen an output switch carried restarted there and was
+        scrobbled twice. A reading at the Seek's second, or as far past it
+        as the time since it was asked, is the Seek landed — however late:
+        the clock takes it at once. Till then the clock runs on from what the
+        Seek set, and holds still while the renderer is paused; past the
+        pending-play deadline after it was asked, the renderer is believed
+        again. True when the reading is spent here — the Seek's own, or one
+        from before it; False when it is the caller's to judge."""
+        due = self._seek_due
+        if due is None:
+            return False
+        age = time.monotonic() - due[1]
+        if due[0] - _RELTIME_TOLERANCE <= real <= due[0] + age + _RELTIME_TOLERANCE:
+            self._seek_due = None
+            self._rebaseline(real)
+            return True
+        if age > _PENDING_PLAY_DEADLINE:
+            self._seek_due = None
+            return False
+        self._rel_stray = None
+        if paused:
+            self._rebaseline(self._position)
+        else:
+            self._position = self._wall_estimate()
+        return True
+
+    def _adopt_reltime(self, real: float, now: float, *, paused: bool = False) -> None:
         """A renderer's RelTime is its word on the position — when it moves
         with the clock. KANN on Opus reports 00:00:00 for the whole track and
         one stray non-zero reading right after SetNextAVTransportURI (the
@@ -655,24 +685,14 @@ class DlnaBackend(PlayerBackend):
         that is a seek made on the device, which the clock cannot know.
         Said in the log with what the renderer reported: a renderer started a
         track over twice on its own (live, 2026-10-31), and only its debug
-        readings could have told that from a load of the node's.
-        A Seek of the node's not yet seen landing (_seek_due) is no such
-        move: a renderer that plays on from where it was until its seek
-        takes effect reads that place meanwhile — taken for its word, the
-        listen an output switch carried restarted there and was scrobbled
-        twice. Its readings are the clock's until one lands at the Seek's
-        second, or the pending-play deadline after it is asked has passed:
-        a renderer that never acts on it is believed then."""
+        readings could have told that from a load of the node's. A reading
+        from before a Seek of the node's is no such move (_seek_pending).
+        `paused`: the renderer says it is paused."""
+        if self._seek_pending(real, paused=paused):
+            return
         if abs(real - self._wall_estimate()) <= _RELTIME_TOLERANCE:
             self._rebaseline(real)
-            self._rel_stray = self._seek_due = None
             return
-        due = self._seek_due
-        if due is not None and time.monotonic() - due[1] <= _PENDING_PLAY_DEADLINE:
-            self._rel_stray = None
-            self._position = self._wall_estimate()
-            return
-        self._seek_due = None
         if self._rel_stray is not None:
             held, at = self._rel_stray
             if abs(real - (held + (now - at))) <= _RELTIME_TOLERANCE:
@@ -888,9 +908,7 @@ class DlnaBackend(PlayerBackend):
                         # claims — KANN's wedged stack reported STOPPED
                         # through an entire playing track (2026-09-01).
                         self._confirmed()
-                        if self._seek_due is None:
-                            # (with a start Seek due, the position is still where
-                            # the renderer was before it: the clock holds)
+                        if not self._seek_pending(self._pos_offset + probed):
                             self._rebaseline(self._pos_offset + probed)
                         logger.info("pending play confirmed by position "
                                     "probe (rel=%.1f, transport says %s)",
@@ -937,7 +955,8 @@ class DlnaBackend(PlayerBackend):
                 t_update = time.monotonic()
                 if rel is not None and rel > 0.5:
                     # RelTime is 0-based on the (possibly offset) stream.
-                    self._adopt_reltime(self._pos_offset + float(rel), self._clock())
+                    self._adopt_reltime(self._pos_offset + float(rel), self._clock(),
+                                        paused=state == "paused")
                 elif state == "playing":
                     self._position = self._wall_estimate()
                 elif state == "paused":
@@ -957,7 +976,7 @@ class DlnaBackend(PlayerBackend):
                         # on our URI (the wedged-KANN signature): the
                         # position is the renderer's word — keep the session
                         # alive on it instead of closing a playing track.
-                        if self._seek_due is None:
+                        if not self._seek_pending(self._pos_offset + probed):
                             self._rebaseline(self._pos_offset + probed)
                         self._emit_now("playing")
                         continue
