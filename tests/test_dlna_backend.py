@@ -37,6 +37,8 @@ from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
 from streaming import service as streaming_service  # noqa: E402
 from streaming import transcode  # noqa: E402
 from streaming.proxy import MediaProxy  # noqa: E402
+# The HQPlayer side of a session that switches: its fake and transport
+from test_hqp_backend import _moving_transport, fake  # noqa: E402,F401
 
 # The tracker as the module defines it: the manager fixture stands it down
 _TRACK_PLAY_EVENT = tracker.track_play_event
@@ -1178,6 +1180,55 @@ def test_a_switch_carries_the_listen_to_the_next_renderer(tmp_path, proxy, rende
     _playing_at(manager, b, second + 2)
     assert listened == []
     assert lastfm == [("update_now_playing", "Track 1")]
+
+
+def _at(manager, index: int, second: float) -> None:
+    wait_for(lambda: manager.latest_status.get("state") == "playing"
+             and manager.latest_status.get("track_index") == index
+             and manager.latest_status.get("position", 0) >= second,
+             timeout=20, what=f"slot {index} playing past {second}")
+
+
+def test_a_session_across_hqplayer_a_renderer_and_back_keeps_one_listen_a_track(
+        fake, proxy, renderers, manager, switch, quality, heard, tmp_path, monkeypatch):
+    """HQPlayer, then a renderer, then HQPlayer again, a streamed track among
+    owned ones (live, 2026-10-31): HQPlayer's Next credits the track moved to
+    with nothing of the one left; each switch plays the track on at its
+    second, the same listen; the renderer walks into the stream, and
+    HQPlayer, picked again, resumes the stream at its second. One listen a
+    track, each announced once, none written at a switch."""
+    listened, lastfm = heard
+    renderer = renderers(name="Kitchen")
+    fake.length, fake.takes_seek = 8, True
+    _moving_transport(fake, monkeypatch, transit=2)
+    items = [track(tmp_path, 1, seconds=8.0), track(tmp_path, 2, seconds=8.0),
+             streamed(proxy, 3, cover_url="", seconds=8.0), track(tmp_path, 4, seconds=8.0)]
+    hqplayer = {"host": "127.0.0.1", "port": fake.port}
+    switch(type="hqplayer", hqplayer=hqplayer)
+    assert manager.replace_queue(items, play=True)[0] == len(items)
+    _at(manager, 1, 2)
+    seen = []
+    push = manager._push_status
+
+    def recorded(data):
+        seen.append((data.get("track_index"), data.get("position")))
+        push(data)
+    manager._push_status = recorded
+    assert manager.backend().next()
+    _at(manager, 2, 2)
+    assert [p for i, p in seen if i == 2][0] < 1, seen    # at its start from the first word on
+    switch(type="dlna", renderer=renderer.record)
+    wait_for(lambda: renderer.called("Seek"), what="the renderer sought")
+    _at(manager, 3, 1)                           # the renderer walked into the stream
+    assert renderer.uri.split("?")[0].endswith("/preview/stream3")
+    n = len(fake.commands)
+    switch(type="hqplayer", hqplayer=hqplayer)
+    _at(manager, 3, 3)
+    assert any(c == "Seek" and float(a["position"]) >= 1 for c, a in fake.commands[n:])
+    assert [t for t, _ in listened] ==["00000000-0000-0000-0000-000000000001",
+                                        "00000000-0000-0000-0000-000000000002"], listened
+    assert [title for call, title in lastfm if call == "update_now_playing"] == \
+        ["Track 1", "Track 2", "Stream 3"], lastfm
 
 
 class Tab:
