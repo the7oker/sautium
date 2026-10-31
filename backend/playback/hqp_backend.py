@@ -786,6 +786,10 @@ CLOCK_SLACK_S = 2.0
 # under the next one's URI (_runs_on): Status's position and the wall clock
 # step apart by a poll's jitter, never by a second
 RUN_ON_SLACK_S = 1.0
+# How long, from the first, answers may still give the entry before's reading
+# (_runs_on): Desktop's transit lasted two answers within a quarter second;
+# a take misjudged once is read as it stands after this
+RUN_ON_MAX_S = 2.0
 
 
 class _Clock:
@@ -1158,8 +1162,10 @@ class HqpBackend(PlayerBackend):
         self._take_read = 0.0
         # The last answer whose position and length were its own entry's, as
         # (track index, URI, position, length, track_serial, read at) — what an
-        # answer that moved on runs on from (_runs_on): the poller's alone
+        # answer that moved on runs on from (_runs_on), and when the first
+        # answer that ran on from it was read: the poller's alone
         self._own: Optional[tuple] = None
+        self._run_on_since: Optional[float] = None
         # The node's own removal of the slot HQPlayer reads, which plays out
         # (queue_remove): _Passing, until HQPlayer passes that entry — set by
         # a removal, let go by the poller or a full hand-over, under its lock
@@ -2178,8 +2184,11 @@ class HqpBackend(PlayerBackend):
                     position = self._clocked(status, read_at, att)
                     length = None
                     if self._runs_on(status, read_at):
-                        # The entry moved to, at its start, its length not given yet
-                        position = length = 0.0
+                        # The entry moved to, at its start, its length the
+                        # queue's until HQPlayer gives its own
+                        position = 0.0
+                        item = playing[1] if playing is not None else None
+                        length = (item.duration_seconds if item is not None else None) or 0.0
                     if playing is not None:
                         # The slot playing on, its position moving since the
                         # tick before on the same take — a Seek's second, a
@@ -2594,7 +2603,8 @@ class HqpBackend(PlayerBackend):
         selected — never one HQPlayer moved on to by itself — and the
         person's for the take that sounds, once a tick read it and its start
         was heard (one sent before may be the entry's before, left gapless
-        before a tick read it).
+        before a tick read it). An answer that still gives the entry before's
+        reading under the next one's URI hands on 0 instead (_runs_on).
         Called on the poller, which alone keeps it."""
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
         take = (status.track_serial, status.uri)
@@ -2665,19 +2675,36 @@ class HqpBackend(PlayerBackend):
         written as heard and scrobbled a second after the Next (live,
         2026-10-31). Such an answer names another take and URI than the last
         answer whose reading was its own entry's, with that answer's track
-        index and length, and a position running on from its — no Seek sent
-        since. The rest is that last own answer. HQPlayer 5 names no take: its
-        answers are read as they stand. Called on the poller, which alone
-        keeps it."""
+        index and length, and a position running on from its — or from the
+        second of a Seek of the node's sent since, and when it was sent (a
+        Next right after a Seek, before the poller read again). A scrub in
+        HQPlayer's own window is no Seek of the node's: one followed by a Next
+        inside one poll is read as it stands. No answer runs on past
+        RUN_ON_MAX_S from the first that did: a take misjudged once is read
+        as it stands after it. The rest is that last own answer. HQPlayer 5
+        names no take: its answers are read as they stand. Called on the
+        poller, which alone keeps it."""
         own = self._own
+        if own is None:
+            base = lowest = base_at = 0.0
+        elif self._seek_mark is not None and self._seek_mark[1] > own[5]:
+            base, base_at = self._seek_mark[0], self._seek_mark[1]
+            lowest = base - RUN_ON_SLACK_S      # a Seek lands on a frame, not on its second
+        else:
+            base, base_at = own[2], own[5]
+            lowest = base
+        since = self._run_on_since
         runs_on = (own is not None and status.track_serial is not None
                    and status.track_serial != own[4] and bool(status.uri) and status.uri != own[1]
                    and status.track_index == own[0]
                    and status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
                    and status.length == own[3] > 0
-                   and own[2] <= status.position <= own[2] + (read_at - own[5]) + RUN_ON_SLACK_S
-                   and (self._seek_mark is None or self._seek_mark[1] <= own[5]))
-        if not runs_on:
+                   and lowest <= status.position <= base + (read_at - base_at) + RUN_ON_SLACK_S
+                   and (since is None or read_at - since <= RUN_ON_MAX_S))
+        if runs_on:
+            self._run_on_since = read_at if since is None else since
+        else:
+            self._run_on_since = None
             self._own = (status.track_index, status.uri, status.position, status.length,
                          status.track_serial, read_at)
         return runs_on

@@ -2520,6 +2520,39 @@ def _status(state, serial, position, *, uri=_URI_A, delay=None):
                        length=300.0, volume=-3.0, uri=uri, track_serial=serial, output_delay=delay)
 
 
+def _in_transit(serial, position, *, uri=_URI_B):
+    """An answer naming `uri`'s take while its index and length are still
+    entry 1's (FakeHqp._transit's shape)."""
+    return TrackStatus(state=PlaybackState.PLAYING, track_index=1, track_id="", position=position,
+                       length=300.0, volume=-3.0, uri=uri, track_serial=serial)
+
+
+def test_an_answer_in_transit_runs_on_from_a_seek_of_the_nodes_sent_since(fake):
+    """A Seek of the node's, then a Next before the poller reads again: the
+    answer in transit gives the Seek's second under the next entry's URI. It
+    runs on from the Seek, as it would from the last own answer — read as
+    the next entry's, that track was shown and credited at the Seek's second."""
+    b = HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
+    t = 1000.0
+    assert not b._runs_on(_status(PlaybackState.PLAYING, 5, 43.0), t)      # entry 1's own reading
+    b._seek_mark = (150.0, t + 0.2, None)                                  # the node's Seek, taken
+    assert b._runs_on(_in_transit(6, 150.1), t + 0.4)                      # its Next, in transit
+    assert not b._runs_on(_status(PlaybackState.PLAYING, 6, 0.2, uri=_URI_B), t + 0.6)  # entry 2's own
+
+
+def test_answers_run_on_for_two_seconds_at_most_from_the_first(fake):
+    """A take misread as running on is read as it stands two seconds after
+    the first answer that did: one misreading never lasts the track (Now
+    Playing at 0:00, its listen a 0 % skip)."""
+    b = HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
+    t = 1000.0
+    assert not b._runs_on(_status(PlaybackState.PLAYING, 5, 0.4), t)
+    for dt in (0.5, 1.0, 2.4):
+        assert b._runs_on(_in_transit(6, 0.4 + dt), t + dt)
+    assert not b._runs_on(_in_transit(6, 3.1), t + 2.7)                    # past the bound: its own
+    assert not b._runs_on(_in_transit(6, 4.1), t + 3.7)                    # and so on
+
+
 def _sound(t0, start, last=None):
     """What the meter showed by a tick: sound from `start` on — to `last`, or still."""
     return lambda at: {"sessions": [{"open": t0, "first": t0 + 0.05, "closed": None}],

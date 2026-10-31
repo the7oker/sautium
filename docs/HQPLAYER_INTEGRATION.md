@@ -1438,7 +1438,23 @@ entry it selected — never one HQPlayer moved on to by itself; the person's
 for the take that sounds, once a tick read it and its start was heard —
 one sent before may belong to the entry before, which HQPlayer can leave
 gapless before a tick reads it. Without a start the meter heard the
-position is Status's, as before.
+position is Status's, as before — but for the answers in transit below.
+
+**The answers in transit** (since 2026-10-31). HQPlayer's first answers
+after its own Next or Previous name the next entry's URI and take
+(`track_serial` one more) while their track index, position and length are
+still the entry before's, running on (Desktop 6, read every 0.25 s: one or
+two answers within a quarter second). Read as the next entry's, the track
+moved to was shown at the second the one left was at and the play tracker
+credited it with that second — a listen written as heard and a Last.fm
+scrobble a second after the Next. Such an answer — another take and URI
+than the last answer whose reading was its own entry's, with that answer's
+track index and length, a position running on from its or from a Seek of
+this node's sent since — hands on the entry moved to at 0, its length the
+queue's until HQPlayer gives its own; the next answer that moves the index
+is the entry's own. Answers run on for two seconds at most from the first;
+a scrub in HQPlayer's own window right before a Next is read as it stands.
+HQPlayer 5, which names no take, is read as it stands.
 
 HQPlayer's own advance is an attempt too (`advance`, since 2026-10-18).
 Onto an entry of another rate HQPlayer stops on no entry at the end of the
