@@ -2546,17 +2546,34 @@ def test_an_answer_in_transit_runs_on_from_a_seek_of_the_nodes_sent_since(fake):
     assert not b._runs_on(_status(PlaybackState.PLAYING, 6, 0.2, uri=_URI_B), t + 0.6)  # entry 2's own
 
 
-def test_answers_run_on_for_two_seconds_at_most_from_the_first(fake):
+def test_answers_run_on_for_two_seconds_at_most_from_the_first(fake, caplog):
     """A take misread as running on is read as it stands two seconds after
     the first answer that did: one misreading never lasts the track (Now
-    Playing at 0:00, its listen a 0 % skip)."""
+    Playing at 0:00, its listen a 0 % skip) — and it is said, once."""
     b = HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
     t = 1000.0
     assert not b._runs_on(_status(PlaybackState.PLAYING, 5, 0.4), t)
     for dt in (0.5, 1.0, 2.4):
         assert b._runs_on(_in_transit(6, 0.4 + dt), t + dt)
-    assert not b._runs_on(_in_transit(6, 3.1), t + 2.7)                    # past the bound: its own
-    assert not b._runs_on(_in_transit(6, 4.1), t + 3.7)                    # and so on
+    with caplog.at_level("INFO", logger="playback.hqp_backend"):
+        assert not b._runs_on(_in_transit(6, 3.1), t + 2.7)                # past the bound: its own
+        assert not b._runs_on(_in_transit(6, 4.1), t + 3.7)                # and so on
+    assert caplog.text.count("read as they stand from now") == 1, caplog.text
+
+
+def test_a_resume_is_its_own_take_never_one_in_transit(fake):
+    """A resume — SelectTrack, Seek, Play — on the entry HQPlayer last
+    answered paused, its stream handed again under another URI: the first
+    answer names the new take at the Seek's second, with the entry's index
+    and length. It is the start's own entry, read as it stands: run on, it
+    was shown at 0:00 and the listen carried to it restarted."""
+    b = HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
+    t = 1000.0
+    paused = TrackStatus(state=PlaybackState.PAUSED, track_index=1, track_id="", position=149.6,
+                         length=300.0, volume=-3.0, uri=_URI_A, track_serial=5)
+    assert not b._runs_on(paused, t)
+    b._seek_mark = (150.0, t + 0.5, diag.Attempt(intent="resume", slot=1))     # the start's own Seek
+    assert not b._runs_on(_in_transit(6, 150.2), t + 0.8)
 
 
 def _sound(t0, start, last=None):
@@ -5352,13 +5369,16 @@ def test_the_status_hqplayer_gives_as_it_moves_on_is_not_the_new_tracks(fake, ou
     push = mgr._push_status
 
     def recorded(data):
-        seen.append((data.get("track_index"), data.get("position")))
+        seen.append((data.get("track_index"), data.get("position"), data.get("length")))
         push(data)
     mgr._push_status = recorded
     left = mgr._latest_status["position"]
+    mgr.queue.item_at(to).duration_seconds = 250.0
     assert getattr(b, step)()
-    assert _wait(lambda: any(i == to and p >= 2 for i, p in seen)), seen
-    assert all(p < 5 for i, p in seen if i == to), seen   # at its own start, from the first word on
+    assert _wait(lambda: any(i == to and p >= 2 for i, p, _ in seen)), seen
+    assert all(p < 5 for i, p, _ in seen if i == to), seen   # at its own start, from the first word on
+    # Its length the queue's until HQPlayer gives its own — never 0:00 / 0:00
+    assert [length for i, _, length in seen if i == to][0] == 250.0, seen
     _polls(fake, 2)
     # The listen left ends where it was left; the one moved to is open, from 0:00
     rows = _listened(writes)[n_written:]

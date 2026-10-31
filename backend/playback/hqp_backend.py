@@ -2803,31 +2803,37 @@ class HqpBackend(PlayerBackend):
         2026-10-31). Such an answer names another take and URI than the last
         answer whose reading was its own entry's, with that answer's track
         index and length, and a position running on from its — or from the
-        second of a Seek of the node's sent since, and when it was sent (a
-        Next right after a Seek, before the poller read again). A scrub in
-        HQPlayer's own window is no Seek of the node's: one followed by a Next
-        inside one poll is read as it stands. No answer runs on past
+        second of the person's Seek sent through the node since, and when it
+        was sent (a Next right after a Seek, before the poller read again). A
+        scrub in HQPlayer's own window is no Seek of the node's: one followed
+        by a Next inside one poll is read as it stands. A start's own Seek
+        sent since (a resume: SelectTrack, Seek, Play) makes a take of the
+        entry it selected, never one in transit. No answer runs on past
         RUN_ON_MAX_S from the first that did: a take misjudged once is read
-        as it stands after it. The rest is that last own answer. HQPlayer 5
-        names no take: its answers are read as they stand. Called on the
-        poller, which alone keeps it."""
-        own = self._own
+        as it stands after it, and said. The rest is that last own answer.
+        HQPlayer 5 names no take: its answers are read as they stand. Called
+        on the poller, which alone keeps it."""
+        own, seek = self._own, self._seek_mark
         if own is None:
             base = lowest = base_at = 0.0
-        elif self._seek_mark is not None and self._seek_mark[1] > own[5]:
-            base, base_at = self._seek_mark[0], self._seek_mark[1]
+        elif seek is not None and seek[1] > own[5]:
+            base, base_at = seek[0], seek[1]
             lowest = base - RUN_ON_SLACK_S      # a Seek lands on a frame, not on its second
         else:
             base, base_at = own[2], own[5]
             lowest = base
         since = self._run_on_since
-        runs_on = (own is not None and status.track_serial is not None
+        transit = (own is not None and status.track_serial is not None
                    and status.track_serial != own[4] and bool(status.uri) and status.uri != own[1]
                    and status.track_index == own[0]
                    and status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
                    and status.length == own[3] > 0
-                   and lowest <= status.position <= base + (read_at - base_at) + RUN_ON_SLACK_S
-                   and (since is None or read_at - since <= RUN_ON_MAX_S))
+                   and not (seek is not None and seek[1] > own[5] and seek[2] is not None)
+                   and lowest <= status.position <= base + (read_at - base_at) + RUN_ON_SLACK_S)
+        runs_on = transit and (since is None or read_at - since <= RUN_ON_MAX_S)
+        if transit and not runs_on:
+            logger.info("HQPlayer: answers naming entry %s with the entry before's position for "
+                        "%.1f s — read as they stand from now", status.track_index, read_at - since)
         if runs_on:
             self._run_on_since = read_at if since is None else since
         else:
