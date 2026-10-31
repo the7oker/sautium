@@ -811,6 +811,11 @@ class HqpLink:
         with self._state_lock:
             self._latest[kind] = max(self._latest.get(kind, 0), n)
 
+    def serving(self) -> Optional[Item]:
+        """The item this thread's command sequence serves, if one (command,
+        hold_as)."""
+        return getattr(self._local, "item", None)
+
     def superseded(self, item: Item) -> Optional[str]:
         """Why `item` must not be sent any more, or None."""
         with self._state_lock:

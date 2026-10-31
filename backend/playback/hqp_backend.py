@@ -913,6 +913,20 @@ class _Start:
     steps: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class _Parked:
+    """A start that waits in the node for its stream's bytes (_park): its
+    track by identity, the second it starts at, the intent it serves — a
+    newer one that supersedes it lets it go — the stream's token, and
+    whether it goes as a play press: HQPlayer holds the entry in a shape it
+    must be handed again in, and only a hand-over afresh replaces it."""
+    item: QueueItem
+    second: int
+    start: Item
+    token: str
+    press: bool = False
+
+
 class _Words:
     """A person's play intents held by the work that carries them out at
     its end — a play press, a queue mutation in flight: each start and each
@@ -1131,10 +1145,14 @@ class HqpBackend(PlayerBackend):
         # erases it; a command refused, as busy or by HQPlayer, leaves it.
         self._spot: Optional[tuple] = None
         self._spot_lock = threading.Lock()
-        # A start of a streamed slot whose bytes the media proxy dropped, as
-        # (its item, the second it starts at): it waits here for them, never
-        # on HQPlayer's control thread (_park, slot_ready)
-        self._parked: Optional[tuple] = None
+        # A start of a streamed slot whose bytes are out of the media proxy's
+        # RAM: it waits here for them, never on HQPlayer's control thread
+        # (_park, _land)
+        self._parked: Optional[_Parked] = None
+        # The streams whose bytes landed in another shape than HQPlayer was
+        # handed them in, where no repair could hand them again in place: the
+        # next hand-over that reads the playlist does (_first_reshaped)
+        self._reshaped: set = set()
         # Moves on with every spot set and every start taken: a start that
         # did not go puts its spot back only if nothing moved it since it was
         # owed (_put_back)
@@ -1622,94 +1640,136 @@ class HqpBackend(PlayerBackend):
             self._spot_gen += 1
 
     def _bytes_away(self, item: Optional[QueueItem]) -> Optional[str]:
-        """The token of the stream `item` opens through the media proxy while
-        its bytes are not in RAM — the budget dropped them — else None: a
-        file, a stream in hand, a token the proxy does not know (its GET
-        answers at once)."""
+        """The token of the media proxy's stream `item` opens while its bytes
+        are out of RAM and come back with a fetch (MediaProxy.bytes_away),
+        else None: a file, a stream in hand, one whose fetch failed — its GET
+        answers at once, with the error the start's attempt then says."""
         src = item.opener() if item is not None else {}
         if src.get("kind") != "proxy":
             return None
         from streaming import service as streaming_service
         proxy = streaming_service.get_proxy()
-        return src["token"] if proxy is not None and proxy.holds_bytes(src["token"]) is False else None
+        return src["token"] if proxy is not None and proxy.bytes_away(src["token"]) else None
 
-    def _park(self, item: QueueItem, second: int, token: str) -> bool:
-        """A start of a streamed slot whose bytes the media proxy dropped:
-        HQPlayer would open the entry and wait out the refetch on its control
-        thread — live, 32.8 s of silence on a tap, the person's next tap
-        refused as busy. It waits here instead: the refetch asked for at the
-        head of the fetch queue, Now Playing "loading" the slot (_status_of)
-        while what plays plays on; the start goes once the bytes land
-        (slot_ready), through the tap's or the resume's own path. A newer
-        start replaces it; a Pause or a Stop ends it."""
+    def _park(self, item: QueueItem, second: float, token: str,
+              start: Optional[Item] = None) -> bool:
+        """A start of a streamed slot whose bytes are out of RAM: HQPlayer
+        would open the entry and wait out the fetch on its control thread —
+        live, 32.8 s of silence on a tap, the person's next tap refused as
+        busy. It waits here instead, serving `start` — the intent it was
+        asked as; a person's word of its own when none: the fetch asked for
+        at the head of the fetch queue, Now Playing "loading" the slot
+        (_status_of) while what plays plays on, and the start goes once the
+        fetch ends (_land) — the bytes in, or its error met. A newer word
+        supersedes it (a tap, Next, Previous, Pause, Stop, a new queue); a
+        Play while it waits is its own; a Seek moves its second."""
         from streaming import service as streaming_service
+        if start is None:
+            start = self._link.item("start", self._link.accept("transport"),
+                                    queue=self._queue, generation=self._queue.generation)
         with self._spot_lock:
-            self._parked = (item, second)
-        streaming_service.get_proxy().ensure_buffered([token])
+            self._parked = _Parked(item, int(second), start, token)
+        proxy = streaming_service.get_proxy()
+        proxy.ensure_buffered([token])
         logger.info("HQPlayer: slot %s waits for its stream (%s — %s)",
                     self._queue.index_of(item), item.artist, item.title)
         self.poke()
+        if not proxy.bytes_away(token):
+            self._land(token)       # in, or failed, before the park stood: it goes now
         return True
 
-    def _unpark(self) -> None:
+    def _parked_now(self) -> Optional[_Parked]:
+        """The start that waits for its stream while it may still go: its
+        track in the queue, no newer intent over it — one that may not is let
+        go here."""
         with self._spot_lock:
-            self._parked = None
+            park = self._parked
+            if park is not None and (self._queue.index_of(park.item) is None
+                                     or self._link.superseded(park.start) is not None):
+                park = self._parked = None
+            return park
 
-    def slot_ready(self, index: int) -> None:
-        """The bytes of a slot's stream landed: a start parked there goes, on
-        a thread of its own (the media proxy's fetch thread tells it)."""
+    def _land(self, token: str) -> None:
+        """The fetch of the stream `token` ended (stream_landed, stream_failed,
+        or between a park's look and its standing): a start parked on it
+        goes, on a thread of its own."""
         with self._spot_lock:
-            parked = self._parked
-            if parked is None or self._queue.index_of(parked[0]) != index:
+            park = self._parked
+            if park is None or park.token != token:
                 return
             self._parked = None
-        threading.Thread(target=self._start_parked, args=parked, daemon=True,
+        threading.Thread(target=self._start_parked, args=(park,), daemon=True,
                          name="hqp-parked").start()
 
-    def _start_parked(self, item: QueueItem, second: int) -> None:
-        index = self._queue.index_of(item)
-        if index is None or self._detached:
-            return
-        if second:
-            self._set_spot(item, second)
-            ok = self.play()
-        else:
-            ok = self.select(index, item.track_id)
-        if not ok:
-            logger.warning("HQPlayer: the start slot %d waited for did not go: %s",
-                           index, diag.redact_text(self.refusal()))
+    def _start_parked(self, park: _Parked) -> None:
+        """A parked start goes, as the intent it serves — dropped once a newer
+        one superseded it — a build it meets waited out (background): at the
+        slot's entry on a playlist in step, else — or when HQPlayer must be
+        handed the entry again first — as a play press."""
+        link = self._link
 
-    def stream_landed(self, index: int, reshaped: bool) -> None:
-        """A stream's bytes landed. Where they came in another shape than
-        HQPlayer was told when it added the entry — another provider in the
-        chain, the excerpt after a spent demo listen — the entry is handed to
-        it again first (HQPlayer holds the length its probe read), then a
-        start parked on the slot goes."""
+        def go() -> None:
+            index = self._queue.index_of(park.item)
+            if index is None:
+                return
+            if park.press or self._mirror != "step" or self._live(self._pressed) is not None:
+                self._press(park.item, park.second, item=park.start)
+                return
+            start = self._start_point(index, park.second)
+            if start is None:
+                return
+            with self._intent("select", slot=start[0].n):
+                self._start_entry(*start, fallback=False, item=park.start)
+        background(f"HQPlayer: the start of {park.item.artist} — {park.item.title} that waited "
+                   "for its stream did not go", go,
+                   needed=lambda: link.superseded(park.start)
+                   or ("HQPlayer was detached" if self._detached else None),
+                   until=lambda: self._detached or link.superseded(park.start) is not None)
+        self.poke()
+
+    def stream_landed(self, token: str, reshaped: bool) -> None:
+        """A stream's bytes landed (the media proxy's fetch thread tells it).
+        Where they came in another shape than HQPlayer was told when it added
+        the entry — another provider in the chain, the excerpt after a spent
+        demo listen — the entry is handed to it again first (HQPlayer holds
+        the length its probe read), then a start parked on the stream goes."""
         if not reshaped:
-            self.slot_ready(index)
+            self._land(token)
             return
-        threading.Thread(target=self._rehand, args=(self._queue.item_at(index),),
-                         daemon=True, name="hqp-rehand").start()
+        threading.Thread(target=self._rehand, args=(token,), daemon=True,
+                         name="hqp-rehand").start()
 
-    def _rehand(self, item: Optional[QueueItem]) -> None:
-        """Hand HQPlayer the entry of `item`'s slot again (stream_landed):
-        playing or paused on an entry before it, HQPlayer's playlist behind
-        the entry it reads is made the queue's again from that entry on, as a
-        tail repair does; stopped, it takes the queue afresh. Never the entry
-        it reads, nor one before it: that plays out, or lies behind. Then a
-        start parked on the slot goes. Under the queue lock, as background
-        work (a build met is waited out)."""
+    def stream_failed(self, token: str) -> None:
+        """A stream's fetch ended with no audio: a start parked on it goes and
+        meets the error — answered at once — which its attempt says; never a
+        "loading" for good."""
+        self._land(token)
+
+    def _rehand(self, token: str) -> None:
+        """Hand HQPlayer again the entries of the stream `token`, its bytes
+        landed in another shape (stream_landed): under the queue lock, as
+        background work (a build met is waited out). Playing or paused on an
+        entry of ours before one of them, in step or a tail mirror, its
+        playlist behind the entry it reads is made the queue's again from
+        that entry on, as a tail repair does; stopped, it takes the queue
+        afresh, resting where it rested — the spot, else the slot it stood
+        on. The entry it reads, or one before it, cannot be replaced where it
+        stands, nor can any on a playlist that is no mirror: the next
+        hand-over that reads the playlist takes it again (_reshaped), and a
+        start parked on the stream goes as a play press, which hands HQPlayer
+        the queue afresh. Then that start goes."""
         from playback.manager import manager
-        if item is None or self.gap(item) is not None:
-            return
+        press = False
 
         def step() -> None:
-            if self._mirror != "step":
-                return              # no mirror: its next hand-over takes the stream as it is
-            layout = self._layout()
-            slot = self._queue.index_of(item)
-            stale = layout.entry(slot) if slot is not None else None
-            if stale is None:
+            nonlocal press
+            items = [it for it in (self._queue.item_at(s) for s in self._queue.slots_streaming(token))
+                     if it is not None and self.gap(it) is None]
+            if not items:
+                return
+            if self._mirror not in ("step", "tail"):
+                self._reshaped.add(token)
+                press = True
                 return
 
             def read(h: HQPlayerClient) -> tuple:
@@ -1718,27 +1778,53 @@ class HqpBackend(PlayerBackend):
                 return status, (playlist if h.last_error is None else None)
             status, playlist = self._cmd(read)
             if status is None or playlist is None or not status.state.known:
-                return
-            if status.state == PlaybackState.STOPPED:
-                spot = self._spot_at()
-                self._remirror(at=self._queue.item_at(spot[0]) if spot else None,
-                               position=spot[1] if spot else 0)
+                self._reshaped.add(token)
+                press = True
                 return
             playing = self._playing(status, mutating=True)
+            if status.state == PlaybackState.STOPPED:
+                spot = self._spot_at()
+                rests = (playing[1] if playing is not None and not playing[2] else None)
+                self._remirror(at=self._queue.item_at(spot[0]) if spot else rests,
+                               position=spot[1] if spot else 0)
+                return
             reads = Entry.read(status)
             if (playing is None or playing[2] or not playing[0] or reads is None
-                    or reads >= stale or reads.n > len(playlist)):
-                return              # at or past it, or not one entry of ours
-            self._repair_tail(reads, playing[0], playlist, layout, stale=stale)
+                    or reads.n > len(playlist)):
+                self._reshaped.add(token)       # not one entry of ours
+                press = True
+                return
+            layout = self._layout()
+            behind = layout.behind(playing[0])
+            stale = [reads + (1 + i) for i, it in enumerate(behind) if any(it is x for x in items)]
+            if len(stale) < len(items):
+                self._reshaped.add(token)       # the entry it reads, or one before it
+                press = True
+            if stale:
+                self._repair_tail(reads, playing[0], playlist, layout, stale=stale[0])
         try:
             background("HQPlayer did not take the stream again",
                        lambda: manager.mirror_step(self, step),
                        needed=lambda: "HQPlayer was detached" if self._detached else None,
                        until=lambda: self._detached)
         finally:
-            index = self._queue.index_of(item)
-            if index is not None:
-                self.slot_ready(index)
+            if press:
+                with self._spot_lock:
+                    if self._parked is not None and self._parked.token == token:
+                        self._parked = replace(self._parked, press=True)
+            self._land(token)
+
+    def _unpark(self) -> None:
+        with self._spot_lock:
+            self._parked = None
+
+    def _first_reshaped(self, playlist: list, after: Entry) -> Optional[Entry]:
+        """The first of HQPlayer's entries past `after` whose stream landed in
+        another shape since it was handed (_reshaped), or None."""
+        if not self._reshaped:
+            return None
+        return next((Entry(n) for n, t in enumerate(playlist, 1)
+                     if n > after.n and _token_of(t.get("uri") or "") in self._reshaped), None)
 
     def _put_back(self, spot: tuple, gen: int) -> None:
         """Where a start that did not go would have started (`spot`): the
@@ -1933,7 +2019,8 @@ class HqpBackend(PlayerBackend):
             self._reconverge_due = self._lost_by in ("silence", "owed")
             return
         if (len(playlist) == len(layout.handed)
-                and self._first_divergence(playlist, layout.handed) is None):
+                and self._first_divergence(playlist, layout.handed) is None
+                and self._first_reshaped(playlist, Entry(0)) is None):
             self._in_step()                             # it holds the queue as it is
             return
         playing = self._playing(status, mutating=True)
@@ -1951,7 +2038,8 @@ class HqpBackend(PlayerBackend):
             if (playing is None or playing[2] or twice or reads is None
                     or reads.n > len(playlist)):
                 return              # not one entry of ours: the play press re-mirrors
-            self._repair_tail(reads, playing[0], playlist, layout)
+            self._repair_tail(reads, playing[0], playlist, layout,
+                              stale=self._first_reshaped(playlist, reads))
         elif status.state == PlaybackState.STOPPED:
             self._remirror(at=playing[1] if playing is not None and not playing[2]
                            and not twice else None)
@@ -2079,6 +2167,7 @@ class HqpBackend(PlayerBackend):
         refused — a batch it took whole ends the last one. Returns whether
         HQPlayer holds them now."""
         sent, answered = items[:unsent], taken[:unsent]
+        self._reshaped.difference_update(it.opener().get("token") for it, t in zip(sent, answered) if t)
         self._note_refused(sent, answered)
         if any(answered):
             self._link.refusals.extend((it, _slot_key(it))
@@ -2959,17 +3048,17 @@ class HqpBackend(PlayerBackend):
             extra["resume"] = {"index": spot[0], "position": spot[1]}
         if self._pressed is not None:
             extra["rebuilding"] = True      # a play press: HQPlayer takes the queue again
-        parked = self._parked
-        slot = self._queue.index_of(parked[0]) if parked is not None else None
+        parked = self._parked_now()
+        slot = self._queue.index_of(parked.item) if parked is not None else None
         if slot is not None:
             # A start waiting for its stream (_park): the slot it waits on,
             # loading, at its second — what HQPlayer plays meanwhile is none of
             # this status's words
             for key in ("artist", "album", "song", "source", "resume", "diagnosis", "starting"):
                 extra.pop(key, None)
-            return PlaybackStatus(state="loading", position=float(parked[1]),
-                                  length=parked[0].duration_seconds or 0.0, queue_index=slot,
-                                  volume=status.volume, extra=extra, item=parked[0])
+            return PlaybackStatus(state="loading", position=float(parked.second),
+                                  length=parked.item.duration_seconds or 0.0, queue_index=slot,
+                                  volume=status.volume, extra=extra, item=parked.item)
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
             position=status.position if position is None else position,
@@ -3797,8 +3886,21 @@ class HqpBackend(PlayerBackend):
         pass (_poll_loop). Called on the poller."""
         self._said = status
         self._said_starting = self._start_under_way()
-        self._emit(replace(status, extra={**status.extra, "starting": True})
+        self._emit(replace(status, extra={**status.extra, "starting": True,
+                                          "start_slot": self._start_slot()})
                    if self._said_starting else status)
+
+    def _start_slot(self) -> Optional[int]:
+        """The queue slot a start under way goes to — a play press's, the
+        attempt's — or None: the media proxy keeps its bytes until HQPlayer
+        reads them (PlaybackManager._maintain_preview_window), though the
+        status names the slot it left until then."""
+        pressed = self.pressing()
+        if pressed:
+            return pressed.get("index")
+        att = self._attempt
+        target = att.target if att is not None and att.under_way() else None
+        return self._queue.index_of(target[0]) if target is not None else None
 
     def _start_under_way(self) -> bool:
         """Is a start under way? One a play press or a queue mutation holds,
@@ -3964,10 +4066,10 @@ class HqpBackend(PlayerBackend):
         and its attempt is watched from its turn, as a tap's is."""
         if word is None and self._held_play():
             return True
+        if self._parked_now() is not None:
+            return True                     # the start that waits for its stream is this Play
         if self._mirror != "step" or self._live(self._pressed) is not None:
             return self._press_play(word)
-        if self._parked is not None:
-            return True                     # the start that waits for its stream is this Play
         held, spot = self._spot, self._spot_at()
         rests = self._last_tick
         target = ((self._queue.item_at(spot[0]), spot[1]) if spot is not None
@@ -4112,8 +4214,8 @@ class HqpBackend(PlayerBackend):
                 self.poke()
                 return True                     # the queue's end: the target stays
             return self._press(target, 0)
-        parked = self._parked
-        index = self._queue.index_of(parked[0]) if parked is not None else None
+        parked = self._parked_now()
+        index = self._queue.index_of(parked.item) if parked is not None else None
         if index is not None:
             # A start that waits for its stream: moved, counted from its slot
             target = self._queue.item_at(layout.held(index + by, by))
@@ -4780,6 +4882,16 @@ class HqpBackend(PlayerBackend):
         `position` (diag.Attempt.aim). Returns HQPlayer's refusal, or
         None."""
         att = getattr(self._local, "attempt", None)
+        token = self._bytes_away(target)
+        if token is not None:
+            # HQPlayer would open the entry and wait out the fetch on its
+            # control thread: whoever made the start — a play press's, a
+            # word held through a queue edit, one owed — it waits for the
+            # bytes in the node, as the intent this sequence serves
+            if att is not None:
+                att.request_end("superseded")
+            self._park(target, position, token, start=self._link.serving())
+            return None
         if att is not None:
             att.aim(target, position)
         try:
@@ -4865,6 +4977,15 @@ class HqpBackend(PlayerBackend):
         return ok
 
     def seek(self, seconds: int) -> bool:
+        with self._spot_lock:
+            park = self._parked
+            if park is not None:
+                # A start that waits for its stream: it starts at the new
+                # second, and what HQPlayer plays meanwhile is not sought
+                self._parked = replace(park, second=int(seconds))
+        if park is not None and self._parked_now() is not None:
+            self.poke()
+            return True
         if self._held_seek(int(seconds)) or self._seek_pressed(int(seconds)):
             self.poke()
             return True

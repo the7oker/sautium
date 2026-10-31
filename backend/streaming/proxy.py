@@ -165,6 +165,10 @@ class MediaProxy:
         # Kept generic so the proxy stays CLAP-agnostic: the enrichment tee is
         # one hook, the queue refresh another.
         self.track_ready_hooks: list[Callable[["_Entry"], None]] = []
+        # Fired (with the _Entry, its `error` said) once a fetch ends with no
+        # audio, before the entry is marked ready: whoever waits for those
+        # bytes in the node hears the fetch is over (a start an output parked)
+        self.track_failed_hooks: list[Callable[["_Entry"], None]] = []
         # Whether a chain link may be fetched NOW — the demo policy's gate
         # (streaming/demo.py). A chain is a plan made at resolve time; a link
         # the gate refuses is skipped and the chain cascades on.
@@ -321,13 +325,14 @@ class MediaProxy:
             preview_events.ping()
         return n
 
-    def holds_bytes(self, token: str) -> Optional[bool]:
-        """Whether the stream `token` names has its bytes in RAM now — False
-        once the budget dropped them, or before they ever came; None for a
-        token this proxy does not know."""
+    def bytes_away(self, token: str) -> bool:
+        """Whether the stream `token` names is out of RAM and comes back with
+        a fetch — the budget dropped its bytes, or they are on their way or
+        not asked for yet. Not one whose fetch failed (its GET answers at
+        once, with the error), nor one in hand or unknown here."""
         with self._lock:
             e = self._entries.get(token)
-            return None if e is None else e.audio is not None
+            return e is not None and e.audio is None and e.error is None
 
     def ensure_buffered(self, keys: list) -> None:
         """Priority-(re)fetch the playback window, first key most urgent —
@@ -767,6 +772,12 @@ class MediaProxy:
                         hook(e)
                     except Exception:
                         logger.exception("track-ready hook failed [%d]", e.index)
+            elif e.error is not None:
+                for hook in list(self.track_failed_hooks):
+                    try:
+                        hook(e)
+                    except Exception:
+                        logger.exception("track-failed hook failed [%d]", e.index)
             e.ready.set()
             preview_events.ping()   # buffering ended → re-fetch picks up the change
 
@@ -966,14 +977,15 @@ def _make_handler(proxy: MediaProxy):
             # and one the RAM budget dropped since answers from what it was
             # told then, never waiting on a refetch: HQPlayer's probe of a tail
             # repair or a reconverge waited out whole fetches on its control
-            # thread (live, 45 s on one add).
+            # thread (live, 45 s on one add). One whose fetch failed is
+            # answered with its error, as its GET is.
             tok = self._token()
             if tok is None:
                 return
             self._open_hit(tok, "opus" if transcode.wants_opus(self._q()) else "preview")
             held = proxy._peek(tok)
-            if (held is not None and held.audio is None and held.held is not None
-                    and not transcode.wants_opus(self._q())):
+            if (held is not None and held.audio is None and held.error is None
+                    and held.held is not None and not transcode.wants_opus(self._q())):
                 self.send_response(200)
                 self.send_header("Content-Type", held.held[1])
                 self.send_header("Accept-Ranges", "bytes")

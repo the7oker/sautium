@@ -5485,19 +5485,22 @@ class _GatedStream:
         self.go.set()
         self.data = b"fLaC" + b"\x00" * 4092
         self.fetches = 0
+        self.fails = None           # a fetch that ends with this error, no audio
 
     def fetch(self, query):
-        from streaming.base import FetchedAudio
+        from streaming.base import FetchedAudio, ProviderError
         self.fetches += 1
         self.go.wait(20)
+        if self.fails:
+            raise ProviderError(self.fails)
         return FetchedAudio(data=self.data, mime="audio/flac", lossless=True)
 
 
 def _streams_on_hqplayer(fake, monkeypatch, *, dropped: int):
     """HQPlayer playing slot 1 of four — owned, then three streams fetched
-    through the media proxy — with the bytes of slot `dropped` dropped by the
-    RAM budget, every landing told to the manager as the node's track-ready
-    hook tells it. Returns (manager, backend, provider, tokens by slot)."""
+    through the media proxy — with the bytes of slot `dropped` alone dropped
+    by the RAM budget, every fetch's end told to the manager as the node's
+    hooks tell it. Returns (manager, backend, provider, tokens by slot)."""
     from playback import manager as manager_mod
     from streaming.base import TrackQuery
     monkeypatch.setattr(hl.BuildWatch, "after", 0.3)
@@ -5509,7 +5512,9 @@ def _streams_on_hqplayer(fake, monkeypatch, *, dropped: int):
     for tok in toks:
         assert proxy.wait_ready(tok, timeout=5).audio is not None
     mgr = PlaybackManager()
-    proxy.track_ready_hooks.append(lambda e: mgr.stream_landed(e.token, e.reshaped))
+    monkeypatch.setattr(proxy, "track_ready_hooks", [lambda e: mgr.stream_landed(e.token, e.reshaped)])
+    monkeypatch.setattr(proxy, "track_failed_hooks", [lambda e: mgr.stream_failed(e.token)],
+                        raising=False)
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1)] + [
         QueueItem(track_id=f"stream-{i}", media_file_id=None, source={"kind": "proxy", "token": tok},
                   title=f"Stream {i}", artist="Artist", album="Album", duration_seconds=300.0,
@@ -5520,9 +5525,27 @@ def _streams_on_hqplayer(fake, monkeypatch, *, dropped: int):
         fake.state, fake.track, fake.position = int(PlaybackState.PLAYING), 1, 41.0
     assert _wait(lambda: mgr._latest_status.get("state") == "playing")
     by_slot = dict(zip((2, 3, 4), toks))
-    proxy.enforce_budget(set(), [by_slot[dropped]], 0)
-    assert proxy._peek(by_slot[dropped]).audio is None
+    proxy.enforce_budget({t for slot, t in by_slot.items() if slot != dropped}, [by_slot[dropped]], 0)
+    assert [proxy._peek(t).audio is None for t in toks] == [slot == dropped for slot in (2, 3, 4)]
     return mgr, b, prov, by_slot
+
+
+def _starts(fake, n):
+    return [(c, a.get("index")) for c, a in fake.commands[n:] if c in ("SelectTrack", "Play", "Next",
+                                                                       "Previous", "Seek")]
+
+
+def _selects_with_bytes(fake, monkeypatch, token):
+    """Each SelectTrack HQPlayer is sent, with whether the stream `token`'s
+    bytes were out of RAM as it came."""
+    proxy, seen, real = streaming_service.get_proxy(), [], fake._dispatch
+
+    def dispatch(cmd, attrs):
+        if cmd == "SelectTrack":
+            seen.append((attrs.get("index"), proxy._peek(token).audio is None))
+        return real(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", dispatch)
+    return seen
 
 
 def test_a_tap_on_a_stream_whose_bytes_were_dropped_waits_for_them_off_hqplayer(fake, monkeypatch):
@@ -5777,6 +5800,248 @@ def test_the_diagnostics_name_the_add_hqplayer_owes(fake, output, monkeypatch):
     assert "slow.flac" in owed["entry"] and owed["since"]
     go.set()
     assert _wait(lambda: player_router.hqplayer_diagnostics()["owed"] is None)
+
+
+def test_a_tap_on_a_stream_whose_refetch_fails_goes_and_meets_its_error(fake, monkeypatch):
+    """The refetch a tap waits for fails: the start goes and meets the
+    error, which its attempt says — never "loading" for good, a Play
+    swallowed and a second tap fetching nothing."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    try:
+        prov.fails = "the provider has it no more"
+        n = len(fake.commands)
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: ("SelectTrack", "3") in _starts(fake, n)), _starts(fake, n)
+        assert _wait(lambda: mgr._latest_status.get("state") != "loading"), mgr._latest_status
+        m = len(fake.commands)
+        assert b.select(3, "stream-3")                      # again: at once, nothing waits
+        assert _wait(lambda: ("SelectTrack", "3") in _starts(fake, m))
+    finally:
+        prov.go.set()
+        b.shutdown()
+
+
+def test_a_play_press_onto_a_stream_whose_bytes_are_away_waits_for_them(fake, monkeypatch):
+    """Next on a playlist that is no mirror is a play press: its start onto
+    a stream whose bytes are out of RAM waits for them in the node, as a
+    tap's does — SelectTrack goes only with the bytes in."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=2)
+    try:
+        seen = _selects_with_bytes(fake, monkeypatch, toks[2])
+        prov.go.clear()
+        b._drifted("an edit in HQPlayer's own window")
+        assert b.next()
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading"
+                     and mgr._latest_status.get("track_index") == 2), mgr._latest_status
+        assert seen == []
+        prov.go.set()
+        assert _wait(lambda: fake.track == 2 and fake.state == int(PlaybackState.PLAYING))
+        assert seen and all(not away for _, away in seen), seen
+    finally:
+        prov.go.set()
+        b.shutdown()
+
+
+def test_a_tap_held_through_a_queue_edit_waits_for_its_streams_bytes(fake, monkeypatch):
+    """A tap made while a queue edit hands HQPlayer its playlist goes once
+    the edit is through — and onto a stream whose bytes are out of RAM,
+    only once they are in."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    try:
+        seen = _selects_with_bytes(fake, monkeypatch, toks[3])
+        prov.go.clear()
+        fake.service["PlaylistRemove"] = 2.0
+        t = threading.Thread(target=mgr.remove, args=(4, "stream-4"), daemon=True)
+        t.start()
+        assert _wait(lambda: b._inflight is not None, 5)
+        assert b.select(3, "stream-3")
+        t.join(15)
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading"), mgr._latest_status
+        fake.service.pop("PlaylistRemove")
+        prov.go.set()
+        assert _wait(lambda: fake.track == 3 and fake.state == int(PlaybackState.PLAYING))
+        assert seen and all(not away for _, away in seen), seen
+    finally:
+        fake.service.pop("PlaylistRemove", None)
+        prov.go.set()
+        b.shutdown()
+
+
+def test_a_play_while_a_tap_waits_is_that_taps_on_any_playlist(fake, monkeypatch):
+    """Play while a tap waits for its stream, on a playlist that is no
+    mirror: the tap's own Play — never a play press of the queue's first
+    track, the tap going after it."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    try:
+        prov.go.clear()
+        b._drifted("an edit in HQPlayer's own window")
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading")
+        n = len(fake.commands)
+        assert b.play()
+        _polls(fake, 2)
+        assert _starts(fake, n) == [] and fake.track == 1
+        prov.go.set()
+        assert _wait(lambda: fake.track == 3 and fake.state == int(PlaybackState.PLAYING))
+        assert ("SelectTrack", "1") not in _starts(fake, n)
+    finally:
+        prov.go.set()
+        b.shutdown()
+
+
+def test_a_waiting_start_whose_track_leaves_the_queue_leaves_play_its_own(fake, monkeypatch):
+    """The track a start waits for leaves the queue: nothing waits any more,
+    and Play is a Play again."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    try:
+        prov.go.clear()
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading")
+        assert mgr.remove(3, "stream-3")
+        with fake._lock:
+            fake.state = int(PlaybackState.STOPPED)
+        assert _wait(lambda: mgr._latest_status.get("state") == "stopped")
+        n = len(fake.commands)
+        assert b.play()
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)), _starts(fake, n)
+    finally:
+        prov.go.set()
+        b.shutdown()
+
+
+def test_a_seek_while_a_tap_waits_moves_the_second_it_starts_at(fake, monkeypatch):
+    """A Seek while a tap waits for its stream: the start goes at that
+    second — what HQPlayer plays meanwhile is not sought."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    try:
+        fake.takes_seek = True
+        prov.go.clear()
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading")
+        n = len(fake.commands)
+        assert b.seek(120)
+        _polls(fake, 1)
+        assert fake.track == 1 and fake.position < 120 and _starts(fake, n) == []
+        assert mgr._latest_status.get("position") == 120.0
+        prov.go.set()
+        assert _wait(lambda: fake.track == 3 and fake.position >= 120), (fake.track, fake.position)
+    finally:
+        prov.go.set()
+        b.shutdown()
+
+
+def test_bytes_that_land_as_a_start_parks_start_it(fake, monkeypatch):
+    """The refetch lands between the look at the bytes and the park: the
+    start goes at once — never "loading" for good with the bytes in RAM."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    proxy = streaming_service.get_proxy()
+    real, raced = proxy.bytes_away, []
+
+    def stale(token):
+        away = real(token)
+        if token == toks[3] and not raced:
+            raced.append(True)
+            proxy.ensure_buffered([token])                # the window's refetch lands right after it
+            assert _wait(lambda: not real(token), 10)
+        return away
+    try:
+        monkeypatch.setattr(proxy, "bytes_away", stale)
+        n = len(fake.commands)
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: ("SelectTrack", "3") in _starts(fake, n)), _starts(fake, n)
+    finally:
+        b.shutdown()
+
+
+def test_a_waiting_start_whose_bytes_land_during_a_build_goes_after_it(fake, monkeypatch):
+    """The bytes a tap waits for land while HQPlayer builds: the start waits
+    the build out, then goes — never lost on its thread."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    raised = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: raised.append(args.exc_value))
+    try:
+        prov.go.clear()
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading")
+        ended = b._link.build.begin("SetFilter", {})
+        n = len(fake.commands)
+        prov.go.set()
+        time.sleep(1.0)
+        assert ("SelectTrack", "3") not in _starts(fake, n) and raised == []
+        ended("answered")
+        assert _wait(lambda: ("SelectTrack", "3") in _starts(fake, n)), _starts(fake, n)
+    finally:
+        prov.go.set()
+        b.shutdown()
+
+
+def test_a_refetch_in_another_shape_while_stopped_keeps_where_hqplayer_rested(fake, monkeypatch):
+    """HQPlayer stopped on slot 2 when a stream lands in another shape: it
+    takes the queue afresh resting there — Play starts slot 2, not the
+    queue's first track."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=4)
+    proxy = streaming_service.get_proxy()
+    try:
+        assert b.select(2, "stream-2")
+        assert _wait(lambda: fake.track == 2 and fake.state == int(PlaybackState.PLAYING))
+        assert b.stop()
+        assert _wait(lambda: mgr._latest_status.get("state") == "stopped"
+                     and mgr._latest_status.get("track_index") == 2)
+        proxy.enforce_budget({toks[2], toks[3]}, [toks[4]], 0)   # slot 4's bytes dropped again
+        assert proxy._peek(toks[4]).audio is None
+        prov.data = b"fLaC" + b"\x01" * 2000                 # the refetch's other shape
+        n = len(fake.commands)
+        proxy.ensure_buffered([toks[4]])
+        assert _wait(lambda: any(c == "PlaylistAdd" and a.get("clear") == "1"
+                                 for c, a in fake.commands[n:]))
+        assert _wait(lambda: len(fake.playlist) == 4)
+        assert b.play()
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING))
+        assert fake.track == 2
+    finally:
+        b.shutdown()
+
+
+def test_a_refetch_in_another_shape_on_a_tail_mirror_is_handed_again(fake, monkeypatch):
+    """On a tail mirror, as in step: an entry behind the one HQPlayer reads
+    whose stream came back in another shape is handed to it again."""
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=4)
+    proxy = streaming_service.get_proxy()
+    try:
+        b._move_mirror("tail")
+        prov.data = b"fLaC" + b"\x01" * 2000
+        uri = next(u for u in fake.playlist if toks[4] in u)
+        n = len(fake.commands)
+        proxy.ensure_buffered([toks[4]])
+        assert _wait(lambda: any(c == "PlaylistAdd" and a.get("uri") == uri
+                                 for c, a in fake.commands[n:]))
+        assert _wait(lambda: fake.playlist.count(uri) == 1 and fake.playlist.index(uri) == 3)
+        assert fake.track == 1 and fake.state == int(PlaybackState.PLAYING)
+    finally:
+        b.shutdown()
+
+
+def test_the_window_keeps_the_bytes_of_a_start_under_way(fake, monkeypatch):
+    """While a start goes to a slot far ahead the status still names the
+    slot it leaves: the window keeps the start's bytes in RAM until HQPlayer
+    reads them — the budget drops what lies farthest ahead first."""
+    from streaming.base import TrackQuery
+    proxy = streaming_service.get_proxy()
+    prov = _GatedStream()
+    toks = proxy.start_session([(TrackQuery(artist="Artist", title=f"Stream {i}", album="Album",
+                                            duration=300.0, track_id=f"stream-{i}"), [(prov, None)])
+                                for i in range(1, 11)])
+    for tok in toks:
+        assert proxy.wait_ready(tok, timeout=5).audio is not None
+    mgr = PlaybackManager()
+    mgr.queue.replace([QueueItem(track_id=f"stream-{i}", media_file_id=None,
+                                 source={"kind": "proxy", "token": tok}, title=f"Stream {i}",
+                                 artist="Artist", album="Album", duration_seconds=300.0,
+                                 preview=True, provider="stub")
+                       for i, tok in enumerate(toks, 1)])
+    monkeypatch.setattr(hb.settings, "streaming_preview_ram_mb", 0)
+    mgr._maintain_preview_window(1, 10)
+    assert proxy._peek(toks[9]).audio is not None and proxy._peek(toks[7]).audio is None
 
 
 def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_into_it(fake, output):

@@ -96,6 +96,9 @@ def init(settings) -> bool:
         playback_manager.stream_landed(e.token, e.reshaped)
 
     _proxy.track_ready_hooks.append(_refresh_queue_item)
+    # A fetch that ended with no audio: a start the output parked on it goes,
+    # and meets the error the attempt then says
+    _proxy.track_failed_hooks.append(lambda e: playback_manager.stream_failed(e.token))
     # The demo policy: the fetch-time gate and the listen observer.
     _proxy.link_admissible = demo.link_admissible
     playback_manager.subscribe_status(demo.status_observer)

@@ -451,15 +451,22 @@ class PlaybackManager:
 
     def stream_landed(self, token: str, reshaped: bool) -> None:
         """A stream's bytes landed in the media proxy (its track-ready hook,
-        on the fetch's own thread): told to the active output for every slot
-        streaming it — a start parked there goes, and one whose bytes came in
-        another shape than the output was told is handed to it again first
+        on the fetch's own thread): told to the active output, by the
+        stream's token — the slots it fills may move meanwhile — a start
+        parked on it goes, and an entry the output holds in another shape
+        than the bytes came in is handed to it again first
         (PlayerBackend.stream_landed)."""
         b = self._active
-        if b is None:
-            return
-        for index in self.queue.slots_streaming(token):
-            b.stream_landed(index, reshaped)
+        if b is not None:
+            b.stream_landed(token, reshaped)
+
+    def stream_failed(self, token: str) -> None:
+        """A stream's fetch ended with no audio (the media proxy's
+        track-failed hook): told to the active output (PlayerBackend.
+        stream_failed)."""
+        b = self._active
+        if b is not None:
+            b.stream_failed(token)
 
     def init_from_settings(self) -> None:
         """Boot-time output activation from persisted settings.
@@ -601,17 +608,20 @@ class PlaybackManager:
 
     # -- status pipeline ---------------------------------------------------------
 
-    def _maintain_preview_window(self, idx) -> None:
+    def _maintain_preview_window(self, idx, start=None) -> None:
         """Playback-position-keyed RAM bound for streamed/transcoded buffers —
         the long-standing eviction follow-up (the OOM path: a long phantom
         queue held every fetched FLAC in RAM forever). The window
         [idx-1 .. idx+4] is untouchable and priority-(re)fetched so
-        transitions stay gapless; beyond it enforce_budget evicts
-        most-distant-first (behind the playhead before far-ahead), and an
-        evicted track refetches transparently on demand. Runs on the status
-        thread; the (slot, queue-version) guard keeps it off the 1 Hz tick."""
+        transitions stay gapless, and so is `start`, the slot a start under
+        way goes to while the status still names the one it leaves: its
+        bytes, just in, stay until the output reads them; beyond it
+        enforce_budget evicts most-distant-first (behind the playhead before
+        far-ahead), and an evicted track refetches transparently on demand.
+        Runs on the status thread; the (slot, queue-version, start) guard
+        keeps it off the 1 Hz tick."""
         anchor = idx if isinstance(idx, int) and idx >= 1 else 1
-        key = (anchor, self.queue.version)
+        key = (anchor, self.queue.version, start)
         if key == self._preview_window_key:
             return
         self._preview_window_key = key
@@ -632,6 +642,9 @@ class PlaybackManager:
         keys = [ident(it) for it in self.queue.snapshot()]
         keep = {k for k in keys[lo - 1:hi] if k}
         window = [k for k in keys[anchor - 1:hi] if k]
+        if isinstance(start, int) and 1 <= start <= len(keys) and keys[start - 1]:
+            keep.add(keys[start - 1])
+            window.insert(0, keys[start - 1])
         ranked = ([k for k in keys[:lo - 1] if k]             # behind: oldest first
                   + [k for k in reversed(keys[hi:]) if k])    # ahead: farthest first
         freed = proxy.enforce_budget(
@@ -790,7 +803,7 @@ class PlaybackManager:
         tracker.track_play_event(new_data["state"], s.position, s.length, item,
                                  external=s.extra.get("source") == "external",
                                  holds=bool(s.extra.get("resume")))
-        self._maintain_preview_window(idx)
+        self._maintain_preview_window(idx, s.extra.get("start_slot"))
         self._subs.maintain(idx)
 
         # Natural end-of-queue: the player stopped on the last track. Archive

@@ -423,6 +423,62 @@ def test_a_head_for_bytes_the_budget_dropped_answers_at_once_from_what_it_told()
         proxy._httpd.shutdown()
 
 
+def _refetch_fails(proxy, prov, tok):
+    """The bytes of `tok` dropped by the budget, and their refetch failing."""
+    from streaming.base import ProviderError
+    proxy.enforce_budget(set(), [tok], 0)
+
+    def gone(query):
+        raise ProviderError("the provider has it no more")
+    prov.fetch = gone
+    proxy.ensure_buffered([tok])
+    assert proxy.wait_ready(tok, timeout=5).error
+
+
+def test_a_head_for_a_stream_whose_refetch_failed_answers_the_error():
+    """A HEAD for a stream whose refetch failed answers the error, as its GET
+    does — never the size and type it was served with before: HQPlayer would
+    take an add of it and fail it only when it plays it."""
+    import urllib.error
+    import urllib.request
+    prov = _GatedProvider()
+    prov.release("a1")
+    proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k", bind_host="127.0.0.1")
+    proxy.start()
+    try:
+        tok = _session(proxy, prov, "a1")[0]
+        proxy.wait_ready(tok, timeout=5)
+        _refetch_fails(proxy, prov, tok)
+        req = urllib.request.Request(f"http://127.0.0.1:{proxy._httpd.server_address[1]}/preview/{tok}",
+                                     method="HEAD")
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            status = 200
+        except urllib.error.HTTPError as e:
+            status = e.code
+        assert status == 502
+    finally:
+        proxy._httpd.shutdown()
+
+
+def test_a_refetch_that_fails_is_told_and_comes_back_with_no_fetch():
+    """Whoever waits in the node for a refetch hears it failed
+    (track_failed_hooks), and the stream is no longer one whose bytes come
+    back with a fetch (bytes_away): nothing waits on it for good."""
+    prov = _GatedProvider()
+    prov.release("a1")
+    proxy = _proxy()
+    failed = []
+    proxy.track_failed_hooks.append(lambda e: failed.append(e.token))
+    tok = _session(proxy, prov, "a1")[0]
+    proxy.wait_ready(tok, timeout=5)
+    assert not proxy.bytes_away(tok)
+    proxy.enforce_budget(set(), [tok], 0)
+    assert proxy.bytes_away(tok)
+    _refetch_fails(proxy, prov, tok)
+    assert failed == [tok] and not proxy.bytes_away(tok)
+
+
 def test_a_refetch_that_lands_in_another_shape_says_so():
     """The demo channel's bytes dropped (its listen spent), the refetch
     lands on the excerpt: another size and type than the consumers were
