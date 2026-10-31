@@ -3346,11 +3346,39 @@ class HqpBackend(PlayerBackend):
                         diag.redact_text(v["sentence"]))
         if changed:
             _notify_notices()
+        if v["code"] in ("not_played", "rate_refused") and att.advance is None:
+            self._rests_on_its_start(att)
         if v["code"] in ("not_played", "unknown", "rate_refused") or (v["code"] == "rejected"
                                                                       and not v.get("quote")):
             # HQPlayer's log names what the protocol did not — read once, now.
             threading.Thread(target=self._attach_log, args=(att, facts.get("uri")),
                              daemon=True, name="hqp-log").start()
+
+    def _rests_on_its_start(self, att: diag.Attempt) -> None:
+        """A start of the node's own HQPlayer stopped on by itself — a rate
+        it refused, an entry it opened and dropped (the attempt's verdict).
+        Desktop's own stop rests on no entry: Now Playing fell back to the
+        queue's head and Play started HQPlayer's first entry, not the track
+        that failed (live, 2026-10-31). The spot stays at the start's slot,
+        at the second it went to: Now Playing names that track with its
+        diagnosis, Play starts it, Next and Previous move from it — erased as
+        any spot is, with its item or once a start from it is taken. Only a
+        start of the node's (HQPlayer's own advance is none), only while
+        HQPlayer still rests (not once anything plays again — the person's
+        word in its own window, another controller), and a spot set since
+        stays. Called on the poller."""
+        item, second = att.target if att.target is not None else (None, 0.0)
+        last = self._last_tick
+        if (item is None or last is None or last.state != "stopped"
+                or last.extra.get("source") == "external" or self._queue.index_of(item) is None):
+            return
+        with self._spot_lock:
+            if self._spot is not None:
+                return
+            self._spot, self._spot_gen = (item, int(second)), self._spot_gen + 1
+        logger.info("HQPlayer stopped on the start of slot %d by itself — Play starts it again",
+                    self._queue.index_of(item))
+        self.poke()
 
     def _attach_log(self, att: diag.Attempt, uri: Optional[str]) -> None:
         source = diag.log_source(self._link.host, self._info)

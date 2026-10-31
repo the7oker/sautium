@@ -141,6 +141,9 @@ class FakeHqp:
         # at 0 s: a rate combination it refuses ("Requested filter not
         # possible with this rate combination …, stop" in its log)
         self.refuse_play: set = set()
+        # That stop rests on no entry — track 0, no URI — as Desktop 6's own
+        # stop does (2026-10-31: the next Play started its first entry)
+        self.rests_nowhere = False
         # (time.time(), command) as each command ARRIVES — `commands` logs
         # them as they are carried out, after any silence, in the order they
         # arrived on whichever connection: HQPlayer's one control thread
@@ -337,11 +340,14 @@ class FakeHqp:
 
     def _stops_if_refused(self) -> None:
         """The entry a Play went to is one it refuses at Play (refuse_play):
-        stopped on at once. Under the lock."""
+        stopped on at once — resting on no entry where `rests_nowhere`.
+        Under the lock."""
         if (1 <= self.track <= len(self.playlist)
                 and any(part in self.playlist[self.track - 1] for part in self.refuse_play)):
             self.state = int(PlaybackState.STOPPED)
             self.position = 0.0
+            if self.rests_nowhere:
+                self.track = 0
 
     def _dispatch(self, cmd: str, attrs: dict) -> str:
         with self._lock:
@@ -5383,6 +5389,51 @@ def test_a_switch_to_another_hqplayer_carries_the_listen(fake, fake_b, output, l
     assert lastfm.count("update_now_playing") == n_now
 
 
+def _refused_next(mgr, b, fake, monkeypatch) -> None:
+    """Track 1 playing, Next onto track 2, whose rate HQPlayer refuses: it
+    stops on it by itself and rests on no entry (Desktop 6); then its
+    attempt is judged."""
+    _moving_transport(fake, monkeypatch)
+    fake.rests_nowhere = True
+    fake.refuse_play.add("A/02.flac")
+    assert b.next()
+    assert _wait(lambda: fake.state == int(PlaybackState.STOPPED) and fake.track == 0)
+    assert _wait(lambda: mgr._latest_status.get("resume") == {"index": 2, "position": 0}, 25), \
+        mgr._latest_status
+
+
+def test_a_start_hqplayer_stops_on_by_itself_leaves_the_spot_there(fake, output, monkeypatch):
+    """The start was the node's, HQPlayer's stop its own: the spot stays at
+    that slot — Now Playing names its track, Play starts it, not HQPlayer's
+    first entry (live, 2026-10-31: the rate set right, Play played the
+    queue's head)."""
+    mgr, b = output
+    _refused_next(mgr, b, fake, monkeypatch)
+    st = mgr._latest_status
+    assert (st["state"], st["track_index"], st["track_id"]) == ("stopped", 2, "track-2")
+    fake.refuse_play.clear()                             # the rate set right in HQPlayer
+    n = len(fake.commands)
+    assert b.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
+    assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
+
+
+def test_next_and_previous_move_the_spot_a_refused_start_left(fake, output, monkeypatch):
+    """At that spot Next and Previous move it, as at any spot: no command,
+    no sound."""
+    mgr, b = output
+    _refused_next(mgr, b, fake, monkeypatch)
+    n = len(fake.commands)
+    assert b.next()
+    assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("index") == 3)
+    assert b.previous() and b.previous()
+    assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("index") == 1)
+    sent = [c for c, _ in fake.commands[n:] if c not in ("Status", "PlaylistGet", "State", "GetInfo",
+                                                          "GetModes", "GetRates", "GetFilters",
+                                                          "GetShapers", "VolumeRange")]
+    assert sent == [] and fake.state == int(PlaybackState.STOPPED)
+
+
 def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_into_it(fake, output):
     mgr, b = output
     buildings = _seen(mgr, "building")
@@ -8356,9 +8407,10 @@ def test_previous_while_a_removal_plays_out_never_brings_the_removed_track_back(
 def _moving_transport(fake, monkeypatch, *, transit=0):
     """Next and Previous move as HQPlayer's own do — onto the entry beside,
     a new take, playing (its position held for start_polls reads, as a
-    Play's) — where the fake's answer and stay. `transit`: that many Status
-    reads after each name the new take with the entry before's track index,
-    position and length (FakeHqp._transit)."""
+    Play's), stopping on an entry it refuses (refuse_play) — where the
+    fake's answer and stay. `transit`: that many Status reads after each
+    name the new take with the entry before's track index, position and
+    length (FakeHqp._transit)."""
     real = fake._dispatch
 
     def dispatch(cmd, attrs):
@@ -8373,6 +8425,7 @@ def _moving_transport(fake, monkeypatch, *, transit=0):
                 fake._starting = fake.start_polls
                 fake._took()
                 fake._transit = before if transit else None
+                fake._stops_if_refused()
         return f'<{cmd} result="OK"/>'
     monkeypatch.setattr(fake, "_dispatch", dispatch)
 
