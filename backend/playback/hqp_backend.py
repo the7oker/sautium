@@ -781,6 +781,12 @@ DRIFT_CHECK_EVERY = 30
 # more — a position that stands still after it is a stall
 CLOCK_SLACK_S = 2.0
 
+# How far past the time elapsed since the entry before was last read its
+# position may have run in an answer that still gives that entry's reading
+# under the next one's URI (_runs_on): Status's position and the wall clock
+# step apart by a poll's jitter, never by a second
+RUN_ON_SLACK_S = 1.0
+
 
 class _Clock:
     """Where the entry HQPlayer plays is while its Status's position stands
@@ -1150,6 +1156,10 @@ class HqpBackend(PlayerBackend):
         # first tick that read it was (_clocked)
         self._take: tuple = (None, 0.0, 0.0)
         self._take_read = 0.0
+        # The last answer whose position and length were its own entry's, as
+        # (track index, URI, position, length, track_serial, read at) — what an
+        # answer that moved on runs on from (_runs_on): the poller's alone
+        self._own: Optional[tuple] = None
         # The node's own removal of the slot HQPlayer reads, which plays out
         # (queue_remove): _Passing, until HQPlayer passes that entry — set by
         # a removal, let go by the poller or a full hand-over, under its lock
@@ -2166,6 +2176,10 @@ class HqpBackend(PlayerBackend):
                             hqp_meter.meter.seen()):
                         _notify_notices()
                     position = self._clocked(status, read_at, att)
+                    length = None
+                    if self._runs_on(status, read_at):
+                        # The entry moved to, at its start, its length not given yet
+                        position = length = 0.0
                     if playing is not None:
                         # The slot playing on, its position moving since the
                         # tick before on the same take — a Seek's second, a
@@ -2181,7 +2195,7 @@ class HqpBackend(PlayerBackend):
                                 and (status.process_speed is None or status.process_speed >= 1.0)
                                 and diag.note_playing(playing[0], self._queue.generation)):
                             _notify_notices()
-                        self._last_tick = self._status_of(status, playing, position)
+                        self._last_tick = self._status_of(status, playing, position, length)
                         self._let_go(passed)
                         self._say(self._last_tick)
                     if diag.note_answered():
@@ -2641,9 +2655,38 @@ class HqpBackend(PlayerBackend):
             position = max(status.position, clock.read(read_at))
         return min(position, status.length) if status.length > 0 else position
 
-    def _status_of(self, status, playing: tuple, position: Optional[float] = None) -> PlaybackStatus:
+    def _runs_on(self, status, read_at: float) -> bool:
+        """Do this answer's position and length belong to the entry before
+        the one it names? HQPlayer's first answers after its own Next or
+        Previous name the new entry's URI and take, while their track index,
+        position and length are still the entry before's, running on (Desktop
+        6 on Windows, probed 2026-10-16): read as the new entry's, the track
+        moved to was credited with the second the one left was at — its listen
+        written as heard and scrobbled a second after the Next (live,
+        2026-10-31). Such an answer names another take and URI than the last
+        answer whose reading was its own entry's, with that answer's track
+        index and length, and a position running on from its — no Seek sent
+        since. The rest is that last own answer. HQPlayer 5 names no take: its
+        answers are read as they stand. Called on the poller, which alone
+        keeps it."""
+        own = self._own
+        runs_on = (own is not None and status.track_serial is not None
+                   and status.track_serial != own[4] and bool(status.uri) and status.uri != own[1]
+                   and status.track_index == own[0]
+                   and status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
+                   and status.length == own[3] > 0
+                   and own[2] <= status.position <= own[2] + (read_at - own[5]) + RUN_ON_SLACK_S
+                   and (self._seek_mark is None or self._seek_mark[1] <= own[5]))
+        if not runs_on:
+            self._own = (status.track_index, status.uri, status.position, status.length,
+                         status.track_serial, read_at)
+        return runs_on
+
+    def _status_of(self, status, playing: tuple, position: Optional[float] = None,
+                   length: Optional[float] = None) -> PlaybackStatus:
         """One status tick as the manager reads it, at the slot `_playing`
-        found and at `position` (_clocked; Status's when not given).
+        found and at `position` (_clocked; Status's when not given), its
+        length `length` (Status's when not given).
         HQPlayer's own tags are authoritative only for a slot it opened as a
         file; an http-served slot (a preview, a transcode, every owned file
         for an HQPlayer elsewhere) is described by the queue item, so those
@@ -2697,7 +2740,8 @@ class HqpBackend(PlayerBackend):
             extra["rebuilding"] = True      # a play press: HQPlayer takes the queue again
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
-            position=status.position if position is None else position, length=status.length,
+            position=status.position if position is None else position,
+            length=status.length if length is None else length,
             queue_index=idx, volume=status.volume, extra=extra, item=item, out_after=out_after)
 
     def _diagnosis(self, status) -> Optional[dict]:

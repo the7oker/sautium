@@ -118,6 +118,11 @@ class FakeHqp:
         # 6.2.4, a heavy SDM filter, 2026-10-21); the entry and the polls left
         self.cuda_polls = 0
         self._cuda = None
+        # Status reads after its own Next or Previous that name the new take
+        # (the entry's URI, track_serial one more) with the entry before's
+        # track index, position and length, still running on (Desktop 6 on
+        # Windows, probed 2026-10-16); [track, position, length, reads left]
+        self._transit = None
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -382,6 +387,12 @@ class FakeHqp:
                 uri = (f' uri="{self._uri_out(self.playlist[self.track - 1])}"'
                        if 1 <= self.track <= len(self.playlist) else "")
                 track, length = (0, 0) if opening else (self.track, self.length)
+                if self._transit is not None:
+                    track, shown, length = self._transit[:3]
+                    self._transit[1] += 0.1
+                    self._transit[3] -= 1
+                    if self._transit[3] <= 0:
+                        self._transit = None
                 clips = f' clips="{self.clips}"' if self.clips is not None else ""
                 extra = "".join(f' {k}="{v}"' for k, v in self.status_extra.items())
                 if self.track_serial is not None:
@@ -5271,6 +5282,51 @@ def _seen(mgr, key):
     return seen
 
 
+def _listened(writes) -> list:
+    """(track, percent) of every listen the tracker wrote, in order."""
+    return [(p["tid"], round(p["pct"])) for sql, p in writes
+            if p and "INSERT INTO listening_history" in sql]
+
+
+@pytest.mark.parametrize("step", ["next", "previous"])
+def test_the_status_hqplayer_gives_as_it_moves_on_is_not_the_new_tracks(fake, output, listens,
+                                                                       monkeypatch, step):
+    """HQPlayer's first answers after its own Next or Previous name the new
+    take — the entry's URI, track_serial one more — with the entry before's
+    track index, position and length (Desktop 6 on Windows, probed
+    2026-10-16). The track moved to is at its start: never shown at the
+    second of the one left, never a listen of it at that second — live, it
+    was scrobbled at the old track's 84 % a second after the Next, and its
+    listen written as completed."""
+    mgr, b = output
+    writes, lastfm = listens
+    _moving_transport(fake, monkeypatch, transit=2)
+    at, to = (1, 2) if step == "next" else (2, 1)
+    if at == 2:
+        assert b.select(2, "track-2")                    # a tap: track 2 from its start
+        assert _wait(lambda: mgr._latest_status.get("track_index") == 2)
+    with fake._lock:
+        fake.position = 200.0                            # two thirds in: its listen scrobbles
+    assert _wait(lambda: mgr._latest_status.get("position", 0) >= 200)
+    n_written, n_scrobbled = len(_listened(writes)), lastfm.count("scrobble")
+    seen = []
+    push = mgr._push_status
+
+    def recorded(data):
+        seen.append((data.get("track_index"), data.get("position")))
+        push(data)
+    mgr._push_status = recorded
+    left = mgr._latest_status["position"]
+    assert getattr(b, step)()
+    assert _wait(lambda: any(i == to and p >= 2 for i, p in seen)), seen
+    assert all(p < 5 for i, p in seen if i == to), seen   # at its own start, from the first word on
+    _polls(fake, 2)
+    # The listen left ends where it was left; the one moved to is open, from 0:00
+    rows = _listened(writes)[n_written:]
+    assert [t for t, _ in rows] == [f"track-{at}"] and rows[0][1] >= round(left / 3), rows
+    assert lastfm.count("scrobble") == n_scrobbled, lastfm
+
+
 def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_into_it(fake, output):
     mgr, b = output
     buildings = _seen(mgr, "building")
@@ -8241,10 +8297,12 @@ def test_previous_while_a_removal_plays_out_never_brings_the_removed_track_back(
     assert _wait(lambda: mgr._latest_status.get("track_id") == "track-3", timeout=8), mgr._latest_status
 
 
-def _moving_transport(fake, monkeypatch):
+def _moving_transport(fake, monkeypatch, *, transit=0):
     """Next and Previous move as HQPlayer's own do — onto the entry beside,
     a new take, playing (its position held for start_polls reads, as a
-    Play's) — where the fake's answer and stay."""
+    Play's) — where the fake's answer and stay. `transit`: that many Status
+    reads after each name the new take with the entry before's track index,
+    position and length (FakeHqp._transit)."""
     real = fake._dispatch
 
     def dispatch(cmd, attrs):
@@ -8254,9 +8312,11 @@ def _moving_transport(fake, monkeypatch):
             fake.commands.append((cmd, attrs))
             to = fake.track + (1 if cmd == "Next" else -1)
             if 1 <= to <= len(fake.playlist):
+                before = [fake.track, fake.position, fake.length, transit]
                 fake.track, fake.position, fake.state = to, 0.0, int(PlaybackState.PLAYING)
                 fake._starting = fake.start_polls
                 fake._took()
+                fake._transit = before if transit else None
         return f'<{cmd} result="OK"/>'
     monkeypatch.setattr(fake, "_dispatch", dispatch)
 
