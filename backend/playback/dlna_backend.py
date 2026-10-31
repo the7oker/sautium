@@ -646,7 +646,10 @@ class DlnaBackend(PlayerBackend):
         short, and every natural end read as a manual stop 6–16 s early.
         A reading within tolerance of the clock is adopted; one far from it
         is held, and adopted only if the next reading advanced from it —
-        that is a seek made on the device, which the clock cannot know."""
+        that is a seek made on the device, which the clock cannot know.
+        Said in the log with what the renderer reported: a renderer started a
+        track over twice on its own (live, 2026-10-31), and only its debug
+        readings could have told that from a load of the node's."""
         if abs(real - self._wall_estimate()) <= _RELTIME_TOLERANCE:
             self._rebaseline(real)
             self._rel_stray = None
@@ -654,6 +657,10 @@ class DlnaBackend(PlayerBackend):
         if self._rel_stray is not None:
             held, at = self._rel_stray
             if abs(real - (held + (now - at))) <= _RELTIME_TOLERANCE:
+                logger.info("renderer '%s' moved slot %d from %.0f s to %.0f s by itself "
+                            "(%s, its track …%s)", self.label, self._index, self._wall_estimate(),
+                            real, self._state_name(),
+                            (getattr(self._dmr, "current_track_uri", None) or "")[-14:])
                 self._rebaseline(real)
                 self._rel_stray = None
                 return

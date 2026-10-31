@@ -850,6 +850,24 @@ def test_a_length_only_the_renderer_knows_is_read_from_the_seek(tmp_path, proxy,
     assert n.last.length == 40
 
 
+def test_a_track_the_renderer_starts_over_by_itself_is_said(tmp_path, proxy, renderers, nodes,
+                                                           quality, caplog):
+    """A renderer that starts the playing track over on its own — no command
+    of the node's — is followed, and the log says it moved the slot, from
+    where to where, with what it reported."""
+    r = renderers()
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=40.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.statuses and n.last.state == "playing" and n.last.position >= 6,
+             what="playing past 6 s")
+    with caplog.at_level("INFO", logger="playback.dlna_backend"):
+        r._base, r._t0 = 0.0, time.monotonic()           # the renderer, from 0:00
+        wait_for(lambda: n.last.position < 4, what="the node following it")
+    assert "moved slot 1 from" in caplog.text and "by itself (playing" in caplog.text
+
+
 @pytest.fixture
 def manager(monkeypatch):
     """The real PlaybackManager with the node's settings in memory and no
