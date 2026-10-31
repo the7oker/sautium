@@ -43,7 +43,12 @@ A link owns:
     — is never sent once a newer intent of a kind that supersedes it holds
     (SUPERSEDED_BY), checked right before the bytes go;
   * the Stop a person's switch away owes it (the late Stop): sent at once,
-    or once HQPlayer answers through a build or a silence.
+    or once HQPlayer answers through a build or a silence;
+  * the add HQPlayer owes it (_Owed): a PlaylistAdd whose answer did not
+    come within its wait while HQPlayer answered the rest — it opens what it
+    was given first, on that connection alone — is owed, not lost. Its
+    answer is read on its own connection, with no limit of this node's, and
+    nothing changes HQPlayer's playlist until it comes (Owed).
 
 Life cycle: link_for creates a link on first use; the same HQPlayer keeps its
 link; choosing another HQPlayer (choose) retires the old one — what its
@@ -57,17 +62,19 @@ idle one is closed, and every waiter released.
 
 import datetime
 import logging
+import selectors
 import socket
 import threading
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from config import settings
-from hqplayer_client import HQPlayerClient, PlaybackState, redact_uri
+from hqplayer_client import HQPlayerClient, PlaybackState, Waker, redact_uri, wait_on
 from playback.hqp_benchmark import BUILD_LIMIT_S
 
 logger = logging.getLogger(__name__)
@@ -102,6 +109,14 @@ SHORT_SILENCE_COMMANDS = frozenset({"Stop", "PlaylistClear"})
 # before (a Seek right after the SelectTrack that starts a stopped HQPlayer):
 # a late answer to one of them is a build.
 BUILD_COMMANDS = (HANDOVER_COMMANDS - SHORT_SILENCE_COMMANDS) | {"Seek"}
+# What HQPlayer may still carry out after its wait ran out while it answers
+# the rest: a PlaylistAdd waits for HQPlayer to open the file or the stream it
+# names, on its own connection — a stream fetched first, a drive spinning up
+# (live, 45 s). Its answer is owed (_Owed).
+OWED_COMMANDS = frozenset({"PlaylistAdd"})
+# What changes HQPlayer's playlist: none goes while an add is owed — the add
+# lands behind what HQPlayer holds when it is carried out
+PLAYLIST_EDITS = frozenset({"PlaylistAdd", "PlaylistClear", "PlaylistRemove"})
 # A failed connect fails the next ones at its address fast for this long: a
 # stalled control port would otherwise make every reconnect wait out the
 # connect timeout. Another address is dialled at once.
@@ -174,6 +189,19 @@ class NotAnswering(ConnectionError):
 
     def __init__(self) -> None:
         super().__init__(NOT_ANSWERING)
+
+
+class Owed(NotAnswering):
+    """Refused while HQPlayer owes the answer to an add (409): it is still
+    opening what it was given, and what changes its playlist now would land
+    around that add once it is carried out. Nothing is added again, added
+    behind it or cleared until HQPlayer answers it or its connection ends."""
+
+    def __init__(self, owed: "_Owed") -> None:
+        ConnectionError.__init__(self, f"HQPlayer is still opening a track it was given at "
+                                       f"{_moment(owed.since)} — its playlist changes once it "
+                                       "answers")
+        self.owed = owed
 
 
 # Which newer intents supersede an item of each kind.
@@ -514,6 +542,67 @@ class _LateStop:
             link._close_if_retired()
 
 
+class _Owed:
+    """The answer HQPlayer owes to an add this node gave up waiting for
+    (HQPlayerClient `owed`). HQPlayer opens what a PlaylistAdd names before
+    it adds it, on that request's connection alone, and answers the others
+    meanwhile: a re-read playlist lacked the add, the reconverge sent it
+    again — nine times in 45 s — and HQPlayer carried out every one (live).
+    The answer is read on its connection, on a thread of its own, with no
+    limit of this node's: it ends with HQPlayer's answer — taken, or refused
+    in its words — or with the connection (closed or reset; a dead peer is
+    found by the connection's keepalive); a link that closes lets it go
+    ("dropped"). A HQPlayer that neither answers nor closes is a hung one,
+    and stays owed: `view` says since when."""
+
+    def __init__(self, link: "HqpLink", attributes: Dict[str, str], sock: socket.socket,
+                 buffer: bytes):
+        self.link = link
+        self.uri = attributes.get("uri", "")
+        self.since = time.time()
+        self.sock = sock
+        self.buffer = bytearray(buffer)
+        self.waker = Waker()
+        # "taken", "refused" (`message` HQPlayer's words), "closed" (no
+        # answer: `message` why), "dropped" (the link let it go)
+        self.outcome: Optional[str] = None
+        self.message = ""
+
+    def view(self) -> dict:
+        return {"entry": redact_uri(self.uri), "since": _moment(self.since)}
+
+    def run(self) -> None:
+        try:
+            self.outcome, self.message = self._answer()
+        finally:
+            self.sock.close()
+            self.waker.close()
+            self.link._owed_ended(self)
+
+    def _answer(self) -> tuple:
+        while (nl := self.buffer.find(b"\n")) < 0:
+            if wait_on(self.sock, selectors.EVENT_READ, None, self.waker) == "woken":
+                return "dropped", self.link.why or "HQPlayer was let go"
+            try:
+                chunk = self.sock.recv(1 << 16)
+            except OSError as e:
+                return "closed", str(e)
+            if not chunk:
+                return "closed", "closed by HQPlayer"
+            self.buffer += chunk
+        line = bytes(self.buffer[:nl]).decode("utf-8", "replace").strip()
+        try:
+            answer = ET.fromstring(line)
+        except ET.ParseError as e:
+            return "closed", f"unreadable answer: {e}"
+        if answer.get("result") == "OK":
+            return "taken", ""
+        return "refused", (answer.text or "").strip() or f"HQPlayer: {answer.get('result')}"
+
+    def drop(self) -> None:
+        self.waker.wake()
+
+
 def _closed(sock: socket.socket) -> bool:
     """Has this idle connection ended — the peer closed it, or it was shut
     under us? A peek that waits for nothing, with no select: no descriptor
@@ -562,6 +651,9 @@ class HqpLink:
     Its identity is fixed (`key`, this machine's aliases one); the address
     it dials is the alias chosen last (readdress)."""
 
+    # The commands whose answer the link reads on past their wait (owe)
+    owes = OWED_COMMANDS
+
     def __init__(self, key: tuple, host: str, port: int):
         self.key = key
         self.host = host
@@ -569,7 +661,8 @@ class HqpLink:
         self.build = BuildWatch(self)
         self.lock = _CommandLock(self)
         self.client = HQPlayerClient(host=host, port=port, timeout=COMMAND_WAIT_S,
-                                     waits=_command_waits(), late=self.build, gate=self)
+                                     waits=_command_waits(), late=self.build, owed=self,
+                                     gate=self)
         self.client.on_outcome = self._route_outcome
         # open → retiring (another HQPlayer was chosen) → closed
         self.state = "open"
@@ -587,6 +680,10 @@ class HqpLink:
         self.refusals: list = []
         self._state_lock = threading.Lock()
         self._late_stop: Optional[_LateStop] = None
+        # The add HQPlayer owes (_Owed), until its answer or its connection's
+        # end; told to whoever waits for it under its condition
+        self.owed: Optional[_Owed] = None
+        self._owed_cond = threading.Condition()
         # The connection: the thread whose request holds it, the threads
         # waiting for it in the order they came, and the one a hand-over
         # left it to (a thread id, or _HELD) with the command that did
@@ -950,6 +1047,8 @@ class HqpLink:
         scope = getattr(self._local, "scope", None)
         if scope is not None and scope.silent:
             raise NotAnswering()
+        if command in PLAYLIST_EDITS:
+            self.refuse_edits()
         item = getattr(self._local, "item", None)
         if item is not None:
             why = self.superseded(item)
@@ -994,7 +1093,9 @@ class HqpLink:
             elif c.timed_out and self.build.count == builds:
                 if scope is not None:
                     scope.silent = True
-                if short is not None:
+                if short is not None and not c.kept:
+                    # (an add owed is HQPlayer opening what it was given — it
+                    # answers the rest: no silence of its)
                     self._not_answering(short, STOP_ANSWER_S)
         finally:
             self.teardown = None
@@ -1154,6 +1255,75 @@ class HqpLink:
             if not held and number is not None:
                 self.withdraw(number)
 
+    # -- the add HQPlayer owes (_Owed) -------------------------------------------------
+
+    def owe(self, command: str, attributes: Dict[str, str], sock: socket.socket,
+            buffer: bytes) -> None:
+        """The client gave up waiting for the answer to an add (OwedAnswers):
+        it is owed — read on its own connection, the mirror told (owes), and
+        nothing changes HQPlayer's playlist until it comes (refuse_edits)."""
+        owed = _Owed(self, attributes, sock, buffer)
+        with self._state_lock:
+            if self.state == "closed":
+                sock.close()
+                return
+            with self._owed_cond:
+                self.owed = owed
+        logger.warning("HQPlayer has not answered the add of %s — its answer is read on its own "
+                       "connection, and nothing changes its playlist until it comes",
+                       redact_uri(owed.uri))
+        threading.Thread(target=owed.run, daemon=True, name="hqp-owed").start()
+        b = self.attached
+        if b is not None:
+            b.owes(owed)
+
+    def _owed_ended(self, owed: _Owed) -> None:
+        """The owed add's answer came, or its connection ended: said, the
+        backend told (it judges the playlist again), and every wait for it
+        let go."""
+        with self._owed_cond:
+            if self.owed is owed:
+                self.owed = None
+            self._owed_cond.notify_all()
+        took = time.time() - owed.since
+        what = redact_uri(owed.uri)
+        if owed.outcome == "taken":
+            logger.info("HQPlayer answered the add of %s %.0f s after it was sent: taken", what, took)
+        elif owed.outcome == "refused":
+            logger.warning("HQPlayer answered the add of %s %.0f s after it was sent: refused (%s)",
+                           what, took, owed.message)
+        elif owed.outcome == "closed":
+            logger.warning("HQPlayer ended the connection of the add of %s %.0f s after it was sent, "
+                           "unanswered (%s) — its playlist is read to see whether it took it",
+                           what, took, owed.message)
+        if owed.outcome == "dropped":
+            return
+        b = self.attached
+        if b is not None:
+            b.owed_ended(owed)
+        self._poke()
+
+    def refuse_edits(self) -> None:
+        """A change of HQPlayer's playlist is refused while an add is owed
+        (Owed) — before anything of it is sent: a new queue's Stop would go
+        and its playlist not."""
+        owed = self.owed
+        if owed is not None:
+            raise Owed(owed)
+
+    def wait_owed(self, until: Callable[[], bool]) -> None:
+        """Until no add is owed — or `until` says the wait is over, looked at
+        whenever the owed add ends, the link is detached from or closes.
+        Background work that hands HQPlayer the queue waits here, never on
+        HQPlayer's control port."""
+        with self._owed_cond:
+            while self.owed is not None and not until():
+                self._owed_cond.wait()
+
+    def _wake_owed_waiters(self) -> None:
+        with self._owed_cond:
+            self._owed_cond.notify_all()
+
     def ask_raw(self, xml: str, wait: float) -> bytes:
         """One raw request — the library's LibraryGet, its hash, GetInfo for a
         registration — answered as the line of bytes HQPlayer sent."""
@@ -1204,6 +1374,7 @@ class HqpLink:
         if self.attached is backend:
             self.attached = self.attachment = None
             self.build.last_change = None    # the outcome of a change was that attachment's
+        self._wake_owed_waiters()
         self._close_if_retired()
 
     def release(self, ours: Optional[Callable[[Any], bool]]) -> Optional[str]:
@@ -1319,6 +1490,9 @@ class HqpLink:
                 return
             self.state, self.why = "closed", why
             self._late_stop = None
+            owed = self.owed
+        if owed is not None:
+            owed.drop()
         with self._conn:
             self._reserved = None
             idle = self._owner is None

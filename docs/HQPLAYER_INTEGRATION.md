@@ -352,9 +352,10 @@ HQPlayer screen's reads, the play gate's probe, the library's hash and
 listing, the in-process assistant's questions, and putting back a benchmark
 run cut short. A link owns one connection, taken by each request for itself
 in the order they came — a question goes between the requests of a command
-sequence — so at most one request of this node is outstanding at HQPlayer
-(its one control thread answers in order anyway; two connections only sent
-requests into each other's silences). After a command a silence may follow
+sequence — so at most one request of this node is outstanding at HQPlayer,
+an add whose answer it owes aside (below) (its one control thread answers in
+order anyway; two connections only sent requests into each other's
+silences). After a command a silence may follow
 — one that may set off a build, a Stop, a PlaylistClear — the connection
 passes to the sequence's next request or to a Status the link holds itself,
 so that silence never falls on a question with a short wait — the request
@@ -413,6 +414,26 @@ watches (getaddrinfo can be neither woken nor bounded: a `.local` HQPlayer
 switched off took the resolver seconds, and held the node stop with it), so
 a close or the connect's own bound ends the lookup too; an address is
 dialled as it is.
+
+**An add HQPlayer owes** (since 2026-10-31). HQPlayer opens what a
+`PlaylistAdd` names before it adds it — a stream it fetches, a file on a
+drive spinning up — and holds that request alone while it answers the
+others. An add given up on after its wait was taken for lost: the reconverge
+read a playlist without it and sent it again, nine times in 45 s, and
+HQPlayer carried out every copy (live). The link now keeps such a request's
+connection and reads its answer there, on a thread of its own, with no limit
+of the node's (`HqpLink.owe`, `_Owed`): the add is owed until HQPlayer
+answers — taken, or refused in its words, a gap of this output as one
+refused in its batch is — or the connection ends (closed, reset, a dead peer
+found by its keepalive; one read of the playlist then decides whether it was
+taken). While it is owed nothing changes HQPlayer's playlist: the hand-over
+stops at it, the mirror is lost to it (a playlist read without it is no edit
+made elsewhere), the reconverge waits for its answer, a new queue or a clear
+is refused at once, before its Stop (409, `Owed`), and a play press waits
+for the answer in the node before it hands the queue over. An HQPlayer that
+neither answers nor closes keeps it owed: the diagnostics
+(`/api/player/diagnostics/hqplayer`, `owed`) and each attempt's context name
+the entry and since when.
 
 ### Builds: a DSP change waits one out (since 2026-10-11)
 HQPlayer answers nothing on its control port while it builds a setting — a
@@ -593,7 +614,10 @@ comes after the control port answers again — so neither can end the wait.
     one that moved on meanwhile is repaired at its next answer. Lost too
     when HQPlayer refused every file of a mirror, or of a person's replace
     after its Stop: no slot becomes a gap (every slot a gap would read as an
-    empty queue held), and the next Play hands the queue over again.
+    empty queue held), and the next Play hands the queue over again. Lost
+    too to an add HQPlayer owes the answer to (since 2026-10-31, below): no
+    step and no tail mirror until it answers, and the reconverge waits for
+    that answer.
   - **A tail mirror** when that repair leaves a difference before the entry
     HQPlayer reads: what touches only the tail (an append, a "play next",
     HQPlayer's own advance) goes to HQPlayer as on a mirror, the entry it

@@ -61,7 +61,7 @@ from playback.base import (Capabilities, OutputRefused, PlaybackStatus, PlayerBa
 from playback import hqp_benchmark
 from playback.hqp_benchmark import _building
 from playback.hqp_link import (NOT_ANSWERING, QUESTION_WAIT_S, UNFINISHED, Building, Dropped,
-                               GaveUp, HqpLink, Item, NotAnswering, background, through)
+                               GaveUp, HqpLink, Item, NotAnswering, Owed, background, through)
 from playback.queue import CanonicalQueue, QueueItem
 
 logger = logging.getLogger(__name__)
@@ -273,7 +273,8 @@ def _add_uris_with_retry(link: HqpLink, uris: list[str], *,
     sent once more on a fresh one. A silence ends the batch: every add after
     it would wait out the same silence (a Pi 5 playing a setting it could not
     keep up with answered nothing for minutes, and a queue of 19 took five
-    of them to fail).
+    of them to fail). So does an add whose answer HQPlayer owes (HqpLink.owe):
+    it is no loss, and nothing is added behind it until it is answered.
 
     Returns one flag per URI, in order — taken or not — and where the batch
     stopped because HQPlayer did not answer or could not be reached: the
@@ -289,6 +290,7 @@ def _add_uris_with_retry(link: HqpLink, uris: list[str], *,
     taken: list = []
     refused = 0
     unsent = len(uris)
+    owed = False
     for i, uri in enumerate(uris):
         clear = clear_first and not any(taken)
         ok = answered = False
@@ -301,11 +303,11 @@ def _add_uris_with_retry(link: HqpLink, uris: list[str], *,
                 if not ok:
                     # Read now: the playlist check below replaces it.
                     result, refusal = _refusal(hqp)
-                    answered, silent = hqp.answered, hqp.timed_out
+                    answered, silent, owed = hqp.answered, hqp.timed_out, hqp.kept
             except (Building, Dropped):
                 raise
             except NotAnswering as e:
-                ok, silent = False, True
+                ok, silent, owed = False, True, isinstance(e, Owed)
                 result, refusal = "lost", str(e)
             except (BrokenPipeError, ConnectionError, OSError) as e:
                 ok = False
@@ -322,6 +324,10 @@ def _add_uris_with_retry(link: HqpLink, uris: list[str], *,
         taken.append(ok)
         if ok:
             continue
+        if owed:
+            # Owed, not lost (HqpLink.owe): nothing goes behind it
+            unsent = i
+            break
         logger.warning("playlist_add failed: %s — %s", redact_uri(uri), refusal)
         if not answered:
             # Not a refusal: HQPlayer did not answer, or could not be reached
@@ -331,7 +337,8 @@ def _add_uris_with_retry(link: HqpLink, uris: list[str], *,
     # Each reason the batch is short is told: the silence that stopped it,
     # and what HQPlayer refused before it
     if unsent < len(uris):
-        logger.warning("HQPlayer is not answering — %d of %d tracks were not handed over",
+        logger.warning("HQPlayer has not answered an add — %d of %d tracks wait for its answer"
+                       if owed else "HQPlayer is not answering — %d of %d tracks were not handed over",
                        len(uris) - unsent, len(uris))
     if refused and _stream_mode():
         logger.warning(
@@ -1242,6 +1249,11 @@ class HqpBackend(PlayerBackend):
         self._attachment = link.attach(self)
         if link.state == "closed":
             return              # the node is stopping (hqp_link.close_all): nothing to start
+        owed = link.owed
+        if owed is not None:
+            # An add HQPlayer owes since an attachment before this one: no
+            # mirror, and nothing handed to it, until it answers
+            self.owes(owed)
         # HQPlayer builds and answers nothing: no question is put to it now —
         # each would wait out its timeout — and what it holds is read once
         # it answers (the poller's mirror check), never replaced in its
@@ -1321,6 +1333,8 @@ class HqpBackend(PlayerBackend):
             return self._remirror()
         except Building:
             self._verify_mirror = True
+        except Owed:
+            pass                # the queue goes to HQPlayer once it answers the add it owes
         except (BrokenPipeError, ConnectionError, OSError) as e:
             logger.warning("canonical mirror on attach failed: %s", e)
         return False
@@ -1804,12 +1818,20 @@ class HqpBackend(PlayerBackend):
                 return False
             if only_from and self._mirror not in only_from:
                 return False
+            asked = True
+            if state in ("step", "tail") and self._link.owed is not None:
+                # HQPlayer owes an add: its playlist lacks an entry it will
+                # hold, and nothing is handed to it until it answers — no
+                # mirror till then, the reconverge reads it at the answer
+                state, by, asked = "lost", "owed", False
+            if state == "lost" and by == "owed" and (self._mirror, self._lost_by) == ("lost", "owed"):
+                return False
             self._mirror, self._lost_by = state, by
-            self._reconverge_due = state == "lost" and by == "silence"
+            self._reconverge_due = state == "lost" and by in ("silence", "owed")
             self._mirror_moves += 1
             if state == "lost" and by != "press":
                 self.mirror_losses += 1
-            return True
+            return asked
 
     def lose_mirror(self, why: str, *, by: str = "silence",
                     expect: Optional[int] = None) -> bool:
@@ -1818,14 +1840,46 @@ class HqpBackend(PlayerBackend):
         unanswered add, a filler whose wait gave up, a restart) HQPlayer gets
         the queue back when it answers again (_reconverge, once per loss);
         lost through a refusal of everything — it answered, and took nothing
-        — the next play press tries again. `expect`: see _move_mirror.
-        Returns whether it was lost here."""
+        — the next play press tries again; lost to an add HQPlayer owes
+        (HqpLink.owe), it gets the queue back once it answers that add.
+        `expect`: see _move_mirror. Returns whether it was lost here."""
         if not self._move_mirror("lost", by=by, expect=expect):
             return False
         logger.warning("%s — %s", why, "HQPlayer gets the queue back once it answers again"
-                       if by == "silence" else "the next play press hands it over again")
+                       if by == "silence" else "HQPlayer gets the queue back once it answers the add "
+                       "it owes" if by == "owed" else "the next play press hands it over again")
         self.poke()
         return True
+
+    def owes(self, owed) -> None:
+        """HQPlayer owes the answer to an add (HqpLink.owe): its playlist
+        lacks an entry it will hold once it answers, and nothing is handed to
+        it till then — a mirror in step or a tail mirror is lost to it, and
+        a playlist read without the add is no edit made elsewhere."""
+        self._move_mirror("lost", by="owed", only_from=("step", "tail"))
+        self.poke()
+
+    def owed_ended(self, owed) -> None:
+        """The add HQPlayer owed was answered, or its connection ended
+        (HqpLink._owed_ended): the hand-over ledger keeps the answer, a file
+        it refused is a gap of this output until the next full mirror — as
+        one refused in its batch is (_took) — and the playlist is read again
+        at the poller's next pass (the reconverge it was owed): whether it
+        took an add whose connection ended unanswered, the rest of the queue
+        behind it, and the edits made meanwhile."""
+        from playback.manager import manager
+        if owed.outcome in ("taken", "refused"):
+            diag.note_add(owed.uri, owed.outcome == "taken",
+                          None if owed.outcome == "taken" else "Error", owed.message)
+        if owed.outcome == "refused":
+            def gap() -> None:
+                refused = [it for it in self._queue.snapshot()
+                           if any(_reads_item(r, it) for r in self._readings(owed.uri))]
+                self._link.refusals.extend((it, _slot_key(it)) for it in refused)
+                if refused and diag.note_refused(refused, len(refused), stream=_stream_mode()):
+                    _notify_notices()
+            manager.mirror_locked(self, gap)
+        self.poke()
 
     def _in_step(self, *, expect: Optional[int] = None) -> bool:
         return self._move_mirror("step", expect=expect)
@@ -2028,7 +2082,11 @@ class HqpBackend(PlayerBackend):
             self._link.refusals.extend((it, _slot_key(it))
                                        for it, t in zip(sent, answered) if not t)
         if unsent < len(items):
-            self.lose_mirror(f"HQPlayer took {sum(taken)} of the {len(items)} tracks {what}")
+            if self._link.owed is not None:
+                self.lose_mirror(f"HQPlayer took {sum(taken)} of the {len(items)} tracks {what}, "
+                                 "an add of them not answered yet", by="owed")
+            else:
+                self.lose_mirror(f"HQPlayer took {sum(taken)} of the {len(items)} tracks {what}")
             return False
         if items and not any(taken):
             self.lose_mirror(f"HQPlayer refused all {len(items)} tracks {what}", by="refusal")
@@ -2273,8 +2331,9 @@ class HqpBackend(PlayerBackend):
                 elif status is not None:
                     self._failures = self._silent_misses = 0
                     self._judge_start(status, playing)
-                    if self._reconverge_due:
-                        # Once per loss: HQPlayer answers again, and gets the queue back
+                    if self._reconverge_due and link.owed is None:
+                        # Once per loss: HQPlayer answers again — the add it
+                        # owed among it — and gets the queue back
                         self._reconverge_due = False
                         threading.Thread(target=self._reconverge, daemon=True,
                                          name="hqp-reconverge").start()
@@ -3547,9 +3606,11 @@ class HqpBackend(PlayerBackend):
         return self._mirror == "drift"
 
     def _context(self) -> dict:
+        owed = self._link.owed
         return {"hqplayer": f"{self._link.host}:{self._link.port}",
                 "media_url": f"{self._url_host}:{settings.media_proxy_port}",
                 "remote": _stream_mode(), "mirror": self._mirror,
+                "owed": owed.view() if owed is not None else None,
                 "endpoint_id": self.endpoint_id, "info": dict(self._info)}
 
     def _facts(self, att: diag.Attempt, reads: Optional[dict]) -> dict:
@@ -4456,6 +4517,9 @@ class HqpBackend(PlayerBackend):
         playlist stays no mirror, and HQPlayer gets the queue back at its
         next answer without a stop."""
         from playback.manager import manager
+        # An add HQPlayer owes lands behind whatever it holds once it is
+        # carried out: the queue is handed afresh after its answer
+        self._link.wait_owed(lambda: self._detached)
         taking = manager.mirror_locked(self, lambda: self._press_begin(press))
         if taking is None:
             return
@@ -5187,7 +5251,11 @@ class HqpBackend(PlayerBackend):
                            intent="queue") as n, self._steps(att):
             taken, unsent, n = self._afresh(uris, "queue", number=n)
             if uris and not any(taken):
-                if unsent < len(uris):
+                if unsent < len(uris) and self._link.owed is not None:
+                    why = ("HQPlayer is still opening the first track of the new queue — try "
+                           "again once it has")
+                    self.lose_mirror(why, by="owed")
+                elif unsent < len(uris):
                     why = "HQPlayer took nothing of a new queue before it fell silent"
                     self.lose_mirror(why)
                 else:
@@ -5222,6 +5290,7 @@ class HqpBackend(PlayerBackend):
         intent's number."""
         with self._link.command(intent, number=number) as n:
             self._check_attached()
+            self._link.refuse_edits()           # nothing of it sent: its Stop neither
             if reading is not None:
                 now = self._link.client.get_status()
                 if now is None or not _still_reads(now, reading):
@@ -5551,6 +5620,7 @@ class HqpBackend(PlayerBackend):
         is no mirror of the queue's seed, and it gets the queue back at its
         next answer (_reconverge)."""
         def clear(h: HQPlayerClient) -> tuple:
+            self._link.refuse_edits()           # before the rotation: neither goes
             archive()
             now = h.get_status()
             playing = self._playing(now, mutating=True) if now is not None else None

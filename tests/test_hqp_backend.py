@@ -144,6 +144,14 @@ class FakeHqp:
         # That stop rests on no entry — track 0, no URI — as Desktop 6's own
         # stop does (2026-10-31: the next Play started its first entry)
         self.rests_nowhere = False
+        # Parts of URIs a PlaylistAdd of opens first: the add waits for the
+        # part's Event on its own connection — every other connection served
+        # meanwhile, as HQPlayer's probe of an http URI or a file on a drive
+        # spinning up holds that request alone — and is carried out once it
+        # is set, its client still there or not. In `probe_drops`, the
+        # connection ends there instead, once: no answer, nothing carried out.
+        self.probe_holds: dict = {}
+        self.probe_drops: set = set()
         # (time.time(), command) as each command ARRIVES — `commands` logs
         # them as they are carried out, after any silence, in the order they
         # arrived on whichever connection: HQPlayer's one control thread
@@ -198,6 +206,16 @@ class FakeHqp:
                         with fake._lock:
                             fake.arrivals.append((time.time(), m.group(1)))
                             fake._log_wire(conn, "in", m.group(1))
+                            held = [(part, ev) for part, ev in fake.probe_holds.items()
+                                    if m.group(1) == "PlaylistAdd" and part in attrs.get("uri", "")]
+                        for part, ev in held:
+                            ev.wait(30)
+                            with fake._lock:
+                                dropped = part in fake.probe_drops
+                                fake.probe_drops.discard(part)
+                            if dropped:
+                                return      # its connection ends unanswered, nothing carried out
+                        with fake._lock:
                             built = fake._builds.pop(m.group(1), None)
                             ticket = next(fake._tickets)
                         if built is not None and built[1] == "last":
@@ -607,9 +625,10 @@ def test_a_queue_handed_to_an_hqplayer_that_does_not_answer_gives_up_at_once(fak
     with link.command():
         taken, unsent = hb._add_uris_with_retry(
             link, [f"http://127.0.0.1:1/file/t{i}" for i in range(6)], clear_first=True)
-    # one track's two tries, not six tracks' — and in what it is, not a refusal
+    # one try, not six tracks' — and in what it is, not a refusal: its answer
+    # owed (HqpLink.owe), the rest waiting for it
     assert not any(taken) and unsent == 0 and time.monotonic() - t < 3
-    assert "HQPlayer is not answering — 6 of 6 tracks were not handed over" in caplog.text
+    assert "HQPlayer has not answered an add — 6 of 6 tracks wait for its answer" in caplog.text
     assert "refused 6 of 6" not in caplog.text
 
 
@@ -1643,7 +1662,7 @@ def test_a_refusal_before_the_silence_that_stops_the_batch_is_told_apart_from_it
     # no retry; "b"'s add met HQPlayer's silence and stops the batch at once —
     # no playlist check, no retry, each would wait out the same silence.
     class Stub:
-        timed_out = answered = False
+        timed_out = answered = kept = False
 
         def playlist_add(self, uri, clear=False):
             self.timed_out = uri == "b"
@@ -5551,6 +5570,145 @@ def test_a_refetch_in_another_shape_is_handed_to_hqplayer_again_before_it_gets_t
         b.shutdown()
 
 
+def _stream_item(n):
+    """A slot streamed through the media proxy, its bytes in hand; with the
+    part of its URI that names it."""
+    from streaming.base import TrackQuery
+    proxy = streaming_service.get_proxy()
+    tok = proxy.add_tracks([(TrackQuery(artist="Artist", title=f"Stream {n}", album="Album",
+                                        duration=300.0, track_id=f"stream-{n}"), [(_GatedStream(), None)])])[0]
+    assert proxy.wait_ready(tok, timeout=5).audio is not None
+    return QueueItem(track_id=f"stream-{n}", media_file_id=None, source={"kind": "proxy", "token": tok},
+                     title=f"Stream {n}", artist="Artist", album="Album", duration_seconds=300.0,
+                     preview=True, provider="stub"), tok
+
+
+def _adds_since(fake, k):
+    return [c for _, c in fake.arrivals[k:] if c == "PlaylistAdd"]
+
+
+@pytest.mark.parametrize("kind", ["file", "stream"])
+def test_an_add_hqplayer_answers_late_is_owed_and_never_sent_again(fake, output, monkeypatch, kind):
+    """HQPlayer opens what an add names before it adds it — a stream it
+    fetches, a file on a drive spinning up — holding that request alone and
+    answering the rest. Given up on after its wait, the add was sent again
+    by every reconverge — nine times in 45 s — and HQPlayer carried out
+    each one (live). It is owed: its answer read on its own connection, the
+    mirror lost to it (a playlist read without it is no edit made
+    elsewhere), nothing sent again nor added behind it, and the queue handed
+    on once HQPlayer answers."""
+    mgr, b = output
+    monkeypatch.setattr(b._link.client, "timeout", 0.4)          # the add's wait (5 s live)
+    slow, part = ((_item("E:/Music/S/slow.flac", 9), "S/slow.flac") if kind == "file"
+                  else _stream_item(9))
+    after = _item("E:/Music/S/after.flac", 10)
+    go = threading.Event()
+    fake.probe_holds[part] = go
+    k = len(fake.arrivals)
+    assert mgr.append([slow, after]) == 2
+    _polls(fake, 4)                                              # its wait long over, the poller asks on
+    assert _adds_since(fake, k) == ["PlaylistAdd"]               # once, and nothing behind it
+    monkeypatch.setattr(b._link.client, "timeout", hl.COMMAND_WAIT_S)   # the adds after it, at ease
+    named = "slow.flac" if kind == "file" else part[:6]           # a token shows its first characters
+    assert b._mirror == "lost" and named in b._context()["owed"]["entry"]
+    go.set()
+    assert _wait(lambda: b._mirror == "step"), b._mirror
+    assert [part in u for u in fake.playlist[3:]] == [True, False] and "S/after" in fake.playlist[4]
+    assert _adds_since(fake, k) == ["PlaylistAdd"] * 2 and b._context()["owed"] is None
+
+
+def test_an_owed_add_hqplayer_refuses_is_a_gap_never_sent_again(fake, output, monkeypatch):
+    """An owed add's late answer is a refusal: the file is a gap of this
+    output, as one refused in its batch is — never sent again."""
+    mgr, b = output
+    monkeypatch.setattr(b._link.client, "timeout", 0.4)
+    slow = _item("E:/Music/S/slow.flac", 9)
+    go = threading.Event()
+    fake.probe_holds["S/slow"] = go
+    fake.refuse.add("S/slow")
+    k = len(fake.arrivals)
+    assert mgr.append([slow]) == 1
+    _polls(fake, 3)
+    monkeypatch.setattr(b._link.client, "timeout", hl.COMMAND_WAIT_S)
+    go.set()
+    assert _wait(lambda: b._mirror == "step" and b.gap(slow) == hb.REFUSED_HERE), b._mirror
+    _polls(fake, 2)
+    assert _adds_since(fake, k) == ["PlaylistAdd"] and not any("S/slow" in u for u in fake.playlist)
+
+
+def test_an_owed_add_whose_connection_ends_unanswered_is_read_again(fake, output, monkeypatch):
+    """The connection of an owed add ends with no answer: one read of the
+    playlist decides whether HQPlayer took it. Here it did not — a loss —
+    and the add goes once more."""
+    mgr, b = output
+    monkeypatch.setattr(b._link.client, "timeout", 0.4)
+    go = threading.Event()
+    fake.probe_holds["S/slow"] = go
+    fake.probe_drops.add("S/slow")
+    k = len(fake.arrivals)
+    assert mgr.append([_item("E:/Music/S/slow.flac", 9)]) == 1
+    _polls(fake, 3)
+    assert _adds_since(fake, k) == ["PlaylistAdd"]
+    monkeypatch.setattr(b._link.client, "timeout", hl.COMMAND_WAIT_S)
+    go.set()                                                     # its connection ends, nothing carried out
+    assert _wait(lambda: b._mirror == "step"), b._mirror
+    assert _adds_since(fake, k) == ["PlaylistAdd"] * 2
+    assert sum("S/slow" in u for u in fake.playlist) == 1
+
+
+def test_a_tap_while_an_add_is_owed_waits_for_its_answer_and_a_new_queue_is_refused(fake, output,
+                                                                                    monkeypatch):
+    """While an add is owed nothing changes HQPlayer's playlist: a new queue
+    is refused at once, before its Stop (409); a tap — a play press on a
+    playlist that is no mirror — waits for the answer in the node, then
+    hands the queue over and starts its slot."""
+    mgr, b = output
+    monkeypatch.setattr(b._link.client, "timeout", 0.4)
+    go = threading.Event()
+    fake.probe_holds["S/slow"] = go
+    assert mgr.append([_item("E:/Music/S/slow.flac", 9)]) == 1
+    _polls(fake, 2)
+    monkeypatch.setattr(b._link.client, "timeout", hl.COMMAND_WAIT_S)
+    n = len(fake.commands)
+    with pytest.raises(hl.NotAnswering):
+        mgr.replace_queue([_item("E:/Music/B/01.flac", 21)], play=True)
+    assert b.select(3, "track-3")
+    _polls(fake, 2)
+    assert not [c for c, _ in fake.commands[n:] if c in ("Stop", "PlaylistClear", "PlaylistAdd",
+                                                          "SelectTrack", "Play")], fake.commands[n:]
+    go.set()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 3
+                 and b._mirror == "step"), (fake.state, fake.track, b._mirror)
+    assert sum("S/slow" in u for u in fake.playlist) == 1
+
+
+def test_an_attach_while_an_add_is_owed_hands_the_queue_over_once_it_is_answered(fake, output,
+                                                                                monkeypatch):
+    """Switched away and back while HQPlayer still owes an add: the new
+    attachment's mirror is lost to it, nothing goes to HQPlayer's playlist
+    until the answer, and then the queue does."""
+    mgr, b = output
+    monkeypatch.setattr(b._link.client, "timeout", 0.4)
+    go = threading.Event()
+    fake.probe_holds["S/slow"] = go
+    assert mgr.append([_item("E:/Music/S/slow.flac", 9)]) == 1
+    _polls(fake, 2)
+    monkeypatch.setattr(b._link.client, "timeout", hl.COMMAND_WAIT_S)
+    b.shutdown()
+    n = len(fake.commands)
+    b2 = _attach(mgr)
+    try:
+        _polls(fake, 2)
+        assert b2._mirror == "lost"
+        assert not [c for c, _ in fake.commands[n:] if c in ("Stop", "PlaylistClear", "PlaylistAdd",
+                                                              "PlaylistRemove")]
+        go.set()
+        assert _wait(lambda: b2._mirror == "step"), b2._mirror
+        assert sum("S/slow" in u for u in fake.playlist) == 1
+    finally:
+        b2.shutdown()
+
+
 def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_into_it(fake, output):
     mgr, b = output
     buildings = _seen(mgr, "building")
@@ -9446,8 +9604,8 @@ def test_a_close_while_a_request_holds_the_connection_outside_a_wait_closes_its_
     read = c._read_response
     answered, release = threading.Event(), threading.Event()
 
-    def holding(wait, on_late=None):
-        out = read(wait, on_late)
+    def holding(wait, on_late=None, keep=None):
+        out = read(wait, on_late, keep)
         answered.set()
         release.wait(5)
         return out
@@ -12560,8 +12718,8 @@ def test_a_close_as_the_connection_passes_on_closes_no_socket_another_request_ho
     gave, b_ready, b_go = threading.Event(), threading.Event(), threading.Event()
     read, wait_on = c._read_response, c._wait
 
-    def holding(wait=None, on_late=None):
-        out = read(wait, on_late)
+    def holding(wait=None, on_late=None, keep=None):
+        out = read(wait, on_late, keep)
         if threading.current_thread() is threads.get("a"):
             a_holds.set()                        # answered; the connection still its
             a_go.wait(5)

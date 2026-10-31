@@ -238,8 +238,9 @@ class CommandOutcome:
     element's text) or None (queries carry none, some setters answer bare) —
     or what went wrong below the protocol: "refused" (no connection), "lost"
     (no answer: the socket dropped, timed out, or returned no XML; `during`
-    names the command it was carrying) or "unparsed" (a Status/State answer
-    that did not parse). `ts` is when the outcome was known, `sent` when the
+    names the command it was carrying), "owed" (no answer within the wait,
+    its connection kept for it: HqpLink's owed add) or "unparsed" (a
+    Status/State answer that did not parse). `ts` is when the outcome was known, `sent` when the
     command went onto the connection (None: it never left)."""
     ts: float
     host: str
@@ -466,6 +467,20 @@ class LateAnswers(Protocol):
     def begin(self, command: str, attributes: Dict[str, str]) -> Callable[[str], None]: ...
 
 
+class OwedAnswers(Protocol):
+    """Who takes a connection whose answer HQPlayer still owes (HQPlayerClient
+    `owed`): the wait for the answer to one of `owes` ran out with the
+    connection open, and HQPlayer may still be carrying the request out — it
+    opens what a PlaylistAdd names before it adds it, holding that request
+    alone while it answers the others. The answer is read there, off the
+    client, which goes on on a new connection. `owe` is told on the thread
+    that waited, with the connection and what had come of the answer."""
+    owes: frozenset
+
+    def owe(self, command: str, attributes: Dict[str, str], sock: socket.socket,
+            buffer: bytes) -> None: ...
+
+
 class _PerThread:
     """What the latest request a thread sent came to — its failure, whether
     HQPlayer kept the connection silent, whether it answered — is that
@@ -521,6 +536,10 @@ class HQPlayerClient:
     timed_out = _PerThread(False)
     # The latest read got its line: HQPlayer answered, whatever it said.
     answered = _PerThread(False)
+    # The latest request's wait ran out and its connection went to `owed`:
+    # HQPlayer still owes the answer — it carries the request out, or refuses
+    # it, once it gives it.
+    kept = _PerThread(False)
     # When the thread's latest request went onto the connection — after any
     # wait for it (playback.hqp_link hands it out a request at a time), so it
     # orders the request exactly against another thread's.
@@ -532,7 +551,8 @@ class HQPlayerClient:
 
     def __init__(self, host: str = "127.0.0.1", port: int = 4321, timeout: float = 5.0,
                  *, ring: bool = True, waits: Optional[Dict[str, float]] = None,
-                 late: Optional["LateAnswers"] = None, gate: Any = None):
+                 late: Optional["LateAnswers"] = None, owed: Optional["OwedAnswers"] = None,
+                 gate: Any = None):
         """
         Initialize HQPlayer client
 
@@ -551,6 +571,10 @@ class HQPlayerClient:
                 given up on is carried out by HQPlayer all the same
             late: told when the answer to one of its commands is late — the
                 HQPlayer link's build watch (playback.hqp_link.BuildWatch)
+            owed: takes the connection of one of its commands whose answer
+                did not come within the wait — the HQPlayer link: the
+                request is owed, not lost, and its answer read where it
+                will come
             gate: what every request passes, around its send and its answer
                 (`gate.request(command)`, a context), and around its bytes
                 (`gate.sending()`) — the HQPlayer link (playback.hqp_link):
@@ -563,6 +587,7 @@ class HQPlayerClient:
         self.ring = ring
         self.waits: Dict[str, float] = dict(waits or {})
         self.late = late
+        self.owed = owed
         self.gate = gate
         self.socket: Optional[socket.socket] = None
         self.buffer = bytearray()
@@ -793,7 +818,8 @@ class HQPlayerClient:
             return False
 
     def _read_line(self, wait: Optional[float] = None,
-                   on_late: Optional[Callable[[], Callable[[str], None]]] = None
+                   on_late: Optional[Callable[[], Callable[[str], None]]] = None,
+                   keep: Optional[Callable[[socket.socket, bytes], None]] = None
                    ) -> Optional[bytes]:
         """
         Read one answer — a newline-framed line — waiting `wait` seconds for
@@ -804,7 +830,8 @@ class HQPlayerClient:
         connection and said nothing; `answered` whether a line came. The wait
         is one another thread may end (interrupt, close): then this thread
         closes its own socket, `_io_error` "interrupted" — no loss of
-        HQPlayer's.
+        HQPlayer's. With `keep`, a wait that runs out hands the connection
+        to it, with what came of the line, instead of closing it (`kept`).
         """
         self.answered = False
         if not self.socket:
@@ -857,12 +884,20 @@ class HQPlayerClient:
                 self.losses += 1
                 self.disconnect()
                 return None
-            # The connection goes all the same: the late answer would be
-            # read as the next command's.
             logger.warning(f"HQPlayer did not answer within {wait:g} s")
             self._io_error = f"no answer within {wait:g} s"
             self.timed_out = True
             how = "timeout"
+            if keep is not None:
+                # Its answer is read where it will come; this client goes on
+                # on a new connection
+                sock, buffer = self.socket, bytes(self.buffer)
+                self.socket, self.buffer = None, bytearray()
+                self.kept = True
+                keep(sock, buffer)
+                return None
+            # The connection goes all the same: the late answer would be
+            # read as the next command's.
             self.disconnect()
             return None
         except Exception as e:
@@ -876,10 +911,11 @@ class HQPlayerClient:
                 ended(how)
 
     def _read_response(self, wait: Optional[float] = None,
-                       on_late: Optional[Callable[[], Callable[[str], None]]] = None
+                       on_late: Optional[Callable[[], Callable[[str], None]]] = None,
+                       keep: Optional[Callable[[socket.socket, bytes], None]] = None
                        ) -> Optional[ET.Element]:
         """The answer (_read_line) as an XML element, or None."""
-        line = self._read_line(wait, on_late)
+        line = self._read_line(wait, on_late, keep)
         if line is None:
             return None
         try:
@@ -932,6 +968,7 @@ class HQPlayerClient:
         self.last_error = None
         self._io_error = None
         self.answered = False
+        self.kept = False
         self.sent_at = None
         inherited, self._inherited = self._inherited, None
         # Build XML command
@@ -958,10 +995,16 @@ class HQPlayerClient:
                 wait, watched = inherited[0], watched or inherited[1]
             on_late = ((lambda: self.late.begin(command, dict(attributes or {})))
                        if watched and self.late is not None else None)
-            response = self._read_response(wait, on_late)
+            # A build's late answer is the build watch's; an answer owed past
+            # its wait otherwise is read where it will come
+            keep = ((lambda sock, buffer: self.owed.owe(command, dict(attributes or {}), sock, buffer))
+                    if self.owed is not None and command in self.owed.owes and on_late is None
+                    else None)
+            response = self._read_response(wait, on_late, keep)
             if response is None:
                 self._outcome("<connection>", attributes,
-                              "interrupted" if self._io_error == "interrupted" else "lost",
+                              "interrupted" if self._io_error == "interrupted"
+                              else "owed" if self.kept else "lost",
                               f"{command}: {self._io_error}", during=command)
                 return None
             result = response.get("result")

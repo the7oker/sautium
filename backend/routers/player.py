@@ -1320,10 +1320,14 @@ def _hqp_info() -> dict:
 def hqplayer_diagnostics():
     from hqplayer_client import HQPlayerClient
     from playback import hqp_diagnostics as diag
+    b = manager.active
+    owed = b.link().owed if b is not None and b.id == "hqplayer" else None
     return {"attempts": [diag.summary(a) for a in diag.attempts()],
             "failing": diag.failing_run(),
             "log_source": diag.log_source(settings.hqplayer_host, _hqp_info()),
-            "client_errors": HQPlayerClient.last_errors()}
+            "client_errors": HQPlayerClient.last_errors(),
+            # The add HQPlayer owes the answer to, while its mirror waits for it
+            "owed": owed.view() if owed is not None else None}
 
 
 @router.get("/diagnostics/hqplayer/log")
