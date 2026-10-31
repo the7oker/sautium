@@ -1169,7 +1169,7 @@ def test_a_switch_carries_the_listen_to_the_next_renderer(tmp_path, proxy, rende
     """N-14: the track plays on on the new output at its second — the same
     listen. Nothing is written at the switch and the track is not announced
     again (live, 2026-10-31: every switch wrote a skip of the track playing and
-    opened its listen afresh; past its half it would be scrobbled twice)."""
+    opened its listen afresh)."""
     listened, lastfm = heard
     a, b = renderers(name="Kitchen"), renderers(name="Study")
     _on_renderer(manager, a, [track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)])
@@ -1180,6 +1180,24 @@ def test_a_switch_carries_the_listen_to_the_next_renderer(tmp_path, proxy, rende
     _playing_at(manager, b, second + 2)
     assert listened == []
     assert lastfm == [("update_now_playing", "Track 1")]
+
+
+def test_a_stop_on_the_renderer_a_switch_went_to_ends_the_listen(tmp_path, proxy, renderers, manager,
+                                                                  switch, quality, heard):
+    """Paused on one renderer and switched to another, which holds the track
+    paused at its second — then stopped there before it played: the listen
+    ends at the Stop, as after any pause, not at whatever plays next."""
+    listened, lastfm = heard
+    a, b = renderers(name="Kitchen"), renderers(name="Study")
+    _on_renderer(manager, a, [track(tmp_path, 1, seconds=40.0)])
+    _playing_at(manager, a, 3)
+    manager.backend().pause()
+    wait_for(lambda: manager.latest_status.get("state") == "paused", what="paused")
+    switch(type="dlna", renderer=b.record)
+    assert listened == []                                # held through the switch
+    assert manager.backend().stop()
+    wait_for(lambda: listened, what="the listen written at the Stop")
+    assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"]
 
 
 def _at(manager, index: int, second: float) -> None:

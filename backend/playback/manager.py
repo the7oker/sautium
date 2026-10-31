@@ -364,7 +364,7 @@ class PlaybackManager:
             # in does not.
             self._subs.reset()
             self._reresolve(backend)
-            if spot is not None:
+            if spot is not None and spot.slot >= 1 and self.queue.item_at(spot.slot) is not None:
                 # The track and its second go on here: so does the listen —
                 # before the new output's first word, its attach's among them
                 tracker.carry_listen()
@@ -774,7 +774,8 @@ class PlaybackManager:
         # session/Home-shelf archival below — that snapshots the whole queue,
         # this records each play.
         tracker.track_play_event(new_data["state"], s.position, s.length, item,
-                                 external=s.extra.get("source") == "external")
+                                 external=s.extra.get("source") == "external",
+                                 holds=bool(s.extra.get("resume")))
         self._maintain_preview_window(idx)
         self._subs.maintain(idx)
 

@@ -139,10 +139,12 @@ def _scrobbling_enabled() -> bool:
 def carry_listen() -> None:
     """An output switch keeps the track and the second it was at, and the
     new output plays on there or holds it paused: the listen in progress is
-    one listen on both outputs. Until the new output plays, what it says —
-    stopped as it attaches, stopped or paused at the spot it holds, loading
-    it — ends nothing; its first word playing goes on with the listen (the
-    same track at its second) or ends it (any other)."""
+    one listen on both outputs. Until the new output plays, what it says as
+    it attaches (no track yet) and while it holds the track's spot (paused,
+    or stopped there with its play press resuming it), or loads it, ends
+    nothing; its first word playing goes on with the listen (the same track
+    at its second) or ends it (any other), and any other word ends it — a
+    Stop on the new output among them."""
     global _carried
     _carried = _play_session is not None
 
@@ -216,7 +218,7 @@ def _save_play_session(s: "_PlaySession") -> None:
 
 
 def track_play_event(state_name: str, position: float, length: float,
-                     item, *, external: bool = False) -> None:
+                     item, *, external: bool = False, holds: bool = False) -> None:
     """Advance listening-history / scrobble state from one status tick. Mirrors
     the retired daemon's _handle_event, but resolves identity from the
     canonical queue item (source-agnostic) — so phantom previews are tracked
@@ -234,7 +236,8 @@ def track_play_event(state_name: str, position: float, length: float,
     ours — so the listen before it ends there. The same track re-starting
     from the top (repeat-one, a duplicate slot, a deliberate replay) IS a new
     listen — detected by the position falling back to the start. An output
-    switch carries the listen over (carry_listen)."""
+    switch carries the listen over (carry_listen); `holds`: the output holds
+    the slot's spot, stopped there, and its play press resumes it."""
     global _play_session, _carried
 
     if external:
@@ -252,15 +255,19 @@ def track_play_event(state_name: str, position: float, length: float,
                   and ident["track_id"] == _play_session.track_id)
     if state_name != "playing":
         if _play_session is not None and (
-                _carried or state_name == "paused"
-                or (state_name == "loading" and same_track)):
+                state_name == "paused"
+                or (state_name == "loading" and same_track)
+                or (_carried and (ident is None or (same_track and holds)))):
             # Interruptions, not the end of the listen: a pause, a seek
             # that reloads the same track (Opus streams re-encode from the
-            # offset), an output switch on its way. Closing the session here
-            # wrote a "skipped" history row and a skip_count per pause, and
-            # the resume re-opened one that re-counted the prefix and re-sent
-            # Last.fm now-playing with the resume as its start time.
+            # offset), the output a switch went to attaching (it names no
+            # track yet) or holding the track's spot. Closing the session
+            # here wrote a "skipped" history row and a skip_count per pause,
+            # and the resume re-opened one that re-counted the prefix and
+            # re-sent Last.fm now-playing with the resume as its start time.
+            # Anything else ends it: a Stop on the new output among it.
             return
+        _carried = False
         if _play_session is not None:
             _save_play_session(_play_session)
             _play_session = None

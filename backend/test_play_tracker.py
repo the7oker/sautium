@@ -89,3 +89,39 @@ def test_a_full_stream_after_an_excerpt_opens_its_own_listen(recorder):
     tracker.track_play_event("playing", 2.0, 200.0, _item("t3"))
     assert tracker._play_session is not None and tracker._play_session.track_id == "t3"
     assert lastfm == ["update_now_playing"] and _history_rows(writes) == []
+
+
+def test_a_switch_carries_the_listen_through_the_new_outputs_attach_and_its_hold(recorder, monkeypatch):
+    """An output switch keeps the track and its second: the new output's
+    attach (no track yet), its hold of the spot (stopped there, its play press
+    resuming it) and its load end nothing; its first word playing at that
+    second goes on with the listen — one row, one now-playing, one scrobble."""
+    monkeypatch.setattr(tracker, "_carried", False)
+    writes, lastfm = recorder
+    tracker.track_play_event("playing", 10.0, 200.0, _item("t1"))
+    tracker.track_play_event("playing", 120.0, 200.0, _item("t1"))       # past the half: scrobbled
+    tracker.carry_listen()
+    tracker.track_play_event("stopped", 0.0, 0.0, None)                   # the new output attaches
+    tracker.track_play_event("stopped", 120.0, 200.0, _item("t1"), holds=True)
+    tracker.track_play_event("loading", 120.0, 200.0, _item("t1"))
+    tracker.track_play_event("playing", 121.0, 200.0, _item("t1"))
+    tracker.track_play_event("playing", 199.0, 200.0, _item("t1"))
+    tracker.track_play_event("stopped", 0.0, 0.0, None)
+    assert len(_history_rows(writes)) == 1
+    assert lastfm == ["update_now_playing", "scrobble"]
+
+
+def test_a_stop_on_the_output_a_switch_went_to_ends_the_listen_it_carried(recorder, monkeypatch):
+    """Switched while paused and stopped there before it played: the listen
+    ends at the Stop, as a Stop after a pause ends it on any output — not at
+    whatever plays next, hours later."""
+    monkeypatch.setattr(tracker, "_carried", False)
+    writes, lastfm = recorder
+    tracker.track_play_event("playing", 10.0, 200.0, _item("t1"))
+    tracker.track_play_event("paused", 60.0, 200.0, _item("t1"))
+    tracker.carry_listen()
+    tracker.track_play_event("stopped", 0.0, 0.0, None)                   # the attach
+    tracker.track_play_event("paused", 60.0, 200.0, _item("t1"))          # the spot, held paused
+    tracker.track_play_event("stopped", 0.0, 200.0, _item("t1"))          # the person's Stop there
+    assert len(_history_rows(writes)) == 1 and tracker._play_session is None
+    assert not tracker._carried
