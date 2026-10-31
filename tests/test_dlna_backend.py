@@ -31,11 +31,15 @@ if str(BACKEND) not in sys.path:
 
 from config import settings  # noqa: E402
 from playback import dlna_backend  # noqa: E402
+from playback import tracker  # noqa: E402
 from playback.dlna_backend import DlnaBackend  # noqa: E402
 from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
 from streaming import service as streaming_service  # noqa: E402
 from streaming import transcode  # noqa: E402
 from streaming.proxy import MediaProxy  # noqa: E402
+
+# The tracker as the module defines it: the manager fixture stands it down
+_TRACK_PLAY_EVENT = tracker.track_play_event
 
 AVT = "urn:schemas-upnp-org:service:AVTransport:1"
 RC = "urn:schemas-upnp-org:service:RenderingControl:1"
@@ -1122,6 +1126,40 @@ def test_a_switch_from_a_paused_renderer_stays_paused_there(tmp_path, proxy, ren
     assert player_router.play()["ok"]
     wait_for(lambda: b.called("Seek"), what="sought on Play")
     assert b.called("Seek")[-1]["Target"] == f"0:00:{int(paused_at):02d}"
+
+
+@pytest.fixture
+def heard(monkeypatch):
+    """The play tracker as the manager drives it, its writes and Last.fm
+    calls recorded instead of made: [(track, percent) per listen written],
+    [(Last.fm call, track)]."""
+    listened, lastfm = [], []
+    monkeypatch.setattr(tracker, "track_play_event", _TRACK_PLAY_EVENT)
+    monkeypatch.setattr(tracker, "_play_session", None)
+    monkeypatch.setattr(tracker, "_db_execute", lambda sql, p=None: listened.append(
+        (p["tid"], round(p["pct"]))) if "INSERT INTO listening_history" in sql else None)
+    monkeypatch.setattr(tracker, "_scrobble_async",
+                        lambda method, **kw: lastfm.append((method, kw.get("title"))))
+    monkeypatch.setattr(tracker, "_scrobbling_enabled", lambda: True)
+    return listened, lastfm
+
+
+def test_a_switch_carries_the_listen_to_the_next_renderer(tmp_path, proxy, renderers, manager,
+                                                          switch, quality, heard):
+    """N-14: the track plays on on the new output at its second — the same
+    listen. Nothing is written at the switch and the track is not announced
+    again (live, 2026-10-31: every switch wrote a skip of the track playing and
+    opened its listen afresh; past its half it would be scrobbled twice)."""
+    listened, lastfm = heard
+    a, b = renderers(name="Kitchen"), renderers(name="Study")
+    _on_renderer(manager, a, [track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)])
+    _playing_at(manager, a, 3)
+    switch(type="dlna", renderer=b.record)
+    wait_for(lambda: b.called("Seek"), what="the new renderer sought")
+    second = _seconds(b.called("Seek")[-1]["Target"])
+    _playing_at(manager, b, second + 2)
+    assert listened == []
+    assert lastfm == [("update_now_playing", "Track 1")]
 
 
 class Tab:

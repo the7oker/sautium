@@ -5327,6 +5327,29 @@ def test_the_status_hqplayer_gives_as_it_moves_on_is_not_the_new_tracks(fake, ou
     assert lastfm.count("scrobble") == n_scrobbled, lastfm
 
 
+def test_a_switch_to_another_hqplayer_carries_the_listen(fake, fake_b, output, listens, monkeypatch):
+    """Track 1 playing at 0:42, the output switched to another HQPlayer: it
+    takes the queue stopped, holds the spot there, and the switch's play
+    press starts the track at that second — one listen on both: nothing
+    written at the switch, the track not announced again (live, 2026-10-31:
+    every switch wrote a skip of the track playing and opened its listen
+    afresh)."""
+    import routers.player as player_router
+    mgr, b = output
+    writes, lastfm = listens
+    fake_b.takes_seek = True
+    settings_router = _picker(monkeypatch, fake)
+    monkeypatch.setattr(player_router, "manager", mgr)
+    n_written, n_now = len(_listened(writes)), lastfm.count("update_now_playing")
+    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
+    assert mgr.active is not b
+    assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                 and mgr._latest_status.get("position", 0) >= 44), mgr._latest_status
+    assert any(c == "Seek" and float(a["position"]) >= 42 for c, a in fake_b.commands)
+    assert _listened(writes)[n_written:] == []
+    assert lastfm.count("update_now_playing") == n_now
+
+
 def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_into_it(fake, output):
     mgr, b = output
     buildings = _seen(mgr, "building")

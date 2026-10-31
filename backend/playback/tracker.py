@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 _SCROBBLE_MIN_SECONDS = 240  # Last.fm: scrobble after >50% OR >4 min, whichever first
 
 _play_session: "Optional[_PlaySession]" = None
+# The listen in progress goes on on the output a switch went to, until that
+# output plays (carry_listen)
+_carried = False
 _scrobbler = None
 
 
@@ -133,6 +136,17 @@ def _scrobbling_enabled() -> bool:
         return True
 
 
+def carry_listen() -> None:
+    """An output switch keeps the track and the second it was at, and the
+    new output plays on there or holds it paused: the listen in progress is
+    one listen on both outputs. Until the new output plays, what it says —
+    stopped as it attaches, stopped or paused at the spot it holds, loading
+    it — ends nothing; its first word playing goes on with the listen (the
+    same track at its second) or ends it (any other)."""
+    global _carried
+    _carried = _play_session is not None
+
+
 def open_listen_started_at() -> Optional[datetime]:
     """When the listen in progress began, or None. Its scrobble may already be
     on Last.fm (scrobbled mid-listen) while its history row is written only
@@ -219,13 +233,15 @@ def track_play_event(state_name: str, position: float, length: float,
     as `external` is no such gap — the output reads an entry that is not
     ours — so the listen before it ends there. The same track re-starting
     from the top (repeat-one, a duplicate slot, a deliberate replay) IS a new
-    listen — detected by the position falling back to the start."""
-    global _play_session
+    listen — detected by the position falling back to the start. An output
+    switch carries the listen over (carry_listen)."""
+    global _play_session, _carried
 
     if external:
         # HQPlayer's playlist edited in its own window, another controller:
         # nothing of this is a listen, and carrying the open one on would
         # credit its seconds to the track before it.
+        _carried = False
         if _play_session is not None:
             _save_play_session(_play_session)
             _play_session = None
@@ -236,19 +252,20 @@ def track_play_event(state_name: str, position: float, length: float,
                   and ident["track_id"] == _play_session.track_id)
     if state_name != "playing":
         if _play_session is not None and (
-                state_name == "paused"
+                _carried or state_name == "paused"
                 or (state_name == "loading" and same_track)):
-            # Interruptions, not the end of the listen: a pause, or a seek
+            # Interruptions, not the end of the listen: a pause, a seek
             # that reloads the same track (Opus streams re-encode from the
-            # offset). Closing the session here wrote a "skipped" history
-            # row and a skip_count per pause, and the resume re-opened one
-            # that re-counted the prefix and re-sent Last.fm now-playing
-            # with the resume as its start time.
+            # offset), an output switch on its way. Closing the session here
+            # wrote a "skipped" history row and a skip_count per pause, and
+            # the resume re-opened one that re-counted the prefix and re-sent
+            # Last.fm now-playing with the resume as its start time.
             return
         if _play_session is not None:
             _save_play_session(_play_session)
             _play_session = None
         return
+    _carried = False
 
     if item is not None and item.excerpt:
         # A 30 s excerpt is not a listen: no history row (25 s of it would

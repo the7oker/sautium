@@ -364,6 +364,10 @@ class PlaybackManager:
             # in does not.
             self._subs.reset()
             self._reresolve(backend)
+            if spot is not None:
+                # The track and its second go on here: so does the listen —
+                # before the new output's first word, its attach's among them
+                tracker.carry_listen()
             # Assigned before start() so early emits resolve their output
             # info — but a failed start MUST roll back: a half-constructed
             # backend left as "active" is a zombie that swallows every
@@ -647,8 +651,10 @@ class PlaybackManager:
         UI as a "Playback error" for the output the user just left (seen
         live: a phone renderer that had gone away refused the switch-away
         Stop, and the new output came up under that toast). Nothing is lost
-        with its last tick: the listen it was in the middle of closes on the
-        new backend's first tick, and a switch is not an end of queue."""
+        with its last tick: the listen it was in the middle of goes on on the
+        new output, which plays the track on or holds it at its second
+        (tracker.carry_listen) — a switch with nowhere to resume ends it at
+        the new backend's first tick — and a switch is not an end of queue."""
         if sender is not self._active:
             return
         if s.state == "disconnected":
