@@ -577,7 +577,15 @@ comes after the control port answers again — so neither can end the wait.
   none): playing or paused on its track, it was taken after all. A command refused,
   as busy or by HQPlayer, leaves it. Back on HQPlayer after another output,
   the slot the queue was on is a spot when the attach found HQPlayer
-  stopped; one that plays keeps its own place.
+  stopped; one that plays keeps its own place. A start of the node's own
+  that HQPlayer stopped on by itself — judged `not_played` or
+  `rate_refused`, a refused output rate among the causes — leaves the spot
+  at its slot, at the second the start went to (since 2026-10-31): Desktop's
+  own stop rests on no entry, and Play then started HQPlayer's first entry.
+  Now Playing keeps that track with its diagnosis, Play starts it, Next and
+  Previous move from it. Not HQPlayer's own advance, nor a stop while
+  another controller holds HQPlayer (Roon, its own window), and a spot set
+  since stays.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
