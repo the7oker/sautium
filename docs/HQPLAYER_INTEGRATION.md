@@ -569,15 +569,18 @@ comes after the control port answers again — so neither can end the wait.
   it there. The spot names a queue item, not a slot: an insert or a removal
   before it moves its index, an append after it changes nothing, and it goes
   with its item. Stopped there, Next and Previous only move it a slot, to
-  its start — no command, no sound; a tap on a track plays that track. A
+  its start — no command, no sound — and a Seek moves its second, nothing
+  sent (since 2026-11-01; HQPlayer's own Seek found no take of ours to move);
+  a tap on a track plays that track. A
   start taken spends it — a plain Play too — spent under the command lock
   the start held, so a start dropped meanwhile puts none back. One
   HQPlayer answered past the build limit, given up on, is judged at
   HQPlayer's first answer since that names a slot (an opening tick names
   none): playing or paused on its track, it was taken after all. And a tick
-  that reads HQPlayer playing the spot's very item spends it, whoever started
-  it (since 2026-11-01): an advance or a start judged before HQPlayer played
-  it, a person's word in its own window. A command refused,
+  that reads HQPlayer playing the spot's very item — its position moving on
+  the same take since the tick before — spends it, whoever started it (since
+  2026-11-01): an advance or a start judged before HQPlayer played it, a
+  person's word in its own window. A command refused,
   as busy or by HQPlayer, leaves it. Back on HQPlayer after another output,
   the slot the queue was on is a spot when the attach found HQPlayer
   stopped; one that plays keeps its own place. A start of the node's own
@@ -609,10 +612,12 @@ comes after the control port answers again — so neither can end the wait.
   controller's stream. A start that waited for its stream (below) when
   another controller took HQPlayer is over — that controller's word is newer
   — and its track and second are the spot. While another controller holds
-  HQPlayer, an append (a filler's, the radio's — which refills nothing from
-  that spot — a person's) and a new queue put together without playing it
-  are the queue's alone: nothing goes into that controller's playlist; the
-  press that takes HQPlayer back hands the queue over.
+  HQPlayer — as the poller last read it, whatever the status says meanwhile
+  (a take-back that waits for its stream says "loading") — an append (a
+  filler's, the radio's, a person's), the radio's own clear and a new queue
+  put together without playing it are the queue's alone: nothing goes into
+  that controller's playlist; the press that takes HQPlayer back hands the
+  queue over. The radio refills nothing from the spot a takeover left.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
@@ -1110,12 +1115,17 @@ cut by another controller, it leaves its spot, which the status names instead
 (the spot, above; on a DLNA renderer the same spot, which Play loads there and a Seek
 moves — though Next and Previous there load and play their slot, as on a renderer
 they always do — since 2026-11-01).
-Two ticks give no verdict and are not emitted. One is the tick on which
+Three ticks give no verdict and are not emitted. One is the tick on which
 HQPlayer opens an entry: PLAYING at track 0 and length 0, with the URI already
-named; a listen opened there froze a length of 0. The other is an entry the
+named; a listen opened there froze a length of 0. Another is an entry the
 queue does not hold at the slot HQPlayer's entry names (through the layout:
 the queue without its gaps) while a mutation is in flight — unless the
-asker is the backend's own mirror step, whose mutation it is. Sautium's
+asker is the backend's own mirror step, whose mutation it is. The third
+(since 2026-11-01) is an entry nothing names (no URI from this build, a
+stream token of an earlier session) in a playlist said to be the queue's,
+while a mutation is in flight or a take that moved with no command of the
+node's is still unread against the playlist: the layout's slot may be another
+controller's stream there. Sautium's
 own mutations mirror into HQPlayer before the queue commits them, and every
 queue mutation of the manager runs inside `CanonicalQueue.mutation()`: a
 replace plays its first track before its commit, and a removal shifts
@@ -1132,10 +1142,10 @@ tracked and scrobbled as the queued track at that index; and a queue holding a
 slot HQPlayer drops (one it cannot open) went untracked while the canary said
 drift. A build whose status names no entry, or a stream token of an earlier
 session, leaves the layout's slot standing while the playlist is the mirror —
-external (playing) or no slot (stopped) while it is not; a take that moved
-with no command of the node's has the playlist read at that tick (the
-mirror's state, above — since 2026-11-01), and until that read stands — a
-queue edit in flight holds it — such an entry gets no verdict. A DLNA renderer has no playlist to
+external (playing) or no slot (stopped) while it is not, and no verdict while
+a queue edit is in flight or a take that moved with no command of the node's
+is unread (above); that take has the playlist read at its tick (the mirror's
+state, above — since 2026-11-01). A DLNA renderer has no playlist to
 read: a URI it names, on the poll or in an event, that is none this
 attachment handed it — no CurrentURI, no NextURI — is another controller's
 (since 2026-11-01): external at slot 0, the node's load let go, no track end

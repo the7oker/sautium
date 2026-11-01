@@ -690,6 +690,161 @@ def test_a_queue_put_together_without_playing_while_roon_holds_hqplayer_sends_it
         roon.close()
 
 
+
+def _drop_bytes(toks, slot):
+    """The RAM budget drops slot `slot`'s stream bytes as well (slot 2's
+    kept)."""
+    from streaming import service as streaming_service
+    p = streaming_service.get_proxy()
+    p.enforce_budget({toks[2]}, [toks[slot]], 0)
+    assert p._peek(toks[slot]).audio is None
+
+
+def _roon_holds_streams(fake, monkeypatch):
+    """HQPlayer plays slot 1 of [a file, three streams], the bytes of slots 3
+    and 4 away; Roon takes HQPlayer. Returns (manager, backend, provider,
+    tokens by slot, roon)."""
+    fake.raw_streams = "uri"
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    _drop_bytes(toks, 4)
+    roon = FakeRoon(fake.port)
+    _, _, ticks = _roon_takes_over(fake, mgr, roon)
+    assert ticks is not None, "the node never said external"
+    return mgr, b, prov, toks, roon
+
+
+@pytest.mark.parametrize("how", ["one", "next", "tap"])
+def test_a_take_back_that_waits_for_its_stream_under_roon_goes_and_so_does_the_word_after_it(fake, monkeypatch,
+                                                                                              how):
+    """Roon holds HQPlayer; the person taps a streamed slot whose bytes are
+    away: the take-back waits ("loading"), asked while another controller
+    held HQPlayer — the newer word, which Roon's ticks never end — and so
+    is the person's next word while it waits (Next, or a tap on another such
+    slot), however the status reads meanwhile: when its bytes land it takes
+    HQPlayer back at its slot."""
+    mgr, b, prov, toks, roon = _roon_holds_streams(fake, monkeypatch)
+    try:
+        prov.go.clear()
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading")
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3)
+        target = 3
+        if how != "one":
+            assert (b.next() if how == "next" else b.select(4, "stream-4"))
+            target = 4
+            k = len(fake.commands)
+            _wait(lambda: _statuses(fake, k) >= 3)
+        waiting = b._parked
+        st = dict(mgr._latest_status)
+        prov.go.set()
+        _wait(lambda: fake.state == PLAYING and fake.track == target
+              and not any(u.endswith("/stream.raw") for u in fake.playlist), timeout=15)
+        _observed("A-take-back-waits", how=how, waiting=getattr(waiting, "under_another", None),
+                  status=(st.get("state"), st.get("track_index")), hqplayer=(fake.state, fake.track))
+        assert waiting is not None and waiting.under_another and (st["state"], st["track_index"]) == ("loading",
+                                                                                                        target)
+        assert fake.track == target and not any(u.endswith("/stream.raw") for u in fake.playlist)
+    finally:
+        prov.go.set()
+        b.shutdown()
+        roon.close()
+
+
+def test_while_a_take_back_waits_under_roon_nothing_goes_into_roons_playlist_but_the_take_back(fake, listens,
+                                                                                                monkeypatch):
+    """While the person's take-back waits for its stream under Roon — the
+    status "loading" — an append and a new queue put together without play
+    are still the queue's alone: nothing goes into Roon's playlist, and Roon
+    plays on until the take-back itself."""
+    mgr, b, prov, toks, roon = _roon_holds_streams(fake, monkeypatch)
+    try:
+        prov.go.clear()
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading")
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2)
+        n = _mark(fake, roon)
+        assert mgr.append([_item("E:/Music/B/09.flac", 9)], generation=mgr.queue.generation) == 1
+        mgr.replace_queue([_item("E:/Music/C/01.flac", 21), _item("E:/Music/C/02.flac", 22)], play=False)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2)
+        assert _node_commands(fake, n, roon) == [] and fake.state == PLAYING
+        assert fake.playlist[-1].endswith("/stream.raw") and len(fake.playlist) == 1
+    finally:
+        prov.go.set()
+        b.shutdown()
+        roon.close()
+
+
+def test_the_radios_clear_while_roon_holds_hqplayer_is_the_queues_alone(fake, listens, monkeypatch):
+    """Radio started from the spot Roon's takeover left: the clear around the
+    seed is the queue's alone — Roon's playlist is not ours to clear."""
+    mgr, b, roon, spot = _roon_holds_the_spot(fake, monkeypatch)
+    try:
+        n = _mark(fake, roon)
+        mgr.clear_for_radio(lambda: None)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2)
+        assert _node_commands(fake, n, roon) == [] and fake.state == PLAYING
+        assert [it.track_id for it in mgr.queue.snapshot()] == ["track-2"]
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_a_seek_at_the_spot_moves_it_once_roon_stopped_as_at_any_stopped_spot(fake, listens, monkeypatch):
+    """Roon's takeover left the spot, then Roon stopped: HQPlayer rests on
+    Roon's entry, the spot stands — and a Seek moves it as at any stopped
+    spot, nothing sent; Play takes HQPlayer back at the new second."""
+    fake.takes_seek = True
+    mgr, b, roon, spot = _roon_holds_the_spot(fake, monkeypatch)
+    try:
+        roon.stop()
+        k = len(fake.commands)
+        _wait(lambda: fake.state == int(PlaybackState.STOPPED) and _statuses(fake, k) >= 3)
+        assert mgr._latest_status.get("source") is None and mgr._latest_status.get("resume") == spot
+        n = _mark(fake, roon)
+        assert b.seek(150)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2)
+        assert _node_commands(fake, n, roon) == [] and mgr._latest_status.get("resume") == {"index": 2,
+                                                                                               "position": 150}
+        m = len(fake.commands)
+        assert b.play()
+        _wait(lambda: fake.playlist == MIRROR and fake.state == PLAYING, timeout=15)
+        assert [int(float(a["position"])) for c, a in fake.commands[m:] if c == "Seek"] == [150]
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_roon_starting_while_hqplayer_answers_no_playlist_read_is_no_listen_of_ours(fake, listens, monkeypatch):
+    """Roon starts under a Status that names no URI while HQPlayer answers
+    no PlaylistGet for a while: the moved take stays unread, and the entry
+    nothing names gets no verdict meanwhile — never the layout's slot 1, a
+    listen or a now-playing of it. Read at last, it is Roon's."""
+    writes, lastfm = listens
+    fake.raw_streams = "bare"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        fake.replies["PlaylistGet"] = '<PlaylistGet result="Error">busy</PlaylistGet>'
+        n_lastfm = len(lastfm)
+        roon.play_track()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4)
+        during = dict(mgr._latest_status)
+        del fake.replies["PlaylistGet"]
+        _wait(lambda: mgr._latest_status.get("source") == "external", 10)
+        rows = _rows(writes)
+        assert during.get("track_index") != 1 and lastfm[n_lastfm:] == []
+        assert [r["tid"] for r in rows] == ["track-2"]
+        assert mgr._latest_status.get("source") == "external"
+    finally:
+        b.shutdown()
+        roon.close()
+
 def _st(state, track, position, *, uri, serial, length=300.0):
     return TrackStatus(state=state, track_index=track, track_id="", position=position, length=length,
                        volume=-3.0, uri=uri, track_serial=serial)

@@ -2139,6 +2139,27 @@ def test_a_spot_hqplayer_plays_after_all_is_spent(traced, fake, monkeypatch, tmp
     sent = [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")]
     assert sent == ["Play"]
 
+
+def test_one_playing_answer_on_the_spots_track_spends_nothing(fake, output, monkeypatch):
+    """Case 2's spot: HQPlayer stopped by itself on a start it refused. The
+    person tries the track again in HQPlayer's own window, and HQPlayer
+    answers PLAYING on it — its position never moving — before its own stop
+    again: no start was taken, so the spot stays, and Play starts that
+    track. Only a position moving on the take is HQPlayer playing it."""
+    mgr, b = output
+    _refused_next(mgr, b, fake, monkeypatch)
+    with fake._lock:
+        fake.track, fake.state, fake.position = 2, int(PlaybackState.PLAYING), 0.0
+        fake._starting = 50
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), 10.0)
+    with fake._lock:
+        fake.state, fake.track, fake._starting = int(PlaybackState.STOPPED), 0, 0
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), 10.0)
+    assert b._spot is not None and (b._spot[0].track_id, b._spot[1]) == ("track-2", 0)
+    assert mgr._latest_status.get("resume") == {"index": 2, "position": 0}
+
 class HqpMeterPort:
     """HQPlayer's meter port beside a FakeHqp, as the live look of
     2026-10-22 showed it: a frame of sound every 50 ms while it plays an
