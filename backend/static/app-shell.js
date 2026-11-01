@@ -1338,11 +1338,16 @@
       // its transport waits meanwhile — a silence no build of ours explains,
       // or, for a stopped HQPlayer, the spot the play press resumes (a
       // paused one whose playlist was taken afresh is left stopped: never
-      // "paused").
+      // "paused"). Another app on the output (`source` external): the track
+      // its takeover cut, at the second Play takes the output back at.
       const b = data.building, r = data.resume;
+      const out = (data.output && data.output.label) || 'this output';
       const tag = b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
         : data.not_answering ? 'HQPlayer is not answering'
         : data.rebuilding ? 'HQPlayer is taking the queue again'
+        : data.source === 'external'
+          ? (r ? `Another app took ${out} — Play takes it back at ${fmtDuration(r.position)}`
+            : `Another app is playing through ${out} — Play takes it back`)
         : r && r.position > 0 && data.state === 'stopped'
           ? `Stopped at ${fmtDuration(r.position)} — Play resumes here` : '';
       this.hqpTag.hidden = !tag;

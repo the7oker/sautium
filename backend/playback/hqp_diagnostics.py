@@ -1205,7 +1205,7 @@ def _v(code: str, f: dict, **detail) -> dict:
         title = "Another controller is driving HQPlayer"
         sentence = ("HQPlayer's playlist holds entries Sautium did not put there — another app "
                     "(Roon?) or HQPlayer's own window is in control.")
-        nxt = "Stop playback in that app, then start the album or track again here."
+        nxt = "Press Play here to take HQPlayer back — that stops the other app's playback."
     elif code == "not_played":
         title = "HQPlayer could not play it"
         got = "fetched the stream" if mode in HTTP_MODES else "opened the file"

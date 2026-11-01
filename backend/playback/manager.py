@@ -815,9 +815,10 @@ class PlaybackManager:
         # the active session so a fully-listened album/queue lands in history
         # without a follow-up play. Only when the previous tick was PLAYING
         # the last slot — a manual stop mid-queue is left alone so resume
-        # doesn't fragment the session.
+        # doesn't fragment the session, and so is another app taking the
+        # output there (stopped at the spot it cut: Play takes it back).
         qlen = len(self.queue)
-        if (new_data["state"] == "stopped"
+        if (new_data["state"] == "stopped" and new_data.get("source") != "external"
                 and self._latest_status.get("state") == "playing"
                 and qlen > 0
                 and self._latest_status.get("track_index") == qlen):

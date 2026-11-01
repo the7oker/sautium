@@ -585,7 +585,15 @@ comes after the control port answers again — so neither can end the wait.
   Now Playing keeps that track with its diagnosis, Play starts it, Next and
   Previous move from it. Not HQPlayer's own advance, nor a stop while
   another controller holds HQPlayer (Roon, its own window), and a spot set
-  since stays.
+  since stays. Another controller that cuts the node's own listen leaves a
+  spot too (since 2026-11-01): the first tick that reads its entry, playing
+  or paused, after one that read the node's own — the take moved once since,
+  no Stop of the node's after it — sets the spot at that slot and the
+  second of the node's last own reading. Now Playing keeps that track,
+  stopped there and external ("Another app took HQPlayer — Play takes it
+  back at …"), and Play takes HQPlayer back at it. A listen a Stop of ours,
+  or HQPlayer moving on by itself, ended first was cut by no one: another
+  controller took an idle HQPlayer, and no spot is set.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
@@ -674,9 +682,13 @@ comes after the control port answers again — so neither can end the wait.
     controller's start whose Status names no URI (Roon's raw stream) is no
     longer the layout's slot until the canary. A gapless advance through
     our own playlist is read too, and stays ours: one PlaylistGet.
-  - **The play press** on a playlist that is no mirror: Play on a pause
-    only resumes (the tail behind the entry read is repaired as above);
-    Play from a stop, a tap, Next or Previous while it plays hand HQPlayer
+  - **The play press** on a playlist that is no mirror: Play on a pause of
+    an entry of ours only resumes (the tail behind the entry read is
+    repaired as above); Play from a stop, a tap, Next or Previous while it
+    plays — and a Play or a tap while another controller holds HQPlayer,
+    its entry playing or paused at the last tick, whatever the canary last
+    said (since 2026-11-01: never HQPlayer's own Play, nor a resume of that
+    entry) — hand HQPlayer
     the queue afresh — once — and start a track, in the background: the
     route answers at once, naming the track it will start (`starts`), and
     the status says "HQPlayer is taking the queue again". The queue lock is
@@ -1074,7 +1086,9 @@ and the manager reads the slot off the item: a mutation that committed between
 the two looks cannot make an index name another track. An entry that is not in
 the queue (a file played from HQPlayer's own GUI, another controller) is
 external playback (slot 0) from its first tick: no listen, no Last.fm call, no
-DSP sample, the benchmark holds back, and the listen that was open ends there.
+DSP sample, the benchmark holds back, and the listen that was open ends there —
+cut by another controller, it leaves its spot, which the status names instead
+(the spot, above; on a DLNA renderer the same, since 2026-11-01).
 Two ticks give no verdict and are not emitted. One is the tick on which
 HQPlayer opens an entry: PLAYING at track 0 and length 0, with the URI already
 named; a listen opened there froze a length of 0. The other is an entry the
@@ -1420,7 +1434,7 @@ checked in this order — positive evidence before any absence of it:
 | `unreachable` | a command never reached HQPlayer (or the play gate's GetInfo got no answer) | start HQPlayer; an Embedded in trial mode stops every 30 minutes |
 | `played` | started — the meter's frames, or where none came `playing` with the position moving — on our entry (over http: its token was served) | — |
 | `too_slow` | it played, but past start-up `process_speed` < 1 on three ticks in a row (one dip plays through), or the output buffer drained while the input held (`input_fill` -1 = a file, no input buffer) | a lighter filter or modulator, a lower rate (the setting is named) |
-| `external` | HQPlayer plays an entry Sautium did not put there | stop the other controller (Roon?), play again here |
+| `external` | HQPlayer plays an entry Sautium did not put there | Play here takes HQPlayer back — that stops the other controller (Roon?) |
 | `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
 | `no_fetch` | an http hand-over HQPlayer never requested (none from the hand-over to 5 s after Play) | same LAN, the firewall for the media port, the Docker forward — host and port named |
 | `rejected` | PlaylistAdd or Play refused (HQPlayer's words quoted; "Empty transport" = nothing was taken), or the expected entry missing from its playlist | the file must be readable here; a copy in HQPlayer's library: Rescan it |
