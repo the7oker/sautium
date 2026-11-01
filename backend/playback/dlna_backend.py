@@ -363,6 +363,9 @@ class DlnaBackend(PlayerBackend):
         self._loading = False
         self._load_lock = asyncio.Lock()
         self._closed = False
+        # Why the last word this thread asked for was refused here, before
+        # anything was sent (refusal)
+        self._local = threading.local()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -398,6 +401,12 @@ class DlnaBackend(PlayerBackend):
     def capabilities(self) -> Capabilities:
         return Capabilities(volume=True, volume_kind="percent", seek=True,
                             gapless=False)
+
+    def refusal(self) -> str:
+        """Why this thread's last word was refused before anything was sent
+        (a Seek while another controller holds the renderer), said once."""
+        words, self._local.refusal = getattr(self._local, "refusal", None), None
+        return words or ""
 
     def healthy(self) -> bool:
         """Battery DAPs and phones drop off the network in deep sleep —
@@ -641,6 +650,14 @@ class DlnaBackend(PlayerBackend):
             # Another controller holds it: its state is said, and moves nothing
             self._emit_now()
             return
+        if self._parked is not None:
+            # A play waiting for its slot's stream, nothing of ours loaded:
+            # what the renderer still plays of ours moves nothing, and another
+            # controller taking it meanwhile is the newer word (_taken_by_another)
+            cur = getattr(self._dmr, "current_track_uri", None)
+            if cur and cur not in self._handed:
+                self._taken_by_another()
+            return
         if self._current_url is None:
             return
         if self._loading:
@@ -849,11 +866,18 @@ class DlnaBackend(PlayerBackend):
         the spot stays at the slot and its last own second, Now Playing names
         its track saying another app took the renderer (_emit_now), and Play
         loads it there; erased as any spot is, with its item or once a start
-        from it is taken. Taken from a stop, no listen was cut: no spot. Its
-        callers end the position poll. Runs on the dlna-loop."""
+        from it is taken. Taken from a stop, no listen was cut: no spot. A
+        play that waited for its slot's stream (_parked) is over: the other
+        controller's word is newer — its track and second are the spot, as a
+        Stop leaves them. Its callers end the position poll. Runs on the
+        dlna-loop."""
         logger.info("another controller took %s — slot %d let go at %.0f s",
                     self.label, self._index, self._position)
-        if self._said in ("playing", "paused"):
+        parked, self._parked = self._parked, None
+        slot = self._queue.index_of(parked[0]) if parked is not None else None
+        if slot is not None:
+            self._index, self._resume = slot, parked[1]
+        elif self._said in ("playing", "paused"):
             self._resume = self._position
         self._held_item = self._queue.item_at(self._index)
         self._external = True
@@ -1827,8 +1851,12 @@ class DlnaBackend(PlayerBackend):
             # answers it leaves no spot behind (_lose) — said once taken, so
             # one the renderer refuses never reads as a stop of the listen.
             # No retry: a slow refusal and its retry could outlast the
-            # command's window, read as the renderer gone
-            self._resume = self._seek_on_start = self._parked = self._seek_due = None
+            # command's window, read as the renderer gone. While another
+            # controller holds it the Stop is of its playback: the spot its
+            # takeover left stays, as on HQPlayer
+            self._seek_on_start = self._parked = self._seek_due = None
+            if not self._external:
+                self._resume = None
             self._said = "stopped"
             await self._avt("Stop")
             self._emit_now("stopped")
@@ -1846,11 +1874,15 @@ class DlnaBackend(PlayerBackend):
         return self._call_async(self._load_and_play(index))
 
     def seek(self, seconds: int) -> bool:
-        if self._current_url is None and (self._resume is not None or self._parked is not None
-                                          or self._external):
-            # A carried-over spot, a slot waiting for its stream, another
-            # controller's playback — nothing of ours loaded: the start goes
-            # to the new second (a Seek now finds no media of ours)
+        if self._external and self._resume is None and self._parked is None:
+            # Another controller holds the renderer and no listen of ours was
+            # cut: nothing of ours to seek in, and its stream is not ours to move
+            self._local.refusal = f"another app is playing through {self.label} — Play takes it back"
+            return False
+        if self._current_url is None and (self._resume is not None or self._parked is not None):
+            # A carried-over spot, a slot waiting for its stream, the spot
+            # another controller's takeover left — nothing of ours loaded:
+            # the start goes to the new second (a Seek now finds no media)
             self._resume = self._position = float(seconds)
             if self._parked is not None:
                 self._parked = (self._parked[0], float(seconds))

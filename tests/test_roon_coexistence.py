@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_hqp_backend import (_QUESTIONS, _album, _attach, _queue_stays_in_memory,  # noqa: E402,F401
                               _wait, fake, listens)
 from test_dlna_backend import (_gena_port, _on_renderer, _playing_at, _seconds, heard,  # noqa: E402,F401
-                               manager, nodes, proxy, quality, renderers, track, wait_for)
+                               manager, nodes, proxy, quality, renderers, streamed, track, wait_for)
 
 from hqplayer_client import PlaybackState  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
@@ -609,3 +609,101 @@ def test_b_another_controller_taking_a_stopped_renderer_leaves_no_spot(tmp_path,
     wait_for(lambda: r.state == "PLAYING" and "raat://" not in r.uri and n.last.state == "playing"
              and n.last.queue_index == 1, timeout=10, what="slot 1 playing again")
     assert "Seek" not in _sent(r, mark)
+
+
+def test_b_a_play_waiting_for_its_stream_ends_when_another_controller_takes_the_renderer(tmp_path, proxy,
+                                                                                         renderers, nodes,
+                                                                                         quality):
+    """A tap waits for its slot's stream (loading, the renderer still on the
+    track before); another controller takes the renderer meanwhile: its word
+    is newer — the wait ends, its track and second the spot, external — and
+    the stream's landing sends the renderer nothing."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    waiting = n.queue.item_at(2)
+    waiting.play = {"kind": "pending"}
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 2, what="waiting on slot 2")
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    mark = len(r.calls)
+    st = n.last
+    waiting.play = streamed(proxy, 2, cover_url="").source
+    n.backend.slot_ready(2)
+    time.sleep(1.0)
+    _observed("B-park", status=(st.state, st.queue_index, st.extra.get("resume")), node_sent=_sent(r, mark))
+    assert (st.state, st.queue_index, st.extra.get("resume")) == ("stopped", 2, {"index": 2, "position": 0.0})
+    assert _sent(r, mark) == [] and "raat://" in r.uri
+
+
+def test_b_a_queue_edit_while_another_controller_holds_the_renderer_moves_its_spot_and_arms_nothing(
+        tmp_path, proxy, renderers, nodes, quality):
+    """The spot another controller's takeover left follows its track through
+    a queue edit — a slot inserted before it moves it one on — and goes with
+    it; the renderer is sent nothing, no next armed into what it plays."""
+    r = renderers()
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, i, seconds=60.0) for i in (1, 2, 3)])
+    n = nodes(q, r)
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 2 and n.last.position >= 3,
+             timeout=15, what="slot 2 playing")
+    r.taken_by_another("playing")
+    wait_for(lambda: (n.last.extra.get("resume") or {}).get("index") == 2, timeout=5, what="the spot")
+    mark = len(r.calls)
+    q.insert_after(0, [track(tmp_path, 4, seconds=60.0)])
+    n.backend.queue_changed("insert")
+    wait_for(lambda: (n.last.extra.get("resume") or {}).get("index") == 3, timeout=5, what="the spot moved")
+    q.remove(3)
+    n.backend.queue_changed("remove")
+    wait_for(lambda: n.last.extra.get("resume") is None and n.last.queue_index == 0, timeout=5,
+             what="the spot gone with its track")
+    _observed("B-edit", node_sent=_sent(r, mark), status=(n.last.state, n.last.queue_index))
+    assert _sent(r, mark) == [] and n.last.extra.get("source") == "external"
+
+
+def test_b_a_replace_without_play_while_another_controller_holds_the_renderer_sends_it_nothing(
+        tmp_path, proxy, renderers, nodes, quality):
+    """A new queue put together without playing it — a curation act — while
+    another controller holds the renderer: nothing is sent to it, the spot
+    goes with the queue it was in, and Play then loads the new queue's
+    head."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("resume") is not None, timeout=5, what="the spot")
+    mark = len(r.calls)
+    n.queue.replace([track(tmp_path, 5, seconds=60.0), track(tmp_path, 6, seconds=60.0)])
+    n.backend.queue_changed("replace", play=False)
+    wait_for(lambda: n.last.extra.get("resume") is None and n.last.queue_index == 0, timeout=5,
+             what="the spot gone")
+    assert _sent(r, mark) == [] and "raat://" in r.uri
+    assert n.backend.play()
+    wait_for(lambda: r.state == "PLAYING" and "raat://" not in r.uri and n.last.state == "playing"
+             and n.last.queue_index == 1, timeout=10, what="the new queue's head")
+    assert n.last.extra.get("source") is None
+
+
+def test_b_a_seek_or_a_stop_while_another_controller_holds_the_renderer(tmp_path, proxy, renderers, nodes,
+                                                                        quality):
+    """While another controller holds the renderer, a Seek moves the spot
+    its takeover left — nothing sent — and a Stop goes to what it plays but
+    leaves the spot, as on HQPlayer. With no spot (the node had stopped) a
+    Seek is refused in words: nothing of ours to seek in."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("resume") is not None, timeout=5, what="the spot")
+    mark = len(r.calls)
+    assert n.backend.seek(20)
+    assert n.last.extra.get("resume") == {"index": 1, "position": 20.0} and _sent(r, mark) == []
+    assert n.backend.stop()
+    wait_for(lambda: r.state == "STOPPED", timeout=5, what="the other controller's playback stopped")
+    assert _sent(r, mark) == ["Stop"] and n.last.extra.get("resume") == {"index": 1, "position": 20.0}
+    # Taken from the node's own Stop: no spot, and a Seek is refused
+    r2, n2 = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    assert n2.backend.stop()
+    wait_for(lambda: n2.last.state == "stopped" and r2.state == "STOPPED", timeout=5, what="stopped")
+    r2.taken_by_another("playing")
+    wait_for(lambda: n2.last.extra.get("source") == "external", timeout=5, what="external")
+    mark2 = len(r2.calls)
+    assert not n2.backend.seek(20)
+    assert "another app is playing through" in n2.backend.refusal() and _sent(r2, mark2) == []
+    assert n2.last.extra.get("resume") is None
