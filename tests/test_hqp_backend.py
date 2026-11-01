@@ -2112,6 +2112,33 @@ def test_hqplayers_own_advance_into_a_refused_rate_leaves_the_spot_and_play_star
     assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
 
 
+
+@pytest.mark.parametrize("why", ["rule", "slow"])
+def test_a_spot_hqplayer_plays_after_all_is_spent(traced, fake, monkeypatch, tmp_path, why):
+    """HQPlayer's own advance whose rebuild outlasts its deadline while it
+    says stopped: judged before HQPlayer plays the entry — by the rate rule,
+    or not_played where no rule explains it — so the spot stays at it; then
+    HQPlayer plays it after all. The spot is spent at the first tick that
+    reads HQPlayer playing its item, as a start of the node's spends it: a
+    Pause and a Play then resume what plays, never restart it at the spot."""
+    if why == "slow":
+        monkeypatch.setattr(diag, "_rate_refused", lambda f, log=None: None)
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=0.5, log=False, refused=None, polls=6)
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert att.verdict["code"] in ("not_played", "rate_refused")
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2, 20.0)
+    assert _wait(lambda: traced._spot is None, 5.0), traced._spot
+    fake.takes_seek = True
+    with fake._lock:
+        fake.position = 120.0
+    assert traced.pause()
+    assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), 5.0)
+    n = len(fake.commands)
+    assert traced.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING), 10.0)
+    sent = [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")]
+    assert sent == ["Play"]
+
 class HqpMeterPort:
     """HQPlayer's meter port beside a FakeHqp, as the live look of
     2026-10-22 showed it: a frame of sound every 50 ms while it plays an

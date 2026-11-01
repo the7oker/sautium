@@ -2520,6 +2520,7 @@ class HqpBackend(PlayerBackend):
                             _notify_notices()
                         self._note_listen(status, playing, position, read_at, prev_at)
                         self._taken_over(playing)
+                        self._spot_played(status, playing)
                         self._last_tick = self._status_of(status, playing, position, length)
                         self._let_go(passed)
                         self._say(self._last_tick)
@@ -2988,6 +2989,21 @@ class HqpBackend(PlayerBackend):
                 self._spot, self._spot_gen = (park.item, park.second), self._spot_gen + 1
         logger.info("another controller took HQPlayer while slot %s waited for its stream — "
                     "Play starts it there", slot)
+
+    def _spot_played(self, status, playing: tuple) -> None:
+        """HQPlayer plays the spot's very item: a start taken after all — an
+        advance or a start of ours judged before HQPlayer played it (a build
+        that outlasted its window: _rests_on_its_start), a person's word in
+        its own window. The spot is spent, as a start of the node's spends
+        it: a Pause then a Play resumes what plays, never restarts the track
+        at the spot, and a stop later names what HQPlayer stopped on. Called
+        on the poller."""
+        if status.state != PlaybackState.PLAYING or playing[1] is None or playing[2]:
+            return
+        with self._spot_lock:
+            held = self._spot
+            if held is not None and held[0] is playing[1]:
+                self._spot, self._spot_gen = None, self._spot_gen + 1
 
     def _taken(self) -> bool:
         """Does another controller hold HQPlayer, as the last tick found it —

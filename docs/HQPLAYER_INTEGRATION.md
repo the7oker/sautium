@@ -574,7 +574,10 @@ comes after the control port answers again — so neither can end the wait.
   the start held, so a start dropped meanwhile puts none back. One
   HQPlayer answered past the build limit, given up on, is judged at
   HQPlayer's first answer since that names a slot (an opening tick names
-  none): playing or paused on its track, it was taken after all. A command refused,
+  none): playing or paused on its track, it was taken after all. And a tick
+  that reads HQPlayer playing the spot's very item spends it, whoever started
+  it (since 2026-11-01): an advance or a start judged before HQPlayer played
+  it, a person's word in its own window. A command refused,
   as busy or by HQPlayer, leaves it. Back on HQPlayer after another output,
   the slot the queue was on is a spot when the attach found HQPlayer
   stopped; one that plays keeps its own place. A start of the node's own
