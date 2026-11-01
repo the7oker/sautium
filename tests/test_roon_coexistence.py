@@ -13,8 +13,11 @@ what the renderer's AVTransport says then is guessed both ways too
 
 Each scenario prints one OBSERVED line — what the node did — for the record,
 whether or not it meets the design. Where the code
-of 9abe41c does not, the test is a strict xfail naming the finding (TODAY):
-the fix turns it into an XPASS, which fails until the mark goes."""
+does not yet, the test is a strict xfail naming the finding (TODAY): the fix
+turns it into an XPASS, which fails until the mark goes. A take that moved by
+no command of the node's is read against the playlist at that tick: Roon's
+entry is another controller's from its first tick whether or not Status
+names it."""
 
 import collections
 import json
@@ -34,16 +37,16 @@ from test_dlna_backend import (_gena_port, nodes, proxy, quality, renderers, tra
                                wait_for)
 
 from hqplayer_client import PlaybackState  # noqa: E402
+from playback import hqp_backend as hb  # noqa: E402
+from playback import hqp_diagnostics as diag  # noqa: E402
 from playback import tracker  # noqa: E402
 from playback.queue import CanonicalQueue  # noqa: E402
 
 
 PLAYING = int(PlaybackState.PLAYING)
 
-# (scenario, guess) -> the finding the code of 9abe41c meets there
+# (scenario, guess) -> the finding the code still meets there
 TODAY = {
-    ("A1", "bare"): "F1: an entry Status does not name is the layout's slot until the canary (30 ticks): "
-                    "Roon's track is a listen of slot 1",
     ("A2", "uri"): "F2: Play while another controller plays is a bare Play to HQPlayer (_press_play)",
     ("A2", "bare"): "F2: Play while another controller plays is a bare Play to HQPlayer (_press_play)",
     ("A3", "uri"): "F3: Play while another controller paused resumes its stream (_press_play)",
@@ -185,6 +188,34 @@ def test_a1_roon_starts_while_the_node_plays(request, fake, roon, listens, monke
         assert lastfm == ["update_now_playing"]
         assert mgr.queue.snapshot() == items
         assert (st["track_index"], st["source"]) == (0, "external")
+    finally:
+        b.shutdown()
+
+
+def test_a_natural_advance_is_read_against_the_playlist_and_stays_ours(fake, listens, monkeypatch):
+    """HQPlayer's own advance through our playlist — gapless, no stopped
+    tick between the two entries — moves its take with no command of the
+    node's: the playlist is read at that tick and found the queue's — the
+    slot after plays as ours, in step, nothing drifted. The canary's own turn
+    is out of the way, and the start's attempt closed before the advance."""
+    from playback import manager as manager_mod
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 10 ** 6)
+    monkeypatch.setattr(diag, "OBSERVE_S", 1.5)
+    mgr = _album(3)
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    b = _attach(mgr)
+    try:
+        assert b.select(1)
+        assert _wait(lambda: mgr._latest_status.get("track_index") == 1 and b._attempt is None
+                     and mgr._latest_status.get("state") == "playing", timeout=15)
+        n = len(fake.commands)
+        fake.end_now()
+        assert _wait(lambda: mgr._latest_status.get("track_index") == 2
+                     and mgr._latest_status.get("state") == "playing", timeout=20)
+        _observed("advance", reads=sum(1 for c, _ in fake.commands[n:] if c == "PlaylistGet"),
+                  mirror=b._mirror)
+        assert any(c == "PlaylistGet" for c, _ in fake.commands[n:]), "the moved take was not read"
+        assert b._mirror == "step" and mgr._latest_status.get("source") != "external"
     finally:
         b.shutdown()
 

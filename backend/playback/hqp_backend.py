@@ -780,6 +780,13 @@ STATUS_FAILURE_THRESHOLD = 5
 # HQPlayer reads (_playing).
 DRIFT_CHECK_EVERY = 30
 
+# The node's commands that make HQPlayer take an entry — a start, or a DSP
+# setting it may rebuild the transport for: a take that moved with none of
+# them sent since the tick before is read against the playlist at that tick
+# (_unexplained_take). Any other command moving it costs one read, never a
+# wrong verdict.
+_TAKES = diag.TRANSPORT | (diag.OWNER_COMMANDS - {"Stop", "Pause", "PlaylistClear"})
+
 # With the meter stream closed, a filter whose start takes seconds keeps
 # Status's position standing still until about a second past the output
 # delay HQPlayer reports, counted from the take's start — from the start
@@ -1109,6 +1116,12 @@ class HqpBackend(PlayerBackend):
         # The entry not ours (its URI, the queue's version) the canary last
         # judged at once (_foreign_in_step)
         self._foreign_judged: Optional[tuple] = None
+        # When the node last sent a command HQPlayer took that makes it take
+        # an entry (_TAKES), by the clock the poller's reads are stamped on;
+        # and a take that moved without one, read at every tick until the
+        # canary judged it (_unexplained_take)
+        self._took_at = 0.0
+        self._take_unread = False
         # Every URI this attachment handed HQPlayer since its last full mirror
         # (a clear: what it held before is gone): an entry it reads that is
         # one of them is ours at a switch away (_reads_any)
@@ -2327,10 +2340,12 @@ class HqpBackend(PlayerBackend):
                             info = hqp.get_info(wait=QUESTION_WAIT_S)
                             learned = bool(info)
                             self._info = info or self._info
+                    if status is not None and self._unexplained_take(status):
+                        self._take_unread = True
                     foreign = self._foreign_in_step(status) if status is not None else None
                     if status is not None and (self._verify_mirror
                                                or tick % DRIFT_CHECK_EVERY == 0
-                                               or foreign is not None):
+                                               or foreign is not None or self._take_unread):
                         _, version, pending = self._queue.view()
                         mirror = self._mirror_moves
                         hqp_playlist = hqp.get_playlist()
@@ -2347,7 +2362,7 @@ class HqpBackend(PlayerBackend):
                                 and self._queue.view()[1:] == (version, False)):
                             self._foreign_judged = foreign or self._foreign_judged
                             if self._judge_mirror(hqp_playlist, status, expect=mirror):
-                                self._verify_mirror = False
+                                self._verify_mirror = self._take_unread = False
                     # Stopped while a benchmark run's measured mode is
                     # unchecked: judged at this rest (hqp_benchmark.check_measured)
                     check_due = (status is not None and status.state == PlaybackState.STOPPED
@@ -2682,23 +2697,46 @@ class HqpBackend(PlayerBackend):
         None."""
         return self._rate_served
 
+    def _ends_ours(self, status) -> bool:
+        """Is this tick HQPlayer's own advance from an entry of ours: stopped,
+        its track_serial one more than the tick before, which played an entry
+        of ours to its last seconds with one after it?"""
+        before, playing = self._before or (None, None)
+        return not (before is None or playing is None or playing[1] is None or playing[2]
+                    or status.state != PlaybackState.STOPPED
+                    or before.state != PlaybackState.PLAYING
+                    or status.track_serial is None or before.track_serial is None
+                    or status.track_serial != before.track_serial + 1
+                    or not 1 <= before.track_index < before.tracks_total
+                    or before.length <= 0 or before.position < before.length - diag.ADVANCE_END_S)
+
+    def _unexplained_take(self, status) -> bool:
+        """Did HQPlayer's take move (its track_serial past the tick before's)
+        with no command of the node's that makes it take an entry sent since
+        that tick was asked for (_TAKES), and no advance of its own from an
+        entry of ours (_ends_ours)? Then its playlist is read at this tick:
+        another controller's start (Roon's) hands it an entry its Status may
+        not name, which the layout would read as the queue's slot until the
+        canary — a listen and a scrobble of a track that did not sound. It
+        reads, never assumes: a natural advance through our own playlist
+        reads as ours, at the cost of one PlaylistGet. Called on the
+        poller."""
+        before = self._before[0] if self._before is not None else None
+        return (before is not None and status.track_serial is not None
+                and before.track_serial is not None and status.track_serial > before.track_serial
+                and self._took_at <= self._before_at and not self._ends_ours(status))
+
     def _advance(self, status, read_at: float) -> Optional[diag.Attempt]:
         """HQPlayer's own advance as an attempt of its own (diag.advance):
         this tick stopped, its track_serial one more than the tick before,
         which played an entry of ours to its last seconds with one after it
-        — while no intent of ours is watched and no mutation or play press
-        runs, watched from `read_at`, when this tick's status was asked for.
-        On this machine its log is followed while the attempt waits
-        (diag.LogFollower). Called on the poller."""
-        before, playing = self._before or (None, None)
-        if (before is None or playing is None or playing[1] is None or playing[2]
-                or status.state != PlaybackState.STOPPED or before.state != PlaybackState.PLAYING
-                or status.track_serial is None or before.track_serial is None
-                or status.track_serial != before.track_serial + 1
-                or not 1 <= before.track_index < before.tracks_total
-                or before.length <= 0 or before.position < before.length - diag.ADVANCE_END_S
-                or self._pressed is not None or self._queue.view()[2]):
+        (_ends_ours) — while no intent of ours is watched and no mutation or
+        play press runs, watched from `read_at`, when this tick's status was
+        asked for. On this machine its log is followed while the attempt
+        waits (diag.LogFollower). Called on the poller."""
+        if not self._ends_ours(status) or self._pressed is not None or self._queue.view()[2]:
             return None
+        before, playing = self._before
         att = diag.advance(before.track_index, status.track_serial, before.output_delay, read_at)
         if self._mirror in ("step", "tail"):
             # The slot after the one it played, found by its item in the queue
@@ -3527,6 +3565,8 @@ class HqpBackend(PlayerBackend):
         sets the position's clock (_clocked), and where the attempt watched
         reads its position from (diag.Attempt.sought)."""
         mine = getattr(self._local, "attempt", None)
+        if outcome.command in _TAKES and not outcome.failed:
+            self._took_at = max(self._took_at, outcome.sent or outcome.ts)
         if outcome.command == "Seek" and not outcome.failed:
             self._seek_mark = (float(outcome.attributes.get("position") or 0), outcome.sent or outcome.ts,
                                mine)

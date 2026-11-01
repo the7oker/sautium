@@ -666,7 +666,14 @@ comes after the control port answers again — so neither can end the wait.
     the canary does (since 2026-10-13): another controller's, or one that is
     no longer the queue, is drifted before a tap can select into it — and so
     does the poller's first answer that reads an entry not ours while the
-    mirror is in step (once per entry and queue version).
+    mirror is in step (once per entry and queue version), and the first
+    whose take moved (its `track_serial` past the tick before's) with no
+    command of the node's sent since that makes HQPlayer take an entry — a
+    start, a DSP setting it may rebuild the transport for — and no advance
+    of its own from an entry of ours (since 2026-11-01): another
+    controller's start whose Status names no URI (Roon's raw stream) is no
+    longer the layout's slot until the canary. A gapless advance through
+    our own playlist is read too, and stays ours: one PlaylistGet.
   - **The play press** on a playlist that is no mirror: Play on a pause
     only resumes (the tail behind the entry read is repaired as above);
     Play from a stop, a tap, Next or Previous while it plays hand HQPlayer
@@ -1090,7 +1097,9 @@ tracked and scrobbled as the queued track at that index; and a queue holding a
 slot HQPlayer drops (one it cannot open) went untracked while the canary said
 drift. A build whose status names no entry, or a stream token of an earlier
 session, leaves the layout's slot standing while the playlist is the mirror —
-external (playing) or no slot (stopped) while it is not.
+external (playing) or no slot (stopped) while it is not; a take that moved
+with no command of the node's has the playlist read at that tick (the
+mirror's state, above — since 2026-11-01).
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last
