@@ -653,7 +653,11 @@ comes after the control port answers again — so neither can end the wait.
   moved the spot (sending nothing) leaves it the rest rule's on either. HQPlayer's own advance onto the next entry of ours,
   stopped on the same way, leaves it too, at that slot at 0 (since
   2026-11-01): an album boundary into a rate the output family refuses — a
-  44.1 kHz album, then a 96 kHz one — is the commonest road there. Only an
+  44.1 kHz album, then a 96 kHz one — is the commonest road there. An
+  advance closed on the refusal its log named can meet, last, the one
+  playing status at 0 s of a filter HQPlayer builds before it refuses: no
+  play, and the spot is set there all the same (since 2026-11-01) — a
+  position moving on spends it, as above. Only an
   entry of ours in a mirror in step or a tail mirror (the advance names its
   target only there); not a stop while another controller holds HQPlayer
   (Roon, its own window), and a spot set since stays. Another controller

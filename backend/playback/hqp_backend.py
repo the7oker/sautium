@@ -4702,22 +4702,29 @@ class HqpBackend(PlayerBackend):
         track with its diagnosis, Play starts it, Next and Previous move from
         it — erased as any spot is, with its item or once a start from it is
         taken. Only an entry of ours in an intact mirror (an advance aims at
-        none elsewhere: _advance), only while HQPlayer still rests (not once
-        anything plays again — the person's word in its own window, another
-        controller, whose takeover leaves its own spot: _note_listen), and a
-        spot set since stays. Called on the poller."""
+        none elsewhere: _advance), only while HQPlayer still rests — stopped,
+        or saying it plays that very entry: the one PLAYING answer of a
+        filter it builds before it refuses, which an advance closed on the
+        refusal its log named can meet last, no play, as _spot_played reads
+        one (a position moving on spends the spot) — not once anything else
+        plays (the person's word in its own window, another controller, whose
+        takeover leaves its own spot: _note_listen), and a spot set since
+        stays. Called on the poller."""
         item, second = att.target if att.target is not None else (None, 0.0)
         last = self._last_tick
-        if (item is None or last is None or last.state != "stopped"
-                or last.extra.get("source") == "external" or self._queue.index_of(item) is None):
+        rests = last is not None and (last.state == "stopped"
+                                      or (last.state == "playing" and last.item is item))
+        if (item is None or not rests or last.extra.get("source") == "external"
+                or self._queue.index_of(item) is None):
             return
         with self._spot_lock:
             if self._spot is not None:
                 return
             self._spot, self._spot_gen = (item, int(second)), self._spot_gen + 1
             self._rest_gen, self._rest_left = self._spot_gen, time.time()
-        logger.info("HQPlayer stopped on the start of slot %d by itself — Play starts it again",
-                    self._queue.index_of(item))
+        logger.info("HQPlayer did not play the start of slot %d (%s) — the spot stays there, Play starts it again",
+                    self._queue.index_of(item), att.verdict["code"])
+        self.poke()
 
     def _attach_log(self, att: diag.Attempt, uri: Optional[str]) -> None:
         source = diag.log_source(self._link.host, self._info)

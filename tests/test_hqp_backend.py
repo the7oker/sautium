@@ -2411,6 +2411,52 @@ def test_hqplayers_own_advance_into_a_refused_rate_leaves_the_spot_and_play_star
     assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
 
 
+@pytest.mark.parametrize("close_meets", ["its playing answer", "the stop", "another entry's start"])
+def test_an_advance_closed_on_a_filter_hqplayer_built_and_refused_leaves_the_spot(traced, fake, monkeypatch,
+                                                                                  tmp_path, close_meets):
+    """HQPlayer's own advance onto our next entry, whose filter it builds —
+    one playing status at 0 s — and then refuses: "lInRate > lOutRate" in
+    its log, followed since the stop, closes the advance at the poller's
+    next pass, which can meet that playing status before HQPlayer's own stop
+    on no entry. Either way the spot stays at that slot at 0, and Play
+    starts it — not HQPlayer's first entry, where Desktop's own stop rests.
+    One that meets HQPlayer starting another entry (the person's word in its
+    own window) finds it resting on nothing of the advance's: no spot."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    building = (int(PlaybackState.PLAYING), 2, 10 ** 6)
+    meanwhile = {"its playing answer": [], "the stop": [(int(PlaybackState.STOPPED), 0, 0)],
+                 "another entry's start": [(int(PlaybackState.PLAYING), 1, 10 ** 6)]}[close_meets]
+    for state, track, starting in [building, *meanwhile]:
+        with fake._lock:
+            fake._advancing = None
+            fake.state, fake.track, fake.position, fake._starting = state, track, 0.0, starting
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n, 2), 10.0)
+    with open(tmp_path / "HQPlayer9Desktop.log", "a", encoding="utf-8") as f:
+        f.write("I 2001/05/06 10:00:09 Rate: 48000, block size: 8192, frame size: 32768\n"
+                "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate\n")
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
+    assert att.facts["ticks"][-1]["state"] == ("stopped" if close_meets == "the stop" else "playing")
+    if close_meets == "another entry's start":
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)     # the close's pass, the rest's, is over
+        assert traced._spot is None
+        return
+    with fake._lock:
+        fake.state, fake.track, fake._starting = int(PlaybackState.STOPPED), 0, 0
+    assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 10.0)
+    st = traced._last_tick
+    assert (st.state, st.queue_index, st.item.track_id) == ("stopped", 2, "track-2")
+    with fake._lock:
+        fake.length = 300
+    n = len(fake.commands)
+    assert traced.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2, 8.0)
+    assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
+
+
 
 @pytest.mark.parametrize("why", ["rule", "slow"])
 def test_a_spot_hqplayer_plays_after_all_is_spent(traced, fake, monkeypatch, tmp_path, why):
