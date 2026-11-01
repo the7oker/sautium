@@ -3586,9 +3586,11 @@ def _radio_refill_observer(new_data: dict, item) -> None:
     queue, append another drifting batch (owned + a few streamed phantoms,
     seeded from the current track) so radio runs on. Registered as a
     manager status observer — runs on every status tick. Background —
-    the phantom resolve+buffer is slow; one fill at a time."""
+    the phantom resolve+buffer is slow; one fill at a time. Not while
+    another app holds the output (`source` external): nothing of the queue
+    plays, the tick names at most the spot its takeover left."""
     global _radio_refilling
-    if not manager.radio_mode or _radio_refilling:
+    if not manager.radio_mode or _radio_refilling or new_data.get("source") == "external":
         return
     idx = new_data.get("track_index")
     qlen = len(manager.queue)

@@ -592,13 +592,24 @@ comes after the control port answers again — so neither can end the wait.
   (Roon, its own window), and a spot set since stays. Another controller
   that cuts the node's own listen leaves a spot too (since 2026-11-01): the
   first tick that reads its entry, playing or paused, after one that read
-  the node's own — the take moved once since,
-  no Stop of the node's after it — sets the spot at that slot and the
-  second of the node's last own reading. Now Playing keeps that track,
-  stopped there and external ("Another app took HQPlayer — Play takes it
-  back at …"), and Play takes HQPlayer back at it. A listen a Stop of ours,
-  or HQPlayer moving on by itself, ended first was cut by no one: another
-  controller took an idle HQPlayer, and no spot is set.
+  the node's own — named by what its entry is, not by its place alone — the
+  take moved once since, no Stop of the node's after it, sets the spot at
+  that slot and the second of the node's last own reading. Now Playing keeps
+  that track, stopped there and external ("Another app took HQPlayer — Play
+  takes it back at …"), and Play takes HQPlayer back at it; a Seek moves it,
+  nothing sent, and Next and Previous move it as at any stopped spot. A
+  listen a Stop of ours, or HQPlayer moving on by itself, ended first was
+  cut by no one, nor one read in its last seconds (HQPlayer's own advance,
+  or near enough): another controller took an idle HQPlayer, no spot is set,
+  and while it holds HQPlayer a Seek, Next or Previous is refused in words —
+  nothing of the queue's to move, and HQPlayer's own would move that
+  controller's stream. A start that waited for its stream (below) when
+  another controller took HQPlayer is over — that controller's word is newer
+  — and its track and second are the spot. While another controller holds
+  HQPlayer, an append (a filler's, the radio's — which refills nothing from
+  that spot — a person's) and a new queue put together without playing it
+  are the queue's alone: nothing goes into that controller's playlist; the
+  press that takes HQPlayer back hands the queue over.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
@@ -1118,7 +1129,8 @@ drift. A build whose status names no entry, or a stream token of an earlier
 session, leaves the layout's slot standing while the playlist is the mirror —
 external (playing) or no slot (stopped) while it is not; a take that moved
 with no command of the node's has the playlist read at that tick (the
-mirror's state, above — since 2026-11-01). A DLNA renderer has no playlist to
+mirror's state, above — since 2026-11-01), and until that read stands — a
+queue edit in flight holds it — such an entry gets no verdict. A DLNA renderer has no playlist to
 read: a URI it names, on the poll or in an event, that is none this
 attachment handed it — no CurrentURI, no NextURI — is another controller's
 (since 2026-11-01): external at slot 0, the node's load let go, no track end

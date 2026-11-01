@@ -924,14 +924,17 @@ class _Start:
 class _Parked:
     """A start that waits in the node for its stream's bytes (_park): its
     track by identity, the second it starts at, the intent it serves — a
-    newer one that supersedes it lets it go — the stream's token, and
-    whether it goes as a play press: HQPlayer holds the entry in a shape it
-    must be handed again in, and only a hand-over afresh replaces it."""
+    newer one that supersedes it lets it go — the stream's token, whether
+    it goes as a play press: HQPlayer holds the entry in a shape it must be
+    handed again in, and only a hand-over afresh replaces it — and whether
+    it was asked while another controller held HQPlayer (a takeover then is
+    no newer word than it: _taken_over)."""
     item: QueueItem
     second: int
     start: Item
     token: str
     press: bool = False
+    under_another: bool = False
 
 
 class _Words:
@@ -1691,7 +1694,7 @@ class HqpBackend(PlayerBackend):
         with self._spot_lock:
             if self._parked is not None and self._parked.start.n > start.n:
                 return True         # a newer start waits already: this one is over
-            self._parked = _Parked(item, int(second), start, token)
+            self._parked = _Parked(item, int(second), start, token, under_another=self._taken())
         proxy = streaming_service.get_proxy()
         proxy.ensure_buffered([token])
         logger.info("HQPlayer: slot %s waits for its stream (%s — %s)",
@@ -2516,6 +2519,7 @@ class HqpBackend(PlayerBackend):
                                 and diag.note_playing(playing[0], self._queue.generation)):
                             _notify_notices()
                         self._note_listen(status, playing, position, read_at, prev_at)
+                        self._taken_over(playing)
                         self._last_tick = self._status_of(status, playing, position, length)
                         self._let_go(passed)
                         self._say(self._last_tick)
@@ -2917,33 +2921,40 @@ class HqpBackend(PlayerBackend):
     def _note_listen(self, status, playing: tuple, position: float, read_at: float,
                      prev_at: float) -> None:
         """The node's own listen, and another controller cutting it. A tick
-        that finds HQPlayer playing or pausing a slot of ours is the listen's
-        latest reading: its item, the second handed on, the take. The first
-        tick after it that finds HQPlayer playing or pausing an entry not
-        ours judges it, once: another controller's start cut the listen —
-        the take moved once since that reading, with no Stop of the node's
-        sent after it (where HQPlayer names no take, the tick before was the
-        listen's own) — and the spot stays at that slot and second: Now
-        Playing names its track, saying another app took HQPlayer
-        (_status_of), Play takes HQPlayer back there, and it is erased as any
-        spot is, with its item or once a start from it is taken. A listen
-        that ended before cut nothing — a Stop of ours ended it, and so did
-        HQPlayer moving on by itself first (the other controller's start then
-        two takes past the listen's); a verdict that turned on the same take
-        is no start of anyone's. Another controller then took an idle
-        HQPlayer: no spot, and Play starts as from a stop. Ticks between that
-        find neither — the other controller's Stop on our entry, its cleared
-        playlist — leave the listen as it was. Called on the poller."""
+        that finds HQPlayer playing or pausing a slot of ours — named by what
+        its entry is, never by its place alone: the layout's slot for an
+        entry nothing names may be another controller's stream — is the
+        listen's latest reading: its item, the second handed on, the take,
+        whether it is in its last seconds. The first tick after it that finds
+        HQPlayer playing or pausing an entry not ours judges it, once:
+        another controller's start cut the listen — the take moved once since
+        that reading, with no Stop of the node's sent after it (where
+        HQPlayer names no take, the tick before was the listen's own) — and
+        the spot stays at that slot and second: Now Playing names its track,
+        saying another app took HQPlayer (_status_of), Play takes HQPlayer
+        back there, and it is erased as any spot is, with its item or once a
+        start from it is taken. A listen that ended before cut nothing — a
+        Stop of ours ended it, and so did HQPlayer moving on by itself first
+        (the other controller's start then two takes past the listen's), and
+        one read in its last seconds is HQPlayer's own advance (onto an entry
+        the queue no longer names, read as not ours) or close enough to it; a
+        verdict that turned on the same take is no start of anyone's. Another
+        controller then took an idle HQPlayer: no spot, and Play starts as
+        from a stop. Ticks between that find neither — the other controller's
+        Stop on our entry, its cleared playlist — leave the listen as it was.
+        Called on the poller."""
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
         if busy and playing[0] and playing[1] is not None and not playing[2]:
-            self._listen = (playing[1], position, status.track_serial, read_at)
+            if self._readings(status.uri):
+                near_end = status.length > 0 and status.position >= status.length - diag.ADVANCE_END_S
+                self._listen = (playing[1], position, status.track_serial, read_at, near_end)
             return
         listen = self._listen
         if listen is None or not playing[2]:
             return
         self._listen = None
-        item, second, take, at = listen
-        if self._stopped_at > at:
+        item, second, take, at, near_end = listen
+        if self._stopped_at > at or near_end:
             return
         if take is not None and status.track_serial is not None:
             if status.track_serial != take + 1:
@@ -2956,6 +2967,27 @@ class HqpBackend(PlayerBackend):
         self._set_spot(item, int(second))
         logger.info("another controller took HQPlayer at slot %d, %d s — Play takes it back there",
                     slot, int(second))
+
+    def _taken_over(self, playing: tuple) -> None:
+        """A start that waits for its stream (_park) when another controller
+        takes HQPlayer — a tick that reads its entry, playing or paused: that
+        controller's word is the newer one. The wait ends, and its track and
+        second are the spot, as a Stop leaves them (stop): Play takes
+        HQPlayer back there. One asked while another controller already held
+        HQPlayer is the newer word itself, and goes once its bytes land.
+        Called on the poller."""
+        if not playing[2]:
+            return
+        with self._spot_lock:
+            park = self._parked
+            if park is None or park.under_another:
+                return
+            self._parked = None
+            slot = self._queue.index_of(park.item)
+            if slot is not None:
+                self._spot, self._spot_gen = (park.item, park.second), self._spot_gen + 1
+        logger.info("another controller took HQPlayer while slot %s waited for its stream — "
+                    "Play starts it there", slot)
 
     def _taken(self) -> bool:
         """Does another controller hold HQPlayer, as the last tick found it —
@@ -4338,8 +4370,11 @@ class HqpBackend(PlayerBackend):
         (_leading) they move its target, counted from the newest one — the
         slot after or before that this HQPlayer holds, at its start: a start
         of their own (_press); at either end of the queue it stays. Stopped
-        at the spot, they only move it, as far: no command, no sound (at
-        either end of the queue it stays). Otherwise HQPlayer's own Next or
+        at the spot — the spot another controller's takeover left among
+        them — they only move it, as far: no command, no sound (at either end
+        of the queue it stays). While another controller holds HQPlayer and
+        no spot stands, nothing is sent, said in words: the queue has no
+        place to count from. Otherwise HQPlayer's own Next or
         Previous — onto the entry beside, the slot it holds beside — a start
         taken that spends a spot. On a playlist that is no mirror the slot
         beside is started by a play press, and at either end of the queue
@@ -4383,6 +4418,12 @@ class HqpBackend(PlayerBackend):
                         self._spot_gen += 1
             self.poke()
             return True
+        if self._taken():
+            # Another controller holds HQPlayer and no spot stands: its own
+            # Next or Previous would move that controller's playlist, and the
+            # queue has no place to count from — said, nothing sent
+            self._local.refusal = f"another app is playing through {self.label} — Play takes it back"
+            return False
         passing = self._passing
         if by < 0 and passing is not None:
             # The node's own removal plays out: HQPlayer's own Previous would
@@ -5155,6 +5196,20 @@ class HqpBackend(PlayerBackend):
         if self._held_seek(int(seconds)) or self._seek_pressed(int(seconds)):
             self.poke()
             return True
+        if self._taken():
+            # Another controller holds HQPlayer: its stream is not ours to
+            # move. The spot its takeover left goes to the new second — Play
+            # takes HQPlayer back there, nothing sent; with none there is
+            # nothing of ours to seek in
+            held = self._spot
+            if held is None or self._queue.index_of(held[0]) is None:
+                self._local.refusal = f"another app is playing through {self.label} — Play takes it back"
+                return False
+            with self._spot_lock:
+                if self._spot is held:
+                    self._spot, self._spot_gen = (held[0], int(seconds)), self._spot_gen + 1
+            self.poke()
+            return True
         ok = self._command("Seek", lambda h: h.seek(int(seconds)))
         self.poke()
         return ok
@@ -5525,7 +5580,10 @@ class HqpBackend(PlayerBackend):
         was handed: the canonical queue holds the old ones until the commit.
         The spot goes with its item when the queue is replaced, and stays
         when nothing commits. An empty queue is no replace — the manager
-        commits none — and HQPlayer is handed nothing."""
+        commits none — and HQPlayer is handed nothing. Put together without
+        `play` while another controller holds HQPlayer (_taken), the new
+        queue is the queue's alone: nothing sent, that controller's playback
+        left as it is — the press that takes HQPlayer back hands it over."""
         if not items:
             return []
         # Refused before it is numbered or watched: it supersedes nothing
@@ -5534,6 +5592,9 @@ class HqpBackend(PlayerBackend):
         layout = _Layout(items, self.gap)
         if items and not layout.handed:
             raise OutputRefused(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
+        if not play and self._taken():
+            self._drifted("another controller holds HQPlayer")
+            return list(items)
         uris = [self._uri_for(it) for it in layout.handed]
         att = (self._watch("replace", slot=1, uris=uris, items=list(layout.handed))
                if play and uris else None)
@@ -5632,9 +5693,12 @@ class HqpBackend(PlayerBackend):
         handed over (_queue_takes). With the mirror lost the append is the
         queue's alone: lost through a silence, HQPlayer gets the queue back
         when it answers again (_reconverge); lost through a refusal, or to a
-        play press under way, the press hands it over."""
+        play press under way, the press hands it over. So it is while another
+        controller holds HQPlayer (_taken): its playlist is not ours to add
+        to — HQPlayer would play our track inside its session — and the
+        press that takes HQPlayer back hands the whole queue over."""
         self._ways_in(items)
-        if self._mirror == "lost":
+        if self._mirror == "lost" or self._taken():
             return list(items)
         handed = _Layout(items, self.gap).handed
         uris = [self._uri_for(it) for it in handed]

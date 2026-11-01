@@ -1367,7 +1367,9 @@
       }
       if (this.timeTotal) this.timeTotal.textContent = data.length_formatted || '0:00';
       if (this.playPauseIcon) {
-        const playing = data.state === 'playing';
+        // Another app's playback (`source` external) offers Play: it takes
+        // the output back (player.js togglePlayPause)
+        const playing = data.state === 'playing' && data.source !== 'external';
         this.playPauseIcon.setAttribute('d',
           playing
             ? 'M9 5h4v20H9V5zm8 0h4v20h-4V5z'   // pause bars
@@ -1713,7 +1715,7 @@
 
       if (this.playPauseIcon) {
         this.playPauseIcon.setAttribute('d',
-          playing
+          playing && data.source !== 'external'
             ? 'M6 5h4v14H6V5zm8 0h4v14h-4V5z'   // pause bars
             : 'M8 5v14l11-7z');                  // play triangle
         const btn = this.playPauseIcon.closest('button');

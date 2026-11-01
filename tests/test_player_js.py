@@ -542,3 +542,93 @@ def test_the_transport_button_spins_while_a_start_is_in_flight_in_now_playing_an
     assert json.loads(proc.stdout) == [[True, True, False, False, True], [True, True, False, False, True],
                                        [False, False, True, True, True], [True, True, False, False, True],
                                        [False, False, True, True, True]]
+
+
+# Another app holding the output (`source` external): what plays is none of
+# the queue's, so the transport offers Play — the toggle sends play, and the
+# button of Now Playing and of the mini player draws the play triangle —
+# while its tag says "Play takes it back"
+
+_TOGGLE = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const sent = [], store = {};
+let onMessage = null;
+const window = {
+  addEventListener() {}, dispatchEvent() {}, reportPlaybackResult: async () => false,
+  sseStream: (url, fn) => { onMessage = fn; return { abort() {} }; },
+};
+vm.runInNewContext(fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'), {
+  window, crypto: require('node:crypto').webcrypto, CustomEvent: class {},
+  document: { readyState: 'complete', visibilityState: 'visible', addEventListener() {}, dispatchEvent() {} },
+  fetch: async (url) => { sent.push(url); return { ok: true, status: 200, json: async () => ({ ok: true, tracks: [] }) }; },
+  sessionStorage: { getItem: k => store[k] || null, setItem: (k, v) => { store[k] = v; } },
+  console: { warn() {}, log() {}, error() {} }, setTimeout, clearTimeout,
+});
+(async () => {
+  const out = [];
+  for (const status of JSON.parse(fs.readFileSync(0, 'utf8'))) {
+    onMessage({ data: JSON.stringify({ t: 'status', d: status }) });
+    await new Promise(r => setTimeout(r, 30));
+    sent.length = 0;
+    await window.togglePlayPause();
+    out.push(sent.filter(u => !u.startsWith('/api/player/playlist')));
+  }
+  process.stdout.write(JSON.stringify(out));
+})().catch(e => { process.stderr.write(String(e && e.stack)); process.exit(1); });
+"""
+
+_ICONS = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const shell = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
+const cut = (from, to) => {
+  const a = shell.indexOf(from), b = shell.indexOf(to, a);
+  if (a < 0 || b < 0) throw new Error('marker not found: ' + (a < 0 ? from : to));
+  return shell.slice(a, b);
+};
+const drawn = { np: null, mp: null };
+const icon = key => ({ setAttribute(k, v) { if (k === 'd') drawn[key] = v; },
+                       closest: () => ({ classList: { toggle() {} } }) });
+const el = () => ({ hidden: false, textContent: '', dataset: {}, setAttribute() {} });
+const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), timeCurrent: el(), timeTotal: el(), radioBtn: el(),
+             playPauseIcon: icon('np'), _paintProgress() {}, tryFetchDetail() {}, lastTrackKey: 'Song|Artist' };
+const mp = { el: el(), title: el(), artist: el(), playPauseIcon: icon('mp'), lastSongKey: 'Song|Album' };
+const ctx = { document: { body: { classList: { add() {}, remove() {} } } }, window: {} };
+vm.createContext(ctx);
+vm.runInContext([
+  cut('  function transportBusy(data) {', '\n  const sheet = {'),
+  cut('  function fmtDuration(seconds) {', '\n  function fmtDurationLong(seconds) {'),
+  'this.__np = { ' + cut('    onStatus(data) {', '\n    // One similar path for owned AND preview') + ' };',
+  'this.__mp = { ' + cut('    update(data) {', '\n    setCover(detail) {') + ' };',
+].join('\n'), ctx);
+const out = [];
+for (const status of JSON.parse(fs.readFileSync(0, 'utf8'))) {
+  ctx.__np.onStatus.call(np, status);
+  ctx.__mp.update.call(mp, status);
+  out.push([drawn.np.startsWith('M9 5v20'), drawn.mp.startsWith('M8 5v14'), np.hqpTag.textContent]);
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_the_transport_offers_play_while_another_app_holds_the_output():
+    """Another app plays through the output — with the spot its takeover
+    left (stopped) or without one (its own state, playing): the toggle sends
+    play, never pause, and both buttons draw Play; the tag says what Play
+    does. The node's own playback keeps Pause."""
+    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
+            "position_formatted": "0:00", "length_formatted": "5:00",
+            "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
+    statuses = [{**base, "state": "playing", "source": "external"},
+                {**base, "state": "stopped", "source": "external", "resume": {"index": 2, "position": 83}},
+                {**base, "state": "playing"}]
+    proc = subprocess.run([NODE, "-e", _TOGGLE, "--", str(REPO_ROOT / "backend" / "static" / "player.js")],
+                          input=json.dumps(statuses).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert json.loads(proc.stdout) == [["/api/player/play"], ["/api/player/play"], ["/api/player/pause"]]
+    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
+                          input=json.dumps(statuses).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert json.loads(proc.stdout) == [
+        [True, True, "Another app is playing through HQPlayer Desktop — Play takes it back"],
+        [True, True, "Another app took HQPlayer Desktop — Play takes it back at 1:23"],
+        [False, False, ""]]

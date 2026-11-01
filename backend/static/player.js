@@ -32,6 +32,9 @@
 (() => {
   // --- State -----------------------------------------------------------
   let currentState = 'disconnected';
+  // Another app holds the output (`source` external): what plays is none
+  // of the queue's, so the transport offers Play — it takes the output back
+  let currentSource = null;
   let lastPlaylistVersion = null;
   let _sseSource = null;
 
@@ -256,6 +259,7 @@
   async function processStatusEvent(data, seq) {
     if (seq !== _statusSeq) return;   // superseded while queued — the newest speaks
     currentState = data.state;
+    currentSource = data.source || null;
     if (data.ui_build) maybeReloadForUpdate(data.ui_build);
     // Browser-output renderer lifecycle: THIS tab renders audio only while
     // it holds the sessionStorage claim AND the backend output is browser.
@@ -377,7 +381,7 @@
     if (browserRenderer.active && currentState !== 'playing') {
       if (browserRenderer.resumeLocal()) return Promise.resolve();
     }
-    return playerCmd(currentState === 'playing' ? 'pause' : 'play');
+    return playerCmd(currentState === 'playing' && currentSource !== 'external' ? 'pause' : 'play');
   }
 
   // ---- Browser output renderer ("this device") ---------------------------
