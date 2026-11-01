@@ -1107,7 +1107,9 @@ the queue (a file played from HQPlayer's own GUI, another controller) is
 external playback (slot 0) from its first tick: no listen, no Last.fm call, no
 DSP sample, the benchmark holds back, and the listen that was open ends there —
 cut by another controller, it leaves its spot, which the status names instead
-(the spot, above; on a DLNA renderer the same, since 2026-11-01).
+(the spot, above; on a DLNA renderer the same spot, which Play loads there and a Seek
+moves — though Next and Previous there load and play their slot, as on a renderer
+they always do — since 2026-11-01).
 Two ticks give no verdict and are not emitted. One is the tick on which
 HQPlayer opens an entry: PLAYING at track 0 and length 0, with the URI already
 named; a listen opened there froze a length of 0. The other is an entry the
@@ -1138,7 +1140,10 @@ read: a URI it names, on the poll or in an event, that is none this
 attachment handed it — no CurrentURI, no NextURI — is another controller's
 (since 2026-11-01): external at slot 0, the node's load let go, no track end
 and no advance of the queue for it, nothing sent to the renderer; a stale URI
-of the node's own, named for a tick after its own load, stays its own.
+of the node's own, named for a tick after its own load, stays its own. A play waiting for
+its slot's stream ends at such a takeover — a URI the renderer moved to after the wait
+began, other than its track's or its transport's as the wait began, read in an event or
+asked of it at the stream's landing: what it held before the person's word is none.
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last

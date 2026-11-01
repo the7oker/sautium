@@ -328,6 +328,11 @@ class DlnaBackend(PlayerBackend):
         # (playback.substitute): (its item — the slot follows it through
         # queue edits — and the second it starts at); slot_ready starts it.
         self._parked: Optional[tuple[QueueItem, float]] = None
+        # What the renderer named as that wait began — its track's URI and
+        # its transport's, as it last said them: only another URI, none this
+        # attachment handed, is another controller taking it meanwhile
+        # (_moved_on) — what it held before was there before the person's word
+        self._park_uris: frozenset = frozenset()
         # The state this instance last told the manager, or a Stop it has
         # decided: what a renderer that stops answering was doing, as far as
         # the node knows it — its own transport state is stale by then
@@ -462,6 +467,14 @@ class DlnaBackend(PlayerBackend):
         async def _parked_start():
             parked = self._parked
             if parked is None or self._queue.index_of(parked[0]) != index:
+                return
+            if not self._external:
+                # The decision point: a renderer whose events do not reach
+                # the node may have been taken during the wait — read once
+                cur = await self._renderer_uri()
+                if self._parked is parked and self._moved_on(cur):
+                    self._taken_by_another()
+            if self._parked is not parked:
                 return
             self._parked = None
             await self._load_and_play(index, start_at=parked[1])
@@ -652,10 +665,10 @@ class DlnaBackend(PlayerBackend):
             return
         if self._parked is not None:
             # A play waiting for its slot's stream, nothing of ours loaded:
-            # what the renderer still plays of ours moves nothing, and another
-            # controller taking it meanwhile is the newer word (_taken_by_another)
-            cur = getattr(self._dmr, "current_track_uri", None)
-            if cur and cur not in self._handed:
+            # what the renderer held as the wait began moves nothing — its
+            # load sequence's own events neither — and another controller
+            # taking it meanwhile is the newer word (_taken_by_another)
+            if not self._loading and self._moved_on(getattr(self._dmr, "current_track_uri", None)):
                 self._taken_by_another()
             return
         if self._current_url is None:
@@ -852,6 +865,27 @@ class DlnaBackend(PlayerBackend):
             self._resume = self._wall_estimate()
         elif self._said in ("paused", "loading"):
             self._resume = self._position
+
+    def _moved_on(self, cur: Optional[str]) -> bool:
+        """Has the renderer, while a play of ours waits for its slot's
+        stream, moved to a URI (`cur`) it did not name as the wait began and
+        this attachment never handed — another controller taking it
+        meanwhile? Whatever it held before the person's word (another app
+        playing on, a stale URI of an idle device, one of ours from an
+        earlier attachment) is no takeover."""
+        return bool(cur) and cur not in self._park_uris and cur not in self._handed
+
+    async def _renderer_uri(self) -> Optional[str]:
+        """The URI the renderer names now, asked (GetPositionInfo): its
+        evented state may be unset or stale while it is stopped — what it
+        last said when it does not answer the question."""
+        action = self._dmr._action("AVT", "GetPositionInfo")
+        if action is not None:
+            try:
+                return (await action.async_call(InstanceID=0)).get("TrackURI") or None
+            except Exception as e:
+                logger.debug("the renderer's URI not read (%s) — taken as last said", e)
+        return getattr(self._dmr, "current_track_uri", None)
 
     def _taken_by_another(self) -> None:
         """Another controller took the renderer: it names a URI that is
@@ -1352,13 +1386,21 @@ class DlnaBackend(PlayerBackend):
         # `url_override` reuses the currently-playing stream's exact URL
         # (a seek must keep the format the track was dispatched in).
         # `start_at` (seconds) starts the slot mid-track: an Opus stream
-        # reloads from there, any other is sought once it plays.
+        # reloads from there, any other is sought once it plays. While
+        # another controller holds the renderer the slot is adopted for the
+        # load's own "loading" only: a hand-over the renderer refuses leaves
+        # the spot its takeover left where it was.
         async with self._load_lock:
             self._loading = True
+            held = (self._index, self._position, self._length) if self._external else None
             try:
                 return await self._load_seq(index, play=play, ss=ss,
                                             url_override=url_override,
                                             start_at=start_at)
+            except Exception:
+                if held is not None and self._external:
+                    self._index, self._position, self._length = held
+                raise
             finally:
                 self._loading = False
 
@@ -1470,6 +1512,8 @@ class DlnaBackend(PlayerBackend):
                 # meanwhile keeps or moves it
                 self._resume = start_at if start_at > 0 else None
                 self._parked = (item, start_at)
+                self._park_uris = frozenset(u for u in (getattr(self._dmr, "current_track_uri", None),
+                                                        getattr(self._dmr, "av_transport_uri", None)) if u)
                 self._seek_due = None
                 self._position, self._length = start_at, item.duration_seconds or 0.0
                 self._error = None
@@ -1936,9 +1980,10 @@ class DlnaBackend(PlayerBackend):
                 self._call_async(self._load_and_play(1))
             elif self._external:
                 # Another controller holds the renderer: nothing of ours plays
-                # there to stop, and the spot went with the queue it was in
+                # there to stop, and the spot — or a play waiting for its
+                # stream — went with the queue it was in
                 async def _drop():
-                    self._resume = self._held_item = None
+                    self._resume = self._held_item = self._parked = None
                     self._index = 0
                     self._emit_now()
                 self._call(_drop())

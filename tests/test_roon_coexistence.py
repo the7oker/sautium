@@ -1005,3 +1005,116 @@ def test_b_a_seek_or_a_stop_while_another_controller_holds_the_renderer(tmp_path
     assert not n2.backend.seek(20)
     assert "another app is playing through" in n2.backend.refusal() and _sent(r2, mark2) == []
     assert n2.last.extra.get("resume") is None
+
+
+@pytest.mark.parametrize("held", ["another_app", "stale", "ours_before"])
+def test_b_a_play_that_waits_for_its_stream_goes_whatever_the_renderer_held_before_it(tmp_path, proxy, renderers,
+                                                                                       nodes, quality, held):
+    """On a fresh attachment the person presses Play and the first slot waits
+    for its stream. What the renderer held before that word — another app
+    playing on, an idle device's stale URI, one of the node's own from an
+    earlier attachment — is no takeover, whatever event comes meanwhile (the
+    node's own disarm of the NextURI it held among them): the wait stands,
+    and the stream's landing loads and plays the slot."""
+    r = renderers()
+    if held == "ours_before":
+        q0 = CanonicalQueue()
+        q0.replace([track(tmp_path, 9, seconds=60.0)])
+        n0 = nodes(q0, r)
+        assert n0.backend.select(1)
+        wait_for(lambda: r.state == "PLAYING", timeout=15, what="an earlier attachment playing")
+        n0.backend.shutdown()
+    elif held == "another_app":
+        r.taken_by_another("playing")
+    else:
+        r.uri, r.meta, r.state = "http://192.0.2.7:8080/old.flac", "", "STOPPED"
+    r.next_uri = "http://192.0.2.7:8080/next.flac"
+    q = CanonicalQueue()
+    waiting = track(tmp_path, 1, seconds=60.0)
+    waiting.play = {"kind": "pending"}
+    q.replace([waiting, track(tmp_path, 2, seconds=60.0)])
+    n = nodes(q, r)
+    assert n.backend.play()
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 1, what="waiting on slot 1")
+    time.sleep(1.5)                     # the disarm's event, and what else comes
+    st = n.last
+    assert n.backend._parked is not None and (st.state, st.queue_index, st.extra.get("source")) == ("loading", 1, None)
+    waiting.play = streamed(proxy, 1, cover_url="").source
+    n.backend.slot_ready(1)
+    wait_for(lambda: r.state == "PLAYING" and r.uri.endswith("/preview/stream1") and n.last.state == "playing",
+             timeout=10, what="slot 1 loaded and playing")
+
+
+def test_b_a_renderer_taken_during_a_wait_without_an_event_is_read_when_the_stream_lands(tmp_path, proxy,
+                                                                                        renderers, nodes,
+                                                                                        quality):
+    """A renderer whose events do not reach the node is taken by another
+    controller while a play waits for its stream: the landing reads it once
+    before loading — another URI than the wait began on, none of ours — and
+    sends nothing; the wait's track and second are the spot."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    waiting = n.queue.item_at(2)
+    waiting.play = {"kind": "pending"}
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 2, what="waiting on slot 2")
+    r.notifying = False
+    r.taken_by_another("playing")
+    mark = len(r.calls)
+    waiting.play = streamed(proxy, 2, cover_url="").source
+    n.backend.slot_ready(2)
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=10, what="external at the landing")
+    time.sleep(0.5)
+    assert _sent(r, mark) == [] and "raat://" in r.uri
+    assert (n.last.state, n.last.queue_index, n.last.extra.get("resume")) == ("stopped", 2,
+                                                                            {"index": 2, "position": 0.0})
+
+
+def test_b_a_queue_put_together_while_a_take_back_waits_for_its_stream_ends_the_wait(tmp_path, proxy, renderers,
+                                                                                     nodes, quality):
+    """Another controller holds the renderer; the person taps a slot whose
+    stream is on its way — the take-back waits — and a queue is then put
+    together without playing it: the wait goes with the queue it was in, the
+    status external again, never "loading" for good."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    waiting = n.queue.item_at(2)
+    waiting.play = {"kind": "pending"}
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 2, what="the take-back waiting")
+    n.queue.replace([track(tmp_path, 5, seconds=60.0)])
+    n.backend.queue_changed("replace", play=False)
+    wait_for(lambda: n.last.state != "loading" and n.last.extra.get("source") == "external", timeout=5,
+             what="external again")
+    assert n.backend._parked is None and n.last.queue_index == 0
+
+
+def test_b_a_renderer_lost_or_refusing_our_load_while_another_controller_holds_it(tmp_path, proxy, renderers,
+                                                                                  nodes, quality):
+    """While another controller holds the renderer: lost — it stops
+    answering — it keeps the spot the takeover left, and makes none from the
+    other controller's state; a load of ours it refuses leaves it the other
+    controller's, the status external with the refusal said."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    r.taken_by_another("playing")
+    wait_for(lambda: (n.last.extra.get("resume") or {}).get("index") == 1, timeout=5, what="the spot")
+    spot = n.last.extra["resume"]
+    r.faults["SetAVTransportURI"] = [701]
+    assert n.backend.select(2)
+    wait_for(lambda: n.backend._error is not None and n.last.state != "loading", timeout=10, what="the refusal")
+    assert n.last.extra.get("source") == "external" and n.last.extra.get("resume") == spot
+    r.stop_answering()
+    assert not n.backend.stop()
+    wait_for(lambda: n.backend._gone, timeout=10, what="lost")
+    assert n.last.state == "stopped" and n.last.extra.get("resume") == spot
+    r.answer_again()
+    r2, n2 = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    assert n2.backend.stop()
+    wait_for(lambda: n2.last.state == "stopped" and r2.state == "STOPPED", timeout=5, what="stopped")
+    r2.taken_by_another("playing")
+    wait_for(lambda: n2.last.extra.get("source") == "external", timeout=5, what="external")
+    r2.stop_answering()
+    assert not n2.backend.pause()
+    wait_for(lambda: n2.backend._gone, timeout=10, what="lost")
+    assert n2.last.state == "stopped" and n2.last.extra.get("resume") is None
+    r2.answer_again()
