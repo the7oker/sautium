@@ -126,7 +126,7 @@ class FakeHqp:
         # How it describes an entry that is a raw stream another controller
         # handed it — Roon's `http://<core>:30000/<hex>/stream.raw`, a new
         # one per track and no metadata (HQPlayer's logs under Roon quoted on
-        # the Roon community, 2016–2025; Jussi Laako, 2025-12-22: "Roon
+        # the Roon community, 2016–2025; HQPlayer's author, 2025-12-22: "Roon
         # doesn't pass any of the information to HQPlayer, only raw audio"):
         # song "Roon", length 0, never ended by itself — its controller ends
         # it (end_now). "uri": Status names the entry as any other; "bare":

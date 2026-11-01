@@ -2,9 +2,10 @@
 the matrix that fakes can show, asserted as the design has them.
 
 Roon is HQPlayer's other controller on a control connection of its own
-(FakeRoon). Per track it sends Stop, PlaylistClear, a PlaylistAdd of a new
-raw stream from its Core and Play — the sequence HQPlayer's own logs under
-Roon show on the Roon community (2016–2025) — and no metadata. How Desktop
+(FakeRoon). A person's start in Roon is Stop, PlaylistClear, a PlaylistAdd
+of a new raw stream from its Core and Play — as HQPlayer's own logs under
+Roon show (2016–2025); at a natural transition the same without the Stop —
+and no metadata. How Desktop
 6.1.1's Status names that entry is guessed both ways (FakeHqp.raw_streams)
 until the live run's A7 records it. On a renderer Roon goes past UPnP (RAAT):
 what the renderer's AVTransport says then is guessed both ways too
@@ -97,7 +98,7 @@ class FakeRoon:
         self._send("<Pause/>")
 
     def stop(self) -> None:
-        # A person's stop in Roon (Jussi Laako, 2024-12-11: "Roon calls Pause and then Stop")
+        # A person's stop in Roon: Pause, then Stop (HQPlayer's author, 2024-12-11)
         self._send("<Pause/>", "<Stop/>")
 
     def close(self) -> None:
@@ -349,5 +350,5 @@ def test_b1_the_other_controllers_track_running_past_ours_moves_nothing(request,
               statuses=[(s.state, s.queue_index, round(s.position, 1)) for s in after][-5:],
               ended_ours=any(s.queue_index == 2 for s in after))
     _today(request, "B1-end", taken)
-    assert _sent(r, mark) == []
     assert not any(s.queue_index == 2 for s in after)
+    assert _sent(r, mark) == []
