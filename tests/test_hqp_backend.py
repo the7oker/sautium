@@ -123,6 +123,16 @@ class FakeHqp:
         # track index, position and length, still running on (Desktop 6 on
         # Windows, probed 2026-10-16); [track, position, length, reads left]
         self._transit = None
+        # How it describes an entry that is a raw stream another controller
+        # handed it — Roon's `http://<core>:30000/<hex>/stream.raw`, a new
+        # one per track and no metadata (HQPlayer's logs under Roon quoted on
+        # the Roon community, 2016–2025; Jussi Laako, 2025-12-22: "Roon
+        # doesn't pass any of the information to HQPlayer, only raw audio"):
+        # song "Roon", length 0, never ended by itself — its controller ends
+        # it (end_now). "uri": Status names the entry as any other; "bare":
+        # it names none (hqplayerd's log: `song='Roon' uri=''`, 2024-11-24).
+        # Guessed for Desktop 6.1.1 until a live run records it.
+        self.raw_streams = "uri"
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -344,6 +354,11 @@ class FakeHqp:
         if nxt <= len(self.playlist) and not any(part in self.playlist[nxt - 1] for part in self.refuse_play):
             self._advancing = [nxt, self.advance_polls]
 
+    def _raw(self) -> bool:
+        """Does it read a raw stream another controller handed it
+        (raw_streams)? Under the lock."""
+        return 1 <= self.track <= len(self.playlist) and self.playlist[self.track - 1].endswith("/stream.raw")
+
     def end_now(self) -> None:
         """The entry it plays ends now, whatever its Status says of the
         position — a short one whose position its Status kept at 0."""
@@ -396,7 +411,7 @@ class FakeHqp:
                         self._starting -= 1
                     else:
                         self.position += 1.0
-                        if self.position >= self.length:
+                        if self.position >= self.length and not self._raw():
                             self._end_of_track()
                 shown = self.position
                 if self.held_polls > 0 and self.state == int(PlaybackState.PLAYING):
@@ -408,15 +423,19 @@ class FakeHqp:
                     self._held_at = None
                 # The entry it reads, named as its playlist names it (Desktop
                 # 6.2.3 sends it to an unauthenticated client).
+                raw = self._raw()
                 uri = (f' uri="{self._uri_out(self.playlist[self.track - 1])}"'
-                       if 1 <= self.track <= len(self.playlist) else "")
-                track, length = (0, 0) if opening else (self.track, self.length)
+                       if 1 <= self.track <= len(self.playlist)
+                       and not (raw and self.raw_streams == "bare") else "")
+                track, length = (0, 0) if opening else (self.track, 0 if raw else self.length)
                 if self._transit is not None:
                     track, shown, length = self._transit[:3]
                     self._transit[1] += 0.1
                     self._transit[3] -= 1
                     if self._transit[3] <= 0:
                         self._transit = None
+                tags = ('artist="" album="" song="Roon"' if raw
+                        else 'artist="Fake artist" album="Fake album" song="Fake song"')
                 clips = f' clips="{self.clips}"' if self.clips is not None else ""
                 extra = "".join(f' {k}="{v}"' for k, v in self.status_extra.items())
                 if self.track_serial is not None:
@@ -427,8 +446,7 @@ class FakeHqp:
                         f'input_fill="0.9" output_fill="0.9" active_mode="{self.active["mode"]}" '
                         f'active_filter="{self.active["filter"]}" active_shaper="{self.active["shaper"]}" '
                         f'active_rate="{self.active["rate"]}"{extra}>'
-                        f'<metadata artist="Fake artist" album="Fake album" '
-                        f'song="Fake song" genre=""{uri}'
+                        f'<metadata {tags} genre=""{uri}'
                         + (f' gain="{self.track_gain}"' if self.track_gain is not None else '')
                         + '/></Status>')
             if cmd == "GetInfo":

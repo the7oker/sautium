@@ -525,6 +525,21 @@ class FakeRenderer:
 
     # -- for the tests ---------------------------------------------------------------
 
+    def taken_by_another(self, how: str) -> None:
+        """Another controller takes the device past UPnP — Roon over RAAT on
+        a player that is a Roon endpoint too — and its AVTransport says so in
+        one of two ways, guessed until a live run records it: "stopped", the
+        transport stopped on our URI, its position frozen there; "playing",
+        playing a URI of the other controller's, its position running from
+        0. Our NextURI is gone either way. Evented as any change."""
+        if how == "stopped":
+            self._base, self._t0, self.state = self.position(), None, "STOPPED"
+        else:
+            self.uri, self.meta = "raat://another-controller/stream", ""
+            self._base, self._t0, self.state = 0.0, time.monotonic(), "PLAYING"
+        self.next_uri = self.next_meta = ""
+        self._run(self._changed())
+
     def called(self, action: str) -> list[dict]:
         return [args for name, args in self.calls if name == action]
 
