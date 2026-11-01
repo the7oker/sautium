@@ -2794,7 +2794,9 @@ class HqpBackend(PlayerBackend):
         lock, and the queue it judges is the one it acts on. With nothing
         that names the entry (no URI from this build; a stream token of an
         earlier session) the layout's slot stands while the playlist is our
-        mirror; elsewhere a busy entry is not ours, a stopped one no slot.
+        mirror — no verdict while a mutation is in flight or a take that
+        moved by no command of ours is still unread against the playlist —
+        and elsewhere a busy entry is not ours, a stopped one no slot.
 
         Stopped where the play press resumes (a spot), HQPlayer names the
         slot of the spot: it is the one Now Playing shows and a queue edit
@@ -2818,6 +2820,12 @@ class HqpBackend(PlayerBackend):
         readings = self._readings(status.uri)
         if not readings:
             if self._mirror == "step" and slot is not None:
+                if not mutating and (pending or self._take_unread):
+                    # Nothing names the entry, and the playlist it stands in
+                    # may be another controller's now: a take that moved with
+                    # no command of ours is unread yet (_unexplained_take),
+                    # or a mutation in flight holds the read — no verdict
+                    return None
                 return slot, items[slot - 1], False
             return 0, None, busy
         key = (status.uri, entry, slot, version, busy)

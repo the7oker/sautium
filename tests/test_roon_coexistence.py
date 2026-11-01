@@ -192,6 +192,51 @@ def test_a1_roon_starts_while_the_node_plays(fake, roon, listens, monkeypatch):
         b.shutdown()
 
 
+def test_roon_starting_during_a_queue_edit_under_a_status_that_names_no_uri_is_no_listen_of_ours(
+        fake, listens, monkeypatch):
+    """Roon starts while a queue mutation is in flight, its Status naming no
+    URI: the playlist read waits for the mutation, and meanwhile the layout's
+    slot is no verdict — Roon's stream is never a listen of slot 1 nor its
+    now-playing. Read once the mutation ends, it is another controller's,
+    and the spot stands where it cut the node's own listen."""
+    import threading
+    writes, lastfm = listens
+    fake.raw_streams = "bare"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    hold = threading.Event()
+
+    def edit():
+        with mgr.queue.mutation():
+            hold.wait(8)
+    t = threading.Thread(target=edit, daemon=True)
+    try:
+        t.start()
+        time.sleep(0.3)
+        n_lastfm = len(lastfm)
+        at = mgr._latest_status.get("position")
+        roon.play_track()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, 10)
+        during = dict(mgr._latest_status)
+        hold.set()
+        t.join()
+        _wait(lambda: mgr._latest_status.get("source") == "external", 10)
+        st = mgr._latest_status
+        rows = _rows(writes)
+        _observed("A1-mutation", at=at, during=(during.get("state"), during.get("track_index")),
+                  rows=[(r["tid"], r["dur"]) for r in rows], lastfm=lastfm[n_lastfm:],
+                  status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume")})
+        assert during.get("track_index") != 1 and lastfm[n_lastfm:] == []
+        assert [r["tid"] for r in rows] == ["track-2"] and rows[0]["dur"] <= at + 1
+        assert st["source"] == "external" and st["resume"]["index"] == 2
+        assert int(at) <= st["resume"]["position"] <= int(at) + 1
+    finally:
+        hold.set()
+        b.shutdown()
+        roon.close()
+
+
 def test_a_natural_advance_is_read_against_the_playlist_and_stays_ours(fake, listens, monkeypatch):
     """HQPlayer's own advance through our playlist — gapless, no stopped
     tick between the two entries — moves its take with no command of the
