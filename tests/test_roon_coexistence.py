@@ -49,13 +49,17 @@ TODAY = {
     ("A3", "bare"): "F3: Play while another controller paused resumes its stream (_press_play)",
     ("B1", "playing"): "F4: the position poll reads another controller's PLAYING as our slot on the clock",
     ("B2", "playing"): "F5: Play on a renderer playing another controller's URI is a Play to it, our slot loading",
+    ("B1-end", "playing"): "F4: our slot's clock runs out under the other controller's music; its next STOPPED "
+                           "reads as our track's end and the node loads and plays slot 2 on the renderer",
 }
 
 
 def _today(request, scenario: str, guess: str) -> None:
+    """Marked just before the assertions that state the finding: a failure in a
+    scenario's set-up stays a failure, never read as the finding."""
     why = TODAY.get((scenario, guess))
     if why:
-        request.node.add_marker(pytest.mark.xfail(reason=why, strict=True))
+        request.node.add_marker(pytest.mark.xfail(reason=why, strict=True, raises=AssertionError))
 
 
 def _observed(scenario: str, **what) -> None:
@@ -77,7 +81,10 @@ class FakeRoon:
             self.sock.sendall(c.encode())
             answer = b""
             while not answer.endswith(b"\n"):
-                answer += self.sock.recv(65536)
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    raise ConnectionError("HQPlayer closed Roon's control connection")
+                answer += chunk
             self.sent.append(re.match(r"<(\w+)", c).group(1))
 
     def play_track(self) -> str:
@@ -90,7 +97,8 @@ class FakeRoon:
         self._send("<Pause/>")
 
     def stop(self) -> None:
-        self._send("<Stop/>")
+        # A person's stop in Roon (Jussi Laako, 2024-12-11: "Roon calls Pause and then Stop")
+        self._send("<Pause/>", "<Stop/>")
 
     def close(self) -> None:
         self.sock.close()
@@ -155,7 +163,6 @@ def test_a1_roon_starts_while_the_node_plays(request, fake, roon, listens, monke
     command of the node's (transport only on a person's intent); the node's
     own listen ends at its own seconds and Roon's playback is never a listen
     (the own-window rule); the queue as it was; Now Playing says external."""
-    _today(request, "A1", fake.raw_streams)
     writes, lastfm = listens
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
     items = mgr.queue.snapshot()
@@ -170,6 +177,7 @@ def test_a1_roon_starts_while_the_node_plays(request, fake, roon, listens, monke
                   rows=[(r["tid"], r["dur"], r["comp"]) for r in rows], lastfm=lastfm, at=at,
                   status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "song", "position")},
                   queue_kept=mgr.queue.snapshot() == items)
+        _today(request, "A1", fake.raw_streams)
         assert ticks is not None and ticks <= 1, f"external after {ticks} Status reads"
         assert _node_commands(fake, n, roon) == []
         assert [r["tid"] for r in rows] == ["track-2"] and rows[0]["dur"] <= at + 1 and not rows[0]["comp"]
@@ -180,7 +188,7 @@ def test_a1_roon_starts_while_the_node_plays(request, fake, roon, listens, monke
         b.shutdown()
 
 
-def _takes_back(fake, mgr, b, roon, scenario, **context):
+def _takes_back(request, fake, mgr, b, roon, scenario, **context):
     """A person presses Play in the node while Roon holds HQPlayer. Designed
     (A2): the node takes HQPlayer back — its queue mirrored
     again, none of Roon's entries left, one of its slots playing. Which slot
@@ -195,17 +203,17 @@ def _takes_back(fake, mgr, b, roon, scenario, **context):
               playlist=["roon" if u.endswith("/stream.raw") else u.rsplit("/", 1)[-1] for u in fake.playlist],
               hqplayer_state=fake.state, hqplayer_entry=fake.track,
               status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "position")}, **context)
+    _today(request, scenario, fake.raw_streams)
     assert fake.playlist == mirror, "Roon's entry is still HQPlayer's playlist"
     assert fake.state == PLAYING and st.get("source") != "external" and st["track_index"] >= 1
 
 
 def test_a2_a_play_in_the_node_while_roon_plays_takes_hqplayer_back(request, fake, roon, listens, monkeypatch):
-    _today(request, "A2", fake.raw_streams)
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
     try:
         at, _, ticks = _roon_takes_over(fake, mgr, roon)
         assert ticks is not None, "the node never said external"
-        _takes_back(fake, mgr, b, roon, "A2", roon_state="playing", interrupted_at=(2, at))
+        _takes_back(request, fake, mgr, b, roon, "A2", roon_state="playing", interrupted_at=(2, at))
     finally:
         b.shutdown()
 
@@ -213,7 +221,6 @@ def test_a2_a_play_in_the_node_while_roon_plays_takes_hqplayer_back(request, fak
 def test_a3_roon_paused_then_a_play_in_the_node(request, fake, roon, listens, monkeypatch):
     """A3. Roon pauses its track: the node stays external and silent; a Play
     in the node takes HQPlayer back as in A2 — never resumes Roon's stream."""
-    _today(request, "A3", fake.raw_streams)
     writes, lastfm = listens
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
     try:
@@ -225,12 +232,12 @@ def test_a3_roon_paused_then_a_play_in_the_node(request, fake, roon, listens, mo
         _observed("A3-paused", mode=fake.raw_streams, rows=len(_rows(writes)), lastfm=lastfm,
                   status={k_: st.get(k_) for k_ in ("state", "track_index", "source")})
         assert (st["state"], st["track_index"], st["source"]) == ("paused", 0, "external")
-        _takes_back(fake, mgr, b, roon, "A3", roon_state="paused", interrupted_at=(2, at))
+        _takes_back(request, fake, mgr, b, roon, "A3", roon_state="paused", interrupted_at=(2, at))
     finally:
         b.shutdown()
 
 
-def test_a4_roon_stopped_then_a_play_in_the_node(fake, roon, listens, monkeypatch):
+def test_a4_roon_stopped_then_a_play_in_the_node(request, fake, roon, listens, monkeypatch):
     """A4. Roon stops: HQPlayer stopped on Roon's entry, no listen of anyone's
     opens; a Play in the node takes HQPlayer back."""
     writes, lastfm = listens
@@ -247,7 +254,7 @@ def test_a4_roon_stopped_then_a_play_in_the_node(fake, roon, listens, monkeypatc
                   session=tracker._play_session is not None,
                   status={k_: st.get(k_) for k_ in ("state", "track_index", "source")})
         assert st["state"] == "stopped" and tracker._play_session is None
-        _takes_back(fake, mgr, b, roon, "A4", roon_state="stopped", interrupted_at=(2, at))
+        _takes_back(request, fake, mgr, b, roon, "A4", roon_state="stopped", interrupted_at=(2, at))
     finally:
         b.shutdown()
 
@@ -283,7 +290,6 @@ def test_b1_another_controller_takes_the_renderer_while_the_node_plays(request, 
     """B1. Designed: the node sends the renderer nothing; from its first
     reading of the takeover no status says our slot plays (a listen would run
     on the other controller's music); it never advances the queue for it."""
-    _today(request, "B1", taken)
     r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
     mark, seen = len(r.calls), len(n.statuses)
     at = n.last.position
@@ -295,6 +301,7 @@ def test_b1_another_controller_takes_the_renderer_while_the_node_plays(request, 
     _observed("B1", taken=taken, at=round(at, 1), node_sent=_sent(r, mark),
               statuses=[(s.state, s.queue_index, round(s.position, 1), s.extra.get("source")) for s in after][-6:],
               ours_playing_after=len(ours_playing))
+    _today(request, "B1", taken)
     assert _sent(r, mark) == []
     # The event and a poll already under way may still name the slot once
     assert len(ours_playing) <= 1, f"our slot said playing {len(ours_playing)} times after the takeover"
@@ -305,7 +312,6 @@ def test_b2_a_play_in_the_node_after_another_controller_took_the_renderer(reques
                                                                            nodes, quality, taken):
     """B2. Designed: a person's Play in the node plays its slot on the
     renderer again — our URI loaded or played, and the renderer playing it."""
-    _today(request, "B2", taken)
     r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
     r.taken_by_another(taken)
     time.sleep(2.5)
@@ -314,5 +320,34 @@ def test_b2_a_play_in_the_node_after_another_controller_took_the_renderer(reques
     _wait(lambda: r.state == "PLAYING" and "raat://" not in r.uri and n.last.state == "playing", timeout=10)
     _observed("B2", taken=taken, play_returned=ok, node_sent=_sent(r, mark), renderer=(r.state, r.uri[-24:]),
               status=(n.last.state, n.last.queue_index, round(n.last.position, 1)))
+    _today(request, "B2", taken)
     assert ok and r.state == "PLAYING" and "raat://" not in r.uri
     assert n.last.state == "playing" and n.last.queue_index == 1
+
+
+def test_b1_the_other_controllers_track_running_past_ours_moves_nothing(request, tmp_path, proxy, renderers, nodes,
+                                                                         quality, taken):
+    """B1, carried to the end of our slot's length: the other controller plays
+    on past it and then stops. Designed: the node never sends the renderer
+    anything for it — no load, no Play (a person's intent alone does) — and
+    never says our slot reached its end."""
+    r = renderers()
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=8.0), track(tmp_path, 2, seconds=60.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and n.last.position >= 2,
+             timeout=15, what="slot 1 playing")
+    mark, seen = len(r.calls), len(n.statuses)
+    r.taken_by_another(taken)
+    time.sleep(8.0)                    # past slot 1's 8 s on the clock
+    if taken == "playing":
+        r.taken_by_another("stopped")  # the other controller stops: STOPPED on its URI
+    time.sleep(4.0)
+    after = n.statuses[seen:]
+    _observed("B1-end", taken=taken, node_sent=_sent(r, mark), last_uri=r.uri[-24:],
+              statuses=[(s.state, s.queue_index, round(s.position, 1)) for s in after][-5:],
+              ended_ours=any(s.queue_index == 2 for s in after))
+    _today(request, "B1-end", taken)
+    assert _sent(r, mark) == []
+    assert not any(s.queue_index == 2 for s in after)
