@@ -333,6 +333,10 @@ class DlnaBackend(PlayerBackend):
         # attachment handed, is another controller taking it meanwhile
         # (_moved_on) — what it held before was there before the person's word
         self._park_uris: frozenset = frozenset()
+        # That wait was asked while another controller played on the renderer
+        # (a URI none of ours, playing or paused): the person's take-back — the
+        # newer word, which that controller's own next track never ends
+        self._park_under_another = False
         # The state this instance last told the manager, or a Stop it has
         # decided: what a renderer that stops answering was doing, as far as
         # the node knows it — its own transport state is stale by then
@@ -468,16 +472,21 @@ class DlnaBackend(PlayerBackend):
             parked = self._parked
             if parked is None or self._queue.index_of(parked[0]) != index:
                 return
+            item = parked[0]
             if not self._external:
                 # The decision point: a renderer whose events do not reach
                 # the node may have been taken during the wait — read once
                 cur = await self._renderer_uri()
-                if self._parked is parked and self._moved_on(cur):
+                if self._parked is not None and self._parked[0] is item and self._moved_on(cur):
                     self._taken_by_another()
-            if self._parked is not parked:
+            # The wait as it stands after the read: a Seek meanwhile moved its
+            # second, a queue edit its slot; another word ended it
+            parked = self._parked
+            slot = self._queue.index_of(item) if parked is not None and parked[0] is item else None
+            if slot is None:
                 return
             self._parked = None
-            await self._load_and_play(index, start_at=parked[1])
+            await self._load_and_play(slot, start_at=parked[1])
         if self._loop is None:
             return
         # Not through _call_async: a slot nobody waits on must not clear
@@ -873,7 +882,8 @@ class DlnaBackend(PlayerBackend):
         meanwhile? Whatever it held before the person's word (another app
         playing on, a stale URI of an idle device, one of ours from an
         earlier attachment) is no takeover."""
-        return bool(cur) and cur not in self._park_uris and cur not in self._handed
+        return (not self._park_under_another and bool(cur) and cur not in self._park_uris
+                and cur not in self._handed)
 
     async def _renderer_uri(self) -> Optional[str]:
         """The URI the renderer names now, asked (GetPositionInfo): its
@@ -1514,6 +1524,8 @@ class DlnaBackend(PlayerBackend):
                 self._parked = (item, start_at)
                 self._park_uris = frozenset(u for u in (getattr(self._dmr, "current_track_uri", None),
                                                         getattr(self._dmr, "av_transport_uri", None)) if u)
+                self._park_under_another = (self._state_name() in ("playing", "paused")
+                                            and any(u not in self._handed for u in self._park_uris))
                 self._seek_due = None
                 self._position, self._length = start_at, item.duration_seconds or 0.0
                 self._error = None

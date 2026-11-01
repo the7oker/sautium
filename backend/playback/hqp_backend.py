@@ -1135,8 +1135,13 @@ class HqpBackend(PlayerBackend):
         self._stopped_at = 0.0
         # Whether the last tick that gave a verdict found HQPlayer playing or
         # pausing an entry not ours — another controller holding it — whatever
-        # the status presents meanwhile (_taken). The poller's alone to write
+        # the status presents meanwhile, and when that tick was asked for: the
+        # poller's alone to write; and when the node last cleared HQPlayer's
+        # playlist itself (a new queue's hand-over, a press's rebuild), which
+        # ends such a hold read before it (_taken)
         self._held_by_another = False
+        self._held_read_at = 0.0
+        self._cleared_at = 0.0
         # Every URI this attachment handed HQPlayer since its last full mirror
         # (a clear: what it held before is gone): an entry it reads that is
         # one of them is ours at a switch away (_reads_any)
@@ -2501,7 +2506,8 @@ class HqpBackend(PlayerBackend):
                         _notify_notices()
                     position = self._clocked(status, read_at, att)
                     length = None
-                    if self._runs_on(status, read_at):
+                    runs_on = self._runs_on(status, read_at)
+                    if runs_on:
                         # The entry moved to, at its start, its length the
                         # queue's until HQPlayer gives its own
                         position = 0.0
@@ -2522,10 +2528,12 @@ class HqpBackend(PlayerBackend):
                         if (moving and (status.process_speed is None or status.process_speed >= 1.0)
                                 and diag.note_playing(playing[0], self._queue.generation)):
                             _notify_notices()
-                        self._held_by_another = playing[2]
+                        self._held_by_another, self._held_read_at = playing[2], read_at
                         self._note_listen(status, playing, position, read_at, prev_at)
                         self._taken_over(playing)
-                        if moving:
+                        if moving and not runs_on:
+                            # A transit answer's position is the entry before's,
+                            # running on: nothing of this one played yet
                             self._spot_played(playing)
                         self._last_tick = self._status_of(status, playing, position, length)
                         self._let_go(passed)
@@ -3015,10 +3023,13 @@ class HqpBackend(PlayerBackend):
         """Does another controller hold HQPlayer, as the last tick that gave a
         verdict found it — playing or paused on an entry not ours? The
         poller's own reading, never the status it presents (a start that
-        waits for its stream says "loading" over it). A play intent then
-        takes the queue afresh (_press): never HQPlayer's own Play, nor a
-        resume of the other controller's entry."""
-        return self._held_by_another
+        waits for its stream says "loading" over it) — and over once the
+        node cleared HQPlayer's playlist itself after that tick was asked
+        for: a new queue that takes HQPlayer back owns it from its hand-over,
+        and what follows it (a filler's appends) goes to HQPlayer. A play
+        intent while held takes the queue afresh (_press): never HQPlayer's
+        own Play, nor a resume of the other controller's entry."""
+        return self._held_by_another and self._cleared_at <= self._held_read_at
 
     def _foreign_in_step(self, status) -> Optional[tuple]:
         """Does HQPlayer read an entry of no queue slot while its playlist is
@@ -3710,6 +3721,11 @@ class HqpBackend(PlayerBackend):
             # A Stop of ours ends the node's own listen: none is cut after it
             # (_note_listen)
             self._stopped_at = max(self._stopped_at, outcome.sent or outcome.ts)
+        if not outcome.failed and (outcome.command == "PlaylistClear" or (
+                outcome.command == "PlaylistAdd" and outcome.attributes.get("clear") == "1")):
+            # HQPlayer's playlist cleared by the node itself: another
+            # controller's hold read before it is over (_taken)
+            self._cleared_at = max(self._cleared_at, outcome.sent or outcome.ts)
         if outcome.command == "Seek" and not outcome.failed:
             self._seek_mark = (float(outcome.attributes.get("position") or 0), outcome.sent or outcome.ts,
                                mine)
@@ -5221,11 +5237,12 @@ class HqpBackend(PlayerBackend):
             return True
         held, spot = self._spot, self._spot_at()
         last = self._last_tick
-        if spot is not None and last is not None and last.state == "stopped":
+        if (spot is not None and last is not None and last.state == "stopped"
+                and not self._start_under_way()):
             # Stopped at the spot — the one another controller's takeover left
-            # among them: a Seek moves it, nothing sent (HQPlayer's own would
-            # find no take of ours, or move another controller's stream), and
-            # Play starts there
+            # among them, no start from it under way: a Seek moves it, nothing
+            # sent (HQPlayer's own would find no take of ours, or move another
+            # controller's stream), and Play starts there
             with self._spot_lock:
                 if self._spot is held:
                     self._spot, self._spot_gen = (held[0], int(seconds)), self._spot_gen + 1
@@ -5724,7 +5741,12 @@ class HqpBackend(PlayerBackend):
         to — HQPlayer would play our track inside its session — and the
         press that takes HQPlayer back hands the whole queue over."""
         self._ways_in(items)
-        if self._mirror == "lost" or self._taken():
+        if self._taken():
+            # Its playlist is not ours to add to: the queue's alone, the mirror
+            # no mirror — the press that takes HQPlayer back hands it over
+            self._drifted("another controller holds HQPlayer")
+            return list(items)
+        if self._mirror == "lost":
             return list(items)
         handed = _Layout(items, self.gap).handed
         uris = [self._uri_for(it) for it in handed]

@@ -22,11 +22,13 @@ saying another app took the output, and a Play in the node takes the output
 back at it — the queue taken afresh, never the other controller's stream
 resumed."""
 
+import asyncio
 import collections
 import json
 import re
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -34,13 +36,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_hqp_backend import (_QUESTIONS, _album, _attach, _item, _queue_stays_in_memory,  # noqa: E402,F401
-                              _streams_on_hqplayer, _wait, fake, listens)
-from test_dlna_backend import (_gena_port, _on_renderer, _playing_at, _seconds, heard,  # noqa: E402,F401
-                               manager, nodes, proxy, quality, renderers, streamed, track, wait_for)
+from test_hqp_backend import (_QUESTIONS, _album, _attach, _item, _link, _queue_stays_in_memory,  # noqa: E402,F401
+                              _routes_on, _stopped_at_spot, _streams_on_hqplayer, _wait, fake, listens)
+from test_dlna_backend import (FakeRenderer, _gena_port, _on_renderer, _playing_at, _seconds,  # noqa: E402,F401
+                               heard, manager, nodes, proxy, quality, renderers, streamed, track, wait_for)
 
 from hqplayer_client import PlaybackState, TrackStatus  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
+from playback import hqp_link as hl  # noqa: E402
 from playback import hqp_diagnostics as diag  # noqa: E402
 from playback import tracker  # noqa: E402
 from playback.queue import CanonicalQueue  # noqa: E402
@@ -845,6 +848,81 @@ def test_roon_starting_while_hqplayer_answers_no_playlist_read_is_no_listen_of_o
         b.shutdown()
         roon.close()
 
+
+@pytest.mark.parametrize("opening", [0, 2])
+def test_an_album_that_takes_hqplayer_back_from_roon_reaches_it_whole(fake, listens, monkeypatch, opening):
+    """Roon holds HQPlayer and the person plays an album that rolls in — its
+    first track a new queue that plays, the rest appended right after (a
+    filler's way): the new queue's hand-over takes HQPlayer back, and the
+    appends after it go to HQPlayer though no tick has read it since — the
+    hold read before the node's own clear is over. The album plays on past
+    its first track. `opening`: Status reads after the start that name no
+    slot yet."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        player_router = _routes_on(monkeypatch, mgr)
+        real = fake._dispatch
+
+        def dispatch(cmd, attrs):
+            out = real(cmd, attrs)
+            if cmd in ("SelectTrack", "Play") and opening:
+                with fake._lock:
+                    fake.opening = opening
+            return out
+        monkeypatch.setattr(fake, "_dispatch", dispatch)
+        with fake._lock:
+            fake.length = 8
+        added, gen = mgr.replace_queue([_item("E:/Music/C/01.flac", 31)], play=True)
+        assert added == 1
+        for it in (_item("E:/Music/C/02.flac", 32), _item("E:/Music/C/03.flac", 33)):
+            assert player_router._filler_append(it, gen)
+        album = [f"file:///E:/Music/C/0{i}.flac" for i in (1, 2, 3)]
+        assert fake.playlist == album, fake.playlist
+        assert _wait(lambda: fake.state == PLAYING and fake.track == 2, 30), (fake.state, fake.track)
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_a_seek_while_a_start_from_the_spot_builds_is_not_swallowed(fake, listens, monkeypatch):
+    """Stopped at a spot, Play starts it — HQPlayer silent while it builds,
+    the last tick still "stopped". A Seek made during that build is no Seek
+    at a stopped spot: the start reads the spot already. It goes to HQPlayer
+    as a Seek of the start (said if HQPlayer refuses it), never moves a spot
+    no start reads any more."""
+    monkeypatch.setattr(hl.BuildWatch, "after", 0.3)
+    mgr = _album(3)
+    b = _attach(mgr)
+    try:
+        _stopped_at_spot(fake, mgr, monkeypatch)
+        assert b._spot is not None and (b._spot[0].track_id, b._spot[1]) == ("track-2", 150)
+        fake.takes_seek = True
+        fake.build("SelectTrack", 3.0)
+        n = len(fake.commands)
+        res = {}
+        t = threading.Thread(target=lambda: res.setdefault("play", b.play()), daemon=True)
+        t.start()
+        assert _wait(lambda: _link().build.state is not None, 5)
+        try:
+            res["seek"] = b.seek(30)
+        except Exception as e:
+            res["seek"] = type(e).__name__
+        moved = (b._spot[0].track_id, b._spot[1]) if b._spot is not None else None
+        t.join(15)
+        assert _wait(lambda: fake.state == PLAYING and fake.track == 2, 10)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3)
+        seeks = [int(float(a.get("position", 0))) for c, a in fake.commands[n:] if c == "Seek"]
+        _observed("A-seek-while-starting", res=res, moved=moved, seeks=seeks)
+        assert moved != ("track-2", 30)
+        assert res["seek"] is not True or 30 in seeks
+    finally:
+        b.shutdown()
+
 def _st(state, track, position, *, uri, serial, length=300.0):
     return TrackStatus(state=state, track_index=track, track_id="", position=position, length=length,
                        volume=-3.0, uri=uri, track_serial=serial)
@@ -1273,3 +1351,61 @@ def test_b_a_renderer_lost_or_refusing_our_load_while_another_controller_holds_i
     wait_for(lambda: n2.backend._gone, timeout=10, what="lost")
     assert n2.last.state == "stopped" and n2.last.extra.get("resume") is None
     r2.answer_again()
+
+
+def test_b_a_seek_during_the_landings_read_moves_the_start_and_the_slot_still_goes(tmp_path, proxy, renderers,
+                                                                                   nodes, quality, monkeypatch):
+    """The stream of a waiting slot lands, and the landing asks the renderer
+    its URI first — a renderer slow to answer. A Seek made meanwhile moves the
+    wait's second: the landing goes on with the wait as it stands then, the
+    slot loaded and started there — never "loading" for good."""
+    real = FakeRenderer._control
+
+    async def slow(self, request):
+        if getattr(self, "gpi_delay", 0) and "GetPositionInfo" in request.headers.get("SOAPACTION", ""):
+            await asyncio.sleep(self.gpi_delay)
+        return await real(self, request)
+    monkeypatch.setattr(FakeRenderer, "_control", slow)
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    waiting = n.queue.item_at(2)
+    waiting.play = {"kind": "pending"}
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 2, what="waiting on slot 2")
+    time.sleep(1.0)
+    r.gpi_delay = 2.0
+    waiting.play = streamed(proxy, 2, cover_url="").source
+    n.backend.slot_ready(2)
+    time.sleep(0.5)
+    assert n.backend.seek(20)
+    wait_for(lambda: r.state == "PLAYING" and r.uri.endswith("/preview/stream2") and r.called("Seek"),
+             timeout=15, what="slot 2 loaded and sought")
+    r.gpi_delay = 0
+    assert r.called("Seek")[-1]["Target"] == "0:00:20"
+
+
+def test_b_a_take_back_that_waits_survives_the_other_apps_own_next_track(tmp_path, proxy, renderers, nodes,
+                                                                         quality):
+    """Another app plays on the renderer when the person picks it and presses
+    Play — a fresh attachment — and the first slot waits for its stream:
+    the person's take-back, the newer word. The other app moving on to its
+    own next track meanwhile does not end it; the landing loads and plays
+    the slot."""
+    r = renderers()
+    r.taken_by_another("playing")
+    q = CanonicalQueue()
+    waiting = track(tmp_path, 1, seconds=60.0)
+    waiting.play = {"kind": "pending"}
+    q.replace([waiting, track(tmp_path, 2, seconds=60.0)])
+    n = nodes(q, r)
+    assert n.backend.play()
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 1, what="waiting on slot 1")
+    time.sleep(1.0)
+    r.uri = "raat://another-controller/stream-2"
+    r._base, r._t0 = 0.0, time.monotonic()
+    r._run(r._changed())
+    time.sleep(1.5)
+    assert n.backend._parked is not None and n.last.state == "loading"
+    waiting.play = streamed(proxy, 1, cover_url="").source
+    n.backend.slot_ready(1)
+    wait_for(lambda: r.state == "PLAYING" and r.uri.endswith("/preview/stream1") and n.last.state == "playing",
+             timeout=10, what="slot 1 loaded and playing")

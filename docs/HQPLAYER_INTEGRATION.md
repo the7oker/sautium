@@ -569,8 +569,9 @@ comes after the control port answers again — so neither can end the wait.
   it there. The spot names a queue item, not a slot: an insert or a removal
   before it moves its index, an append after it changes nothing, and it goes
   with its item. Stopped there, Next and Previous only move it a slot, to
-  its start — no command, no sound — and a Seek moves its second, nothing
-  sent (since 2026-11-01; HQPlayer's own Seek found no take of ours to move);
+  its start — no command, no sound — and, no start from it under way, a Seek
+  moves its second, nothing sent (since 2026-11-01; HQPlayer's own Seek found
+  no take of ours to move);
   a tap on a track plays that track. A
   start taken spends it — a plain Play too — spent under the command lock
   the start held, so a start dropped meanwhile puts none back. One
@@ -578,7 +579,8 @@ comes after the control port answers again — so neither can end the wait.
   HQPlayer's first answer since that names a slot (an opening tick names
   none): playing or paused on its track, it was taken after all. And a tick
   that reads HQPlayer playing the spot's very item — its position moving on
-  the same take since the tick before — spends it, whoever started it (since
+  the same take since the tick before, a transit answer's (the entry
+  before's, running on) never — spends it, whoever started it (since
   2026-11-01): an advance or a start judged before HQPlayer played it, a
   person's word in its own window. A command refused,
   as busy or by HQPlayer, leaves it. Back on HQPlayer after another output,
@@ -617,7 +619,10 @@ comes after the control port answers again — so neither can end the wait.
   filler's, the radio's, a person's), the radio's own clear and a new queue
   put together without playing it are the queue's alone: nothing goes into
   that controller's playlist; the press that takes HQPlayer back hands the
-  queue over. The radio refills nothing from the spot a takeover left.
+  queue over, and a new queue that takes it back owns it from its own
+  hand-over — the clear ends the hold read before it, so what follows it (a
+  filler's appends) goes to HQPlayer. The radio refills nothing from the spot
+  a takeover left.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
@@ -1153,7 +1158,8 @@ and no advance of the queue for it, nothing sent to the renderer; a stale URI
 of the node's own, named for a tick after its own load, stays its own. A play waiting for
 its slot's stream ends at such a takeover — a URI the renderer moved to after the wait
 began, other than its track's or its transport's as the wait began, read in an event or
-asked of it at the stream's landing: what it held before the person's word is none.
+asked of it at the stream's landing: what it held before the person's word is none, and a
+take-back asked while another app played on it outlasts that app's own next track.
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last
