@@ -583,11 +583,16 @@ comes after the control port answers again — so neither can end the wait.
   at its slot, at the second the start went to (since 2026-10-31): Desktop's
   own stop rests on no entry, and Play then started HQPlayer's first entry.
   Now Playing keeps that track with its diagnosis, Play starts it, Next and
-  Previous move from it. Not HQPlayer's own advance, nor a stop while
-  another controller holds HQPlayer (Roon, its own window), and a spot set
-  since stays. Another controller that cuts the node's own listen leaves a
-  spot too (since 2026-11-01): the first tick that reads its entry, playing
-  or paused, after one that read the node's own — the take moved once since,
+  Previous move from it. HQPlayer's own advance onto the next entry of ours,
+  stopped on the same way, leaves it too, at that slot at 0 (since
+  2026-11-01): an album boundary into a rate the output family refuses — a
+  44.1 kHz album, then a 96 kHz one — is the commonest road there. Only an
+  entry of ours in a mirror in step or a tail mirror (the advance names its
+  target only there); not a stop while another controller holds HQPlayer
+  (Roon, its own window), and a spot set since stays. Another controller
+  that cuts the node's own listen leaves a spot too (since 2026-11-01): the
+  first tick that reads its entry, playing or paused, after one that read
+  the node's own — the take moved once since,
   no Stop of the node's after it — sets the spot at that slot and the
   second of the node's last own reading. Now Playing keeps that track,
   stopped there and external ("Another app took HQPlayer — Play takes it

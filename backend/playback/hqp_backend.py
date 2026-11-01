@@ -3769,7 +3769,7 @@ class HqpBackend(PlayerBackend):
                         diag.redact_text(v["sentence"]))
         if changed:
             _notify_notices()
-        if v["code"] in ("not_played", "rate_refused") and att.advance is None:
+        if v["code"] in ("not_played", "rate_refused"):
             self._rests_on_its_start(att)
         if v["code"] in ("not_played", "unknown", "rate_refused") or (v["code"] == "rejected"
                                                                       and not v.get("quote")):
@@ -3779,17 +3779,21 @@ class HqpBackend(PlayerBackend):
 
     def _rests_on_its_start(self, att: diag.Attempt) -> None:
         """A start of the node's own HQPlayer stopped on by itself — a rate
-        it refused, an entry it opened and dropped (the attempt's verdict).
-        Desktop's own stop rests on no entry: Now Playing fell back to the
-        queue's head and Play started HQPlayer's first entry, not the track
-        that failed (live, 2026-10-31). The spot stays at the start's slot,
-        at the second it went to: Now Playing names that track with its
-        diagnosis, Play starts it, Next and Previous move from it — erased as
-        any spot is, with its item or once a start from it is taken. Only a
-        start of the node's (HQPlayer's own advance is none), only while
-        HQPlayer still rests (not once anything plays again — the person's
-        word in its own window, another controller), and a spot set since
-        stays. Called on the poller."""
+        it refused, an entry it opened and dropped (the attempt's verdict) —
+        or HQPlayer's own advance onto an entry of ours stopped on the same
+        way: an album boundary into a rate the output family refuses is the
+        commonest road there. Desktop's own stop rests on no entry: Now
+        Playing fell back to the queue's head and Play started HQPlayer's
+        first entry, not the track that failed (live, 2026-10-31). The spot
+        stays at the start's slot, at the second it went to — an advance's
+        target, the entry the mirror holds next, at 0: Now Playing names that
+        track with its diagnosis, Play starts it, Next and Previous move from
+        it — erased as any spot is, with its item or once a start from it is
+        taken. Only an entry of ours in an intact mirror (an advance aims at
+        none elsewhere: _advance), only while HQPlayer still rests (not once
+        anything plays again — the person's word in its own window, another
+        controller, whose takeover leaves its own spot: _note_listen), and a
+        spot set since stays. Called on the poller."""
         item, second = att.target if att.target is not None else (None, 0.0)
         last = self._last_tick
         if (item is None or last is None or last.state != "stopped"

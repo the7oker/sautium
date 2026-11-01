@@ -2088,6 +2088,30 @@ def test_a_play_of_a_refused_advances_entry_is_an_attempt_of_its_own(traced, fak
     assert att.verdict["code"] == "rate_refused"
 
 
+def test_hqplayers_own_advance_into_a_refused_rate_leaves_the_spot_and_play_starts_it(traced, fake, monkeypatch,
+                                                                                       tmp_path):
+    """An album boundary into a rate HQPlayer refuses: its own advance onto
+    our next entry, stopped there by itself on no entry, as Desktop's own
+    stop rests. The spot stays at that slot at 0 with its diagnosis — the
+    status names the refused track — and Play starts it, not the queue's
+    head (the rule of a start of the node's own HQPlayer stopped on)."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=0.5, log=False)
+    assert _wait(lambda: att.verdict is not None, 5.0)
+    assert att.verdict["code"] == "rate_refused"
+    assert _wait(lambda: traced._last_tick is not None
+                 and traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 5.0)
+    st = traced._last_tick
+    assert (st.state, st.queue_index, st.item.track_id) == ("stopped", 2, "track-2")
+    assert st.extra["diagnosis"]["code"] == "rate_refused"
+    fake.refuse_play.clear()                             # the rate set right in HQPlayer
+    with fake._lock:
+        fake.length = 300
+    n = len(fake.commands)
+    assert traced.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2, 8.0)
+    assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
+
+
 class HqpMeterPort:
     """HQPlayer's meter port beside a FakeHqp, as the live look of
     2026-10-22 showed it: a frame of sound every 50 ms while it plays an
