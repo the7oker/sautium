@@ -1099,7 +1099,12 @@ drift. A build whose status names no entry, or a stream token of an earlier
 session, leaves the layout's slot standing while the playlist is the mirror —
 external (playing) or no slot (stopped) while it is not; a take that moved
 with no command of the node's has the playlist read at that tick (the
-mirror's state, above — since 2026-11-01).
+mirror's state, above — since 2026-11-01). A DLNA renderer has no playlist to
+read: a URI it names, on the poll or in an event, that is none this
+attachment handed it — no CurrentURI, no NextURI — is another controller's
+(since 2026-11-01): external at slot 0, the node's load let go, no track end
+and no advance of the queue for it, nothing sent to the renderer; a stale URI
+of the node's own, named for a tick after its own load, stays its own.
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last

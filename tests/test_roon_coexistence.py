@@ -17,7 +17,9 @@ does not yet, the test is a strict xfail naming the finding (TODAY): the fix
 turns it into an XPASS, which fails until the mark goes. A take that moved by
 no command of the node's is read against the playlist at that tick: Roon's
 entry is another controller's from its first tick whether or not Status
-names it."""
+names it. A renderer naming a URI the node never handed it is another
+controller's: external, the node's load let go, nothing of it a listen or an
+end of ours."""
 
 import collections
 import json
@@ -33,8 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_hqp_backend import (_QUESTIONS, _album, _attach, _queue_stays_in_memory,  # noqa: E402,F401
                               _wait, fake, listens)
-from test_dlna_backend import (_gena_port, nodes, proxy, quality, renderers, track,  # noqa: E402,F401
-                               wait_for)
+from test_dlna_backend import (_gena_port, _on_renderer, _playing_at, heard, manager,  # noqa: E402,F401
+                               nodes, proxy, quality, renderers, track, wait_for)
 
 from hqplayer_client import PlaybackState  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
@@ -51,10 +53,6 @@ TODAY = {
     ("A2", "bare"): "F2: Play while another controller plays is a bare Play to HQPlayer (_press_play)",
     ("A3", "uri"): "F3: Play while another controller paused resumes its stream (_press_play)",
     ("A3", "bare"): "F3: Play while another controller paused resumes its stream (_press_play)",
-    ("B1", "playing"): "F4: the position poll reads another controller's PLAYING as our slot on the clock",
-    ("B2", "playing"): "F5: Play on a renderer playing another controller's URI is a Play to it, our slot loading",
-    ("B1-end", "playing"): "F4: our slot's clock runs out under the other controller's music; its next STOPPED "
-                           "reads as our track's end and the node loads and plays slot 2 on the renderer",
 }
 
 
@@ -382,4 +380,54 @@ def test_b1_the_other_controllers_track_running_past_ours_moves_nothing(request,
               ended_ours=any(s.queue_index == 2 for s in after))
     _today(request, "B1-end", taken)
     assert not any(s.queue_index == 2 for s in after)
+    assert _sent(r, mark) == []
+
+
+def test_b_a_stale_uri_of_ours_after_our_own_load_is_no_other_controller(tmp_path, proxy, renderers, nodes,
+                                                                          quality):
+    """After the node's own load the renderer names the URI before it again,
+    playing — as a renderer does for a tick after our own Stop,
+    SetAVTransportURI and Play, and as one that sits PAUSED on the old URI
+    does. Every URI this attachment handed it is ours however stale: never
+    another controller's — the slot plays on, nothing is let go or sent."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    before = r.uri, r.meta
+    assert n.backend.next()
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 2 and n.last.position >= 2,
+             timeout=15, what="slot 2 playing")
+    ours = r.uri, r.meta
+    mark, seen = len(r.calls), len(n.statuses)
+    r.uri, r.meta = before
+    r._run(r._changed())
+    time.sleep(2.5)                 # its event, and the polls that read it
+    r.uri, r.meta = ours
+    r._run(r._changed())
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 2, timeout=5, what="slot 2 on")
+    after = n.statuses[seen:]
+    _observed("B-stale", node_sent=_sent(r, mark),
+              statuses=[(s.state, s.queue_index, s.extra.get("source")) for s in after][-6:])
+    assert not any(s.extra.get("source") == "external" for s in after)
+    assert _sent(r, mark) == [] and n.backend._current_url == ours[0]
+
+
+def test_b1_the_listen_ends_at_its_own_seconds_and_the_other_controllers_track_is_none_of_ours(
+        tmp_path, proxy, renderers, manager, heard, quality, taken):
+    """B1 through the manager and the play tracker: the node's listen ends at
+    its own seconds, written once under half its track; what the other
+    controller plays on is no listen of ours — its seconds never run our
+    slot's clock past the scrobble's floor (F4: the node scrobbled a track
+    that did not sound)."""
+    listened, lastfm = heard
+    r = renderers()
+    _on_renderer(manager, r, [track(tmp_path, 1, seconds=60.0), track(tmp_path, 2, seconds=60.0)])
+    _playing_at(manager, r, 1)
+    assert manager.backend().seek(25)
+    _playing_at(manager, r, 26)
+    mark = len(r.calls)
+    r.taken_by_another(taken)
+    time.sleep(7.0)                 # past 30 s on our slot's clock: half the track, the scrobble's floor
+    _observed("B1-listen", taken=taken, listened=listened, lastfm=lastfm, node_sent=_sent(r, mark),
+              status={k_: manager.latest_status.get(k_) for k_ in ("state", "track_index", "source")})
+    assert lastfm == [("update_now_playing", "Track 1")]
+    assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"] and listened[0][1] < 50
     assert _sent(r, mark) == []
