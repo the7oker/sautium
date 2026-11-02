@@ -224,27 +224,38 @@ class SyncServer:
         except Exception as e:
             logger.debug(f"inbound reachability callback failed: {e}")
 
+    @staticmethod
+    def _route_path(request: web.Request) -> str:
+        """The path the gate judges a request by: the route aiohttp matched,
+        in its canonical form — the path the handler is reached by, however
+        the request-target spelled it. "" when no route matched (the answer
+        is then the router's own 404 or 405)."""
+        resource = request.match_info.route.resource
+        return resource.canonical if resource is not None else ""
+
     @web.middleware
     async def _inbound_middleware(self, request: web.Request, handler):
         self._note_inbound(request.remote)
         timer = contact_log.RequestTimer()
+        route_path = self._route_path(request)
         peer_pubkey = lane = None
         items = targets = None
         gate_price = gate_status = None
         response = None
         try:
-            if not peer_auth.is_identity_bound(request.raw_path):
+            if not peer_auth.is_identity_bound(route_path):
                 response = await handler(request)
                 return response
             peer_pubkey, status, lane, cert, refusal = await self._authenticate_peer(request)
+            query = request.query_string
             items, targets = contact_log.extract_request_shape(
-                request.raw_path, await request.read())
+                route_path + (f"?{query}" if query else ""), await request.read())
             if refusal is not None:
                 response = refusal
                 return response
             request["peer_pubkey"] = peer_pubkey
             request["lane"] = lane
-            action = contact_log.endpoint_family(request.raw_path)
+            action = contact_log.endpoint_family(route_path)
             pricer = self._price()
             gate_price = pricer.would_be(peer_pubkey or "", action, lane)
             payment = request.headers.get(admission.HDR_GATE)
@@ -289,7 +300,7 @@ class SyncServer:
         finally:
             wall_ms, cpu_ms = timer.elapsed_ms()
             self._contact_log.record(
-                endpoint=contact_log.endpoint_family(request.raw_path),
+                endpoint=contact_log.endpoint_family(route_path),
                 status=getattr(response, "status", 500),
                 wall_ms=wall_ms, cpu_ms=cpu_ms, pubkey=peer_pubkey,
                 addr=request.remote, lane=lane,
