@@ -61,9 +61,9 @@ Web UI has no build step, and asks no font service for its type.
 
 customtkinter (MIT) · pystray (LGPL-3.0) · Pillow (MIT-CMU) · qrcode (BSD) ·
 psutil (BSD-3-Clause) · psycopg2-binary (LGPL with exceptions) · cryptography
-(Apache-2.0 OR BSD-3-Clause) · aiohttp (Apache-2.0 AND MIT) · libtorrent (BSD) ·
-argon2-cffi (MIT) · PyNaCl (Apache-2.0) · miniupnpc (BSD-3-Clause, the UPnP
-port mapping).
+(Apache-2.0 OR BSD-3-Clause) · aiohttp (Apache-2.0 AND MIT) · Brotli (MIT) ·
+libtorrent (BSD) · argon2-cffi (MIT) · PyNaCl (Apache-2.0) · miniupnpc
+(BSD-3-Clause, the UPnP port mapping).
 
 pystray and psycopg2-binary are LGPL. They are installed by pip on the
 user's machine as separate, replaceable modules (not statically linked);
@@ -86,7 +86,7 @@ argon2-cffi (MIT) · PyNaCl (Apache-2.0) · cryptography (Apache-2.0 OR BSD-3-Cl
 AND MIT) · numpy (BSD-3-Clause) · pandas (BSD-3-Clause) · scipy
 (BSD-3-Clause) · httpx (BSD-3-Clause) · zstandard (BSD-3-Clause) · requests (Apache-2.0) ·
 urllib3 (MIT) · certifi (MPL-2.0) · aiohttp
-(Apache-2.0 AND MIT) · python-json-logger (BSD-2-Clause) · pytest (MIT) ·
+(Apache-2.0 AND MIT) · Brotli (MIT) · python-json-logger (BSD-2-Clause) · pytest (MIT) ·
 pytest-asyncio (Apache-2.0) · anyascii (ISC) · pypinyin
 (MIT) · cutlet (MIT) · koroman (MIT).
 

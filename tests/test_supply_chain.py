@@ -21,13 +21,35 @@ _DISTRIBUTIONS = {
 }
 
 
-def _requirements(path: Path) -> dict:
+# The interpreters a node runs its packages on: the launcher's (Windows, both
+# kinds of Mac) and the Docker image's (Linux, both architectures)
+_RUNTIMES = {
+    "windows": {"sys_platform": "win32", "platform_system": "Windows",
+                "platform_machine": "AMD64", "python_version": "3.12"},
+    "mac": {"sys_platform": "darwin", "platform_system": "Darwin",
+            "platform_machine": "arm64", "python_version": "3.12"},
+    "intel-mac": {"sys_platform": "darwin", "platform_system": "Darwin",
+                  "platform_machine": "x86_64", "python_version": "3.12"},
+    "linux": {"sys_platform": "linux", "platform_system": "Linux",
+              "platform_machine": "x86_64", "python_version": "3.11"},
+    "linux-arm": {"sys_platform": "linux", "platform_system": "Linux",
+                  "platform_machine": "aarch64", "python_version": "3.11"},
+}
+
+
+def _requirements(path: Path, runtime: str = "windows") -> dict:
+    """The file's requirements that apply on `runtime`, by name; two lines of
+    one name never both apply."""
+    env = dict(_RUNTIMES[runtime], platform_python_implementation="CPython",
+               implementation_name="cpython")
     found = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.split("#", 1)[0].strip()
         if line:
             req = Requirement(line)
-            found[req.name.lower()] = req
+            if req.marker is None or req.marker.evaluate(env):
+                assert req.name.lower() not in found, f"two lines of {req.name} apply on {runtime}"
+                found[req.name.lower()] = req
     return found
 
 
@@ -63,7 +85,7 @@ def test_the_launcher_requirements_carry_every_package_its_p2p_layer_imports():
 def test_the_libtorrent_floor_is_a_windows_wheel_with_its_own_openssl():
     # 2.0.11's Windows wheel imported OpenSSL 1.1 DLLs from the system;
     # 2.0.13's and every later one link OpenSSL in.
-    req = _requirements(REPO / "desktop" / "requirements.txt")["libtorrent"]
+    req = _requirements(REPO / "desktop" / "requirements.txt", "windows")["libtorrent"]
     assert _floor(req) >= Version("2.0.13")
 
 
@@ -73,20 +95,55 @@ def test_the_libtorrent_floor_is_a_windows_wheel_with_its_own_openssl():
 _FIXED = {
     "backend": {"aiohttp": "3.14.4", "starlette": "1.3.1", "h11": "0.16.0", "anyio": "4.14.2",
                 "cryptography": "50.0.0", "pynacl": "1.6.2", "certifi": "2026.10.18",
-                "urllib3": "2.8.0", "requests": "2.33.0"},
+                "urllib3": "2.8.0", "requests": "2.33.0", "brotli": "1.2.1"},
     "desktop": {"aiohttp": "3.14.4", "cryptography": "50.0.0", "pynacl": "1.6.2",
-                "libtorrent": "2.0.15"},
+                "brotli": "1.2.1"},
 }
+# Where a runtime has no wheel of the fix: cryptography publishes none for an
+# Intel Mac past 48; 49 and 50 fixed its X.509 path validation and PKCS#7
+# decryption, which no node may call while that holds.
+_BELOW_THE_FIX = {"intel-mac": {"cryptography": "48.0.1"}}
+_LEFT_UNFIXED = r"x509\.verification|x509 import verification|pkcs7"
 
 
 def test_what_faces_the_internet_is_held_above_its_last_published_fix():
+    import re
     low = []
-    for tree, fixed in _FIXED.items():
-        required = _requirements(REPO / tree / "requirements.txt")
-        for name, version in fixed.items():
-            if name not in required or _floor(required[name]) < Version(version):
-                low.append(f"{tree}: {name} below {version}")
+    for runtime in _RUNTIMES:
+        for tree, fixed in _FIXED.items():
+            required = _requirements(REPO / tree / "requirements.txt", runtime)
+            for name, version in dict(fixed, **_BELOW_THE_FIX.get(runtime, {})).items():
+                if name not in required or _floor(required[name]) < Version(version):
+                    low.append(f"{tree} on {runtime}: {name} below {version}")
     assert low == []
+    unfixed = re.compile(_LEFT_UNFIXED, re.IGNORECASE)
+    assert [str(path.relative_to(REPO)) for tree in ("backend", "desktop", "mcp")
+            for path in (REPO / tree).rglob("*.py")
+            if unfixed.search(path.read_text(encoding="utf-8", errors="replace"))] == []
+
+
+def test_a_runtime_in_a_folder_of_any_script_is_found_whatever_the_locale(tmp_path):
+    """The install record sits in the runtime's own site-packages, under a
+    profile folder the user named; a launcher whose locale cannot spell that
+    name still reads the path whole (Windows: a code page, not UTF-8)."""
+    import subprocess
+    import sys
+    import venv
+    runtime = tmp_path / "Користувач" / "runtime"
+    venv.create(runtime, with_pip=False)
+    bindir = "Scripts" if sys.platform == "win32" else "bin"
+    python = runtime / bindir / ("python.exe" if sys.platform == "win32" else "python")
+    probe = ("import sys; from desktop.service_manager import ServiceManager; "
+             "sys.stdout.buffer.write(str(ServiceManager._deps_marker(sys.argv[1])).encode("
+             "'utf-8', 'surrogateescape'))")
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C", "PYTHONCOERCECLOCALE": "0",
+           "PYTHONUTF8": "0", "PYTHONPATH": str(REPO)}
+    out = subprocess.run([sys.executable, "-X", "utf8=0", "-c", probe, str(python)],
+                         capture_output=True, env=env, cwd=REPO)
+    assert out.returncode == 0, out.stderr.decode(errors="replace")[-600:]
+    marker = Path(out.stdout.decode("utf-8"))
+    assert marker.name == ".sautium-backend-deps" and marker.parent.is_dir()
+    assert "Користувач" in str(marker)
 
 
 def test_a_runtime_replaced_at_the_same_path_gets_its_packages_installed_again(tmp_path, monkeypatch):

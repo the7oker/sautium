@@ -418,9 +418,10 @@ class ServiceManager:
         new release while its path stays — and one data root read by several
         interpreters (a checkout's venv beside the app's own) never lets one
         of them vouch for another."""
+        # UTF-8 both ways: a profile folder's name is the user's, in any script
         result = subprocess.run(
-            [python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-            capture_output=True, text=True, timeout=30,
+            [python, "-X", "utf8", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         if result.returncode != 0 or not result.stdout.strip():
