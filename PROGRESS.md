@@ -3328,6 +3328,34 @@ of its links looked up ahead of any click otherwise.
 - FastAPI's interactive `/docs` went: their pages load their scripts from a
   CDN, and only a signed caller could open them.
 
+### A renderer let go sends nothing; one picked again stays (2026-11-02)
+
+The phone, paused, moved from the LAN to a tunnel; Play attached it again
+there (the play gate), and the person, hearing nothing for nine seconds,
+picked it again in the Output picker: the track started twice. The re-pick
+let the gate's new instance go — its Stop and UNSUBSCRIBE went out — and
+attached a third. But the play press had already begun a load on the
+second, waiting for its stream (an Opus transcode from the second it was
+left at), and once the stream was ready that load went on — Stop,
+SetAVTransportURI, Play, SetNextAVTransportURI — from an instance that had
+unsubscribed; the switch's own play press then loaded the same second on
+the third. Nothing ended an instance's coroutines at its detach.
+
+Now every SOAP request an instance makes — its commands, the library's
+reads, an attach's description — goes through the instance's own requester
+(`dlna_backend._Requester`), which refuses all once the manager has let it
+go (`release`, `shutdown`): a load, a seek or an advance still on its way
+ends at its next request, logged, never said as a failure; its GENA
+subscriptions end with it, one made while it was let go included. A switch
+away lets the instance go first and sends its Stop as the instance's last
+word — a load in flight used to go on past that Stop and start the renderer
+switched away from beside the new one. And the renderer already driven,
+picked again, stays the output as it is, as HQPlayer does
+(`PlaybackManager.answering`): attached again only where it no longer
+answers, so a play press made on it goes on there. Lesson: an intent
+belongs to the instance it was made on — letting the instance go must end
+what it was doing, at the one place every request passes.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

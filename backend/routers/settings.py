@@ -2091,7 +2091,8 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     old one's place in it — the track, the second, playing or paused as it
     was: a play press once the change is over, through the play gate as any
     other (one it did not take is said in `resume_refused`). The HQPlayer
-    already driven, picked again, stays the output as it is."""
+    or the renderer already driven, picked again, stays the output as it
+    is."""
     from playback.manager import OutputHeld, manager
 
     # Not while the benchmark has the output: checked under the lock a hold
@@ -2191,8 +2192,20 @@ def _put_output_prefs(req: OutputPrefs) -> tuple:
             told = manager.activate(None)
             manager.activate("browser", spot=spot)
         elif otype == "dlna":
-            told = manager.activate(None)
-            manager.activate("dlna", spot=spot, renderer=_read("output.dlna_renderer"))
+            renderer = _read("output.dlna_renderer")
+            active = manager.active
+            if active is not None and active.id == "dlna" and active.drives(renderer):
+                # The renderer already driven, picked again, stays the output
+                # as it is — a play press made on it goes on there — and is
+                # attached again only where it answers no more, as a play
+                # press finds it. Let go and attached afresh, a re-pick while
+                # the play gate attached the phone loaded its track twice,
+                # once from the instance let go (2026-11-01)
+                manager.answering()
+                spot = None
+            else:
+                told = manager.activate(None)
+                manager.activate("dlna", spot=spot, renderer=renderer)
         elif otype == "local":
             # Deactivate first — re-selecting "local" with a different device
             # must reconstruct the engine, and activate() is idempotent per type.

@@ -211,6 +211,10 @@ class FakeRenderer:
         # Its transport state says STOPPED while it plays on — GetTransportInfo
         # and its events alike (a wedged stack, live 2026-09-01)
         self.says_stopped = False
+        # Its description is held until this is set: an attach stopped half
+        # way, as a phone waking on a tunnel answers late
+        self.hold_description: Optional[threading.Event] = None
+        self.describing = threading.Event()    # its description was asked
         self._base = 0.0                  # position at _t0
         self._t0: Optional[float] = None  # monotonic start while PLAYING
         self._subs: dict[str, tuple[str, str]] = {}   # sid → (service key, callback)
@@ -423,6 +427,9 @@ class FakeRenderer:
     # -- HTTP --------------------------------------------------------------------
 
     async def _description(self, request):
+        self.describing.set()
+        if self.hold_description is not None:
+            await asyncio.to_thread(self.hold_description.wait, 20)
         services = "".join(
             f"<service><serviceType>{st}</serviceType><serviceId>{sid}</serviceId>"
             f"<SCPDURL>/{key}/scpd.xml</SCPDURL><controlURL>/{key}/control</controlURL>"
@@ -481,10 +488,12 @@ class FakeRenderer:
             sid = f"uuid:{uuid.uuid4()}"
             self._subs[sid] = (svc, callback)
             self._seq[sid] = 0
+            self.calls.append(("SUBSCRIBE", {"SID": sid, "service": svc}))
             asyncio.ensure_future(self._initial(sid, svc))
         return web.Response(headers={"SID": sid, "TIMEOUT": "Second-1800"})
 
     async def _unsubscribe(self, request):
+        self.calls.append(("UNSUBSCRIBE", {"SID": request.headers.get("SID")}))
         self._subs.pop(request.headers.get("SID"), None)
         return web.Response()
 
@@ -1766,3 +1775,136 @@ def test_the_fake_renderer_plays_a_queue_through(tmp_path, proxy, renderers, nod
     loads = [a["CurrentURI"] for a in r.called("SetAVTransportURI")]
     assert len(loads) == 1 and loads[0] != r.uri
     assert r.called("SetNextAVTransportURI")[0]["NextURI"] == r.uri
+
+
+# -- N-20: an instance let go sends nothing; a renderer picked again stays ----------
+
+
+class _Awaited:
+    """A lock that tells when another thread waits for it."""
+
+    def __init__(self, lock):
+        self._lock = lock
+        self.waiting = threading.Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.acquire(False):
+            return True
+        if not blocking:
+            return False
+        self.waiting.set()
+        return self._lock.acquire(True, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.release()
+        return False
+
+
+def _first_stream_held(proxy, monkeypatch) -> tuple:
+    """The first stream a load makes ready waits until `go` is set
+    (`waiting` says it does); the others go at once."""
+    waiting, go, made = threading.Event(), threading.Event(), proxy.materialize_file
+
+    def held(*args):
+        if not waiting.is_set():
+            waiting.set()
+            go.wait(10)
+        return made(*args)
+    monkeypatch.setattr(proxy, "materialize_file", held)
+    return waiting, go
+
+
+def test_an_instance_let_go_while_its_load_is_on_its_way_sends_nothing_more(tmp_path, proxy, renderers, nodes,
+                                                                            quality, monkeypatch):
+    """N-20: an instance let go — a switch away, the play gate attaching the
+    renderer elsewhere — while one of its loads waits for its stream sends
+    the renderer nothing more: not that load's URI, its Play or its next. A
+    phone started 6:45 a second time from an instance that had already
+    unsubscribed (2026-11-01)."""
+    r = renderers()
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)])
+    n = nodes(q, r)
+    waiting, go = _first_stream_held(proxy, monkeypatch)
+    assert n.backend.select(1)
+    assert waiting.wait(10), "the load waits for its stream"
+    n.backend.shutdown()
+    let_go = len(r.calls)
+    go.set()
+    wait_for(lambda: not n.backend._loading, what="the load over")
+    assert r.called("UNSUBSCRIBE"), "the instance was let go"
+    assert r.calls[let_go:] == []
+    assert r.state == "NO_MEDIA_PRESENT"
+
+
+def test_a_switch_away_while_a_load_is_on_its_way_leaves_the_renderer_stopped(tmp_path, proxy, renderers, manager,
+                                                                              switch, quality, monkeypatch):
+    """N-20: a track tapped on one renderer is on its way (its stream being
+    made ready) when the person moves the music to another. The renderer left
+    gets the switch's Stop, its instance's last word, and the tap's load goes
+    no further — it used to go on past that Stop and start the renderer
+    switched away from, beside the new one."""
+    a, b = renderers(name="Kitchen"), renderers(name="Study")
+    _on_renderer(manager, a, [track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)])
+    _playing_at(manager, a, 2)
+    waiting, go = _first_stream_held(proxy, monkeypatch)
+    left = manager.backend()
+    assert left.select(2)
+    assert waiting.wait(10), "the tap's load waits for its stream"
+    switch(type="dlna", renderer=b.record)
+    assert a.called("Stop"), "the switch stopped the renderer left"
+    stopped = len(a.calls)
+    go.set()
+    wait_for(lambda: not left._loading, what="the tap's load over")
+    wait_for(lambda: b.state == "PLAYING", what="the new renderer playing")
+    assert a.calls[stopped:] == []
+    assert a.state == "STOPPED"
+    assert manager.latest_status["track_index"] == 2
+
+
+def test_a_renderer_picked_again_while_the_play_gate_attaches_it_loads_the_track_once(
+        tmp_path, proxy, renderers, manager, picker, switch, quality):
+    """N-20: the phone, paused, moved from the LAN to a tunnel; Play attaches
+    it again at the tunnel (the play gate), and the person, hearing nothing
+    yet, picks it again in the Output picker. The renderer picked again stays
+    the output as it is: the track loads once, by the instance the press was
+    made on, at the second it was left at. On 2026-11-01 the re-pick let the
+    gate's instance go — whose load still went, after its UNSUBSCRIBE — and
+    attached another, which loaded the track a second time."""
+    lan, tunnel = renderers(name="Phone"), renderers(name="Phone")
+    tunnel.udn = lan.udn
+    _on_renderer(manager, lan, [track(tmp_path, 1, seconds=40.0)])
+    _playing_at(manager, lan, 3)
+    manager.backend().pause()
+    wait_for(lambda: manager.latest_status.get("state") == "paused", what="paused")
+    lan.stop_answering()                                  # Wi-Fi off
+    wait_for(lambda: manager.latest_status.get("resume"), timeout=15, what="the renderer lost")
+    left_at = manager.latest_status["resume"]["position"]
+    picker.note_renderer_location(lan.udn, tunnel.location)     # a scan reached it through the tunnel
+    hold = tunnel.hold_description = threading.Event()
+    manager._mutate_lock = gate = _Awaited(manager._mutate_lock)
+    answers = []
+    press = threading.Thread(target=lambda: answers.append(picker.play()))
+    press.start()
+    assert tunnel.describing.wait(15), "the play gate attaches the renderer at the tunnel"
+    row = _rows(picker)[0]
+    repick = threading.Thread(target=lambda: answers.append(switch(type="dlna", renderer=row)))
+    repick.start()
+    assert gate.waiting.wait(10), "the re-pick waits for the gate"
+    hold.set()
+    press.join(20)
+    repick.join(20)
+    assert len(answers) == 2 and answers[0] == {"ok": True}
+    wait_for(lambda: tunnel.state == "PLAYING", timeout=20, what="the phone playing")
+    assert not tunnel.called("UNSUBSCRIBE"), "the instance the press was made on was never let go"
+    wait_for(lambda: manager.latest_status.get("state") == "playing", timeout=20, what="the node saying so")
+    assert len(tunnel.called("SetAVTransportURI")) == 1
+    wait_for(lambda: tunnel.called("Seek"), what="the start sought")
+    assert [s["Target"] for s in tunnel.called("Seek")] == [dlna_backend._rel_time(left_at)]

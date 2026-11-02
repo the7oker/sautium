@@ -16,10 +16,12 @@ host (renderers can't fetch from 127.0.0.1).
 """
 
 import asyncio
+import contextvars
 import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import timedelta
 from functools import partial
 from typing import Optional
@@ -109,6 +111,51 @@ def sink_spelling(mime: str, formats: dict) -> Optional[str]:
 class DlnaAttachError(RuntimeError):
     """Attach failure whose message is already user-ready — start() re-raises
     it verbatim instead of wrapping it in the generic dozing-renderer hint."""
+
+
+class Detached(RuntimeError):
+    """A request of an instance the manager has let go (DlnaBackend.release,
+    shutdown): it never reaches the renderer, and the intent it belonged to
+    ends with the instance — nothing failed."""
+
+
+class _Requester:
+    """One instance's way to its renderer. Every SOAP request the instance
+    makes goes through it — its own commands, the library's reads, the
+    volume, the description of an attach — and none once the instance is let
+    go: a load still on its way ends at its next request. The phone started
+    the same track twice on 2026-11-01, once from an instance that had
+    already unsubscribed: a play press's load went on there after a re-pick
+    had let it go. The one request that still goes is the switch away's
+    Stop, the instance's last word (last_word).
+
+    GENA requests ride the shared notify server's own requester — every
+    instance's events come through that server — so an instance's
+    subscriptions end at its detach instead (DlnaBackend._subscribe,
+    _async_shutdown)."""
+
+    # Set for the last word's own task only: a load on its way in another
+    # task stays refused while that Stop goes
+    _last_word = contextvars.ContextVar("dlna_last_word", default=False)
+
+    def __init__(self, inner, backend: "DlnaBackend"):
+        self.inner = inner
+        self._backend = backend
+
+    async def async_http_request(self, http_request):
+        if self._backend._closed and not self._last_word.get():
+            action = (http_request.headers or {}).get("SOAPAction", "").strip('"').rpartition("#")[2]
+            raise Detached(f"'{self._backend.label}' was let go — "
+                           f"{action or http_request.method + ' ' + urlparse(http_request.url).path} not sent")
+        return await self.inner.async_http_request(http_request)
+
+    @contextmanager
+    def last_word(self):
+        token = self._last_word.set(True)
+        try:
+            yield
+        finally:
+            self._last_word.reset(token)
 
 # The dlna-loop and the GENA notify server are PROCESS singletons: the
 # notify port is a one-per-process resource, and rebinding it on every
@@ -365,13 +412,18 @@ class DlnaBackend(PlayerBackend):
         self._load_gen = 0
         self._poll_task: Optional[asyncio.Task] = None
         self._preload_task: Optional[asyncio.Task] = None   # SetNext, once the next buffer is in hand
+        self._resubscribe_task: Optional[asyncio.Task] = None
         self._art_misses: set = set()   # cover URLs that answered "no art" — not re-asked per track
         self._error: Optional[str] = None
         # Track-change SOAP sequence in flight → status reports `loading`
         # (the UI shows a transition spinner on the tapped track).
         self._loading = False
         self._load_lock = asyncio.Lock()
+        # Let go by the manager (release, shutdown): from then on nothing of
+        # this instance reaches the renderer (_Requester), and nothing it
+        # still hears is said or acted on
         self._closed = False
+        self._requester: Optional[_Requester] = None
         # Why the last word this thread asked for was refused here, before
         # anything was sent (refusal)
         self._local = threading.local()
@@ -394,7 +446,9 @@ class DlnaBackend(PlayerBackend):
         logger.info("DLNA backend attached to %s", self.label)
 
     def shutdown(self) -> None:
-        self._closed = True   # stop emitting / polling before cleanup runs
+        # Let go before cleanup runs: a load, a seek or an advance still on
+        # its way sends nothing more, and nothing is said or polled
+        self._closed = True
         if self._loop is not None:
             # Unsubscribe only — the shared loop and notify server outlive
             # this backend by design (see the singleton note above).
@@ -406,6 +460,31 @@ class DlnaBackend(PlayerBackend):
                 logger.warning("DLNA shutdown cleanup incomplete: %s",
                                str(e).strip() or type(e).__name__)
         logger.info("DLNA backend detached from %s", self.label)
+
+    def release(self) -> Optional[str]:
+        """A switch away. The instance is let go first — a load, a seek or an
+        advance still on its way sends nothing more — and its last word is
+        the renderer's Stop: a load in flight used to go on past that Stop
+        and start the renderer the person had just switched away from. A
+        renderer believed off the network gets no Stop
+        (PlayerBackend.release)."""
+        healthy = self.healthy()
+        self._closed = True
+        if not healthy:
+            logger.info("%s believed off the network — switched away without a stop", self.id)
+            return None
+
+        async def _s():
+            with self._requester.last_word():
+                await self._avt("Stop")
+        self._call(_s())
+        return None
+
+    def drives(self, renderer: Optional[dict]) -> bool:
+        """Is `renderer` (a record: udn, location…) the device this instance
+        drives — by its UDN, whatever address it was picked at?"""
+        from routers.player import udn_key
+        return bool(renderer) and udn_key(renderer.get("udn")) == udn_key(self._renderer.get("udn"))
 
     def capabilities(self) -> Capabilities:
         return Capabilities(volume=True, volume_kind="percent", seek=True,
@@ -535,6 +614,8 @@ class DlnaBackend(PlayerBackend):
         for loc in alive:
             try:
                 return await factory.async_create_device(loc), loc
+            except Detached:
+                raise
             except Exception as e:
                 logger.debug("renderer answered at %s but described badly: %s", loc, e)
         raise DlnaAttachError(
@@ -546,7 +627,8 @@ class DlnaBackend(PlayerBackend):
         # 10s over the default 5s: phone renderers in Wi-Fi power-save can
         # stall the first request for seconds while the radio wakes up.
         requester = AiohttpRequester(timeout=10)
-        factory = UpnpFactory(requester, non_strict=True)
+        self._requester = _Requester(requester, self)
+        factory = UpnpFactory(self._requester, non_strict=True)
         device, location = await self._create_device(factory)
         if location != self._renderer.get("location"):
             self._renderer = {**self._renderer, "location": location}
@@ -554,12 +636,16 @@ class DlnaBackend(PlayerBackend):
             from routers.player import note_renderer_location
             note_renderer_location(self._renderer["udn"], location)
             logger.info("renderer %s answered at %s instead", self.label, location)
+        # The shared server is every instance's: never handed this one's way
+        # in, which refuses all once this instance is let go
         notify_server = await _ensure_notify(requester, self._peer_host)
 
         self._dmr = DmrDevice(device, notify_server.event_handler)
         self._dmr.on_event = self._on_gena_event
         try:
-            await self._dmr.async_subscribe_services(auto_resubscribe=True)
+            await self._subscribe()
+        except Detached:
+            raise
         except Exception as e:
             # Some renderers/firewalls reject eventing — degrade to the
             # position poll (it already carries transport state) and try
@@ -567,6 +653,19 @@ class DlnaBackend(PlayerBackend):
             logger.warning("GENA subscribe failed (%s) — poll-only mode", e)
         await self._dmr.async_update()
         self._emit_now("stopped")
+
+    async def _subscribe(self) -> None:
+        """GENA subscription with its renewals. Its requests go through the
+        shared notify server, not this instance's way in, so a let-go that
+        lands while it is under way is met after it: what it subscribed then
+        is let go too — an attach the manager gave up on (its start timed
+        out) left renewals running for nobody."""
+        if self._closed:
+            raise Detached(f"'{self.label}' was let go — SUBSCRIBE not sent")
+        await self._dmr.async_subscribe_services(auto_resubscribe=True)
+        if self._closed:
+            await self._dmr.async_unsubscribe_services()
+            raise Detached(f"'{self.label}' was let go while it subscribed")
 
     async def _resubscribe(self) -> None:
         """A rejected GENA subscription is not forever: KANN's UPnP stack
@@ -576,8 +675,10 @@ class DlnaBackend(PlayerBackend):
         device's own screen. Retried off the load path, at the user's next
         track load (the renderer is awake and answering then)."""
         try:
-            await self._dmr.async_subscribe_services(auto_resubscribe=True)
+            await self._subscribe()
             logger.info("GENA subscription established on retry")
+        except Detached:
+            return
         except Exception as e:
             logger.info("GENA subscribe retry failed (%s) — still poll-only", e)
 
@@ -586,6 +687,8 @@ class DlnaBackend(PlayerBackend):
             self._poll_task.cancel()
         if self._preload_task:
             self._preload_task.cancel()
+        if self._resubscribe_task:
+            self._resubscribe_task.cancel()
         try:
             if self._dmr:
                 # Unsubscribe is HTTP to the renderer — a powered-off or
@@ -943,6 +1046,8 @@ class DlnaBackend(PlayerBackend):
     async def _seek_started(self, target: float) -> None:
         try:
             await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(target))
+        except Detached:
+            return
         except Exception as e:
             logger.warning("DLNA: the start at %d s was refused (%s) — playing "
                            "from the top", target, _describe(e))
@@ -1567,8 +1672,9 @@ class DlnaBackend(PlayerBackend):
             self._seek_due = None         # ...and the old load's Seek
             if play:
                 self._emit_now("loading")
-            if not self._dmr.is_subscribed:
-                asyncio.ensure_future(self._resubscribe(), loop=self._loop)
+            if not self._dmr.is_subscribed and (self._resubscribe_task is None
+                                                or self._resubscribe_task.done()):
+                self._resubscribe_task = asyncio.ensure_future(self._resubscribe(), loop=self._loop)
             if self._preload_task is not None:
                 self._preload_task.cancel()   # its "next" is not this load's next
             mime = await self._serve_ready(item, url, front=True)
@@ -1753,9 +1859,13 @@ class DlnaBackend(PlayerBackend):
         self._emit_now("playing")
 
     async def _advance(self) -> None:
-        """Track finished (STOPPED near the end) → play the next queue slot."""
+        """Track finished (STOPPED near the end) → play the next queue slot.
+        One the instance was let go in the middle of ends there."""
         if self._queue.item_at(self._index + 1) is not None:
-            await self._load_and_play(self._index + 1)
+            try:
+                await self._load_and_play(self._index + 1)
+            except Detached as e:
+                logger.info("DLNA: the advance to slot %d ends — %s", self._index + 1, e)
         else:
             self._emit_now("stopped")
 
@@ -1791,6 +1901,11 @@ class DlnaBackend(PlayerBackend):
             return await self._avt(name, **kwargs)
 
     def _cmd_failed(self, e: Exception, what: str) -> None:
+        if isinstance(e, Detached):
+            # Let go while it was on its way: the intent ends with the
+            # instance it was made on — nothing failed, nothing to say
+            logger.info("DLNA %s ends — %s", what, e)
+            return
         reason = _describe(e)
         logger.warning("DLNA %s failed: %s", what, reason)
         # Surface it: a silently swallowed command is how "next" looked

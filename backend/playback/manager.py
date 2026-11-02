@@ -221,40 +221,48 @@ class PlaybackManager:
             probed = None
         with self._mutate_lock, self._ensure_lock:
             self._refuse_if_held()
-            b = self._active
-            if b is not None and b is not probed:
-                self._probe(b)
-            if b is not None and b.healthy():
-                return b
-            from routers.settings import _read
-            otype = _read("output.type")
-            if otype is None:
-                return self.backend()   # legacy: honest ConnectionError
-            if otype == "dlna":
-                renderer = _read("output.dlna_renderer")
-                if not renderer:
-                    raise ConnectionError("No DLNA renderer configured")
-                from playback.dlna_backend import renderer_online
-                if not renderer_online(renderer):
-                    raise ConnectionError(
-                        f"'{renderer.get('name', 'DLNA renderer')}' is offline "
-                        "— turn it on, or pick another output in "
-                        "Settings → Audio output")
-            logger.info("play intent on %s '%s' output — (re)attaching",
-                        "unhealthy" if b is not None else "inactive", otype)
-            spot = None
-            if b is not None:
-                # Where the lost instance left the queue: the attach resumes
-                # there, the queue and the second as they were
-                spot = self.spot()
-                # A clean detach of the dead instance — no Stop, and no switch
-                # away: the same output is attached again
-                self.activate(None, stop_old=False)
-            self.activate(otype, spot=spot,
-                          device_id=_read("output.local_device"),
-                          exclusive=bool(_read("output.local_exclusive")),
-                          renderer=_read("output.dlna_renderer"))
-            return self.backend()
+            return self.answering(probed)
+
+    def answering(self, probed: Optional[PlayerBackend] = None) -> PlayerBackend:
+        """The active output where its device answers, under the output-change
+        locks (ensure_active; output_change for a renderer picked again): the
+        instance as it is when it answers where it talks to its device —
+        `probed` was asked already — else the output attached again from the
+        persisted settings, at the spot the instance left."""
+        b = self._active
+        if b is not None and b is not probed:
+            self._probe(b)
+        if b is not None and b.healthy():
+            return b
+        from routers.settings import _read
+        otype = _read("output.type")
+        if otype is None:
+            return self.backend()   # legacy: honest ConnectionError
+        if otype == "dlna":
+            renderer = _read("output.dlna_renderer")
+            if not renderer:
+                raise ConnectionError("No DLNA renderer configured")
+            from playback.dlna_backend import renderer_online
+            if not renderer_online(renderer):
+                raise ConnectionError(
+                    f"'{renderer.get('name', 'DLNA renderer')}' is offline "
+                    "— turn it on, or pick another output in "
+                    "Settings → Audio output")
+        logger.info("%s '%s' output — (re)attaching",
+                    "unhealthy" if b is not None else "inactive", otype)
+        spot = None
+        if b is not None:
+            # Where the lost instance left the queue: the attach resumes
+            # there, the queue and the second as they were
+            spot = self.spot()
+            # A clean detach of the dead instance — no Stop, and no switch
+            # away: the same output is attached again
+            self.activate(None, stop_old=False)
+        self.activate(otype, spot=spot,
+                      device_id=_read("output.local_device"),
+                      exclusive=bool(_read("output.local_exclusive")),
+                      renderer=_read("output.dlna_renderer"))
+        return self.backend()
 
     @staticmethod
     def _probe(b: PlayerBackend) -> None:
