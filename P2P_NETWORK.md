@@ -158,7 +158,8 @@ LAN Discovery (UDP broadcast on 19002 + localhost Docker probe)
 Internet tiers, only for what the LAN left behind:
    A. discovery-key nodes + directory volunteers → health-probed 8 at a
       time, drained ONE at a time (each inventory answers for the whole
-      library); the master hint only when nothing else exists
+      library); the master hint when no other node answered (seen
+      addresses that never answer do not count)
    B. only past the network-size threshold: ENGAGED artists (an owned file
       or a completed listen) still missing analysis, rarest first → their
       exact keys, a ROTATING slice of 50 through the traversal lane (cursor

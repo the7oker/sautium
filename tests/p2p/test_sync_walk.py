@@ -97,3 +97,69 @@ def test_dead_address_backs_off_doubling_to_a_day(monkeypatch):
     dead.answered(addr)
     dead.failed(addr)
     assert dead._entries[addr][0] - clock[0] == base     # an answer resets the strikes
+
+
+class _Walked:
+    """A walk run with its stores and peers stood in for: one artist missing,
+    the DHT and the directory naming the given addresses, the master hint
+    naming the master, and only `answering` addresses answering /health."""
+
+    MASTER = ("198.51.100.99", 8801)
+
+    def __init__(self, monkeypatch, dht_nodes, volunteers, answering, empty_handed=()):
+        self.probed, self.drained, self.hint_asked = [], [], 0
+        walk = _walk()
+        walk.dht = SimpleNamespace(is_available=True, tail_enabled=False,
+                                   set_tail_enabled=lambda mode: None)
+        walk._skip_addrs = None
+        walk._gap_count = 1               # the gap set did not grow since the last run
+        for addr in empty_handed:
+            walk._empty_peers[addr] = 1e18
+
+        async def db(fn, *args):
+            return {"incomplete_artist_uuids": ["a1"], "unenriched_artist_uuids": ["a1"],
+                    "core_and_bulk": (["t1"], [])}.get(fn.__name__, [])
+
+        async def lookup():
+            return list(dht_nodes)
+
+        async def connect(addr, is_lan=False):
+            self.probed.append(addr)
+            return (SimpleNamespace(base_url=f"https://{addr}", peer_pubkey=None)
+                    if addr in answering else None)
+
+        async def pull(addr, gaps, progress, progress_cb, peer_api=None, is_lan=False):
+            self.drained.append(addr)
+            return {}
+
+        async def measure(reply_size, sample, directory_total):
+            return False
+
+        def hint():
+            self.hint_asked += 1
+            return self.MASTER
+
+        walk.db, walk._lookup_nodes_safe, walk.connect_peer = db, lookup, connect
+        walk._sync_from_peer, walk._measure_network = pull, measure
+        monkeypatch.setattr(sync_walk.node_hints, "fetch", lambda cap: list(volunteers))
+        monkeypatch.setattr(sync_walk.node_hints, "total", lambda cap: None)
+        monkeypatch.setattr(sync_walk.master_hint, "fetch", hint)
+        asyncio.run(walk.run())
+
+
+def test_the_master_hint_is_asked_when_no_node_answered_and_only_then(monkeypatch):
+    # A newcomer with a dead DHT sees only directory entries that do not
+    # answer: seeing them is not reaching a node, and the master is asked.
+    w = _Walked(monkeypatch, dht_nodes=[("198.51.100.20", 21000)],
+                volunteers=[("198.51.100.21", 21001, "ab" * 32)], answering={"198.51.100.99:8801"})
+    assert w.hint_asked == 1
+    assert "198.51.100.99:8801" in w.probed
+    assert w.drained == ["198.51.100.99:8801"]
+    # It stays the last tier: not when a node answered this run, nor when one
+    # answered lately with nothing for us.
+    w = _Walked(monkeypatch, dht_nodes=[("198.51.100.20", 21000)], volunteers=[],
+                answering={"198.51.100.20:21000"})
+    assert w.hint_asked == 0 and w.drained == ["198.51.100.20:21000"]
+    w = _Walked(monkeypatch, dht_nodes=[("198.51.100.20", 21000)], volunteers=[], answering=set(),
+                empty_handed={"198.51.100.20:21000"})
+    assert w.hint_asked == 0 and w.probed == []

@@ -585,6 +585,7 @@ class SyncWalk:
         # answers for the whole library at once); then the residual rare
         # artists through their own keys.
         dht_seen: set[str] = set()       # addresses already considered this run
+        answered_empty: set[str] = set()  # of them, peers that answered lately with nothing for us
         skip_dht_addrs: set[str] = set(self._skip_addrs()) if self._skip_addrs else set()
         if skip_dht_addrs:
             logger.debug(f"DHT skip list: {skip_dht_addrs}")
@@ -600,7 +601,10 @@ class SyncWalk:
                 if addr in dht_seen or addr in skip_dht_addrs:
                     continue
                 dht_seen.add(addr)
-                if self.dead.backing_off(addr) or self._empty_peers.get(addr, 0.0) > now:
+                if self.dead.backing_off(addr):
+                    continue
+                if self._empty_peers.get(addr, 0.0) > now:
+                    answered_empty.add(addr)
                     continue
                 out.append(addr)
             return out
@@ -643,20 +647,24 @@ class SyncWalk:
         remaining = await self.db(unenriched_artist_uuids)
         candidates = _fresh(
             list(nodes) + [(h, p) for h, p, _ in (volunteers or [])])
-        if remaining and not candidates and not dht_seen:
-            # Nothing anywhere (dead DHT, empty directory): the master
-            # hint is the last tier, validated like any other node.
-            hint = await asyncio.get_event_loop().run_in_executor(
-                None, master_hint.fetch)
-            if hint:
-                candidates = _fresh([hint])
         if not remaining:
             _progress("Nothing left to pull — measuring the network only")
+        reachable = []
         if candidates:
             _progress(f"Probing {len(candidates)} nodes...")
             reachable = await self._probe_candidates(candidates)
-            if remaining:
-                await _drain(reachable)
+        if remaining and not reachable and not answered_empty:
+            # No node answered — a dead DHT, an empty directory, or one
+            # whose entries all failed to answer: the master hint is the
+            # last tier, validated like any other node. Seeing addresses is
+            # not reaching a node.
+            hint = await asyncio.get_event_loop().run_in_executor(
+                None, master_hint.fetch)
+            last = _fresh([hint]) if hint else []
+            if last:
+                reachable = await self._probe_candidates(last)
+        if remaining:
+            await _drain(reachable)
         rare_mode = await self._measure_network(
             len(nodes), sample, node_hints.total("sync"))
 
