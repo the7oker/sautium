@@ -32,7 +32,7 @@ import invite_tokens
 from config import settings
 from db_pool import db_query_one, get_conn
 from p2p_chat import MAX_ENCRYPTED_CHARS, get_peer_chat
-from p2p_identity import load_signing_key, resolve_identity, verify_invite_code
+from p2p_identity import load_signing_key, resolve_identity, verify_invite_code, witness_recorder
 from serving import EventStream
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
@@ -207,6 +207,17 @@ def set_subscribe_hook(cb) -> None:
 # Handshake (classic + token + grant-recovery paths)
 # ---------------------------------------------------------------------------
 
+async def _witness_handshake(body: dict, peer_pubkey: str) -> None:
+    """An accepted token or grant handshake is a sighting of the guest when
+    it carried its certificate (desktop/p2p/witness.py) — the guest's
+    signature was checked, the use was burned. Never the classic mutual-add
+    path: it is unsigned, and anyone could post anyone's public certificate
+    there. Mirrors sync_server._witness_handshake."""
+    cert = body.get("birth_cert")
+    if isinstance(cert, dict):
+        await asyncio.to_thread(witness_recorder(settings).note, cert, "handshake", peer_pubkey)
+
+
 @chat_router.post("/handshake")
 async def chat_handshake(request: Request):
     svc = get_peer_chat()
@@ -275,6 +286,7 @@ async def chat_handshake(request: Request):
                           if token_id else grant_in.get("rights", []))
                 invite_tokens.snapshot_rights(conn, resolved["id"], rights)
         svc.update_friend_last_seen(peer_pubkey)
+        await _witness_handshake(body, peer_pubkey)
         return _accept(_mint(tid, rights))
 
     if token_id:
@@ -316,6 +328,7 @@ async def chat_handshake(request: Request):
         svc.update_friend_last_seen(peer_pubkey)
         logger.info("Token handshake accepted from %s (%s...)",
                     peer_username, peer_pubkey[:16])
+        await _witness_handshake(body, peer_pubkey)
         return _accept(_mint(token_id, tok["rights"]))
 
     if grant_in:
@@ -339,6 +352,7 @@ async def chat_handshake(request: Request):
         svc.update_friend_last_seen(peer_pubkey)
         logger.info("Grant recovery accepted from %s (%s...)",
                     peer_username, peer_pubkey[:16])
+        await _witness_handshake(body, peer_pubkey)
         return _accept(_mint(grant_in["token_id"],
                              grant_in.get("rights", [])))
 

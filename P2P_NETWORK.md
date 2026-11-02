@@ -481,6 +481,23 @@ POST /api/sync/offer, /push/{…}  carry: segments, audio_features, track_mbids
   computed and logged, nothing is charged. Format + vectors:
   P2P-SYNC-INTEGRITY.md § "Wire format v1", `tests/p2p/vectors/`.
 
+### Witness records — SHIPPED 2026-11-02 (BIRTH-SYNC slice 1)
+- Every node keeps a local record of the identities it meets: for each
+  foreign identity with a valid certificate, the first sighting of each of
+  its certificates on each channel (`p2p_witness`, `desktop/p2p/witness.py`)
+  — introduced to this node by a signed request, met in an accepted token or
+  grant handshake, or dialed by it (a probe). Each row keeps the certificate
+  exactly as the authority signed it, the node's own clock, the node's
+  signature over the statement and a self-contained copy of the Worker stamp
+  of the batch it rode: evidence of when the node first saw whom, for the
+  witnessed age the trust design rests on. The database refuses to change or
+  delete a row. Never shared: not in the sync protocol, a share export, the
+  seed or a support bundle; life data in a backup.
+- `/health` carries `birth_cert`, the node's own certificate (never its
+  proof; the Worker publishes certificates by key anyway), so the node that
+  dials it can witness it. Older peers ignore the field.
+- Design: P2P-SYNC-INTEGRITY.md § "Witness records".
+
 ### Future
 - Bandwidth limiting
 

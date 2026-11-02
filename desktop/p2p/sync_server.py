@@ -30,7 +30,7 @@ import psycopg2.pool
 from aiohttp import web
 
 from desktop.p2p import (addrs, admission, contact_log, lb_slice_queries, mb_slice_queries,
-                         peer_auth, sync_queries)
+                         peer_auth, sync_queries, witness)
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,10 @@ class SyncServer:
         self._gate_mode = ("shadow", 0.0)   # (value, read-at) — user_settings p2p.gate_mode, cached
         self._contact_log = contact_log.ContactLog(
             self._db)
+        # The witness record (desktop/p2p/witness.py) of this process: the
+        # introductions and handshakes served here, and the probes the walk
+        # and the slice cycles make (p2p_manager._peer_identity).
+        self.witness = witness.Recorder(self._db, own_keys=self._own_keys)
         # Relay wake registry: who holds a stream here, per node of each key
         self._wake = WakeRegistry()
         # Peer-relay clients (Phase D): pubkey -> voucher record
@@ -232,7 +236,7 @@ class SyncServer:
             if not peer_auth.is_identity_bound(request.raw_path):
                 response = await handler(request)
                 return response
-            peer_pubkey, status, lane, refusal = await self._authenticate_peer(request)
+            peer_pubkey, status, lane, cert, refusal = await self._authenticate_peer(request)
             items, targets = contact_log.extract_request_shape(
                 request.raw_path, await request.read())
             if refusal is not None:
@@ -267,6 +271,11 @@ class SyncServer:
                     "quote_url": f"/api/gate/quote?pubkey={peer_pubkey or ''}&action={action}",
                 }, status=402)
                 return response
+            if cert is not None:
+                # After the gate's verdict: an unpaid flood must not fill the
+                # day's `introduced` ceiling once the gate is armed.
+                await asyncio.get_event_loop().run_in_executor(
+                    None, self.witness.note, cert, "introduced", peer_pubkey)
             response = await handler(request)
             if peer_pubkey is not None:
                 response.headers[peer_auth.HDR_IDENTITY] = status
@@ -294,18 +303,19 @@ class SyncServer:
         anonymous lane; a signed one is checked against OUR pubkey, then
         the identity registry decides stranger vs identity lane; the
         introduction header is recorded (never evaluated here — lazy).
-        Returns (pubkey|None, status|None, lane, refusal_response|None)."""
+        Returns (pubkey|None, status|None, lane, introduced certificate|None,
+        refusal_response|None)."""
         own = (self.account_info or {}).get("public_key_hex", "")
         body = await request.read()          # cached by aiohttp; b"" for GET
         if not own:
-            return None, None, peer_auth.LANE_ANONYMOUS, None
+            return None, None, peer_auth.LANE_ANONYMOUS, None, None
         pubkey, err = peer_auth.verify_request(
             request.headers, own, request.method, request.raw_path, body)
         if err is not None:
-            return None, None, None, self._json_response(
+            return None, None, None, None, self._json_response(
                 request, {"error": err}, status=403)
         if pubkey is None:
-            return None, None, peer_auth.LANE_ANONYMOUS, None
+            return None, None, peer_auth.LANE_ANONYMOUS, None, None
 
         bundle = None
         raw_bundle = request.headers.get(peer_auth.HDR_CERT)
@@ -314,8 +324,9 @@ class SyncServer:
             bundle = peer_auth.decode_cert_bundle(raw_bundle)
             if (bundle is None or not verify_certificate(bundle["cert"])
                     or bundle["cert"].get("pubkey", "").lower() != pubkey):
-                return None, None, None, self._json_response(
+                return None, None, None, None, self._json_response(
                     request, {"error": "identity certificate invalid"}, status=400)
+        cert = bundle["cert"] if bundle is not None else None
 
         from desktop.p2p import identity_registry
         addr = request.remote
@@ -335,12 +346,12 @@ class SyncServer:
             banned, row = await asyncio.get_event_loop().run_in_executor(None, _registry)
         except Exception as e:
             logger.warning(f"identity registry unavailable: {e}")
-            return pubkey, "unknown", peer_auth.LANE_STRANGER, None
+            return pubkey, "unknown", peer_auth.LANE_STRANGER, cert, None
         if banned or (row is not None and row["status"] == "failed"):
-            return None, None, None, self._json_response(
+            return None, None, None, None, self._json_response(
                 request, {"error": "identity banned"}, status=403)
         status = row["status"] if row is not None else "unknown"
-        return pubkey, status, identity_registry.lane_for(row, signed=True), None
+        return pubkey, status, identity_registry.lane_for(row, signed=True), cert, None
 
     def set_chat_service(self, chat_service, on_message_cb: Callable = None):
         """Attach chat service for handling chat endpoints."""
@@ -449,6 +460,11 @@ class SyncServer:
         n = self._price().price(pubkey, action, lane)
         quote = await loop.run_in_executor(None, self._admission().quote, pubkey, keys, action, n)
         return self._json_response(request, quote)
+
+    def _own_keys(self) -> frozenset:
+        from desktop.node_identity import _identity_dir
+        return witness.own_keys((self.account_info or {}).get("public_key_hex", ""),
+                                _identity_dir())
 
     def _identity_gate(self):
         """Lazy: the asyncio semaphore inside must be born on the serving loop."""
@@ -593,11 +609,18 @@ class SyncServer:
     async def handle_health(self, request: web.Request) -> web.Response:
         """Health check endpoint. `mb_slices` is the replica inventory size —
         a dump-less node with verified blobs is a partial slice source, and
-        requesters try those BEFORE dump nodes to spread the load."""
+        requesters try those BEFORE dump nodes to spread the load.
+        `birth_cert` is this node's certificate, never its proof: a peer that
+        dials it records the sighting (desktop/p2p/witness.py), and the
+        Worker publishes every certificate anyway."""
+        from desktop.p2p.birth_cert import served_certificate
+        cert = served_certificate()
         return self._json_response(request, {
             "status": "ok",
             "node_id": self.node_id,
             "type": "sautium-peer",
+            "birth_cert": (cert if cert is not None
+                           and cert["pubkey"].lower() == self.node_id.lower() else None),
             "mb_dump": self.mb_dump_version,
             "mb_slices": self._slice_blob_total(),
             # The ListenBrainz family: the dump version this node serves
@@ -1014,6 +1037,18 @@ class SyncServer:
             key, token_id, rights, peer_pubkey,
             self.account_info.get("public_key_hex", ""))
 
+    async def _witness_handshake(self, body: dict, peer_pubkey: str) -> None:
+        """An accepted token or grant handshake is a sighting of the guest
+        when it carried its certificate (desktop/p2p/witness.py) — the
+        guest's signature was checked, the use was burned. Never the classic
+        mutual-add path: it is unsigned, and anyone could post anyone's
+        public certificate there. MIRRORS
+        backend/routers/peer_chat._witness_handshake."""
+        cert = body.get("birth_cert")
+        if isinstance(cert, dict):
+            await asyncio.get_event_loop().run_in_executor(
+                None, self.witness.note, cert, "handshake", peer_pubkey)
+
     async def handle_chat_handshake(self, request: web.Request) -> web.Response:
         """POST /api/chat/handshake — exchange public keys for friend request.
 
@@ -1114,6 +1149,7 @@ class SyncServer:
                           if token_id else grant_in.get("rights", []))
                 invite_tokens.snapshot_rights(conn, resolved["id"], rights)
             self._chat_service.update_friend_last_seen(peer_pubkey)
+            await self._witness_handshake(body, peer_pubkey)
             return _accept(self._mint_grant(tid, rights, peer_pubkey))
 
         if token_id:
@@ -1159,6 +1195,7 @@ class SyncServer:
             self._chat_service.update_friend_last_seen(peer_pubkey)
             logger.info(f"Token handshake accepted from {peer_username} "
                         f"({peer_pubkey[:16]}...)")
+            await self._witness_handshake(body, peer_pubkey)
             return _accept(self._mint_grant(token_id, tok["rights"],
                                             peer_pubkey))
 
@@ -1187,6 +1224,7 @@ class SyncServer:
             self._chat_service.update_friend_last_seen(peer_pubkey)
             logger.info(f"Grant recovery accepted from {peer_username} "
                         f"({peer_pubkey[:16]}...)")
+            await self._witness_handshake(body, peer_pubkey)
             return _accept(self._mint_grant(grant_in["token_id"],
                                             grant_in.get("rights", []),
                                             peer_pubkey))

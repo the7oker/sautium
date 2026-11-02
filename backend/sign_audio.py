@@ -41,7 +41,15 @@ rate-limited remote one: a Worker 429 threw the whole batch away, and the
 Worker round trip sat inside the window in which a canon pass could move
 rows from under the batch (52 segments, 2026-08-25). The backend never calls
 either directly — backend/notary.py owns them: it signs on every producer's
-wake and stamps on its own cadence. A batch is capped at
+wake and stamps on its own cadence.
+
+Witness records (p2p_witness, desktop/p2p/witness.py) seal here too, on their
+own terms: sign_witness() signs them and nothing else — a sighting is a
+wake of its own, and it must not cost the catalogue scans sign() runs — and
+they ride the next stamp made for analysis, alone only when the notary
+says their backstop is due (stamp(witness_only=True)). Their stamp is
+COPIED into the row: an identity-rule migration empties signing_batches,
+and a witness row must outlive it. A batch is capped at
 MAX_RECORDS_PER_BATCH: every pending record, its Merkle proof and the JSON of
 that proof sit in memory until the batch commits, and a full re-seal after an
 identity migration (930k records on the master, 2026-08-25) took the whole
@@ -67,8 +75,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import psycopg2
 import psycopg2.extras
 
+import birth_authority
 import record_sig as rs
 from config import settings
+from desktop.p2p import witness
 from p2p_identity import load_signing_key
 from record_sig import FEATURE_ORDER, canonical_features_blob
 
@@ -105,9 +115,11 @@ def _vector_bytes(text: str) -> bytes:
 STAMP_REQUEST_VERSION = 1
 STAMP_MAX_ROOTS = 100
 
-# What stamp() hands the notary: records stamped, and the Worker's pace
-# advice (epoch seconds, None when the Worker gave none).
-StampResult = namedtuple("StampResult", "stamped not_before")
+# What stamp() hands the notary: records stamped, the Worker's pace advice
+# (epoch seconds, None when the Worker gave none), and the seen_at of the
+# oldest witness row still waiting for its stamp (None when none waits) —
+# what the notary arms its witness backstop from.
+StampResult = namedtuple("StampResult", "stamped not_before witness_waiting")
 
 
 class NotaryThrottled(Exception):
@@ -344,6 +356,45 @@ def _signer():
     return key, _pubkey_hex(key)
 
 
+def _sign_witness(conn, key, author: str, dry_run=False,
+                  max_records=MAX_RECORDS_PER_BATCH) -> int:
+    cur = conn.cursor()
+    cur.execute("""SELECT id, witness_v, subject, cert_sig, channel, via, seen_at
+                     FROM p2p_witness WHERE signature IS NULL
+                    ORDER BY id"""
+                + (f" LIMIT {int(max_records)}" if max_records else ""))
+    rows = cur.fetchall()
+    if dry_run or not rows:
+        conn.rollback()
+        return len(rows)
+    signed = [(r["id"], author, rs.sign(witness.statement(r, author), key)) for r in rows]
+    # Signed once: a row another signer reached first (the rotation's drain
+    # beside the notary) is left as that signer made it.
+    psycopg2.extras.execute_values(
+        cur,
+        """UPDATE p2p_witness AS t SET author_pubkey = v.author, signature = v.sig
+             FROM (VALUES %s) AS v(id, author, sig)
+            WHERE t.id = v.id AND t.signature IS NULL""",
+        signed, template="(%s::bigint, %s, %s)", page_size=500)
+    conn.commit()
+    logger.info("signed %d witness record(s)", len(signed))
+    return len(signed)
+
+
+def sign_witness(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> int:
+    """Stage 1 for witness records alone (desktop/p2p/witness.py): sign every
+    unsigned p2p_witness row with the node's key, and do nothing else — no
+    tracklist materialization, no catalogue scan. What a witness wake runs,
+    and what an identity rotation runs first, so the key that saw a sighting
+    is the key that signs it. Returns the rows signed; a call that fills the
+    cap means more are waiting."""
+    signer = _signer()
+    if signer is None:
+        return 0
+    key, author = signer
+    return _sign_witness(conn, key, author, dry_run=dry_run, max_records=max_records)
+
+
 def sign(conn, full=False, limit=None, dry_run=False,
          max_records=MAX_RECORDS_PER_BATCH) -> int:
     """Stage 1 — author-sign every record that became signable. Local and
@@ -353,11 +404,13 @@ def sign(conn, full=False, limit=None, dry_run=False,
 
     The analysis layer is found from its unsigned rows (cheap on every
     wake); the album layer above it is scoped to those tracks unless
-    `full` — see _TRACK_PRED_FULL for when the end-to-end scan is due."""
+    `full` — see _TRACK_PRED_FULL for when the end-to-end scan is due.
+    Witness records sign first, in their own transaction (sign_witness)."""
     signer = _signer()
     if signer is None:
         return 0
     key, author = signer
+    witnessed = _sign_witness(conn, key, author, dry_run=dry_run, max_records=max_records)
     cur = conn.cursor()
 
     minted = _materialize_owned_tracklists(cur)
@@ -423,11 +476,11 @@ def sign(conn, full=False, limit=None, dry_run=False,
     if dry_run:
         conn.rollback()
         logger.info("dry-run — %d record(s) would sign, nothing stored",
-                    len(pending))
-        return len(pending)
+                    len(pending) + witnessed)
+        return len(pending) + witnessed
     if not pending:
         conn.commit()          # the materialized tracklist rows, if any
-        return 0
+        return witnessed
 
     # Grouped and batched: a statement per record was fine at audio scale and
     # is not at enrichment scale — the first unified pass signed 300k+ rows.
@@ -468,28 +521,46 @@ def sign(conn, full=False, limit=None, dry_run=False,
     if capped:
         logger.info("pass capped at %d records — run again to continue",
                     max_records)
-    return len(pending)
+    return len(pending) + witnessed
 
 
 # Stage 2 finds "signed, awaiting stamp" by scan; the partial indexes of
 # migration 011 make that O(pending) on the tables that are gigabytes.
+# Witness rows last: under the cap, analysis goes first.
+_WITNESS_TABLE = "p2p_witness"
 _STAMP_TABLES = ("embedding_segments", "audio_features", "albums",
-                 "album_tracks", "track_mbids")
+                 "album_tracks", "track_mbids", _WITNESS_TABLE)
+_TABLE_PK[_WITNESS_TABLE] = ("id", "bigint")
 
 
-def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> StampResult:
+def _oldest_waiting_witness(cur):
+    cur.execute("""SELECT min(seen_at) AS at FROM p2p_witness
+                    WHERE signature IS NOT NULL AND batch_root IS NULL""")
+    return cur.fetchone()["at"]
+
+
+def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
+          witness_only=False) -> StampResult:
     """Stage 2 — one Merkle batch over everything signed but not yet
     stamped, one Worker call, root + proofs written back. The only stage
     on the network, so the only one that can fail or be throttled
     (NotaryThrottled) — and failing loses nothing: the signatures stay and
     the next call finds them again. One batch per author key, so a rotated
     identity's leftovers stamp under their own author (the request itself
-    is signed by the CURRENT key — the identity the Worker prices). Returns
-    the records stamped and the Worker's `not_before`; a count that fills
-    the cap means more are waiting."""
+    is signed by the CURRENT key — the identity the Worker prices).
+
+    Witness rows ride a batch that stamps analysis; a batch of witness rows
+    alone is a Worker call of its own, made only when `witness_only` (the
+    notary's backstop is due). A Worker that answers under an authority this
+    node does not trust stamps nothing: the witness rows keep their copy of
+    the stamp forever, and every peer would refuse the analysis seals.
+
+    Returns the records stamped, the Worker's `not_before`, and the seen_at
+    of the oldest witness row still waiting; a count that fills the cap
+    means more are waiting."""
     signer = _signer()
     if signer is None:
-        return StampResult(0, None)
+        return StampResult(0, None, None)
     key, me = signer
     cur = conn.cursor()
     pending = []
@@ -507,7 +578,7 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> StampResult
                        for r in cur.fetchall())
     if not pending:
         conn.rollback()
-        return StampResult(0, None)
+        return StampResult(0, None, None)
 
     by_author: dict = {}
     for rec in pending:
@@ -515,19 +586,24 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> StampResult
 
     stamped, not_before = 0, None
     for author, recs in by_author.items():
+        if not witness_only and all(r[0] == _WITNESS_TABLE for r in recs):
+            continue        # witness rows alone wait for an analysis batch or the backstop
         leaves = [rs.record_leaf(sig) for _, _, _, sig in recs]
         root, proofs = rs.merkle_tree(leaves)
         logger.info("batch: %d records by %s…, root %s",
                     len(recs), author[:8], root[:16])
         if dry_run:
+            stamped += len(recs)
             continue
 
         ts = _timestamp_root(root, key, me)
         not_before = ts.get("not_before") or not_before
-        if not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
-                                   ts["authority"], int(ts["v"])):
+        if (ts["authority"] not in birth_authority.TRUSTED_AUTHORITIES
+                or not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
+                                           ts["authority"], int(ts["v"]))):
             conn.rollback()
-            raise RuntimeError("Worker timestamp failed verification — aborting")
+            raise RuntimeError("Worker timestamp failed verification against the trusted "
+                               "authorities — aborting")
 
         cur.execute("""INSERT INTO signing_batches
                          (batch_root, author_pubkey, worker_date, ip_hash,
@@ -543,6 +619,28 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> StampResult
             done = 0
             for i in range(0, len(rows), 500):
                 page = rows[i:i + 500]
+                if table == _WITNESS_TABLE:
+                    # The batch's stamp is copied into the row with its proof,
+                    # once: signing_batches may come and go, the row stays.
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """UPDATE p2p_witness AS t
+                              SET batch_root = v.root, merkle_proof = v.proof::jsonb,
+                                  worker_date = v.date, worker_ip_hash = v.ip_hash,
+                                  worker_sig = v.wsig, worker_authority = v.authority,
+                                  timestamp_version = v.ver
+                             FROM (VALUES %s) AS v(pk, sig, root, proof, date, ip_hash,
+                                                   wsig, authority, ver)
+                            WHERE t.id = v.pk AND t.signature = v.sig
+                              AND t.batch_root IS NULL""",
+                        [row + (ts["date"], ts["ip_hash"], ts["sig"], ts["authority"],
+                                int(ts["v"])) for row in page],
+                        template=("(%s::bigint, %s, %s, %s, %s::timestamptz, %s::uuid, "
+                                  "%s, %s, %s::smallint)"),
+                        page_size=500,
+                    )
+                    done += cur.rowcount
+                    continue
                 # The signature predicate is the seal: a row re-signed while
                 # the batch was open holds a leaf this tree never had, so it
                 # stays unstamped for the next batch instead of carrying a
@@ -574,12 +672,14 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> StampResult
     if dry_run:
         conn.rollback()
         logger.info("dry-run — %d record(s) would stamp, not timestamped or stored",
-                    len(pending))
-        return StampResult(len(pending), None)
+                    stamped)
+        return StampResult(stamped, None, None)
     if max_records and len(pending) >= max_records:
         logger.info("batch capped at %d records — run again to continue",
                     max_records)
-    return StampResult(stamped, not_before)
+    waiting = _oldest_waiting_witness(cur)
+    conn.rollback()
+    return StampResult(stamped, not_before, waiting)
 
 
 def run(stage="both", limit=None, dry_run=False, until_done=False,
@@ -615,9 +715,11 @@ def verify_all() -> bool:
     was sealed — then runs the full chain (author signature → Merkle inclusion
     → Worker timestamp by a trusted authority). A signed row whose provenance
     link is missing counts as INVALID: the seal asserts a content-address the
-    row no longer carries. Reports valid/invalid counts; returns True iff every
-    seal holds. (This is the seal check; a --deep audit that re-fingerprints
-    the file to confirm the address is a separate, heavier pass.)"""
+    row no longer carries. Witness records are checked the same way against
+    their own copy of the stamp, and their certificate with it. Reports
+    valid/invalid counts; returns True iff every seal holds. (This is the
+    seal check; a --deep audit that re-fingerprints the file to confirm the
+    address is a separate, heavier pass.)"""
     from birth_authority import TRUSTED_AUTHORITIES
 
     conn = psycopg2.connect(settings.database_url)
@@ -705,6 +807,35 @@ def verify_all() -> bool:
             if len(bad_samples) < 5:
                 bad_samples.append(f"features {r['tid'][:8]}")
     feat_cur.close()
+
+    # Witness records carry their own copy of the stamp (signing_batches is
+    # not theirs to rely on), and a signed row without one is waiting for an
+    # analysis batch or the backstop by design — counted apart, not invalid.
+    awaiting = 0
+    w_cur = conn.cursor(name="verify_witness",
+                        cursor_factory=psycopg2.extras.RealDictCursor)
+    w_cur.itersize = 2000
+    w_cur.execute("SELECT * FROM p2p_witness WHERE signature IS NOT NULL ORDER BY id")
+    for r in w_cur:
+        holds = (witness.certificate_holds(r, TRUSTED_AUTHORITIES)
+                 and rs.verify(witness.statement(r, r["author_pubkey"]),
+                               r["signature"], r["author_pubkey"]))
+        if holds and r["batch_root"] is None:
+            awaiting += 1
+            continue
+        if holds and rs.verify_seal(
+                witness.statement(r, r["author_pubkey"]), r["signature"], r["author_pubkey"],
+                r["merkle_proof"], r["batch_root"],
+                r["worker_date"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                str(r["worker_ip_hash"]), r["worker_sig"], r["worker_authority"],
+                TRUSTED_AUTHORITIES, worker_version=int(r["timestamp_version"])):
+            ok += 1
+        else:
+            bad += 1
+            if len(bad_samples) < 5:
+                bad_samples.append(f"witness {r['id']} ({r['subject'][:8]}, {r['channel']})")
+    w_cur.close()
+    logger.info("witness records: %d signed awaiting their stamp", awaiting)
 
     logger.info("seal verification: %d valid, %d invalid", ok, bad)
     if bad_samples:

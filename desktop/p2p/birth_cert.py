@@ -161,6 +161,23 @@ def load_certificate() -> Optional[dict]:
     return cert
 
 
+_served = (None, None)       # (the file's mtime_ns, its verified certificate)
+
+
+def served_certificate() -> Optional[dict]:
+    """This node's certificate as its /health serves it — the certificate
+    only, never the proof, whose mined_at the Worker does not publish. Read
+    and verified once per version of the file, not on every probe."""
+    global _served
+    try:
+        mtime = _cert_path().stat().st_mtime_ns
+    except OSError:
+        return None
+    if _served[0] != mtime:
+        _served = (mtime, load_certificate())
+    return _served[1]
+
+
 def save_certificate(cert: dict) -> bool:
     """Persist this node's certificate (e.g. fresh from the master).
     Rejects invalid signatures and certificates for a different identity."""

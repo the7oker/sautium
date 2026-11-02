@@ -370,3 +370,32 @@ def test_two_clones_merge_to_the_union_in_either_order(clones, tmp_path):
     assert not any(again["merged"].values()), again["merged"]
     assert again["waiting"] == got["waiting"]
     assert _stats(a) == sa and _friends(a) == fa and len(hist(a)) == 5 and len(demos(a)) == 2
+
+
+def _witness(subject, channel="probe", seen=T0, *, signed=False):
+    return ("""INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v, issued_at, method,
+                                       difficulty, params_version, channel, seen_at, author_pubkey, signature)
+               VALUES (%s, 'sautium-birth:v4:' || %s, %s, %s, 4, %s, 'pow', 32, 1, %s, %s, %s, %s)""",
+            (subject, subject, "5a" * 64, "aa" * 32, T0 - timedelta(days=30), channel, seen,
+             PUB if signed else None, "6b" * 64 if signed else None))
+
+
+def test_witness_records_merge_insert_only(clones, tmp_path):
+    """Evidence is never replaced: a sighting this node lacks comes in under a
+    fresh id (the dump's one may be a live row's), a sighting it holds keeps
+    its row even when the backup's is earlier, and the guard that refuses any
+    change or deletion is never met."""
+    a, b = clones["a"], clones["b"]
+    only_b, both, only_a = "71" * 32, "72" * 32, "73" * 32
+    _exec(a, [_witness(only_a), _witness(both, seen=T0 + timedelta(days=2))])
+    _exec(b, [_witness(only_b, signed=True), _witness(both, seen=T0 + timedelta(days=1), signed=True)])
+    ids_a = dict(_rows(a, "SELECT subject, id FROM p2p_witness"))
+    ids_b = dict(_rows(b, "SELECT subject, id FROM p2p_witness"))
+    assert ids_b[only_b] in ids_a.values()            # the dump's id names a live row here
+    got = _merge(_backup(b, tmp_path / "b"), a)
+    assert got["merged"]["witness"] == 1
+    rows = {r[0]: r[1:] for r in _rows(a, "SELECT subject, id, seen_at, signature FROM p2p_witness")}
+    assert set(rows) == {only_a, both, only_b}
+    assert rows[only_b][0] not in ids_a.values() and rows[only_b][1:] == (T0, "6b" * 64)
+    assert rows[both] == (ids_a[both], T0 + timedelta(days=2), None)      # this node's own record stays
+    assert _merge(_backup(b, tmp_path / "b2"), a)["merged"]["witness"] == 0

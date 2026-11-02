@@ -2,8 +2,15 @@
 // and a throwaway authority key, so the Python mirrors can be checked against
 // certificates the Worker code actually emits (see test_birth_cert.py).
 //
-// usage: node worker_harness.mjs <authority_seed_hex> <email_pepper>
-// prints one JSON object on stdout.
+// usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--serve [--stamp-brake N]]
+// Without --serve: runs one scripted scenario and prints one JSON object on
+// stdout. With --serve: answers HTTP on 127.0.0.1 (a free port) with the same
+// Worker code and env — what a node's notary is pointed at in a test
+// (sign_audio.WORKER_URL) — prints {"url", "authority_pub"} as its first
+// line and serves until killed. Its address brake on /timestamp lets N
+// stamps through (default: no limit; the scenario's 8 would turn the ninth
+// stamp of a test into a 429), and GET /__harness/calls answers how many
+// /timestamp requests reached the Worker.
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -12,7 +19,11 @@ import { webcrypto } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 const subtle = webcrypto.subtle;
-const [authoritySeedHex, emailPepper] = process.argv.slice(2);
+const harnessArgs = process.argv.slice(2);
+const [authoritySeedHex, emailPepper] = harnessArgs;
+const serveMode = harnessArgs.includes("--serve");
+const brakeAt = harnessArgs.indexOf("--stamp-brake");
+const stampBrake = brakeAt >= 0 ? Number(harnessArgs[brakeAt + 1]) : Infinity;
 const here = dirname(fileURLToPath(import.meta.url));
 const workerPath = resolve(here, "../../worker/verify.js");
 
@@ -108,7 +119,7 @@ const env = {
   BIRTH_SIGNING_KEY: authoritySeedHex,
   EMAIL_PEPPER: emailPepper,
   IP_PEPPER: "test-ip-pepper",
-  BRAKE_STAMP: fakeBrake(8),
+  BRAKE_STAMP: fakeBrake(serveMode ? stampBrake : 8),
   BRAKE_BIRTH: fakeBrake(100),
   BIRTH_LEDGER: { idFromName: (name) => name, get: () => ledgerStub },
   MAILBOX: { idFromName: (name) => name, get: () => mailboxStub },
@@ -133,6 +144,39 @@ async function call(method, path, body, { ip = "203.0.113.7", cf } = {}) {
   if (cf) req.cf = cf;                       // request.cf as the edge would set it
   const res = await worker.fetch(req, env);
   return { status: res.status, body: await res.json() };
+}
+
+if (serveMode) {
+  const { createServer } = await import("node:http");
+  let timestampCalls = 0;
+  const server = createServer(async (req, res) => {
+    if (req.url === "/__harness/calls") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ timestamp: timestampCalls }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks);
+    if (req.url.startsWith("/timestamp")) timestampCalls += 1;
+    try {
+      const response = await worker.fetch(new Request(`https://worker.test${req.url}`, {
+        method: req.method,
+        headers: { "Content-Type": req.headers["content-type"] || "application/json",
+                   "CF-Connecting-IP": "203.0.113.7" },
+        body: body.length ? body : undefined,
+      }), env);
+      res.writeHead(response.status, Object.fromEntries(response.headers));
+      res.end(Buffer.from(await response.arrayBuffer()));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(e) }));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  console.log(JSON.stringify({ url: `http://127.0.0.1:${server.address().port}`,
+                               authority_pub: authority.pubHex }));
+  await new Promise(() => {});        // serves until the test ends the process
 }
 
 // --- subject 1: fresh identity, then email upgrade ---

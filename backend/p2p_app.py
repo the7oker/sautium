@@ -166,10 +166,10 @@ class PeerAuthMiddleware:
             return await refuse(403, err)
 
         lane = peer_auth.LANE_ANONYMOUS
+        bundle = None
         if pubkey is not None:
             import birth_authority
             from desktop.p2p import identity_registry
-            bundle = None
             raw_bundle = headers.get(peer_auth.HDR_CERT)
             if raw_bundle:
                 bundle = peer_auth.decode_cert_bundle(raw_bundle)
@@ -225,6 +225,15 @@ class PeerAuthMiddleware:
             await send_wrapper({"type": "http.response.body", "body": payload})
             _record()
             return
+
+        if bundle is not None:
+            # After the gate's verdict: an unpaid flood must not fill the
+            # day's `introduced` ceiling once the gate is armed
+            # (desktop/p2p/witness.py). Off the loop, like the registry.
+            from config import settings
+            from p2p_identity import witness_recorder
+            await asyncio.to_thread(witness_recorder(settings).note,
+                                    bundle["cert"], "introduced", pubkey)
 
         state = scope.setdefault("state", {})
         state["peer_pubkey"] = pubkey
@@ -427,7 +436,11 @@ async def rate_limit(request: Request, call_next):
 @app.get("/health")
 async def health() -> dict:
     """Peer-facing identity. Same contract as the launcher's sync server —
-    node_id + mb_dump + capabilities are what a peer picks sources by."""
+    node_id + mb_dump + capabilities are what a peer picks sources by, and
+    `birth_cert` (the certificate, never the proof) is what a peer that
+    dials this node records it by (desktop/p2p/witness.py)."""
+    from config import settings
+    from p2p_identity import served_certificate
     mb_slices = 0
     try:
         from db_pool import get_conn
@@ -438,10 +451,13 @@ async def health() -> dict:
     except Exception:
         pass   # table absent until the first slice lands — 0 is the truth
     lb_slices, lb_slices_version = lb_inventory()
+    node_id = node_pubkey_hex()
+    cert = served_certificate(settings)
     return {
         "status": "ok",
         "type": "sautium-peer",
-        "node_id": node_pubkey_hex(),
+        "node_id": node_id,
+        "birth_cert": cert if cert is not None and node_id and cert["pubkey"] == node_id else None,
         "mb_dump": mb_dump_version(),
         "mb_slices": mb_slices,
         "lb_dump": lb_dump_version(),

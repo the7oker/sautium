@@ -15615,7 +15615,10 @@
         ${_settingsHeader('Sync & P2P')}
         <div data-sync-content style="margin-top:calc(14*var(--px));">${_renderSync(sync)}</div>
         <div class="profile-group-label">Learn more</div>
-        <div class="form-group">${linkRow('What leaves your machine', siteLink(SITE_PATHS.privacy))}</div>
+        <div class="form-group">
+          <div class="form-row stacked"><div class="row-stack-sub">This node keeps a local record of the identities it meets, and never shares it.</div></div>
+          ${linkRow('What leaves your machine', siteLink(SITE_PATHS.privacy))}
+        </div>
       </section>
     `;
     _wireBack(root);

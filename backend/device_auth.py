@@ -245,16 +245,22 @@ async def rotate_identity(username: str, password: str) -> dict:
     Everything in this process that cached the old key is told; the P2P
     layer learns through NOTIFY (the launcher restarts its manager on it —
     a Docker node restarts the backend, its peer surface is bound to the
-    key at start)."""
+    key at start).
+
+    The old key first signs every witness record still waiting for its
+    signature (notary.drain_witness): a sighting stays signed by the key
+    that saw it, never by one issued after it."""
     d = _identity_dir()
     if d is None:
         raise RuntimeError("no identity directory configured")
+    import notary
     from desktop.node_identity import rotate_identity as _rotate
 
     async with _create_lock:
         if not account_configured():
             raise RuntimeError("no account to change")
         anonymous = not password
+        await asyncio.to_thread(notary.drain_witness)
         result = await asyncio.to_thread(
             _rotate, d, username, password or secrets.token_urlsafe(32), anonymous)
 

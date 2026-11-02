@@ -757,7 +757,7 @@ def create_backup(out_dir: Path, *, target: PgTarget, kek: bytes, username: str,
 # ---------------------------------------------------------------------------
 
 OWN_DATA_TABLES = ("media_files", "listening_history", "demo_plays", "friends", "p2p_messages",
-                   "chat_messages", "user_gear")
+                   "chat_messages", "user_gear", "p2p_witness")
 
 
 def _db_exists(admin_conn, dbname: str) -> bool:
@@ -768,8 +768,9 @@ def _db_exists(admin_conn, dbname: str) -> bool:
 
 def has_own_data(conn) -> bool:
     """Whether a database holds anything a restore would destroy: owned
-    files, listens, friends, chat, gear. A fresh node (schema, seed, settings)
-    has none of these and may be replaced without asking twice."""
+    files, listens, friends, chat, gear, the identities it witnessed. A fresh
+    node (schema, seed, settings) has none of these and may be replaced
+    without asking twice."""
     with conn.cursor() as cur:
         cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
         present = {r[0] for r in cur.fetchall()}

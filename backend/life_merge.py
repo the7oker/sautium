@@ -5,9 +5,11 @@ sessions, friends and their messages, AI chats, gear, a handful of
 preferences — is unioned into this database by natural key, so a second run
 changes nothing. Nothing the owner did is replaced or removed; the one row
 that gives way is an imported Last.fm record, to the native record of the
-same listen (play_stats.same_listen). Enrichment inside the file is not
-touched: that travels as a share export through the gate
-(Product B), like anyone else's.
+same listen (play_stats.same_listen). Witness records (p2p_witness) are
+evidence, only ever added: of two records of one sighting the one here
+stays, and the database would refuse the merge any change or deletion.
+Enrichment inside the file is not touched: that travels as a share export
+through the gate (Product B), like anyone else's.
 
 The file is a Product-A `.sbk` of the same account: the password unwraps it,
 and the manifest's key is this node's or one it retired. Its `pg_dump`
@@ -55,7 +57,7 @@ LIFE_TABLES = (
     "friends", "friend_rights", "friend_grants", "friend_grant_rights", "p2p_messages",
     "chat_sessions", "chat_messages",
     "gear_brands", "gear_models", "user_gear", "gear_pair_notes", "user_profile",
-    "p2p_identities", "p2p_node_bans", "user_settings",
+    "p2p_identities", "p2p_node_bans", "p2p_witness", "user_settings",
 )
 
 # Preferences of the person, never of the machine: no hosts, ports, paths,
@@ -267,16 +269,17 @@ def load_scratch(reader: nb.BackupReader, target: nb.PgTarget, conn, *, tables: 
 # The keyed union
 # ---------------------------------------------------------------------------
 
-def _cols(cur, table: str) -> Tuple[sql.SQL, sql.SQL]:
+def _cols(cur, table: str, exclude: Tuple[str, ...] = ()) -> Tuple[sql.SQL, sql.SQL]:
     """(`a, b, c`, `s.a, s.b, s.c`) over the live table's columns — a whole-row
     insert that follows the schema instead of restating it."""
-    names = _live_columns(cur, table)
+    names = [c for c in _live_columns(cur, table) if c not in exclude]
     return (sql.SQL(", ").join(sql.Identifier(c) for c in names),
             sql.SQL(", ").join(sql.Identifier("s", c) for c in names))
 
 
-def _whole_rows(cur, table: str, *, where: sql.SQL = sql.SQL("TRUE")) -> int:
-    into, from_ = _cols(cur, table)
+def _whole_rows(cur, table: str, *, where: sql.SQL = sql.SQL("TRUE"),
+                exclude: Tuple[str, ...] = ()) -> int:
+    into, from_ = _cols(cur, table, exclude)
     cur.execute(sql.SQL("INSERT INTO {t} ({into}) SELECT {from_} FROM {s}.{t} s WHERE {where} "
                         "ON CONFLICT DO NOTHING").format(
         t=sql.Identifier(table), into=into, from_=from_, s=sql.Identifier(SCRATCH), where=where))
@@ -546,6 +549,12 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
              WHERE NOT EXISTS (SELECT 1 FROM p2p_node_bans b
                                 WHERE b.pubkey IS NOT DISTINCT FROM s.pubkey
                                   AND b.addr IS NOT DISTINCT FROM s.addr)""")
+
+        # --- witness records, insert only: a sighting this node already
+        # holds keeps its row — evidence is never replaced, even by the other
+        # machine's earlier record of it. Never the dump's id: a collision
+        # with a live one would drop the row silently.
+        merged["witness"] = _whole_rows(cur, "p2p_witness", exclude=("id",))
 
         # --- preferences: the allowlist, missing keys only.
         merged["settings"] = run("""

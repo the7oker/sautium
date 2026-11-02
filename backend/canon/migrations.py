@@ -477,6 +477,12 @@ def normalize_artists(
 # Identity re-normalization — the one-off after a uuid_utils.normalize change
 # ---------------------------------------------------------------------------
 
+# p2p_witness is sealed too and deliberately absent: its statements bind no
+# entity uuid, so a re-normalization has nothing to re-seal there; a
+# re-sealed sighting would carry a later stamp, losing the priority it exists
+# for; and its guard refuses the UPDATE. Its rows keep their own copy of the
+# stamp, so _shed_all_seals' DELETE FROM signing_batches leaves them
+# verifiable.
 _SEALED_TABLES = ("embedding_segments", "audio_features", "albums",
                   "album_tracks", "track_mbids")
 _TRACK_BATCH = 100_000

@@ -119,10 +119,14 @@ def verify_request(headers: Mapping[str, str], server_pubkey: str, method: str,
 class PeerIdentity:
     """What a peer CLIENT needs to sign and introduce itself: its pubkey,
     a signer over raw bytes, and a loader for the {cert, proof} bundle
-    (called lazily — the certificate can arrive after the client exists)."""
+    (called lazily — the certificate can arrive after the client exists).
+    `witness(cert, pubkey)` takes the certificate a peer's /health carried,
+    with the key its TLS channel is bound to — a `probe` sighting for the
+    node's witness record (desktop/p2p/witness.py); it never raises."""
     pubkey: str
     sign: Callable[[bytes], bytes]
     cert_bundle: Callable[[], Optional[dict]]
+    witness: Optional[Callable[[dict, str], None]] = None
 
 
 # ---------------------------------------------------------------------------

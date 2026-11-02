@@ -863,6 +863,9 @@ async def lifespan(app: FastAPI):
     import notary
     if notary.start():
         notary.wake("startup", full=True)
+        # Witness records wake it through the database: the launcher records
+        # them from its own process (notary.py)
+        notary.start_witness_listener()
 
     # Dump auto-updates — MusicBrainz and ListenBrainz statistics (opt-in
     # toggles in More → Offline databases).
@@ -917,7 +920,8 @@ async def lifespan(app: FastAPI):
     waits = [asyncio.create_task(asyncio.to_thread(stop)) for stop in (
         _stop_playback, _stop_load_meter, notary.stop, stop_gear_research_worker,
         stop_files_listener, stop_chat_listener, stop_sync_listener,
-        stop_gear_state_listener, stop_mb_sources_listener, stop_recommendations_listener)]
+        stop_gear_state_listener, stop_mb_sources_listener, stop_recommendations_listener,
+        notary.stop_witness_listener)]
     if _identity_stop:
         _identity_stop.set()
     if _identity_task:

@@ -58,7 +58,7 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 | **Text vectors** (derived) | `text_embeddings`, `lyrics_embeddings`, `artist_bio_embeddings`, `genre_desc_embeddings` | yes | no — a BGE-M3 vector is a deterministic function of text the file already carries and of the local metadata composed around it; every node encodes its own in background enrichment, on every profile (`lite` on the CPU, smaller slices) | — |
 | **Local ledgers** | `external_metadata` (which source was asked for what and whether it answered — `not_found` included, so a step never re-asks), `covers` (fetched art) | yes | no — a record of this node's own fetches | — |
 | **Lyrics** | `track_lyrics` | yes | no — the one category that is verbatim copyrighted text; out of the sync protocol since 2026-07-11, every node fetches its own from the public sources | — |
-| **Life data** (personal) | `listening_history`, `demo_plays`, `listening_sessions`, `session_tracks`, `local_play_stats`, `friends`, `friend_rights`, `friend_grants`, `friend_grant_rights`, `invite_tokens`, `invite_token_rights`, `sent_invites`, `p2p_messages`, `chat_sessions`, `chat_messages`, `user_profile`, `user_gear`, `gear_pair_notes`, `pending_key_rotations`, `p2p_identities`, `p2p_node_bans`, `support_*`, `diag_*` | yes, encrypted | no | **yes, keyed dedup** for the tables § Phase 3 lists; `local_play_stats` is recomputed; `invite_token_rights`, `pending_key_rotations`, `support_*` and `diag_*` stay with the node that wrote them |
+| **Life data** (personal) | `listening_history`, `demo_plays`, `listening_sessions`, `session_tracks`, `local_play_stats`, `friends`, `friend_rights`, `friend_grants`, `friend_grant_rights`, `invite_tokens`, `invite_token_rights`, `sent_invites`, `p2p_messages`, `chat_sessions`, `chat_messages`, `user_profile`, `user_gear`, `gear_pair_notes`, `pending_key_rotations`, `p2p_identities`, `p2p_node_bans`, `p2p_witness`, `support_*`, `diag_*` | yes, encrypted | no | **yes, keyed dedup** for the tables § Phase 3 lists; `local_play_stats` is recomputed; `invite_token_rights`, `pending_key_rotations`, `support_*` and `diag_*` stay with the node that wrote them |
 | **HQPlayer DSP measurements** (node-local, since 2026-10-02, migrations 033–043) | `hqp_dsp_samples` (90 days of samples), `hqp_dsp_speed` (the rollup), `hqp_benchmark_runs`, `hqp_benchmark_points` (what each run asked and how it ended) | yes (in the dump) | no | no — keyed to this node's `hqp_endpoints` ids, which mean nothing on another node and have no reliable natural key (an Embedded box calls itself "HQPlayerEmbedded", its address moves); listening measures again within minutes, a benchmark fills the rest |
 | **Last.fm history import** (node-local, since 2026-09-24, migration 021) | `lastfm_import` (the walk's cursor), `pending_scrobbles`, `pending_scrobble_artists` (the waiting room of raw strings, kept only until placed) | yes (in the dump) | no | no — a placed scrobble merges as its `listening_history` row (`source = 'lastfm'`); the cursor and the waiting room stay with the node that walked |
 | **Gear catalogue** | `gear_brands`, `gear_models`, `gear_specs`, `gear_spec_attributes`, `gear_technologies`, `gear_model_technologies`, `gear_sentiment_terms`, `gear_measured_caveats`, `gear_registry_entries` | yes | no | the `gear_brands` / `gear_models` rows the owner's chain names come along with `user_gear`; research stays where it was done |
@@ -320,6 +320,7 @@ after a rebuild): union, keyed so that a second import changes nothing.
 | `gear_brands`, `gear_models`, `user_gear`, `gear_pair_notes` | deterministic ids | insert missing (the catalogue rows the chain needs come along; a model already here keeps its own research) |
 | `user_profile` | the one row | fields empty here fill in |
 | `p2p_identities`, `p2p_node_bans` | pubkey, `(pubkey, addr)` | insert missing; a ban on either side is a ban |
+| `p2p_witness` (since 2026-11-02, migration 044) | `(subject, cert_sig, channel)` | insert missing, never the dump's `id`; nothing else — a witness record is evidence, which the database never lets change or go (its guard refuses UPDATE of a sighting, DELETE and TRUNCATE), so of two records of one sighting the one here stays, even when the other machine's is earlier |
 | `user_settings` | key | **allowlist only** (`life_merge.SETTINGS_ALLOWLIST`: phantom layer, sync switches and budgets, gate mode, enrichment switches, scrobbling, album sort, language, diagnostics); a key set here wins; never machine state or machine-specific keys (`hqplayer.host`, ports, paths, `sync.last_at`, secrets) |
 | identity `previous/` | pubkey | union of rotation records (the notice, certificate and proof of each retired identity the backup lists and this node does not) |
 
@@ -352,8 +353,8 @@ for a reason found while building:
   PostgreSQL cannot query across databases, and a plaintext dump on disk
   is what the format forbids. The dump member streams once through
   `pg_restore --data-only -t <life tables> -f -` — pg_restore selects the
-  life tables (`life_merge.LIFE_TABLES`, 21 since `demo_plays` joined on
-  2026-09-17) out of a non-seekable stream in one pass (3.3 GB in ~20 s
+  life tables (`life_merge.LIFE_TABLES`, 22 since `p2p_witness` joined on
+  2026-11-02) out of a non-seekable stream in one pass (3.3 GB in ~20 s
   on the master) — and the `COPY … FROM stdin` blocks of the script it
   emits are parsed and COPY'd into `_merge.<table>` (`LIKE public.<table>
   INCLUDING DEFAULTS`, dump-only columns added as text). The keyed inserts
@@ -444,7 +445,8 @@ from the sketch above, each for a reason found while building:
   so paired browsers keep working.
 - **Restore is staged and reversible.** The dump lands in
   `<db>__restore`; only a complete, migrated restore is swapped in. A
-  database holding own data (owned files, listens, friends, chat, gear) is
+  database holding own data (owned files, listens, friends, chat, gear,
+  witness records) is
   replaced only on an explicit confirm / `--replace` and is kept as
   `<db>__previous` (one copy; the next restore drops the older one); a
   fresh database (schema, seed, settings only) is dropped. Other sessions

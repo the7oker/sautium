@@ -305,7 +305,9 @@ class BackendAPIClient:
         that recipient. The authoritative key is the TLS channel's verified
         node-key binding; a /health body that claims a different node_id is
         an impostor (or a relay answering for someone else) and the peer is
-        treated as unreachable."""
+        treated as unreachable. The peer's certificate in the body
+        (`birth_cert`) goes to the identity's witness sink with the
+        channel's key — the sink checks it is that key's before it records."""
         health = self._get_json("/health")
         if self.peer is not None and health:
             channel = (peer_auth.pinned_pubkey(self._ssl_ctx)
@@ -322,6 +324,9 @@ class BackendAPIClient:
             if channel != self._server_pubkey:
                 self._server_pubkey = channel
                 self._introduced = False
+            cert = health.get("birth_cert")
+            if self.peer.witness is not None and isinstance(cert, dict):
+                self.peer.witness(cert, channel)
         self.last_health = health
         return health
 

@@ -825,7 +825,9 @@ class P2PManager:
     def _peer_identity(self):
         """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
         signer, pubkey and a lazy {cert, proof} loader — the certificate and
-        the mined proof can land after the client object exists."""
+        the mined proof can land after the client object exists. A peer's
+        certificate on its /health goes to the sync server's witness record
+        as a `probe` sighting (desktop/p2p/witness.py)."""
         from desktop.node_identity import get_account_info, sign_message
         from desktop.p2p import birth_cert, peer_auth
         account = get_account_info()
@@ -836,8 +838,14 @@ class P2PManager:
             cert = birth_cert.load_certificate()
             return {"cert": cert, "proof": birth_cert.load_proof()} if cert else None
 
+        def witness(cert: dict, pubkey: str) -> None:
+            server = self._sync_server
+            if server is not None:
+                server.witness.note(cert, "probe", pubkey)
+
         return peer_auth.PeerIdentity(pubkey=account["public_key_hex"].lower(),
-                                      sign=sign_message, cert_bundle=bundle)
+                                      sign=sign_message, cert_bundle=bundle,
+                                      witness=witness)
 
     # -------------------------------------------------------------------
     # Chat operations (called from launcher thread)

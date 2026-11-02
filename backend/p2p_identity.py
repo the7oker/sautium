@@ -278,6 +278,26 @@ def save_certificate(settings, cert: dict) -> bool:
     return True
 
 
+_served = (None, None)       # (the certificate file's mtime_ns, its verified certificate)
+
+
+def served_certificate(settings) -> Optional[dict]:
+    """This node's certificate as its /health serves it — the certificate
+    only, never the proof, whose mined_at the Worker does not publish. Read
+    and verified once per version of the file, not on every probe."""
+    global _served
+    d = identity_dir(settings)
+    if d is None:
+        return None
+    try:
+        mtime = (d / CERT_FILENAME).stat().st_mtime_ns
+    except OSError:
+        return None
+    if _served[0] != mtime:
+        _served = (mtime, load_certificate(settings))
+    return _served[1]
+
+
 def proof_path(settings):
     from desktop.p2p.identity_proof import PROOF_FILENAME
     d = identity_dir(settings)
@@ -295,9 +315,35 @@ def tls_binding(settings):
     return ident["public_key_hex"].lower(), key.sign
 
 
+_witness = None
+
+
+def witness_recorder(settings):
+    """This process's witness record (desktop/p2p/witness.py) over db_pool:
+    the introductions and handshakes the peer surface serves, and the probes
+    the walk and the slice cycles make. The launcher's lives on its sync
+    server."""
+    global _witness
+    if _witness is None:
+        from pathlib import Path
+
+        from db_pool import get_conn
+        from desktop.p2p import witness
+
+        def own_keys() -> frozenset:
+            ident = resolve_identity(settings) or {}
+            d = Path(settings.p2p_identity_dir) if settings.p2p_identity_dir else None
+            return witness.own_keys(ident.get("public_key_hex", ""), d)
+
+        _witness = witness.Recorder(get_conn, own_keys=own_keys)
+    return _witness
+
+
 def peer_identity(settings):
     """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
-    signer, pubkey and a lazy {cert, proof} loader. None without identity."""
+    signer, pubkey and a lazy {cert, proof} loader. None without identity.
+    A peer's certificate on its /health goes to the witness record as a
+    `probe` sighting."""
     from desktop.p2p import identity_proof, peer_auth
 
     ident = resolve_identity(settings)
@@ -314,5 +360,8 @@ def peer_identity(settings):
         return {"cert": cert,
                 "proof": proof if identity_proof.proof_binds(proof, cert) else None}
 
+    def witness(cert: dict, pubkey: str) -> None:
+        witness_recorder(settings).note(cert, "probe", pubkey)
+
     return peer_auth.PeerIdentity(pubkey=ident["public_key_hex"].lower(),
-                                  sign=key.sign, cert_bundle=bundle)
+                                  sign=key.sign, cert_bundle=bundle, witness=witness)

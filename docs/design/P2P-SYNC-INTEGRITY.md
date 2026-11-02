@@ -809,6 +809,60 @@ the ceiling and collapsed the planned tiers into one task.
   formalized as karma in the next section. Mandatory payment would kill
   adoption — mass adoption is the product goal.
 
+### Witness records
+
+Age is witnessed — first seen at THIS node, never `issued_at` alone — and
+witnessing can count only what was recorded. Since 2026-11-02 (BIRTH-SYNC
+slice 1, migration 044) every node keeps `p2p_witness`: for each foreign
+identity it meets with a valid certificate, one row per (identity,
+certificate, channel), the first sighting of each.
+
+- **Channels.** `introduced` — the subject signed a request to this node
+  and introduced itself (`X-Sautium-Peer-Cert`), recorded after the
+  admission gate's verdict; `handshake` — an ACCEPTED token or grant
+  handshake carried the guest's certificate (never the unsigned classic
+  path); `probe` — this node dialed the subject and its `/health`, on a
+  channel TLS-bound to its key, carried `birth_cert`. A fourth value,
+  `carried` (a certificate riding with records its key authored, `via` the
+  deliverer), is reserved for slice 2. The DHT and the relay are no
+  channels: they carry addresses and ciphertext, no certificate.
+- **What a row holds.** The certificate exactly as the authority signed it
+  (`cert_payload`, `cert_sig`, `issuer` — authentic forever by Ed25519
+  alone, no builder of the format needed; the fields beside it are for
+  queries), `seen_at` on the node's own clock, and the notary's seal: the
+  node's signature over the statement
+  `sautium-witness:v1:{witness}:{subject}:{cert_sig}:{channel}:{via|-}:{seen_at}`
+  (frozen; `witness_v` per row), then a self-contained copy of the Worker
+  stamp of the batch it rode. The stamp is the "no later than" a third
+  party can check: testimony about the network's first weeks had to be
+  committed in them. No addresses, no request content, no proof of work
+  (its difficulty is pinned at issuance, so dating it buys nothing).
+- **Sealed on the notary's terms.** A recorded row NOTIFYs; the backend
+  signs it alone on that wake (no catalogue scan), and it rides the next
+  stamp made for analysis. A node with nothing else to stamp stamps
+  witness rows alone once the oldest has waited 7 days plus a per-node
+  offset of up to 48 h (derived from its key) — a permission beside the
+  notary's pace, never a deadline that holds analysis back. An identity
+  rotation first signs every waiting row with the old key, so each row is
+  signed by the key that saw it.
+- **Evidence, so append-only.** The database refuses any change to a
+  recorded sighting (only its seal fills, once) and every DELETE and
+  TRUNCATE. The stamp is a copy, not a reference: an identity-rule
+  migration empties `signing_batches`, and the rows stay verifiable
+  (`sign_audio.py --verify` checks them against their own copy).
+  Growth is bounded where rows come in — per channel and UTC day, 5 000
+  `introduced`, 6 000 `probe`, 5 000 `carried` (a re-sign of a known
+  subject under a newer certificate format does not count; a `handshake`
+  is bounded by accepted handshakes) — and never by deletion.
+- **Local.** Shared, the table would be the node's contact graph with
+  times. It is life data — backed up, merged insert-only between one
+  owner's machines — and in no sync payload, share export, seed or support
+  warrant. The Web UI says so (Sync & P2P). Whether witness statements are
+  ever shared is a decision of its own.
+- **Beside the registry, not instead of it.** `p2p_identities` stays what
+  it is — mutable, evicted past its cap, rewritten by succession, filled
+  only on the contacted side — and keeps deciding lanes and verification.
+
 ## Admission gate — per-event pricing (designed 2026-08-14)
 
 Identity certificates make *pseudonyms* scarce; this layer prices
