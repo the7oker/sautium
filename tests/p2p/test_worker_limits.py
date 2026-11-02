@@ -310,7 +310,20 @@ def test_a_full_master_mailbox_refuses_and_drops_nothing():
 
 
 def test_an_older_mailbox_keeps_its_mail_counts_it_once_and_indexes_its_expiry():
-    assert _run("mailbox")["upgraded"] == {"held": 5, "indexes": ["mail_expires"], "rows": 5}
+    assert _run("mailbox")["upgraded"] == {
+        "held": 5, "indexes": ["mail_expires"], "triggers": ["mail_held_in", "mail_held_out"], "rows": 5,
+        "heldAfterRestart": 5}
+
+
+def test_the_count_of_mail_held_follows_the_rows_whoever_writes_them():
+    # this code's drops, ack and expiry, then an older Worker's insert and delete
+    assert _run("drops")["heldExact"] == [True] * 4
+
+
+def test_a_drop_whose_step_fails_after_its_writes_leaves_none_of_them():
+    r = _run("drops")
+    assert r["failedAfterWrite"] == [503, {"error": "temporarily unavailable"}]
+    assert r["failedAfterWriteLeft"] is False
 
 
 def test_the_master_mailbox_counts_the_mail_it_stores_per_sender_address_and_day():
@@ -405,6 +418,18 @@ def test_directory_registrations_are_capped_per_address_and_in_all_a_day():
 def test_a_registration_its_networks_cap_refuses_spends_none_of_its_day():
     # seventeen volunteers in one /48: sixteen listed, and only they counted
     assert _run("directory")["v6DayCount"] == [16]
+
+
+def test_a_volunteer_past_its_own_day_spends_none_of_its_networks():
+    # the per-address day holds sixteen keys' (16 x 30 = 480)
+    r = _run("directory")
+    assert r["keyDayCap"] == 429 and r["neighbourAtKeyCap"] == 200
+
+
+def test_a_registration_without_an_address_is_refused_before_any_write():
+    r = _run("directory")
+    assert r["olderWorker"] == [503, {"error": "temporarily unavailable"}]
+    assert r["olderWorkerWrote"] is False
 
 
 # --- the birth ledger --------------------------------------------------------

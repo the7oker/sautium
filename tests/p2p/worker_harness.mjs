@@ -981,7 +981,7 @@ async function directoryLimits() {
   const dayKeysBefore = new Set(keysIn(dirDb, "directory:addr:"));
   out.firstOfDay = (await reg(k5, "203.0.113.230")).status;
   const dayKey = keysIn(dirDb, "directory:addr:").find((key) => !dayKeysBefore.has(key));
-  if (dayKey) presetIn(dirDb, dayKey, 400);
+  if (dayKey) presetIn(dirDb, dayKey, 480);
   const dayRowsBefore = nodes();
   out.addrDayCap = (await reg(k5, "203.0.113.230", 20000, ts() + 4)).status;
   out.rowsUnchangedByDayCap = JSON.stringify(nodes()) === JSON.stringify(dayRowsBefore);
@@ -990,6 +990,25 @@ async function directoryLimits() {
   out.dayCeiling = ceiling.status;
   out.dayCeilingRetryAfter = ceiling.headers["retry-after"] ?? null;
   dirDb.prepare("DELETE FROM counters WHERE key = 'directory:all:'").run();
+  // a day's registrations per key: a listed volunteer past its own day is
+  // refused, and its network's others are not
+  const k6 = await newKey(), k7 = await newKey();
+  await issue(k6, { ip: "198.51.100.231" });
+  await issue(k7, { ip: "198.51.100.232" });
+  await reg(k6, "2001:db8:aa:1::1");
+  presetIn(dirDb, `directory:key:${k6.pubHex}`, 30);
+  out.keyDayCap = (await reg(k6, "2001:db8:aa:1::1", 20000, ts() + 6)).status;
+  out.neighbourAtKeyCap = (await reg(k7, "2001:db8:aa:2::1")).status;
+  // a registration from an older Worker, with no address to count, is
+  // refused before anything is written
+  const writtenBefore = JSON.stringify([nodes(), keysIn(dirDb, "")]);
+  const older = await directory.stub.fetch("https://object/register", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pubkey: "cc".repeat(32), host: "192.0.2.77", fam: 4, port: 20000, caps: "sync",
+                           now: Date.now() }),
+  });
+  out.olderWorker = [older.status, await older.json()];
+  out.olderWorkerWrote = JSON.stringify([nodes(), keysIn(dirDb, "")]) !== writtenBefore;
   // a directory kept before the network columns existed: its rows get them
   const oldDb = new DatabaseSync(":memory:");
   oldDb.exec(`CREATE TABLE nodes (pubkey TEXT PRIMARY KEY, host4 TEXT, host6 TEXT, port INTEGER NOT NULL,
@@ -1093,8 +1112,6 @@ async function mailboxFull() {
   mailDb.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
                INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at)
                SELECT printf('%08d-0000-4000-8000-000000000000', i), 'x', 'y', 't', ${now - 2 * 86400e3}, ${now + 86400e3} FROM n`);
-  // the rows above came in past the object: its count of the mail held follows them
-  if (hasTable(mailDb, "held")) mailDb.exec("UPDATE held SET n = (SELECT count(*) FROM mail)");
   const encrypted = Buffer.from("box:hi").toString("base64");
   const uuid = "00000000-0000-4000-8000-999999999999";
   const timestamp = "2026-11-02T14:00:00Z";
@@ -1115,12 +1132,17 @@ async function mailboxFull() {
       .run(`old-${i}`, now, now + 86400e3);
   }
   objectOf(workerModule.MasterMailbox, oldDb);
+  const heldOf = () => hasTable(oldDb, "held") ? oldDb.prepare("SELECT n FROM held").get().n : null;
   const upgraded = {
-    held: hasTable(oldDb, "held") ? oldDb.prepare("SELECT n FROM held").get().n : null,
+    held: heldOf(),
     indexes: oldDb.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'mail' AND sql IS NOT NULL ORDER BY name")
+      .all().map((r) => r.name),
+    triggers: oldDb.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'mail' ORDER BY name")
       .all().map((r) => r.name),
     rows: oldDb.prepare("SELECT count(*) AS n FROM mail").get().n,
   };
+  objectOf(workerModule.MasterMailbox, oldDb);                 // its next start counts nothing again
+  upgraded.heldAfterRestart = heldOf();
   return { answer, oldestKept: mailDb.prepare("SELECT count(*) AS n FROM mail WHERE uuid = '00000001-0000-4000-8000-000000000000'").get().n,
            rows: mailDb.prepare("SELECT count(*) AS n FROM mail").get().n, upgraded };
 }
@@ -1189,6 +1211,31 @@ async function mailboxDrops() {
   });
   out.olderWorker = [older.status, await older.json()];
   out.olderWorkerWrote = held() !== heldBefore || rows() !== rowsBefore;
+  // a drop whose step fails after its writes leaves nothing of them
+  const countersNow = () => JSON.stringify(mailDb.prepare("SELECT key, n FROM counters ORDER BY key").all());
+  const [heldPre, rowsPre, countersPre] = [held(), rows(), countersNow()];
+  const exec = mailbox.obj.sql.exec;
+  mailbox.obj.sql.exec = (query, ...params) => {
+    const result = exec(query, ...params);
+    if (/^\s*INSERT INTO mail\b/.test(query)) throw new Error("storage failed after the write");
+    return result;
+  };
+  const failed = await drop(b, 16, "198.51.100.123");
+  mailbox.obj.sql.exec = exec;
+  out.failedAfterWrite = [failed.status, failed.body];
+  out.failedAfterWriteLeft = held() !== heldPre || rows() !== rowsPre || countersNow() !== countersPre;
+  // the count of mail held follows the rows whoever writes them: this code,
+  // or an older Worker deployed over it
+  const exact = () => held() === rows();
+  out.heldExact = [exact()];
+  mailDb.prepare("UPDATE mail SET expires_at = ? WHERE id = (SELECT min(id) FROM mail)").run(Date.now() - 1);
+  await drop(b, 17, "198.51.100.124");                       // its expiry runs first
+  out.heldExact.push(exact());
+  mailDb.prepare(`INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at)
+                  VALUES ('older-1', 'x', 'y', 't', ?, ?)`).run(Date.now(), Date.now() + 86400e3);
+  out.heldExact.push(exact());
+  mailDb.prepare("DELETE FROM mail WHERE id IN (SELECT id FROM mail ORDER BY id LIMIT 2)").run();
+  out.heldExact.push(exact());
   return out;
 }
 

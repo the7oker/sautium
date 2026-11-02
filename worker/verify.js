@@ -109,7 +109,8 @@ const FROM_EMAIL = "noreply@sautium.net";
 const FROM_NAME = "Sautium";
 
 // Admission (the Limiter object, one instance per route): a route's
-// counters, per 24 h from a counter's first use. Workers Paid has no hard
+// counters, per 24 h from a counter's first use (the mail routes' ceilings
+// per UTC day: MAIL_ROUTES). Workers Paid has no hard
 // spending cap, so these ceilings are the cap: `all` bounds the route's KV
 // writes, reads or mail on a bad day — a day with every route at its ceiling
 // costs well under a dollar in KV and Durable Object charges at 2026 prices
@@ -123,7 +124,9 @@ const FROM_NAME = "Sautium";
 // codes first — 60 codes, 24 invites, 12 acceptance mails; 12, 5 and 4
 // addresses fill them. `addr` is volumeToken(): the exact IPv4, the IPv6
 // /48. The master's mailbox (MAIL_PER_*) and the directory keep their daily
-// caps in their own objects, where they count only what they store.
+// caps in their own objects, where they count only what they store; the
+// directory's per-address cap holds sixteen keys' (DIRECTORY_PER_NETWORK ×
+// `key`), so the volunteers one network lists never spend one another's day.
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const LIMITS = {
@@ -136,7 +139,7 @@ const LIMITS = {
   accept:    { key: 20, addr: 20, all: 10000 },                 // stored acceptances
   notify:    { key: 3, to: 3, addr: 3, all: 12 },               // acceptance mails
   pending:   { key: 100, addr: 200, all: 20000 },               // pickups (a KV list each)
-  directory: { addr: 400, all: 50000 },                         // registrations (volunteers renew hourly)
+  directory: { key: 30, addr: 480, all: 50000 },                // stored registrations (a volunteer renews hourly)
 };
 // The routes that send mail. Their ceilings count the provider's day, from
 // 00:00 UTC, not 24 h from first use: two windows that each straddle a
@@ -1534,8 +1537,8 @@ async function handleNodeRegister(request, env) {
    * the master itself is refused — it has /master-hint, and clients keep
    * it as the LAST tier by design. One network holds at most
    * DIRECTORY_PER_NETWORK fresh entries; registrations are capped per /64
-   * an hour, and per address and in all a day (LIMITS.directory) — the day's
-   * counted by the directory, of the registrations it stores.
+   * an hour, and per key, per address and in all a day (LIMITS.directory) —
+   * the day's counted by the directory, of the registrations it stores.
    */
   const braked = await routeBrake(env, request, "node-register");
   if (braked) return braked;
@@ -1621,22 +1624,28 @@ export class NodeDirectory {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS nodes (
       pubkey TEXT PRIMARY KEY, host4 TEXT, host6 TEXT, port INTEGER NOT NULL,
       caps TEXT NOT NULL, ts INTEGER NOT NULL, net4 TEXT, net6 TEXT)`);
-    // Columns added after the first deployment (SQLite: ADD COLUMN only).
+    // Columns added after the first deployment (SQLite: ADD COLUMN only). The
+    // rows from before get theirs once, when the columns come — not a read of
+    // every row at every start; a renewal writes them anyway.
+    let added = false;
     for (const ddl of ["ALTER TABLE nodes ADD COLUMN net4 TEXT",
                        "ALTER TABLE nodes ADD COLUMN net6 TEXT"]) {
-      try { this.sql.exec(ddl); } catch (e) { /* already there */ }
+      try { this.sql.exec(ddl); added = true; } catch (e) { /* already there */ }
     }
-    for (const r of this.sql.exec(
-        `SELECT pubkey, host4, host6 FROM nodes
-          WHERE (host4 IS NOT NULL AND net4 IS NULL) OR (host6 IS NOT NULL AND net6 IS NULL)`).toArray()) {
-      this.sql.exec("UPDATE nodes SET net4 = ?, net6 = ? WHERE pubkey = ?",
-                    r.host4 ? subnetOf(r.host4) : null, r.host6 ? subnetOf(r.host6) : null, r.pubkey);
+    if (added) {
+      for (const r of this.sql.exec(
+          `SELECT pubkey, host4, host6 FROM nodes
+            WHERE (host4 IS NOT NULL AND net4 IS NULL) OR (host6 IS NOT NULL AND net6 IS NULL)`).toArray()) {
+        this.sql.exec("UPDATE nodes SET net4 = ?, net6 = ? WHERE pubkey = ?",
+                      r.host4 ? subnetOf(r.host4) : null, r.host6 ? subnetOf(r.host6) : null, r.pubkey);
+      }
     }
     this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_ts ON nodes (ts)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_net4_ts ON nodes (net4, ts)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_net6_ts ON nodes (net6, ts)");
-    // The day's registrations per address and in all (LIMITS.directory),
-    // counted here so a registration the network's cap refuses spends none.
+    // The day's registrations per key, per address and in all
+    // (LIMITS.directory), counted here so a registration the network's cap
+    // refuses spends none.
     counterTable(this.sql);
   }
 
@@ -1695,7 +1704,8 @@ export class NodeDirectory {
     if (crowd >= DIRECTORY_PER_NETWORK) {
       return { status: 429, body: { error: "this network lists enough volunteers" } };
     }
-    const taken = takeCounters(this.sql, now, [daily("directory", "addr", addr), daily("directory", "all")]);
+    const taken = takeCounters(this.sql, now, [
+      daily("directory", "key", pubkey), daily("directory", "addr", addr), daily("directory", "all")]);
     if (!taken.ok) {
       return { status: 429, body: { error: "rate limited", retry_after: taken.retry_after } };
     }
@@ -1728,12 +1738,18 @@ export class MasterMailbox {
       received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
     this.sql.exec("CREATE INDEX IF NOT EXISTS mail_expires ON mail (expires_at)");
     // Every drop, refused ones included, reads only by index: the mail held is
-    // a count kept beside the rows (an older object's, counted once here),
-    // and the daily caps are counters, which drained mail does not lower.
+    // a count beside the rows, and the daily caps are counters, which drained
+    // mail does not lower. Triggers keep the count, so any code that writes
+    // `mail` keeps it exact — an older Worker deployed over this one too; an
+    // older object's mail is counted once, here.
     this.sql.exec("CREATE TABLE IF NOT EXISTS held (n INTEGER NOT NULL)");
     if (!this.sql.exec("SELECT n FROM held").toArray().length) {
       this.sql.exec("INSERT INTO held (n) SELECT count(*) FROM mail");
     }
+    this.sql.exec(`CREATE TRIGGER IF NOT EXISTS mail_held_in AFTER INSERT ON mail
+                   BEGIN UPDATE held SET n = n + 1; END`);
+    this.sql.exec(`CREATE TRIGGER IF NOT EXISTS mail_held_out AFTER DELETE ON mail
+                   BEGIN UPDATE held SET n = n - 1; END`);
     counterTable(this.sql);
     // The indexes an older object's caps read.
     this.sql.exec("DROP INDEX IF EXISTS mail_sender_recv");
@@ -1757,7 +1773,11 @@ export class MasterMailbox {
     }
     if (request.method === "POST" && url.pathname === "/ack") {
       const { upto } = await request.json();
-      const deleted = this.state.storage.transactionSync(() => this._delete("id <= ?", Number(upto) || 0));
+      const deleted = this.state.storage.transactionSync(() => {
+        const before = this._held();
+        this.sql.exec("DELETE FROM mail WHERE id <= ?", Number(upto) || 0);
+        return before - this._held();
+      });
       return Response.json({ deleted });
     }
     if (request.method === "GET" && url.pathname === "/wake") {
@@ -1779,19 +1799,12 @@ export class MasterMailbox {
     return Number(this.sql.exec("SELECT n FROM held").one().n);
   }
 
-  _delete(where, ...params) {
-    // Mail rows go, and the count of mail held with them.
-    const n = this.sql.exec(`DELETE FROM mail WHERE ${where} RETURNING id`, ...params).toArray().length;
-    if (n) this.sql.exec("UPDATE held SET n = n - ?", n);
-    return n;
-  }
-
   put({ uuid, sender, addr, encrypted, ts, now }) {
     if (![uuid, sender, addr, encrypted, ts].every((v) => typeof v === "string" && v)) {
       return { status: 503, body: { error: "temporarily unavailable" } };   // an older Worker's call
     }
     now = Number(now) || Date.now();
-    this._delete("expires_at <= ?", now);
+    this.sql.exec("DELETE FROM mail WHERE expires_at <= ?", now);
     if (this.sql.exec("SELECT id FROM mail WHERE uuid = ?", uuid).toArray().length) {
       return { status: 200, body: { stored: false, duplicate: true } };
     }
@@ -1813,7 +1826,6 @@ export class MasterMailbox {
     const id = Number(this.sql.exec(
       "INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
       uuid, sender, encrypted, ts, now, now + MAIL_TTL_MS).one().id);
-    this.sql.exec("UPDATE held SET n = n + 1");
     return { status: 200, body: { stored: true, id } };
   }
 
