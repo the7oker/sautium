@@ -21,10 +21,10 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from functools import partial
-from typing import Optional
+from typing import Callable, ContextManager, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from config import settings
@@ -32,7 +32,7 @@ from config import settings
 from playback.base import Capabilities, PlaybackStatus, PlayerBackend
 from playback.queue import CanonicalQueue, QueueItem
 from streaming import transcode
-from streaming.media_host import media_host
+from streaming.media_host import media_host, through_tunnel
 from streaming.proxy import MIME_BY_FORMAT
 
 logger = logging.getLogger(__name__)
@@ -127,7 +127,9 @@ class _Requester:
     the same track twice on 2026-11-01, once from an instance that had
     already unsubscribed: a play press's load went on there after a re-pick
     had let it go. The one request that still goes is the switch away's
-    Stop, the instance's last word (last_word).
+    Stop, the instance's last word (last_word), sent once every request
+    already on its way has its answer (drained): a Play answered after that
+    Stop would start the renderer switched away from.
 
     GENA requests ride the shared notify server's own requester — every
     instance's events come through that server — so an instance's
@@ -141,13 +143,28 @@ class _Requester:
     def __init__(self, inner, backend: "DlnaBackend"):
         self.inner = inner
         self._backend = backend
+        self._on_its_way = 0
+        self._answered = asyncio.Event()    # every request on its way has its answer
+        self._answered.set()
 
     async def async_http_request(self, http_request):
         if self._backend._closed and not self._last_word.get():
             action = (http_request.headers or {}).get("SOAPAction", "").strip('"').rpartition("#")[2]
             raise Detached(f"'{self._backend.label}' was let go — "
                            f"{action or http_request.method + ' ' + urlparse(http_request.url).path} not sent")
-        return await self.inner.async_http_request(http_request)
+        self._on_its_way += 1
+        self._answered.clear()
+        try:
+            return await self.inner.async_http_request(http_request)
+        finally:
+            self._on_its_way -= 1
+            if not self._on_its_way:
+                self._answered.set()
+
+    async def drained(self) -> None:
+        """Until every request on its way has its answer — or its failure:
+        the requester's own timeout bounds each."""
+        await self._answered.wait()
 
     @contextmanager
     def last_word(self):
@@ -297,6 +314,12 @@ def renderer_reachable(location: str, timeout: float = _PROBE_TIMEOUT) -> bool:
         return False
 
 
+def _tunnel_address(location: Optional[str]) -> bool:
+    """Is a renderer's address a tunnel's rather than its LAN's
+    (media_host.through_tunnel)?"""
+    return through_tunnel(urlparse(location or "").hostname)
+
+
 def known_locations(renderer: dict) -> list[str]:
     """Every address the renderer was reached at, the current one first."""
     known = []
@@ -378,15 +401,19 @@ class DlnaBackend(PlayerBackend):
         self._seek_on_start: Optional[float] = None
         # A Seek of the node's — a start's, or the person's sent through the
         # node — not yet seen landing, as (its second, monotonic when it was
-        # asked for, whether it is a Seek in an Opus stream): till then the
-        # renderer reads where it was before it (_adopt_reltime). An Opus
-        # Seek's landing, or none by the pending-play deadline, is the
-        # renderer's fact (_remember_opus_seek); unlanded, the stream loads
-        # again from the clock's second (_seek_unlanded)
-        self._seek_due: Optional[tuple[float, float, bool]] = None
+        # asked for, its distance from where the renderer was): till then
+        # the renderer reads where it was before it (_adopt_reltime). The
+        # distance is set for a Seek in an Opus stream judged as the
+        # renderer's fact — a landing, or none by the pending-play deadline
+        # (_remember_opus_seek), unlanded the stream loads again from the
+        # clock's second (_seek_unlanded) — and None for any other
+        self._seek_due: Optional[tuple[float, float, Optional[float]]] = None
         # RelTime readings taken as the renderer's word on this load — with
         # the clock, a move of its own, a Seek's landing (_heard)
         self._heard_on_load = 0
+        # The poll's updates failed in a row since one last answered: three
+        # lose the renderer; one already puts its address in doubt (reachable)
+        self._misses = 0
         # A play press waiting on a slot whose stream is on its way
         # (playback.substitute): (its item — the slot follows it through
         # queue edits — and the second it starts at); slot_ready starts it.
@@ -480,8 +507,9 @@ class DlnaBackend(PlayerBackend):
     def release(self) -> Optional[str]:
         """A switch away. The instance is let go first — a load, a seek or an
         advance still on its way sends nothing more — and its last word is
-        the renderer's Stop: a load in flight used to go on past that Stop
-        and start the renderer the person had just switched away from. A
+        the renderer's Stop, once what it had already sent has its answer: a
+        load in flight used to go on past that Stop, and a Play answered after
+        it would start the renderer the person had just switched away from. A
         renderer believed off the network gets no Stop
         (PlayerBackend.release)."""
         healthy = self.healthy()
@@ -491,6 +519,7 @@ class DlnaBackend(PlayerBackend):
             return None
 
         async def _s():
+            await self._requester.drained()
             with self._requester.last_word():
                 await self._avt("Stop")
         self._call(_s())
@@ -509,8 +538,16 @@ class DlnaBackend(PlayerBackend):
 
     def answers_here(self) -> bool:
         """Does the renderer answer at the address this instance talks to it
-        at (a TCP connect, the probe window at most)?"""
-        return renderer_reachable(self.location)
+        at (a TCP connect, the probe window at most)? One that does not is
+        lost there, as one that stopped answering: its spot is what this
+        instance last said — the clock's second if it played, not a reading
+        the failing poll never refreshed — and the instance let go with it
+        waits for nothing from that address (_lose, _async_shutdown)."""
+        if renderer_reachable(self.location):
+            return True
+        self._lose()
+        self._emit_now()
+        return False
 
     def capabilities(self) -> Capabilities:
         return Capabilities(volume=True, volume_kind="percent", seek=True,
@@ -529,30 +566,50 @@ class DlnaBackend(PlayerBackend):
         instance."""
         return self._dmr is not None and not self._gone
 
-    def reachable(self) -> bool:
+    def reachable(self, waiting: Callable[[], ContextManager] = nullcontext) -> bool:
         """The play gate's probe: does the renderer answer where this
         instance talks to it — or, moved since, at another address it is
         known at now (a scan or a pin added it: _record)? Then this instance
         is let go and the gate attaches the renderer again where it answers:
         a phone back on the LAN from a tunnel failed its first Play on the
         tunnel address it had been chosen at. False when it answers nowhere.
-        The two probes run at once."""
+
+        Every address is asked at once, and where it answers first decides
+        — unless the attached address is to be waited for: the node has no
+        word against it (no request of its poll has failed there, the
+        renderer is not lost) and the address that answered first is no
+        better (a LAN address is better than a tunnel's). A renderer that
+        answers at two addresses of a kind about as fast is never moved
+        between them press after press; one attached through a tunnel that
+        answers on the LAN is moved there, once: the phone back home, the
+        tunnel down or up. The wait is said (`waiting`: the manager's
+        connecting), up to the probe window if the address went dark before
+        any request there failed. Waiting on the attached address first
+        whatever answered cost a Play pressed back on the LAN the whole probe
+        window on the tunnel address (2026-11-01)."""
         attached = self._renderer.get("location")
-        record = self._record()
-        elsewhere = {"locations": [loc for loc in known_locations(record) if loc != attached]}
-        pool = ThreadPoolExecutor(max_workers=2)
+        known = [attached, *(loc for loc in known_locations(self._record()) if loc != attached)]
+        trusted = not (self._misses or self._gone)
+        pool = ThreadPoolExecutor(max_workers=len(known))
         try:
-            here = pool.submit(renderer_reachable, attached)
-            there = pool.submit(renderer_online, elsewhere)
-            if here.result():
-                return True
-            if not there.result():
-                return False
+            probes = {pool.submit(renderer_reachable, loc): loc for loc in known}
+            here = next(f for f, loc in probes.items() if loc == attached)
+            answered = next((probes[f] for f in as_completed(probes) if f.result()), None)
+            better = answered is not None and _tunnel_address(attached) and not _tunnel_address(answered)
+            if answered not in (None, attached) and trusted and not better:
+                # Its own address decides first — its answer waited for, and
+                # said while it is still to come
+                with nullcontext() if here.done() else waiting():
+                    if here.result():
+                        answered = attached
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
-        logger.info("renderer %s answers at another address now — attaching it there", self.label)
-        self._lose()
-        self._emit_now()
+        if answered is None:
+            return False
+        if answered != attached:
+            logger.info("renderer %s answers at another address now — attaching it there", self.label)
+            self._lose()
+            self._emit_now()
         return True
 
     def _record(self) -> dict:
@@ -630,8 +687,13 @@ class DlnaBackend(PlayerBackend):
         ever tried. Probed together, they still waited for the slowest: the
         dead address's whole probe window, 5 s of every attach of a phone
         moved to a tunnel (2026-11-01). The first address that answers is
-        described now; the others are let go."""
+        described now, and taken when what answers there is this renderer —
+        its UDN, the device's own or one it embeds: another device holding an
+        address this one has left answers first as well; the others are let
+        go."""
+        from routers.player import udn_key
         known = known_locations(self._renderer)
+        udn = udn_key(self._renderer.get("udn"))
 
         async def probe(loc: str) -> tuple:
             return loc, await asyncio.to_thread(renderer_reachable, loc)
@@ -642,11 +704,15 @@ class DlnaBackend(PlayerBackend):
                 if not ok:
                     continue
                 try:
-                    return await factory.async_create_device(loc), loc
+                    device = await factory.async_create_device(loc)
                 except Detached:
                     raise
                 except Exception as e:
                     logger.debug("renderer answered at %s but described badly: %s", loc, e)
+                    continue
+                if udn in {udn_key(d.udn) for d in (device, *device.embedded_devices.values())}:
+                    return device, loc
+                logger.info("another device answers at %s now, not %s", loc, self.label)
         finally:
             for p in probes:
                 p.cancel()
@@ -709,7 +775,8 @@ class DlnaBackend(PlayerBackend):
         try:
             await self._subscribe()
             logger.info("GENA subscription established on retry")
-        except Detached:
+        except Detached as e:
+            logger.info("GENA subscribe retry ends — %s", e)
             return
         except Exception as e:
             logger.info("GENA subscribe retry failed (%s) — still poll-only", e)
@@ -872,21 +939,30 @@ class DlnaBackend(PlayerBackend):
         the clock takes it at once. Till then the clock runs on from what the
         Seek set, and holds still while the renderer is paused; past the
         pending-play deadline after it was asked, the renderer is believed
-        again — but in an Opus stream, which loads again from the second
-        instead (_seek_unlanded, at the poll's tick). True when the reading
-        is spent here — the Seek's own, or one from before it; False when it
-        is the caller's to judge."""
+        again. A Seek in an Opus stream judged as the renderer's fact lands
+        only on a reading its staying where it was cannot explain — a
+        renderer that ignores the Seek and plays on enters the window above
+        once the distance is played, and was taken for one that seeks — and
+        unlanded it loads again from the second (_seek_unlanded, at a playing
+        tick). True when the reading is spent here — the Seek's own, or one
+        from before it; False when it is the caller's to judge."""
         due = self._seek_due
         if due is None:
             return False
-        age = time.monotonic() - due[1]
-        if due[0] - _RELTIME_TOLERANCE <= real <= due[0] + age + _RELTIME_TOLERANCE:
+        second, asked, distance = due
+        age = time.monotonic() - asked
+        # Where the renderer would read had it stayed: the clock, which runs
+        # from the Seek's second while it plays and holds while it is paused,
+        # less the distance asked
+        stayed = (distance is not None
+                  and abs(real - (self._wall_estimate() - distance)) <= _RELTIME_TOLERANCE)
+        if second - _RELTIME_TOLERANCE <= real <= second + age + _RELTIME_TOLERANCE and not stayed:
             self._seek_due = None
             self._heard(real)
-            if due[2]:
+            if distance is not None:
                 self._remember_opus_seek(True)
             return True
-        if age > _PENDING_PLAY_DEADLINE and not due[2]:
+        if age > _PENDING_PLAY_DEADLINE and distance is None:
             self._seek_due = None
             return False
         self._rel_stray = None
@@ -1101,7 +1177,8 @@ class DlnaBackend(PlayerBackend):
         cur = self._current_url or ""
         try:
             await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(target))
-        except Detached:
+        except Detached as e:
+            logger.info("DLNA: the start's Seek ends — %s", e)
             return
         except Exception as e:
             if self._opus_refused(e, cur, target):
@@ -1111,7 +1188,9 @@ class DlnaBackend(PlayerBackend):
             self._seek_due = None
             self._rebaseline(0.0)
             return
-        self._seek_due = (float(int(target)), time.monotonic(), "q=opus" in cur)
+        # The renderer plays from its top until the Seek lands: the distance
+        # is the second itself
+        self._seek_due = (float(int(target)), time.monotonic(), self._judged(cur, float(int(target))))
         self._rebaseline(float(int(target)))
         self._emit_now()
 
@@ -1162,12 +1241,21 @@ class DlnaBackend(PlayerBackend):
         url = base + ("&" if "?" in base else "?") + f"ss={int(seconds)}"
         return self._load_and_play(self._index, ss=float(int(seconds)), url_override=url)
 
+    @staticmethod
+    def _judged(cur: str, distance: float) -> Optional[float]:
+        """A Seek of `distance` in the stream `cur` is judged as the renderer's
+        fact (its distance, else None) in an Opus stream, and only when its
+        landing can be told from staying where it was: farther than both
+        readings' tolerance."""
+        return distance if "q=opus" in cur and abs(distance) > 2 * _RELTIME_TOLERANCE else None
+
     def _opus_refused(self, e: Exception, cur: str, second: float) -> bool:
         """A Seek in the Opus stream `cur` refused as one the renderer does
         not take — 710, no such seek mode; 711, no such target — loads the
         stream again from `second` instead (?ss=). 710 is the renderer's
-        fact and is remembered; 711 is the target's. False for any other
-        refusal, another format, or a stream since replaced."""
+        fact and is remembered; 711 is the target's. True when it was such a
+        refusal — spent, with nothing loaded for a stream since replaced;
+        False for any other refusal or format."""
         code = getattr(e, "error_code", None)
         if "q=opus" not in cur or code not in (710, 711):
             return False
@@ -1225,7 +1313,7 @@ class DlnaBackend(PlayerBackend):
         """1 Hz GetPositionInfo while playing — RelTime is not evented
         (documented boundary exception, §2.6). Also our track-end detector:
         some renderers under-report the final GENA STOPPED."""
-        misses = 0
+        self._misses = 0
         logger.info("position poll started (slot %d)", self._index)
         try:
             while True:
@@ -1244,11 +1332,11 @@ class DlnaBackend(PlayerBackend):
                 t_tick = time.monotonic()
                 try:
                     await self._dmr.async_update()
-                    misses = 0
+                    self._misses = 0
                 except Exception as e:
                     logger.debug("position poll update failed: %s", e)
-                    misses += 1
-                    if misses >= 3:
+                    self._misses += 1
+                    if self._misses >= 3:
                         # The renderer left the network (battery DAPs drop
                         # Wi-Fi in deep sleep while playing from buffer) —
                         # a frozen "playing" status would just gaslight the
@@ -1259,7 +1347,7 @@ class DlnaBackend(PlayerBackend):
                                        "(deep sleep / Wi-Fi off)")
                         logger.warning("DLNA renderer unreachable after "
                                        "%d poll misses — stopped at slot %d, %.0f s",
-                                       misses, self._index, self._resume or 0.0)
+                                       self._misses, self._index, self._resume or 0.0)
                         self._emit_now("stopped")
                         return
                     continue
@@ -1376,10 +1464,16 @@ class DlnaBackend(PlayerBackend):
                         self._emit_now("stopped")
                     return
                 due = self._seek_due
-                if due is not None and due[2] and time.monotonic() - due[1] > _PENDING_PLAY_DEADLINE:
-                    # Not seen landing, with or without readings meanwhile
-                    self._seek_unlanded()
-                    continue
+                if due is not None and due[2] is not None:
+                    if state == "paused":
+                        # A judged Seek's wait counts while the renderer
+                        # plays: paused, it neither lands visibly nor plays on,
+                        # and its reload would start it
+                        self._seek_due = (due[0], time.monotonic(), due[2])
+                    elif time.monotonic() - due[1] > _PENDING_PLAY_DEADLINE:
+                        # Not seen landing, with or without readings meanwhile
+                        self._seek_unlanded()
+                        continue
                 self._emit_now(state)
                 t_emit = time.monotonic()
                 if t_emit - t_tick > 2.0:
@@ -1860,7 +1954,7 @@ class DlnaBackend(PlayerBackend):
             # second the start's own Seek goes to once the renderer plays —
             # due from now: it plays from the top until that Seek lands
             self._seek_on_start = start_at or None
-            self._seek_due = (start_at, time.monotonic(), False) if start_at else None
+            self._seek_due = (start_at, time.monotonic(), None) if start_at else None
             self._rebaseline(ss or start_at)
             # Accepted is not started: the renderer confirms by reporting
             # PLAYING (poll/GENA clear this), and until then the track is
@@ -2218,6 +2312,8 @@ class DlnaBackend(PlayerBackend):
             return self._call_async(self._load_again_from(cur, seconds))
 
         async def _s():
+            # Where the renderer is as it is asked: the clock, held if paused
+            was = self._position if self._said == "paused" else self._wall_estimate()
             try:
                 # In the stream's own time: an offset stream starts at its ?ss=
                 await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(seconds - self._pos_offset))
@@ -2226,7 +2322,7 @@ class DlnaBackend(PlayerBackend):
                     return
                 raise
             self._rebaseline(float(int(seconds)))   # clock continues from the seek target
-            self._seek_due = (float(int(seconds)), time.monotonic(), "q=opus" in cur)
+            self._seek_due = (float(int(seconds)), time.monotonic(), self._judged(cur, seconds - was))
             self._emit_now()
         return self._call(_s())
 

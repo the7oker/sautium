@@ -7831,7 +7831,7 @@ def test_a_play_the_output_refuses_leaves_history_as_it_was(fake, play_route, mo
     elif refusal == "the mirror":
         reachable = b.reachable
 
-        def then_a_build():
+        def then_a_build(waiting=None):
             ok = reachable()
             fake.build("SetFilter", 2.0)
             hb.change_dsp({"filter": 57, "filter1x": 57})
@@ -8544,7 +8544,7 @@ class _Away:
     def healthy(self):
         return True
 
-    def reachable(self):
+    def reachable(self, waiting=None):
         return True
 
     def resume_at(self, index, position=0.0):
@@ -15824,3 +15824,32 @@ def test_a_switch_away_from_a_playing_hqplayer_plays_on_at_its_second(fake, outp
     browser = mgr.active
     assert browser.id == "browser" and browser._pending_play_index == 1 and browser._position >= at
     assert _wait(lambda: fake.state == int(PlaybackState.STOPPED), timeout=8)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_an_hqplayer_that_is_off_is_said_offline_at_every_press(fake, output, monkeypatch, legacy):
+    """The play gate asks the output it believes gone too: HQPlayer closed,
+    every Play says it is offline, and none attaches it again in between.
+    Not asked once believed gone, the second press attached HQPlayer again
+    and answered "Cannot connect", the third "offline" again — and with the
+    output known by its endpoint alone (no output.type), every press after
+    the first passed the gate and failed late (DLNA-N2's review, round 1)."""
+    from fastapi import HTTPException
+    from routers import settings as settings_router
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    if legacy:
+        monkeypatch.setattr(settings_router, "_read", lambda key: None)
+    else:
+        _picker(monkeypatch, fake)
+    monkeypatch.setattr(hl, "CIRCUIT_COOLDOWN_S", 0.0)
+    fake.close()
+    try:
+        for _press in range(3):
+            with pytest.raises(HTTPException) as e:
+                player_router.play()
+            assert e.value.status_code == 503 and "offline" in str(e.value.detail), e.value.detail
+            assert mgr.active is b
+    finally:
+        if mgr.active is not None and mgr.active is not b:
+            mgr.active.shutdown()

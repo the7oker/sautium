@@ -9,6 +9,7 @@ socket reports the bridge), so the candidates are configured
 picks among them. Shared by every output that serves URLs; a backend never
 carries its own copy of this rule.
 """
+import ipaddress
 import logging
 from typing import Optional
 
@@ -16,20 +17,30 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# A tailnet hands out /32s from CGNAT's shared space, with no subnet structure
+_TUNNELS = ipaddress.ip_network("100.64.0.0/10")
+
+
+def through_tunnel(host: Optional[str]) -> bool:
+    """Is `host` reached through a tunnel — a tailnet's address — rather than
+    on its LAN?"""
+    try:
+        return ipaddress.ip_address(host or "") in _TUNNELS
+    except ValueError:
+        return False
+
 
 def _same_network(a: str, b: str) -> bool:
     """Would a device at `b` reach a server at `a` without leaving its own
     network? CGNAT is treated whole because a tailnet hands out /32s from
     100.64/10 with no subnet structure — two peers there reach each other
     regardless of how far apart the addresses look."""
-    import ipaddress
     try:
         ia, ib = ipaddress.ip_address(a), ipaddress.ip_address(b)
     except ValueError:
         return False
-    cgnat = ipaddress.ip_network("100.64.0.0/10")
-    if ia in cgnat or ib in cgnat:
-        return ia in cgnat and ib in cgnat
+    if ia in _TUNNELS or ib in _TUNNELS:
+        return ia in _TUNNELS and ib in _TUNNELS
     return (ipaddress.ip_network(f"{a}/24", strict=False)
             == ipaddress.ip_network(f"{b}/24", strict=False))
 

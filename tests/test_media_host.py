@@ -10,7 +10,15 @@ if str(BACKEND) not in sys.path:
 
 from config import settings  # noqa: E402
 from streaming.media_host import (  # noqa: E402
-    _same_network, media_host, media_host_for_name)
+    _same_network, media_host, media_host_for_name, through_tunnel)
+
+
+def test_a_tunnels_address_is_cgnats_shared_space_and_nothing_else():
+    """A renderer reached through a tunnel is one at a tailnet's address:
+    the play gate takes a LAN address that answers over it."""
+    assert through_tunnel("100.64.0.1") and through_tunnel("100.127.255.1")
+    assert not through_tunnel("192.168.1.1") and not through_tunnel("phone.local")
+    assert not through_tunnel(None)
 
 
 def test_same_network_is_a_slash_24_except_cgnat_which_is_one():

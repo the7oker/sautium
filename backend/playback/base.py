@@ -17,9 +17,9 @@ defaults.
 
 import logging
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Callable, ContextManager, NamedTuple, Optional
 
 if TYPE_CHECKING:
     from playback.queue import QueueItem
@@ -138,11 +138,13 @@ class PlayerBackend(ABC):
         self-heal on their own."""
         return True
 
-    def reachable(self) -> bool:
+    def reachable(self, waiting: Callable[[], ContextManager] = nullcontext) -> bool:
         """Fast, synchronous liveness probe at play-intent time. Overridden
         by outputs that can be physically off (DLNA renderers) so a powered-
         off device fails in ~2s with a clear message instead of stacked
-        command/attach timeouts. Default True — no cheap probe, trust it."""
+        command/attach timeouts. `waiting`: what the probe holds while it
+        waits on the device after it was found elsewhere — the manager's
+        "connecting". Default True — no cheap probe, trust it."""
         return True
 
     @abstractmethod

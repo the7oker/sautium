@@ -163,7 +163,7 @@ class _Elsewhere:
     def healthy(self) -> bool:
         return True
 
-    def reachable(self) -> bool:
+    def reachable(self, waiting=None) -> bool:
         return True
 
     def refusal(self) -> str:
@@ -1555,7 +1555,7 @@ def test_a_link_closed_while_hqplayer_built_is_nobodys(fake, fake_b, listens, mo
         world.settle(full=True)
         assert time.monotonic() - t0 < 5.0 and not world.violations, world.violations
         reachable = HqpBackend.reachable
-        monkeypatch.setattr(HqpBackend, "reachable", lambda self: False if self._mirror in (
+        monkeypatch.setattr(HqpBackend, "reachable", lambda self, waiting=None: False if self._mirror in (
             "lost", "drift") else reachable(self))
         _lost_for_good(world)
         world.at_rest()

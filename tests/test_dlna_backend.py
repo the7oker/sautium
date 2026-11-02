@@ -220,6 +220,10 @@ class FakeRenderer:
         # with no byte↔time map for VBR Opus does both (live, 2026-07-24)
         self.opus_position = True
         self.opus_seek = "lands"
+        # An action held this many seconds before it takes effect and is
+        # answered: a request still on its way
+        self.slow: dict[str, float] = {}
+        self.answered: list[str] = []          # actions in the order their answers went
         self._base = 0.0                  # position at _t0
         self._t0: Optional[float] = None  # monotonic start while PLAYING
         self._subs: dict[str, tuple[str, str]] = {}   # sid → (service key, callback)
@@ -463,11 +467,14 @@ class FakeRenderer:
         element = body.find(f".//{{{st}}}{action}")
         args = {child.tag: child.text or "" for child in (element if element is not None else [])}
         self.calls.append((action, args))
+        if self.slow.get(action):
+            await asyncio.sleep(self.slow[action])
         before = self._avt_state()
         try:
             if self.faults.get(action):
                 raise Fault(self.faults[action].pop(0), "Current state of service prevents invoking that action")
             out = self._act(svc, action, args)
+            self.answered.append(action)
         except Fault as f:
             fault = (f'<?xml version="1.0"?><s:Envelope xmlns:s="{SOAP_NS}" '
                      's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
@@ -1955,6 +1962,19 @@ class _Swallowing:
             s.close()
 
 
+@pytest.fixture
+def swallowing():
+    """Addresses made to swallow connects (_Swallowing), let go at the end."""
+    made = []
+
+    def make(port: int) -> _Swallowing:
+        made.append(_Swallowing(port))
+        return made[-1]
+    yield make
+    for hole in made:
+        hole.close()
+
+
 def _lost_paused(manager, r: FakeRenderer) -> float:
     """Paused, the renderer leaves the network: the node loses it there.
     Returns the second it was left at."""
@@ -1981,7 +2001,7 @@ def _statuses(manager) -> list:
 
 
 def test_a_scan_that_reaches_the_renderer_through_a_tunnel_moves_the_output_there(
-        tmp_path, proxy, renderers, manager, picker, quality):
+        tmp_path, proxy, renderers, manager, picker, quality, swallowing):
     """N-20, the owner's Tailscale requirement, there: the phone, paused on
     the LAN, goes off Wi-Fi onto a tunnel. A scan that reaches it through
     the tunnel moves the output there at once — at the spot, nothing
@@ -1993,7 +2013,7 @@ def test_a_scan_that_reaches_the_renderer_through_a_tunnel_moves_the_output_ther
     _on_renderer(manager, lan, [track(tmp_path, 1, seconds=90.0)])
     _playing_at(manager, lan, 3)
     left_at = _lost_paused(manager, lan)                  # Wi-Fi off
-    gone = _Swallowing(lan.port)
+    swallowing(lan.port)
     seen = _statuses(manager)
     picker.found[:] = [tunnel.location]                   # the tunnel up; the person scans
     asyncio.run(picker._scan_run())
@@ -2011,11 +2031,10 @@ def test_a_scan_that_reaches_the_renderer_through_a_tunnel_moves_the_output_ther
     wait_for(lambda: tunnel.state == "PLAYING" and tunnel.called("Seek"), what="the phone playing at the tunnel")
     assert [s["Target"] for s in tunnel.called("Seek")] == [dlna_backend._rel_time(left_at)]
     assert len(tunnel.called("SetAVTransportURI")) == 1
-    gone.close()
 
 
 def test_back_on_the_lan_the_first_play_attaches_the_renderer_there_with_no_wait_on_the_tunnel(
-        tmp_path, proxy, renderers, manager, picker, quality):
+        tmp_path, proxy, renderers, manager, picker, quality, swallowing):
     """N-20, the owner's Tailscale requirement, back: the phone played
     through the tunnel, paused, and came back on Wi-Fi, the tunnel down; no
     scan. The first Play attaches it at its LAN address with no wait on the
@@ -2023,17 +2042,12 @@ def test_back_on_the_lan_the_first_play_attaches_the_renderer_there_with_no_wait
     each waited out the address it had left), saying meanwhile that it
     connects — never "disconnected" — and starts the track once, at the
     second it was left at."""
-    lan, tunnel = renderers(name="Phone"), renderers(name="Phone")
-    tunnel.udn = lan.udn
     # Attached through the tunnel, the LAN address known behind it, as a
     # scan through the tunnel leaves the chosen record
-    manager.store.update({"output.type": "dlna", "output.dlna_renderer": {
-        **tunnel.record, "locations": [tunnel.location, lan.location]}})
-    manager.activate("dlna", renderer=manager.store["output.dlna_renderer"])
-    assert manager.replace_queue([track(tmp_path, 1, seconds=90.0)], play=True)[0] == 1
-    _playing_at(manager, tunnel, 3)
+    tunnel, lan = _attached_at_one_of_two(tmp_path, manager, renderers, other_answers=False)
     left_at = _lost_paused(manager, tunnel)               # the tunnel down
-    gone = _Swallowing(tunnel.port)
+    swallowing(tunnel.port)
+    lan.answer_again()                                    # back on Wi-Fi
     seen = _statuses(manager)
     assert _pressed(picker) < dlna_backend._PROBE_TIMEOUT - 1, "the press waited on the address left"
     assert manager.active._renderer["location"] == lan.location
@@ -2044,7 +2058,6 @@ def test_back_on_the_lan_the_first_play_attaches_the_renderer_there_with_no_wait
     assert connecting and all(s["connecting"] == "Phone" for s in connecting)
     assert "disconnected" not in [s.get("state") for s in seen]
     assert not manager.latest_status.get("connecting")
-    gone.close()
 
 
 # -- N-7: a renderer's own Seek in an Opus stream before the reload ---------------
@@ -2064,6 +2077,8 @@ def _opus_on(tmp_path, monkeypatch, quality, renderers, nodes, **knobs) -> tuple
     n = nodes(q, r)
     assert n.backend.select(1)
     wait_for(lambda: n.last.state == "playing" and n.last.position >= 4, what="playing past 4 s")
+    if r.opus_position:
+        wait_for(lambda: getattr(n.backend, "_heard_on_load", 2) >= 2, what="its position heard twice")
     assert "q=opus_96" in r.uri and "ss=" not in r.uri
     return r, n
 
@@ -2148,3 +2163,268 @@ def test_a_renderer_known_to_seek_opus_starts_a_spot_with_its_own_seek(tmp_path,
     assert len(loaded) == 1 and "q=opus_96" in loaded[0]["CurrentURI"] and "ss=" not in loaded[0]["CurrentURI"]
     assert [s["Target"] for s in r.called("Seek")] == ["0:00:35"]
     wait_for(lambda: n.last.state == "playing" and n.last.position >= 36, what="playing on from 35")
+
+
+# -- the review's first round ----------------------------------------------------
+
+
+def _attached_at_one_of_two(tmp_path, manager, renderers, *, other_answers: bool = True) -> tuple:
+    """One renderer at two addresses — `here`, where it is attached, and
+    `there`, known behind it in the chosen record (as a scan through a tunnel
+    leaves it) — playing past 3 s. `other_answers` False: `there` refuses
+    meanwhile (the phone away from its LAN)."""
+    here, there = renderers(name="Phone"), renderers(name="Phone")
+    there.udn = here.udn
+    there.stop_answering()            # the attach takes the first address that answers
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": {
+        **here.record, "locations": [here.location, there.location]}})
+    manager.activate("dlna", renderer=manager.store["output.dlna_renderer"])
+    assert manager.active._renderer["location"] == here.location
+    if other_answers:
+        there.answer_again()
+    assert manager.replace_queue([track(tmp_path, 1, seconds=90.0)], play=True)[0] == 1
+    _playing_at(manager, here, 3)
+    assert manager.active._renderer["location"] == here.location
+    return here, there
+
+
+def _paused(manager, r: FakeRenderer) -> float:
+    manager.backend().pause()
+    wait_for(lambda: manager.latest_status.get("state") == "paused" and r.state == "PAUSED_PLAYBACK",
+             what="paused")
+    return manager.latest_status["position"]
+
+
+def test_back_on_the_lan_play_takes_the_lan_address_at_once(
+        tmp_path, proxy, renderers, manager, picker, quality, swallowing, monkeypatch):
+    """N-20 as it happened: the phone played through the tunnel, paused, and
+    came back on Wi-Fi, the tunnel down — its address swallowing what is sent
+    to it, the node not yet aware (each poll waits out its timeout) — and
+    Play pressed at once. A LAN address that answers is better than the
+    tunnel's: taken at once (the press waited out the tunnel address's probe
+    window first, 11 s live), "connecting" said, the track started once at
+    the second it was left at."""
+    tunnel, lan = _attached_at_one_of_two(tmp_path, manager, renderers, other_answers=False)
+    monkeypatch.setattr(dlna_backend, "_tunnel_address", lambda location: location == tunnel.location,
+                        raising=False)
+    left_at = _paused(manager, tunnel)
+    lan.answer_again()                                      # back on Wi-Fi
+    tunnel.stop_answering()
+    swallowing(tunnel.port)                                 # the tunnel down
+    assert manager.active.healthy(), "the node has no word of it yet"
+    seen = _statuses(manager)
+    assert _pressed(picker) < dlna_backend._PROBE_TIMEOUT - 1, "the press waited on the address left"
+    assert manager.active._renderer["location"] == lan.location
+    wait_for(lambda: lan.state == "PLAYING" and lan.called("Seek"), what="the phone playing on the LAN")
+    assert [s["Target"] for s in lan.called("Seek")] == [dlna_backend._rel_time(left_at)]
+    assert len(lan.called("SetAVTransportURI")) == 1
+    assert any(s.get("connecting") == "Phone" for s in seen)
+
+
+def test_play_takes_another_address_at_once_once_a_poll_failed_where_it_is_attached(
+        tmp_path, proxy, renderers, manager, picker, quality, swallowing):
+    """The address the renderer is attached at went dark while it was paused
+    (its poll waits out each request): once one of the poll's requests has
+    failed there, the node doubts it, and Play takes the other address that
+    answers at once, at the spot."""
+    here, there = _attached_at_one_of_two(tmp_path, manager, renderers)
+    left_at = _paused(manager, here)
+    here.stop_answering()
+    swallowing(here.port)
+    wait_for(lambda: getattr(manager.active, "_misses", 1) >= 1, timeout=20, what="a poll failed there")
+    assert manager.active.healthy(), "not lost yet"
+    assert _pressed(picker) < dlna_backend._PROBE_TIMEOUT - 1, "the press waited on the address left"
+    assert manager.active._renderer["location"] == there.location
+    wait_for(lambda: there.state == "PLAYING" and there.called("Seek"), what="playing at the other address")
+    assert [s["Target"] for s in there.called("Seek")] == [dlna_backend._rel_time(left_at)]
+
+
+def test_play_waiting_on_the_address_it_is_attached_at_says_it_connects(
+        tmp_path, proxy, renderers, manager, picker, quality, swallowing):
+    """The renderer stopped — no poll runs, so nothing has failed at its
+    address when it goes dark — and Play pressed at once. The address it is
+    attached at decides first, and its wait is that address's probe window;
+    but once another address has answered, the wait is said ("connecting",
+    within a second of the press, not after it), never "disconnected", and
+    the track then plays at the other address."""
+    here, there = _attached_at_one_of_two(tmp_path, manager, renderers)
+    manager.backend().stop()
+    wait_for(lambda: manager.latest_status.get("state") == "stopped" and here.state == "STOPPED", what="stopped")
+    here.stop_answering()
+    swallowing(here.port)
+    seen = []
+    push = manager._push_status
+    manager._push_status = lambda data: (push(data), seen.append((time.monotonic(), dict(data))))[0]
+    pressed = time.monotonic()
+    assert picker.play() == {"ok": True}
+    said = next((at for at, data in seen if data.get("connecting") == "Phone"), None)
+    assert said is not None and said - pressed < 1.5, (said and said - pressed)
+    assert "disconnected" not in [data.get("state") for _at, data in seen]
+    assert manager.active._renderer["location"] == there.location
+    wait_for(lambda: there.state == "PLAYING", what="playing at the other address")
+
+
+def test_a_renderer_answering_at_two_addresses_of_a_kind_stays_where_it_is_attached(
+        tmp_path, proxy, renderers, manager, picker, quality):
+    """A renderer that answers at two addresses of a kind about as fast stays
+    where it is attached press after press: moved to whichever answered
+    first, it would be attached afresh at random, every press a reload."""
+    here, there = _attached_at_one_of_two(tmp_path, manager, renderers)
+    attached, changes = manager.active, manager.output_changes()
+    for _press in range(3):
+        _paused(manager, here)
+        assert picker.play() == {"ok": True}
+        wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing again")
+    assert manager.active is attached and manager.output_changes() == changes
+    assert not there.called("SetAVTransportURI")
+
+
+def test_a_scan_moves_a_playing_renderer_whose_address_went_dark_at_the_clocks_second(
+        tmp_path, proxy, renderers, manager, picker, quality, swallowing):
+    """N-20: the phone plays when its LAN address goes dark, the node not yet
+    aware (its poll waits out each request), and a scan reaches it through
+    the tunnel. The move holds the track at the second by the clock — where
+    the music is — not at the last reading the stalled poll left seconds
+    behind, and starts nothing."""
+    lan, tunnel = renderers(name="Phone"), renderers(name="Phone")
+    tunnel.udn = lan.udn
+    _on_renderer(manager, lan, [track(tmp_path, 1, seconds=90.0)])
+    _playing_at(manager, lan, 3)
+    lan.stop_answering()
+    swallowing(lan.port)
+    dark, at_dark = time.monotonic(), manager.latest_status["position"]
+    assert manager.active.healthy(), "the node has no word of it yet"
+    picker.found[:] = [tunnel.location]
+    asyncio.run(picker._scan_run())
+    moved = time.monotonic() - dark
+    st = manager.latest_status
+    assert manager.active._renderer["location"] == tunnel.location
+    assert (st["state"], st["track_index"]) == ("paused", 1)
+    assert st["position"] >= at_dark + moved - 2 * dlna_backend._RELTIME_TOLERANCE, (st["position"], moved)
+    assert not tunnel.called("SetAVTransportURI")
+
+
+def test_a_move_whose_attach_fails_keeps_the_spot_for_the_next_play(
+        tmp_path, proxy, renderers, manager, picker, quality, monkeypatch, swallowing):
+    """N-20: a scan reaches the lost phone through the tunnel, but the attach
+    there fails (a description it cannot read, an update timing out): the
+    output is said disconnected with its spot kept, and the next Play
+    attaches it there and starts the track at the second it was left at —
+    it used to start at 0:00, the spot gone with the failed attach."""
+    lan, tunnel = renderers(name="Phone"), renderers(name="Phone")
+    tunnel.udn = lan.udn
+    _on_renderer(manager, lan, [track(tmp_path, 1, seconds=90.0)])
+    _playing_at(manager, lan, 5)
+    left_at = _lost_paused(manager, lan)
+    swallowing(lan.port)
+    create, failing = DlnaBackend._create_device, {"on": True}
+
+    async def once_failing(self, factory):
+        if failing["on"]:
+            raise dlna_backend.DlnaAttachError("described badly")
+        return await create(self, factory)
+    monkeypatch.setattr(DlnaBackend, "_create_device", once_failing)
+    picker.found[:] = [tunnel.location]
+    asyncio.run(picker._scan_run())
+    assert manager.active is None and manager.latest_status["state"] == "disconnected"
+    failing["on"] = False
+    assert picker.play() == {"ok": True}
+    wait_for(lambda: tunnel.state == "PLAYING" and tunnel.called("Seek"), what="the phone playing at its second")
+    assert [s["Target"] for s in tunnel.called("Seek")] == [dlna_backend._rel_time(left_at)]
+
+
+def test_a_seek_in_an_opus_stream_a_renderer_ignores_is_never_taken_for_a_landing(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7: a renderer that reports its position in an Opus stream but plays
+    on where it was at a Seek. Its readings come into the Seek's window once
+    it has played the distance, and were taken for a landing: the scrub lost,
+    the renderer remembered as one that seeks. A reading its staying put
+    explains is no landing: at the deadline the stream loads again from the
+    clock's second, remembered false. A seek within both readings' tolerance
+    cannot be told from staying put: it is left to the renderer, and teaches
+    nothing."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 10.0)
+    r, n = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes, opus_seek="ignores")
+    target = int(n.last.position) + 9
+    assert n.backend.seek(target)
+    wait_for(lambda: "ss=" in r.uri and r.state == "PLAYING", timeout=20, what="the stream again")
+    assert FakeRenderer.offset(r.uri) >= target + 8, r.uri          # the clock's second, not the renderer's
+    assert stored["output.dlna_opus_seek"] == {r.udn.lower(): False}
+    near, m = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes, opus_seek="ignores")
+    assert m.backend.seek(int(m.last.position) + 5)
+    wait_for(lambda: near.called("Seek"), what="the Seek")
+    wait_for(lambda: m.backend._seek_due is None, timeout=15, what="the Seek let go")
+    assert near.udn.lower() not in stored["output.dlna_opus_seek"] and "ss=" not in near.uri
+
+
+def test_a_paused_seek_in_an_opus_stream_never_starts_playback_by_itself(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7, paused: a renderer that ignores a Seek in an Opus stream stays
+    paused past the deadline — the reload would start it, and a scrub while
+    paused is no Play — and the Seek's wait counts once it plays again: its
+    readings then show it played on from where it was, and the stream loads
+    again from the clock's second."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 3.0)
+    r, n = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes, opus_seek="ignores")
+    assert n.backend.pause()
+    wait_for(lambda: r.state == "PAUSED_PLAYBACK" and n.last.state == "paused", what="paused")
+    assert n.backend.seek(40)
+    time.sleep(5.0)                                       # past the deadline, paused
+    assert r.state == "PAUSED_PLAYBACK" and "ss=" not in r.uri and n.last.state == "paused"
+    assert r.udn.lower() not in stored.get("output.dlna_opus_seek", {})
+    assert n.backend.play()
+    wait_for(lambda: "ss=" in r.uri and r.state == "PLAYING", timeout=15, what="the stream again")
+    assert FakeRenderer.offset(r.uri) >= 42, r.uri
+    assert stored["output.dlna_opus_seek"] == {r.udn.lower(): False}
+
+
+def test_a_seek_refused_as_no_such_target_reloads_and_teaches_nothing(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7: UPnP 711 (no such target) is about the target, not the renderer:
+    the stream loads again from the second, and nothing is remembered."""
+    r, n = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes)
+    r.faults["Seek"] = [711]
+    assert n.backend.seek(40)
+    wait_for(lambda: "ss=40" in r.uri and r.state == "PLAYING", what="the stream again from 40")
+    assert len(r.called("Seek")) == 1
+    assert r.udn.lower() not in stored.get("output.dlna_opus_seek", {})
+
+
+def test_a_start_seek_refused_in_an_opus_stream_loads_it_from_the_spot(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7 at a spot: a renderer remembered to seek Opus refuses the start's
+    Seek with 710 — it is remembered false, and the stream loads again from
+    the spot's second."""
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK)
+    r.faults["Seek"] = [710]
+    stored["output.dlna_opus_seek"] = {r.udn.lower(): True}
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    assert n.backend.play()
+    wait_for(lambda: "ss=35" in r.uri and r.state == "PLAYING", what="the stream again from 35")
+    assert len(r.called("Seek")) == 1
+    assert stored["output.dlna_opus_seek"] == {r.udn.lower(): False}
+
+
+def test_a_play_on_its_way_at_a_switch_away_is_answered_before_the_last_word(
+        tmp_path, proxy, renderers, manager, switch, quality):
+    """N-20: the renderer left was still to answer a Play of the node's when
+    the person switched away. The switch's Stop goes once that Play has its
+    answer: sent while it was on its way, the Stop came first, and the Play
+    then started the renderer switched away from."""
+    a, b = renderers(name="Kitchen"), renderers(name="Study")
+    _on_renderer(manager, a, [track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)])
+    _playing_at(manager, a, 2)
+    a.slow["Play"] = 1.5
+    plays, answered = len(a.called("Play")), a.answered.count("Play")
+    assert manager.backend().select(2)
+    wait_for(lambda: len(a.called("Play")) > plays, what="the tap's Play on its way")
+    switch(type="dlna", renderer=b.record)
+    wait_for(lambda: a.answered.count("Play") > answered, what="the tap's Play answered")
+    wait_for(lambda: b.state == "PLAYING", what="the new renderer playing")
+    assert a.state == "STOPPED", a.state
+    assert [act for act in a.answered if act in ("Play", "Stop")][-2:] == ["Play", "Stop"]

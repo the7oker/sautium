@@ -1608,9 +1608,10 @@ class HqpBackend(PlayerBackend):
         away still owes the Stop."""
         return not self._gone
 
-    def reachable(self) -> bool:
+    def reachable(self, waiting=nullcontext) -> bool:
         """The play gate, on the link (HqpLink.probe): HQPlayer answered
-        GetInfo naming a product. Busy is raised — a build (Building), a
+        GetInfo naming a product — one address, so nothing found elsewhere
+        is waited on (`waiting` unused). Busy is raised — a build (Building), a
         connection taken and left unanswered (NotAnswering) — and offline is
         False, said in the playback trace either way. While this backend's
         play press drives HQPlayer, or a queue mutation hands it its

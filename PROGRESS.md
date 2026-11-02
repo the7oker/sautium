@@ -3348,8 +3348,9 @@ go (`release`, `shutdown`): a load, a seek or an advance still on its way
 ends at its next request, logged, never said as a failure; its GENA
 subscriptions end with it, one made while it was let go included. A switch
 away lets the instance go first and sends its Stop as the instance's last
-word — a load in flight used to go on past that Stop and start the renderer
-switched away from beside the new one. And the renderer already driven,
+word, once every request already on its way has its answer — a load in
+flight used to go on past that Stop, and a Play answered after it started
+the renderer switched away from beside the new one. And the renderer already driven,
 picked again, stays the output as it is, as HQPlayer does
 (`PlaybackManager.answering`): attached again only where it no longer
 answers, so a play press made on it goes on there. Lesson: an intent
@@ -3369,19 +3370,25 @@ the attach probed every known address together and waited for the slowest
 on it costs its whole timeout.
 
 Now a scan that reaches the active renderer elsewhere moves the output there
-at once when its own address no longer answers — lost, or a probe it fails
-— at the spot, nothing started (`PlaybackManager.renderer_reached`): the
-first Play then goes at once. The gate does not probe an instance known lost
-again, the attach describes the first address that answers
-(`DlnaBackend._create_device`), and a lost instance's UNSUBSCRIBE is not
-waited for. While the output attaches again every status says so
-(`connecting`, the renderer's name) and never "disconnected", which hid the
-mini player: Now Playing says "Connecting to ‹renderer›…" beside the track,
-and both transport buttons spin as for a start in flight. Still waited for:
-the probe of the address a renderer is attached at while the node has no
-word that it left — a renderer stopped, not paused, whose network changed
-(no poll ran to lose it); a scan moves it first. Lesson: wait on an
-address only while nothing says the device is elsewhere, and say the wait.
+at once when its own address no longer answers — lost, or a probe it fails,
+which loses it there by the clock's second — at the spot, nothing started
+(`PlaybackManager.renderer_reached`): the first Play then goes at once. The
+gate asks every address the renderer is known at together
+(`DlnaBackend.reachable`): a LAN address that answers is taken over the
+tunnel's at once, so a renderer the node still believes on a tunnel that
+went down is found on the LAN without a wait; otherwise the attached
+address decides first while nothing has failed there — a renderer
+answering at two addresses about as fast is never moved between them press
+after press — and the wait for it, once another has answered, is said.
+The attach describes the first address that answers and is that renderer
+(its UDN, `_create_device`), and a lost instance's UNSUBSCRIBE is not
+waited for. An attach that fails keeps the
+spot it was to resume at, said with the output disconnected, for the next
+Play. While the output attaches again every status says so (`connecting`,
+the renderer's name) and never "disconnected", which hid the mini player:
+Now Playing says "Connecting to ‹renderer›…" beside the track, and both
+transport buttons spin as for a start in flight. Lesson: never wait on one
+address while another can answer, and say what is being waited for.
 
 ### A renderer that seeks an Opus stream itself is asked to (2026-11-02)
 
@@ -3399,7 +3406,11 @@ position on this load (two readings taken as its word; one may be a DAP's
 stray), so the landing can be seen. It falls back to the reload on UPnP
 710 (no such seek mode) or 711 (no such target), or when the Seek is not
 seen landing by the pending-play deadline: the stream then loads again from
-where the clock stands. What a Seek showed is kept per renderer, by UDN
+where the clock stands. A landing is a reading the renderer's staying where
+it was cannot explain — one that ignores the Seek and plays on enters the
+Seek's window once it has played the distance — and a seek within both
+readings' tolerance is not judged at all; paused, the wait counts once the
+renderer plays again, never starting it. What a Seek showed is kept per renderer, by UDN
 (`output.dlna_opus_seek`): a stored fact, never a guess from its name — 710
 and a Seek that did not land as "does not seek one", a landing as "does";
 711 is the target's, not the renderer's. A renderer known to seek one starts

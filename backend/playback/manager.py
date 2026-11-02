@@ -230,11 +230,12 @@ class PlaybackManager:
         """The active output where its device answers, under the output-change
         locks (ensure_active; output_change for a renderer picked again): the
         instance as it is when it answers where it talks to its device —
-        `probed` was asked already, and one known lost is not asked again: its
-        address is the one that stopped answering — else the output attached
-        again from the persisted settings, at the spot the instance left."""
+        `probed` was asked already; one believed lost is asked again too, an
+        HQPlayer that is off says so at every press — else the output
+        attached again from the persisted settings, at the spot the instance
+        left."""
         b = self._active
-        if b is not None and b is not probed and b.healthy():
+        if b is not None and b is not probed:
             self._probe(b)
         if b is not None and b.healthy():
             return b
@@ -256,13 +257,16 @@ class PlaybackManager:
         def stays(b: Optional[PlayerBackend]) -> bool:
             return (b is None or b.id != "dlna" or not b.drives({"udn": udn})
                     or b.location in locations)
-        if stays(self._active):
+        b = self._active
+        # Asked before the locks: a queue edit never waits on a dead
+        # address. One that does not answer is lost there, its spot by the
+        # clock (DlnaBackend.answers_here)
+        if stays(b) or (b.healthy() and b.answers_here()):
             return
         with self._mutate_lock, self._ensure_lock:
-            b = self._active
-            if stays(b) or (b.healthy() and b.answers_here()):
-                return
-            logger.info("a scan reached %s at %s — the output moves there", b.label, locations[0])
+            if self._active is not b:
+                return      # attached again meanwhile, by a press or another scan
+            logger.info("a scan reached %s elsewhere — the output moves where it answers", b.label)
             self._attach_again(b)
 
     def _attach_again(self, b: Optional[PlayerBackend]) -> None:
@@ -291,9 +295,10 @@ class PlaybackManager:
                         "output in Settings → Audio output")
             logger.info("%s '%s' output — attaching it again",
                         "unhealthy" if b is not None else "inactive", otype)
-            # Where the lost instance left the queue: the attach resumes
+            # Where the lost instance left the queue — or where an attach that
+            # failed was to resume (activate keeps it): the attach resumes
             # there, the queue and the second as they were
-            spot = self.spot() if b is not None else None
+            spot = self.spot()
             self.activate(otype, spot=spot, stop_old=False, again=True,
                           device_id=_read("output.local_device"),
                           exclusive=bool(_read("output.local_exclusive")),
@@ -315,15 +320,16 @@ class PlaybackManager:
             self._connecting = None
             self._push_status(dict(self._latest_status))
 
-    @staticmethod
-    def _probe(b: PlayerBackend) -> None:
+    def _probe(self, b: PlayerBackend) -> None:
         """Fast offline-fail: a powered-off DLNA renderer must 503 within
         the probe window with a clear message, not after stacked SOAP +
         re-attach timeouts (34s, live) — and the first attempt must not
         silently accept (fire-and-forget commands return 200 while the
         failure is async). A dozing-but-networked renderer passes the
-        probe: its window is sized for a sleeping radio."""
-        if not b.reachable():
+        probe: its window is sized for a sleeping radio. A wait on a
+        renderer already found elsewhere is said, as its attach is
+        (_connecting_to)."""
+        if not b.reachable(waiting=lambda: self._connecting_to(b.label)):
             b._gone = True
             hint = getattr(b, "offline_hint",
                            "turn it on, or pick another output in "
@@ -338,14 +344,14 @@ class PlaybackManager:
         """Where the output stands in the queue, from its latest word: a
         track it plays, starts or holds paused, or the spot a stopped one's
         play press resumes (`resume`: an HQPlayer's, a renderer's that
-        stopped answering). None when it stands nowhere — stopped, or no
-        output."""
+        stopped answering, or the one an attach that failed was to resume
+        at). None when it stands nowhere — stopped, or no output."""
         st = self._latest_status
         state, slot = st.get("state"), st.get("track_index")
         if state in ("playing", "loading", "paused") and isinstance(slot, int) and slot >= 1:
             return Spot(slot, float(st.get("position") or 0.0), state != "paused")
         resume = st.get("resume")
-        if state == "stopped" and resume and resume.get("index"):
+        if state in ("stopped", "disconnected") and resume and resume.get("index"):
             return Spot(resume["index"], float(resume.get("position") or 0.0), False)
         return None
 
@@ -455,7 +461,12 @@ class PlaybackManager:
                     backend.shutdown()
                 except Exception as e:
                     logger.debug("rollback shutdown failed: %s", e)
-                self._push_status({"state": "disconnected"})
+                # The spot it was to resume at stays the output's: the next
+                # play press attaches it again there, not at the slot's 0:00
+                # (a renderer a scan found elsewhere, its attach failed)
+                held = ({"resume": {"index": spot.slot, "position": spot.position}}
+                        if spot is not None and spot.slot >= 1 else {})
+                self._push_status({"state": "disconnected", **held})
                 raise
             if spot is None:
                 spot = Spot(prev_idx, 0.0, False)
