@@ -1,10 +1,12 @@
-"""Every model loads at a pinned commit, from the cache alone once that
-commit is there whole (backend/model_cache.py from_hub). The name of a model
-is its identity in the database and on the network, so the commit is what
-that identity means; a model with no pinned commit is not loaded. PaSST's
-checkpoint, fetched by URL outside the Hub, is checked by its SHA-256 before
-anything reads it; MADLAD's local conversion is taken only when the prebuilt
-model is gone, never on a network that failed."""
+"""Every model loads at a pinned commit, from the cache alone once every
+file its loaders read at that commit is there (backend/model_cache.py
+from_hub, HUB_FILES). The name of a model is its identity in the database and
+on the network, so the commit is what that identity means; a model with no
+pinned commit is not loaded. PaSST's checkpoint, fetched by URL outside the
+Hub, is checked by its SHA-256 before anything reads it, where hear21passt
+reads it; MADLAD's local conversion is taken only when the prebuilt model is
+gone, never on a network that failed, and reads the pinned source's own
+folder."""
 
 import hashlib
 import sys
@@ -20,32 +22,57 @@ if str(REPO / "backend") not in sys.path:
 import model_cache  # noqa: E402
 
 CLAP = "laion/clap-htsat-unfused"
+BGE = "BAAI/bge-m3"
 
 
-def test_a_cached_commit_is_read_from_the_cache_alone():
+@pytest.fixture
+def hub(tmp_path, monkeypatch):
+    """A Hugging Face cache of the test's own, and a Hub that records what it
+    is asked for."""
+    hf = pytest.importorskip("huggingface_hub")
+    import huggingface_hub.constants
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    asked = []
+
+    def cache(name, files):
+        snapshot = (tmp_path / "hub" / f"models--{name.replace('/', '--')}" / "snapshots"
+                    / model_cache.HUB_REVISIONS[name])
+        for f in files:
+            (snapshot / f).parent.mkdir(parents=True, exist_ok=True)
+            (snapshot / f).write_bytes(b"")
+
+    def download(name, *, revision, allow_patterns=None, **kw):
+        asked.append((name, revision, sorted(allow_patterns or [])))
+        cache(name, allow_patterns or [])
+        return str(tmp_path / "hub")
+
+    monkeypatch.setattr(hf, "snapshot_download", download)
+    return types.SimpleNamespace(cache=cache, asked=asked)
+
+
+def test_a_cached_commit_is_read_from_the_cache_alone(hub):
     calls = []
 
     def load(name, **kwargs):
         calls.append((name, kwargs))
         return "model"
 
+    hub.cache(CLAP, model_cache.HUB_FILES[CLAP])
     assert model_cache.from_hub(load, CLAP, torch_dtype="bf16") == "model"
     assert calls == [(CLAP, {"revision": model_cache.HUB_REVISIONS[CLAP],
                              "local_files_only": True, "torch_dtype": "bf16"})]
+    assert hub.asked == []
 
 
-def test_a_commit_not_in_the_cache_whole_is_fetched_at_the_same_commit():
+def test_a_cache_without_one_file_of_the_commit_fetches_its_files_then_reads_the_cache(hub):
+    """BGE-M3 with its weights but not modules.json loads, as a model
+    sentence-transformers makes up; the files come first."""
     calls = []
-
-    def load(name, **kwargs):
-        calls.append(kwargs)
-        if kwargs.get("local_files_only"):
-            raise OSError("model.safetensors is not in the cache")
-        return "model"
-
-    assert model_cache.from_hub(load, CLAP) == "model"
-    revision = model_cache.HUB_REVISIONS[CLAP]
-    assert calls == [{"revision": revision, "local_files_only": True}, {"revision": revision}]
+    hub.cache(BGE, [f for f in model_cache.HUB_FILES[BGE] if f != "modules.json"])
+    assert model_cache.from_hub(lambda name, **kw: calls.append(kw) or "model", BGE) == "model"
+    revision = model_cache.HUB_REVISIONS[BGE]
+    assert hub.asked == [(BGE, revision, sorted(model_cache.HUB_FILES[BGE]))]
+    assert calls == [{"revision": revision, "local_files_only": True}]
 
 
 def test_a_model_with_no_pinned_commit_is_not_loaded():
@@ -63,11 +90,13 @@ def test_every_hub_model_the_node_loads_has_a_pinned_commit():
     names |= {translation.MODEL_ID, translation.CT2_REPO}
     assert names <= set(model_cache.HUB_REVISIONS)
     assert all(len(rev) == 40 for rev in model_cache.HUB_REVISIONS.values())
+    assert set(model_cache.HUB_FILES) == set(model_cache.HUB_REVISIONS) - {translation.CT2_REPO}
 
 
-def test_clap_loads_at_its_pinned_commit(monkeypatch):
+def test_clap_loads_at_its_pinned_commit(hub, monkeypatch):
     pytest.importorskip("transformers")
     import clap_model
+    hub.cache(CLAP, model_cache.HUB_FILES[CLAP])
     seen = []
 
     class Fake:
@@ -122,6 +151,24 @@ def test_a_downloaded_passt_checkpoint_that_does_not_match_is_refused_and_remove
     assert list(passt.path.parent.iterdir()) == []
 
 
+def test_the_pinned_passt_checkpoint_is_the_file_hear21passt_loads(passt, monkeypatch, tmp_path):
+    """hear21passt reads its checkpoint through timm's download cache, by the
+    URL's file name under torch.hub's folder: the pinned file must be that
+    one, or it fetches its own, unchecked."""
+    pytest.importorskip("hear21passt")
+    import torch
+    from hear21passt.models.passt import default_cfgs
+    try:
+        from timm.models._hub import download_cached_file
+    except ImportError:
+        from timm.models.hub import download_cached_file
+    assert default_cfgs["passt_s_swa_p16_128_ap476"]["url"] == passt.ei.PASST_CHECKPOINT_URL
+    monkeypatch.setattr(torch.hub, "_hub_dir", str(tmp_path))
+    passt.path.write_bytes(passt.good)
+    assert Path(download_cached_file(passt.ei.PASST_CHECKPOINT_URL)) == passt.ei.pinned_passt_checkpoint()
+    assert passt.served["count"] == 0
+
+
 def test_a_verified_passt_checkpoint_is_not_hashed_again(passt, monkeypatch):
     passt.path.write_bytes(passt.good)
     passt.ei.pinned_passt_checkpoint()
@@ -165,7 +212,7 @@ def test_the_prebuilt_translator_is_read_from_the_cache_alone_once_whole(madlad,
         (snapshot / name).write_bytes(b"")
     calls = []
 
-    def download(repo, *, revision, local_files_only=False):
+    def download(repo, *, revision, local_files_only=False, **kw):
         calls.append(local_files_only)
         return str(snapshot)
 
@@ -177,7 +224,7 @@ def test_the_prebuilt_translator_is_read_from_the_cache_alone_once_whole(madlad,
 def test_a_network_that_failed_converts_nothing(madlad, monkeypatch):
     from huggingface_hub.errors import LocalEntryNotFoundError
 
-    def download(repo, *, revision, local_files_only=False):
+    def download(repo, *, revision, local_files_only=False, **kw):
         if local_files_only:
             raise LocalEntryNotFoundError("not cached")
         raise ConnectionError("the Hub did not answer")
@@ -190,8 +237,14 @@ def test_a_network_that_failed_converts_nothing(madlad, monkeypatch):
 
 def test_a_prebuilt_translator_that_is_gone_is_converted_from_the_pinned_source(madlad, monkeypatch):
     from huggingface_hub.errors import LocalEntryNotFoundError, RepositoryNotFoundError
+    source = madlad.translation.MODEL_ID
+    snapshot = madlad.tmp / "source-snapshot"
+    asked = []
 
-    def download(repo, *, revision, local_files_only=False):
+    def download(repo, *, revision, local_files_only=False, allow_patterns=None):
+        if repo == source:
+            asked.append((revision, sorted(allow_patterns)))
+            return str(snapshot)
         if local_files_only:
             raise LocalEntryNotFoundError("not cached")
         raise RepositoryNotFoundError("no such repository")
@@ -199,5 +252,6 @@ def test_a_prebuilt_translator_that_is_gone_is_converted_from_the_pinned_source(
     monkeypatch.setattr(madlad.hub, "snapshot_download", download)
     out = madlad.translation.ensure_ct2_model()
     assert (out / "model.bin").exists()
-    source = madlad.translation.MODEL_ID
-    assert madlad.converted == [(source, model_cache.HUB_REVISIONS[source])]
+    assert asked == [(model_cache.HUB_REVISIONS[source],
+                      sorted([*model_cache.HUB_FILES[source], *madlad.translation.SOURCE_FILES]))]
+    assert madlad.converted == [(str(snapshot), None)]

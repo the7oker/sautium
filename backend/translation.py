@@ -45,10 +45,13 @@ MODEL_ID = "google/madlad400-3b-mt"
 # conversion on the multilingual protocol (2026-07-21); a moving revision
 # would let upstream silently swap weights under every fresh node.
 CT2_REPO = "Nextcloud-AI/madlad400-3b-mt-ct2-int8"
-# What the translator reads from it: a snapshot without one of these is a
-# download that broke off.
-CT2_FILES = ("config.json", "model.bin", "shared_vocabulary.json",
-             "tokenizer_config.json", "spiece.model")
+# What the translator and its tokenizer read from it: a snapshot without one
+# of these is a download that broke off.
+CT2_FILES = ("config.json", "model.bin", "shared_vocabulary.json", "tokenizer_config.json",
+             "spiece.model", "tokenizer.json", "special_tokens_map.json", "added_tokens.json")
+# What the local conversion reads of the source: its tokenizer
+# (model_cache.HUB_FILES) and its weights
+SOURCE_FILES = ("generation_config.json", "model.safetensors")
 
 
 def _ct2_model_dir() -> Path:
@@ -102,9 +105,11 @@ def ensure_ct2_model() -> Path:
     tmp = out.with_name(out.name + ".tmp")
     logger.info(f"Converting {MODEL_ID} to CTranslate2 int8 → {out} "
                 "(one-time; downloads the 12GB source if not cached)")
-    converter = ctranslate2.converters.TransformersConverter(
-        MODEL_ID, load_as_float16=True, revision=model_cache.HUB_REVISIONS[MODEL_ID],
-    )
+    # From the pinned snapshot's own folder: the converter reads those files
+    # and asks the Hub nothing
+    source = snapshot_download(MODEL_ID, revision=model_cache.HUB_REVISIONS[MODEL_ID],
+                               allow_patterns=[*model_cache.HUB_FILES[MODEL_ID], *SOURCE_FILES])
+    converter = ctranslate2.converters.TransformersConverter(source, load_as_float16=True)
     converter.convert(str(tmp), quantization="int8", force=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():

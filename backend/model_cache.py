@@ -47,18 +47,48 @@ HUB_REVISIONS = {
 }
 
 
+# What the loaders read of each pinned model's snapshot, as the repository
+# holds it at that commit. A cache without one of them is a download that
+# broke off, whatever a loader would make of the rest — sentence-transformers
+# builds a mean-pooling model of its own when modules.json is missing.
+HUB_FILES = {
+    "laion/clap-htsat-unfused": (
+        "config.json", "merges.txt", "preprocessor_config.json", "pytorch_model.bin",
+        "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "vocab.json"),
+    "BAAI/bge-m3": (
+        "1_Pooling/config.json", "README.md", "config.json", "config_sentence_transformers.json",
+        "modules.json", "pytorch_model.bin", "sentence_bert_config.json",
+        "sentencepiece.bpe.model", "special_tokens_map.json", "tokenizer.json",
+        "tokenizer_config.json"),
+    "MIT/ast-finetuned-audioset-10-10-0.4593": (
+        "config.json", "model.safetensors", "preprocessor_config.json"),
+    # Its tokenizer: a node that converted the translator itself reads it
+    # here (translation.QueryTranslator)
+    "google/madlad400-3b-mt": (
+        "added_tokens.json", "config.json", "special_tokens_map.json", "spiece.model",
+        "tokenizer.json", "tokenizer_config.json"),
+}
+
+
+def _whole_in_cache(name: str, revision: str) -> bool:
+    from huggingface_hub import try_to_load_from_cache
+    return all(isinstance(try_to_load_from_cache(name, f, revision=revision), str)
+               for f in HUB_FILES[name])
+
+
 def from_hub(load, name: str, **kwargs):
     """`load(name, …)` — a from_pretrained, or a constructor that takes the
-    same `revision` and `local_files_only` — at the model's pinned commit:
-    from the cache alone once it holds every file that commit needs, from
-    the Hub otherwise (a first start, a download that broke off). A model
-    with no pinned commit is refused (KeyError)."""
+    same `revision` and `local_files_only` — at the model's pinned commit,
+    from the cache alone: when the cache lacks a file HUB_FILES names (a
+    first start, a download that broke off), those files are fetched at that
+    commit first. A model with no pinned commit or no file list is refused
+    (KeyError)."""
     revision = HUB_REVISIONS[name]
-    try:
-        return load(name, revision=revision, local_files_only=True, **kwargs)
-    except OSError:
+    if not _whole_in_cache(name, revision):
+        from huggingface_hub import snapshot_download
         logger.info("%s at %s is not in the cache whole: fetching it", name, revision[:8])
-        return load(name, revision=revision, **kwargs)
+        snapshot_download(name, revision=revision, allow_patterns=list(HUB_FILES[name]))
+    return load(name, revision=revision, local_files_only=True, **kwargs)
 
 
 @contextlib.contextmanager

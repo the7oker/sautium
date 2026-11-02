@@ -450,9 +450,11 @@ def test_an_analysis_run_whose_text_pass_stopped_is_no_success(monkeypatch):
 @pytest.fixture
 def pinned(monkeypatch):
     """The test's encoder name with a pinned commit (model_cache.from_hub
-    refuses a model without one); the commit, for what the test expects."""
+    refuses a model without one), whole in the cache; the commit, for what
+    the test expects."""
     import model_cache
     monkeypatch.setitem(model_cache.HUB_REVISIONS, NAME, "0" * 40)
+    monkeypatch.setattr(model_cache, "_whole_in_cache", lambda name, revision: True)
     return "0" * 40
 
 
@@ -1072,6 +1074,8 @@ def test_ast_is_loaded_with_its_devices_attention(monkeypatch, device_name, atte
     import hear21passt.base
     import transformers
     import ensemble_instruments
+    import model_cache
+    monkeypatch.setattr(model_cache, "_whole_in_cache", lambda name, revision: True)
     seen = []
 
     class Ast:
@@ -1177,12 +1181,13 @@ def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch, 
 
 @pytest.mark.parametrize("which", ["clap", "instruments"])
 def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, factory_lock, which):
-    import model_cache
-    monkeypatch.setitem(model_cache.HUB_REVISIONS, "clap", "0" * 40)
     """Loaded from a pass (a stream's analysis, the run) beside a search's
     load, they would race it as the text encoder would: a pass's load holds
     the lock, and a search's factory, which holds it already, takes it
     again."""
+    import model_cache
+    monkeypatch.setitem(model_cache.HUB_REVISIONS, "clap", "0" * 40)
+    monkeypatch.setattr(model_cache, "_whole_in_cache", lambda name, revision: True)
     held = []
 
     def loading():
