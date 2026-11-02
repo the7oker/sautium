@@ -2249,6 +2249,17 @@ user brings.
   wider one, so "Tailscale works because its address is one of the node's
   own interfaces" held for a Docker node with the variable set and not for
   the launcher.
+- **A request is judged on the scope uvicorn routes on (2026-11-03).**
+  Whether a path needs a signature is decided on `scope["path"]`, the
+  path the router routes; the signature covers the request-target as the
+  client sent it (`serving.request_target`: the path's own bytes and the
+  raw query); the Host guard takes a name or an IP literal with at most a
+  port. All three used to read `request.url`, which Starlette builds again
+  from the Host header — on some releases with a path other than the one
+  routed. The peer surface's limiter and its diagnostics signature read
+  the same scope. A percent-encoded path now verifies as the browser
+  signs it: the old check compared the decoded form, which no signer
+  produced.
 - **Found on the way:** `portmap._serves_web_ui` still looked for the
   inlined-secret marker of the 2026-08 page, so it recognised no port as
   the Web UI; it now reads the `sautium-webui` health type.

@@ -10,6 +10,10 @@ begins. They never end by themselves: uvicorn waited out its whole graceful
 window on them, then cancelled them — a traceback for each in the log, and
 five of the ten seconds the launcher gives a stop (2026-10-25).
 
+And what a request names (request_target): every check that admits a
+request reads the scope uvicorn routes on, never a URL Starlette builds
+again from the Host header.
+
 Light at import: the entrypoint imports it before the database is up.
 """
 
@@ -32,6 +36,18 @@ logger = logging.getLogger(__name__)
 _streams: set = set()
 _stopping = weakref.WeakSet()
 _streams_lock = threading.Lock()
+
+
+def request_target(scope) -> str:
+    """The request-target as the client sent it: the path's own bytes and the
+    query string, both as received. A signature over a request covers this;
+    the route is the decoded `scope["path"]`, a function of these bytes, so
+    the signature binds it. `request.url` is no stand-in: Starlette builds it
+    again from the Host header, and on some releases its path is not the one
+    routed."""
+    target = (scope.get("raw_path") or scope["path"].encode()).decode("latin-1")
+    query = scope.get("query_string") or b""
+    return target + "?" + query.decode("latin-1") if query else target
 
 
 class EventStream(StreamingResponse):

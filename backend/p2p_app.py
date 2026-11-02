@@ -40,6 +40,7 @@ from routers.sync import (
     SYNC_CAPABILITIES, carry_queries, lb_dump_version, lb_inventory, lb_router,
     mb_dump_version, mb_router, node_pubkey_hex, router, sharing_enabled,
 )
+from serving import request_target
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +96,7 @@ class PeerAuthMiddleware:
         timer = contact_log.RequestTimer()
         client = scope.get("client")
         addr = client[0] if client else None
-        raw_target = scope.get("raw_path", scope["path"].encode()).decode("latin-1")
-        if scope.get("query_string"):
-            raw_target += "?" + scope["query_string"].decode("latin-1")
+        raw_target = request_target(scope)
         headers = _CIHeaders(scope["headers"])
         outcome = {"status": 500, "bytes_out": 0}
         pubkey, status, lane = None, None, None
@@ -411,7 +410,9 @@ def _rate_limited(stamps: list, now: float) -> JSONResponse:
 async def rate_limit(request: Request, call_next):
     ip = request.client.host if request.client else "unknown"
     now = time.time()
-    if request.url.path == "/api/mb/search":
+    # The routed path, never request.url's (serving.request_target)
+    path = request.scope["path"]
+    if path == "/api/mb/search":
         if not _search_allowed(ip, now):
             return _rate_limited(_search_hits.get(ip, []), now)
         return await call_next(request)
@@ -419,7 +420,7 @@ async def rate_limit(request: Request, call_next):
     # asks, and the nodes behind one router share one address — probes
     # counted with the work spent the window the work needed, and a 429 on
     # a probe read as "no source" (2026-09-24).
-    bucket = _health_hits if request.url.path == "/health" else _hits
+    bucket = _health_hits if path == "/health" else _hits
     recent = [t for t in bucket.get(ip, ()) if now - t < RATE_LIMIT_WINDOW]
     if len(recent) >= RATE_LIMIT_PER_MINUTE:
         bucket[ip] = recent

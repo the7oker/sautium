@@ -10,6 +10,12 @@ where:
 
     canonical = METHOD + "\n" + PATH_AND_QUERY + "\n" + TS + "\n" + sha256_hex(body)
 
+PATH_AND_QUERY is the request-target as sent — the path's own bytes,
+percent-encoding and all, and the raw query (serving.request_target) — and
+whether a path needs a signature at all is judged on the path the router
+routes (`scope["path"]`). Neither is read off `request.url`, which Starlette
+builds again from the Host header.
+
 The server secret lives beside the node's identity (``<identity dir>/
 .api_secret``, 32 bytes) — it is part of who this node IS, not of the code
 it runs. It used to sit in ``backend/data/`` inside the checkout, which made
@@ -56,6 +62,7 @@ import hmac
 import ipaddress
 import logging
 import os
+import re
 import secrets
 import sys
 import time
@@ -67,6 +74,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import device_auth
+from serving import request_target
 
 logger = logging.getLogger(__name__)
 
@@ -160,16 +168,22 @@ def is_own_address(host: Optional[str]) -> bool:
     return h in allowed or f"[{h}]" in allowed or _own_ipv4_literal(h, allowed)
 
 
+# What a Host header may be: a name or an IPv4 literal, or a bracketed IPv6
+# literal, then at most a port. Anything else — a path, a query, userinfo, a
+# port that is not digits — is no address of ours, whatever it starts with.
+_HOST_FORM = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+)\]|(?P<name>[a-z0-9._-]+))(?::[0-9]{1,5})?")
+
+
 def host_allowed(host_header: str) -> bool:
     if not host_header:
         return True          # HTTP/1.0 and health probes send none
-    host = host_header.strip().lower()
-    if host.startswith("["):                  # [::1]:8000
-        host = host.split("]")[0] + "]"
-    elif ":" in host:
-        host = host.rsplit(":", 1)[0]
+    form = _HOST_FORM.fullmatch(host_header.strip().lower())
+    if form is None:
+        return False
     allowed = _allowed_host_set()
-    return host in allowed or _own_ipv4_literal(host, allowed)
+    if form["v6"] is not None:
+        return f"[{form['v6']}]" in allowed or form["v6"] in allowed
+    return form["name"] in allowed or _own_ipv4_literal(form["name"], allowed)
 
 
 def _own_ipv4_literal(host: str, allowed: set) -> bool:
@@ -333,7 +347,7 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
         return self._secret
 
     async def dispatch(self, request: Request, call_next):
-        path = request.url.path
+        path = request.scope["path"]
 
         if not host_allowed(request.headers.get("host", "")):
             # Refuse before anything else, whitelist included — the whitelist
@@ -376,9 +390,7 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
         # calls hit the cached value.
         request._body = body  # noqa: SLF001 — documented Starlette workaround
 
-        path_and_query = path
-        if request.url.query:
-            path_and_query = f"{path}?{request.url.query}"
+        path_and_query = request_target(request.scope)
 
         # Two keys are accepted, for two kinds of caller:
         #   * the DEVICE TOKEN — what a browser gets after logging in. The

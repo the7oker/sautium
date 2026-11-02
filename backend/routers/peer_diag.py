@@ -34,6 +34,7 @@ from db_pool import db_execute, db_query, db_query_one, get_conn
 from desktop.p2p import diag_protocol, peer_auth
 from p2p_chat import get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity
+from serving import request_target
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +67,6 @@ async def _read_capped(request: Request, cap: int) -> Optional[bytes]:
     return b"".join(chunks)
 
 
-def _request_target(request: Request) -> str:
-    target = request.url.path
-    if request.url.query:
-        target += "?" + request.url.query
-    return target
-
-
 def _verify(request: Request, body: bytes):
     """(signer pubkey, None) for a friend's valid signature, else
     (None, response)."""
@@ -81,7 +75,7 @@ def _verify(request: Request, body: bytes):
         return None, _err("no account configured", 503)
     pubkey, err = peer_auth.verify_request(
         request.headers, ident["public_key_hex"], request.method,
-        _request_target(request), body)
+        request_target(request.scope), body)
     if err:
         return None, _err(err, 403)
     if not pubkey:

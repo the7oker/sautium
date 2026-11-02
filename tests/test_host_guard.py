@@ -98,6 +98,18 @@ def test_loopback_forms_and_no_header(interfaces):
     assert auth_hmac.host_allowed("")
 
 
+def test_a_host_is_a_name_or_a_literal_and_at_most_a_port(interfaces):
+    """What follows an address of ours is a port or nothing: a path, a query,
+    userinfo or a port that is not digits makes it no address of ours."""
+    for value in ("[::1]/api/auth/status?", "[::1]?x", "[::1]x:80", "localhost:80x",
+                  "localhost:8800/x", "localhost/api", "user@localhost", "localhost:",
+                  "127.0.0.1#x", f"{LAN}:8800?q", "local host"):
+        assert not auth_hmac.host_allowed(value), value
+    assert auth_hmac.host_allowed("[::1]")
+    assert auth_hmac.host_allowed("LOCALHOST:8800")
+    assert auth_hmac.host_allowed(f" {LAN}:8800 ")
+
+
 def test_operator_configuration_is_honoured(interfaces, monkeypatch):
     monkeypatch.setenv("SAUTIUM_HOST_IPS", "100.64.0.9")
     monkeypatch.setenv("SAUTIUM_ALLOWED_HOSTS", "Node.tail1234.ts.net")
