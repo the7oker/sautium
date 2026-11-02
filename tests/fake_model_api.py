@@ -11,6 +11,7 @@ kept, so a test reads what the client offered the model and what each tool
 call returned."""
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -167,6 +168,14 @@ def codex_tools(body: dict) -> dict[str, list[str]]:
     for t in body.get("tools") or []:
         offered.setdefault("", []).append(t.get("name"))
     return offered
+
+
+def codex_hosted_tools(body: dict) -> list[str]:
+    """The tools codex offers inside its code-mode host, by name — the host's
+    description lists each under a "### `name`" heading."""
+    return [name for item in body.get("input") or [] if item.get("type") == "additional_tools"
+            for ns in item.get("tools") or [] for t in ns.get("tools") or []
+            for name in re.findall(r"### `([a-z_]+)`", t.get("description") or "")]
 
 
 def codex_tool_outputs(body: dict) -> list[str]:

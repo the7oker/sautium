@@ -712,14 +712,14 @@ Do NOT rely solely on audio features — an artist can sound similar but belong 
 # Codex has no --disallowed-tools: the harness keeps its own exec /
 # apply_patch / plan / question tools in the roster no matter what, and
 # codex_runner can only switch off the shell and the plugin/agent surface.
-# This block is the instruction fence for the rest — and, since this text
-# REPLACES codex's built-in coding-agent prompt, also the style guidance
-# that prompt used to carry.
+# Its read-only sandbox refuses any write; this block keeps the model off
+# those tools altogether — and, since this text REPLACES codex's built-in
+# coding-agent prompt, also carries the style guidance that prompt used to.
 _CODEX_TOOL_DISCIPLINE = """\
 - You run inside the Codex CLI harness, but you are NOT a coding agent and there is no \
 repository, workspace or task here — ignore any such instincts. Besides the MCP tools \
 (mcp__postgres query + mcp__assistant search/playback) the harness lists exec, apply_patch, \
-update_plan, view_image, wait and request_user_input: NEVER use any of them — no shell, no \
+update_plan, wait and request_user_input: NEVER use any of them — no shell, no \
 scripts, no files created, read or modified, no plans, and a question to the user goes in your \
 reply text, not through a tool. Do ALL work through the MCP tools, called directly.
 - Independent tool calls go out in parallel (three mb_resolve checks in one round, not three \

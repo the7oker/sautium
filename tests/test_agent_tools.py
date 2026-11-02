@@ -26,7 +26,11 @@ if str(BACKEND) not in sys.path:
 
 import claude_code  # noqa: E402
 import claude_code_runner as runner  # noqa: E402
-from tests.fake_model_api import FakeModelApi, anthropic_tool_results, anthropic_tools  # noqa: E402
+import codex_cli  # noqa: E402
+import codex_runner  # noqa: E402
+from tests.fake_model_api import (FakeModelApi, anthropic_tool_results,  # noqa: E402
+                                  anthropic_tools, codex_hosted_tools, codex_tool_outputs,
+                                  codex_tools)
 
 PROBE = Path(__file__).resolve().parent / "mcp_probe_server.py"
 
@@ -37,12 +41,13 @@ def _in_the_image() -> bool:
         pwd.getpwnam(runner.AGENT_USER)
     except (ImportError, KeyError):
         return False
-    return os.geteuid() == 0 and runner._resolve_claude_executable() is not None
+    return (os.geteuid() == 0 and runner._resolve_claude_executable() is not None
+            and codex_runner._resolve_codex_executable() is not None)
 
 
 pytestmark = pytest.mark.skipif(
     not _in_the_image(),
-    reason="the backend image's run: the Claude Code CLI and the agent account it runs as")
+    reason="the backend image's run: both agent CLIs and the agent account they run as")
 
 
 @pytest.fixture
@@ -79,6 +84,45 @@ def claude(shared, monkeypatch):
     yield at
     for api in apis:
         api.__exit__(None, None, None)
+
+
+@pytest.fixture
+def codex(shared, monkeypatch):
+    """Every codex spawn pointed at a fake API that plays `script` — the
+    runner's own flags plus a provider entry naming the fake; the CLI's
+    home in shared/codex. Returns the fake."""
+    home = shared / "codex"
+    home.mkdir()
+    home.chmod(0o777)
+    (home / "auth.json").write_text("{}")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setenv("SAUTIUM_TEST_MODEL_KEY", "test-key")
+    monkeypatch.setattr(codex_cli, "auth", claude_code.AgentAuth("Codex", codex_cli._cli_status))
+    apis = []
+    flags = codex_runner._base_flags
+
+    def at(script):
+        api = FakeModelApi(script).__enter__()
+        apis.append(api)
+        provider = ["-c", 'model_provider="fake"', "-c", 'model_providers.fake.name="fake"',
+                    "-c", f'model_providers.fake.base_url="{api.url}/v1"',
+                    "-c", 'model_providers.fake.wire_api="responses"',
+                    "-c", 'model_providers.fake.env_key="SAUTIUM_TEST_MODEL_KEY"',
+                    "-c", "model_providers.fake.requires_openai_auth=false"]
+        monkeypatch.setattr(codex_runner, "_base_flags", lambda *a, **k: flags(*a, **k) + provider)
+        return api
+
+    yield at
+    for api in apis:
+        api.__exit__(None, None, None)
+
+
+def _patch_that_adds(path: Path) -> dict:
+    """A scripted call to codex's file tool, through its code-mode host,
+    adding `path`."""
+    patch = f"*** Begin Patch\n*** Add File: {path}\n+text\n*** End Patch\n"
+    return {"custom": "exec",
+            "input": f"const r = await tools.apply_patch({json.dumps(patch)});\ntext(JSON.stringify(r));\n"}
 
 
 def _probes(shared: Path, *names: str) -> dict:
@@ -135,3 +179,39 @@ def test_gear_research_offers_the_web_pair_and_loads_no_server_of_the_users(clau
 
     assert sorted(anthropic_tools(api.bodies("/messages")[0])) == ["WebFetch", "WebSearch"]
     assert _calls(shared, "personal") == []
+
+
+def _outputs(api) -> str:
+    return " ".join(o for body in api.bodies("/responses") for o in codex_tool_outputs(body))
+
+
+def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(codex, shared):
+    target = shared / "written.txt"
+    api = codex([_patch_that_adds(target), {"text": "Evening Set"}])
+
+    answer = codex_runner.call_codex_oneshot("Name it", "You write short titles.")
+
+    assert answer == "Evening Set"
+    assert not target.exists()
+    assert "writing is blocked by read-only sandbox" in _outputs(api)
+    sent = json.dumps(api.bodies("/responses")[0])
+    assert "You write short titles." in sent
+    assert "You are Codex" not in sent
+
+
+def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared, monkeypatch):
+    library = shared / "mcp.json"
+    library.write_text(json.dumps(_probes(shared, "postgres")))
+    monkeypatch.setattr(codex_runner, "MCP_CONFIG_PATH", str(library))
+    target = shared / "written.txt"
+    api = codex([{"tool": "ping", "namespace": "mcp__postgres", "input": {"note": "postgres"}},
+                 _patch_that_adds(target), {"text": "ok"}])
+
+    done = list(codex_runner.call_codex_stream("go"))[-1]
+
+    assert done.error is None
+    assert _calls(shared, "postgres") == ["postgres"]
+    assert not target.exists()
+    first = api.bodies("/responses")[0]
+    assert codex_tools(first)["mcp__postgres"] == ["ping"]
+    assert "view_image" not in codex_hosted_tools(first)

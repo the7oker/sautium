@@ -444,6 +444,11 @@ async def _run_event_stream(run: _LiveRun) -> AsyncIterator[str]:
 # (e.g. Ukrainian) where fewer words = more characters per word.
 _TITLE_MAX_CHARS = 60
 
+# The system prompt of every title call: chat titles and mix names.
+_TITLE_SYSTEM = (
+    "You write short titles. Output the title text only — no quotes, no "
+    "preamble, no explanation."
+)
 
 _TITLE_PROMPT_TEMPLATE = (
     "Summarise this chat exchange into a concise chat title — "
@@ -558,16 +563,16 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
 
 
 def _title_via_codex(prompt: str) -> Optional[str]:
-    """Codex analog of `_title_via_claude_code`: a bare `codex exec
-    --ephemeral` one-shot — no MCP, no assistant workdir, fast small model.
-    All spawn details (demote, env key handling, sandbox flag) live in
-    the runner's oneshot helper."""
+    """Codex analog of `_title_via_claude_code`: a `codex exec --ephemeral`
+    one-shot — no MCP, the title instructions in place of codex's own
+    prompt, fast small model. All spawn details (demote, env key handling,
+    the sandbox) live in the runner's oneshot helper."""
     from providers import get_provider as _get_provider
     if _get_provider("codex") is None:
         return None
     try:
         from codex_runner import call_codex_oneshot
-        answer = call_codex_oneshot(prompt)
+        answer = call_codex_oneshot(prompt, _TITLE_SYSTEM)
         return _clean_title(answer or "")
     except Exception as e:
         logger.debug(f"Codex title gen failed: {e}")

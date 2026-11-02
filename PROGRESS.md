@@ -531,20 +531,28 @@ implementation details live in the code, DB and git history.
   no `--mcp-config` → the
   SAME mcp-docker/windows.json is translated at spawn into dotted `-c
   mcp_servers.*` overrides + `--ignore-user-config` (analog of
-  `--strict-mcp-config`); no `--disallowed-tools`, and no
-  sandbox either — under ANY sandbox mode `codex exec` auto-denies every
-  MCP tool call ("requires approval, but approval policy is never";
-  measured on macOS Seatbelt, upstream openai/codex#24135), so the
-  dangerous bypass is mandatory, not a fallback — and it flips codex's
-  default `web_search` to LIVE, so the runner sets `web_search="disabled"`
-  explicitly. Actual fences: `--disable shell_tool` (verified — the model
-  has no shell), `--disable plugins/apps/multi_agent/tool_suggest/goals/
-  image_generation` (each measured to remove roster or prompt noise — the
-  "plugins available but not installed" list alone was 3 KB of
-  streaming-service bait per session), prompt-level prohibition. Known residual: the
+  `--strict-mcp-config`); no `--disallowed-tools`. Until 2026-11-02 no
+  sandbox either — under any sandbox `codex exec` refused every MCP
+  call ("requires approval, but approval policy is never", upstream
+  openai/codex#24135), so the runner bypassed approvals and the sandbox.
+  Since 2026-11-02 codex keeps both: `sandbox_mode="read-only"` (a
+  setting, since `exec resume` takes no `--sandbox`), `approval_policy=
+  "never"`, and each MCP server pre-approved with
+  `default_tools_approval_mode="approve"` — the per-server approval the
+  earlier measurement lacked. Measured against a fake of the API on
+  loopback: under the bypass an apply_patch wrote outside the working
+  directory; read-only refuses it, and the pre-approved MCP call runs;
+  a thread started under the bypass resumes read-only. web_search stays
+  `"disabled"` explicitly. Other fences: `--disable shell_tool` (verified
+  — the model has no shell), `--disable plugins/apps/multi_agent/
+  tool_suggest/goals/image_generation/view_image` (each measured to remove
+  roster or prompt noise — the "plugins available but not installed" list
+  alone was 3 KB of streaming-service bait per session; view_image read
+  any image file and sent it on), prompt-level prohibition. The
   apply_patch file tool has no off switch (feature flag unknown,
-  include_apply_patch_tool=false inert — both measured) and stays
-  reachable behind the prompt fence. Auth is auth.json-ONLY — a bare
+  include_apply_patch_tool=false inert — both measured); the sandbox
+  refuses its writes. The title one-shot runs on an instructions file of
+  its own, so codex's coding-agent prompt never rides along. Auth is auth.json-ONLY — a bare
   OPENAI_API_KEY env is ignored by the CLI (measured, 0.149), so the
   runner mints auth.json via `codex login --with-api-key` when needed,
   and POPS the env keys when auth.json exists (mirror of the

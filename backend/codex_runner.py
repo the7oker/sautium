@@ -40,15 +40,20 @@ Differences from the Claude runner, all forced by the CLI surface
   of `--strict-mcp-config`. Profile files (`-p`) and a project
   `.codex/config.toml` do not load under it, which is why everything
   travels as `-c` flags plus one file path.
-- No `--disallowed-tools`, and no sandbox either — under any sandbox
-  mode `codex exec` auto-denies every MCP tool call (openai/codex#24135),
-  so the dangerous bypass is mandatory. The bypass also flips codex's
-  default `web_search` from cached to LIVE, hence the explicit
-  `web_search="disabled"`. The fences that remain: `--disable shell_tool`
-  (verified — the model has no shell), the plugin / connector /
-  agent-team / goal / image tools switched off, and the hard
-  prompt-level prohibition in CODEX_SYSTEM_PROMPT on the apply_patch
-  file tool, which has no off switch.
+- No `--disallowed-tools`; codex keeps its sandbox and its approvals.
+  Every spawn runs `sandbox_mode="read-only"` with `approval_policy="never"`,
+  so whatever would need an approval is refused, and our MCP servers are
+  pre-approved one by one (`default_tools_approval_mode="approve"`).
+  Without that per-server approval `codex exec` refuses every MCP call
+  under any sandbox ("requires approval, but approval policy is never",
+  openai/codex#24135) — why the runner once bypassed approvals and the
+  sandbox altogether. Measured 2026-11-02 against a fake of the API on
+  loopback: under the bypass an apply_patch wrote outside the working
+  directory; under the read-only sandbox the same patch is refused and
+  the pre-approved MCP call runs. Beside the sandbox: `--disable
+  shell_tool` (the model has no shell), web search off explicitly, and
+  the plugin / connector / agent-team / goal / image tools switched off.
+  apply_patch has no off switch; the sandbox refuses its writes.
 - Auth is auth.json-only: a bare OPENAI_API_KEY env var is ignored by
   the CLI (measured, 0.149), so when auth.json is missing and a key is
   present the runner mints auth.json via `codex login --with-api-key`
@@ -57,6 +62,7 @@ Differences from the Claude runner, all forced by the CLI surface
   the ChatGPT subscription to the pay-as-you-go API account.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -105,10 +111,11 @@ INSTRUCTIONS_FILE = "instructions.md"
 # injecting the "you are /root, the primary agent in a team" preamble
 # regardless — that one falls to `agents.enabled=false` below);
 # tool_suggest — request_plugin_install; goals and image_generation —
-# their tools. Names come from `codex features list`; an unknown name is
-# a hard CLI error, so check that list before adding one.
+# their tools; view_image — a reader of any image file the sandbox can
+# read, sent on to the model. Names come from `codex features list`; an
+# unknown name is a hard CLI error, so check that list before adding one.
 _DISABLED_FEATURES = ("plugins", "apps", "multi_agent", "tool_suggest",
-                      "goals", "image_generation")
+                      "goals", "image_generation", "view_image")
 
 CODEX_LOGIN_MSG = (
     "Codex is signed out — its sign-in expired or is missing. Sign in "
@@ -256,6 +263,8 @@ def _mcp_config_overrides() -> List[str]:
         # them finish. Align with the chat wallclock — the turn watchdog
         # is the real ceiling either way.
         args += ["-c", f"{base}.tool_timeout_sec={TIMEOUT_SECONDS}"]
+        # The one approval the sandbox lets through: this server's tools.
+        args += ["-c", f'{base}.default_tools_approval_mode="approve"']
     if names:
         # Without this every MCP tool sits behind the code-mode `exec`
         # host: the model greps ALL_TOOLS by regex before it can call one
@@ -267,27 +276,18 @@ def _mcp_config_overrides() -> List[str]:
 
 
 def _base_flags(model: str, effort: str, with_mcp: bool,
-                instructions: Optional[Path] = None) -> List[str]:
+                instructions: Path) -> List[str]:
     """Flags shared by `codex exec` and `codex exec resume` — the same
     set once `--cd` is out of the picture (resume rejects it; the cwd
-    comes from Popen instead). `instructions` is the assistant prompt
-    file that replaces codex's built-in prompt; the title one-shot runs
-    without it, on codex's own.
+    comes from Popen instead). `instructions` is the file whose text
+    replaces codex's built-in coding-agent prompt: the assistant's for a
+    chat turn, the caller's own for a one-shot.
 
-    The dangerous bypass is MANDATORY, not a fallback: under ANY
-    sandbox mode `codex exec` auto-denies every MCP tool call ("MCP
-    tool call requires approval, but approval policy is never" —
-    measured on macOS Seatbelt; upstream openai/codex#24135 confirms no
-    non-interactive allow knob exists). The chat IS its MCP tools, so
-    sandboxed codex is a chat that cannot answer. What actually fences
-    the agent instead: shell_tool disabled (verified — the model
-    reports having no shell), web search disabled explicitly (the
-    bypass would otherwise default it to LIVE), the surface in
-    _DISABLED_FEATURES switched off, and the prompt-level prohibition in
-    CODEX_SYSTEM_PROMPT. Known residual: the apply_patch file tool cannot
-    be switched off (no feature flag, include_apply_patch_tool=false is
-    inert — both measured) and stays reachable behind the prompt fence
-    only."""
+    The sandbox and the approvals stay on (module doc): read-only, every
+    approval refused, the MCP servers pre-approved by
+    _mcp_config_overrides. The apply_patch file tool has no off switch
+    (no feature flag; include_apply_patch_tool=false is inert — both
+    measured); the read-only sandbox refuses its writes."""
     flags = [
         "--json",
         "--skip-git-repo-check",
@@ -299,20 +299,21 @@ def _base_flags(model: str, effort: str, with_mcp: bool,
         "-m", model,
         "--disable", "shell_tool",
         "-c", f"model_reasoning_effort={json.dumps(effort)}",
+        # As a setting, not --sandbox: `exec resume` takes no --sandbox. A
+        # thread started under the old bypass resumes read-only (measured).
+        "-c", 'sandbox_mode="read-only"',
         "-c", 'approval_policy="never"',
         "-c", 'web_search="disabled"',
         "-c", "agents.enabled=false",
         # Every spawn is a fresh process; the CLI's update ping is a
         # network round trip the chat turn never benefits from.
         "-c", "check_for_update_on_startup=false",
+        "-c", f"model_instructions_file={json.dumps(str(instructions))}",
     ]
     for feature in _DISABLED_FEATURES:
         flags += ["--disable", feature]
-    if instructions is not None:
-        flags += ["-c", f"model_instructions_file={json.dumps(str(instructions))}"]
     if with_mcp:
         flags += _mcp_config_overrides()
-    flags.append("--dangerously-bypass-approvals-and-sandbox")
     return flags
 
 
@@ -577,13 +578,29 @@ def call_codex_stream(
     )
 
 
+def _write_text_instructions(workdir: Path, text: str) -> Path:
+    """A one-shot's instructions file — `text` replaces codex's coding-agent
+    prompt, which tells the model to edit files. Named by its content, so
+    concurrent one-shots with different prompts never share a file and
+    the same prompt is written once."""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    path = workdir / f"text-{digest}.md"
+    if not path.is_file():
+        tmp = workdir / f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        tmp.replace(path)
+    return path
+
+
 def call_codex_oneshot(
     prompt: str,
+    system_prompt: str,
     model: str = TITLE_MODEL,
     timeout_seconds: int = 25,
 ) -> Optional[str]:
-    """Bare one-shot codex call — no MCP, codex's own built-in prompt (no
-    instructions file), `--ephemeral` so title generations don't litter
+    """One-shot codex call, text in and text out — no MCP, `system_prompt`
+    as its instructions, `--ephemeral` so title generations don't litter
     session storage. Returns the final agent message text, or None on
     any failure — callers treat title generation as best-effort."""
     codex_exe = _resolve_codex_executable()
@@ -592,8 +609,9 @@ def call_codex_oneshot(
     if _ensure_auth(codex_exe):
         return None
 
+    instructions = _write_text_instructions(_codex_workdir(), system_prompt)
     cmd = [codex_exe, "exec", "--ephemeral"]
-    cmd += _base_flags(model, "low", with_mcp=False)
+    cmd += _base_flags(model, "low", with_mcp=False, instructions=instructions)
     cmd += ["--", prompt]
     try:
         kwargs = _spawn_kwargs(os.environ.copy())
