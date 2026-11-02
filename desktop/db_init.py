@@ -146,8 +146,17 @@ def grant_assistant_reads(cur) -> None:
     cur.execute(sql.SQL("REVOKE TEMPORARY ON DATABASE {} FROM PUBLIC").format(
         sql.Identifier(cur.fetchone()[0])))
     cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
+    # A database whose schema drifted from 001 (the master's predates the
+    # unified file) may lack a relation the list names: that costs the
+    # assistant the relation, not the node its start.
+    cur.execute("SELECT name FROM unnest(%s::text[]) AS name "
+                "WHERE to_regclass(format('public.%%I', name)) IS NULL", (list(ASSISTANT_READS),))
+    missing = {name for (name,) in cur.fetchall()}
+    if missing:
+        logger.error("the assistant's reads name relations this database lacks: %s",
+                     ", ".join(sorted(missing)))
     cur.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(
-        sql.SQL(", ").join(sql.Identifier(t) for t in ASSISTANT_READS), role))
+        sql.SQL(", ").join(sql.Identifier(t) for t in ASSISTANT_READS if t not in missing), role))
 
 
 def end_assistant_sessions(cur, keep: Optional[int] = None) -> int:

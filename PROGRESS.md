@@ -534,11 +534,12 @@ implementation details live in the code, DB and git history.
   ends what a stopped backend's turn left, before its deltas;
   no `--mcp-config` → the
   SAME MCP configuration (the launcher's mcp-windows.json, the Docker
-  backend's `/app/data/mcp-docker.json`) is translated at spawn into dotted `-c
-  mcp_servers.*` overrides + `--ignore-user-config` (analog of
+  backend's `/app/data/mcp-docker.json`) is translated at spawn into
+  dotted `-c mcp_servers.*` overrides + `--ignore-user-config` (analog of
   `--strict-mcp-config`), the login's password named in `env_vars` and
   valued in codex's environment, never on its command line (other local
-  accounts read process arguments on macOS); no `--disallowed-tools`. Until 2026-11-02 no
+  accounts read process arguments on macOS; Claude Code reads the same
+  file by its path); no `--disallowed-tools`. Until 2026-11-02 no
   sandbox either — under any sandbox `codex exec` refused every MCP
   call ("requires approval, but approval policy is never", upstream
   openai/codex#24135), so the runner bypassed approvals and the sandbox.

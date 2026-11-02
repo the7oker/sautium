@@ -113,13 +113,17 @@ def pytest_sessionstart(session):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    if _recreate(SESSION_DATABASE, create=False):
-        # Its grants went with the scratch databases and the session's own.
-        admin = _admin()
-        with admin.cursor() as cur:
-            cur.execute(f'DROP ROLE IF EXISTS "{ASSISTANT_ROLE}"')
-        admin.close()
-    shutil.rmtree(HQPLAYER_DIR)
+    try:
+        if _recreate(SESSION_DATABASE, create=False):
+            # Its grants went with the scratch databases and the session's own;
+            # a scratch database a killed run left behind still holds some, and
+            # the drop then fails, naming it.
+            admin = _admin()
+            with admin.cursor() as cur:
+                cur.execute(f'DROP ROLE IF EXISTS "{ASSISTANT_ROLE}"')
+            admin.close()
+    finally:
+        shutil.rmtree(HQPLAYER_DIR)
 
 
 @pytest.fixture(scope="module")

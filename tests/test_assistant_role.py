@@ -165,6 +165,27 @@ def test_without_the_login_the_grants_wait_and_say_why(owner, monkeypatch, caplo
     assert "sautium_assistant_absent does not exist" in caplog.text
 
 
+def test_a_relation_the_database_lacks_costs_the_assistant_only_that_relation(
+        owner, scratch_dsn, caplog):
+    """A node whose schema drifted from 001 (the master's predates the
+    unified file) still starts; the assistant reads the rest."""
+    caplog.set_level(logging.ERROR, logger=db_init.logger.name)
+    with owner.cursor() as cur:
+        cur.execute("ALTER TABLE seed_picks RENAME TO seed_picks_aside")
+        try:
+            db_init.grant_assistant_reads(cur)
+        finally:
+            cur.execute("ALTER TABLE seed_picks_aside RENAME TO seed_picks")
+            db_init.grant_assistant_reads(cur)
+    assert "relations this database lacks: seed_picks" in caplog.text
+    reader = _as_assistant(scratch_dsn)
+    try:
+        with reader.cursor() as cur:
+            cur.execute("SELECT count(*) FROM artists")
+    finally:
+        reader.close()
+
+
 def test_the_assistant_sees_the_output_settings_and_no_other(owner, assistant):
     with owner.cursor() as cur:
         cur.execute("""INSERT INTO user_settings (key, value) VALUES

@@ -65,7 +65,7 @@ ENV DISABLE_AUTOUPDATER=1
 # The node's user: the backend and the agent CLIs run as it. The image's
 # entrypoint (node_user.py, root's, outside /app — which that user can write)
 # hands it the node's folders and drops root, then runs the command.
-# codex-agent is the codex working root — its instructions file lands there.
+# codex-agent is the codex working root — its instructions files land there.
 RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.claude/debug \
     && mkdir -p /home/agent/.claude/projects \

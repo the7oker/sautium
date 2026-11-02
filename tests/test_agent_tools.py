@@ -215,7 +215,7 @@ def _codex_roster(body: dict) -> tuple[dict, list[str]]:
     (The fake answers codex's model-metadata request with 404: the set is
     the CLI's own default for the model.)"""
     return ({ns: sorted(names) for ns, names in codex_tools(body).items()},
-            codex_hosted_tools(body))
+            sorted(codex_hosted_tools(body)))
 
 
 def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(codex, shared):

@@ -182,10 +182,12 @@ def codex_instructions(body: dict) -> str:
 
 def codex_hosted_tools(body: dict) -> list[str]:
     """The tools codex offers inside its code-mode host, by name — the host's
-    description lists each under a "### `name`" heading."""
+    description lists each under a "### `name`" heading (the only "###"
+    headings it has, measured on 0.149); any such heading counts, backticks
+    or not, so a tool of a new name or form is not missed."""
     return [name for item in body.get("input") or [] if item.get("type") == "additional_tools"
             for ns in item.get("tools") or [] for t in ns.get("tools") or []
-            for name in re.findall(r"### `([a-z_]+)`", t.get("description") or "")]
+            for name in re.findall(r"^### `?([^`\n]+?)`?\s*$", t.get("description") or "", re.M)]
 
 
 def codex_tool_outputs(body: dict) -> list[str]:
