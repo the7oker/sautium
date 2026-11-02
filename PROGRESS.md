@@ -3383,6 +3383,30 @@ word that it left — a renderer stopped, not paused, whose network changed
 (no poll ran to lose it); a scan moves it first. Lesson: wait on an
 address only while nothing says the device is elsewhere, and say the wait.
 
+### A renderer that seeks an Opus stream itself is asked to (2026-11-02)
+
+Every seek in an Opus stream loaded it again from the second (`?ss=`, the
+rest re-encoded), because a DAP reports 0:00:00 throughout VBR Opus and
+plays on where it was at a Seek (2026-07-24). But the reload restarts the
+renderer's own player: on the phone, after `ss=309` in a 7:22 track, its
+scale read 2:13 from 0:00, and the Stop the reload begins with made a
+locked phone's renderer withdraw. The phone seeks an Opus stream itself in
+57–74 ms.
+
+Now a seek in an Opus stream is the renderer's own Seek where it is known
+to land, or — never seen either way — where the renderer reports its
+position on this load (two readings taken as its word; one may be a DAP's
+stray), so the landing can be seen. It falls back to the reload on UPnP
+710 (no such seek mode) or 711 (no such target), or when the Seek is not
+seen landing by the pending-play deadline: the stream then loads again from
+where the clock stands. What a Seek showed is kept per renderer, by UDN
+(`output.dlna_opus_seek`): a stored fact, never a guess from its name — 710
+and a Seek that did not land as "does not seek one", a landing as "does";
+711 is the target's, not the renderer's. A renderer known to seek one starts
+a spot from the top and is sought there, as in any other format, instead of
+an offset stream; forgetting a renderer forgets what it showed. Lesson: ask
+the device, keep its answer — not its make.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

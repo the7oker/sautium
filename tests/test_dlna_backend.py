@@ -215,6 +215,11 @@ class FakeRenderer:
         # way, as a phone waking on a tunnel answers late
         self.hold_description: Optional[threading.Event] = None
         self.describing = threading.Event()    # its description was asked
+        # In an Opus stream (?q=opus…): False — its RelTime reads 0:00:00
+        # throughout; "ignores" — a Seek is answered and moves nothing. A DAP
+        # with no byte↔time map for VBR Opus does both (live, 2026-07-24)
+        self.opus_position = True
+        self.opus_seek = "lands"
         self._base = 0.0                  # position at _t0
         self._t0: Optional[float] = None  # monotonic start while PLAYING
         self._subs: dict[str, tuple[str, str]] = {}   # sid → (service key, callback)
@@ -390,6 +395,8 @@ class FakeRenderer:
         elif action == "Seek":
             if self.state not in ("PLAYING", "PAUSED_PLAYBACK"):
                 raise Fault(701, "Transition not available")
+            if self.opus_seek == "ignores" and "q=opus" in self.uri:
+                return {}
             target, uri = _seconds(args["Target"]) or 0.0, self.uri
 
             def lands():
@@ -404,7 +411,8 @@ class FakeRenderer:
             return {"CurrentTransportState": self._transport_state(), "CurrentTransportStatus": self.status,
                     "CurrentSpeed": "1"}
         elif action == "GetPositionInfo":
-            rel = _hms(self.position()) if self.uri else "0:00:00"
+            silent = not self.opus_position and "q=opus" in self.uri
+            rel = _hms(self.position()) if self.uri and not silent else "0:00:00"
             return {"Track": "1" if self.uri else "0",
                     "TrackDuration": _hms(self.reported_length() or 0),
                     "TrackMetaData": self.meta, "TrackURI": self.uri, "RelTime": rel,
@@ -606,6 +614,17 @@ def quality(monkeypatch):
     value = {"q": "lossless"}
     monkeypatch.setattr(DlnaBackend, "_quality", staticmethod(lambda: value["q"]))
     return value
+
+
+@pytest.fixture
+def stored(monkeypatch):
+    """The node's settings in memory, for a backend with no manager around
+    it: what it remembers of a renderer."""
+    import routers.settings as settings_router
+    store = {}
+    monkeypatch.setattr(settings_router, "_read", lambda key: store.get(key))
+    monkeypatch.setattr(settings_router, "_write", lambda key, value: store.__setitem__(key, value))
+    return store
 
 
 class Node:
@@ -846,13 +865,16 @@ def test_a_format_listed_under_another_spelling_goes_as_it_is(tmp_path, proxy, r
     assert 'protocolInfo="http-get:*:audio/flac:' in nxt["NextURIMetaData"]
 
 
-def _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, seconds):
+def _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, seconds, stored):
     """A phone renderer playing one owned track in opus_96: it reports, as
-    its TrackDuration, what its decoder measured of the stream it was given."""
+    its TrackDuration, what its decoder measured of the stream it was given.
+    Remembered as one that does not seek Opus itself (N-7), so a seek loads
+    the stream again from the second (?ss=)."""
     monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
     quality["q"] = "opus_96"
     r = renderers(sink=PHONE_SINK,
                   reports=lambda uri, didl: (didl or 40.0) - FakeRenderer.offset(uri))
+    stored["output.dlna_opus_seek"] = {r.udn.lower(): False}
     q = CanonicalQueue()
     q.replace([track(tmp_path, 1, seconds=seconds)])
     n = nodes(q, r)
@@ -868,12 +890,12 @@ def _seek_to(r: FakeRenderer, n: Node, target: int) -> None:
              what=f"playing on past {target}")
 
 
-def test_an_opus_seek_keeps_the_track_length(tmp_path, proxy, renderers, nodes, quality, monkeypatch):
+def test_an_opus_seek_keeps_the_track_length(tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
     """N-13: an Opus seek reloads the stream from the target, and the phone
     reports that stream's own length (30 s of a 40-s track after ss=10). The
     track keeps the length the node knows, so the next seek lands where it
     is asked — the slider's scale used to shrink to the stream's."""
-    r, n = _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, 40.0)
+    r, n = _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, 40.0, stored)
     assert n.last.length == 40
     _seek_to(r, n, 10)
     assert r.reported_length() == 30
@@ -883,11 +905,11 @@ def test_an_opus_seek_keeps_the_track_length(tmp_path, proxy, renderers, nodes, 
 
 
 def test_a_length_only_the_renderer_knows_is_read_from_the_seek(tmp_path, proxy, renderers, nodes,
-                                                                quality, monkeypatch):
+                                                                quality, monkeypatch, stored):
     """N-13: a track whose length the node does not know takes the renderer's
     word — on an offset stream read 0-based, like RelTime: the offset plus
     the rest the decoder measured."""
-    r, n = _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, None)
+    r, n = _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, None, stored)
     wait_for(lambda: n.last.length == 40, what="the renderer's length")
     _seek_to(r, n, 10)
     assert n.last.length == 40
@@ -2023,3 +2045,106 @@ def test_back_on_the_lan_the_first_play_attaches_the_renderer_there_with_no_wait
     assert "disconnected" not in [s.get("state") for s in seen]
     assert not manager.latest_status.get("connecting")
     gone.close()
+
+
+# -- N-7: a renderer's own Seek in an Opus stream before the reload ---------------
+
+
+def _opus_on(tmp_path, monkeypatch, quality, renderers, nodes, **knobs) -> tuple:
+    """One owned 90-s track in opus_96 on a phone renderer of its own (its
+    knobs set first), playing past 4 s: a renderer that reports its position
+    has been heard more than once by then."""
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK)
+    for knob, value in knobs.items():
+        setattr(r, knob, value)
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.position >= 4, what="playing past 4 s")
+    assert "q=opus_96" in r.uri and "ss=" not in r.uri
+    return r, n
+
+
+def test_an_opus_stream_is_sought_by_a_renderer_that_reports_its_position_there(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7: the phone reports its position in an Opus stream and seeks one
+    itself in 57–74 ms: it is sent a Seek — no reload, so its own player keeps
+    the track's scale (after ss=309 in a 7:22 track it read 2:13, from 0:00:
+    2026-11-01), its transport plays on and nothing is re-encoded — and it is
+    remembered as a renderer that seeks one. A DAP that reports 0:00:00
+    throughout an Opus stream and plays on where it was at a Seek keeps the
+    reload: a Seek's landing could never be seen there."""
+    phone, n = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes)
+    assert n.backend.seek(40)
+    wait_for(lambda: phone.called("Seek"), what="the Seek")
+    assert [s["Target"] for s in phone.called("Seek")] == ["0:00:40"]
+    wait_for(lambda: n.last.state == "playing" and n.last.position >= 41.5, what="playing on past 40")
+    assert len(phone.called("SetAVTransportURI")) == 1 and "ss=" not in phone.uri
+    assert stored["output.dlna_opus_seek"] == {phone.udn.lower(): True}
+    dap, m = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes,
+                      opus_position=False, opus_seek="ignores")
+    assert m.backend.seek(40)
+    wait_for(lambda: "ss=40" in dap.uri and dap.state == "PLAYING", what="the DAP's stream again from 40")
+    assert not dap.called("Seek")
+    assert dap.udn.lower() not in stored["output.dlna_opus_seek"]
+
+
+def test_a_renderer_that_refuses_a_seek_in_an_opus_stream_gets_the_reload_and_is_remembered(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7: a renderer that answers a Seek in an Opus stream with UPnP 710
+    (no such seek mode) gets the stream again from the second (?ss=), and is
+    remembered as one that does not seek one: its next seek is the reload,
+    with no Seek first."""
+    r, n = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes)
+    r.faults["Seek"] = [710]
+    assert n.backend.seek(40)
+    wait_for(lambda: "ss=40" in r.uri and r.state == "PLAYING", what="the stream again from 40")
+    assert len(r.called("Seek")) == 1
+    assert stored["output.dlna_opus_seek"] == {r.udn.lower(): False}
+    assert n.backend.seek(60)
+    wait_for(lambda: "ss=60" in r.uri and r.state == "PLAYING", what="the stream again from 60")
+    assert len(r.called("Seek")) == 1
+
+
+def test_a_seek_in_an_opus_stream_that_does_not_land_loads_the_stream_again_from_the_clock(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7: a renderer that reports its position in an Opus stream but plays
+    on where it was at a Seek. Not seen landing by the pending-play deadline,
+    the stream loads again from where the clock stands — the Seek's second,
+    run on since, where the slider is — and the renderer is remembered as one
+    that does not seek one."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 3.0)
+    r, n = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes, opus_seek="ignores")
+    asked = time.monotonic()
+    assert n.backend.seek(40)
+    wait_for(lambda: "ss=" in r.uri and r.state == "PLAYING", timeout=15, what="the stream again")
+    second = FakeRenderer.offset(r.uri)
+    assert 42 <= second <= 40 + (time.monotonic() - asked) + 1
+    assert [s["Target"] for s in r.called("Seek")] == ["0:00:40"]
+    assert stored["output.dlna_opus_seek"] == {r.udn.lower(): False}
+    wait_for(lambda: n.last.state == "playing" and n.last.position >= second + 1, what="playing on there")
+
+
+def test_a_renderer_known_to_seek_opus_starts_a_spot_with_its_own_seek(tmp_path, proxy, renderers, nodes,
+                                                                       quality, monkeypatch, stored):
+    """N-7 at a start mid-track — an output switch's spot, a lost renderer's:
+    a renderer remembered as one that seeks an Opus stream itself starts it
+    from the top and is sought there once it plays, as in any other format;
+    the reload's offset stream would have restarted its own player at 0:00."""
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK)
+    stored["output.dlna_opus_seek"] = {r.udn.lower(): True}
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    assert n.backend.play()
+    wait_for(lambda: r.called("Seek"), what="the start sought")
+    loaded = r.called("SetAVTransportURI")
+    assert len(loaded) == 1 and "q=opus_96" in loaded[0]["CurrentURI"] and "ss=" not in loaded[0]["CurrentURI"]
+    assert [s["Target"] for s in r.called("Seek")] == ["0:00:35"]
+    wait_for(lambda: n.last.state == "playing" and n.last.position >= 36, what="playing on from 35")

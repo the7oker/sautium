@@ -939,6 +939,10 @@ async def dlna_remove(req: DlnaRemoveRequest):
     if active and udn_key(active.get("udn")) == key:
         _write("output.dlna_renderer", None)
         removed = True
+    # What its Seeks showed (DlnaBackend._remember_opus_seek) goes with it
+    facts = _read("output.dlna_opus_seek") or {}
+    if key in facts:
+        _write("output.dlna_opus_seek", {k: v for k, v in facts.items() if k != key})
     return {"ok": True, "removed": removed}
 
 

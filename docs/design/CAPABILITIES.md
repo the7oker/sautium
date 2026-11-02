@@ -121,6 +121,7 @@ code disagree, the code is what this file records and § 14 names the doc.
 - [UI] Output picker: rescan, Add device by address (HQPlayer probed first), forget a device, exclusive-mode toggle, output quality; one row per renderer (its UDN), where the last scan reached it, every other address it was pinned or chosen at kept as a fallback; the renderer or HQPlayer already driven, picked again, stays as it is — `POST /api/player/outputs/scan`, `/outputs/add`, `/outputs/dlna/remove`; `PUT /api/settings/output`; `routers/player.py: _dlna_rows`
 - [auto] A renderer that moved networks (a phone from Wi-Fi to a tunnel and back) is attached again where it answers: at once when a scan reaches it there, else by the next Play; meanwhile Now Playing says "Connecting to ‹renderer›…", and the track resumes at its second — `PlaybackManager.renderer_reached`, `ensure_active`; `playback/dlna_backend.py: _create_device`
 - [UI] Output quality for DLNA and the browser: Lossless, Opus 192k, Opus 96k; applies from the next track — `streaming/transcode.py: OPUS_BITRATES`
+- [auto] A seek in an Opus stream is the renderer's own Seek where it seeks one (seen to, and remembered per renderer), else the stream loads again from the second — `playback/dlna_backend.py: seek`, `_seeks_opus_to`, `_remember_opus_seek`
 
 ## 6. HQPlayer
 

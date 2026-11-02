@@ -378,9 +378,15 @@ class DlnaBackend(PlayerBackend):
         self._seek_on_start: Optional[float] = None
         # A Seek of the node's — a start's, or the person's sent through the
         # node — not yet seen landing, as (its second, monotonic when it was
-        # asked for): till then the renderer reads where it was before it
-        # (_adopt_reltime)
-        self._seek_due: Optional[tuple[float, float]] = None
+        # asked for, whether it is a Seek in an Opus stream): till then the
+        # renderer reads where it was before it (_adopt_reltime). An Opus
+        # Seek's landing, or none by the pending-play deadline, is the
+        # renderer's fact (_remember_opus_seek); unlanded, the stream loads
+        # again from the clock's second (_seek_unlanded)
+        self._seek_due: Optional[tuple[float, float, bool]] = None
+        # RelTime readings taken as the renderer's word on this load — with
+        # the clock, a move of its own, a Seek's landing (_heard)
+        self._heard_on_load = 0
         # A play press waiting on a slot whose stream is on its way
         # (playback.substitute): (its item — the slot follows it through
         # queue edits — and the second it starts at); slot_ready starts it.
@@ -866,17 +872,21 @@ class DlnaBackend(PlayerBackend):
         the clock takes it at once. Till then the clock runs on from what the
         Seek set, and holds still while the renderer is paused; past the
         pending-play deadline after it was asked, the renderer is believed
-        again. True when the reading is spent here — the Seek's own, or one
-        from before it; False when it is the caller's to judge."""
+        again — but in an Opus stream, which loads again from the second
+        instead (_seek_unlanded, at the poll's tick). True when the reading
+        is spent here — the Seek's own, or one from before it; False when it
+        is the caller's to judge."""
         due = self._seek_due
         if due is None:
             return False
         age = time.monotonic() - due[1]
         if due[0] - _RELTIME_TOLERANCE <= real <= due[0] + age + _RELTIME_TOLERANCE:
             self._seek_due = None
-            self._rebaseline(real)
+            self._heard(real)
+            if due[2]:
+                self._remember_opus_seek(True)
             return True
-        if age > _PENDING_PLAY_DEADLINE:
+        if age > _PENDING_PLAY_DEADLINE and not due[2]:
             self._seek_due = None
             return False
         self._rel_stray = None
@@ -904,7 +914,7 @@ class DlnaBackend(PlayerBackend):
         if self._seek_pending(real, paused=paused):
             return
         if abs(real - self._wall_estimate()) <= _RELTIME_TOLERANCE:
-            self._rebaseline(real)
+            self._heard(real)
             return
         if self._rel_stray is not None:
             held, at = self._rel_stray
@@ -913,11 +923,18 @@ class DlnaBackend(PlayerBackend):
                             "(%s, its track …%s)", self.label, self._index, self._wall_estimate(),
                             real, self._state_name(),
                             (getattr(self._dmr, "current_track_uri", None) or "")[-14:])
-                self._rebaseline(real)
-                self._rel_stray = None
+                self._heard(real)
                 return
         self._rel_stray = (real, now)
         self._position = self._wall_estimate()
+
+    def _heard(self, real: float) -> None:
+        """A RelTime reading taken as the renderer's word: the clock runs on
+        from it. Two on a load are a renderer reporting its position there
+        (a Seek's landing can be seen on it); one may be the stray reading a
+        DAP gives on VBR Opus, 0:00:00 otherwise."""
+        self._heard_on_load += 1
+        self._rebaseline(real)
 
     def _adopt_length(self, reported: float) -> None:
         """The renderer's TrackDuration is the length of the STREAM it plays:
@@ -1081,19 +1098,99 @@ class DlnaBackend(PlayerBackend):
             asyncio.ensure_future(self._seek_started(target), loop=self._loop)
 
     async def _seek_started(self, target: float) -> None:
+        cur = self._current_url or ""
         try:
             await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(target))
         except Detached:
             return
         except Exception as e:
+            if self._opus_refused(e, cur, target):
+                return
             logger.warning("DLNA: the start at %d s was refused (%s) — playing "
                            "from the top", target, _describe(e))
             self._seek_due = None
             self._rebaseline(0.0)
             return
-        self._seek_due = (float(int(target)), time.monotonic())
+        self._seek_due = (float(int(target)), time.monotonic(), "q=opus" in cur)
         self._rebaseline(float(int(target)))
         self._emit_now()
+
+    def _opus_seeks(self) -> Optional[bool]:
+        """Whether this renderer seeks an Opus stream itself, as it was seen
+        to (output.dlna_opus_seek, by UDN) — None while no Seek of the
+        node's in one has landed or failed."""
+        from routers.player import udn_key
+        from routers.settings import _read
+        return (_read("output.dlna_opus_seek") or {}).get(udn_key(self._renderer.get("udn")))
+
+    def _remember_opus_seek(self, seeks: bool) -> None:
+        """What a Seek in an Opus stream showed of this renderer, kept per
+        UDN: a stored fact, never a guess from its name. The phone seeks
+        one in 57–74 ms; a DAP that maps no time to VBR Opus bytes plays on
+        where it was and reports no position there."""
+        from routers.player import udn_key
+        from routers.settings import _read, _write
+        facts = dict(_read("output.dlna_opus_seek") or {})
+        key = udn_key(self._renderer.get("udn"))
+        if facts.get(key) is seeks:
+            return
+        facts[key] = seeks
+        _write("output.dlna_opus_seek", facts)
+        logger.info("renderer '%s' %s an Opus stream itself — remembered", self.label,
+                    "seeks" if seeks else "does not seek")
+
+    def _seeks_opus_to(self, seconds: float) -> bool:
+        """Is the Opus stream playing sought to `seconds` by the renderer
+        itself? The stream must hold the second (an offset stream starts at
+        its ?ss=), and the renderer must be known to seek one — or, never
+        seen to either way, be reporting its position on this load, where
+        the Seek's landing can be seen. One that reports none (VBR Opus on a
+        DAP: 0:00:00 throughout) keeps the reload, with nothing to remember."""
+        if seconds < self._pos_offset:
+            return False
+        seeks = self._opus_seeks()
+        return self._heard_on_load >= 2 if seeks is None else seeks
+
+    def _load_again_from(self, cur: str, seconds: float):
+        """The stream `cur` loaded again from `seconds` (?ss=): the Opus tier
+        it was dispatched in kept, whatever the quality setting says now —
+        a coroutine for _call_async."""
+        base = cur
+        for sep in ("&ss=", "?ss="):
+            if sep in base:
+                base = base.split(sep)[0]
+        url = base + ("&" if "?" in base else "?") + f"ss={int(seconds)}"
+        return self._load_and_play(self._index, ss=float(int(seconds)), url_override=url)
+
+    def _opus_refused(self, e: Exception, cur: str, second: float) -> bool:
+        """A Seek in the Opus stream `cur` refused as one the renderer does
+        not take — 710, no such seek mode; 711, no such target — loads the
+        stream again from `second` instead (?ss=). 710 is the renderer's
+        fact and is remembered; 711 is the target's. False for any other
+        refusal, another format, or a stream since replaced."""
+        code = getattr(e, "error_code", None)
+        if "q=opus" not in cur or code not in (710, 711):
+            return False
+        if self._current_url == cur:
+            if code == 710:
+                self._remember_opus_seek(False)
+            logger.info("renderer '%s' refused a Seek in its Opus stream (%s) — loading it again "
+                        "from %.0f s", self.label, code, second)
+            self._call_async(self._load_again_from(cur, second))
+        return True
+
+    def _seek_unlanded(self) -> None:
+        """A Seek in an Opus stream not seen landing by the pending-play
+        deadline: the renderer played on where it was, or says nothing of its
+        position — it does not seek such a stream itself. Remembered, and
+        the stream loads again from where the clock stands: the Seek's
+        second, run on since."""
+        self._seek_due = None
+        self._remember_opus_seek(False)
+        second = self._wall_estimate()
+        logger.info("renderer '%s' did not land a Seek in its Opus stream — loading it again "
+                    "from %.0f s", self.label, second)
+        self._call_async(self._load_again_from(self._current_url, second))
 
     def _transport_error(self) -> bool:
         """CurrentTransportStatus from GetTransportInfo: ERROR_OCCURRED is
@@ -1183,7 +1280,7 @@ class DlnaBackend(PlayerBackend):
                         # through an entire playing track (2026-09-01).
                         self._confirmed()
                         if not self._seek_pending(self._pos_offset + probed):
-                            self._rebaseline(self._pos_offset + probed)
+                            self._heard(self._pos_offset + probed)
                         logger.info("pending play confirmed by position "
                                     "probe (rel=%.1f, transport says %s)",
                                     probed, state)
@@ -1257,7 +1354,7 @@ class DlnaBackend(PlayerBackend):
                         # position is the renderer's word — keep the session
                         # alive on it instead of closing a playing track.
                         if not self._seek_pending(self._pos_offset + probed):
-                            self._rebaseline(self._pos_offset + probed)
+                            self._heard(self._pos_offset + probed)
                         self._emit_now("playing")
                         continue
                     # The verdict is about where the audio WAS when it stopped.
@@ -1278,6 +1375,11 @@ class DlnaBackend(PlayerBackend):
                     else:
                         self._emit_now("stopped")
                     return
+                due = self._seek_due
+                if due is not None and due[2] and time.monotonic() - due[1] > _PENDING_PLAY_DEADLINE:
+                    # Not seen landing, with or without readings meanwhile
+                    self._seek_unlanded()
+                    continue
                 self._emit_now(state)
                 t_emit = time.monotonic()
                 if t_emit - t_tick > 2.0:
@@ -1688,8 +1790,11 @@ class DlnaBackend(PlayerBackend):
                                item.artist, item.title)
                 index, ss, url_override, start_at = index + 1, 0.0, None, 0.0
                 continue
-            if start_at > 0 and "q=opus" in url:
-                ss, start_at = start_at, 0.0     # the Opus stream starts there
+            if start_at > 0 and "q=opus" in url and self._opus_seeks() is not True:
+                # The Opus stream starts there — but a renderer known to seek
+                # one itself starts it from the top and is sought (N-7): its
+                # own player keeps the track's scale
+                ss, start_at = start_at, 0.0
             if ss > 0 and not url_override:
                 # Server-side seek: re-encode the track from the offset (the
                 # media route honors ?ss). Only Opus URLs (which carry ?q)
@@ -1707,6 +1812,7 @@ class DlnaBackend(PlayerBackend):
             self._error = None      # something in the queue is playable after all
             self._awaiting_play = False   # a new load supersedes an unconfirmed Play
             self._seek_due = None         # ...and the old load's Seek
+            self._heard_on_load = 0       # a new stream: what it reports is to be heard
             if play:
                 self._emit_now("loading")
             if not self._dmr.is_subscribed and (self._resubscribe_task is None
@@ -1754,7 +1860,7 @@ class DlnaBackend(PlayerBackend):
             # second the start's own Seek goes to once the renderer plays —
             # due from now: it plays from the top until that Seek lands
             self._seek_on_start = start_at or None
-            self._seek_due = (start_at, time.monotonic()) if start_at else None
+            self._seek_due = (start_at, time.monotonic(), False) if start_at else None
             self._rebaseline(ss or start_at)
             # Accepted is not started: the renderer confirms by reporting
             # PLAYING (poll/GENA clear this), and until then the track is
@@ -1881,6 +1987,7 @@ class DlnaBackend(PlayerBackend):
         self._length = (item.duration_seconds or 0.0) if item else 0.0
         self._pos_offset = 0.0    # a gapless auto-advance is always a fresh track
         self._seek_due = None
+        self._heard_on_load = 0
         self._rebaseline(0.0)     # gapless auto-advance → fresh track clock
         # The poll exits on any STOPPED observation (including the brief
         # blip some renderers emit at a gapless boundary) — a track that
@@ -2101,23 +2208,25 @@ class DlnaBackend(PlayerBackend):
         # track playing its ORIGINAL format (the change applies from the
         # next track), so its URL — not the setting — is the source of truth.
         cur = self._current_url or ""
-        if "q=opus" in cur:
-            # VBR Opus renderers (KANN) can't time-seek — reload the SAME
-            # stream at the offset (reusing cur keeps its Opus format even
-            # after the setting flipped to lossless). Fire-and-forget like a
-            # track change; the UI holds the scrubbed position meanwhile.
-            base = cur
-            for sep in ("&ss=", "?ss="):
-                if sep in base:
-                    base = base.split(sep)[0]
-            url = base + ("&" if "?" in base else "?") + f"ss={int(seconds)}"
-            return self._call_async(
-                self._load_and_play(self._index, ss=float(seconds), url_override=url))
+        if "q=opus" in cur and not self._seeks_opus_to(seconds):
+            # A renderer that cannot time-seek VBR Opus (a DAP: no byte↔time
+            # map) gets the SAME stream again from the second. The reload
+            # restarts the renderer's own player at 0:00 (the phone's scale
+            # read 2:13 of a 7:22 track after ss=309), so a renderer that
+            # seeks the stream itself is asked to first (N-7). Fire-and-forget
+            # like a track change; the UI holds the scrubbed position meanwhile.
+            return self._call_async(self._load_again_from(cur, seconds))
 
         async def _s():
-            await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(seconds))
+            try:
+                # In the stream's own time: an offset stream starts at its ?ss=
+                await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(seconds - self._pos_offset))
+            except Exception as e:
+                if self._opus_refused(e, cur, seconds):
+                    return
+                raise
             self._rebaseline(float(int(seconds)))   # clock continues from the seek target
-            self._seek_due = (float(int(seconds)), time.monotonic())
+            self._seek_due = (float(int(seconds)), time.monotonic(), "q=opus" in cur)
             self._emit_now()
         return self._call(_s())
 
