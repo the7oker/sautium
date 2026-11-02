@@ -3527,6 +3527,21 @@ a spot from the top and is sought there, as in any other format, instead of
 an offset stream; forgetting a renderer forgets what it showed. Lesson: ask
 the device, keep its answer — not its make.
 
+### What a LAN listener of the node holds for a device it does not know (2026-11-03)
+
+The GENA callback server, the media proxy and the Output scan answer any
+device on the network; none of them may hold for it more than a bound.
+
+- **GENA keeps an early event only while it waits for one.** A renderer can
+  send its first event before the answer to the SUBSCRIBE that named it,
+  and async_upnp_client keeps every event of a SID it does not know, for
+  good. `dlna_backend._EventHandler` keeps one only while a SUBSCRIBE or a
+  renewal of the node's is in flight or answered less than 30 s ago — 16 at
+  most, each for 30 s — and plays it to its subscription when the answer
+  names the SID; any other is refused with 412, as UPnP says. A body past
+  64 KiB is refused (413). The first event lost to that bound costs
+  nothing: the attach reads the renderer's state itself after subscribing.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

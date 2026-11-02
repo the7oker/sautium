@@ -20,10 +20,12 @@ import contextvars
 import logging
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from functools import partial
+from http import HTTPStatus
 from typing import Callable, ContextManager, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -41,6 +43,7 @@ try:
     from aiohttp import ClientConnectionError
     from async_upnp_client.aiohttp import AiohttpNotifyServer, AiohttpRequester
     from async_upnp_client.client_factory import UpnpFactory
+    from async_upnp_client.event_handler import UpnpEventHandler
     from async_upnp_client.exceptions import UpnpError
     from async_upnp_client.profiles.dlna import DmrDevice, TransportState
     HAS_UPNP = True
@@ -211,6 +214,81 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
         return _shared_loop
 
 
+# An event whose subscription is not known yet is kept this long, and so many
+# of them: a renderer's first event can come before the answer to the
+# SUBSCRIBE that named it. A GENA body is a few kilobytes of LastChange XML.
+_EARLY_EVENT_SECONDS = 30.0
+_EARLY_EVENTS = 16
+_NOTIFY_BODY_MAX = 64 * 1024
+
+if HAS_UPNP:
+    class _EventHandler(UpnpEventHandler):
+        """The library's handler with its early events bounded. An event
+        whose SID no subscription knows is kept only while a SUBSCRIBE of
+        this node's is in flight or just answered — at most _EARLY_EVENTS,
+        each for _EARLY_EVENT_SECONDS — and played to its subscription
+        when the answer names it; any other is refused as UPnP says (412).
+        The library kept every such event, without bound and for good."""
+
+        def __init__(self, notify_server, requester) -> None:
+            super().__init__(notify_server, requester)
+            self._early: OrderedDict = OrderedDict()    # SID -> (monotonic time, request)
+            self._expect_until = 0.0
+
+        def _expect(self) -> None:
+            self._expect_until = max(self._expect_until, time.monotonic() + _EARLY_EVENT_SECONDS)
+
+        async def handle_notify(self, http_request):
+            headers = http_request.headers
+            sid = headers.get("SID")
+            if (headers.get("NT") != "upnp:event" or headers.get("NTS") != "upnp:propchange"
+                    or not sid or self.service_for_sid(sid) is not None):
+                return await super().handle_notify(http_request)
+            now = time.monotonic()
+            for stale in [k for k, (at, _) in self._early.items() if now - at > _EARLY_EVENT_SECONDS]:
+                del self._early[stale]
+            if now > self._expect_until:
+                return HTTPStatus.PRECONDITION_FAILED
+            self._early[sid] = (now, http_request)
+            self._early.move_to_end(sid)
+            while len(self._early) > _EARLY_EVENTS:
+                self._early.popitem(last=False)
+            return HTTPStatus.OK
+
+        async def _played_early(self, answer):
+            early = self._early.pop(answer[0], None)
+            if early is not None:
+                await super().handle_notify(early[1])
+            return answer
+
+        async def async_subscribe(self, service, *args, **kwargs):
+            self._expect()
+            try:
+                answer = await super().async_subscribe(service, *args, **kwargs)
+            finally:
+                self._expect()
+            return await self._played_early(answer)
+
+        async def async_resubscribe(self, service_or_sid, *args, **kwargs):
+            self._expect()
+            try:
+                answer = await super().async_resubscribe(service_or_sid, *args, **kwargs)
+            finally:
+                self._expect()
+            return await self._played_early(answer)
+
+    class _NotifyServer(AiohttpNotifyServer):
+        """The GENA callback server with _EventHandler, and no body past
+        _NOTIFY_BODY_MAX (aiohttp answers 413)."""
+
+        def __init__(self, requester, **kwargs) -> None:
+            super().__init__(requester, **kwargs)
+            self.event_handler = _EventHandler(self, requester)
+
+        async def _handle_request(self, request):
+            return await super()._handle_request(request.clone(client_max_size=_NOTIFY_BODY_MAX))
+
+
 async def _ensure_notify(requester, peer: Optional[str] = None):
     """The GENA callback server, rebuilt when the address it advertises stops
     being right. It is shared per process but its callback URL is not
@@ -227,7 +305,7 @@ async def _ensure_notify(requester, peer: Optional[str] = None):
         _shared_notify = None
     if _shared_notify is None:
         port = settings.dlna_gena_port
-        server = AiohttpNotifyServer(
+        server = _NotifyServer(
             requester, source=("0.0.0.0", port),
             callback_url=f"http://{host}:{port}/notify")
         try:
