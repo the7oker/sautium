@@ -3592,6 +3592,17 @@ device on the network; none of them may hold for it more than a bound.
   path, any protocol the build carries. The DLNA and browser outputs
   never opened one; the local engine skips such a slot as unplayable
   now, as they do. ffprobe takes its source after `-i`.
+- **A cover is decoded as a raster picture, within Pillow's own bound.**
+  `covers.open_cover` — the one opener of the covers pipeline and of the
+  DLNA output's JPEG — opens JPEG, PNG, WebP, GIF, BMP or TIFF only: an
+  embedded picture or a folder image is no file the node vouches for, and
+  every other Pillow plugin read it before (EPS through Ghostscript where
+  installed, WMF and EMF through Windows). Ghostscript is off for the
+  process. The size is read from the header and judged before a pixel is
+  decoded: past Pillow's ~89 MP bound — no longer raised to 200 MP for
+  booklets, which are ~50 — a picture is refused undecoded, never a
+  multi-gigabyte decode that ends in a crash and repeats on the next
+  view.
 
 ## Known Gotchas
 

@@ -40,7 +40,7 @@ from typing import Optional, Tuple
 import httpx
 import imagehash
 from mutagen import File as MutagenFile
-from PIL import Image, UnidentifiedImageError
+from PIL import EpsImagePlugin, Image, UnidentifiedImageError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -58,8 +58,12 @@ logger = logging.getLogger(__name__)
 # `api_cooldown` module (source 'deezer') — armed here in resolve_artist_photo,
 # honored by the endpoint in routers/covers.py, and it survives restarts.
 
-# Album booklets scanned for print can reach ~50 MP — raise default bomb guard.
-Image.MAX_IMAGE_PIXELS = 200_000_000
+# What a cover is decoded as — the raster formats covers come in, nothing a
+# Pillow plugin reads beyond them (EPS through Ghostscript, WMF/EMF through
+# the OS): a picture comes from music files and outside hosts the node does
+# not vouch for. Ghostscript is off for the process all the same.
+COVER_FORMATS = ("JPEG", "PNG", "WEBP", "GIF", "BMP", "TIFF")
+EpsImagePlugin.gs_binary = False
 
 TARGET_MAX_DIM = 1024
 WEBP_QUALITY = 85
@@ -185,17 +189,31 @@ def extract_embedded_cover(audio_path: Path) -> Optional[bytes]:
     return None
 
 
+def open_cover(data: bytes) -> Optional[Image.Image]:
+    """`data` decoded as a cover (COVER_FORMATS), or None. Its size is read
+    from the header and judged before a pixel is decoded: past Pillow's own
+    bound (MAX_IMAGE_PIXELS, ~89 MP — a booklet scanned for print is ~50)
+    it is refused, never decoded."""
+    try:
+        img = Image.open(BytesIO(data), formats=COVER_FORMATS)
+        if img.width * img.height > Image.MAX_IMAGE_PIXELS:
+            logger.debug("cover of %dx%d refused undecoded", img.width, img.height)
+            return None
+        img.load()
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError) as e:
+        logger.debug(f"PIL decode failed: {e}")
+        return None
+    return img
+
+
 def _encode_and_hash(data: bytes):
     """Decode source bytes → (webp_bytes, w, h, orig_w, orig_h, orig_format, phash).
 
     phash is computed from the original (resize-invariant anyway).
-    Returns None if PIL cannot identify the format.
+    Returns None if the bytes are no cover open_cover takes.
     """
-    try:
-        img = Image.open(BytesIO(data))
-        img.load()
-    except (UnidentifiedImageError, OSError) as e:
-        logger.debug(f"PIL decode failed: {e}")
+    img = open_cover(data)
+    if img is None:
         return None
 
     orig_w, orig_h = img.size

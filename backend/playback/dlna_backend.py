@@ -1704,17 +1704,22 @@ class DlnaBackend(PlayerBackend):
 
     @staticmethod
     def _to_jpeg(data: bytes, label: str) -> Optional[bytes]:
-        """Any image → JPEG bytes: hi-fi renderers rarely decode webp."""
+        """A cover (covers.open_cover: its formats, its size) → JPEG bytes:
+        hi-fi renderers rarely decode webp."""
+        import io
+
+        from covers import open_cover
+        img = open_cover(data)
+        if img is None:
+            logger.debug("cover convert failed for %s", label)
+            return None
+        out = io.BytesIO()
         try:
-            import io
-            from PIL import Image
-            img = Image.open(io.BytesIO(data)).convert("RGB")
-            out = io.BytesIO()
-            img.save(out, format="JPEG", quality=85)
-            return out.getvalue()
-        except Exception as e:
+            img.convert("RGB").save(out, format="JPEG", quality=85)
+        except (OSError, ValueError) as e:
             logger.debug("cover convert failed for %s: %s", label, e)
             return None
+        return out.getvalue()
 
     @staticmethod
     def _load_cover_jpeg(cover_id: str) -> Optional[bytes]:
