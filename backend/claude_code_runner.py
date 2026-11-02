@@ -131,9 +131,11 @@ def _auth_failure(evt: dict) -> Optional[str]:
 def _claude_env() -> dict:
     """Env for the Claude Code subprocess.
 
-    Drops ANTHROPIC_API_KEY so the CLI uses OAuth credentials (Claude
-    subscription) rather than the pay-as-you-go API account — when the
-    variable is set the CLI silently bills against it.
+    No ANTHROPIC_API_KEY reaches it — the process that starts it dropped the
+    node's credentials from its environment (serving.hold_secrets) — so the
+    CLI uses OAuth credentials (Claude subscription) rather than the
+    pay-as-you-go API account, which it silently bills when the variable is
+    set.
 
     ENABLE_TOOL_SEARCH=false inlines every MCP tool schema upfront
     instead of deferring them behind a ToolSearch call — with deferral
@@ -143,7 +145,6 @@ def _claude_env() -> dict:
     input tokens are cheap.
     """
     env = os.environ.copy()
-    env.pop("ANTHROPIC_API_KEY", None)
     env["MAX_THINKING_TOKENS"] = _MAX_THINKING_TOKENS
     env["ENABLE_TOOL_SEARCH"] = "false"
     return env
@@ -375,30 +376,16 @@ def write_docker_mcp_config() -> None:
     logger.info("MCP config written to %s", path)
 
 
-# What the node holds that an agent CLI never needs: the database's and the
-# P2P account's credentials, the owner's other services, the other agent's
-# provider. The agent reaches the database through its MCP servers' own
-# config and the backend through the API secret file; the key of the
-# agent's own provider is its runner's to keep or drop (_claude_env,
-# codex_runner._codex_env).
-_NODE_SECRETS = frozenset({
-    "POSTGRES_USER", "POSTGRES_PASSWORD", "DATABASE_URL",
-    "P2P_USERNAME", "P2P_PASSWORD", "P2P_EMAIL",
-    "LASTFM_API_KEY", "LASTFM_API_SECRET", "LASTFM_USERNAME", "LASTFM_SESSION_KEY",
-    "GENIUS_ACCESS_TOKEN", "OPENAI_COMPAT_API_KEY", "ANTHROPIC_API_KEY",
-})
-
-
 def spawn_kwargs(env: dict) -> dict:
     """Popen setup shared by every agent CLI spawn — Claude's and Codex's
-    chat turns, their one-shots, the sign-ins and status looks: the node's
-    secrets out of `env`; never root — a backend that still runs as root (a
-    Docker image from before the node's own user) starts the child as the
-    node's user, with no group but its own, and that user's HOME, where the
-    CLIs keep their sign-ins and sessions; no flashing console window on
-    Windows."""
-    for name in _NODE_SECRETS:
-        env.pop(name, None)
+    chat turns, their one-shots, the sign-ins and status looks — from a
+    process that has dropped the node's credentials from its environment
+    (serving.hold_secrets; the agent reaches the database through its MCP
+    servers' own config and the backend through the API secret file): never
+    root — a backend that still runs as root (a Docker image from before the
+    node's own user) starts the child as the node's user, with no group but
+    its own, and that user's HOME, where the CLIs keep their sign-ins and
+    sessions; no flashing console window on Windows."""
     kwargs: dict[str, Any] = {"env": env}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW

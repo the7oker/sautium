@@ -305,10 +305,7 @@ def _cli_status() -> Optional[dict]:
     if claude is None:
         return None
     from claude_code_runner import spawn_kwargs
-    env = os.environ.copy()
-    # Judged on the subscription the calls bill, not a stray API key.
-    env.pop("ANTHROPIC_API_KEY", None)
-    kwargs = spawn_kwargs(env)
+    kwargs = spawn_kwargs(os.environ.copy())
     kwargs.update(capture_output=True, text=True, encoding="utf-8",
                   errors="replace", timeout=STATUS_TIMEOUT_SECONDS)
     try:
@@ -428,10 +425,6 @@ def start_signin(on_change) -> dict:
     claude = get_claude_executable()
     if claude is None:
         raise RuntimeError("Claude Code CLI not installed")
-    env = os.environ.copy()
-    # The login must bind the subscription the chat turns bill, not a
-    # stray API key — same drop as the runner's _claude_env().
-    env.pop("ANTHROPIC_API_KEY", None)
 
     def changed(snap: dict) -> None:
         if not snap["running"] and _signin is driver:
@@ -439,7 +432,7 @@ def start_signin(on_change) -> dict:
         on_change(snap)
 
     driver = _signin = AgentLogin("claude", claude_login_command(claude),
-                                  spawn_kwargs(env), on_change=changed)
+                                  spawn_kwargs(os.environ.copy()), on_change=changed)
     return driver.start()
 
 

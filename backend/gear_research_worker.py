@@ -796,6 +796,8 @@ def stop_gear_research_worker() -> None:
 if __name__ == "__main__":
     import argparse
 
+    from serving import hold_secrets
+    hold_secrets()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Gear research worker CLI")
     parser.add_argument("--list", action="store_true", help="show queue state")

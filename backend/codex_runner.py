@@ -137,18 +137,6 @@ def _codex_home() -> Path:
     return codex_home()
 
 
-def _codex_env() -> dict:
-    """Env for the codex subprocess. When auth.json exists (subscription
-    sign-in or a stored key) the env API keys are dropped so the CLI
-    cannot silently bill the API account; without auth.json they are
-    kept so `_ensure_auth` can mint the file from them."""
-    env = os.environ.copy()
-    if (_codex_home() / "auth.json").is_file():
-        env.pop("OPENAI_API_KEY", None)
-        env.pop("CODEX_API_KEY", None)
-    return env
-
-
 def _resolve_codex_executable() -> Optional[str]:
     from codex_cli import get_codex_executable
     exe = get_codex_executable()
@@ -169,19 +157,19 @@ def _spawn_kwargs(env: dict) -> dict:
 
 
 def _ensure_auth(codex_exe: str) -> Optional[str]:
-    """Materialize auth.json from OPENAI_API_KEY when it is missing —
-    the CLI never reads the env var itself. Returns an error message,
+    """Materialize auth.json from the settings' OpenAI key when it is
+    missing — no key reaches the CLI's environment, so it cannot bill the
+    API account past the sign-in the owner chose. Returns an error message,
     or None when auth is in place."""
     if (_codex_home() / "auth.json").is_file():
         return None
-    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY")
+    key = codex_cli.api_key()
     if not key:
         # Nothing to sign in with — and the verdict hears it from the store
         # (a cancelled `codex login` deletes auth.json behind any reader).
         codex_cli.auth.signed_in(fresh=True)
         return CODEX_LOGIN_MSG
-    env = os.environ.copy()
-    kwargs = _spawn_kwargs(env)
+    kwargs = _spawn_kwargs(os.environ.copy())
     kwargs.update(stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                   stderr=subprocess.STDOUT)
     try:
@@ -326,8 +314,7 @@ def _base_flags(model: str, effort: str, with_mcp: bool,
 
 
 def _spawn_codex(cmd: List[str]):
-    env = _codex_env()
-    kwargs = _spawn_kwargs(env)
+    kwargs = _spawn_kwargs(os.environ.copy())
     kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return subprocess.Popen(cmd, **kwargs)
 
@@ -606,8 +593,7 @@ def call_codex_oneshot(
     cmd += _base_flags(model, "low", with_mcp=False)
     cmd += ["--", prompt]
     try:
-        env = _codex_env()
-        kwargs = _spawn_kwargs(env)
+        kwargs = _spawn_kwargs(os.environ.copy())
         result = subprocess.run(
             cmd, capture_output=True, timeout=timeout_seconds, **kwargs)
     except subprocess.TimeoutExpired:

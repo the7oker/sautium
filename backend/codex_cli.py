@@ -144,6 +144,14 @@ def codex_auth_file() -> Path:
     return codex_home() / "auth.json"
 
 
+def api_key() -> Optional[str]:
+    """The OpenAI key the runner mints auth.json from when there is none
+    (OPENAI_API_KEY, or Codex's own CODEX_API_KEY) — read from the settings:
+    the environment no longer holds it once the process starts agents."""
+    from config import settings
+    return settings.openai_api_key or settings.codex_api_key
+
+
 def _cli_status() -> Optional[dict]:
     """`codex login status` for the store the chat turns use (exit 0 =
     logged in; the words go to stderr, and they name no account — how the
@@ -155,10 +163,9 @@ def _cli_status() -> Optional[dict]:
     if codex is None:
         return None
     if not codex_auth_file().is_file():
-        minted = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"))
-        return {"signed_in": minted, "account": None}
-    from codex_runner import _codex_env, _spawn_kwargs
-    kwargs = _spawn_kwargs(_codex_env())
+        return {"signed_in": bool(api_key()), "account": None}
+    from codex_runner import _spawn_kwargs
+    kwargs = _spawn_kwargs(os.environ.copy())
     kwargs.update(capture_output=True, timeout=STATUS_TIMEOUT_SECONDS)
     try:
         out = subprocess.run([str(codex), "login", "status"], **kwargs)
@@ -188,7 +195,7 @@ def codex_auth_method() -> Optional[str]:
             logger.debug(f"codex auth.json unreadable: {e}")
             mode = None
         return "chatgpt" if mode == "chatgpt" else "api_key"
-    if os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"):
+    if api_key():
         return "env_key"
     return None
 

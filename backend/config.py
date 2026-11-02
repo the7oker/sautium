@@ -120,6 +120,9 @@ class Settings(BaseSettings):
 
     # Multi-provider LLM support
     openai_api_key: Optional[str] = None
+    # Codex's own name for an OpenAI key: the runner mints the CLI's sign-in
+    # from either (codex_cli.api_key)
+    codex_api_key: Optional[str] = None
     openai_compat_base_url: Optional[str] = None
     openai_compat_api_key: Optional[str] = None
     openai_compat_model: Optional[str] = None
@@ -278,6 +281,17 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
+
+# The variables the settings read the node's credentials and the owner's
+# accounts from. A process that starts agent CLIs drops them from its
+# environment once the settings hold them (serving.hold_secrets).
+SECRET_ENV = frozenset({
+    "POSTGRES_USER", "POSTGRES_PASSWORD", "DATABASE_URL",
+    "P2P_USERNAME", "P2P_PASSWORD", "P2P_EMAIL",
+    "LASTFM_API_KEY", "LASTFM_API_SECRET", "LASTFM_USERNAME", "LASTFM_SESSION_KEY",
+    "GENIUS_ACCESS_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY",
+    "OPENAI_COMPAT_API_KEY",
+})
 
 
 _UI_BUILD_CACHE: Optional[int] = None

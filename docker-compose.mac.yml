@@ -180,8 +180,9 @@ services:
     # a benchmark run puts the owner's HQPlayer back. The Web UI's event
     # streams never end on their own: 2 s for them, then the shutdown runs.
     stop_grace_period: 10s
-    # The backend's own entrypoint, as the other compose files have it;
-    # UVICORN_RELOAD unset keeps uvicorn's reload here
+    # The backend's own entrypoint, as the other compose files have it —
+    # without reload (UVICORN_RELOAD=true is a development opt-in): restart
+    # the backend after a code change
     command: python entrypoint.py
 
 networks:

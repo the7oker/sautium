@@ -176,8 +176,9 @@ def codex(tmp_path, monkeypatch):
     auth_json.write_text('{"auth_mode": "chatgpt"}', encoding="utf-8")
     workdir = tmp_path / "codex-agent"
     workdir.mkdir()
-    for key in ("OPENAI_API_KEY", "CODEX_API_KEY"):
-        monkeypatch.delenv(key, raising=False)
+    from config import settings
+    for key in ("openai_api_key", "codex_api_key"):
+        monkeypatch.setattr(settings, key, None)
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.setenv("FAKE_CODEX_LOGGED_IN", "1")
     monkeypatch.setenv("FAKE_CODEX_CALL", "ok")
@@ -528,7 +529,8 @@ def test_only_words_of_a_refused_account_count_as_a_codex_refusal():
 def test_codex_without_auth_json_is_signed_in_only_with_a_key_to_mint_from(codex, monkeypatch):
     codex.unlink()
     assert codex_cli.get_state() == "not_authed"
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    from config import settings
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
     assert codex_cli.get_state(fresh=True) == "ready"
 
 

@@ -15,6 +15,7 @@ Light at import: the entrypoint imports it before the database is up.
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 import threading
@@ -111,17 +112,32 @@ class Server(uvicorn.Server):
 
 def undumpable() -> None:
     """Linux: this process becomes undumpable — its memory and its
-    /proc/<pid>/environ readable by root alone, not by the agent CLIs it
-    starts, which run as the same user. A process exec'd as that user is
-    dumpable again, so every server process says it for itself: the Docker
-    entrypoint's, and the app's (main.lifespan) — the one a reload supervisor
-    spawns too. Elsewhere nothing to do."""
+    /proc/<pid>/environ readable by root alone, not by the agent CLIs, which
+    run as the same user. A process exec'd as that user is dumpable again, so
+    each says it for itself: the Docker entrypoint's (a reload supervisor's
+    environment keeps the credentials its server is spawned with), and every
+    process that starts agent CLIs (hold_secrets). Elsewhere nothing to do."""
     if sys.platform != "linux":
         return
     import ctypes
     PR_SET_DUMPABLE = 4
     if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE) failed")
+
+
+def hold_secrets() -> None:
+    """What a process that starts agent CLIs does first — the app's lifespan,
+    the gear research worker's CLI: become undumpable, and drop
+    config.SECRET_ENV from its environment, in any case (the settings read
+    names case-insensitively); the settings, built at import, keep the
+    values. A child it starts — an agent CLI, ffmpeg, pg_restore — inherits
+    none of them, so none shows in a /proc/<pid>/environ the CLIs' user can
+    read. A CLI that takes a password by name and starts no agent
+    (`python -m backup … --password-env P2P_PASSWORD`) keeps its environment."""
+    undumpable()
+    from config import SECRET_ENV
+    for name in [n for n in os.environ if n.upper() in SECRET_ENV]:
+        del os.environ[name]
 
 
 def heard_until_served() -> None:

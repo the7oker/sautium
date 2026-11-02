@@ -313,15 +313,15 @@ async def _serve_p2p(port: int) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
-    # Startup
+    # Before anything starts a child
+    from serving import hold_secrets
+    hold_secrets()
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
 
     # Materialize the API secret on disk so launcher / sync_server can
     # read the same value, and warm the module-level cache. Reading at
     # startup surfaces filesystem errors here rather than on first
     # 401, and populating the cache means GET / never re-reads drvfs.
-    from serving import undumpable
-    undumpable()
     _get_api_secret()
     _get_index_html()
     if sys.platform == "linux":

@@ -1,9 +1,10 @@
-"""The Docker node runs as its own user (backend/entrypoint.py): the
+"""The Docker node runs as its own user (backend/node_user.py): the
 container starts as root only to hand the node's folders to that user, then
-drops root before anything else runs. An agent CLI never runs as root and
-carries none of the node's secrets in its environment
-(claude_code_runner.spawn_kwargs). The drops are real ones, so those tests
-run where the suite runs as root, in the backend's image."""
+drops root before anything else runs. An agent CLI never runs as root
+(claude_code_runner.spawn_kwargs), and a process that starts one has dropped
+the node's credentials from its environment first (serving.hold_secrets).
+The drops are real ones, so those tests run where the suite runs as root, in
+the backend's image."""
 
 import ctypes
 import os
@@ -29,14 +30,58 @@ as_root_with_the_node_user = pytest.mark.skipif(
 SECRETS = {"POSTGRES_PASSWORD": "pg", "POSTGRES_USER": "u", "P2P_PASSWORD": "p2p",
            "P2P_USERNAME": "me", "P2P_EMAIL": "me@example.org", "LASTFM_SESSION_KEY": "s",
            "LASTFM_API_SECRET": "x", "GENIUS_ACCESS_TOKEN": "g", "OPENAI_COMPAT_API_KEY": "o",
-           "ANTHROPIC_API_KEY": "a"}
+           "ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "k", "CODEX_API_KEY": "c",
+           "postgres_password": "pg"}
 
 
-def test_an_agent_child_carries_none_of_the_nodes_secrets():
-    env = {"PATH": "/usr/bin", "LANG": "C.UTF-8", "CODEX_HOME": "/somewhere", **SECRETS}
-    kwargs = claude_code_runner.spawn_kwargs(env)
-    assert set(kwargs["env"]) & set(SECRETS) == set()
-    assert {"PATH", "LANG", "CODEX_HOME"} <= set(kwargs["env"])
+def test_no_child_of_a_process_that_holds_the_secrets_inherits_one():
+    import json
+    from serving import hold_secrets
+
+    def check():
+        os.environ.update(SECRETS, CODEX_HOME="/somewhere", LANG="C.UTF-8")
+        hold_secrets()
+        child = subprocess.run([sys.executable, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
+                               capture_output=True, text=True, check=True)
+        return child.stdout
+
+    env = json.loads(_in_a_child(check))
+    assert set(env) & set(SECRETS) == set()
+    assert {"PATH", "LANG", "CODEX_HOME"} <= set(env)
+
+
+def test_every_credential_the_settings_read_is_held():
+    import re
+    from config import SECRET_ENV, Settings
+    credentials = {name.upper() for name in Settings.model_fields
+                   if re.search(r"password|secret|token|key$|_user$|username|email", name)}
+    assert {"P2P_PASSWORD", "CODEX_API_KEY", "LASTFM_SESSION_KEY"} <= credentials <= SECRET_ENV
+
+
+def test_the_processes_that_start_agents_hold_the_secrets_before_anything_else():
+    import ast
+
+    def first_call(body) -> str:
+        for node in body:
+            for n in ast.walk(node):
+                if isinstance(n, ast.Call):
+                    return ast.unparse(n.func)
+        return ""
+
+    main = ast.parse((REPO / "backend" / "main.py").read_text(encoding="utf-8"))
+    lifespan = next(n for n in ast.walk(main) if isinstance(n, ast.AsyncFunctionDef)
+                    and n.name == "lifespan")
+    assert first_call(lifespan.body) == "hold_secrets"
+    worker = ast.parse((REPO / "backend" / "gear_research_worker.py").read_text(encoding="utf-8"))
+    cli = next(n for n in worker.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test))
+    assert first_call(cli.body) == "hold_secrets"
+
+
+def test_reload_is_a_development_opt_in():
+    env = {k: v for k, v in os.environ.items() if k != "UVICORN_RELOAD"}
+    out = subprocess.run([sys.executable, "-c", "import entrypoint; print(entrypoint.RELOAD)"],
+                         cwd=REPO / "backend", env=env, capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"
 
 
 def test_a_root_backend_starts_an_agent_as_the_node_user_with_no_other_group(monkeypatch):
@@ -69,8 +114,35 @@ def test_a_real_agent_child_of_a_root_backend_is_the_node_user_alone():
 def test_the_codex_runner_starts_its_children_the_same_way(monkeypatch):
     import codex_runner
     monkeypatch.setattr(codex_runner, "_codex_workdir", lambda: Path("/tmp"))
-    kwargs = codex_runner._spawn_kwargs(dict(SECRETS, PATH="/usr/bin"))
-    assert set(kwargs["env"]) & set(SECRETS) == set() and kwargs["cwd"] == "/tmp"
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(claude_code_runner.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(claude_code_runner.pwd, "getpwnam", lambda name: types.SimpleNamespace(
+        pw_name=name, pw_uid=1000, pw_gid=1000, pw_dir="/home/" + name))
+    kwargs = codex_runner._spawn_kwargs({"PATH": "/usr/bin"})
+    assert (kwargs["user"], kwargs["cwd"], kwargs["stdin"]) == (1000, "/tmp", subprocess.DEVNULL)
+
+
+def test_codex_signs_in_with_the_settings_key_on_its_stdin_alone(tmp_path, monkeypatch):
+    """The key reaches `codex login --with-api-key` on stdin, from the
+    settings: the environment of a process that starts agents holds none."""
+    import codex_cli
+    import codex_runner
+    from config import settings
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    monkeypatch.setattr(settings, "codex_api_key", "key-from-the-settings")
+    monkeypatch.setattr(codex_cli, "codex_home", lambda: tmp_path / "codex-home")
+    monkeypatch.setattr(codex_runner, "_codex_home", lambda: tmp_path / "codex-home")
+    monkeypatch.setattr(codex_runner, "_codex_workdir", lambda: tmp_path)
+    monkeypatch.setattr(claude_code_runner.os, "geteuid", lambda: 1000)
+    fake = tmp_path / "codex"
+    fake.write_text(f"#!/bin/sh\ncat > {tmp_path}/stdin\nenv > {tmp_path}/env\n")
+    fake.chmod(0o755)
+    assert codex_cli.codex_auth_method() == "env_key"
+    assert codex_runner._ensure_auth(str(fake)) is None
+    assert (tmp_path / "stdin").read_text() == "key-from-the-settings"
+    assert "key-from-the-settings" not in (tmp_path / "env").read_text()
 
 
 # -- the image's entrypoint (backend/node_user.py) ----------------------------------

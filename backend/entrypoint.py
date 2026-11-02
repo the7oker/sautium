@@ -24,7 +24,10 @@ from serving import Server, heard_until_served, served, undumpable
 
 HOST = os.getenv("UVICORN_HOST", "0.0.0.0")
 PORT = int(os.getenv("UVICORN_PORT", "8000"))
-RELOAD = os.getenv("UVICORN_RELOAD", "true").lower() in ("1", "true", "yes")
+# Reload is a development opt-in: its server is a process of its own, spawned
+# with the credentials in its environment and readable by the agents' user
+# until its lifespan begins (serving.hold_secrets)
+RELOAD = os.getenv("UVICORN_RELOAD", "false").lower() in ("1", "true", "yes")
 
 
 def _wait_for_database() -> None:
