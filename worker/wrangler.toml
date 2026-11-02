@@ -1,6 +1,9 @@
 name = "sautium-verify"
 main = "verify.js"
 compatibility_date = "2024-01-01"
+# Variables set in Cloudflare's dashboard survive a deploy: WRITES_PAUSED,
+# the owner's brake on every write route, is set there, never here.
+keep_vars = true
 
 # KV namespace: the Worker's records (certificates, stamps, verified email,
 # acceptances); its binding keeps the historic name. No limit counts here.
@@ -39,10 +42,11 @@ class_name = "NodeDirectory"
 type = "durable-object"
 storage = "sqlite"
 
-# Admission: one SQLite-backed Durable Object ("limits") holds every counter
-# a write or a mail passes first (per key, per mailbox, per address, the
-# route's daily ceiling), the username each key speaks under, and the pending
-# email codes — atomic there, so a refused request writes nothing to KV.
+# Admission: SQLite-backed Durable Objects, one instance per route, hold the
+# counters a write or a mail passes first (per key, per mailbox, per address,
+# the route's daily ceiling); the instance "names" the username each key
+# speaks under, "code" the pending email codes — atomic there, so a refused
+# request writes nothing to KV.
 [[durable_objects.bindings]]
 name = "LIMITER"
 class_name = "Limiter"

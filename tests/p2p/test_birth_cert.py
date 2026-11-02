@@ -373,19 +373,21 @@ def test_worker_timestamp_contract():
     # ip_hash (v3) merges a /64 and separates the next one
     assert r["ipHash64a"] == r["ipHash64b"] and r["ipHash64a"] != r["ipHash64c"]
 
+    # the ledger hears only of requests that bring a new root (a re-submitted
+    # root is free, and leaves no row)
     rows = r["stampRows"]
-    assert [(row["n_new"], row["n_roots"], row["allowed"]) for row in rows[:4]] == [
-        (1, 1, 1), (0, 1, 1), (1, 2, 1), (1, 1, 1)]
-    assert rows[0]["pubkey"] == r["s1_pub"] and rows[3]["pubkey"] == r["s3_pub"]
+    assert [(row["n_new"], row["n_roots"], row["allowed"]) for row in rows[:3]] == [
+        (1, 1, 1), (1, 2, 1), (1, 1, 1)]
+    assert rows[0]["pubkey"] == r["s1_pub"] and rows[2]["pubkey"] == r["s3_pub"]
     assert all(row["pubkey"] for row in rows)
     assert all(row["m"] == 1 for row in rows)
-    # the bucket: 6 deep, one token per NEW root (a re-submitted root is free);
-    # shadow, so the seventh and eighth new roots in a row are only counted
+    # the bucket: 6 deep, one token per NEW root; shadow, so the seventh and
+    # eighth new roots in a row are only counted
     assert 3.9 < r["budgetRow"]["tokens"] < 4.1
-    assert [row["allowed"] for row in rows[3:]] == [1] * 6 + [0, 0]
+    assert [row["allowed"] for row in rows[2:]] == [1] * 6 + [0, 0]
 
     n = r["stats"]["body"]["ledger"]["notary"]["last_24h"]
-    assert n == {"requests": 14, "new_roots": 13, "unsigned": 0, "identities": 3,
+    assert n == {"requests": 13, "new_roots": 13, "unsigned": 0, "identities": 3,
                  "would_throttle": 2, "m2": 3}
     policy = r["stats"]["body"]["policy"]
     assert policy["stamp_budget_armed"] is False

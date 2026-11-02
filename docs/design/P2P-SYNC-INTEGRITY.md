@@ -684,7 +684,9 @@ the ceiling and collapsed the planned tiers into one task.
   — never `issued_at` alone, or hoarded certs would ripen in a
   drawer); karma confiscation burning the mined cost on abuse; and
   node-global windows as the absolute resource ceiling. Issuance
-  keeps only WAF-grade per-IP backstops: identity birth is a
+  keeps only per-address backstops — WAF-grade per minute, and since
+  2026-11-02 a daily cap per address (the exact IPv4, the IPv6 /48)
+  under the Worker's daily ceiling on births: identity birth is a
   once-per-lifetime event, so no honest CGNAT crowd approaches them.
 - **Certificate v2 wire format (shipped 2026-08-17):**
   `{v: 2, pubkey, issued_at, method: pow|email, difficulty,
@@ -1179,11 +1181,12 @@ achieves nothing — and it also covers master going offline on its own.
 ordinary chat wire payload — NaCl Box ciphertext to the master's chat
 key, the Worker never sees plaintext — signed by the sender
 (`mailbox:v1:{to}:{message_uuid}:{timestamp}:{sha256(encrypted)}`),
-gated by a birth certificate issued there (no free keys) and by per-IP
-(60/h), per-sender (30/day) and global (5 000/day) caps, in a
-SQLite-backed Durable Object (`MasterMailbox`: TTL 30 d, 20 k rows,
-oldest evicted; one instance, keyed by the pinned master pubkey — the
-only mailbox that exists). The master drains on an EVENT, never a timer:
+gated by a birth certificate issued there (no free keys) and by
+per-address (60/h, the IPv6 /64), per-sender (30/day) and global
+(5 000/day) caps, in a SQLite-backed Durable Object (`MasterMailbox`: TTL
+30 d, 20 k rows — full, it refuses new mail, since 2026-11-02, and never
+drops mail it accepted; one instance, keyed by the pinned master pubkey —
+the only mailbox that exists). The master drains on an EVENT, never a timer:
 it holds an outbound WebSocket to `GET /mailbox/wake` (hibernating on
 the DO side; keepalives auto-answered) and receives "mail" on every
 store; drain = master-signed `GET /mailbox` pages of 200 → import

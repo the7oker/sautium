@@ -21,12 +21,13 @@
  * All state-changing requests require Ed25519 signature verification.
  * Masha can't impersonate Alice because she can't sign with Alice's keys.
  *
- * Admission (Durable Object LIMITER, SQLite): every KV write and every mail
- * passes its route's counters there first — per key, per mailbox, per
- * address and a ceiling for the route — so a refused request writes nothing,
- * and concurrent requests cannot pass a counter together. A store that fails
- * answers 503, never an error's text. Callers are nodes, never browsers: no
- * CORS grant, and a body is application/json or it is refused.
+ * Admission (Durable Object LIMITER, one SQLite instance per route): every
+ * KV write and every mail passes its route's counters there first — per
+ * key, per mailbox, per address and a ceiling for the route — so a refused
+ * request writes nothing, and concurrent requests cannot pass a counter
+ * together. A store that fails answers 503, never an error's text; the
+ * owner's WRITES_PAUSED stops every write at once. Callers are nodes, never
+ * browsers: no CORS grant, and a body is application/json or it is refused.
  *
  * KV key naming: invite codes contain '#', which is a URL fragment marker and
  * breaks wrangler CLI (list silently hides such keys, get truncates at '#').
@@ -102,26 +103,36 @@ const MAX_BODY_BYTES = 16 * 1024;         // the largest real body is a full mai
 const FROM_EMAIL = "noreply@sautium.net";
 const FROM_NAME = "Sautium";
 
-// Admission (the Limiter object): a route's counters, per 24 h from a
-// counter's first use. Sized for the Workers Paid plan: `all` is the route's
-// ceiling — it bounds the route's KV writes (or its mail) and their cost on a
-// bad day — and the per-key, per-mailbox and per-address caps sit far above
-// one person's use, so that one source cannot spend a ceiling everyone
-// shares. `addr` is volumeToken(): the exact IPv4, the IPv6 /48. The mail
-// ceilings must also sit inside the mail provider's plan.
+// Admission (the Limiter object, one instance per route): a route's
+// counters, per 24 h from a counter's first use. Workers Paid has no hard
+// spending cap, so these ceilings are the cap: `all` bounds the route's KV
+// writes, reads or mail on a bad day — a day with every route at its ceiling
+// costs under a dollar in KV and Durable Object charges at 2026 prices
+// (writes $5 a million, reads and lists by the million at $0.50 and $5) — and
+// the per-key, per-mailbox and per-address caps sit far above one person's
+// use, so that one source cannot spend a ceiling everyone shares. `addr` is
+// volumeToken(): the exact IPv4, the IPv6 /48. The mail ceilings must also
+// sit inside the mail provider's plan.
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const LIMITS = {
-  birth:    { addr: 50, all: 20000 },                        // new identities
-  stamp:    { key: 500, addr: 5000, all: 100000 },           // new timestamp roots
-  code:     { key: 5, to: 5, addr: 20, all: 500 },           // verification mails
-  register: { key: 10, addr: 50, all: 5000 },                // tries; `all` = registrations written
+  birth:    { addr: 50, all: 20000 },                          // new identities
+  stamp:    { key: 500, addr: 5000, all: 50000 },              // new timestamp roots
+  lookup:   { key: 2000, addr: 10000, all: 200000 },           // roots a /timestamp asks about (KV reads)
+  code:     { key: 5, to: 5, addr: 20, all: 500 },             // verification mails
+  register: { key: 10, addr: 50, all: 5000 },                  // tries; `all` = registrations written
   invite:   { key: 20, from: 20, to: 3, addr: 50, all: 300 },  // invite mails
-  accept:   { key: 50, addr: 200, all: 20000 },              // stored acceptances
-  notify:   { key: 20, to: 20, all: 300 },                   // acceptance mails
-  pending:  { key: 200, addr: 500, all: 50000 },             // pickups (a KV list each)
-  check:    { key: 100, addr: 500 },
+  accept:   { key: 50, addr: 200, all: 10000 },                // stored acceptances
+  notify:   { key: 20, to: 20, all: 300 },                     // acceptance mails
+  pending:  { key: 200, addr: 500, all: 20000 },               // pickups (a KV list each)
 };
+// A route's ceiling, once met, refuses everyone until its window ends; each
+// refusal's Retry-After adds up to this much at random, so the waiting
+// nodes do not all come back in the same second.
+const CEILING_JITTER_S = 3600;
+// A key's name is kept while the key uses the invite routes; a year unused
+// and it is forgotten.
+const NAME_RETENTION_MS = 365 * DAY_MS;
 
 // Birth certificate authority keys. MIRRORS backend/birth_authority.py and
 // desktop/p2p/birth_cert.py — update all three together. [0] is the active
@@ -264,19 +275,44 @@ const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
 
 export default {
   async fetch(request, env) {
+    const paused = writesPaused(env);
+    if (paused && writes(request)) return unavailable();
     try {
-      return await route(request, guardStore(env));
+      return await route(request, guardStore(env, paused));
     } catch (e) {
       if (e instanceof StoreUnavailable) {
         console.error("store unavailable:", e.cause);
-        return json({ error: "temporarily unavailable" }, 503,
-                    { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
+        return unavailable();
       }
       console.error("unhandled:", e);
       return json({ error: "internal error" }, 500);
     }
   },
 };
+
+function unavailable() {
+  return json({ error: "temporarily unavailable" }, 503,
+              { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
+}
+
+function writesPaused(env) {
+  // The owner's brake: WRITES_PAUSED, a plain-text variable set in
+  // Cloudflare's dashboard, no deploy needed (wrangler.toml keeps dashboard
+  // variables across deploys). While it holds anything but "0", every
+  // request that writes answers 503 and reads go on.
+  const value = String(env.WRITES_PAUSED || "").trim();
+  return value !== "" && value !== "0";
+}
+
+function writes(request) {
+  // Every POST and DELETE, the pickup of acceptances (it deletes them) and a
+  // wake that records the master's address. A legacy record upgraded while
+  // reading is stopped at the store itself (guardStore).
+  const url = new URL(request.url);
+  return request.method === "POST" || request.method === "DELETE"
+    || url.pathname === "/pending-accepts"
+    || (url.pathname === "/mailbox/wake" && url.searchParams.has("peer_port"));
+}
 
 class StoreUnavailable extends Error {
   // A KV or Durable Object call that failed: the request answers 503 and the
@@ -287,11 +323,15 @@ class StoreUnavailable extends Error {
   }
 }
 
-function guardStore(env) {
+function guardStore(env, paused) {
   // The KV binding as every handler sees it: a failing call throws
-  // StoreUnavailable, whatever the runtime's own error says.
+  // StoreUnavailable, whatever the runtime's own error says — and while the
+  // owner's brake is on, so does every write.
   const kv = env.RATE_LIMITS;
   const guarded = (method) => async (...args) => {
+    if (paused && (method === "put" || method === "delete")) {
+      throw new StoreUnavailable(new Error("writes paused by the owner"));
+    }
     try {
       return await kv[method](...args);
     } catch (e) {
@@ -512,21 +552,6 @@ async function claimMailbox(env, emailToken, pubkey, { takeOver = false } = {}) 
   return current ? current.pubkey : null;
 }
 
-async function bumpIssuance(env, field) {
-  // Best-effort daily counters (KV read-modify-write races only undercount).
-  // Public via /issuance-stats: mass minting under a compromised authority
-  // key would show up as certificates the notary never counted.
-  const day = nowIsoSeconds().slice(0, 10);
-  const stats = (await env.RATE_LIMITS.get("stats:issuance", "json")) || {};
-  const row = stats[day] || { births: 0, email: 0 };
-  row[field] = (row[field] || 0) + 1;
-  stats[day] = row;
-  for (const k of Object.keys(stats)) {
-    if (k < new Date(Date.now() - 90 * 86400 * 1000).toISOString().slice(0, 10)) delete stats[k];
-  }
-  await env.RATE_LIMITS.put("stats:issuance", JSON.stringify(stats));
-}
-
 let statsMemo = null;      // {at, body}: this isolate's last /issuance-stats answer
 
 async function handleIssuanceStats(request, env) {
@@ -534,7 +559,7 @@ async function handleIssuanceStats(request, env) {
   if (refusal) return refusal;
   const now = Date.now();
   if (!statsMemo || now - statsMemo.at > STATS_MEMO_MS) {
-    const stats = (await env.RATE_LIMITS.get("stats:issuance", "json")) || {};
+    const { days = {}, ...ledger } = (await ledgerCall(env, "/stats")) || {};
     statsMemo = { at: now, body: {
       policy: {
         cert_version: BIRTH_CERT_VERSION,
@@ -546,8 +571,11 @@ async function handleIssuanceStats(request, env) {
         stamp_base_per_day: STAMP_BASE_PER_DAY,
         stamp_burst: STAMP_BURST,
       },
-      days: stats,
-      ledger: await ledgerCall(env, "/stats"),
+      // The issuance counts per UTC day (births, email upgrades,
+      // successions), kept by the ledger: mass minting under a compromised
+      // authority key would show up as certificates the notary never counted.
+      days,
+      ledger,
       // Live reachable-volunteer count (fresh directory entries) — the
       // relay/volunteer share the T-points want, visible for free.
       directory: (await directoryCall(env, `/stats?now=${now}`)).body,
@@ -600,6 +628,8 @@ async function handleBirthCertificate(request, env) {
     return throttled("rate limited (too many requests from your address)",
                      BRAKE_RETRY_AFTER_S);
   }
+  const braked = await routeBrake(env, request, "birth");
+  if (braked) return braked;
 
   let record = await loadBirthRecord(env, pubkey);
   if (!record) {
@@ -624,8 +654,7 @@ async function handleBirthCertificate(request, env) {
     };
     record[SIG_FIELD] = await signBirthRecord(env, pubkey, record);
     await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(record));
-    await bumpIssuance(env, "births");
-    await ledgerCall(env, "/birth", facts);
+    await ledgerCall(env, "/birth", score ? { ...facts, m: mult } : facts);
   }
 
   return json(certFromRecord(pubkey, record));
@@ -742,11 +771,12 @@ function shadowMultiplier(c) {
 export class BirthLedger {
   constructor(state, env) {
     this.state = state;
+    this.env = env;
     this.sql = state.storage.sql;
     state.blockConcurrencyWhile(async () => this._init());
   }
 
-  _init() {
+  async _init() {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS births (
       pubkey TEXT PRIMARY KEY, ts INTEGER NOT NULL, asn INTEGER NOT NULL,
       cc TEXT NOT NULL, sub TEXT NOT NULL, method TEXT NOT NULL,
@@ -780,6 +810,45 @@ export class BirthLedger {
     // Per-identity token bucket — atomic here, which the KV counters never were.
     this.sql.exec(`CREATE TABLE IF NOT EXISTS notary_budget (
       pubkey TEXT PRIMARY KEY, tokens REAL NOT NULL, updated INTEGER NOT NULL)`);
+    // The issuance counts per UTC day (births, email upgrades, successions),
+    // public in /issuance-stats. They were one KV key, stats:issuance, which
+    // takes one write a second: two births in a second failed one of them.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS daily (
+      day TEXT NOT NULL, field TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (day, field))`);
+    this.sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+    await this._adoptKvCounts();
+  }
+
+  async _adoptKvCounts() {
+    // The KV key's history, added once to whatever was counted here since.
+    if (!this.env?.RATE_LIMITS
+        || this.sql.exec("SELECT v FROM meta WHERE k = 'kv_counts_adopted'").toArray().length) return;
+    let legacy;
+    try {
+      legacy = await this.env.RATE_LIMITS.get("stats:issuance", "json");
+    } catch (e) {
+      console.error("issuance history unreadable, adopted at the next start:", e);
+      return;
+    }
+    for (const [day, row] of Object.entries(legacy || {})) {
+      for (const [field, n] of Object.entries(row || {})) {
+        if (Number.isInteger(n) && n > 0) {
+          this.sql.exec(
+            `INSERT INTO daily (day, field, n) VALUES (?, ?, ?)
+             ON CONFLICT(day, field) DO UPDATE SET n = n + excluded.n`, day, field, n);
+        }
+      }
+    }
+    this.sql.exec("INSERT INTO meta (k, v) VALUES ('kv_counts_adopted', ?)", nowIsoSeconds());
+  }
+
+  _bump(field, now) {
+    const day = new Date(now).toISOString().slice(0, 10);
+    this.sql.exec(
+      `INSERT INTO daily (day, field, n) VALUES (?, ?, 1)
+       ON CONFLICT(day, field) DO UPDATE SET n = n + 1`, day, field);
+    this.sql.exec("DELETE FROM daily WHERE day < ?",
+                  new Date(now - LEDGER_RETENTION_MS).toISOString().slice(0, 10));
   }
 
   async fetch(request) {
@@ -794,8 +863,16 @@ export class BirthLedger {
       return Response.json(this.recordStamp(await request.json()));
     }
     if (request.method === "POST" && url.pathname === "/method") {
-      const { pubkey, method } = await request.json();
+      // An identity upgraded to method:email — counted, and marked on its
+      // birth row when this ledger saw the birth.
+      const { pubkey, method, now } = await request.json();
       this.sql.exec("UPDATE births SET method = ? WHERE pubkey = ?", method, pubkey);
+      this._bump(method, Number(now) || Date.now());
+      return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/count") {
+      const { field, now } = await request.json();
+      this._bump(String(field), Number(now) || Date.now());
       return Response.json({ ok: true });
     }
     if (request.method === "GET" && url.pathname === "/stats") {
@@ -823,13 +900,16 @@ export class BirthLedger {
     return { m_shadow: shadowMultiplier(counts), ...counts };
   }
 
-  recordBirth({ pubkey, ts, asn, cc, sub, addr, fam }) {
+  recordBirth({ pubkey, ts, asn, cc, sub, addr, fam, m }) {
+    // `m`: the multiplier the certificate was signed with, once armed — the
+    // row keeps what was charged, not a score taken a moment later.
     const prior = this.sql.exec(
       "SELECT m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, n_addr24 FROM births WHERE pubkey = ?",
       pubkey).toArray();
     if (prior.length) return prior[0];               // idempotent, like issuance
     addr = addr || "";
-    const { m_shadow, ...counts } = this.scoreBirth({ ts, asn, sub, addr });
+    const { m_shadow: scored, ...counts } = this.scoreBirth({ ts, asn, sub, addr });
+    const m_shadow = m ?? scored;
     this.sql.exec(
       `INSERT INTO births (pubkey, ts, asn, cc, sub, method, m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, addr, n_addr24, fam)
        VALUES (?, ?, ?, ?, ?, 'pow', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -837,6 +917,7 @@ export class BirthLedger {
       counts.n_asn24, counts.n_glob1, counts.n_glob24, addr, counts.n_addr24,
       Number(fam) === 6 ? 6 : 4);
     this.sql.exec("DELETE FROM births WHERE ts < ?", ts - LEDGER_RETENTION_MS);
+    this._bump("births", ts);
     return { m_shadow, ...counts };
   }
 
@@ -929,7 +1010,12 @@ export class BirthLedger {
       would_throttle: this._count("SELECT count(*) AS n FROM stamps WHERE ts > ? AND allowed = 0", since),
       m2: this._count("SELECT count(*) AS n FROM stamps WHERE ts > ? AND m >= 2", since),
     });
+    const days = {};
+    for (const r of this.sql.exec("SELECT day, field, n FROM daily ORDER BY day").toArray()) {
+      (days[r.day] ||= {})[r.field] = Number(r.n);
+    }
     return {
+      days,
       total: this._count("SELECT count(*) AS n FROM births"),
       last_24h: hist(day),
       last_7d: hist(week),
@@ -985,18 +1071,22 @@ async function birthFacts(env, request, pubkey, issuedAtIso) {
 
 export class Limiter {
   /**
-   * The state every limit of the Worker keys on, in one object so that a
-   * check and its increment are one synchronous step:
+   * The state every limit of the Worker keys on. One instance per route
+   * (its name is the route's: "birth", "invite", …), so a check and its
+   * increment are one synchronous step, and one route's load or failure
+   * never reaches another's; two more instances hold what spans routes:
    *   counters — `take` is all or nothing: every counter is read, and only
    *              when all have room are all incremented. A window runs from
    *              a counter's first use (a single-use nonce is limit 1 for
    *              its lifetime).
-   *   names    — the username each key speaks under (a peppered token of
-   *              it), fixed at its first use of an invite-family route (the
-   *              username is the salt the key was derived from: an honest
-   *              key never has two).
-   *   codes    — pending email verification codes (their hash) and the wrong
-   *              tries each has taken.
+   *   names    — ("names") the username each key speaks under, as a
+   *              peppered token, fixed at its first use of a writing
+   *              invite-family route (the username is the salt the key was
+   *              derived from: an honest key never has two); a year unused
+   *              and it is forgotten.
+   *   codes    — ("code") pending email verification codes (their hash) and
+   *              the wrong tries each has taken; an alarm removes each when
+   *              it expires.
    * Counter keys and names hold public keys and peppered tokens, never an
    * address, a mailbox or a username.
    */
@@ -1011,7 +1101,8 @@ export class Limiter {
       key TEXT PRIMARY KEY, n INTEGER NOT NULL, until INTEGER NOT NULL)`);
     this.sql.exec("CREATE INDEX IF NOT EXISTS counters_until ON counters (until)");
     this.sql.exec(`CREATE TABLE IF NOT EXISTS names (
-      pubkey TEXT PRIMARY KEY, name TEXT NOT NULL, since INTEGER NOT NULL)`);
+      pubkey TEXT PRIMARY KEY, name TEXT NOT NULL, seen INTEGER NOT NULL)`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS names_seen ON names (seen)");
     this.sql.exec(`CREATE TABLE IF NOT EXISTS codes (
       invite TEXT PRIMARY KEY, email TEXT NOT NULL, hash TEXT NOT NULL,
       tries INTEGER NOT NULL, expires INTEGER NOT NULL)`);
@@ -1021,7 +1112,8 @@ export class Limiter {
     const path = new URL(request.url).pathname;
     const body = await request.json();
     if (path === "/take") return Response.json(this.take(body));
-    if (path === "/code/put") return Response.json(this.putCode(body));
+    if (path === "/bind") return Response.json(this.bind(body));
+    if (path === "/code/put") return Response.json(await this.putCode(body));
     if (path === "/code/check") return Response.json(this.checkCode(body));
     if (path === "/code/drop") {
       this.sql.exec("DELETE FROM codes WHERE invite = ?", body.invite);
@@ -1030,20 +1122,17 @@ export class Limiter {
     return new Response("not found", { status: 404 });
   }
 
-  take({ now, counters, bind }) {
+  take({ now, counters }) {
     this.sql.exec("DELETE FROM counters WHERE until <= ?", now);
-    let bound = null;
-    if (bind) {
-      bound = this.sql.exec("SELECT name FROM names WHERE pubkey = ?", bind.pubkey).toArray()[0];
-      if (bound && bound.name !== bind.name) return { ok: false, refused: "name" };
-    }
     const rows = counters.map((c) => this.sql.exec(
       "SELECT n, until FROM counters WHERE key = ?", c.key).toArray()[0]);
     for (let i = 0; i < counters.length; i++) {
       const c = counters[i], row = rows[i];
       if ((row ? Number(row.n) : 0) + c.amount > c.limit) {
         const until = row ? Number(row.until) : now + c.window;
-        return { ok: false, refused: c.key, retry_after: Math.max(1, Math.ceil((until - now) / 1000)) };
+        const jitter = c.key.includes(":all:") ? Math.floor(Math.random() * CEILING_JITTER_S) : 0;
+        return { ok: false, refused: c.key,
+                 retry_after: Math.max(1, Math.ceil((until - now) / 1000)) + jitter };
       }
     }
     for (const c of counters) {
@@ -1052,14 +1141,20 @@ export class Limiter {
          ON CONFLICT(key) DO UPDATE SET n = n + excluded.n`,
         c.key, c.amount, now + c.window);
     }
-    if (bind && !bound) {
-      this.sql.exec("INSERT INTO names (pubkey, name, since) VALUES (?, ?, ?)",
-                    bind.pubkey, bind.name, now);
-    }
     return { ok: true };
   }
 
-  putCode({ invite, email, hash, now }) {
+  bind({ pubkey, name, now }) {
+    this.sql.exec("DELETE FROM names WHERE seen <= ?", now - NAME_RETENTION_MS);
+    const row = this.sql.exec("SELECT name FROM names WHERE pubkey = ?", pubkey).toArray()[0];
+    if (row && row.name !== name) return { ok: false };
+    this.sql.exec(
+      `INSERT INTO names (pubkey, name, seen) VALUES (?, ?, ?)
+       ON CONFLICT(pubkey) DO UPDATE SET seen = excluded.seen`, pubkey, name, now);
+    return { ok: true };
+  }
+
+  async putCode({ invite, email, hash, now }) {
     // A new code replaces the pending one, and its tries start again.
     this.sql.exec("DELETE FROM codes WHERE expires <= ?", now);
     this.sql.exec(
@@ -1067,7 +1162,18 @@ export class Limiter {
        ON CONFLICT(invite) DO UPDATE SET email = excluded.email, hash = excluded.hash,
          tries = 0, expires = excluded.expires`,
       invite, email, hash, now + VERIFY_CODE_TTL_MS);
+    if (await this.state.storage.getAlarm() === null) {
+      await this.state.storage.setAlarm(now + VERIFY_CODE_TTL_MS);
+    }
     return { ok: true };
+  }
+
+  async alarm() {
+    // An expired code (it holds the address it was sent to) is removed when
+    // it expires, not when the next code happens to be asked for.
+    this.sql.exec("DELETE FROM codes WHERE expires <= ?", Date.now());
+    const next = this.sql.exec("SELECT min(expires) AS t FROM codes").one().t;
+    if (next !== null) await this.state.storage.setAlarm(Number(next));
   }
 
   checkCode({ invite, email, hash, now }) {
@@ -1101,8 +1207,8 @@ async function objectCall(namespace, name, path, body) {
   }
 }
 
-async function limiterCall(env, path, body) {
-  return (await objectCall(env.LIMITER, "limits", path, body)).body;
+async function limiterCall(env, instance, path, body) {
+  return (await objectCall(env.LIMITER, instance, path, body)).body;
 }
 
 function daily(route, axis, id = "", amount = 1) {
@@ -1111,25 +1217,33 @@ function daily(route, axis, id = "", amount = 1) {
 }
 
 async function admit(env, counters, bind) {
-  // Take the counters (and check the key's name when `bind` is given):
-  // null when admitted, else the refusal to answer with.
-  const r = await limiterCall(env, "/take", {
-    now: Date.now(), counters,
-    bind: bind && { pubkey: bind.pubkey, name: await nameToken(env, bind.username) },
-  });
-  if (r.ok) return null;
-  if (r.refused === "name") {
-    return json({ error: "this key is registered under another username" }, 403);
+  // Take the counters — all of one route, in that route's own Limiter — and
+  // then, when `bind` is given, hold the key to its name: null when admitted,
+  // else the refusal to answer with. The name is checked after the counters,
+  // so the names instance sees admitted requests only.
+  const route = counters[0].key.slice(0, counters[0].key.indexOf(":"));
+  const r = await limiterCall(env, route, "/take", { now: Date.now(), counters });
+  if (!r.ok) return throttled("rate limited", r.retry_after);
+  if (bind) {
+    const named = await limiterCall(env, "names", "/bind", {
+      pubkey: bind.pubkey, name: await nameToken(env, bind.username), now: Date.now(),
+    });
+    if (!named.ok) return json({ error: "this key is registered under another username" }, 403);
   }
-  return throttled("rate limited", r.retry_after);
+  return null;
 }
 
 async function routeBrake(env, request, route) {
-  // The per-minute brake every route without one of its own stands behind:
-  // its own bucket per route and address, no KV, so what one address sends
-  // past it never reaches the stores.
-  if (await brake(env.BRAKE_ROUTE, `${route}:${addrKey(clientIp(request))}`)) return null;
+  // The per-minute brake every route stands behind (births and stamps
+  // behind their own per-/64 brake too): its own bucket per route and
+  // network — the exact IPv4, the IPv6 /48 (one allocation, one bucket) —
+  // and no KV, so what one network sends past it never reaches the stores.
+  if (await brake(env.BRAKE_ROUTE, `${route}:${netKey(clientIp(request))}`)) return null;
   return throttled("rate limited (too many requests from your address)", BRAKE_RETRY_AFTER_S);
+}
+
+function netKey(ip) {
+  return ip.includes(":") ? subnetOf(ip) : ip;
 }
 
 function clientIp(request) {
@@ -1407,7 +1521,7 @@ async function handleNodeRegister(request, env) {
     return json({ error: "node has no certificate" }, 403);
   }
   const nonce = `directory:sig:${signature.toLowerCase()}`;
-  const taken = await limiterCall(env, "/take", { now: Date.now(), counters: [
+  const taken = await limiterCall(env, "directory", "/take", { now: Date.now(), counters: [
     { key: nonce, limit: 1, window: 2 * MAIL_SIG_SKEW_S * 1000, amount: 1 },
     { key: `directory:addr:${await ipHashUuid(env, ip)}`, limit: DIRECTORY_REG_PER_IP_HOUR,
       window: HOUR_MS, amount: 1 },
@@ -1684,6 +1798,8 @@ async function handleTimestamp(request, env) {
     return throttled("rate limited (too many requests from your address)",
                      BRAKE_RETRY_AFTER_S);
   }
+  const braked = await routeBrake(env, request, "stamp");
+  if (braked) return braked;
 
   if (body.pubkey === undefined || body.signature === undefined || body.ts === undefined) {
     return json({ error: "a signed request is required" }, 400);
@@ -1704,46 +1820,59 @@ async function handleTimestamp(request, env) {
     return json({ error: "no certificate for this key" }, 403);
   }
 
-  // A known root costs nothing (idempotent re-submission); a record in an
-  // older format is re-signed, a write the route's ceiling counts. The
-  // budget charges new roots only.
+  // Every root asked about is a KV read: the lookups are counted before any
+  // is made. Of those, a known root costs nothing more (idempotent
+  // re-submission); a record in an older format is re-signed, a write the
+  // route's ceiling counts. The budget charges new roots only, and the
+  // ledger hears only of requests that bring one.
+  const ipToken = await volumeToken(env, ip);
+  const looked = await admit(env, [
+    daily("lookup", "key", pubkey, roots.length),
+    daily("lookup", "addr", ipToken, roots.length),
+    daily("lookup", "all", "", roots.length),
+  ]);
+  if (looked) return looked;
   const records = await Promise.all(
     roots.map((r) => env.RATE_LIMITS.get(`ts:${r}`, "json")));
   const fresh = records.filter((r) => !r).length;
   const resigned = records.filter((r) => r && (r.v !== TIMESTAMP_VERSION
                                                || r.ipv !== IP_HASH_VERSION)).length;
+  const ipHash = await ipHashUuid(env, ip);
+  let verdict = null;
+  if (fresh) {
+    const cf = request.cf || {};
+    verdict = await ledgerCall(env, "/stamp", {
+      pubkey,
+      issued_at: Date.parse(born.issued_at),
+      method: born.method || "",
+      email_class: born.email_class || "",
+      n_new: fresh,
+      n_roots: roots.length,
+      addr: ipHash,
+      sub: await subnetToken(env, ip),
+      asn: Number(cf.asn) || 0,
+      now: Date.now(),
+    });
+    if (STAMP_BUDGET_ARMED) {
+      // Armed, the budget is a refusal, judged before the daily caps are
+      // spent: no verdict is no stamp.
+      if (!verdict) {
+        return json({ error: "notary budget unavailable" }, 503,
+                    { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
+      }
+      if (verdict.allowed === false) {
+        const wait = Math.max(1, Math.ceil(verdict.not_before - Date.now() / 1000));
+        return throttled("notary budget spent for this identity",
+                         wait, verdict.not_before);
+      }
+    }
+  }
   const counters = fresh ? [daily("stamp", "key", pubkey, fresh),
-                            daily("stamp", "addr", await volumeToken(env, ip), fresh)] : [];
+                            daily("stamp", "addr", ipToken, fresh)] : [];
   if (fresh + resigned) counters.push(daily("stamp", "all", "", fresh + resigned));
   if (counters.length) {
     const refusal = await admit(env, counters);
     if (refusal) return refusal;
-  }
-  const ipHash = await ipHashUuid(env, ip);
-  const cf = request.cf || {};
-  const verdict = await ledgerCall(env, "/stamp", {
-    pubkey,
-    issued_at: Date.parse(born.issued_at),
-    method: born.method || "",
-    email_class: born.email_class || "",
-    n_new: fresh,
-    n_roots: roots.length,
-    addr: ipHash,
-    sub: await subnetToken(env, ip),
-    asn: Number(cf.asn) || 0,
-    now: Date.now(),
-  });
-  if (STAMP_BUDGET_ARMED) {
-    // Armed, the budget is a refusal: no verdict is no stamp.
-    if (!verdict) {
-      return json({ error: "notary budget unavailable" }, 503,
-                  { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
-    }
-    if (verdict.allowed === false) {
-      const wait = Math.max(1, Math.ceil(verdict.not_before - Date.now() / 1000));
-      return throttled("notary budget spent for this identity",
-                       wait, verdict.not_before);
-    }
   }
 
   // Idempotent per root, but re-sign any record still in an older format so a
@@ -1834,7 +1963,7 @@ async function handleVerification(request, env) {
   if (refusal) return refusal;
 
   const code = randomCode(6);
-  await limiterCall(env, "/code/put", {
+  await limiterCall(env, "code", "/code/put", {
     invite: invite_code, email: to, hash: await sha256Hex(code), now: Date.now(),
   });
 
@@ -1895,7 +2024,7 @@ async function handleRegisterEmail(request, env) {
     daily("register", "addr", await volumeToken(env, clientIp(request))),
   ], caller.bind);
   if (tries) return tries;
-  const check = await limiterCall(env, "/code/check", {
+  const check = await limiterCall(env, "code", "/code/check", {
     invite: invite_code, email, hash: await sha256Hex(code.trim().toUpperCase()), now: Date.now(),
   });
   if (!check.ok) {
@@ -1909,8 +2038,13 @@ async function handleRegisterEmail(request, env) {
   const token = await emailToken(env, normalized);
   // Succession: the mailbox moves to this key; whoever held it before is
   // named in the certificate as the predecessor (a password change makes a
-  // new key — nodes carry witnessed age and bans across the link).
-  const previous = await claimMailbox(env, token, pubkey, { takeOver: true });
+  // new key — nodes carry witnessed age and bans across the link). The
+  // holder is read first and the index moves only after the certificate
+  // naming it is stored, so a retry after a failure in between still finds
+  // the predecessor; each count is taken right after its own write, so a
+  // retry counts nothing twice.
+  const holder = await env.RATE_LIMITS.get(`mailbox:${token}`, "json");
+  const previous = holder && holder.pubkey !== pubkey ? holder.pubkey : null;
   const upgraded = {
     ...record,
     method: "email",
@@ -1922,10 +2056,12 @@ async function handleRegisterEmail(request, env) {
   upgraded[SIG_FIELD] = await signBirthRecord(env, pubkey, upgraded);
   await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(upgraded));
   if (record.method !== "email") {
-    await bumpIssuance(env, "email");
-    await ledgerCall(env, "/method", { pubkey, method: "email" });
+    await ledgerCall(env, "/method", { pubkey, method: "email", now: Date.now() });
   }
-  if (previous) await bumpIssuance(env, "succession");
+  if (!holder || previous) {
+    await env.RATE_LIMITS.put(`mailbox:${token}`, JSON.stringify({ pubkey, since: nowIsoSeconds() }));
+    if (previous) await ledgerCall(env, "/count", { field: "succession", now: Date.now() });
+  }
 
   await env.RATE_LIMITS.put(`verified:${kvKey(invite_code)}`, JSON.stringify({
     email,
@@ -1933,7 +2069,7 @@ async function handleRegisterEmail(request, env) {
     born_at: upgraded.issued_at,
     verified_at: nowIsoSeconds(),
   }));
-  await limiterCall(env, "/code/drop", { invite: invite_code });
+  await limiterCall(env, "code", "/code/drop", { invite: invite_code });
 
   return json({
     status: "registered", invite_code, email,
@@ -1962,7 +2098,7 @@ async function handleInvite(request, env) {
   if (userMessage != null && typeof userMessage !== "string") {
     return json({ error: "invalid message" }, 400);
   }
-  if (userMessage && userMessage.length > INVITE_MESSAGE_MAX_CHARS) {
+  if (userMessage && [...userMessage].length > INVITE_MESSAGE_MAX_CHARS) {   // characters, as the backend counts
     return json({ error: "message too long" }, 400);
   }
   if (!isValidEmail(to)) {
@@ -2011,7 +2147,9 @@ async function handleCheckEmail(request, url, env) {
    * Returns {verified: true} only if the stored email matches exactly.
    * Safe: requires signature (proves key ownership), doesn't leak emails.
    * When verified for this very pubkey, also returns (and, if needed,
-   * upgrades to) the method:email identity certificate.
+   * upgrades to) the method:email identity certificate. A read: its only
+   * writes upgrade a record stored before certificate v2, once each, so it
+   * takes no counters and binds no name — the brake alone stands in front.
    */
   const braked = await routeBrake(env, request, "check");
   if (braked) return braked;
@@ -2026,11 +2164,6 @@ async function handleCheckEmail(request, url, env) {
                                     `check-email:${inviteCode}:${email}`, signature);
   if (caller.refusal) return caller.refusal;
   const pubkey = caller.pubkey;
-  const refusal = await admit(env, [
-    daily("check", "key", pubkey),
-    daily("check", "addr", await volumeToken(env, clientIp(request))),
-  ], caller.bind);
-  if (refusal) return refusal;
 
   const stored = await getVerified(env, inviteCode);
   const verified = stored?.email === email;
@@ -2055,8 +2188,7 @@ async function handleCheckEmail(request, url, env) {
     record[SIG_FIELD] = await signBirthRecord(env, pubkey, record);
     await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(record));
     if (!wasEmail) {
-      await bumpIssuance(env, "email");
-      await ledgerCall(env, "/method", { pubkey, method: "email" });
+      await ledgerCall(env, "/method", { pubkey, method: "email", now: Date.now() });
     }
   }
   if (record && record.email_token) {
