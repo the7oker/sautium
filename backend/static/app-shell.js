@@ -13738,6 +13738,25 @@
     const bgEnrich = !!sync.background_enrichment;
     const bgStatusLine = _bgEnrichStatusLine(sync.background_status, bgEnrich);
 
+    // Relaying and support diagnostics run whatever P2P sharing says, so
+    // their switches — and the Support row, what left for support — show in
+    // both states: a switch hidden while its work goes on is no switch.
+    const relayRow = `
+        <div class="form-row">
+          <span class="form-label">Relay for others</span>
+          <button class="toggle ${sync.relay_enabled ? 'on' : ''}" data-action="toggle-relay"><span class="knob"></span></button>
+        </div>`;
+    const diagnosticsRow = `
+        <div class="form-row">
+          <span class="form-label">Share diagnostics with support</span>
+          <button class="toggle ${sync.support && sync.support.enabled ? 'on' : ''}" data-action="toggle-support"><span class="knob"></span></button>
+        </div>`;
+    const supportRow = `
+        <div class="form-row">
+          <span class="form-label">Support</span>
+          <span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>
+        </div>`;
+
     if (!on) {
       // Sharing OFF — consolidated explainer in place of the three
       // detail rows. Background enrichment toggle still visible
@@ -13760,6 +13779,9 @@
             <button class="toggle ${bgEnrich ? 'on' : ''}" data-action="toggle-bg-enrich"><span class="knob"></span></button>
           </div>
           ${bgStatusLine}
+          ${relayRow}
+          ${diagnosticsRow}
+          ${supportRow}
         </div>
       `;
     }
@@ -13801,14 +13823,8 @@
           <span class="form-label">Re-analyze synced audio</span>
           <button class="toggle ${sync.reanalyze_imported ? 'on' : ''}" data-action="toggle-reanalyze"><span class="knob"></span></button>
         </div>
-        <div class="form-row">
-          <span class="form-label">Relay for others</span>
-          <button class="toggle ${sync.relay_enabled ? 'on' : ''}" data-action="toggle-relay"><span class="knob"></span></button>
-        </div>
-        <div class="form-row">
-          <span class="form-label">Share diagnostics with support</span>
-          <button class="toggle ${sync.support && sync.support.enabled ? 'on' : ''}" data-action="toggle-support"><span class="knob"></span></button>
-        </div>
+        ${relayRow}
+        ${diagnosticsRow}
         ${sync.relay_enabled && sync.relay_clients ? `<div class="form-row">
           <span class="form-label">Relaying for</span>
           <span class="form-value mono">${fmtNum(sync.relay_clients)} node${sync.relay_clients === 1 ? '' : 's'}</span>
@@ -13847,10 +13863,7 @@
           <span class="form-label">Market</span>
           <span class="form-value mono" title="${escapeProfileHtml(gateDetail(sync.gate))}">${escapeProfileHtml(gateLabel(sync.gate))}</span>
         </div>
-        <div class="form-row">
-          <span class="form-label">Support</span>
-          <span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>
-        </div>
+        ${supportRow}
       </div>
     `;
   }

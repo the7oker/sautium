@@ -3177,6 +3177,7 @@ class P2PManager:
                         ",".join(warrant["scopes"]))
             extra = {"p2p_status": self.get_status(),
                      "reachability": self._reachability_status}
+            began = datetime.now(timezone.utc)
             try:
                 tar = await loop.run_in_executor(None, partial(
                     diag_bundle.collect, db_dsn=self.db_dsn, data_dir=get_data_dir(),
@@ -3191,19 +3192,28 @@ class P2PManager:
             boxed = diag_protocol.encrypt_to(get_private_key_raw(), MASTER_PUBKEY_HEX, tar)
             stage.write_bytes(boxed)
             await loop.run_in_executor(
-                None, self._diag_db, diag_events.mark_collected, warrant["id"], len(boxed))
+                None, self._diag_db, diag_events.mark_collected, warrant["id"], len(boxed), began)
         await self._diag_upload(warrant["id"], stage, addr)
 
     async def _diag_upload(self, warrant_id: str, stage: Path, addr) -> bool:
         """POST the staged box to the master's peer surface. A refusal
         that cannot change (403/404/409/410/413) closes the warrant; a
-        network failure leaves the stage for the next reconnect."""
+        network failure leaves the stage for the next reconnect. A bundle
+        the owner withdrew — diagnostics switched off since its collection
+        began, whatever they say now — is deleted and its warrant closed,
+        decided right before it would leave."""
         import aiohttp
         from desktop.node_identity import get_account_info, sign_message
         from desktop.p2p import diag_events, peer_auth
         from desktop.p2p.master_node import MASTER_PUBKEY_HEX
 
         loop = asyncio.get_event_loop()
+        if not await loop.run_in_executor(None, self._diag_db, diag_events.may_upload, warrant_id):
+            stage.unlink(missing_ok=True)
+            await loop.run_in_executor(
+                None, self._diag_db, diag_events.mark_failed, warrant_id, diag_events.WITHDRAWN)
+            logger.info("Support bundle %s… %s", warrant_id[:8], diag_events.WITHDRAWN)
+            return False
         body = stage.read_bytes()
         own = get_account_info()["public_key_hex"]
         target = f"/api/diag/bundle?warrant={warrant_id}"
@@ -3263,7 +3273,10 @@ class P2PManager:
     async def _diag_report(self) -> None:
         """Ship unreported events to the master — content-free (encode_report
         strips the local-only fields), boxed, capped per hour. Whatever
-        stays behind rides the next wake."""
+        stays behind rides the next wake. The events are read after the
+        master's address is found, just before they leave: the switch's
+        rule (diag_events.SWITCH_ALLOWS) decides at that moment, not before a
+        lookup that may take a DHT's timeout."""
         import aiohttp
         from desktop.node_identity import (get_account_info, get_private_key_raw,
                                            sign_message)
@@ -3275,9 +3288,7 @@ class P2PManager:
         self._diag_sent = [t for t in self._diag_sent if now - t < 3600]
         if len(self._diag_sent) >= diag_protocol.REPORT_MAX_PER_HOUR:
             return
-        events = await loop.run_in_executor(
-            None, self._diag_db, diag_events.drain_unreported)
-        if not events:
+        if not await loop.run_in_executor(None, self._diag_db, diag_events.pending_count):
             return
         addr = self._master_addr
         if addr is None:
@@ -3286,6 +3297,10 @@ class P2PManager:
             if not peers:
                 return
             addr = peers[0]
+        events = await loop.run_in_executor(
+            None, self._diag_db, diag_events.drain_unreported)
+        if not events:
+            return
         own = get_account_info()["public_key_hex"]
         body = diag_protocol.encrypt_to(get_private_key_raw(), MASTER_PUBKEY_HEX,
                                         diag_protocol.encode_report(events))

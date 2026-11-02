@@ -51,24 +51,42 @@ def _commit(conn) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The switch: "Share diagnostics with support"
+# ---------------------------------------------------------------------------
+
+# A row may be kept for, or leave for, support only while diagnostics are on
+# and have not been switched since the row's moment (`since`): switching off
+# withdraws whatever waits, and switching back on brings none of it back. An
+# absent row is the default, on. The one rule every path below states.
+SWITCH_ALLOWS = """NOT EXISTS (
+    SELECT 1 FROM user_settings s
+     WHERE s.key = 'support.diagnostics_enabled'
+       AND (s.value = 'false'::jsonb OR s.updated_at > {since}))"""
+
+WITHDRAWN = "withdrawn: diagnostics were switched off after it was collected"
+
+
+# ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
 
 def record(conn, kind: str, detail: Optional[dict] = None,
-           ts: Optional[str] = None) -> int:
-    """One event row; the insert trigger NOTIFYs sautium_diag."""
+           ts: Optional[str] = None) -> Optional[int]:
+    """One event row, or none while diagnostics are off: nothing is recorded
+    for support then, so switching back on sends nothing from that time. A
+    spooled event (`ts`) older than the switch's last change is dropped too —
+    whether the switch was on at its moment is not known. The insert trigger
+    NOTIFYs sautium_diag."""
     with conn.cursor() as cur:
-        if ts:
-            cur.execute(
-                "INSERT INTO diag_events (ts, kind, detail) VALUES (%s, %s, %s::jsonb) RETURNING id",
-                (ts, kind, json.dumps(detail or {}, default=str)))
-        else:
-            cur.execute(
-                "INSERT INTO diag_events (kind, detail) VALUES (%s, %s::jsonb) RETURNING id",
-                (kind, json.dumps(detail or {}, default=str)))
-        event_id = cur.fetchone()[0]
+        cur.execute(f"""
+            INSERT INTO diag_events (ts, kind, detail)
+            SELECT coalesce(%(ts)s::timestamptz, now()), %(kind)s, %(detail)s::jsonb
+             WHERE {SWITCH_ALLOWS.format(since="coalesce(%(ts)s::timestamptz, now())")}
+            RETURNING id
+        """, {"ts": ts or None, "kind": kind, "detail": json.dumps(detail or {}, default=str)})
+        row = cur.fetchone()
     _commit(conn)
-    return event_id
+    return row[0] if row else None
 
 
 def record_or_spool(dsn: str, data_dir: Path, kind: str,
@@ -100,11 +118,12 @@ def record_or_spool(dsn: str, data_dir: Path, kind: str,
 def drain_unreported(conn, max_age_days: int = REPORT_MAX_AGE_DAYS,
                      limit: int = REPORT_MAX_EVENTS) -> list:
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT id, kind, ts, detail
               FROM diag_events
              WHERE reported_at IS NULL
                AND ts > now() - make_interval(days => %s)
+               AND {SWITCH_ALLOWS.format(since="diag_events.ts")}
              ORDER BY id
              LIMIT %s
         """, (max_age_days, limit))
@@ -123,21 +142,25 @@ def mark_reported(conn, ids: Iterable[int]) -> None:
 
 def pending_count(conn, max_age_days: int = REPORT_MAX_AGE_DAYS) -> int:
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT count(*) FROM diag_events
              WHERE reported_at IS NULL
                AND ts > now() - make_interval(days => %s)
+               AND {SWITCH_ALLOWS.format(since="diag_events.ts")}
         """, (max_age_days,))
         return int(cur.fetchone()[0])
 
 
 def recent(conn, limit: int) -> list:
     """Newest-first rows for the `events` bundle scope — local-only fields
-    included, this is the bundle the master asked for."""
+    included, this is the bundle the master asked for — since diagnostics
+    were last switched on."""
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT id, ts, kind, detail, reported_at
-              FROM diag_events ORDER BY id DESC LIMIT %s
+              FROM diag_events
+             WHERE {SWITCH_ALLOWS.format(since="diag_events.ts")}
+             ORDER BY id DESC LIMIT %s
         """, (limit,))
         return [{"id": r[0], "ts": r[1].isoformat(), "kind": r[2], "detail": r[3] or {},
                  "reported_at": r[4].isoformat() if r[4] else None}
@@ -273,11 +296,26 @@ def receive_warrant(conn, warrant: dict) -> dict:
             "error": error}
 
 
-def mark_collected(conn, warrant_id: str, size_bytes: int) -> None:
+def mark_collected(conn, warrant_id: str, size_bytes: int, began: datetime) -> None:
+    """`began`: when the collection started — the moment the bundle's content
+    is from, which may_upload measures the switch against."""
     with conn.cursor() as cur:
-        cur.execute("UPDATE diag_warrants SET collected_at = now(), size_bytes = %s WHERE id = %s",
-                    (int(size_bytes), warrant_id))
+        cur.execute("UPDATE diag_warrants SET collected_at = %s, size_bytes = %s WHERE id = %s",
+                    (began, int(size_bytes), warrant_id))
     _commit(conn)
+
+
+def may_upload(conn, warrant_id: str) -> bool:
+    """Whether a collected bundle may still leave: diagnostics on, and not
+    switched since its collection began (SWITCH_ALLOWS)."""
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT {SWITCH_ALLOWS.format(since="w.collected_at")}
+              FROM diag_warrants w
+             WHERE w.id = %s AND w.collected_at IS NOT NULL
+        """, (warrant_id,))
+        row = cur.fetchone()
+    return bool(row and row[0])
 
 
 def mark_uploaded(conn, warrant_id: str) -> None:
@@ -349,7 +387,7 @@ def _selftest(dsn: str) -> None:
         first = receive_warrant(conn, warrant)
         again = receive_warrant(conn, warrant)
         assert first["fresh"] and not again["fresh"], "PK did not decide first receipt"
-        mark_collected(conn, wid, 123)
+        mark_collected(conn, wid, 123, datetime.now(timezone.utc))
         assert wid in resumable_warrants(conn)
         mark_uploaded(conn, wid)
         assert wid not in resumable_warrants(conn)
