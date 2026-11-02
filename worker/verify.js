@@ -22,12 +22,14 @@
  * Masha can't impersonate Alice because she can't sign with Alice's keys.
  *
  * Admission (Durable Object LIMITER, one SQLite instance per route): every
- * KV write and every mail passes its route's counters there first — per
- * key, per mailbox, per address and a ceiling for the route — so a refused
- * request writes nothing, and concurrent requests cannot pass a counter
- * together. A store that fails answers 503, never an error's text; the
- * owner's WRITES_PAUSED stops every write at once. Callers are nodes, never
- * browsers: no CORS grant, and a body is application/json or it is refused.
+ * write a caller can repeat and every mail passes its route's counters there
+ * first — per key, per mailbox, per address and a ceiling for the route — so
+ * a refused request writes nothing, and concurrent requests cannot pass a
+ * counter together. (Outside them: a legacy record upgraded on its first
+ * read, once, and the master's own wake.) A store that fails answers 503,
+ * never an error's text; the owner's WRITES_PAUSED stops every write at
+ * once. Callers are nodes, never browsers: no CORS grant, and a body is
+ * application/json or it is refused.
  *
  * KV key naming: invite codes contain '#', which is a URL fragment marker and
  * breaks wrangler CLI (list silently hides such keys, get truncates at '#').
@@ -94,6 +96,7 @@
  */
 
 const ACCEPT_TTL_SECONDS = 30 * 24 * 3600; // 30 days — must match SENT_INVITES_TTL_DAYS on backend/desktop
+const PICKUP_PAGE = 300;                   // acceptances one pickup takes (KV: 1 000 operations a call)
 const VERIFY_CODE_TTL_MS = 15 * 60 * 1000;
 // Wrong tries that spend a pending verification code: after them even the
 // right code is refused, and only a new code (its own caps) opens another round.
@@ -107,24 +110,26 @@ const FROM_NAME = "Sautium";
 // counters, per 24 h from a counter's first use. Workers Paid has no hard
 // spending cap, so these ceilings are the cap: `all` bounds the route's KV
 // writes, reads or mail on a bad day — a day with every route at its ceiling
-// costs under a dollar in KV and Durable Object charges at 2026 prices
-// (writes $5 a million, reads and lists by the million at $0.50 and $5) — and
-// the per-key, per-mailbox and per-address caps sit far above one person's
-// use, so that one source cannot spend a ceiling everyone shares. `addr` is
-// volumeToken(): the exact IPv4, the IPv6 /48. The mail ceilings must also
-// sit inside the mail provider's plan.
+// costs well under a dollar in KV and Durable Object charges at 2026 prices
+// (writes $5 a million, reads and lists by the million at $0.50 and $5). A
+// ceiling met refuses everyone, so the per-address caps sit far above one
+// person's use and far below the ceiling: filling a route's ceiling takes at
+// least 50 addresses on every route. `addr` is volumeToken(): the exact IPv4,
+// the IPv6 /48. The mail ceilings must also sit inside the mail provider's
+// plan.
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const LIMITS = {
   birth:    { addr: 50, all: 20000 },                          // new identities
-  stamp:    { key: 500, addr: 5000, all: 50000 },              // new timestamp roots
-  lookup:   { key: 2000, addr: 10000, all: 200000 },           // roots a /timestamp asks about (KV reads)
-  code:     { key: 5, to: 5, addr: 20, all: 500 },             // verification mails
+  stamp:    { key: 500, addr: 1000, all: 50000 },              // new timestamp roots
+  lookup:   { key: 2000, addr: 5000, all: 250000 },            // roots a /timestamp asks about (KV reads)
+  code:     { key: 5, to: 5, addr: 10, all: 500 },             // verification mails
   register: { key: 10, addr: 50, all: 5000 },                  // tries; `all` = registrations written
-  invite:   { key: 20, from: 20, to: 3, addr: 50, all: 300 },  // invite mails
-  accept:   { key: 50, addr: 200, all: 10000 },                // stored acceptances
-  notify:   { key: 20, to: 20, all: 300 },                     // acceptance mails
-  pending:  { key: 200, addr: 500, all: 20000 },               // pickups (a KV list each)
+  invite:   { key: 10, from: 10, to: 3, addr: 10, all: 500 },  // invite mails
+  accept:   { key: 20, addr: 20, all: 10000 },                 // stored acceptances
+  notify:   { key: 20, to: 20, addr: 10, all: 500 },           // acceptance mails
+  pending:  { key: 100, addr: 200, all: 20000 },               // pickups (a KV list each)
+  mailbox:  { addr: 30 },                                      // drops for the master (its own caps beside)
 };
 // A route's ceiling, once met, refuses everyone until its window ends; each
 // refusal's Retry-After adds up to this much at random, so the waiting
@@ -184,7 +189,6 @@ const MAIL_PER_SENDER_DAY = 30;
 const MAIL_PER_DAY = 5000;
 const MAIL_CAP = 20000;                  // rows kept; a full mailbox refuses, it never drops accepted mail
 const MAIL_TTL_MS = 30 * 24 * 3600 * 1000;
-const MAIL_IP_PER_HOUR = 60;
 const MAIL_SIG_SKEW_S = 300;
 // Capability directory (Ф16c): reachable volunteers re-register on their
 // existing periodic cycles; an entry older than the TTL is dead. K keeps
@@ -252,13 +256,15 @@ const IP_HASH_VERSION = 3;
 //                × age_ramp(witnessed age) ÷ m(conjunction)
 // spent as a token bucket STAMP_BURST deep, refilled at budget/day, so a
 // re-seal's back-to-back batches pass and a day-old key still gets its first
-// batch. Shadow until armed: the ledger records the verdict and the response
-// carries it as `not_before` advice; what answers 429 today is the
-// per-address brake (BRAKE_STAMP in wrangler.toml — WAF-grade, no KV write,
-// sized for a cohort) and the hard daily caps on new roots (LIMITS.stamp —
-// per key, per address, the route's ceiling), far above a node's pace.
-// Only a key with a certificate issued here is stamped at all. Inputs the
-// Worker can vouch for itself: the mailbox class it verified, the birth it
+// batch. Shadow until armed: the ledger records the verdict of each request
+// that brings a new root and the response carries it as `not_before`
+// advice; what answers 429 today is the per-address brake (BRAKE_STAMP in
+// wrangler.toml — WAF-grade, no KV write, sized for a cohort), the route's
+// brake per network (BRAKE_ROUTE) and the hard daily caps — on the roots a
+// request asks about (LIMITS.lookup) and on new roots (LIMITS.stamp), per
+// key, per address and the route's ceiling — far above a node's pace. Only
+// a key with a certificate issued here is stamped at all. Inputs the Worker
+// can vouch for itself: the mailbox class it verified, the birth it
 // witnessed, the stamps it issued.
 const STAMP_BUDGET_ARMED = false;
 const STAMP_BASE_PER_DAY = 48;
@@ -305,13 +311,13 @@ function writesPaused(env) {
 }
 
 function writes(request) {
-  // Every POST and DELETE, the pickup of acceptances (it deletes them) and a
-  // wake that records the master's address. A legacy record upgraded while
-  // reading is stopped at the store itself (guardStore).
+  // Every POST and DELETE, and the pickup of acceptances (it deletes them).
+  // A legacy record upgraded while reading is stopped at the store itself
+  // (guardStore); the master's wake goes on — it is how the master drains —
+  // and only its address hint waits (handleMailboxWake).
   const url = new URL(request.url);
   return request.method === "POST" || request.method === "DELETE"
-    || url.pathname === "/pending-accepts"
-    || (url.pathname === "/mailbox/wake" && url.searchParams.has("peer_port"));
+    || url.pathname === "/pending-accepts";
 }
 
 class StoreUnavailable extends Error {
@@ -862,6 +868,9 @@ export class BirthLedger {
     if (request.method === "POST" && url.pathname === "/stamp") {
       return Response.json(this.recordStamp(await request.json()));
     }
+    if (request.method === "POST" && url.pathname === "/stamp-score") {
+      return Response.json(this.recordStamp(await request.json(), false));
+    }
     if (request.method === "POST" && url.pathname === "/method") {
       // An identity upgraded to method:email — counted, and marked on its
       // birth row when this ledger saw the birth.
@@ -921,11 +930,12 @@ export class BirthLedger {
     return { m_shadow, ...counts };
   }
 
-  recordStamp({ pubkey, issued_at, method, email_class, n_new, n_roots, addr, sub, asn, now }) {
+  recordStamp({ pubkey, issued_at, method, email_class, n_new, n_roots, addr, sub, asn, now }, commit = true) {
     // The per-identity verdict for one /timestamp request (see the STAMP_*
     // constants). Only signed requests from certified keys reach the ledger
     // now; a row with no pubkey is one recorded before the Worker refused
-    // unsigned requests.
+    // unsigned requests. Without `commit` the verdict is only read: nothing
+    // is charged or recorded (the armed Worker asks it before its caps).
     pubkey = pubkey || ""; addr = addr || ""; sub = sub || "";
     n_new = Number(n_new) || 0; n_roots = Number(n_roots) || 0;
     let verdict = { allowed: true, not_before: null, budget_per_day: null,
@@ -964,15 +974,18 @@ export class BirthLedger {
       // an armed notary would have enforced is visible in not_before.
       if (allowed || !STAMP_BUDGET_ARMED) tokens = Math.max(-STAMP_BURST, tokens - n_new);
       const notBeforeMs = tokens >= 1 ? now : now + (1 - tokens) / refill;
-      this.sql.exec(
-        `INSERT INTO notary_budget (pubkey, tokens, updated) VALUES (?, ?, ?)
-         ON CONFLICT(pubkey) DO UPDATE SET tokens = excluded.tokens, updated = excluded.updated`,
-        pubkey, tokens, now);
+      if (commit) {
+        this.sql.exec(
+          `INSERT INTO notary_budget (pubkey, tokens, updated) VALUES (?, ?, ?)
+           ON CONFLICT(pubkey) DO UPDATE SET tokens = excluded.tokens, updated = excluded.updated`,
+          pubkey, tokens, now);
+      }
       verdict = { allowed, not_before: Math.ceil(notBeforeMs / 1000),
                   budget_per_day: Number(budget.toFixed(2)), m, weight,
                   age_days: Number(ageDays.toFixed(2)),
                   tokens: Number(tokens.toFixed(3)), signed: true };
     }
+    if (!commit) return verdict;
     this.sql.exec(
       `INSERT INTO stamps (pubkey, ts, addr, sub, asn, n_new, n_roots, m, budget, allowed)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1113,6 +1126,11 @@ export class Limiter {
     const body = await request.json();
     if (path === "/take") return Response.json(this.take(body));
     if (path === "/bind") return Response.json(this.bind(body));
+    if (path === "/name") {
+      const row = this.sql.exec("SELECT name FROM names WHERE pubkey = ? AND seen > ?",
+                                body.pubkey, body.now - NAME_RETENTION_MS).toArray()[0];
+      return Response.json({ name: row ? row.name : null });
+    }
     if (path === "/code/put") return Response.json(await this.putCode(body));
     if (path === "/code/check") return Response.json(this.checkCode(body));
     if (path === "/code/drop") {
@@ -1217,18 +1235,23 @@ function daily(route, axis, id = "", amount = 1) {
 }
 
 async function admit(env, counters, bind) {
-  // Take the counters — all of one route, in that route's own Limiter — and
-  // then, when `bind` is given, hold the key to its name: null when admitted,
-  // else the refusal to answer with. The name is checked after the counters,
-  // so the names instance sees admitted requests only.
+  // Take the counters — all of one route, in that route's own Limiter — and,
+  // when `bind` is given, hold the key to its name: null when admitted, else
+  // the refusal to answer with. The name is read before the counters, so a
+  // key under another name spends nobody's counters, and bound after them,
+  // so the names table grows by admitted requests only.
+  const name = bind && await nameToken(env, bind.username);
+  const misnamed = () => json({ error: "this key is registered under another username" }, 403);
+  if (bind) {
+    const held = await limiterCall(env, "names", "/name", { pubkey: bind.pubkey, now: Date.now() });
+    if (held.name && held.name !== name) return misnamed();
+  }
   const route = counters[0].key.slice(0, counters[0].key.indexOf(":"));
   const r = await limiterCall(env, route, "/take", { now: Date.now(), counters });
   if (!r.ok) return throttled("rate limited", r.retry_after);
   if (bind) {
-    const named = await limiterCall(env, "names", "/bind", {
-      pubkey: bind.pubkey, name: await nameToken(env, bind.username), now: Date.now(),
-    });
-    if (!named.ok) return json({ error: "this key is registered under another username" }, 403);
+    const named = await limiterCall(env, "names", "/bind", { pubkey: bind.pubkey, name, now: Date.now() });
+    if (!named.ok) return misnamed();
   }
   return null;
 }
@@ -1358,10 +1381,7 @@ async function handleMailboxPut(request, env) {
   if (!await env.RATE_LIMITS.get(`born:${sender}`, "json")) {
     return json({ error: "sender has no certificate" }, 403);
   }
-  const limited = await admit(env, [{
-    key: `mailbox:addr:${await ipHashUuid(env, clientIp(request))}`,
-    limit: MAIL_IP_PER_HOUR, window: HOUR_MS, amount: 1,
-  }]);
+  const limited = await admit(env, [daily("mailbox", "addr", await volumeToken(env, clientIp(request)))]);
   if (limited) return limited;
   const r = await mailboxCall(env, "/put", {
     uuid: message_uuid, sender, encrypted, ts: timestamp, now: Date.now(),
@@ -1430,7 +1450,7 @@ async function handleMailboxWake(request, url, env) {
   // gate): the signature is the authority, the upgrade only carries the
   // wake stream.
   const port = parseInt(peerPort);
-  if (Number.isInteger(port) && port > 0 && port < 65536) {
+  if (Number.isInteger(port) && port > 0 && port < 65536 && !writesPaused(env)) {
     const sigNonce = `wakesig:${await sha256Hex((url.searchParams.get("signature") || "").toLowerCase())}`;
     if (!await env.RATE_LIMITS.get(sigNonce)) {
       await env.RATE_LIMITS.put(sigNonce, "1", { expirationTtl: 2 * MAIL_SIG_SKEW_S });
@@ -1792,6 +1812,9 @@ async function handleTimestamp(request, env) {
   if (roots.some((r) => !/^[0-9a-f]{64}$/.test(r))) {
     return json({ error: "invalid root" }, 400);
   }
+  if (new Set(roots).size !== roots.length) {
+    return json({ error: "duplicate root" }, 400);
+  }
 
   const ip = clientIp(request);
   if (!await brake(env.BRAKE_STAMP, `ts:${addrKey(ip)}`)) {
@@ -1838,33 +1861,30 @@ async function handleTimestamp(request, env) {
   const resigned = records.filter((r) => r && (r.v !== TIMESTAMP_VERSION
                                                || r.ipv !== IP_HASH_VERSION)).length;
   const ipHash = await ipHashUuid(env, ip);
-  let verdict = null;
-  if (fresh) {
-    const cf = request.cf || {};
-    verdict = await ledgerCall(env, "/stamp", {
-      pubkey,
-      issued_at: Date.parse(born.issued_at),
-      method: born.method || "",
-      email_class: born.email_class || "",
-      n_new: fresh,
-      n_roots: roots.length,
-      addr: ipHash,
-      sub: await subnetToken(env, ip),
-      asn: Number(cf.asn) || 0,
-      now: Date.now(),
-    });
-    if (STAMP_BUDGET_ARMED) {
-      // Armed, the budget is a refusal, judged before the daily caps are
-      // spent: no verdict is no stamp.
-      if (!verdict) {
-        return json({ error: "notary budget unavailable" }, 503,
-                    { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
-      }
-      if (verdict.allowed === false) {
-        const wait = Math.max(1, Math.ceil(verdict.not_before - Date.now() / 1000));
-        return throttled("notary budget spent for this identity",
-                         wait, verdict.not_before);
-      }
+  const cf = request.cf || {};
+  const stampFacts = {
+    pubkey,
+    issued_at: Date.parse(born.issued_at),
+    method: born.method || "",
+    email_class: born.email_class || "",
+    n_new: fresh,
+    n_roots: roots.length,
+    addr: ipHash,
+    sub: await subnetToken(env, ip),
+    asn: Number(cf.asn) || 0,
+    now: Date.now(),
+  };
+  if (fresh && STAMP_BUDGET_ARMED) {
+    // Armed, the budget is a refusal: read before the daily caps are spent,
+    // charged only after them. No verdict is no stamp.
+    const score = await ledgerCall(env, "/stamp-score", stampFacts);
+    if (!score) {
+      return json({ error: "notary budget unavailable" }, 503,
+                  { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
+    }
+    if (score.allowed === false) {
+      const wait = Math.max(1, Math.ceil(score.not_before - Date.now() / 1000));
+      return throttled("notary budget spent for this identity", wait, score.not_before);
     }
   }
   const counters = fresh ? [daily("stamp", "key", pubkey, fresh),
@@ -1874,6 +1894,9 @@ async function handleTimestamp(request, env) {
     const refusal = await admit(env, counters);
     if (refusal) return refusal;
   }
+  // The ledger records — and in shadow charges — only a request that will
+  // be stamped.
+  const verdict = fresh ? await ledgerCall(env, "/stamp", stampFacts) : null;
 
   // Idempotent per root, but re-sign any record still in an older format so a
   // re-submitted root upgrades. The date is the FIRST-issuance moment —
@@ -2255,6 +2278,7 @@ async function handleAcceptInvite(request, env) {
     const limited = await admit(env, [
       daily("notify", "key", caller.pubkey),
       daily("notify", "to", await emailToken(env, normalizeEmail(sender.email))),
+      daily("notify", "addr", await volumeToken(env, clientIp(request))),
       daily("notify", "all"),
     ]);
     if (!limited) {
@@ -2293,8 +2317,11 @@ async function handlePendingAccepts(request, url, env) {
   ], caller.bind);
   if (refusal) return refusal;
 
+  // A page at a time: KV allows a thousand operations per invocation, and
+  // each acceptance costs a get and a delete; the rest wait for the next
+  // pickup, untouched.
   const prefix = `accepted:${kvKey(inviteCode)}:`;
-  const listed = await env.RATE_LIMITS.list({ prefix });
+  const listed = await env.RATE_LIMITS.list({ prefix, limit: PICKUP_PAGE });
 
   const accepts = [];
   for (const key of listed.keys) {

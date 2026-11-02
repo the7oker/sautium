@@ -71,8 +71,9 @@ name = "BRAKE_BIRTH"
 namespace_id = "1002"
 simple = { limit = 10, period = 60 }
 
-# The per-minute brake of every other route, each in a bucket of its own
-# (the route name is in the key), in front of the limiter object.
+# The per-minute brake of every route (births and stamps beside their own),
+# each in a bucket of its own per route and network (the exact IPv4, the
+# IPv6 /48), in front of the limiter instances.
 [[ratelimits]]
 name = "BRAKE_ROUTE"
 namespace_id = "1003"

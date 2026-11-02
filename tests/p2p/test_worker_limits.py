@@ -67,6 +67,10 @@ def test_a_name_unused_for_a_year_is_forgotten():
     assert r["otherNameAfterAYear"]["status"] == 200
 
 
+def test_a_key_under_another_name_spends_nobodys_counters():
+    assert _run("names")["countersUntouchedByName"] is True
+
+
 def test_a_recipient_is_one_plain_mailbox_counted_however_spelled():
     r = _run("mail")
     assert r["listSyntax"]["status"] == 400
@@ -76,8 +80,8 @@ def test_a_recipient_is_one_plain_mailbox_counted_however_spelled():
 
 def test_invites_are_capped_per_key_per_sender_mailbox_and_in_all():
     r = _run("mail")
-    assert r["perKey"] == [200] * 20 + [429]
-    assert r["perMailbox"] == [200] * 20 + [429]          # two keys, one verified mailbox
+    assert r["perKey"] == [200] * 10 + [429]
+    assert r["perMailbox"] == [200] * 10 + [429]          # two keys, one verified mailbox
     assert r["ceiling"] == [200, 429]
 
 
@@ -155,6 +159,10 @@ def test_acceptances_and_their_mail_and_pickups_are_capped_before_any_write():
     assert r["pickupAtCap"]["status"] == 429 and r["writesByPickupRefusal"] == 0
 
 
+def test_a_pickup_takes_a_page_and_leaves_the_rest_for_the_next():
+    assert _run("accepts")["pages"] == [300, 100]
+
+
 # --- timestamps --------------------------------------------------------------
 
 def test_only_a_key_with_a_certificate_writes_a_timestamp():
@@ -168,6 +176,8 @@ def test_only_a_key_with_a_certificate_writes_a_timestamp():
 def test_new_roots_are_capped_per_key_per_address_and_in_all():
     r = _run("stamps")
     assert r["keyCapTwo"]["status"] == 429 and r["writesByRefusal"] == 0
+    assert r["ledgerUntouchedByRefusal"] is True           # neither recorded nor charged
+    assert r["duplicateRoots"]["status"] == 400
     assert r["keyCapOne"]["status"] == 200
     assert r["keyCapFull"]["status"] == 429
     assert r["knownRootAtCap"]["status"] == 200            # a known root costs nothing
@@ -227,6 +237,9 @@ def test_the_owners_brake_stops_every_write_and_no_read():
     assert r["read"]["status"] == 200 and r["stats"]["status"] == 200
     assert r["writesWhilePaused"] == 0 and r["limiterUntouched"] is True
     assert r["zeroIsOff"] == 200
+    # the master still wakes and drains its mailbox; only its address hint waits
+    assert r["masterWake"]["status"] == 426 and r["hintUnchanged"] is True
+    assert r["masterDrain"]["status"] == 200
 
 
 def test_one_routes_limiter_failing_leaves_the_others_working():

@@ -131,8 +131,9 @@ const kv = {
     kvState.writes += 1;
     store.delete(k);
   },
-  async list({ prefix }) {
-    return { keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })) };
+  async list({ prefix, limit = 1000 }) {
+    const all = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+    return { keys: all.slice(0, limit).map((name) => ({ name })), list_complete: all.length <= limit };
   },
 };
 
@@ -560,7 +561,7 @@ async function mail() {
   await issue(many);
   await verifyEmail(many, "many", "many@example.org", { ip: "198.51.100.5" });
   out.perKey = [];
-  for (let i = 0; i < 21; i++) {
+  for (let i = 0; i < 11; i++) {
     out.perKey.push((await invite(many, "many", `p${i}@example.net`, { ip: "198.51.100.5" })).status);
   }
 
@@ -570,8 +571,8 @@ async function mail() {
   await verifyEmail(k1, "kim", "shared@example.org", { ip: "198.51.100.6" });
   await verifyEmail(k2, "kai", "shared@example.org", { ip: "198.51.100.7" });
   out.perMailbox = [];
-  for (let i = 0; i < 12; i++) out.perMailbox.push((await invite(k1, "kim", `m${i}@example.net`, { ip: "198.51.100.6" })).status);
-  for (let i = 12; i < 21; i++) out.perMailbox.push((await invite(k2, "kai", `m${i}@example.net`, { ip: "198.51.100.7" })).status);
+  for (let i = 0; i < 6; i++) out.perMailbox.push((await invite(k1, "kim", `m${i}@example.net`, { ip: "198.51.100.6" })).status);
+  for (let i = 6; i < 11; i++) out.perMailbox.push((await invite(k2, "kai", `m${i}@example.net`, { ip: "198.51.100.7" })).status);
 
   // concurrent requests cannot pass a counter together: twelve invites to one
   // mailbox at once, three may go
@@ -585,7 +586,7 @@ async function mail() {
   out.concurrentMails = mails.length - sent;
 
   // the route's ceiling, and a Retry-After that spreads the waiting nodes
-  preset("invite:all:", 299);
+  preset("invite:all:", 499);
   out.ceiling = [(await invite(alice, "alice", "c1@example.net", { ip: "198.51.100.1" })).status,
                  (await invite(alice, "alice", "c2@example.net", { ip: "198.51.100.1" })).status];
   out.ceilingRetries = [];
@@ -684,7 +685,7 @@ async function accepts() {
   out.pickupAgain = await pending(masha, "masha", { ip: "198.51.100.50" });
   out.pickupUnderAnotherName = await pending(masha, "mallory", { ip: "198.51.100.50" });
   // the acceptance's caps come before its write; the mail's are its own
-  preset(`accept:key:${sasha.pubHex}`, 50);
+  preset(`accept:key:${sasha.pubHex}`, 20);
   let writes = kvState.writes;
   out.acceptAtKeyCap = await accept(sasha, "sasha", typed, { ip: "198.51.100.51" });
   out.writesByAcceptRefusal = kvState.writes - writes;
@@ -694,7 +695,16 @@ async function accepts() {
   const sent2 = mails.length;
   out.acceptAtNotifyCap = await accept(pasha, "pasha", typed, { ip: "198.51.100.52" });
   out.mailsAtNotifyCap = mails.length - sent2;
-  preset(`pending:key:${masha.pubHex}`, 200);
+  // a pickup takes a page at a time (KV: a thousand operations a call)
+  const mashaKv = (await inviteOf(masha, "masha")).replace("#", ":");
+  await pending(masha, "masha", { ip: "198.51.100.50" });            // what the steps above left
+  for (let i = 0; i < 400; i++) {
+    store.set(`accepted:${mashaKv}:x${String(i).padStart(3, "0")}:AAAA-BBBB-CCCC`,
+              JSON.stringify({ invite_code: `x${i}#AAAA-BBBB-CCCC`, accepted_at: "2026-11-02T00:00:00Z" }));
+  }
+  out.pages = [(await pending(masha, "masha", { ip: "198.51.100.50" })).body.accepts.length,
+               (await pending(masha, "masha", { ip: "198.51.100.50" })).body.accepts.length];
+  preset(`pending:key:${masha.pubHex}`, 100);
   writes = kvState.writes;
   out.pickupAtCap = await pending(masha, "masha", { ip: "198.51.100.50" });
   out.writesByPickupRefusal = kvState.writes - writes;
@@ -717,8 +727,14 @@ async function stamps() {
   // the key's daily cap on NEW roots; a known root stays free
   preset(`stamp:key:${k.pubHex}`, 499);
   const writes = kvState.writes;
+  const ledgerOf = (key) => JSON.stringify([
+    db.prepare("SELECT count(*) AS n FROM stamps WHERE pubkey = ?").get(key.pubHex).n,
+    db.prepare("SELECT tokens FROM notary_budget WHERE pubkey = ?").get(key.pubHex)?.tokens ?? null]);
+  const ledgerBefore = ledgerOf(k);
   out.keyCapTwo = await stamp(k, [root(4), root(5)]);
   out.writesByRefusal = kvState.writes - writes;
+  out.ledgerUntouchedByRefusal = ledgerOf(k) === ledgerBefore;
+  out.duplicateRoots = await stamp(k, [root(7), root(7)]);
   out.keyCapOne = await stamp(k, [root(4)]);
   out.keyCapFull = await stamp(k, [root(6)]);
   out.knownRootAtCap = await stamp(k, [root(3)]);
@@ -728,7 +744,7 @@ async function stamps() {
   await stamp(k2, [root(10)], { ip: "198.51.100.60" });
   const addrKey = counterKeys("stamp:addr:").find((key) => key.startsWith("stamp:addr:4."));
   out.addrKeyShape = addrKey ? addrKey.slice(0, 13) : null;
-  if (addrKey) preset(addrKey, 5000);
+  if (addrKey) preset(addrKey, 1000);
   const k3 = await newKey();
   await issue(k3, { ip: "198.51.100.61" });
   out.addrCapFull = await stamp(k3, [root(11)], { ip: "198.51.100.60" });
@@ -915,6 +931,11 @@ async function pausedWrites() {
   out.writesWhilePaused = kvState.writes - writes;
   out.limiterUntouched = counted === JSON.stringify(counterKeys("").map((key) => [key, shardOf(key).db
     .prepare("SELECT n FROM counters WHERE key = ?").get(key).n]));
+  const t = String(Math.floor(Date.now() / 1000));
+  const hintBefore = store.get("master:hint") ?? null;
+  out.masterWake = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${t}&peer_port=8801&signature=${await sign(master, `mailbox-wake:v1:${t}:8801`)}`, undefined, { useEnv: paused, ip: "198.51.100.77" });
+  out.hintUnchanged = (store.get("master:hint") ?? null) === hintBefore;
+  out.masterDrain = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${t}&after=0&signature=${await sign(master, `mailbox-drain:v1:${t}:0`)}`, undefined, { useEnv: paused });
   out.zeroIsOff = (await issue(await newKey(), { useEnv: { ...env, WRITES_PAUSED: "0" } })).status;
   return out;
 }
@@ -927,7 +948,11 @@ async function nameRetention() {
   const out = {};
   const k = await newKey();
   await sendCode(k, "nora", "nora@example.org", { ip: "198.51.100.80" });
+  const spent = () => JSON.stringify(counterKeys("code:").map((key) => [key, shardOf(key).db
+    .prepare("SELECT n FROM counters WHERE key = ?").get(key).n]));
+  const before = spent();
   out.otherNameAtOnce = await sendCode(k, "nina", "nina@example.org", { ip: "198.51.100.80" });
+  out.countersUntouchedByName = spent() === before;
   if (limiter) {
     limiterShard("names").db.prepare("UPDATE names SET seen = ? WHERE pubkey = ?")
       .run(Date.now() - 366 * 86400e3, k.pubHex);
