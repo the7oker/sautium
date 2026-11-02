@@ -212,8 +212,8 @@ def test_the_delta_brings_a_node_at_043_to_the_table(scratch_dsn):
             cur.execute("""SELECT conname FROM pg_constraint
                             WHERE conrelid = 'p2p_witness'::regclass AND contype = 'c' ORDER BY 1""")
             assert [r[0] for r in cur.fetchall()] == [
-                "p2p_witness_signed_whole", "p2p_witness_stamp_whole", "p2p_witness_stamped_signed",
-                "p2p_witness_via_carried"]
+                "p2p_witness_hex", "p2p_witness_signed_whole", "p2p_witness_stamp_whole",
+                "p2p_witness_stamped_signed", "p2p_witness_via_carried"]
         assert db_init.apply_migrations(conn) == 0
     finally:
         conn.close()
@@ -252,10 +252,11 @@ def test_a_carried_sighting_names_its_deliverer(recorder, conn):
     subject, via = _key_hex(), _key_hex()
     assert recorder.record(certificate(subject), "carried", subject, via.upper())
     assert [(r[0], r[2]) for r in _rows(conn, subject)] == [("carried", via)]
-    with conn.cursor() as cur, pytest.raises(psycopg2.errors.CheckViolation):
+    with conn.cursor() as cur, pytest.raises(psycopg2.errors.CheckViolation, match="via_carried"):
         cur.execute("""INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v, issued_at,
                                                 method, difficulty, params_version, channel)
-                       VALUES (%s, 'x', 'y', %s, 4, now(), 'pow', 32, 1, 'carried')""", (subject, ISSUER))
+                       VALUES (%s, 'x', %s, %s, 4, now(), 'pow', 32, 1, 'carried')""",
+                    (subject, "ab" * 64, ISSUER))
 
 
 def test_a_probe_does_not_suppress_the_introduction_of_the_same_certificate(recorder, conn):
@@ -313,6 +314,8 @@ def test_a_re_sign_of_a_known_subject_does_not_count(recorder, conn, monkeypatch
 
 
 def test_a_sighting_past_the_ceiling_is_recorded_once_the_day_turns(recorder, conn, monkeypatch, caplog):
+    first = _key_hex()
+    assert recorder.record(certificate(first), "introduced", first)
     monkeypatch.setattr(witness, "CEILINGS", {"introduced": _counting_today(conn, "introduced")})
     subject = _key_hex()
     assert recorder.record(certificate(subject), "introduced", subject) is False
@@ -322,3 +325,40 @@ def test_a_sighting_past_the_ceiling_is_recorded_once_the_day_turns(recorder, co
         assert recorder.record(certificate(subject), "introduced", subject)
     assert [r[0] for r in _rows(conn, subject)] == ["introduced"]
     assert any("1 introduced sighting(s) past the ceiling on" in r.getMessage() for r in caplog.records)
+
+
+def test_one_certificate_is_one_row_however_its_signature_is_spelled(recorder, pool, conn):
+    subject = _key_hex()
+    cert = certificate(subject)
+    assert birth_cert.verify_certificate(dict(cert, sig=cert["sig"].upper()))      # the parser takes these…
+    spaced = " ".join(cert["sig"][i:i + 2] for i in range(0, 128, 2))
+    assert birth_cert.verify_certificate(dict(cert, sig=spaced))
+    for channel in witness.CHANNELS:
+        via = _key_hex() if channel == "carried" else None
+        assert recorder.record(cert, channel, subject, via)
+        fresh = witness.Recorder(pool, own_keys=frozenset)                         # no memo to hide behind
+        for sig in (cert["sig"].upper(), spaced, " " + cert["sig"], cert["sig"] + "\n"):
+            assert fresh.record(dict(cert, sig=sig), channel, subject, via) is False  # …the record does not
+    assert sorted(r[0] for r in _rows(conn, subject)) == sorted(witness.CHANNELS)
+    with conn.cursor() as cur, pytest.raises(psycopg2.errors.CheckViolation, match="p2p_witness_hex"):
+        cur.execute("""INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v, issued_at,
+                                                method, difficulty, params_version, channel)
+                       VALUES (%s, 'x', %s, %s, 4, now(), 'pow', 32, 1, 'probe')""",
+                    (subject, cert["sig"].upper(), ISSUER))
+
+
+def test_a_second_certificate_under_a_new_format_counts(recorder, conn, monkeypatch):
+    """The re-sign exemption is for a known subject's certificate under a
+    format newer than ANY recorded for it: a bump re-presents every subject
+    once. A second certificate under that format (an upgrade, a new email)
+    is an ordinary sighting and meets the ceiling."""
+    subject = _key_hex()
+    assert recorder.record(certificate(subject), "probe", subject)                  # known at v4
+    monkeypatch.setattr(birth_cert, "CERT_VERSION", 5)
+    monkeypatch.setattr(witness, "CEILINGS", {"probe": _counting_today(conn, "probe")})
+    stranger = _key_hex()
+    assert recorder.record(certificate(stranger), "probe", stranger) is False       # the day is full
+    assert recorder.record(certificate(subject), "probe", subject)                  # its re-sign: exempt
+    upgraded = certificate(subject, method="email", email_token="ab" * 32, email_class="major")
+    assert recorder.record(upgraded, "probe", subject) is False                     # a v5 like the last
+    assert len(_rows(conn, subject)) == 2

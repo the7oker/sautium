@@ -40,6 +40,7 @@ Shared by both runtimes. The launcher records through its sync server's pool
 """
 
 import logging
+import re
 import threading
 from collections import OrderedDict
 from datetime import date, datetime, time, timezone
@@ -56,9 +57,16 @@ CHANNELS = ("introduced", "handshake", "probe", "carried")
 # New rows a channel may add per UTC day — a flood bound, not a quota:
 # certified keys are nearly free to an attacker, so a cheap channel must not
 # grow the table without bound. A probe run dials ~120 candidates, 48 runs a
-# day. `handshake` has no ceiling of its own: accepted handshakes are capped
+# day. `handshake` has no ceiling of its own: its rows are the certificates of
+# friends, and a stranger becomes one only through a token accept, capped
 # upstream (TOKEN_FRIENDS_PER_HOUR). Placeholders until T1's real numbers.
 CEILINGS = {"introduced": 5000, "probe": 6000, "carried": 5000}
+
+# A certificate's signature as the authority writes it. The one field its
+# signature cannot cover: `bytes.fromhex` also takes upper case and spaces
+# between the pairs, and every such spelling of one certificate would be a
+# row of its own.
+_SIG_RE = re.compile(r"[0-9a-f]{128}")
 
 # Recorded (subject, cert_sig, channel) kept in memory, so a known peer's
 # next probe or introduction costs no database touch (~1 MB).
@@ -123,16 +131,18 @@ _PROBE_SQL = """
            EXISTS (SELECT 1 FROM p2p_witness
                     WHERE subject = %(subject)s AND cert_sig = %(cert_sig)s
                       AND channel = %(channel)s),
-           EXISTS (SELECT 1 FROM p2p_witness
-                    WHERE subject = %(subject)s AND cert_v < %(cert_v)s)"""
+           (SELECT max(cert_v) FROM p2p_witness WHERE subject = %(subject)s)"""
 
-# A day's rows of a channel that count: a re-sign row (its subject recorded
-# under an older certificate format) does not.
+# A day's rows of a channel that count. A re-sign row does not: one whose
+# subject was on record before it, under older certificate formats only — a
+# format bump re-presents every known subject once, and that wave is bounded
+# by the subjects already known.
 _TODAY_SQL = """
     SELECT count(*) FROM p2p_witness w
      WHERE w.channel = %(channel)s AND w.seen_at >= %(since)s
-       AND NOT EXISTS (SELECT 1 FROM p2p_witness o
-                        WHERE o.subject = w.subject AND o.cert_v < w.cert_v)"""
+       AND (NOT EXISTS (SELECT 1 FROM p2p_witness o WHERE o.subject = w.subject AND o.id < w.id)
+            OR EXISTS (SELECT 1 FROM p2p_witness o
+                        WHERE o.subject = w.subject AND o.id < w.id AND o.cert_v >= w.cert_v))"""
 
 _INSERT_SQL = """
     INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v, issued_at,
@@ -155,8 +165,11 @@ class Recorder:
         self._own_keys = own_keys
         self._lock = threading.Lock()
         self._memo: "OrderedDict[tuple, None]" = OrderedDict()
-        # channel -> [UTC day its ceiling was met on, sightings past it since]
-        self._full: dict = {}
+        # channel -> [UTC day, its rows that count, sightings turned away]:
+        # counted once a day from the table, then by this process's inserts —
+        # another process's (the launcher's backend probes too) are seen the
+        # next day, so the bound is soft by what they add.
+        self._days: dict = {}
 
     def record(self, cert: dict, channel: str, subject: str, via: Optional[str] = None) -> bool:
         """Put one sighting on record. `subject` is the key the channel
@@ -168,7 +181,12 @@ class Recorder:
         refusal is never remembered, so a sighting past a ceiling counts on a
         later day and a lifted ban is seen at once."""
         subject = subject.lower()
-        key = (subject, str(cert.get("sig") or "").lower(), channel)
+        sig = cert.get("sig")
+        if not isinstance(sig, str) or not _SIG_RE.fullmatch(sig):
+            logger.debug("p2p_witness: %s certificate of %s… is not as the authority wrote it — "
+                         "not recorded", channel, subject[:12])
+            return False
+        key = (subject, sig, channel)
         today = _utc_today()
         with self._lock:
             if key in self._memo:
@@ -183,7 +201,7 @@ class Recorder:
             return False
         row = {
             "subject": subject, "cert_payload": canonical_payload(cert).decode("utf-8"),
-            "cert_sig": key[1], "issuer": cert["issuer"], "cert_v": cert["v"],
+            "cert_sig": sig, "issuer": cert["issuer"], "cert_v": cert["v"],
             "issued_at": cert["issued_at"], "method": cert["method"],
             "difficulty": cert["difficulty"], "params_version": cert["params_version"],
             "email_token": cert.get("email_token") or None,
@@ -194,18 +212,23 @@ class Recorder:
         }
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(_PROBE_SQL, row)
-            banned, known, resign = cur.fetchone()
+            banned, known, newest_v = cur.fetchone()
             if banned:
                 return False
             if not known:
-                if not resign and self._over_ceiling(cur, channel, today):
+                # A re-sign — a known subject's certificate under a format
+                # newer than any recorded for it — does not count.
+                counts = newest_v is None or newest_v >= cert["v"]
+                if counts and self._over_ceiling(cur, channel, today):
                     return False
-                # The count and the insert are two statements: sightings that
+                # The check and the insert are two statements: sightings that
                 # land at once can pass the ceiling by as many as land — a
                 # flood bound, not an exact quota.
                 cur.execute(_INSERT_SQL, row)
                 if cur.rowcount:
                     logger.debug("p2p_witness: %s sighting of %s… recorded", channel, subject[:12])
+                    if counts:
+                        self._count(channel, today)
         with self._lock:
             self._memo[key] = None
             if len(self._memo) > MEMO_SIZE:
@@ -226,26 +249,36 @@ class Recorder:
         if ceiling is None:
             return False
         with self._lock:
-            day = self._full.get(channel)
-            if day is not None and day[0] == today:
-                day[1] += 1
-                return True
-        cur.execute(_TODAY_SQL, {"channel": channel,
-                                 "since": datetime.combine(today, time(0), tzinfo=timezone.utc)})
-        if cur.fetchone()[0] < ceiling:
-            return False
+            day = self._days.get(channel)
+        if day is None:
+            cur.execute(_TODAY_SQL, {"channel": channel,
+                                     "since": datetime.combine(today, time(0), tzinfo=timezone.utc)})
+            counted = cur.fetchone()[0]
+            with self._lock:
+                day = self._days.setdefault(channel, [today, counted, 0])
         with self._lock:
-            self._full[channel] = [today, 1]
-        logger.warning("p2p_witness: the %s ceiling (%d new rows a day) is met — further %s "
-                       "sightings today are not recorded; a later day records them",
-                       channel, ceiling, channel)
+            if day[1] < ceiling:
+                return False
+            day[2] += 1
+            first = day[2] == 1
+        if first:
+            logger.warning("p2p_witness: the %s ceiling (%d new rows a day) is met — further %s "
+                           "sightings today are not recorded; a later day records them",
+                           channel, ceiling, channel)
         return True
 
+    def _count(self, channel: str, today) -> None:
+        with self._lock:
+            day = self._days.get(channel)
+            if day is not None and day[0] == today:
+                day[1] += 1
+
     def _close_days(self, today) -> None:
-        """Called under the lock: a ceiling day that is over says how many
-        sightings it turned away."""
-        for channel, (day, skipped) in list(self._full.items()):
+        """Called under the lock: a day that is over is counted afresh, and
+        one that met its ceiling says how many sightings it turned away."""
+        for channel, (day, _counted, skipped) in list(self._days.items()):
             if day != today:
-                del self._full[channel]
-                logger.warning("p2p_witness: %d %s sighting(s) past the ceiling on %s were "
-                               "not recorded", skipped, channel, day.isoformat())
+                del self._days[channel]
+                if skipped:
+                    logger.warning("p2p_witness: %d %s sighting(s) past the ceiling on %s were "
+                                   "not recorded", skipped, channel, day.isoformat())

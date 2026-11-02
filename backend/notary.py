@@ -200,7 +200,7 @@ class _Notary:
                 break
         if total:
             logger.info("notary: signed %d record(s) on wake (%s)",
-                        total, ", ".join(reasons))
+                        total, ", ".join(dict.fromkeys(reasons)))
         self._set(last_sign_at=_now_iso(), last_signed=total)
 
     def _stamp_if_due(self) -> None:
@@ -292,7 +292,14 @@ def drain_witness() -> int:
     (device_auth.rotate_identity), so a sighting stays signed by the key that
     saw it and no seen_at falls before its signer's issuance. Safe beside the
     notary's own signing (a row is signed once, by whichever comes first);
-    the stamps follow at the notary's next pass."""
+    the stamps follow at the notary's next pass.
+
+    What it cannot cover: a sighting recorded after the new key is in force
+    by a peer surface still bound to the old one (the launcher's until its
+    P2P layer restarts on the rotation's NOTIFY, a Docker node's until its
+    backend restarts) is signed by the new key, its seen_at before that key's
+    certificate — a verifier takes it with the rotation notice that links
+    the two keys."""
     import sign_audio
     conn = sign_audio.connect()
     try:

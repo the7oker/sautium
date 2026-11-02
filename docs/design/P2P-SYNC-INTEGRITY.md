@@ -852,8 +852,12 @@ certificate, channel), the first sighting of each.
   (`sign_audio.py --verify` checks them against their own copy).
   Growth is bounded where rows come in — per channel and UTC day, 5 000
   `introduced`, 6 000 `probe`, 5 000 `carried` (a re-sign of a known
-  subject under a newer certificate format does not count; a `handshake`
-  is bounded by accepted handshakes) — and never by deletion.
+  subject under a certificate format newer than any recorded for it does
+  not count; a `handshake` row is a friend's certificate, and a stranger
+  becomes a friend only through a token accept, capped per hour) — and
+  never by deletion. One spelling per certificate: its signature as the
+  authority writes it (lower-case hex), the only field the authority's
+  signature cannot cover.
 - **Local.** Shared, the table would be the node's contact graph with
   times. It is life data — backed up, merged insert-only between one
   owner's machines — and in no sync payload, share export, seed or support

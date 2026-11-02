@@ -14,6 +14,7 @@ Skipped without a cluster."""
 import asyncio
 import datetime as dt
 import json
+import os
 import ssl
 import threading
 import time
@@ -294,20 +295,76 @@ def _handshake(guest: Node, host: Node, *, token=None, grant=None, cert=True) ->
     return body
 
 
+def _sigs(pool, subject):
+    with pool() as conn, conn.cursor() as cur:
+        cur.execute("SELECT cert_sig FROM p2p_witness WHERE subject = %s AND channel = 'handshake' "
+                    "ORDER BY id", (subject,))
+        return [r[0] for r in cur.fetchall()]
+
+
 def test_an_accepted_token_handshake_is_a_sighting(server, pool):
     s, srv, served = server
     guest = Node("guest")
     tid = _token(pool)
     status, reply = _post(served.url, _handshake(guest, s, token=tid))
     assert (status, reply["accepted"]) == (200, True)
-    assert _rows(pool, guest.pub) == ["handshake"]
-    # The idempotent re-accept and the grant recovery are accepted handshakes
-    # too; the certificate is already on record.
+    assert _sigs(pool, guest.pub) == [guest.cert["sig"]]
+    # The re-accept of a friend, any token id, no use burned: the same
+    # certificate however spelled adds nothing…
+    spaced = " ".join(guest.cert["sig"][i:i + 2] for i in range(0, 128, 2))
+    for sig in (guest.cert["sig"].upper(), spaced):
+        body = _handshake(guest, s, token=str(uuid.uuid4()))
+        body["birth_cert"] = dict(guest.cert, sig=sig)
+        assert _post(served.url, body)[0] == 200
+    assert _sigs(pool, guest.pub) == [guest.cert["sig"]]
+    # …while the friend's new certificate (its email upgrade) is a sighting,
+    # and so is a grant recovery's.
+    guest.cert = certificate(guest.pub, method="email", email_token="ab" * 32, email_class="major")
     assert _post(served.url, _handshake(guest, s, token=tid))[0] == 200
     with pool() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM friends WHERE public_key_hex = %s", (guest.pub,))
+    guest.cert = certificate(guest.pub, method="email", email_token="cd" * 32, email_class="other")
     assert _post(served.url, _handshake(guest, s, grant=reply["grant"]))[0] == 200
-    assert _rows(pool, guest.pub) == ["handshake"]
+    assert len(_sigs(pool, guest.pub)) == 3
+
+
+def test_the_managers_probe_sink_records_through_the_sync_server(server, pool, monkeypatch, tmp_path):
+    from desktop.p2p.p2p_manager import P2PManager
+    s, srv, served = server
+    c = Node("client")
+    d = node_identity._identity_dir()
+    (d / "node_info.json").write_text(json.dumps({"node_id": c.pub, "public_key_hex": c.pub,
+                                                  "username": c.name, "invite_code": c.invite}))
+    mgr = P2PManager("unused", {})
+    assert mgr._peer_identity().witness is not None
+    mgr._sync_server = srv
+    other = Node("other")
+    mgr._peer_identity().witness(other.cert, other.pub)
+    assert _rows(pool, other.pub) == ["probe"]
+    mgr._sync_server = None
+    mgr._peer_identity().witness(c.cert, c.pub)              # no sync server: nothing to record into
+    assert _rows(pool, c.pub) == []
+
+
+def test_the_served_certificate_follows_its_file(monkeypatch):
+    me = Node("me")
+    d = node_identity._identity_dir()
+    (d / "node_info.json").write_text(json.dumps({"node_id": me.pub, "public_key_hex": me.pub,
+                                                  "username": me.name}))
+    monkeypatch.setattr(birth_cert, "_served", (None, None))
+    path = d / "birth_certificate.json"
+    assert birth_cert.served_certificate() is None
+    path.write_text(json.dumps(me.cert))
+    assert birth_cert.served_certificate() == me.cert
+    upgraded = certificate(me.pub, method="email", email_token="ab" * 32, email_class="major")
+    path.write_text(json.dumps(upgraded))
+    os.utime(path, ns=(time.time_ns(), time.time_ns() + 10 ** 9))
+    assert birth_cert.served_certificate() == upgraded
+    path.write_text(json.dumps(certificate(Node("other").pub)))          # another key's: not this node's
+    os.utime(path, ns=(time.time_ns(), time.time_ns() + 2 * 10 ** 9))
+    assert birth_cert.served_certificate() is None
+    path.unlink()
+    assert birth_cert.served_certificate() is None
 
 
 def test_a_refused_or_unsigned_handshake_is_no_sighting(server, pool):

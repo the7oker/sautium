@@ -359,10 +359,14 @@ def _signer():
 def _sign_witness(conn, key, author: str, dry_run=False,
                   max_records=MAX_RECORDS_PER_BATCH) -> int:
     cur = conn.cursor()
+    # Only the statement versions this code can make: a row of a newer one
+    # (merged from a newer node) waits for code that knows it, and never
+    # stops the rest from being signed.
     cur.execute("""SELECT id, witness_v, subject, cert_sig, channel, via, seen_at
-                     FROM p2p_witness WHERE signature IS NULL
+                     FROM p2p_witness WHERE signature IS NULL AND witness_v = ANY(%(known)s)
                     ORDER BY id"""
-                + (f" LIMIT {int(max_records)}" if max_records else ""))
+                + (f" LIMIT {int(max_records)}" if max_records else ""),
+                {"known": sorted(witness.STATEMENTS)})
     rows = cur.fetchall()
     if dry_run or not rows:
         conn.rollback()
@@ -526,7 +530,10 @@ def sign(conn, full=False, limit=None, dry_run=False,
 
 # Stage 2 finds "signed, awaiting stamp" by scan; the partial indexes of
 # migration 011 make that O(pending) on the tables that are gigabytes.
-# Witness rows last: under the cap, analysis goes first.
+# Witness rows last: under the cap, analysis goes first, and they are read
+# only for the authors analysis brought (or all of them when the backstop
+# allows them alone) — a quiet node's week of sightings is not read on every
+# pass only to wait again.
 _WITNESS_TABLE = "p2p_witness"
 _STAMP_TABLES = ("embedding_segments", "audio_features", "albums",
                  "album_tracks", "track_mbids", _WITNESS_TABLE)
@@ -569,16 +576,22 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
         if room is not None and room <= 0:
             break
         pk_col, _ = _TABLE_PK.get(table, ("id", "int"))
+        where, params = "signature IS NOT NULL AND batch_root IS NULL", None
+        if table == _WITNESS_TABLE and not witness_only:
+            params = {"authors": sorted({r[2] for r in pending})}
+            if not params["authors"]:
+                break
+            where += " AND author_pubkey = ANY(%(authors)s)"
         cur.execute(f"""SELECT {pk_col} AS pk, author_pubkey, signature
-                          FROM {table}
-                         WHERE signature IS NOT NULL AND batch_root IS NULL
+                          FROM {table} WHERE {where}
                          ORDER BY {pk_col}"""
-                    + (f" LIMIT {int(room)}" if room is not None else ""))
+                    + (f" LIMIT {int(room)}" if room is not None else ""), params)
         pending.extend((table, r["pk"], r["author_pubkey"], r["signature"])
                        for r in cur.fetchall())
     if not pending:
+        waiting = _oldest_waiting_witness(cur)
         conn.rollback()
-        return StampResult(0, None, None)
+        return StampResult(0, None, waiting)
 
     by_author: dict = {}
     for rec in pending:
@@ -586,8 +599,6 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
 
     stamped, not_before = 0, None
     for author, recs in by_author.items():
-        if not witness_only and all(r[0] == _WITNESS_TABLE for r in recs):
-            continue        # witness rows alone wait for an analysis batch or the backstop
         leaves = [rs.record_leaf(sig) for _, _, _, sig in recs]
         root, proofs = rs.merkle_tree(leaves)
         logger.info("batch: %d records by %s…, root %s",
@@ -811,12 +822,15 @@ def verify_all() -> bool:
     # Witness records carry their own copy of the stamp (signing_batches is
     # not theirs to rely on), and a signed row without one is waiting for an
     # analysis batch or the backstop by design — counted apart, not invalid.
-    awaiting = 0
+    awaiting, newer = 0, 0
     w_cur = conn.cursor(name="verify_witness",
                         cursor_factory=psycopg2.extras.RealDictCursor)
     w_cur.itersize = 2000
     w_cur.execute("SELECT * FROM p2p_witness WHERE signature IS NOT NULL ORDER BY id")
     for r in w_cur:
+        if r["witness_v"] not in witness.STATEMENTS:
+            newer += 1                    # a newer node's statement: this code cannot read it
+            continue
         holds = (witness.certificate_holds(r, TRUSTED_AUTHORITIES)
                  and rs.verify(witness.statement(r, r["author_pubkey"]),
                                r["signature"], r["author_pubkey"]))
@@ -836,6 +850,9 @@ def verify_all() -> bool:
                 bad_samples.append(f"witness {r['id']} ({r['subject'][:8]}, {r['channel']})")
     w_cur.close()
     logger.info("witness records: %d signed awaiting their stamp", awaiting)
+    if newer:
+        logger.warning("witness records: %d of a statement version this code does not know — "
+                       "not checked", newer)
 
     logger.info("seal verification: %d valid, %d invalid", ok, bad)
     if bad_samples:
@@ -887,8 +904,9 @@ def resign_timestamps():
         version = int(out.get("v", rs.TIMESTAMP_VERSION))
         for ts in out["stamps"]:
             root = ts["root"]
-            if not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
-                                       ts["authority"], version):
+            if (ts["authority"] not in birth_authority.TRUSTED_AUTHORITIES
+                    or not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
+                                               ts["authority"], version)):
                 conn.rollback()
                 raise RuntimeError(f"re-timestamp failed verification: {root[:16]}")
             cur.execute("""UPDATE signing_batches

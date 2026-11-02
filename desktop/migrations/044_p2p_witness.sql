@@ -4,11 +4,22 @@
 -- from p2p_identities: its rows hold the current certificate, not the first
 -- one seen, with no channel, and a stamp taken now would date them now.
 
+-- The certificate's enums, created by 001 since 2026-08-17 and by the
+-- registry's own ensure_schema, which runs after the migrations: a node
+-- whose database predates both still gets them here.
+DO $$ BEGIN
+    CREATE TYPE p2p_cert_method AS ENUM ('pow', 'email');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE p2p_email_class AS ENUM ('major', 'other', 'disposable');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- Witness records: what this node saw of other identities — the first
 -- sighting of each certificate of each foreign identity, per channel
 -- (desktop/p2p/witness.py). Witnessed age can count only what was recorded,
--- and the registry above is no record: it is mutable, evicted past its cap,
--- rewritten by succession and filled only on the side that was contacted.
+-- and the identity registry (p2p_identities) is no record: it is mutable,
+-- evicted past its cap, rewritten by succession and filled only on the side
+-- that was contacted.
 -- A row keeps the certificate exactly as the authority signed it
 -- (cert_payload + cert_sig; the other certificate columns are its fields,
 -- for queries), how it came (via = the deliverer of a carried one), this
@@ -55,6 +66,10 @@ CREATE TABLE IF NOT EXISTS p2p_witness (
     worker_authority    CHAR(64),
     timestamp_version   SMALLINT,
     UNIQUE (subject, cert_sig, channel),
+    -- One spelling of each key and signature, the authority's: hex parsers
+    -- take upper case and spaced pairs, and each spelling would be a row.
+    CONSTRAINT p2p_witness_hex CHECK (subject ~ '^[0-9a-f]{64}$' AND cert_sig ~ '^[0-9a-f]{128}$'
+                                      AND (via IS NULL OR via ~ '^[0-9a-f]{64}$')),
     CONSTRAINT p2p_witness_via_carried CHECK ((channel = 'carried') = (via IS NOT NULL)),
     CONSTRAINT p2p_witness_signed_whole CHECK ((author_pubkey IS NULL) = (signature IS NULL)),
     CONSTRAINT p2p_witness_stamped_signed CHECK (batch_root IS NULL OR signature IS NOT NULL),
@@ -64,9 +79,13 @@ CREATE TABLE IF NOT EXISTS p2p_witness (
 );
 CREATE INDEX IF NOT EXISTS idx_p2p_witness_unsigned
     ON p2p_witness (id) WHERE signature IS NULL;
+-- Signed, awaiting a stamp: what a stamp picks up (by author), and the oldest
+-- of them, which the notary's backstop is armed from on every pass.
 CREATE INDEX IF NOT EXISTS idx_p2p_witness_unstamped
-    ON p2p_witness (id) INCLUDE (signature)
+    ON p2p_witness (id) INCLUDE (author_pubkey, signature)
     WHERE signature IS NOT NULL AND batch_root IS NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_witness_waiting
+    ON p2p_witness (seen_at) WHERE signature IS NOT NULL AND batch_root IS NULL;
 CREATE INDEX IF NOT EXISTS idx_p2p_witness_channel_seen ON p2p_witness (channel, seen_at);
 
 -- The notary signs a row the moment it lands: one wake per statement that

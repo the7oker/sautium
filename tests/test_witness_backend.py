@@ -417,9 +417,12 @@ def test_the_listener_wakes_the_notary_to_sign_sightings_alone(worker, conn, mon
             while _row(conn, subject, "introduced")["signature"] is None and time.monotonic() < deadline:
                 time.sleep(0.05)
             row = _row(conn, subject, "introduced")
-            assert row["author_pubkey"] == NODE_PUB and n.status()["last_error"] is None
+            assert row["author_pubkey"] == NODE_PUB
+            deadline = time.monotonic() + 10                 # the same pass's stamp attempt
+            while n.status()["witness_backstop_at"] is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert n.status()["witness_backstop_at"] is not None and n.status()["last_error"] is None
             assert _calls(worker) == before                  # alone, it waits for its stamp
-            assert n._backstop is not None
         finally:
             notary.stop_witness_listener()
 
@@ -549,13 +552,41 @@ def _fresh_database(scratch_dsn, name):
         admin.close()
 
 
+def test_a_statement_version_this_code_does_not_know_stops_nothing(scratch_dsn, monkeypatch):
+    with _fresh_database(scratch_dsn, "sautium_witness_newer") as (name, c):
+        monkeypatch.setattr(settings, "postgres_db", name)
+        insert = """INSERT INTO p2p_witness (witness_v, subject, cert_payload, cert_sig, issuer, cert_v,
+                                               issued_at, method, difficulty, params_version, channel,
+                                               author_pubkey, signature)
+                     VALUES (%s, %s, %s, %s, %s, 4, now(), 'pow', 32, 1, 'probe', %s, %s)"""
+        known, newer = _key_hex(), _key_hex()
+        cert = certificate(known)
+        with c.cursor() as cur:
+            cur.execute(insert, (2, newer, "x", "ab" * 64, ISSUER, None, None))  # merged from a newer node
+            cur.execute(insert, (1, known, birth_cert.canonical_payload(cert).decode(), cert["sig"], ISSUER,
+                                 None, None))
+            cur.execute(insert, (2, _key_hex(), "x", "ab" * 64, ISSUER, NODE_PUB, "cd" * 64))
+        c.commit()
+        stage = sign_audio.connect()
+        try:
+            assert sign_audio.sign_witness(stage) == 1
+        finally:
+            stage.close()
+        with c.cursor() as cur:
+            cur.execute("SELECT subject, signature IS NOT NULL FROM p2p_witness WHERE subject = ANY(%s)",
+                        ([known, newer],))
+            assert dict(cur.fetchall()) == {known: True, newer: False}
+        assert sign_audio.verify_all()
+
+
 def test_witness_records_alone_are_own_data(scratch_dsn):
     with _fresh_database(scratch_dsn, "sautium_witness_own_data") as (_name, c):
         assert not nb.has_own_data(c)
         with c.cursor() as cur:
             cur.execute("""INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v,
                                                     issued_at, method, difficulty, params_version, channel)
-                           VALUES (%s, 'x', 'y', %s, 4, now(), 'pow', 32, 1, 'probe')""", (_key_hex(), ISSUER))
+                           VALUES (%s, 'x', %s, %s, 4, now(), 'pow', 32, 1, 'probe')""",
+                        (_key_hex(), "ab" * 64, ISSUER))
         c.commit()
         assert nb.has_own_data(c)
 
@@ -629,6 +660,15 @@ def test_the_docker_surface_records_after_the_gate_and_never_fails_on_the_record
     assert any("could not be recorded: the database is gone" in r.getMessage() for r in caplog.records)
 
 
+def test_the_docker_probe_sink_records_a_peers_certificate(conn):
+    sink = p2p_identity.peer_identity(settings).witness
+    peer = _key_hex()
+    sink(certificate(peer), peer)
+    assert _row(conn, peer, "probe") is not None
+    sink(certificate(NODE_PUB), NODE_PUB)                    # this node's own: never
+    assert _row(conn, NODE_PUB, "probe") is None
+
+
 def test_the_docker_health_serves_the_certificate_never_the_proof(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -676,15 +716,19 @@ def test_the_docker_handshake_records_an_accepted_token_only(conn, monkeypatch):
     tid = str(uuid.uuid4())
     with conn.cursor() as cur:
         cur.execute("INSERT INTO invite_tokens (id, label, max_uses) VALUES (%s, 'test', 5)", (tid,))
-    guest, stranger = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    guest, stranger, friend = (Ed25519PrivateKey.generate() for _ in range(3))
+    fpub = friend.public_key().public_bytes_raw()
+    service.add_friend(fpub.hex(), node_identity.make_invite_code("guest", fpub), "guest")
     with TestClient(app) as http:
         r = http.post("/api/chat/handshake", json=guest_body(guest, token=tid))
         assert r.status_code == 200 and r.json()["accepted"]
         assert http.post("/api/chat/handshake", json=guest_body(stranger, token=str(uuid.uuid4()))).status_code == 403
         assert http.post("/api/chat/handshake", json=guest_body(stranger)).status_code == 403
+        r = http.post("/api/chat/handshake", json=guest_body(friend))           # classic, accepted
+        assert r.status_code == 200 and r.json()["accepted"]
     gpub = guest.public_key().public_bytes_raw().hex()
     spub = stranger.public_key().public_bytes_raw().hex()
     assert _row(conn, gpub, "handshake") is not None
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) AS n FROM p2p_witness WHERE subject = %s", (spub,))
+        cur.execute("SELECT count(*) AS n FROM p2p_witness WHERE subject = ANY(%s)", ([spub, fpub.hex()],))
         assert cur.fetchone()["n"] == 0

@@ -290,10 +290,13 @@ _MEDIA_FILE_FOR = ("(SELECT mf.id FROM media_files mf WHERE mf.track_id = {track
                    f"ORDER BY {best_rip_order('mf')} LIMIT 1)")
 
 
-def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
+def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[str] = (),
+               same_key: bool = True) -> dict:
     """Union the scratch schema into the live tables on `conn`'s open
     transaction. Returns {"merged": {what: rows added}, "waiting": {…}} —
-    `waiting` counts what named a track this node does not know yet."""
+    `waiting` counts what named a track this node does not know yet.
+    `own_keys`: this node's key and the keys it retired; `same_key`: the
+    backup was written under this node's current key."""
     progress = progress or (lambda *_a, **_k: None)
     merged: Dict[str, int] = {}
     waiting: Dict[str, int] = {}
@@ -553,8 +556,15 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
         # --- witness records, insert only: a sighting this node already
         # holds keeps its row — evidence is never replaced, even by the other
         # machine's earlier record of it. Never the dump's id: a collision
-        # with a live one would drop the row silently.
-        merged["witness"] = _whole_rows(cur, "p2p_witness", exclude=("id",))
+        # with a live one would drop the row silently. As witness.record()
+        # would: no banned key's sighting, none of this node's own keys. A
+        # row the other machine had not signed yet comes only from a backup
+        # of this very key — signed here by another, the statement would not
+        # be the key's that saw it.
+        merged["witness"] = _whole_rows(cur, "p2p_witness", exclude=("id",), where=sql.SQL(
+            "NOT EXISTS (SELECT 1 FROM p2p_node_bans b WHERE b.pubkey = s.subject) "
+            "AND s.subject <> ALL({own}::text[]) AND (s.signature IS NOT NULL OR {same})").format(
+            own=sql.Literal([k.lower() for k in own_keys]), same=sql.Literal(same_key)))
 
         # --- preferences: the allowlist, missing keys only.
         merged["settings"] = run("""
@@ -648,7 +658,15 @@ def merge_backup(path: Path, password: str, *, target: nb.PgTarget, pubkey: str,
                                             cancel=cancel, file_size=file_size)
             if cancel.is_set():
                 raise nb.Cancelled("merge cancelled")
-            result = merge_life(conn, progress=report)
+            with conn.cursor() as cur:
+                # A life table the backup predates has nothing to merge.
+                for table in LIFE_TABLES:
+                    if table not in loaded:
+                        _create_scratch_table(cur, table, [])
+                        loaded[table] = 0
+            backup_key = str((manifest.get("node") or {}).get("pubkey") or "").lower()
+            result = merge_life(conn, progress=report, own_keys=[pubkey, *previous],
+                                same_key=backup_key == pubkey.lower())
             with conn.cursor() as cur:
                 cur.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(SCRATCH)))
             if dry_run:

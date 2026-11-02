@@ -386,16 +386,65 @@ def test_witness_records_merge_insert_only(clones, tmp_path):
     its row even when the backup's is earlier, and the guard that refuses any
     change or deletion is never met."""
     a, b = clones["a"], clones["b"]
-    only_b, both, only_a = "71" * 32, "72" * 32, "73" * 32
-    _exec(a, [_witness(only_a), _witness(both, seen=T0 + timedelta(days=2))])
-    _exec(b, [_witness(only_b, signed=True), _witness(both, seen=T0 + timedelta(days=1), signed=True)])
+    only_b, both, only_a, banned, unsigned = "71" * 32, "72" * 32, "73" * 32, "74" * 32, "75" * 32
+    _exec(a, [_witness(only_a), _witness(both, seen=T0 + timedelta(days=2)),
+              ("INSERT INTO p2p_node_bans (pubkey, reason) VALUES (%s, 'test')", (banned,))])
+    _exec(b, [_witness(only_b, signed=True), _witness(both, seen=T0 + timedelta(days=1), signed=True),
+              _witness(banned, signed=True), _witness(PUB, signed=True), _witness(unsigned)])
     ids_a = dict(_rows(a, "SELECT subject, id FROM p2p_witness"))
     ids_b = dict(_rows(b, "SELECT subject, id FROM p2p_witness"))
     assert ids_b[only_b] in ids_a.values()            # the dump's id names a live row here
     got = _merge(_backup(b, tmp_path / "b"), a)
-    assert got["merged"]["witness"] == 1
+    assert got["merged"]["witness"] == 2              # not a banned key's, not this node's own
     rows = {r[0]: r[1:] for r in _rows(a, "SELECT subject, id, seen_at, signature FROM p2p_witness")}
-    assert set(rows) == {only_a, both, only_b}
+    assert set(rows) == {only_a, both, only_b, unsigned}       # unsigned: this very key's backup
     assert rows[only_b][0] not in ids_a.values() and rows[only_b][1:] == (T0, "6b" * 64)
     assert rows[both] == (ids_a[both], T0 + timedelta(days=2), None)      # this node's own record stays
     assert _merge(_backup(b, tmp_path / "b2"), a)["merged"]["witness"] == 0
+
+
+def test_a_retired_keys_backup_brings_only_signed_witness_records(clones, tmp_path):
+    """A row the other machine had not signed would be signed here by a key
+    that did not see it: from a backup written under a retired key, only the
+    signed ones come over."""
+    a, b = clones["a"], clones["b"]
+    signed, unsigned = "81" * 32, "82" * 32
+    _exec(b, [_witness(signed, signed=True), _witness(unsigned)])
+    got = life_merge.merge_backup(_backup(b, tmp_path / "b"), PW, target=a, pubkey="cd" * 32,
+                                  previous=[PUB], kdf=KDF)
+    assert got["merged"]["witness"] == 1
+    assert {r[0] for r in _rows(a, "SELECT subject FROM p2p_witness WHERE subject = ANY(%s)",
+                                ([signed, unsigned],))} == {signed}
+
+
+def test_a_backup_from_before_the_witness_record_still_merges(tmp_path):
+    """Every .sbk written before migration 044 has no p2p_witness: a life
+    table the backup predates merges as empty, the rest as ever."""
+    try:
+        admin = psycopg2.connect(dbname="postgres", **PG)
+    except psycopg2.OperationalError as e:
+        pytest.skip(f"no PostgreSQL for the merge test: {e}")
+    admin.autocommit = True
+    from desktop import db_init
+    old, new = "sautium_merge_test_043", "sautium_merge_test_044"
+    try:
+        for name in (old, new):
+            nb._drop_database(admin, name)
+            with admin.cursor() as cur:
+                cur.execute(f"CREATE DATABASE {name}")
+            conn = psycopg2.connect(dbname=name, **PG)
+            db_init.apply_migrations(conn)
+            conn.commit()
+            conn.close()
+        _exec(_target(old), [
+            ("DROP TABLE p2p_witness; DROP TYPE p2p_witness_channel; "
+             "DROP FUNCTION notify_witness_recorded(), p2p_witness_guard_update(), p2p_witness_guard_delete(); "
+             "DELETE FROM _schema_migrations WHERE filename = '044_p2p_witness.sql'", None),
+            _friend(F1, "inv1")])
+        got = _merge(_backup(_target(old), tmp_path / "old"), _target(new))
+        assert got["merged"]["witness"] == 0 and got["merged"]["friends"] == 1
+        assert got["loaded"]["p2p_witness"] == 0
+    finally:
+        for name in (old, new):
+            nb._drop_database(admin, name)
+        admin.close()
