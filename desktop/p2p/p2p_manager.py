@@ -384,8 +384,10 @@ class P2PManager:
             _progress("Starting sync server...")
             await self._sync_server.start()
 
-            # Start LAN discovery (always — works behind any NAT)
+            # Start LAN discovery (always — works behind any NAT); it beacons
+            # only while P2P sharing is on (_sharing_changed follows the switch)
             _progress("Starting LAN discovery...")
+            await self._sharing_changed()
             await self._lan_discovery.start()
 
             # Try UPnP port mapping (best-effort)
@@ -3022,7 +3024,17 @@ class P2PManager:
             "sautium_lb_request": lambda: self._lb_cycle.request("request"),
             "sautium_lb_sources": lambda: asyncio.create_task(
                 self._lb_sources_changed()),
+            # The owner moved P2P sharing (routers/settings.put_sync_prefs).
+            "sautium_sharing": lambda: asyncio.create_task(self._sharing_changed()),
         }, lambda: self._running)
+
+    async def _sharing_changed(self) -> None:
+        """P2P sharing as it is now — at start, and whenever the owner moves
+        it: the LAN beacon, which names this node on every network it joins,
+        goes out only while it is on."""
+        loop = asyncio.get_event_loop()
+        on = await loop.run_in_executor(None, self._sync_server.sharing_changed)
+        self._lan_discovery.set_beaconing(on)
 
     async def _after_walk(self):
         """What the walk just carried in may name artists canon waits on

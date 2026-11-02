@@ -509,6 +509,12 @@ class SyncServer:
         finally:
             self._pool.putconn(conn, close=broken)
 
+    def sharing_changed(self) -> bool:
+        """The switch as it is now, past the cache — the owner just moved it
+        (NOTIFY sautium_sharing), and serving follows at once too."""
+        self._sharing_checked = 0.0
+        return self._sharing_enabled()
+
     def _sharing_enabled(self) -> bool:
         """The "P2P sharing" switch from Settings. Peer endpoints have no
         login by design, so this flag is the only thing between "off" and a

@@ -63,6 +63,20 @@ class LANDiscovery:
         self._peers: Dict[Tuple[str, int], dict] = {}
         self._running = False
         self._sock: Optional[socket.socket] = None
+        # Set while the owner shares (set_beaconing); the broadcast loop waits
+        # on it, so a node with P2P sharing off says nothing on the networks
+        # it joins, and one turned back on beacons at once.
+        self._beaconing = asyncio.Event()
+
+    def set_beaconing(self, on: bool) -> None:
+        """Beacons go out only while P2P sharing is on: each one names the
+        node — its key, username and invite code — to every device on the
+        network. The node keeps hearing others' beacons either way. Called
+        on the event loop."""
+        if on:
+            self._beaconing.set()
+        else:
+            self._beaconing.clear()
 
     @property
     def peers(self) -> list[Tuple[str, int]]:
@@ -172,8 +186,10 @@ class LANDiscovery:
         logger.info("LAN discovery stopped")
 
     async def _broadcast_loop(self, loop: asyncio.AbstractEventLoop):
-        """Periodically broadcast beacon on all network interfaces."""
+        """Periodically broadcast beacon on all network interfaces, while
+        beaconing is on."""
         while self._running:
+            await self._beaconing.wait()
             try:
                 beacon = self._make_beacon(enriched_artists=0)
                 # Send to both global and subnet broadcast addresses.
