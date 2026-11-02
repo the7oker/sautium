@@ -328,75 +328,84 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         raise
 
 
-def generate_mcp_config(config: dict, output_path: Path) -> None:
-    """Generate MCP config (mcp-windows.json) for Claude Code with loopback values."""
-    ports = config.get("ports", {})
-    hqp = config.get("hqplayer", {})
+def mcp_servers(python: str, mcp_dir: Path, backend_dir: Path, *, db: dict, backend_url: str,
+                identity_dir: Path, hqplayer_host: str, hqplayer_port: int) -> dict:
+    """The MCP servers an agent turn starts — the SQL tool and the assistant —
+    as both runtimes name them (the launcher's generate_mcp_config, the Docker
+    backend's claude_code_runner.write_docker_mcp_config): Python from the
+    tree on the backend's own interpreter, nothing resolved from a registry.
+    `db` holds host, port, user, password and name.
 
-    # The assistant subprocess spawns the hqplayer server itself, so the command
-    # must be a Python that actually has the backend deps (mcp, httpx,
-    # psycopg2) — the launcher-provisioned interpreter, the same one uvicorn
-    # runs on. A bare "python" from PATH (the original value) either doesn't
-    # exist on a fresh machine or lacks the deps, and the server died on
-    # spawn SILENTLY: Claude Code just proceeds without that server's tools,
-    # so the agent saw prompt descriptions of search/playback/MB tools it
-    # did not have. Same class of bug for the script path: assistant_server.py
-    # lives in <project_root>/mcp/, not <backend>/mcp/.
-    from desktop.python_env import get_backend_python
-    backend_dir = output_path.parent          # the runner reads the file from backend/
-    project_root = backend_dir.parent
-
-    mcp_config = {
+    The command must be a Python that has the backend's packages (mcp, httpx,
+    psycopg2) — the interpreter uvicorn runs on. A bare "python" from PATH
+    either does not exist on a fresh machine or lacks them, and a server that
+    dies on spawn dies SILENTLY: the agent proceeds without its tools, while
+    the prompt describes them."""
+    db_env = {"DB_HOST": db["host"], "DB_PORT": str(db["port"]), "DB_USER": db["user"],
+              "DB_PASSWORD": db["password"], "DB_NAME": db["name"]}
+    return {
         "mcpServers": {
             "postgres": {
-                "command": "npx",
-                "args": ["-y", "postgres-mcp-server"],
-                "env": {
-                    "DB_HOST": LOOPBACK,
-                    "DB_PORT": str(ports.get("postgres", 5432)),
-                    "DB_USER": "sautium",
-                    "DB_PASSWORD": config.get("postgres_password", "changeme"),
-                    "DB_NAME": "sautium",
-                    "DB_SSL": "false",
-                    # Per-statement cap (ms): a runaway agent query must fail
-                    # inside the turn so the model can retry lighter, not eat
-                    # the 150s chat wallclock. Explicit, not the package
-                    # default — npx pulls whatever version is current.
-                    "DB_QUERY_TIMEOUT": "30000",
-                },
+                "command": python,
+                "args": [str(mcp_dir / "postgres_server.py")],
+                # Per-statement cap (ms): a runaway agent query must fail
+                # inside the turn so the model can retry lighter, not eat
+                # the 150s chat wallclock.
+                "env": {**db_env, "DB_QUERY_TIMEOUT": "30000"},
             },
             "assistant": {
-                "command": get_backend_python(),
-                "args": [str(project_root / "mcp" / "assistant_server.py")],
+                "command": python,
+                "args": [str(mcp_dir / "assistant_server.py")],
                 "env": {
-                    "DB_HOST": LOOPBACK,
-                    "DB_PORT": str(ports.get("postgres", 5432)),
-                    "DB_USER": "sautium",
-                    "DB_PASSWORD": config.get("postgres_password", "changeme"),
-                    "DB_NAME": "sautium",
-                    "HQPLAYER_HOST": hqp.get("host", LOOPBACK),
-                    "HQPLAYER_PORT": str(hqp.get("port", 4321)),
-                    "BACKEND_URL": f"http://{LOOPBACK}:{ports.get('web', 8000)}",
+                    **db_env,
+                    "HQPLAYER_HOST": hqplayer_host,
+                    "HQPLAYER_PORT": str(hqplayer_port),
+                    "BACKEND_URL": backend_url,
                     # Where the server finds shared backend code — explicit,
                     # not derived from the script's own location.
                     "BACKEND_PATH": str(backend_dir),
                     # Where .api_secret lives for signing backend requests.
                     # Must be explicit: codex spawns MCP servers with ONLY
-                    # the env configured here, so the launcher backend's
-                    # own P2P_IDENTITY_DIR never reaches the server by
+                    # the env configured here, so the backend's own
+                    # P2P_IDENTITY_DIR never reaches the server by
                     # inheritance the way it does under claude — without
                     # this line every signed assistant tool (mb_resolve,
                     # playback, …) dies with "missing .api_secret" on
                     # codex while claude looks fine.
-                    "P2P_IDENTITY_DIR": str(get_config_dir() / "node_identity"),
+                    "P2P_IDENTITY_DIR": str(identity_dir),
                 },
             },
         }
     }
 
+
+def write_mcp_config(servers: dict, output_path: Path) -> None:
+    """The config, readable by its owner alone (it holds the database
+    password), put in place whole."""
+    tmp = output_path.with_name(output_path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(servers, f, indent=2)
+    os.replace(tmp, output_path)
+
+
+def generate_mcp_config(config: dict, output_path: Path) -> None:
+    """Generate MCP config (mcp-windows.json) for Claude Code with loopback values."""
+    ports = config.get("ports", {})
+    hqp = config.get("hqplayer", {})
+    from desktop.python_env import get_backend_python
+    backend_dir = output_path.parent          # the runner reads the file from backend/
+    servers = mcp_servers(
+        get_backend_python(), backend_dir.parent / "mcp", backend_dir,
+        db={"host": LOOPBACK, "port": ports.get("postgres", 5432), "user": "sautium",
+            "password": config.get("postgres_password", "changeme"), "name": "sautium"},
+        backend_url=f"http://{LOOPBACK}:{ports.get('web', 8000)}",
+        identity_dir=get_config_dir() / "node_identity",
+        hqplayer_host=hqp.get("host", LOOPBACK), hqplayer_port=hqp.get("port", 4321),
+    )
     try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(mcp_config, f, indent=2)
+        write_mcp_config(servers, output_path)
         logger.info(f"Generated MCP config at {output_path}")
     except OSError as e:
         logger.error(f"Failed to generate MCP config: {e}")

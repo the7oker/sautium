@@ -196,3 +196,46 @@ def test_the_embedded_pythons_pip_comes_from_the_pinned_wheel_not_a_script():
     assert ARTIFACTS["pip"].url.endswith("-py3-none-any.whl")
     source = (REPO / "desktop" / "python_env.py").read_text(encoding="utf-8")
     assert "get-pip" not in source and "--no-index" in python_env._PIP_FROM_WHEEL
+
+
+# -- the agents' MCP servers -------------------------------------------------------------
+
+def test_the_launchers_agents_start_only_servers_from_the_tree(tmp_path, monkeypatch):
+    import json
+    import os
+    from desktop import config_manager, python_env
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "config"))
+    monkeypatch.setattr(python_env, "get_backend_python", lambda: "/the/backends/python")
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    out = backend / "mcp-windows.json"
+    config_manager.generate_mcp_config(
+        {"ports": {"postgres": 15432, "web": 18000}, "postgres_password": "pw"}, out)
+    servers = json.loads(out.read_text(encoding="utf-8"))["mcpServers"]
+    assert sorted(servers) == ["assistant", "postgres"]
+    assert {s["command"] for s in servers.values()} == {"/the/backends/python"}
+    assert servers["postgres"]["args"] == [str(tmp_path / "mcp" / "postgres_server.py")]
+    assert servers["assistant"]["args"] == [str(tmp_path / "mcp" / "assistant_server.py")]
+    assert servers["postgres"]["env"]["DB_PASSWORD"] == "pw"
+    if os.name == "posix":
+        assert out.stat().st_mode & 0o777 == 0o600
+
+
+def test_the_docker_node_writes_the_same_servers_from_its_own_settings(tmp_path, monkeypatch):
+    import json
+    import sys
+    import claude_code_runner
+    from config import settings
+    monkeypatch.setattr(claude_code_runner, "MCP_CONFIG_PATH", str(tmp_path / "mcp-docker.json"))
+    monkeypatch.setattr(claude_code_runner.os, "geteuid", lambda: 1000)
+    claude_code_runner.write_docker_mcp_config()
+    servers = json.loads((tmp_path / "mcp-docker.json").read_text(encoding="utf-8"))["mcpServers"]
+    backend = Path(claude_code_runner.__file__).resolve().parent
+    assert sorted(servers) == ["assistant", "postgres"]
+    assert {s["command"] for s in servers.values()} == {sys.executable}
+    assert servers["postgres"]["args"] == [str(backend / "mcp" / "postgres_server.py")]
+    env = servers["postgres"]["env"]
+    assert (env["DB_HOST"], env["DB_NAME"], env["DB_USER"]) == (
+        settings.postgres_host, settings.postgres_db, settings.postgres_user)
+    assert servers["assistant"]["env"]["P2P_IDENTITY_DIR"] == settings.p2p_identity_dir

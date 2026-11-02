@@ -522,9 +522,9 @@ implementation details live in the code, DB and git history.
   effort `medium` — at `low` terra ran the tag SQL and gave up without
   naming one candidate from its own knowledge, at `medium` it named
   three and verified them in a single parallel mb_resolve round (+4s);
-  agent SQL is capped per statement (30s: `PGOPTIONS=-c statement_timeout`
-  on Docker's `@modelcontextprotocol/server-postgres`, explicit
-  `DB_QUERY_TIMEOUT` on the launcher's `postgres-mcp-server`) — an OR'd-EXISTS
+  agent SQL is capped per statement (30s: `DB_QUERY_TIMEOUT` of the in-tree
+  `mcp/postgres_server.py` since 2026-11-02, the npm servers' settings
+  before it) — an OR'd-EXISTS
   join across every tagged artist ran 3+ minutes, ate the whole wallclock and,
   after the SIGKILL, kept running under an orphaned MCP server; inside the
   turn the same failure is a tool error the model retries lighter;
@@ -1690,9 +1690,20 @@ implementation details live in the code, DB and git history.
 - **Spawned by the agent CLI, wherever it runs.** Claude Code and Codex
   spawn MCP servers as child processes, so the servers live beside the CLI:
   inside the backend container on a Docker node (both CLIs are baked into
-  the image, the config is `/app/mcp-docker.json`), on the host under the
-  launcher (`backend/mcp-windows.json`, regenerated at every start). All
-  heavy work is delegated to the backend via HTTP.
+  the image, the config is `/app/mcp-docker.json`, which the backend writes
+  at every start), on the host under the launcher (`backend/mcp-windows.json`,
+  regenerated at every start). Both name the same two servers from one
+  builder (`desktop/config_manager.mcp_servers`). All heavy work is delegated
+  to the backend via HTTP.
+- **The SQL tool is in the tree** (`mcp/postgres_server.py`, since
+  2026-11-02): before it, the launcher ran `npx -y postgres-mcp-server` and the
+  Docker node `npx -y @modelcontextprotocol/server-postgres` — npm resolved
+  each by name at every agent spawn and ran whatever it found. The query runs
+  as a cursor opened inside a session function (`FOR … IN EXECUTE`), which
+  PostgreSQL does only for ONE statement that returns rows, in a READ ONLY
+  transaction under the statement timeout; at most 500 rows return, as JSON.
+  The npm servers sent the caller's text over the simple-query protocol,
+  where a second statement after the first ran too.
 - **Lazy connections** (HQPlayer / DB / backend). Connect on first use,
   auto-reconnect on failure. A cold MCP startup is fast; only the first tool
   call pays the connection cost.

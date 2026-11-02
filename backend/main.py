@@ -322,6 +322,11 @@ async def lifespan(app: FastAPI):
     # 401, and populating the cache means GET / never re-reads drvfs.
     _get_api_secret()
     _get_index_html()
+    if sys.platform == "linux":
+        # The Docker node writes its agents' MCP config itself; the launcher
+        # writes its backend's before starting it
+        from claude_code_runner import write_docker_mcp_config
+        write_docker_mcp_config()
 
     # Validate configuration
     missing_settings = settings.validate_required_settings()

@@ -38,12 +38,11 @@ RUN apt-get update && apt-get install -y software-properties-common \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 (for Claude Code / Codex CLIs + MCP servers)
+# Node.js 22 (for the Claude Code / Codex CLIs)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g @anthropic-ai/claude-code \
     && npm install -g @openai/codex \
-    && npm install -g @modelcontextprotocol/server-postgres \
     && npm cache clean --force
 
 COPY entrypoint.sh /entrypoint.sh
