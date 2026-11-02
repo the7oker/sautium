@@ -25,7 +25,9 @@
  * write a caller can repeat and every mail passes its route's counters there
  * first — per key, per mailbox, per address and a ceiling for the route — so
  * a refused request writes nothing, and concurrent requests cannot pass a
- * counter together. (Outside them: a legacy record upgraded on its first
+ * counter together. The master's mailbox and the directory keep the same
+ * counters in their own objects, counting only what they store, in the step
+ * that stores it. (Outside them: a legacy record upgraded on its first
  * read, once, and the master's own wake.) A store that fails answers 503,
  * never an error's text; the owner's WRITES_PAUSED stops every write at
  * once. Callers are nodes, never browsers: no CORS grant, and a body is
@@ -120,8 +122,8 @@ const FROM_NAME = "Sautium";
 // a mail admitted just before midnight that reaches the provider after it),
 // codes first — 60 codes, 24 invites, 12 acceptance mails; 12, 5 and 4
 // addresses fill them. `addr` is volumeToken(): the exact IPv4, the IPv6
-// /48. The master's mailbox keeps its daily caps in its own object
-// (MAIL_PER_*), where they count only the drops it stores.
+// /48. The master's mailbox (MAIL_PER_*) and the directory keep their daily
+// caps in their own objects, where they count only what they store.
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const LIMITS = {
@@ -194,8 +196,9 @@ const LEDGER_RETENTION_MS = 90 * 24 * 3600 * 1000;
 // achieves nothing; the master being offline costs nothing.
 const MASTER_PUBKEY = "3aa2ae91bc41863468ea4df3346811bcb0f7e0d6a9644b931cfd628d81247042";
 const MAIL_MAX_CHARS = 8192;             // encrypted payload (chat caps are far below)
-// Drops stored in the last 24 h, drained or not, per sender, per address
-// (volumeToken) and in all; a refused drop counts for none of them.
+// Drops stored in a day (24 h from a counter's first use), drained or not,
+// per sender, per address (volumeToken) and in all; a refused drop counts
+// for none of them.
 const MAIL_PER_SENDER_DAY = 30;
 const MAIL_PER_ADDR_DAY = 100;
 const MAIL_PER_DAY = 5000;
@@ -273,8 +276,9 @@ const IP_HASH_VERSION = 3;
 // advice; what answers 429 today is the per-address brake (BRAKE_STAMP in
 // wrangler.toml — WAF-grade, no KV write, sized for a cohort), the route's
 // brake per network (BRAKE_ROUTE) and the hard daily caps — on the roots a
-// request asks about (LIMITS.lookup) and on new roots (LIMITS.stamp), per
-// key, per address and the route's ceiling — far above a node's pace. Only
+// request asks about (LIMITS.lookup) and on the roots it writes, new or
+// re-signed (LIMITS.stamp), per key, per address and the route's ceiling —
+// far above a node's pace. Only
 // a key with a certificate issued here is stamped at all. Inputs the Worker
 // can vouch for itself: the mailbox class it verified, the birth it
 // witnessed, the stamps it issued.
@@ -1094,18 +1098,51 @@ async function birthFacts(env, request, pubkey, issuedAtIso) {
 // Admission — the Limiter object, the brakes, the request body
 // -----------------------------------------------------------------------
 
+// Counters a Durable Object keeps beside what they bound: the Limiter's, and
+// the master mailbox's and the directory's own, where a check, its write and
+// its count are one step.
+function counterTable(sql) {
+  sql.exec(`CREATE TABLE IF NOT EXISTS counters (
+    key TEXT PRIMARY KEY, n INTEGER NOT NULL, until INTEGER NOT NULL)`);
+  sql.exec("CREATE INDEX IF NOT EXISTS counters_until ON counters (until)");
+}
+
+function takeCounters(sql, now, counters) {
+  // All or nothing: every counter is read, and only when all have room are
+  // all incremented. A window runs from a counter's first use (a single-use
+  // nonce is limit 1 for its lifetime); a `utc` counter's ends at the next
+  // multiple of its length since the epoch — a day's at 00:00 UTC, Unix time
+  // having no leap seconds. → {ok: true}, or {ok: false, refused, retry_after}.
+  sql.exec("DELETE FROM counters WHERE until <= ?", now);
+  const end = (c) => c.utc ? (Math.floor(now / c.window) + 1) * c.window : now + c.window;
+  const rows = counters.map((c) => sql.exec(
+    "SELECT n, until FROM counters WHERE key = ?", c.key).toArray()[0]);
+  for (let i = 0; i < counters.length; i++) {
+    const c = counters[i], row = rows[i];
+    if ((row ? Number(row.n) : 0) + c.amount > c.limit) {
+      const until = row ? Number(row.until) : end(c);
+      const jitter = c.key.includes(":all:") ? Math.floor(Math.random() * CEILING_JITTER_S) : 0;
+      return { ok: false, refused: c.key,
+               retry_after: Math.max(1, Math.ceil((until - now) / 1000)) + jitter };
+    }
+  }
+  for (const c of counters) {
+    sql.exec(
+      `INSERT INTO counters (key, n, until) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET n = n + excluded.n`,
+      c.key, c.amount, end(c));
+  }
+  return { ok: true };
+}
+
 export class Limiter {
   /**
-   * The state the Worker's route limits key on (the master's mailbox counts
-   * its drops itself). One instance per route
+   * The state the Worker's route limits key on (the master's mailbox and the
+   * directory count what they store themselves). One instance per route
    * (its name is the route's: "birth", "invite", …), so a check and its
    * increment are one synchronous step, and one route's load or failure
    * never reaches another's; two more instances hold what spans routes:
-   *   counters — `take` is all or nothing: every counter is read, and only
-   *              when all have room are all incremented. A window runs from
-   *              a counter's first use (a single-use nonce is limit 1 for
-   *              its lifetime); a `utc` counter's (a mail route's ceiling)
-   *              ends at the next 00:00 UTC.
+   *   counters — the route's (takeCounters).
    *   names    — ("names") the username each key speaks under, as a
    *              peppered token, fixed at its first use of a writing
    *              invite-family route (the username is the salt the key was
@@ -1124,9 +1161,7 @@ export class Limiter {
   }
 
   _init() {
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS counters (
-      key TEXT PRIMARY KEY, n INTEGER NOT NULL, until INTEGER NOT NULL)`);
-    this.sql.exec("CREATE INDEX IF NOT EXISTS counters_until ON counters (until)");
+    counterTable(this.sql);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS names (
       pubkey TEXT PRIMARY KEY, name TEXT NOT NULL, seen INTEGER NOT NULL)`);
     this.sql.exec("CREATE INDEX IF NOT EXISTS names_seen ON names (seen)");
@@ -1138,7 +1173,7 @@ export class Limiter {
   async fetch(request) {
     const path = new URL(request.url).pathname;
     const body = await request.json();
-    if (path === "/take") return Response.json(this.take(body));
+    if (path === "/take") return Response.json(takeCounters(this.sql, body.now, body.counters));
     if (path === "/bind") return Response.json(this.bind(body));
     if (path === "/name") {
       const row = this.sql.exec("SELECT name FROM names WHERE pubkey = ? AND seen > ?",
@@ -1152,30 +1187,6 @@ export class Limiter {
       return Response.json({ ok: true });
     }
     return new Response("not found", { status: 404 });
-  }
-
-  take({ now, counters }) {
-    this.sql.exec("DELETE FROM counters WHERE until <= ?", now);
-    // A day since the epoch ends at 00:00 UTC (Unix time has no leap seconds).
-    const end = (c) => c.utc ? (Math.floor(now / c.window) + 1) * c.window : now + c.window;
-    const rows = counters.map((c) => this.sql.exec(
-      "SELECT n, until FROM counters WHERE key = ?", c.key).toArray()[0]);
-    for (let i = 0; i < counters.length; i++) {
-      const c = counters[i], row = rows[i];
-      if ((row ? Number(row.n) : 0) + c.amount > c.limit) {
-        const until = row ? Number(row.until) : end(c);
-        const jitter = c.key.includes(":all:") ? Math.floor(Math.random() * CEILING_JITTER_S) : 0;
-        return { ok: false, refused: c.key,
-                 retry_after: Math.max(1, Math.ceil((until - now) / 1000)) + jitter };
-      }
-    }
-    for (const c of counters) {
-      this.sql.exec(
-        `INSERT INTO counters (key, n, until) VALUES (?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET n = n + excluded.n`,
-        c.key, c.amount, end(c));
-    }
-    return { ok: true };
   }
 
   bind({ pubkey, name, now }) {
@@ -1404,7 +1415,7 @@ async function handleMailboxPut(request, env) {
     uuid: message_uuid, sender, addr: await volumeToken(env, clientIp(request)),
     encrypted, ts: timestamp, now: Date.now(),
   });
-  return json(r.body, r.status);
+  return objectAnswer(r);
 }
 
 async function verifyMasterRequest(url, label, extra) {
@@ -1523,7 +1534,8 @@ async function handleNodeRegister(request, env) {
    * the master itself is refused — it has /master-hint, and clients keep
    * it as the LAST tier by design. One network holds at most
    * DIRECTORY_PER_NETWORK fresh entries; registrations are capped per /64
-   * an hour, and per address and in all a day (LIMITS.directory).
+   * an hour, and per address and in all a day (LIMITS.directory) — the day's
+   * counted by the directory, of the registrations it stores.
    */
   const braked = await routeBrake(env, request, "node-register");
   if (braked) return braked;
@@ -1564,8 +1576,6 @@ async function handleNodeRegister(request, env) {
     { key: nonce, limit: 1, window: 2 * MAIL_SIG_SKEW_S * 1000, amount: 1 },
     { key: `directory:hour:${await ipHashUuid(env, ip)}`, limit: DIRECTORY_REG_PER_IP_HOUR,
       window: HOUR_MS, amount: 1 },
-    daily("directory", "addr", await volumeToken(env, ip)),
-    daily("directory", "all"),
   ] });
   if (!taken.ok) {
     return taken.refused === nonce
@@ -1574,9 +1584,17 @@ async function handleNodeRegister(request, env) {
   }
   const r = await directoryCall(env, "/register", {
     pubkey: key, host: ip, fam: ip.includes(":") ? 6 : 4, port: p,
-    caps: caps.join(","), now: Date.now(),
+    caps: caps.join(","), addr: await volumeToken(env, ip), now: Date.now(),
   });
-  return json(r.body, r.status);
+  return objectAnswer(r);
+}
+
+function objectAnswer(r) {
+  // An object's answer as the caller's; a refusal for volume says when to
+  // come back, as the Limiter's do.
+  return r.body.retry_after
+    ? json(r.body, r.status, { "Retry-After": String(r.body.retry_after) })
+    : json(r.body, r.status);
 }
 
 async function handleNodeHints(request, url, env) {
@@ -1617,32 +1635,17 @@ export class NodeDirectory {
     this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_ts ON nodes (ts)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_net4_ts ON nodes (net4, ts)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_net6_ts ON nodes (net6, ts)");
+    // The day's registrations per address and in all (LIMITS.directory),
+    // counted here so a registration the network's cap refuses spends none.
+    counterTable(this.sql);
   }
 
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/register") {
-      const { pubkey, host, fam, port, caps, now } = await request.json();
-      const net = subnetOf(host);
-      const crowd = Number(this.sql.exec(
-        `SELECT count(*) AS n FROM nodes
-          WHERE ${fam === 6 ? "net6" : "net4"} = ? AND ts > ? AND pubkey <> ?`,
-        net, now - DIRECTORY_TTL_MS, pubkey).one().n);
-      if (crowd >= DIRECTORY_PER_NETWORK) {
-        return Response.json({ error: "this network lists enough volunteers" }, { status: 429 });
-      }
-      const prev = this.sql.exec("SELECT host4, host6 FROM nodes WHERE pubkey = ?", pubkey).toArray()[0] || {};
-      const host4 = fam === 4 ? host : (prev.host4 || null);
-      const host6 = fam === 6 ? host : (prev.host6 || null);
-      this.sql.exec(
-        `INSERT INTO nodes (pubkey, host4, host6, port, caps, ts, net4, net6) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(pubkey) DO UPDATE SET host4 = excluded.host4, host6 = excluded.host6,
-           port = excluded.port, caps = excluded.caps, ts = excluded.ts,
-           net4 = excluded.net4, net6 = excluded.net6`,
-        pubkey, host4, host6, port, caps, now,
-        host4 ? subnetOf(host4) : null, host6 ? subnetOf(host6) : null);
-      this.sql.exec("DELETE FROM nodes WHERE ts < ?", now - 7 * 24 * 3600 * 1000);
-      return Response.json({ registered: true });
+      const body = await request.json();
+      const r = this.state.storage.transactionSync(() => this.register(body));
+      return Response.json(r.body, { status: r.status });
     }
     if (request.method === "GET" && url.pathname === "/hints") {
       const cap = url.searchParams.get("cap") || "";
@@ -1679,6 +1682,36 @@ export class NodeDirectory {
     }
     return new Response("not found", { status: 404 });
   }
+
+  register({ pubkey, host, fam, port, caps, addr, now }) {
+    if (typeof addr !== "string" || !addr) {
+      return { status: 503, body: { error: "temporarily unavailable" } };   // an older Worker's call
+    }
+    const net = subnetOf(host);
+    const crowd = Number(this.sql.exec(
+      `SELECT count(*) AS n FROM nodes
+        WHERE ${fam === 6 ? "net6" : "net4"} = ? AND ts > ? AND pubkey <> ?`,
+      net, now - DIRECTORY_TTL_MS, pubkey).one().n);
+    if (crowd >= DIRECTORY_PER_NETWORK) {
+      return { status: 429, body: { error: "this network lists enough volunteers" } };
+    }
+    const taken = takeCounters(this.sql, now, [daily("directory", "addr", addr), daily("directory", "all")]);
+    if (!taken.ok) {
+      return { status: 429, body: { error: "rate limited", retry_after: taken.retry_after } };
+    }
+    const prev = this.sql.exec("SELECT host4, host6 FROM nodes WHERE pubkey = ?", pubkey).toArray()[0] || {};
+    const host4 = fam === 4 ? host : (prev.host4 || null);
+    const host6 = fam === 6 ? host : (prev.host6 || null);
+    this.sql.exec(
+      `INSERT INTO nodes (pubkey, host4, host6, port, caps, ts, net4, net6) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(pubkey) DO UPDATE SET host4 = excluded.host4, host6 = excluded.host6,
+         port = excluded.port, caps = excluded.caps, ts = excluded.ts,
+         net4 = excluded.net4, net6 = excluded.net6`,
+      pubkey, host4, host6, port, caps, now,
+      host4 ? subnetOf(host4) : null, host6 ? subnetOf(host6) : null);
+    this.sql.exec("DELETE FROM nodes WHERE ts < ?", now - 7 * 24 * 3600 * 1000);
+    return { status: 200, body: { registered: true } };
+  }
 }
 
 export class MasterMailbox {
@@ -1693,14 +1726,16 @@ export class MasterMailbox {
       id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL UNIQUE,
       sender TEXT NOT NULL, encrypted TEXT NOT NULL, ts TEXT NOT NULL,
       received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
-    // The daily caps count `drops`, kept a day whether or not the master has
-    // drained the mail. The two mail indexes the caps once read go where an
-    // older object still has them.
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS drops (
-      sender TEXT NOT NULL, addr TEXT NOT NULL, at INTEGER NOT NULL)`);
-    this.sql.exec("CREATE INDEX IF NOT EXISTS drops_at ON drops (at)");
-    this.sql.exec("CREATE INDEX IF NOT EXISTS drops_sender ON drops (sender)");
-    this.sql.exec("CREATE INDEX IF NOT EXISTS drops_addr ON drops (addr)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS mail_expires ON mail (expires_at)");
+    // Every drop, refused ones included, reads only by index: the mail held is
+    // a count kept beside the rows (an older object's, counted once here),
+    // and the daily caps are counters, which drained mail does not lower.
+    this.sql.exec("CREATE TABLE IF NOT EXISTS held (n INTEGER NOT NULL)");
+    if (!this.sql.exec("SELECT n FROM held").toArray().length) {
+      this.sql.exec("INSERT INTO held (n) SELECT count(*) FROM mail");
+    }
+    counterTable(this.sql);
+    // The indexes an older object's caps read.
     this.sql.exec("DROP INDEX IF EXISTS mail_sender_recv");
     this.sql.exec("DROP INDEX IF EXISTS mail_recv");
     if (typeof WebSocketRequestResponsePair !== "undefined" && this.state.setWebSocketAutoResponse) {
@@ -1712,16 +1747,18 @@ export class MasterMailbox {
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/put") {
-      return this._json(this.put(await request.json()));
+      const body = await request.json();
+      const r = this.state.storage.transactionSync(() => this.put(body));
+      if (r.body.stored) this._wake();
+      return Response.json(r.body, { status: r.status });
     }
     if (request.method === "GET" && url.pathname === "/drain") {
       return Response.json(this.drain(parseInt(url.searchParams.get("after") || "0") || 0));
     }
     if (request.method === "POST" && url.pathname === "/ack") {
       const { upto } = await request.json();
-      const before = this._count("SELECT count(*) AS n FROM mail");
-      this.sql.exec("DELETE FROM mail WHERE id <= ?", Number(upto) || 0);
-      return Response.json({ deleted: before - this._count("SELECT count(*) AS n FROM mail") });
+      const deleted = this.state.storage.transactionSync(() => this._delete("id <= ?", Number(upto) || 0));
+      return Response.json({ deleted });
     }
     if (request.method === "GET" && url.pathname === "/wake") {
       if (typeof WebSocketPair === "undefined") {
@@ -1732,46 +1769,51 @@ export class MasterMailbox {
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     if (request.method === "GET" && url.pathname === "/stats") {
-      return Response.json({ pending: this._count("SELECT count(*) AS n FROM mail"),
+      return Response.json({ pending: this._held(),
                              sockets: this.state.getWebSockets ? this.state.getWebSockets().length : 0 });
     }
     return new Response("not found", { status: 404 });
   }
 
-  _json(result) {
-    return Response.json(result.body, { status: result.status });
+  _held() {
+    return Number(this.sql.exec("SELECT n FROM held").one().n);
   }
 
-  _count(query, ...params) {
-    return Number(this.sql.exec(query, ...params).one().n);
+  _delete(where, ...params) {
+    // Mail rows go, and the count of mail held with them.
+    const n = this.sql.exec(`DELETE FROM mail WHERE ${where} RETURNING id`, ...params).toArray().length;
+    if (n) this.sql.exec("UPDATE held SET n = n - ?", n);
+    return n;
   }
 
   put({ uuid, sender, addr, encrypted, ts, now }) {
+    if (![uuid, sender, addr, encrypted, ts].every((v) => typeof v === "string" && v)) {
+      return { status: 503, body: { error: "temporarily unavailable" } };   // an older Worker's call
+    }
     now = Number(now) || Date.now();
-    this.sql.exec("DELETE FROM mail WHERE expires_at <= ?", now);
-    this.sql.exec("DELETE FROM drops WHERE at <= ?", now - DAY_MS);
-    if (this._count("SELECT count(*) AS n FROM mail WHERE uuid = ?", uuid) > 0) {
+    this._delete("expires_at <= ?", now);
+    if (this.sql.exec("SELECT id FROM mail WHERE uuid = ?", uuid).toArray().length) {
       return { status: 200, body: { stored: false, duplicate: true } };
-    }
-    if (this._count("SELECT count(*) AS n FROM drops WHERE sender = ?", sender) >= MAIL_PER_SENDER_DAY) {
-      return { status: 429, body: { error: "sender cap reached" } };
-    }
-    if (this._count("SELECT count(*) AS n FROM drops WHERE addr = ?", addr) >= MAIL_PER_ADDR_DAY) {
-      return { status: 429, body: { error: "address cap reached" } };
-    }
-    if (this._count("SELECT count(*) AS n FROM drops") >= MAIL_PER_DAY) {
-      return { status: 429, body: { error: "mailbox busy" } };
     }
     // Full, it refuses: the sender keeps the message and retries, where an
     // eviction dropped mail already accepted as delivered.
-    if (this._count("SELECT count(*) AS n FROM mail") >= MAIL_CAP) {
+    if (this._held() >= MAIL_CAP) {
       return { status: 429, body: { error: "mailbox full" } };
+    }
+    const taken = takeCounters(this.sql, now, [
+      { key: `mailbox:sender:${sender}`, limit: MAIL_PER_SENDER_DAY, window: DAY_MS, amount: 1 },
+      { key: `mailbox:addr:${addr}`, limit: MAIL_PER_ADDR_DAY, window: DAY_MS, amount: 1 },
+      { key: "mailbox:all:", limit: MAIL_PER_DAY, window: DAY_MS, amount: 1 },
+    ]);
+    if (!taken.ok) {
+      const error = taken.refused.startsWith("mailbox:sender:") ? "sender cap reached"
+        : taken.refused.startsWith("mailbox:addr:") ? "address cap reached" : "mailbox busy";
+      return { status: 429, body: { error, retry_after: taken.retry_after } };
     }
     const id = Number(this.sql.exec(
       "INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
       uuid, sender, encrypted, ts, now, now + MAIL_TTL_MS).one().id);
-    this.sql.exec("INSERT INTO drops (sender, addr, at) VALUES (?, ?, ?)", sender, addr, now);
-    this._wake();
+    this.sql.exec("UPDATE held SET n = n + 1");
     return { status: 200, body: { stored: true, id } };
   }
 

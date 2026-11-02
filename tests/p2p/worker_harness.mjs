@@ -85,15 +85,19 @@ const worker = workerModule.default;
 
 // SQL handles for the Durable Objects: each class the Worker exports runs
 // in-process on node:sqlite — its SQL is exercised for real, only the storage
-// handle is emulated.
+// handle is emulated. `trace`, when set to an array, collects every statement
+// and its parameters.
 function sqlHandle(db) {
-  return {
+  const handle = {
+    trace: null,
     exec(query, ...params) {
+      if (handle.trace) handle.trace.push([query, params]);
       const stmt = db.prepare(query);
-      const rows = /^\s*(SELECT|INSERT[\s\S]*RETURNING)/i.test(query) ? stmt.all(...params) : (stmt.run(...params), []);
+      const rows = /^\s*SELECT|\bRETURNING\b/i.test(query) ? stmt.all(...params) : (stmt.run(...params), []);
       return { toArray: () => rows, one: () => rows[0] };
     },
   };
+  return handle;
 }
 function objectOf(Cls, db, objEnv = {}) {
   let alarmAt = null;
@@ -101,6 +105,17 @@ function objectOf(Cls, db, objEnv = {}) {
     sql: sqlHandle(db),
     async getAlarm() { return alarmAt; },
     async setAlarm(t) { alarmAt = Number(t); },
+    transactionSync(fn) {
+      db.exec("BEGIN");
+      try {
+        const result = fn();
+        db.exec("COMMIT");
+        return result;
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+      }
+    },
   };
   let ready;
   const obj = new Cls({ storage, blockConcurrencyWhile: (fn) => { ready = fn(); } }, objEnv);
@@ -267,20 +282,26 @@ async function stamp(key, roots, opts, ts = Math.floor(Date.now() / 1000)) {
 }
 const root = (n) => n.toString(16).padStart(64, "0");
 
-// A counter of the limiter set by hand, in its route's instance: how close a
-// route already is to its ceiling, without making the requests that brought
-// it there.
+// A counter set by hand — in its route's limiter instance, or in an object
+// that keeps its own (the mailbox, the directory): how close a route already
+// is to its ceiling, without making the requests that brought it there.
 const shardOf = (key) => limiterShard(key.slice(0, key.indexOf(":")));
+function presetIn(counterDb, key, n) {
+  counterDb.prepare(`INSERT INTO counters (key, n, until) VALUES (?, ?, ?)
+                     ON CONFLICT(key) DO UPDATE SET n = excluded.n`).run(key, n, Date.now() + 86400e3);
+}
 function preset(key, n) {
-  if (!limiter) return;
-  shardOf(key).db.prepare(`INSERT INTO counters (key, n, until) VALUES (?, ?, ?)
-                           ON CONFLICT(key) DO UPDATE SET n = excluded.n`).run(key, n, Date.now() + 86400e3);
+  if (limiter) presetIn(shardOf(key).db, key, n);
 }
 function unset(key) {
   if (limiter) shardOf(key).db.prepare("DELETE FROM counters WHERE key = ?").run(key);
 }
-const counterKeys = (prefix) => [...limiterShards.values()].flatMap((shard) =>
-  shard.db.prepare("SELECT key FROM counters WHERE key LIKE ? ORDER BY key").all(`${prefix}%`).map((r) => r.key));
+const keysIn = (counterDb, prefix) =>
+  counterDb.prepare("SELECT key FROM counters WHERE key LIKE ? ORDER BY key").all(`${prefix}%`).map((r) => r.key);
+const counterKeys = (prefix) => [...limiterShards.values()].flatMap((shard) => keysIn(shard.db, prefix));
+const countIn = (counterDb, key) => counterDb.prepare("SELECT n FROM counters WHERE key = ?").get(key)?.n ?? 0;
+const hasTable = (anyDb, name) =>
+  anyDb.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?").get(name).n > 0;
 const namesTable = () => limiter
   ? limiterShard("names").db.prepare("SELECT pubkey, name, seen FROM names").all()
   : [];
@@ -833,6 +854,18 @@ async function stamps() {
   out.resignOverKeyCap = await stamp(k4, [root(5000), root(5001)], { ip: "198.51.100.62" });
   out.resignAtKeyCap = await stamp(k4, [root(5000)], { ip: "198.51.100.62" });
   out.resignedRecord = JSON.parse(store.get(`ts:${root(5000)}`));
+  // … and on its address's count
+  const k5 = await newKey();
+  await issue(k5, { ip: "198.51.100.63" });
+  const addrKeysBefore = new Set(counterKeys("stamp:addr:"));
+  await stamp(k5, [root(5100)], { ip: "198.51.100.63" });
+  const addrKey63 = counterKeys("stamp:addr:").find((key) => !addrKeysBefore.has(key));
+  for (const n of [5101, 5102]) {
+    store.set(`ts:${root(n)}`, JSON.stringify({ v: 1, date: "2026-01-01T00:00:00Z", ip_hash: "x", sig: "y" }));
+  }
+  if (addrKey63) preset(addrKey63, 999);
+  out.resignOverAddrCap = await stamp(k5, [root(5101), root(5102)], { ip: "198.51.100.63" });
+  out.resignAtAddrCap = await stamp(k5, [root(5101)], { ip: "198.51.100.63" });
   return out;
 }
 
@@ -924,6 +957,11 @@ async function directoryLimits() {
   }
   out.v6 = [];
   for (let i = 0; i < 17; i++) out.v6.push((await reg(v6keys[i], `2001:db8:77:${(i + 1).toString(16)}::1`)).status);
+  // the one refused there spends none of its network's day
+  const dayCounts = (prefix) => [
+    ...(hasTable(dirDb, "counters") ? keysIn(dirDb, prefix).map((key) => countIn(dirDb, key)) : []),
+    ...counterKeys(prefix).map((key) => countIn(shardOf(key).db, key))];
+  out.v6DayCount = dayCounts("directory:addr:6.");
   // the registration limit is one /64's, whatever its interface ids
   const one = keys[17];
   out.sameSlash64 = [];
@@ -940,16 +978,18 @@ async function directoryLimits() {
   // a day's registrations, per address and in all
   const k5 = await newKey();
   await issue(k5, { ip: "198.51.100.230" });
-  const dayKeysBefore = new Set(counterKeys("directory:addr:"));
+  const dayKeysBefore = new Set(keysIn(dirDb, "directory:addr:"));
   out.firstOfDay = (await reg(k5, "203.0.113.230")).status;
-  const dayKey = counterKeys("directory:addr:").find((key) => !dayKeysBefore.has(key));
-  if (dayKey) preset(dayKey, 400);
+  const dayKey = keysIn(dirDb, "directory:addr:").find((key) => !dayKeysBefore.has(key));
+  if (dayKey) presetIn(dirDb, dayKey, 400);
   const dayRowsBefore = nodes();
   out.addrDayCap = (await reg(k5, "203.0.113.230", 20000, ts() + 4)).status;
   out.rowsUnchangedByDayCap = JSON.stringify(nodes()) === JSON.stringify(dayRowsBefore);
-  preset("directory:all:", 50000);
-  out.dayCeiling = (await reg(k5, "203.0.113.231", 20000, ts() + 5)).status;
-  unset("directory:all:");
+  presetIn(dirDb, "directory:all:", 50000);
+  const ceiling = await reg(k5, "203.0.113.231", 20000, ts() + 5);
+  out.dayCeiling = ceiling.status;
+  out.dayCeilingRetryAfter = ceiling.headers["retry-after"] ?? null;
+  dirDb.prepare("DELETE FROM counters WHERE key = 'directory:all:'").run();
   // a directory kept before the network columns existed: its rows get them
   const oldDb = new DatabaseSync(":memory:");
   oldDb.exec(`CREATE TABLE nodes (pubkey TEXT PRIMARY KEY, host4 TEXT, host6 TEXT, port INTEGER NOT NULL,
@@ -1053,6 +1093,8 @@ async function mailboxFull() {
   mailDb.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
                INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at)
                SELECT printf('%08d-0000-4000-8000-000000000000', i), 'x', 'y', 't', ${now - 2 * 86400e3}, ${now + 86400e3} FROM n`);
+  // the rows above came in past the object: its count of the mail held follows them
+  if (hasTable(mailDb, "held")) mailDb.exec("UPDATE held SET n = (SELECT count(*) FROM mail)");
   const encrypted = Buffer.from("box:hi").toString("base64");
   const uuid = "00000000-0000-4000-8000-999999999999";
   const timestamp = "2026-11-02T14:00:00Z";
@@ -1060,8 +1102,27 @@ async function mailboxFull() {
     to: master.pubHex, from_public_key: s.pubHex, encrypted, timestamp, message_uuid: uuid,
     signature: await sign(s, `mailbox:v1:${master.pubHex}:${uuid}:${timestamp}:${await sha256Hex(encrypted)}`),
   });
+  // a mailbox kept by an older object: its mail is counted once at the first
+  // start, the indexes its caps read go, the expiry gets one
+  const oldDb = new DatabaseSync(":memory:");
+  oldDb.exec(`CREATE TABLE mail (id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL UNIQUE,
+              sender TEXT NOT NULL, encrypted TEXT NOT NULL, ts TEXT NOT NULL,
+              received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
+  oldDb.exec("CREATE INDEX mail_sender_recv ON mail (sender, received_at)");
+  oldDb.exec("CREATE INDEX mail_recv ON mail (received_at)");
+  for (let i = 0; i < 5; i++) {
+    oldDb.prepare("INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at) VALUES (?, 'x', 'y', 't', ?, ?)")
+      .run(`old-${i}`, now, now + 86400e3);
+  }
+  objectOf(workerModule.MasterMailbox, oldDb);
+  const upgraded = {
+    held: hasTable(oldDb, "held") ? oldDb.prepare("SELECT n FROM held").get().n : null,
+    indexes: oldDb.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'mail' AND sql IS NOT NULL ORDER BY name")
+      .all().map((r) => r.name),
+    rows: oldDb.prepare("SELECT count(*) AS n FROM mail").get().n,
+  };
   return { answer, oldestKept: mailDb.prepare("SELECT count(*) AS n FROM mail WHERE uuid = '00000001-0000-4000-8000-000000000000'").get().n,
-           rows: mailDb.prepare("SELECT count(*) AS n FROM mail").get().n };
+           rows: mailDb.prepare("SELECT count(*) AS n FROM mail").get().n, upgraded };
 }
 
 // -------------------------------------------------------------------------
@@ -1079,11 +1140,7 @@ async function mailboxDrops() {
       signature: await sign(sender, `mailbox:v1:${master.pubHex}:${uuid}:${timestamp}:${await sha256Hex(encrypted)}`),
     }, { ip });
   };
-  const drops = () => mailDb.prepare("SELECT count(*) AS n FROM drops").get().n;
-  const fill = (n, addr) => {
-    const insert = mailDb.prepare("INSERT INTO drops (sender, addr, at) VALUES (?, ?, ?)");
-    for (let i = 0; i < n; i++) insert.run(`filler${i}`, addr, Date.now());
-  };
+  const drops = () => countIn(mailDb, "mailbox:all:");
   const a = await newKey(), b = await newKey();
   await issue(a, { ip: "198.51.100.120" });
   await issue(b, { ip: "198.51.100.121" });
@@ -1100,17 +1157,38 @@ async function mailboxDrops() {
   await call("DELETE", `/mailbox?public_key_hex=${master.pubHex}&ts=${t}&upto=${last}&signature=${await sign(master, `mailbox-ack:v1:${t}:${last}`)}`);
   out.afterDrain = (await drop(a, 7, "198.51.100.120")).status;
   // an address: one drop left there, then another sender from it is refused
-  fill(100 - 3 - 1, mailDb.prepare("SELECT addr FROM drops WHERE sender = ?").get(a.pubHex).addr);
+  presetIn(mailDb, keysIn(mailDb, "mailbox:addr:")[0], 100 - 1);
   out.addressCap = [await drop(b, 10, "198.51.100.120"), await drop(b, 11, "198.51.100.120")]
     .map((r) => [r.status, r.body.error ?? null]);
   out.otherAddress = (await drop(b, 12, "198.51.100.121")).status;
   // the day's drops in all
-  fill(5000 - drops(), "elsewhere");
+  presetIn(mailDb, "mailbox:all:", 5000);
   out.dayCap = await drop(b, 13, "198.51.100.122");
+  // a refused drop reads by index only, whatever the mailbox holds: no
+  // statement it runs scans a table (the one-row count of mail held aside)
+  mailbox.obj.sql.trace = [];
+  await drop(b, 14, "198.51.100.122");
+  const statements = mailbox.obj.sql.trace;
+  mailbox.obj.sql.trace = null;
+  out.scans = statements.flatMap(([query, params]) =>
+    mailDb.prepare(`EXPLAIN QUERY PLAN ${query}`).all(...params).map((r) => r.detail))
+    .filter((detail) => /^SCAN /.test(detail) && !/^SCAN held\b/.test(detail));
   // a day later none of them counts
-  mailDb.prepare("UPDATE drops SET at = ?").run(Date.now() - 25 * 3600e3);
-  out.nextDay = (await drop(a, 14, "198.51.100.120")).status;
+  mailDb.prepare("UPDATE counters SET until = ?").run(Date.now() - 1);
+  out.nextDay = (await drop(a, 15, "198.51.100.120")).status;
   out.dropsNextDay = drops();
+  // a drop from an older Worker, with no address to count, is refused before
+  // anything is written
+  const held = () => mailDb.prepare("SELECT n FROM held").get().n;
+  const rows = () => mailDb.prepare("SELECT count(*) AS n FROM mail").get().n;
+  const [heldBefore, rowsBefore] = [held(), rows()];
+  const older = await mailbox.stub.fetch("https://object/put", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uuid: "00000000-0000-4000-8000-0000000000ff", sender: a.pubHex,
+                           encrypted: "eA==", ts: "2026-11-02T14:00:00Z", now: Date.now() }),
+  });
+  out.olderWorker = [older.status, await older.json()];
+  out.olderWorkerWrote = held() !== heldBefore || rows() !== rowsBefore;
   return out;
 }
 
@@ -1155,6 +1233,16 @@ async function armedStamps() {
   await issue(k2, { ip: "198.51.100.92" });
   out.ledgerDown = await stamp(k2, [root(7200)], { ip: "198.51.100.92", useEnv: { ...env, BIRTH_LEDGER: brokenLedger } });
   out.ledgerDownWrote = store.has(`ts:${root(7200)}`);
+  // the verdict that decides is the charging step's: a ledger that reads the
+  // budget and then fails to charge it stamps nothing
+  const chargeFails = { idFromName: (n) => n, get: () => ({ fetch: async (url, init) => {
+    if (new URL(url).pathname === "/stamp") throw new Error("Durable Object is overloaded");
+    return ledger.stub.fetch(url, init);
+  } }) };
+  const k3 = await newKey();
+  await issue(k3, { ip: "198.51.100.93" });
+  out.chargeDown = await stamp(k3, [root(7300)], { ip: "198.51.100.93", useEnv: { ...env, BIRTH_LEDGER: chargeFails } });
+  out.chargeDownWrote = store.has(`ts:${root(7300)}`);
   return out;
 }
 

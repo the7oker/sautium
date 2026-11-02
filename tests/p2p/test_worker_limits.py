@@ -229,6 +229,8 @@ def test_a_root_re_signed_from_an_older_format_counts_like_a_new_one():
     assert r["resignAtKeyCap"]["status"] == 200
     assert r["resignedRecord"]["v"] == 2
     assert r["resignedRecord"]["date"] == "2026-01-01T00:00:00Z"     # the first date is kept
+    assert r["resignOverAddrCap"]["status"] == 429                   # and on its address's count
+    assert r["resignAtAddrCap"]["status"] == 200
 
 
 def test_armed_the_budget_holds_for_requests_at_one_moment():
@@ -247,6 +249,8 @@ def test_armed_a_spent_budget_is_refused_before_the_caps_and_leaves_nothing():
 def test_armed_no_verdict_is_no_stamp():
     r = _run("armed", "--armed")
     assert r["ledgerDown"]["status"] == 503 and r["ledgerDownWrote"] is False
+    # the charging step's verdict decides: read but not charged, nothing is stamped
+    assert r["chargeDown"]["status"] == 503 and r["chargeDownWrote"] is False
 
 
 # --- the stores and the request ----------------------------------------------
@@ -305,14 +309,30 @@ def test_a_full_master_mailbox_refuses_and_drops_nothing():
     assert r["oldestKept"] == 1 and r["rows"] == 20000
 
 
+def test_an_older_mailbox_keeps_its_mail_counts_it_once_and_indexes_its_expiry():
+    assert _run("mailbox")["upgraded"] == {"held": 5, "indexes": ["mail_expires"], "rows": 5}
+
+
 def test_the_master_mailbox_counts_the_mail_it_stores_per_sender_address_and_day():
     r = _run("drops")
     assert r["senderRefusals"] == [429] * 3 and r["dropsByRefusals"] == 0
     assert r["afterDrain"] == 429                          # drained mail still counts for the day
     assert r["addressCap"] == [[200, None], [429, "address cap reached"]]
     assert r["otherAddress"] == 200
-    assert r["dayCap"]["status"] == 429 and r["dayCap"]["body"] == {"error": "mailbox busy"}
+    assert r["dayCap"]["status"] == 429 and r["dayCap"]["body"]["error"] == "mailbox busy"
+    assert int(r["dayCap"]["headers"]["retry-after"]) > 0
     assert r["nextDay"] == 200 and r["dropsNextDay"] == 1
+
+
+def test_a_refused_drop_reads_by_index_only():
+    assert _run("drops")["scans"] == []
+
+
+def test_a_drop_without_an_address_is_refused_before_any_write():
+    # an older Worker's call during a deploy: the sender keeps it and retries
+    r = _run("drops")
+    assert r["olderWorker"] == [503, {"error": "temporarily unavailable"}]
+    assert r["olderWorkerWrote"] is False
 
 
 def test_any_other_failure_is_a_500_without_its_text():
@@ -379,7 +399,12 @@ def test_directory_registrations_are_capped_per_address_and_in_all_a_day():
     r = _run("directory")
     assert r["firstOfDay"] == 200
     assert r["addrDayCap"] == 429 and r["rowsUnchangedByDayCap"] is True
-    assert r["dayCeiling"] == 429
+    assert r["dayCeiling"] == 429 and int(r["dayCeilingRetryAfter"]) > 0
+
+
+def test_a_registration_its_networks_cap_refuses_spends_none_of_its_day():
+    # seventeen volunteers in one /48: sixteen listed, and only they counted
+    assert _run("directory")["v6DayCount"] == [16]
 
 
 # --- the birth ledger --------------------------------------------------------

@@ -1187,9 +1187,10 @@ key, the Worker never sees plaintext — signed by the sender
 (`mailbox:v1:{to}:{message_uuid}:{timestamp}:{sha256(encrypted)}`),
 gated by a birth certificate issued there (no free keys) and by
 per-sender (30/day), per-address (100/day, the IPv6 /48) and global
-(5 000/day) caps on the mail it stores — counted in the object with each
-stored drop, drained or not, so a refused drop costs nothing (since
-2026-11-02) — in a SQLite-backed Durable Object (`MasterMailbox`: TTL
+(5 000/day) caps on the mail it stores — counted in the object, in the
+step that stores a drop, drained or not, so a refused drop spends none of
+them and reads by index only (since 2026-11-02) — in a SQLite-backed
+Durable Object (`MasterMailbox`: TTL
 30 d, 20 k rows — full, it refuses new mail, since 2026-11-02, and never
 drops mail it accepted; one instance, keyed by the pinned master pubkey —
 the only mailbox that exists). The master drains on an EVENT, never a timer:
