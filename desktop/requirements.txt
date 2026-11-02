@@ -6,11 +6,14 @@ Pillow>=10.0.0
 qrcode>=7.4.0
 psutil>=6.0.0
 psycopg2-binary>=2.9.9
-cryptography>=41.0.0
-aiohttp>=3.9.1
+# Floors on what faces the internet — the peer server, the DHT, TLS — are its
+# last published security fix (OSV, read 2026-11-02), as in
+# backend/requirements.txt.
+cryptography>=50.0.0
+aiohttp>=3.14.4
 # 2.0.13 is the first Windows wheel that carries its own OpenSSL (2.0.11 wanted
 # OpenSSL 1.1 DLLs from the system); the floor is the 2.0 line's latest fix.
 libtorrent>=2.0.15
 argon2-cffi>=23.1.0
-PyNaCl>=1.5.0
+PyNaCl>=1.6.2
 miniupnpc>=2.3.3

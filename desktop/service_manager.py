@@ -229,10 +229,10 @@ class ServiceManager:
         """Install backend dependencies if missing or out-of-date: None when
         they are in place, otherwise why not.
 
-        Skip-fast condition: a marker file at <data_dir>/.backend_deps_<env> holds
-        the SHA-256 of requirements.txt from the last successful install into THAT
-        interpreter. If it matches the current file, the environment is up to date
-        and we return immediately.
+        Skip-fast condition: a marker inside the interpreter's own
+        site-packages (_deps_marker) holds the SHA-256 of requirements.txt from
+        the last successful install into it. If it matches the current file,
+        the environment is up to date and we return immediately.
         Any change to requirements.txt (added/removed/version-bumped package)
         invalidates the marker and forces a `pip install -r requirements.txt`,
         which top-ups whatever is missing.
@@ -256,13 +256,9 @@ class ServiceManager:
         import hashlib
         from desktop.config_manager import get_data_dir
         req_hash = hashlib.sha256(req_file.read_bytes()).hexdigest()
-        # Keyed by interpreter as well as by requirements. One data root is
-        # shared by every runtime that reads it — a checkout's venv and the
-        # macOS app's own Python both keep their state here — and a marker that
-        # knew only the file hash let one of them vouch for the other: the app
-        # skipped its install and its backend died on "No module named uvicorn".
-        env_key = hashlib.sha256(python.encode()).hexdigest()[:12]
-        marker = get_data_dir() / f".backend_deps_{env_key}"
+        marker = self._deps_marker(python)
+        if marker is None:
+            return f"The backend's Python does not start: {python}"
         if marker.exists() and marker.read_text().strip() == req_hash:
             logger.info("Backend dependencies already up to date")
             return None
@@ -406,8 +402,32 @@ class ServiceManager:
             return f"The backend's packages did not install: {last[:200]}"
 
         marker.write_text(req_hash)
+        # Before the marker moved into the interpreter, it sat in the data
+        # root under a key of the interpreter's path
+        for stale in get_data_dir().glob(".backend_deps_*"):
+            stale.unlink(missing_ok=True)
         logger.info("Backend dependencies installed")
         return None
+
+    @staticmethod
+    def _deps_marker(python: str) -> Optional[Path]:
+        """Where the record of the last install into `python` lives: in that
+        interpreter's own site-packages, None when it does not run. A runtime
+        that is replaced takes its packages and this record with it — the
+        macOS app's runtime, which the backend shares, is copied afresh on a
+        new release while its path stays — and one data root read by several
+        interpreters (a checkout's venv beside the app's own) never lets one
+        of them vouch for another."""
+        result = subprocess.run(
+            [python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            capture_output=True, text=True, timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            logger.error("The backend's Python does not start (%s): %s",
+                         python, (result.stderr or "").strip()[-300:])
+            return None
+        return Path(result.stdout.strip()) / ".sautium-backend-deps"
 
     def start_backend(self, progress_cb: Optional[Callable] = None) -> bool:
         """Start the FastAPI backend and say whether it is up. The window
