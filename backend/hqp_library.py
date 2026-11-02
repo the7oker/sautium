@@ -58,8 +58,14 @@ logger = logging.getLogger(__name__)
 
 _HASH_TIMEOUT = 10.0
 # The whole library in one answer. 39k files took 1.2 s from Desktop; an
-# Embedded box scanning a share may answer slower.
+# Embedded box scanning a share may answer slower. Its line may run to tens
+# of megabytes, past what the client takes from any other answer.
 _LIBRARY_TIMEOUT = 300.0
+_LIBRARY_LIMIT = 1024 * 1024 * 1024
+# What a box says about itself is shown and stored: a name, never a control
+# character, so long at most. A library hash is a token of plain ASCII.
+_FACT_MAX = 200
+_HASH_FORM = re.compile(rb'value="([0-9A-Za-z+/=_.:-]{1,256})"')
 # ET refuses the C0 control characters a tag can carry; the raw bytes of
 # other encodings are already U+FFFD after the lenient decode.
 _XML_CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -69,12 +75,17 @@ _LEADING_DIGITS = re.compile(r"^\s*(\d{1,3})(?!\d)")
 Entry = Tuple[str, Dict[str, Any]]
 
 
-def _command(host: str, port: int, xml: str, timeout: float) -> bytes:
+def _command(host: str, port: int, xml: str, timeout: float,
+             limit: Optional[int] = None) -> bytes:
     """One control-port request, one newline-framed line of XML back — on the
     HQPlayer's link (playback.hqp_link), where every request of this node to
     it goes: never into a build's silence, never beside another request."""
     from playback import hqp_link
-    return hqp_link.link_for(host, port).ask_raw(xml, timeout)
+    return hqp_link.link_for(host, port).ask_raw(xml, timeout, limit)
+
+
+def _fact(value: str) -> str:
+    return _XML_CONTROL.sub("", value)[:_FACT_MAX]
 
 
 def get_info(host: str, port: int) -> Dict[str, str]:
@@ -85,7 +96,7 @@ def get_info(host: str, port: int) -> Dict[str, str]:
     out = {}
     for k in ("name", "product", "version", "engine", "platform"):
         m = re.search(rf'\b{k}="([^"]*)"', line)
-        out[k] = m.group(1) if m else ""
+        out[k] = _fact(m.group(1)) if m else ""
     return out
 
 
@@ -104,7 +115,7 @@ def parse_discover(reply: bytes) -> Optional[Dict[str, str]]:
     out = {}
     for k in ("name", "version"):
         m = re.search(rf'\b{k}="([^"]*)"', tag.group(1))   # the XML prolog has a version too
-        out[k] = m.group(1) if m else ""
+        out[k] = _fact(m.group(1)) if m else ""
     return {"name": out["name"], "product": out["version"]}
 
 
@@ -144,8 +155,10 @@ def discover(host: str, port: int = 4321, timeout: float = _DISCOVER_TIMEOUT) ->
 
 
 def library_hash(host: str, port: int) -> str:
+    """The library's hash; ConnectionError for an answer that carries none
+    of the token's shape."""
     line = _command(host, port, "<LibraryGetHash/>", _HASH_TIMEOUT)
-    m = re.search(rb'value="([^"]*)"', line)
+    m = _HASH_FORM.search(line)
     if not m:
         raise ConnectionError(
             f"HQPlayer at {host}:{port} gave no library hash: {line[:120]!r}")
@@ -155,7 +168,7 @@ def library_hash(host: str, port: int) -> str:
 def fetch_library(host: str, port: int) -> str:
     """The whole library as HQPlayer's XML text, decoded leniently."""
     return _command(host, port, '<LibraryGet picture="0"/>',
-                    _LIBRARY_TIMEOUT).decode("utf-8", "replace")
+                    _LIBRARY_TIMEOUT, _LIBRARY_LIMIT).decode("utf-8", "replace")
 
 
 def _int(value: Optional[str]) -> Optional[int]:

@@ -513,14 +513,115 @@ def _msearch_location(ip: str, timeout: float = 3.0) -> Optional[str]:
     return fallback
 
 
+# What a device that answers a scan may make the node fetch and hold: a
+# description and its services' are a few kilobytes each.
+_DESCRIBE_BYTES = 256 * 1024
+_DESCRIBE_DOCUMENTS = 16          # one description and its services
+_DESCRIBE_TIMEOUT_S = 5.0
+_LOCATIONS_PER_HOST = 4
+_LOCATIONS = 64
+_DESCRIBE_DEADLINE_S = 20.0
+
+
+def _describe_requester():
+    """What a description is fetched with (the scan's, an address added by
+    hand): plain-HTTP GETs only, no redirect followed, nothing compressed
+    taken, _DESCRIBE_BYTES per document and _DESCRIBE_DOCUMENTS per device.
+    A device's service URLs stay on its own host (async_upnp_client), and
+    with redirects refused, so does every fetch."""
+    from urllib.parse import urlparse
+
+    from aiohttp import ClientError, ClientSession, ClientTimeout
+    from async_upnp_client.client import UpnpRequester
+    from async_upnp_client.const import HttpResponse
+    from async_upnp_client.exceptions import UpnpCommunicationError, UpnpConnectionError
+
+    class Requester(UpnpRequester):
+        left = _DESCRIBE_DOCUMENTS
+
+        async def async_http_request(self, http_request):
+            self.left -= 1
+            if self.left < 0:
+                raise UpnpCommunicationError("more documents than a device describes itself with")
+            if http_request.method != "GET" or urlparse(http_request.url).scheme != "http":
+                raise UpnpCommunicationError("a description is a plain-HTTP GET")
+            headers = {**(http_request.headers or {}), "Accept-Encoding": "identity"}
+            try:
+                async with ClientSession(auto_decompress=False) as session:
+                    async with session.get(http_request.url, headers=headers, allow_redirects=False,
+                                           timeout=ClientTimeout(total=_DESCRIBE_TIMEOUT_S)) as r:
+                        if r.headers.get("Content-Encoding", "identity").lower() != "identity":
+                            raise UpnpCommunicationError("a compressed description")
+                        body = await r.content.read(_DESCRIBE_BYTES + 1)
+                        if len(body) > _DESCRIBE_BYTES:
+                            raise UpnpCommunicationError("a description past its size")
+                        return HttpResponse(r.status, r.headers,
+                                            body.decode(r.charset or "utf-8", "replace"))
+            except (TimeoutError, ClientError) as e:
+                raise UpnpConnectionError(repr(e)) from e
+            except LookupError as e:                  # a charset no codec names
+                raise UpnpCommunicationError(repr(e)) from e
+    return Requester()
+
+
+def _from_source(location: str, source: Optional[str]) -> bool:
+    """A multicast answer's LOCATION is taken only when it is plain HTTP on
+    the address the answer came from — the unicast sweep rewrites it to
+    that address (_rehost)."""
+    from urllib.parse import urlparse
+    parts = urlparse(location)
+    return (parts.scheme == "http" and bool(source) and parts.hostname is not None
+            and parts.hostname == source.split("%", 1)[0].strip("[]"))
+
+
+def _scan_locations(found: dict, remembered: set) -> list:
+    """The addresses a scan describes: plain HTTP, _LOCATIONS_PER_HOST per
+    host and _LOCATIONS in all, those of the hosts the node remembers a
+    renderer at first, then in order."""
+    from urllib.parse import urlparse
+    hosts = {urlparse(loc).hostname for loc in remembered if loc}
+    per_host: dict = {}
+    out = []
+    for loc in sorted(set(found.values()), key=lambda loc: (urlparse(loc).hostname not in hosts, loc)):
+        host = urlparse(loc).hostname
+        if urlparse(loc).scheme != "http" or per_host.get(host, 0) >= _LOCATIONS_PER_HOST:
+            continue
+        per_host[host] = per_host.get(host, 0) + 1
+        out.append(loc)
+        if len(out) >= _LOCATIONS:
+            break
+    return out
+
+
+def _describe_all(locations: list) -> dict:
+    """Each location's renderer (_dlna_describe), described at once in an
+    event loop of this thread's own — a description is parsed off the
+    server's loop — within _DESCRIBE_DEADLINE_S: what has not answered by
+    then is left out, as is one that fails."""
+    async def run() -> dict:
+        tasks = {loc: asyncio.ensure_future(_dlna_describe(loc)) for loc in locations}
+        if tasks:
+            await asyncio.wait(tasks.values(), timeout=_DESCRIBE_DEADLINE_S)
+        out = {}
+        for loc, task in tasks.items():
+            if not task.done():
+                task.cancel()
+                logger.debug("DLNA describe of %s did not end within the scan", loc)
+            elif task.exception() is not None:
+                logger.debug("DLNA describe failed for %s: %s", loc, task.exception())
+            else:
+                out[loc] = task.result()
+        return out
+    return asyncio.run(run())
+
+
 async def _dlna_describe(location: str) -> dict:
     """Fetch a device description and resolve the MediaRenderer in it →
     {udn, location, name, model}. Rejects descriptions without a renderer:
     multi-device hosts exist (the KANN serves its AK Connect media SERVER
     on the same port) and a pinned server can never play."""
-    from async_upnp_client.aiohttp import AiohttpRequester
     from async_upnp_client.client_factory import UpnpFactory
-    factory = UpnpFactory(AiohttpRequester(), non_strict=True)
+    factory = UpnpFactory(_describe_requester(), non_strict=True)
     device = await factory.async_create_device(location)
     candidates = [device, *device.embedded_devices.values()]
     renderer = next((d for d in candidates
@@ -670,7 +771,7 @@ async def _unicast_sweep(found: dict, found_hqp: dict) -> None:
                             loc = line.split(":", 1)[1].strip()
                         elif low.startswith("usn:"):
                             usn = line.split(":", 1)[1].strip()
-                    if loc:
+                    if loc and loc.lower().startswith("http://"):
                         hits.append((usn or loc, _rehost(loc, ip)))
         except OSError:
             pass
@@ -732,7 +833,7 @@ async def _scan_run():
     async def _on_response(headers) -> None:
         loc = headers.get("location") or headers.get("LOCATION")
         usn = headers.get("usn") or headers.get("USN") or loc
-        if loc:
+        if loc and _from_source(str(loc), headers.get("_host")):
             found[usn] = str(loc)
 
     # Search from EVERY private interface: on a multi-homed host (Wi-Fi +
@@ -754,13 +855,14 @@ async def _scan_run():
     # Each box found is asked over control (GetInfo + the library hash) —
     # all of them at once: one that is slow or closes its port at once must
     # not hold the scan for the others.
+    # Whatever one box answers is that box's failure, never the scan's.
     async def _resolve(host: str) -> tuple:
         try:
             # Its link says first whether HQPlayer takes anything now — a
             # build, one it did not finish, a silence: busy, never asked into
             hqp_link.link_for(host, 4321).refuse()
             return host, await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321), None
-        except OSError as e:
+        except Exception as e:
             return host, None, e
     hqps: dict[tuple, dict] = {}
     configured = _configured_hqp()
@@ -788,17 +890,21 @@ async def _scan_run():
             entry["control"] = False
         else:
             ep, how, _facts = resolved
-            if ep is not None:
-                # the row learns what the box says about itself (a row minted
-                # from an address alone takes HQPlayer's own name); the same
-                # library at a new address (a DHCP lease later) has its row
-                # follow it — a match by an alias of its own address keeps
-                # the address it was registered at
-                ep = await asyncio.to_thread(hqp_library.ensure_endpoint, host, 4321, resolved)
-            elif configured and _hqp_key(host, 4321) == _hqp_key(*configured):
-                # the configured address is the owner's choice: its row comes
-                # on first contact, at the address the owner gave
-                ep = await asyncio.to_thread(hqp_library.register, *configured)
+            try:
+                if ep is not None:
+                    # the row learns what the box says about itself (a row
+                    # minted from an address alone takes HQPlayer's own name);
+                    # the same library at a new address (a DHCP lease later)
+                    # has its row follow it — a match by an alias of its own
+                    # address keeps the address it was registered at
+                    ep = await asyncio.to_thread(hqp_library.ensure_endpoint, host, 4321, resolved)
+                elif configured and _hqp_key(host, 4321) == _hqp_key(*configured):
+                    # the configured address is the owner's choice: its row
+                    # comes on first contact, at the address the owner gave
+                    ep = await asyncio.to_thread(hqp_library.register, *configured)
+            except Exception as e:
+                logger.warning("HQPlayer %r at %s could not be registered: %s", facts["name"], host, e)
+                ep = None
             if ep is not None:
                 entry["endpoint_id"] = ep["id"]
         hqps[(host, 4321)] = entry
@@ -809,13 +915,13 @@ async def _scan_run():
     reached: dict[str, list] = {}      # every address this scan described each renderer at
     pins = _dlna_pins()
     known = {**_dlna_discovered, **pins}
-    for loc in sorted(set(found.values())):
-        try:
-            info = await _dlna_describe(loc)
-        except Exception as e:
-            logger.debug("DLNA describe failed for %s: %s", loc, e)
-            continue
-        if _is_hqplayer_renderer(info, found_hqp):
+    from playback.dlna_backend import known_locations
+    remembered = {loc for record in known.values() for loc in known_locations(record)}
+    locations = _scan_locations(found, remembered)
+    described = await asyncio.to_thread(_describe_all, locations)
+    for loc in locations:
+        info = described.get(loc)
+        if info is None or _is_hqplayer_renderer(info, found_hqp):
             continue
         # A scan finds the device where it is TODAY; whatever we knew about
         # where it used to be stays attached to it, so a phone found on the

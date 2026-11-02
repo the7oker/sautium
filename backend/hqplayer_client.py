@@ -116,6 +116,11 @@ def wait_on(sock: socket.socket, event: int, timeout: Optional[float], waker: Wa
 _CONNECTING = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY,
                getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
 
+# The longest answer line taken: a playlist of thousands of entries is a few
+# megabytes; a whole library (LibraryGet) asks for more itself. Past it the
+# connection goes — the rest of that line would be read as the next answer.
+ANSWER_LIMIT = 16 * 1024 * 1024
+
 
 def _lookup(host: str, port: int, timeout: float,
             wait: Callable[[socket.socket, int, Optional[float]], str]) -> str:
@@ -819,8 +824,8 @@ class HQPlayerClient:
 
     def _read_line(self, wait: Optional[float] = None,
                    on_late: Optional[Callable[[], Callable[[str], None]]] = None,
-                   keep: Optional[Callable[[socket.socket, bytes], None]] = None
-                   ) -> Optional[bytes]:
+                   keep: Optional[Callable[[socket.socket, bytes], None]] = None,
+                   limit: int = ANSWER_LIMIT) -> Optional[bytes]:
         """
         Read one answer — a newline-framed line — waiting `wait` seconds for
         it (the client's timeout by default). With `on_late`, an answer that
@@ -832,6 +837,7 @@ class HQPlayerClient:
         closes its own socket, `_io_error` "interrupted" — no loss of
         HQPlayer's. With `keep`, a wait that runs out hands the connection
         to it, with what came of the line, instead of closing it (`kept`).
+        A line past `limit` bytes ends the connection (ANSWER_LIMIT).
         """
         self.answered = False
         if not self.socket:
@@ -872,6 +878,10 @@ class HQPlayerClient:
                     self.disconnect()
                     return None
                 self.buffer += chunk
+                if len(self.buffer) > limit and self.buffer.find(b"\n", scanned) < 0:
+                    self._io_error = f"an answer longer than {limit} bytes"
+                    self.disconnect()
+                    return None
             how = "answered"
             self.answered = True
             line = bytes(self.buffer[:nl])
@@ -1014,15 +1024,16 @@ class HQPlayerClient:
 
         return None
 
-    def raw(self, xml: str, wait: float) -> bytes:
+    def raw(self, xml: str, wait: float, limit: int = ANSWER_LIMIT) -> bytes:
         """One request sent as it stands, answered as the line of bytes
         HQPlayer sent — a library listing is no XML a parser takes as it
-        stands (hqp_library). Raises ConnectionError — TimeoutError when
-        HQPlayer kept the connection and said nothing — when there is none."""
+        stands (hqp_library) — of at most `limit` bytes. Raises
+        ConnectionError — TimeoutError when HQPlayer kept the connection and
+        said nothing — when there is none."""
         if self.gate is None:
-            return self._raw(xml, wait)
+            return self._raw(xml, wait, limit)
         with self.gate.request("raw"):
-            return self._raw(xml, wait)
+            return self._raw(xml, wait, limit)
 
     def _send(self, xml_command: str) -> bool:
         """_send_command, the gate's last word on it first (`gate.sending()`,
@@ -1032,13 +1043,13 @@ class HQPlayerClient:
         with self.gate.sending():
             return self._send_command(xml_command)
 
-    def _raw(self, xml: str, wait: float) -> bytes:
+    def _raw(self, xml: str, wait: float, limit: int) -> bytes:
         self._io_error = None
         self.answered = False
         self._inherited = None
         if not self._send(xml):
             raise ConnectionError(f"HQPlayer at {self.host}:{self.port}: {self._io_error}")
-        line = self._read_line(wait)
+        line = self._read_line(wait, limit=limit)
         if line is None:
             error = TimeoutError if self._io_error.startswith("no answer within") else ConnectionError
             raise error(f"HQPlayer at {self.host}:{self.port}: {self._io_error}")

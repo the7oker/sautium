@@ -1333,11 +1333,12 @@ class HqpLink:
         with self._owed_cond:
             self._owed_cond.notify_all()
 
-    def ask_raw(self, xml: str, wait: float) -> bytes:
+    def ask_raw(self, xml: str, wait: float, limit: Optional[int] = None) -> bytes:
         """One raw request — the library's LibraryGet, its hash, GetInfo for a
-        registration — answered as the line of bytes HQPlayer sent."""
+        registration — answered as the line of bytes HQPlayer sent, of at
+        most `limit` bytes (the client's ANSWER_LIMIT by default)."""
         with self.asking() as c:
-            return c.raw(xml, wait)
+            return c.raw(xml, wait) if limit is None else c.raw(xml, wait, limit)
 
     # -- the build's moments --------------------------------------------------------
 

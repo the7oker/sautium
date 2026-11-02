@@ -1132,8 +1132,10 @@ def picker(manager, monkeypatch):
     found: list[str] = []
 
     async def search(callback, **kw):
+        # as async_upnp_client hands an answer over: `_host` is where it came from
         for loc in found:
-            await callback({"location": loc, "usn": "uuid:x::urn:schemas-upnp-org:device:MediaRenderer:1"})
+            await callback({"location": loc, "usn": "uuid:x::urn:schemas-upnp-org:device:MediaRenderer:1",
+                            "_host": urlparse(loc).hostname})
 
     async def sweep(found_dlna, found_hqp):
         return None
