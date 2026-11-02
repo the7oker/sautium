@@ -103,9 +103,12 @@ class Shapes:
 
 
 def cached(repo: str, filename: str = "config.json") -> bool:
-    """Whether the hub's cache holds `repo`: the tests load what is on the machine."""
+    """Whether the hub's cache holds `repo` at its pinned commit: the tests load
+    what is on the machine."""
+    import model_cache
     from huggingface_hub import try_to_load_from_cache
-    return isinstance(try_to_load_from_cache(repo, filename), str)
+    return isinstance(try_to_load_from_cache(
+        repo, filename, revision=model_cache.HUB_REVISIONS[repo]), str)
 
 
 def count_cpu_copies(patch) -> list:
@@ -184,7 +187,7 @@ def refusal() -> dict:
     refused_by, copy_by = text_embedder._refused, text_embedder._cpu_copy
     text_embedder._refused = lambda device, why: refused.append(why) or refused_by(device, why)
     text_embedder._cpu_copy = lambda name: copies.append(name) or copy_by(name)
-    model = text_embedder._load(MODEL, "mps", local_files_only=True)
+    model = text_embedder._load(MODEL, "mps")
     longest = min(1730, int(0.9 * single_text_limit(model)))
     rng = random.Random(0)
     left = 0

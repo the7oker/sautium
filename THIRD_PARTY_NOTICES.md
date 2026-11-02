@@ -51,7 +51,7 @@ Web UI has no build step, and asks no font service for its type.
 |---|---|---|
 | `laion/clap-htsat-unfused` | Apache-2.0 | audio embeddings |
 | `BAAI/bge-m3` | MIT | multilingual text embeddings |
-| `google/madlad400-3b-mt`, as the prebuilt CTranslate2 int8 conversion `Nextcloud-AI/madlad400-3b-mt-ct2-int8` (pinned revision; converted locally from the Google source when that repository is unavailable) | Apache-2.0 | query translation |
+| `google/madlad400-3b-mt`, as the prebuilt CTranslate2 int8 conversion `Nextcloud-AI/madlad400-3b-mt-ct2-int8` (pinned revision; converted locally from the Google source, at its pinned revision, only when that repository is gone) | Apache-2.0 | query translation |
 | `MIT/ast-finetuned-audioset-10-10-0.4593` | BSD-3-Clause | instrument tagging |
 | PaSST weights via `hear21passt` | Apache-2.0 | instrument tagging |
 

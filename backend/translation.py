@@ -40,12 +40,15 @@ MODEL_ID = "google/madlad400-3b-mt"
 
 # Prebuilt int8 conversion (Apache 2.0, tokenizer bundled) — saves fresh
 # nodes the 12GB source download + 10-min local conversion. Maintained by
-# Nextcloud (ships MADLAD in their translate app). REVISION IS PINNED:
-# verified byte-identical to our own conversion on the multilingual
-# protocol (2026-07-21); a moving revision would let upstream silently
-# swap weights under every fresh node.
+# Nextcloud (ships MADLAD in their translate app). Its revision is pinned
+# (model_cache.HUB_REVISIONS): verified byte-identical to our own
+# conversion on the multilingual protocol (2026-07-21); a moving revision
+# would let upstream silently swap weights under every fresh node.
 CT2_REPO = "Nextcloud-AI/madlad400-3b-mt-ct2-int8"
-CT2_REVISION = "aa32bbdeba7880eff2096ec044cb155a340a9400"
+# What the translator reads from it: a snapshot without one of these is a
+# download that broke off.
+CT2_FILES = ("config.json", "model.bin", "shared_vocabulary.json",
+             "tokenizer_config.json", "spiece.model")
 
 
 def _ct2_model_dir() -> Path:
@@ -62,25 +65,37 @@ def ensure_ct2_model() -> Path:
     Resolution order:
     1. A locally converted copy (nodes that predate the prebuilt source).
     2. The pinned prebuilt artifact (~3GB incl. tokenizer) — the fresh-node
-       path: no 12GB source, no conversion.
-    3. Local conversion from the BYO HF source — the independence fallback
-       if the prebuilt repo ever disappears. Loads the source as fp16
-       (≈6GB transient RAM instead of 12GB fp32), writes to a tmp dir and
-       renames — a crashed conversion never leaves a half-model that loads.
+       path: no 12GB source, no conversion. Read from the cache alone once
+       it holds the whole snapshot.
+    3. Local conversion from the BYO HF source, at its pinned commit — the
+       independence fallback, taken only when the prebuilt repository or
+       its revision is gone: a network that failed raises, and the next
+       load asks again. Loads the source as fp16 (≈6GB transient RAM
+       instead of 12GB fp32), writes to a tmp dir and renames — a crashed
+       conversion never leaves a half-model that loads.
     """
+    import model_cache
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import (LocalEntryNotFoundError, RepositoryNotFoundError,
+                                        RevisionNotFoundError)
+
     out = _ct2_model_dir()
     if (out / "model.bin").exists():
         return out
 
+    revision = model_cache.HUB_REVISIONS[CT2_REPO]
     try:
-        from huggingface_hub import snapshot_download
-        path = Path(snapshot_download(CT2_REPO, revision=CT2_REVISION))
-        logger.info(
-            f"Using prebuilt ct2 int8 model {CT2_REPO}@{CT2_REVISION[:8]}")
+        path = Path(snapshot_download(CT2_REPO, revision=revision, local_files_only=True))
+        if all((path / name).exists() for name in CT2_FILES):
+            return path
+    except LocalEntryNotFoundError:
+        pass
+    try:
+        path = Path(snapshot_download(CT2_REPO, revision=revision))
+        logger.info(f"Using prebuilt ct2 int8 model {CT2_REPO}@{revision[:8]}")
         return path
-    except Exception as e:
-        logger.warning(
-            f"Prebuilt ct2 model unavailable ({e}) — converting locally")
+    except (RepositoryNotFoundError, RevisionNotFoundError) as e:
+        logger.warning(f"Prebuilt ct2 model is gone ({e}) — converting locally")
 
     import ctranslate2.converters
 
@@ -88,7 +103,7 @@ def ensure_ct2_model() -> Path:
     logger.info(f"Converting {MODEL_ID} to CTranslate2 int8 → {out} "
                 "(one-time; downloads the 12GB source if not cached)")
     converter = ctranslate2.converters.TransformersConverter(
-        MODEL_ID, load_as_float16=True,
+        MODEL_ID, load_as_float16=True, revision=model_cache.HUB_REVISIONS[MODEL_ID],
     )
     converter.convert(str(tmp), quantization="int8", force=True)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +138,8 @@ class QueryTranslator:
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
         except Exception:
-            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+            import model_cache
+            self.tokenizer = model_cache.from_hub(AutoTokenizer.from_pretrained, MODEL_ID)
         self.translator = ctranslate2.Translator(
             str(model_dir), device="cpu", compute_type="int8",
             inter_threads=1,

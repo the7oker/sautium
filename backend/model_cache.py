@@ -34,6 +34,32 @@ _factory_lock = threading.RLock()
 # last — the gaps between two loads included.
 _warming = False
 
+# The commit each Hugging Face model loads at. A model's id in the database
+# and on the network is uuid5 of its name alone (uuid_utils.embedding_model_id),
+# so the commit is what that id means: moving one is a new model — a new
+# identity, migrated as one — never an edit of its line here.
+HUB_REVISIONS = {
+    "laion/clap-htsat-unfused": "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a",
+    "BAAI/bge-m3": "5617a9f61b028005a4858fdac845db406aefb181",
+    "MIT/ast-finetuned-audioset-10-10-0.4593": "f826b80d28226b62986cc218e5cec390b1096902",
+    "google/madlad400-3b-mt": "fa184c675da0b5c9e1c8694fccd4e12e2d422094",
+    "Nextcloud-AI/madlad400-3b-mt-ct2-int8": "aa32bbdeba7880eff2096ec044cb155a340a9400",
+}
+
+
+def from_hub(load, name: str, **kwargs):
+    """`load(name, …)` — a from_pretrained, or a constructor that takes the
+    same `revision` and `local_files_only` — at the model's pinned commit:
+    from the cache alone once it holds every file that commit needs, from
+    the Hub otherwise (a first start, a download that broke off). A model
+    with no pinned commit is refused (KeyError)."""
+    revision = HUB_REVISIONS[name]
+    try:
+        return load(name, revision=revision, local_files_only=True, **kwargs)
+    except OSError:
+        logger.info("%s at %s is not in the cache whole: fetching it", name, revision[:8])
+        return load(name, revision=revision, **kwargs)
+
 
 @contextlib.contextmanager
 def warming_up():

@@ -448,6 +448,15 @@ def test_an_analysis_run_whose_text_pass_stopped_is_no_success(monkeypatch):
 # ── on a device that materializes its attention ────────────────────────────
 
 @pytest.fixture
+def pinned(monkeypatch):
+    """The test's encoder name with a pinned commit (model_cache.from_hub
+    refuses a model without one); the commit, for what the test expects."""
+    import model_cache
+    monkeypatch.setitem(model_cache.HUB_REVISIONS, NAME, "0" * 40)
+    return "0" * 40
+
+
+@pytest.fixture
 def cpu_copy(monkeypatch):
     """A working set whose share is 10,000 (SHARE_GB), and the encoder's copy
     on the CPU a fake that says what it took and how often it was loaded. No
@@ -458,8 +467,8 @@ def cpu_copy(monkeypatch):
     monkeypatch.setattr(device, "empty_cache", lambda dev=None: None)
     cpu = Tokenized()
     cpu.loads = []
-    monkeypatch.setattr(text_embedder, "_load", lambda name, device, **kw: cpu.loads.append(
-        (name, device, kw.get("local_files_only"))) or cpu)
+    monkeypatch.setattr(text_embedder, "_load", lambda name, device: cpu.loads.append(
+        (name, device)) or cpu)
     monkeypatch.setattr(text_embedder, "_cpu", None)
     return cpu
 
@@ -475,7 +484,7 @@ def test_on_mps_a_forward_takes_no_more_attention_than_its_share(cpu_copy):
     # (2 × 64² = 8,192) with the one left over alone
     assert mps.forwards == [(1, 100)] + [(2, 64)] * 5 + [(1, 64)]
     # the one over the share alone went to the CPU
-    assert cpu_copy.forwards == [(1, 101)] and cpu_copy.loads == [(NAME, "cpu", True)]
+    assert cpu_copy.forwards == [(1, 101)] and cpu_copy.loads == [(NAME, "cpu")]
     assert left_out == set()
     assert [float(v[0]) for v in vectors] == pytest.approx([_mark(t) for t in texts])
 
@@ -489,13 +498,13 @@ def test_the_cpu_copy_is_loaded_once_a_pass_and_given_back_at_its_end(cpu_copy, 
         for i in range(2):
             text_embedder.encode(mps, [_words(101, i), _words(10, i)], batch_size=4, device="mps",
                                  name=NAME)
-        assert cpu_copy.loads == [(NAME, "cpu", True)]
+        assert cpu_copy.loads == [(NAME, "cpu")]
     assert text_embedder._cpu is None
     assert [r.getMessage() for r in caplog.records if r.name == "text_embedder"] == [
         f"Text embedding model on the CPU released: {NAME}"]
     with device.heavy_pass("the next text pass"):
         text_embedder.encode(mps, [_words(101)], batch_size=4, device="mps", name=NAME)
-    assert cpu_copy.loads == [(NAME, "cpu", True), (NAME, "cpu", True)]
+    assert cpu_copy.loads == [(NAME, "cpu"), (NAME, "cpu")]
 
 
 def test_a_bio_pass_on_mps_writes_the_bio_over_the_share_from_the_cpu(db, cpu_copy):
@@ -1039,18 +1048,19 @@ def test_the_loaders_kwargs_ask_for_eager_attention_on_mps_alone():
     assert kwargs("cuda", torch.float32) == {} and kwargs("cpu", torch.float32) == {}
 
 
-def test_the_encoder_is_loaded_with_its_devices_kwargs(monkeypatch):
+def test_the_encoder_is_loaded_with_its_devices_kwargs(monkeypatch, pinned):
     import torch
     import text_embedder
     seen = []
     monkeypatch.setattr(text_embedder, "SentenceTransformer",
                         lambda name, device, **kw: seen.append((name, device, kw)) or object())
     text_embedder._load(NAME, "mps")
-    text_embedder._load(NAME, "cpu", local_files_only=True)        # the pass's CPU copy
+    text_embedder._load(NAME, "cpu")        # the pass's CPU copy
     assert seen == [
         (NAME, "mps", {"model_kwargs": {"torch_dtype": torch.bfloat16,
-                                        "attn_implementation": "eager"}}),
-        (NAME, "cpu", {"model_kwargs": {}, "local_files_only": True})]
+                                        "attn_implementation": "eager"},
+                       "revision": pinned, "local_files_only": True}),
+        (NAME, "cpu", {"model_kwargs": {}, "revision": pinned, "local_files_only": True})]
 
 
 @pytest.mark.parametrize("device_name, attention", [("mps", "eager"), ("cpu", None)])
@@ -1089,8 +1099,9 @@ def test_ast_is_loaded_with_its_devices_attention(monkeypatch, device_name, atte
 
     monkeypatch.setattr(transformers, "ASTForAudioClassification", Ast)
     monkeypatch.setattr(transformers, "ASTFeatureExtractor",
-                        types.SimpleNamespace(from_pretrained=lambda name: object()))
+                        types.SimpleNamespace(from_pretrained=lambda name, **kw: object()))
     monkeypatch.setattr(hear21passt.base, "get_basic_model", lambda mode: Passt())
+    monkeypatch.setattr(ensemble_instruments, "pinned_passt_checkpoint", lambda: None)
     ensemble_instruments.InstrumentEnsembleTagger(device=device_name).load()
     assert len(seen) == 1 and seen[0]["attn_implementation"] == attention
 
@@ -1122,7 +1133,8 @@ def factory_lock(monkeypatch):
     return model_cache._factory_lock
 
 
-def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch, factory_lock):
+def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch, factory_lock,
+                                                                   pinned):
     """transformers' loading patches process-wide state: the encoder's loads
     take the search models' lock (model_cache._factory_lock) — the CPU copy,
     loaded every pass, without a hub check — and a pass asking for the model a
@@ -1160,11 +1172,13 @@ def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch, 
     # neither waits for the other: the pass waited on the lock, holding nothing
     assert not loading.is_alive() and not asking.is_alive()
     assert searched[0][0] and passes == [searched[0][1]]
-    assert seen[1:] == [(NAME, "cpu", None, True)]    # one load, the lock held
+    assert seen[1:] == [(NAME, "cpu", True, True)]    # one load, the lock held
 
 
 @pytest.mark.parametrize("which", ["clap", "instruments"])
 def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, factory_lock, which):
+    import model_cache
+    monkeypatch.setitem(model_cache.HUB_REVISIONS, "clap", "0" * 40)
     """Loaded from a pass (a stream's analysis, the run) beside a search's
     load, they would race it as the text encoder would: a pass's load holds
     the lock, and a search's factory, which holds it already, takes it
@@ -1179,9 +1193,9 @@ def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, fact
         import clap_model
         monkeypatch.setattr(clap_model, "_cache", {})
         monkeypatch.setattr(clap_model, "ClapProcessor", types.SimpleNamespace(
-            from_pretrained=lambda name: loading()))
+            from_pretrained=lambda name, **kw: loading()))
         monkeypatch.setattr(clap_model, "ClapModel", types.SimpleNamespace(
-            from_pretrained=lambda name, torch_dtype: types.SimpleNamespace(
+            from_pretrained=lambda name, torch_dtype, **kw: types.SimpleNamespace(
                 to=lambda device: types.SimpleNamespace(eval=lambda: None))))
         get, drop = lambda: clap_model.get_clap_model("clap", "cpu"), clap_model._cache.clear
     else:

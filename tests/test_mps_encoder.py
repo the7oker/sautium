@@ -55,7 +55,7 @@ def encoder():
     if not mps_probe.cached(MODEL):
         pytest.skip(f"{MODEL} is not in the hub's cache")
     import text_embedder
-    held = mps_probe.Held(text_embedder._load(MODEL, "mps", local_files_only=True))
+    held = mps_probe.Held(text_embedder._load(MODEL, "mps"))
     yield held
     held.release()
 

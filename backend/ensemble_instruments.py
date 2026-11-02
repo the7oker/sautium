@@ -29,9 +29,17 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+# The checkpoint hear21passt loads by URL, with no hash check of its own,
+# into torch hub's checkpoints folder, where whatever lies is unpickled.
+PASST_CHECKPOINT_URL = ("https://github.com/kkoutini/PaSST/releases/download/"
+                        "v0.0.1-audioset/passt-s-f128-p16-s10-ap.476-swa.pt")
+PASST_CHECKPOINT_SHA256 = "302903fa8c4aee817b11dc982da0b29aaf8d11a3e722420476d0a12c9db70c2c"
 
 
 # AudioSet class names (exactly as in the model config) we treat as
@@ -108,6 +116,40 @@ def present_instruments(instruments: Optional[Dict[str, float]]) -> Dict[str, fl
     return {k: v for k, v in instruments.items() if v >= threshold_for(k)}
 
 
+def pinned_passt_checkpoint() -> Path:
+    """The PaSST checkpoint where hear21passt looks for it, put there only
+    once it is the pinned file. A file found there is hashed once and its
+    verdict kept beside it, keyed by its size and modification time; one
+    that is not the pinned file is fetched again."""
+    import torch
+    import dump_common
+    path = Path(torch.hub.get_dir()) / "checkpoints" / PASST_CHECKPOINT_URL.rsplit("/", 1)[1]
+    verdict = path.with_name(path.name + ".sha256")
+
+    def stamp() -> str:
+        st = path.stat()
+        return f"{PASST_CHECKPOINT_SHA256} {st.st_size} {st.st_mtime_ns}"
+
+    if path.exists():
+        if verdict.exists() and verdict.read_text(encoding="ascii") == stamp():
+            return path
+        if dump_common.sha256_file(str(path)) == PASST_CHECKPOINT_SHA256:
+            verdict.write_text(stamp(), encoding="ascii")
+            return path
+        logger.warning("The PaSST checkpoint at %s is not the pinned file: fetching it again", path)
+        path.unlink()
+    part = path.with_name(path.name + ".part")
+    dump_common.download_resumable(PASST_CHECKPOINT_URL, str(part), label="PaSST checkpoint")
+    try:
+        dump_common.verify_sha256(str(part), PASST_CHECKPOINT_SHA256)
+    except RuntimeError:
+        part.unlink()
+        raise
+    os.replace(part, path)
+    verdict.write_text(stamp(), encoding="ascii")
+    return path
+
+
 class InstrumentEnsembleTagger:
     """AST + PaSST ensemble. Call load() once, then tag(audio_48k) per track."""
 
@@ -146,14 +188,16 @@ class InstrumentEnsembleTagger:
         from device import attn_implementation, get_model_dtype
         dtype = get_model_dtype(self.device)
 
+        import model_cache
         logger.info("Loading AST model: %s on %s (%s)", self.AST_MODEL_NAME, self.device, dtype)
-        self.ast_extractor = ASTFeatureExtractor.from_pretrained(self.AST_MODEL_NAME)
+        self.ast_extractor = model_cache.from_hub(ASTFeatureExtractor.from_pretrained,
+                                                  self.AST_MODEL_NAME)
         # Eager on MPS: its SDPA keeps 8 bytes a score for every batch size a
         # forward has had (1.7 GB for the 12 windows of tag_full_track) until
         # the process ends: the graph cache is the process's, not the model's
-        self.ast = ASTForAudioClassification.from_pretrained(
-            self.AST_MODEL_NAME, torch_dtype=dtype,
-            attn_implementation=attn_implementation(self.device),
+        self.ast = model_cache.from_hub(
+            ASTForAudioClassification.from_pretrained, self.AST_MODEL_NAME,
+            torch_dtype=dtype, attn_implementation=attn_implementation(self.device),
         )
         self.ast = self.ast.to(self.device).eval()
         self.id2label = self.ast.config.id2label
@@ -180,6 +224,7 @@ class InstrumentEnsembleTagger:
         # frontend stays fp32 — torch.stft has no half kernels and bf16 mel
         # would shift scores vs the fp32-computed library baseline anyway.
         logger.info("Loading PaSST model (hear21passt, logits mode)")
+        pinned_passt_checkpoint()
         with contextlib.redirect_stdout(io.StringIO()):
             self.passt = _passt_get_basic_model(mode="logits")
         if dtype in (torch.float16, torch.bfloat16):

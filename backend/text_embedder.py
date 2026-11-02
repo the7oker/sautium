@@ -67,13 +67,14 @@ def get_text_embedder(model_name: str, device: str):
     return model
 
 
-def _load(model_name: str, device: str, **kwargs):
+def _load(model_name: str, device: str):
     """The model loaded, its caller holding model_cache._factory_lock."""
     from device import get_model_dtype
     dtype = get_model_dtype(device)
     logger.info(f"Loading text embedding model: {model_name} on {device} ({dtype})")
-    model = SentenceTransformer(model_name, device=device,
-                                model_kwargs=_model_kwargs(device, dtype), **kwargs)
+    import model_cache
+    model = model_cache.from_hub(SentenceTransformer, model_name, device=device,
+                                 model_kwargs=_model_kwargs(device, dtype))
     logger.info(f"Text embedding model loaded ({dtype})")
     return model
 
@@ -383,10 +384,10 @@ def _cpu_copy(name: str):
     with _cpu_lock:
         if _cpu is None or _cpu[0] != name:
             try:
-                # The device's model's own snapshot (no hub check every pass),
-                # loaded as every load of the process: one at a time
+                # The device's model's own snapshot (from_hub reads it from the
+                # cache), loaded as every load of the process: one at a time
                 with model_cache._factory_lock:
-                    _cpu = (name, _load(name, "cpu", local_files_only=True))
+                    _cpu = (name, _load(name, "cpu"))
             except Exception as e:
                 said = out_of_memory(e)
                 if said is None:
