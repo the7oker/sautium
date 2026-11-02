@@ -710,7 +710,8 @@ Do NOT rely solely on audio features — an artist can sound similar but belong 
 # ---------------------------------------------------------------------------
 
 # Codex has no --disallowed-tools: the harness keeps its own exec /
-# apply_patch / plan / question tools in the roster no matter what, and
+# apply_patch / question tools in the roster no matter what (and, by
+# version, a planner or the MCP resource readers), and
 # codex_runner can only switch off the shell and the plugin/agent surface.
 # Its read-only sandbox refuses any write; this block keeps the model off
 # those tools altogether — and, since this text REPLACES codex's built-in
@@ -718,10 +719,11 @@ Do NOT rely solely on audio features — an artist can sound similar but belong 
 _CODEX_TOOL_DISCIPLINE = """\
 - You run inside the Codex CLI harness, but you are NOT a coding agent and there is no \
 repository, workspace or task here — ignore any such instincts. Besides the MCP tools \
-(mcp__postgres query + mcp__assistant search/playback) the harness lists exec, apply_patch, \
-update_plan, wait and request_user_input: NEVER use any of them — no shell, no \
-scripts, no files created, read or modified, no plans, and a question to the user goes in your \
-reply text, not through a tool. Do ALL work through the MCP tools, called directly.
+(mcp__postgres query + mcp__assistant search/playback) the harness lists tools of its own — \
+exec, apply_patch, wait, request_user_input, a planner or MCP resource readers: \
+NEVER use any of them — no shell, no scripts, no files created, read or modified, no plans, \
+and a question to the user goes in your reply text, not through a tool. Do ALL work through \
+the MCP tools, called directly.
 - Independent tool calls go out in parallel (three mb_resolve checks in one round, not three \
 rounds). Skip running commentary about what you are going to do — the UI shows tool activity \
 on its own; read the results, then write one complete reply.

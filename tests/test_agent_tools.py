@@ -14,6 +14,7 @@ every one, and the suite runs on an internal network."""
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -218,6 +219,45 @@ def _codex_roster(body: dict) -> tuple[dict, list[str]]:
             sorted(codex_hosted_tools(body)))
 
 
+# What _codex_roster reads, by codex's version: a one-shot (no MCP server)
+# and a chat turn (the probe server as `postgres`), measured against the
+# fake. A version that is not here fails the tests that start codex, and
+# the version the image installs (backend/agents/codex/package.json) must
+# be here.
+_CODEX_ROSTERS = {
+    "0.149.0": {
+        "one-shot": ({"functions": ["exec", "request_user_input", "wait"]},
+                     ["apply_patch", "update_plan"]),
+        "turn": ({"functions": ["exec", "request_user_input", "wait"], "mcp__postgres": ["ping"]},
+                 ["apply_patch", "list_mcp_resource_templates", "list_mcp_resources",
+                  "read_mcp_resource", "update_plan"]),
+    },
+    "0.166.0": {
+        "one-shot": ({"functions": ["exec", "request_user_input", "wait"]},
+                     ["apply_patch", "list_mcp_resource_templates", "list_mcp_resources",
+                      "read_mcp_resource"]),
+        "turn": ({"functions": ["exec", "request_user_input", "wait"], "mcp__postgres": ["ping"]},
+                 ["apply_patch", "list_mcp_resource_templates", "list_mcp_resources",
+                  "read_mcp_resource"]),
+    },
+}
+
+
+def _codex_rosters() -> dict:
+    """_CODEX_ROSTERS' entry for the codex the runner starts."""
+    said = subprocess.run([codex_runner._resolve_codex_executable(), "--version"],
+                          capture_output=True, text=True, check=True).stdout
+    version = said.split()[-1]
+    assert version in _CODEX_ROSTERS, f"codex {version}: its tool sets are not measured"
+    return _CODEX_ROSTERS[version]
+
+
+def test_the_codex_the_image_installs_has_its_tool_sets_measured():
+    pinned = json.loads((BACKEND / "agents" / "codex" / "package.json").read_text(
+        encoding="utf-8"))["dependencies"]["@openai/codex"]
+    assert pinned in _CODEX_ROSTERS
+
+
 def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(codex, shared):
     target = shared / "written.txt"
     api = codex([_patch_that_adds(target), {"text": "Evening Set"}])
@@ -230,8 +270,7 @@ def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(c
     first = api.bodies("/responses")[0]
     assert codex_instructions(first) == "You write short titles."
     assert "You are Codex" not in json.dumps(first)
-    assert _codex_roster(first) == ({"functions": ["exec", "request_user_input", "wait"]},
-                                    ["apply_patch", "update_plan"])
+    assert _codex_roster(first) == _codex_rosters()["one-shot"]
 
 
 def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared, monkeypatch):
@@ -247,10 +286,7 @@ def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared
     assert done.error is None
     assert _calls(shared, "postgres") == ["postgres"]
     assert not target.exists()
-    assert _codex_roster(api.bodies("/responses")[0]) == (
-        {"functions": ["exec", "request_user_input", "wait"], "mcp__postgres": ["ping"]},
-        ["apply_patch", "list_mcp_resource_templates", "list_mcp_resources",
-         "read_mcp_resource", "update_plan"])
+    assert _codex_roster(api.bodies("/responses")[0]) == _codex_rosters()["turn"]
 
 
 def test_a_codex_turn_hands_its_servers_the_login_password_off_its_command_line(
@@ -485,5 +521,6 @@ def test_a_docker_library_turn_reads_the_catalogue_and_is_refused_the_settings(
 
     assert done.error is None
     results = _results(api)
+    assert '[{"n":' in results
     assert results.count("permission denied") == 1
     assert "permission denied for table user_settings" in results

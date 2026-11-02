@@ -152,6 +152,13 @@ def test_no_more_than_the_budget_leaves_the_database(sql):
     sql._conn.rollback()
 
 
+def test_a_call_makes_nothing_in_the_database(sql):
+    """The query runs inside the schema's function: the tool's session holds
+    no object of its own, though this role may create one."""
+    assert json.loads(sql.run_query(
+        "SELECT count(*) AS n FROM pg_proc WHERE pronamespace = pg_my_temp_schema()")) == [{"n": 0}]
+
+
 def test_an_unreachable_database_is_said_as_the_tools_error(sql, monkeypatch):
     if sql._conn is not None:
         sql._conn.close()

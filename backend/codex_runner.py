@@ -58,9 +58,10 @@ Differences from the Claude runner, all forced by the CLI surface
 - Auth is auth.json-only: a bare OPENAI_API_KEY env var is ignored by
   the CLI (measured, 0.149), so when auth.json is missing and a key is
   present the runner mints auth.json via `codex login --with-api-key`
-  once. When auth.json exists the key is POPPED from the env — mirror of
-  the ANTHROPIC_API_KEY strip: billing must not silently migrate from
-  the ChatGPT subscription to the pay-as-you-go API account.
+  once. No key reaches the CLI's environment (the backend drops the
+  node's credentials before any child starts, serving.hold_secrets):
+  billing must not silently migrate from the ChatGPT subscription to the
+  pay-as-you-go API account.
 """
 
 import hashlib
@@ -643,7 +644,8 @@ def call_codex_oneshot(
     """One-shot codex call, text in and text out — `system_prompt` as its
     instructions; no MCP server, no shell, no web. The harness's own tools
     have no off switch and stay: apply_patch (the read-only sandbox refuses
-    it), update_plan, wait, request_user_input. `--ephemeral` so title
+    it), wait, request_user_input and, by version, update_plan or the MCP
+    resource readers (with no server to read). `--ephemeral` so title
     generations don't litter session storage. Returns the final agent
     message text, or None on any failure — callers treat title generation
     as best-effort."""

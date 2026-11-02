@@ -563,9 +563,10 @@ implementation details live in the code, DB and git history.
   its own, so codex's coding-agent prompt never rides along. Auth is auth.json-ONLY — a bare
   OPENAI_API_KEY env is ignored by the CLI (measured, 0.149), so the
   runner mints auth.json via `codex login --with-api-key` when needed,
-  and POPS the env keys when auth.json exists (mirror of the
-  ANTHROPIC_API_KEY strip: billing must not silently leave the
-  subscription). Resume handle: `chat_sessions.codex_thread_id` next to
+  and no key reaches the CLI's environment — the backend drops the
+  node's credentials before any child starts (`serving.hold_secrets`,
+  2026-11-02; before it the runner popped the keys when auth.json
+  existed): billing must not silently leave the subscription. Resume handle: `chat_sessions.codex_thread_id` next to
   `claude_session_id` — per-agent columns, switching providers
   mid-session resumes each agent's own thread. No sessions sub-mount for
   `~/.codex` (unlike claude_sessions): codex indexes threads in sqlite

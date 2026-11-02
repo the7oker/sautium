@@ -260,14 +260,13 @@ def test_the_sql_tool_answers_as_the_assistant_and_makes_nothing(owner, scratch_
                    password=db_init.assistant_password(PG["password"]),
                    dbname=scratch_dsn.rsplit("/", 1)[1])
     try:
-        assert json.loads(tool.run_query("SELECT current_user AS who")) == [
-            {"who": db_init.ASSISTANT_ROLE}]
+        assert json.loads(tool.run_query(
+            "SELECT current_user AS who, "
+            "has_database_privilege(current_database(), 'TEMPORARY') AS temp")) == [
+            {"who": db_init.ASSISTANT_ROLE, "temp": False}]
         assert len(json.loads(tool.run_query("SELECT count(*) AS n FROM artists"))) == 1
         with pytest.raises(ValueError, match="permission denied for table user_settings"):
             tool.run_query("SELECT value FROM user_settings")
-        assert json.loads(tool.run_query(
-            "SELECT count(*) AS n FROM pg_proc WHERE pronamespace = pg_my_temp_schema()")) == [
-            {"n": 0}]
     finally:
         if tool._conn is not None:
             tool._conn.close()
