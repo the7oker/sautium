@@ -1164,7 +1164,9 @@ The attacks worth pricing against, on a single-user home appliance:
   Current state: `probe-connect` is safe (connects only to the
   *observed* TCP source, unspoofable, + per-pubkey cooldown); DHT
   announce-on-behalf is voucher-gated; Worker email is capped per key,
-  per mailbox and per route, invites only from a verified address.
+  per mailbox and per route, invites only from a verified address; the
+  three mail routes' ceilings together sit inside the mail plan's day,
+  counted as the provider counts it (00:00–24:00 UTC, since 2026-11-02).
 - **(e) State-growth** — bloat queues / tables / the task pool. Every
   new store needs a cap (the pool included).
 - **(f) Pricer griefing** — hold a node near its ceiling so legit

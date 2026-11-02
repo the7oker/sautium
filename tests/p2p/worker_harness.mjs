@@ -558,28 +558,31 @@ async function mail() {
   // the recipient: one plain address, counted by its normalised mailbox
   out.listSyntax = await invite(alice, "alice", "a@example.net,b@example.net", { ip: "198.51.100.1" });
   out.displayName = await invite(alice, "alice", "<bob@example.net>", { ip: "198.51.100.1" });
+  const sam = await newKey();
+  await issue(sam);
+  await verifyEmail(sam, "sam", "sam@example.org", { ip: "198.51.100.9" });
   out.sameMailbox = [];
   for (const to of ["Bob.Smith+x@GoogleMail.com", "bobsmith@gmail.com", "BOBSMITH+y@gmail.com", "b.o.b.smith@gmail.com"]) {
-    out.sameMailbox.push((await invite(alice, "alice", to, { ip: "198.51.100.1" })).status);
+    out.sameMailbox.push((await invite(sam, "sam", to, { ip: "198.51.100.9" })).status);
   }
 
-  // per key: twenty invites a day
+  // per key: five invites a day, from any address
   const many = await newKey();
   await issue(many);
   await verifyEmail(many, "many", "many@example.org", { ip: "198.51.100.5" });
   out.perKey = [];
-  for (let i = 0; i < 11; i++) {
-    out.perKey.push((await invite(many, "many", `p${i}@example.net`, { ip: "198.51.100.5" })).status);
+  for (let i = 0; i < 6; i++) {
+    out.perKey.push((await invite(many, "many", `p${i}@example.net`, { ip: `198.51.100.${60 + i}` })).status);
   }
 
-  // per sender mailbox: two keys verified on one mailbox share its twenty
+  // per sender mailbox: two keys verified on one mailbox share its five
   const k1 = await newKey(), k2 = await newKey();
   await issue(k1); await issue(k2);
   await verifyEmail(k1, "kim", "shared@example.org", { ip: "198.51.100.6" });
   await verifyEmail(k2, "kai", "shared@example.org", { ip: "198.51.100.7" });
   out.perMailbox = [];
-  for (let i = 0; i < 6; i++) out.perMailbox.push((await invite(k1, "kim", `m${i}@example.net`, { ip: "198.51.100.6" })).status);
-  for (let i = 6; i < 11; i++) out.perMailbox.push((await invite(k2, "kai", `m${i}@example.net`, { ip: "198.51.100.7" })).status);
+  for (let i = 0; i < 3; i++) out.perMailbox.push((await invite(k1, "kim", `m${i}@example.net`, { ip: "198.51.100.6" })).status);
+  for (let i = 3; i < 6; i++) out.perMailbox.push((await invite(k2, "kai", `m${i}@example.net`, { ip: "198.51.100.7" })).status);
 
   // concurrent requests cannot pass a counter together: twelve invites to one
   // mailbox at once, three may go
@@ -592,13 +595,23 @@ async function mail() {
   out.concurrentStatuses = burst.map((r) => r.status).sort();
   out.concurrentMails = mails.length - sent;
 
-  // the route's ceiling, and a Retry-After that spreads the waiting nodes
-  preset("invite:all:", 499);
-  out.ceiling = [(await invite(alice, "alice", "c1@example.net", { ip: "198.51.100.1" })).status,
-                 (await invite(alice, "alice", "c2@example.net", { ip: "198.51.100.1" })).status];
+  // the route's ceiling — the day's 24th invite goes, the 25th waits for
+  // 00:00 UTC — and a Retry-After that spreads the waiting nodes
+  const cyra = await newKey();
+  await issue(cyra);
+  await verifyEmail(cyra, "cyra", "cyra@example.org", { ip: "198.51.100.11" });
+  preset("invite:all:", 23);
+  out.ceiling = [(await invite(cyra, "cyra", "c1@example.net", { ip: "198.51.100.11" })).status,
+                 (await invite(cyra, "cyra", "c2@example.net", { ip: "198.51.100.11" })).status];
   out.ceilingRetries = [];
+  out.retriesFrom = Date.now();
   for (let i = 0; i < 6; i++) {
-    out.ceilingRetries.push((await invite(alice, "alice", `c${3 + i}@example.net`, { ip: "198.51.100.1" })).body.retry_after);
+    out.ceilingRetries.push((await invite(cyra, "cyra", `c${3 + i}@example.net`, { ip: "198.51.100.11" })).body.retry_after);
+  }
+  out.retriesTo = Date.now();
+  if (limiter) {
+    out.ceilingUntil = Number(limiterShard("invite").db
+      .prepare("SELECT until FROM counters WHERE key = 'invite:all:'").get().until);
   }
 
   // one limiter per route: codes to a mailbox spend nothing of its invites
@@ -606,7 +619,7 @@ async function mail() {
   await issue(coder);
   for (let i = 0; i < 10; i++) await sendCode(coder, "coder", "shared-route@example.net", { ip: `198.51.100.${100 + i}` });
   unset("invite:all:");
-  out.inviteAfterCodes = await invite(alice, "alice", "shared-route@example.net", { ip: "198.51.100.1" });
+  out.inviteAfterCodes = await invite(cyra, "cyra", "shared-route@example.net", { ip: "198.51.100.11" });
 
   // a refusal writes nothing to KV
   const writes = kvState.writes;
@@ -621,7 +634,7 @@ async function mail() {
 
   // the provider unreachable: a 502, never an error's text
   mailState.down = true;
-  out.providerDown = await invite(alice, "alice", "down@example.net", { ip: "198.51.100.1" });
+  out.providerDown = await invite(cyra, "cyra", "down@example.net", { ip: "198.51.100.11" });
   mailState.down = false;
   return out;
 }
@@ -634,7 +647,16 @@ async function codes() {
   const out = {};
   const k = await newKey();
   await issue(k);
+  const t0 = Date.now();
   await sendCode(k, "tess", "tess@example.org", { ip: "198.51.100.30" });
+  const t1 = Date.now();
+  // the day's codes end at 00:00 UTC, the mail provider's day; a person's
+  // own count runs 24 h from its first code
+  if (limiter) {
+    const until = (key) => Number(limiterShard("code").db
+      .prepare("SELECT until FROM counters WHERE key = ?").get(key).until);
+    out.window = { t0, t1, ceiling: until("code:all:"), person: until(`code:key:${k.pubHex}`) };
+  }
   const right = codeIn(mails[mails.length - 1]);
   const wrong = right === "AAAAAA" ? "BBBBBB" : "AAAAAA";
   out.wrong = [];
@@ -669,6 +691,13 @@ async function codes() {
     out.codesToOneMailbox.push((await sendCode(await newKey(), "tom", i % 2 ? "tom@example.org" : "Tom+x@example.org",
                                                { ip: `198.51.100.${40 + i}` })).status);
   }
+  // the day's 60th code goes, the 61st waits for 00:00 UTC
+  preset("code:all:", 59);
+  out.codeCeiling = [];
+  for (let i = 0; i < 2; i++) {
+    out.codeCeiling.push((await sendCode(await newKey(), "cleo", `cleo${i}@example.org`,
+                                         { ip: `198.51.100.${70 + i}` })).status);
+  }
   return out;
 }
 
@@ -698,7 +727,7 @@ async function accepts() {
   out.writesByAcceptRefusal = kvState.writes - writes;
   const pasha = await newKey();
   const notifyTo = counterKeys("notify:to:")[0];
-  if (notifyTo) preset(notifyTo, 20);
+  if (notifyTo) preset(notifyTo, 3);
   const sent2 = mails.length;
   out.acceptAtNotifyCap = await accept(pasha, "pasha", typed, { ip: "198.51.100.52" });
   out.mailsAtNotifyCap = mails.length - sent2;
@@ -707,7 +736,7 @@ async function accepts() {
   const notifyAddrsBefore = new Set(counterKeys("notify:addr:"));
   await accept(await newKey(), "kasia", typed, { ip: "198.51.100.53" });
   const notifyAddr = counterKeys("notify:addr:").find((key) => !notifyAddrsBefore.has(key));
-  if (notifyAddr) preset(notifyAddr, 10);
+  if (notifyAddr) preset(notifyAddr, 3);
   const sent3 = mails.length;
   out.acceptAtNotifyAddrCap = await accept(await newKey(), "lena", typed, { ip: "198.51.100.53" });
   out.mailsAtNotifyAddrCap = mails.length - sent3;
@@ -725,6 +754,18 @@ async function accepts() {
   writes = kvState.writes;
   out.pickupAtCap = await pending(masha, "masha", { ip: "198.51.100.50" });
   out.writesByPickupRefusal = kvState.writes - writes;
+  // the day's 12th acceptance mail goes, the 13th waits for 00:00 UTC; the
+  // acceptance is kept either way
+  const vera = await newKey();
+  await issue(vera);
+  await verifyEmail(vera, "vera", "vera@example.org", { ip: "198.51.100.55" });
+  const veraCode = await inviteOf(vera, "vera");
+  preset("notify:all:", 11);
+  out.notifyCeiling = [];
+  for (let i = 0; i < 2; i++) {
+    const r = await accept(await newKey(), `fan${i}`, veraCode, { ip: `198.51.100.${56 + i}` });
+    out.notifyCeiling.push([r.status, r.body.notified]);
+  }
   return out;
 }
 

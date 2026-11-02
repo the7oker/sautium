@@ -114,9 +114,13 @@ const FROM_NAME = "Sautium";
 // (writes $5 a million, reads and lists by the million at $0.50 and $5). A
 // ceiling met refuses everyone, so the per-address caps sit far above one
 // person's use and far below the ceiling: filling a route's ceiling takes at
-// least 50 addresses on every route. `addr` is volumeToken(): the exact IPv4,
-// the IPv6 /48. The mail ceilings must also sit inside the mail provider's
-// plan. The master's mailbox keeps its daily caps in its own object
+// least 50 addresses on every route but the three that send mail. Their
+// ceilings are the mail plan's: it sends 100 mails a day and 3 000 a month,
+// so the three give 96 a day (96 × 31 = 2 976, and the four left over take
+// a mail admitted just before midnight that reaches the provider after it),
+// codes first — 60 codes, 24 invites, 12 acceptance mails; 12, 5 and 4
+// addresses fill them. `addr` is volumeToken(): the exact IPv4, the IPv6
+// /48. The master's mailbox keeps its daily caps in its own object
 // (MAIL_PER_*), where they count only the drops it stores.
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -124,14 +128,18 @@ const LIMITS = {
   birth:     { addr: 50, all: 20000 },                          // new identities
   stamp:     { key: 500, addr: 1000, all: 50000 },              // roots written: new, or re-signed
   lookup:    { key: 2000, addr: 5000, all: 250000 },            // roots a /timestamp asks about (KV reads)
-  code:      { key: 5, to: 5, addr: 10, all: 500 },             // verification mails
+  code:      { key: 5, to: 5, addr: 5, all: 60 },               // verification mails
   register:  { key: 10, addr: 50, all: 5000 },                  // tries; `all` = registrations written
-  invite:    { key: 10, from: 10, to: 3, addr: 10, all: 500 },  // invite mails
+  invite:    { key: 5, from: 5, to: 3, addr: 5, all: 24 },      // invite mails
   accept:    { key: 20, addr: 20, all: 10000 },                 // stored acceptances
-  notify:    { key: 20, to: 20, addr: 10, all: 500 },           // acceptance mails
+  notify:    { key: 3, to: 3, addr: 3, all: 12 },               // acceptance mails
   pending:   { key: 100, addr: 200, all: 20000 },               // pickups (a KV list each)
   directory: { addr: 400, all: 50000 },                         // registrations (volunteers renew hourly)
 };
+// The routes that send mail. Their ceilings count the provider's day, from
+// 00:00 UTC, not 24 h from first use: two windows that each straddle a
+// midnight would otherwise let both ceilings' mail into one of its days.
+const MAIL_ROUTES = new Set(["code", "invite", "notify"]);
 // A route's ceiling, once met, refuses everyone until its window ends; each
 // refusal's Retry-After adds up to this much at random, so the waiting
 // nodes do not all come back in the same second.
@@ -1096,7 +1104,8 @@ export class Limiter {
    *   counters — `take` is all or nothing: every counter is read, and only
    *              when all have room are all incremented. A window runs from
    *              a counter's first use (a single-use nonce is limit 1 for
-   *              its lifetime).
+   *              its lifetime); a `utc` counter's (a mail route's ceiling)
+   *              ends at the next 00:00 UTC.
    *   names    — ("names") the username each key speaks under, as a
    *              peppered token, fixed at its first use of a writing
    *              invite-family route (the username is the salt the key was
@@ -1147,12 +1156,14 @@ export class Limiter {
 
   take({ now, counters }) {
     this.sql.exec("DELETE FROM counters WHERE until <= ?", now);
+    // A day since the epoch ends at 00:00 UTC (Unix time has no leap seconds).
+    const end = (c) => c.utc ? (Math.floor(now / c.window) + 1) * c.window : now + c.window;
     const rows = counters.map((c) => this.sql.exec(
       "SELECT n, until FROM counters WHERE key = ?", c.key).toArray()[0]);
     for (let i = 0; i < counters.length; i++) {
       const c = counters[i], row = rows[i];
       if ((row ? Number(row.n) : 0) + c.amount > c.limit) {
-        const until = row ? Number(row.until) : now + c.window;
+        const until = row ? Number(row.until) : end(c);
         const jitter = c.key.includes(":all:") ? Math.floor(Math.random() * CEILING_JITTER_S) : 0;
         return { ok: false, refused: c.key,
                  retry_after: Math.max(1, Math.ceil((until - now) / 1000)) + jitter };
@@ -1162,7 +1173,7 @@ export class Limiter {
       this.sql.exec(
         `INSERT INTO counters (key, n, until) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET n = n + excluded.n`,
-        c.key, c.amount, now + c.window);
+        c.key, c.amount, end(c));
     }
     return { ok: true };
   }
@@ -1235,8 +1246,10 @@ async function limiterCall(env, instance, path, body) {
 }
 
 function daily(route, axis, id = "", amount = 1) {
-  // One of a route's counters (LIMITS) over 24 h.
-  return { key: `${route}:${axis}:${id}`, limit: LIMITS[route][axis], window: DAY_MS, amount };
+  // One of a route's counters (LIMITS) over 24 h; a mail route's ceiling
+  // over the UTC day (MAIL_ROUTES).
+  return { key: `${route}:${axis}:${id}`, limit: LIMITS[route][axis], window: DAY_MS, amount,
+           utc: axis === "all" && MAIL_ROUTES.has(route) };
 }
 
 async function admit(env, counters, bind) {

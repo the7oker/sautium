@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 HERE = Path(__file__).parent
+DAY_MS = 86_400_000
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
@@ -80,15 +81,33 @@ def test_a_recipient_is_one_plain_mailbox_counted_however_spelled():
 
 def test_invites_are_capped_per_key_per_sender_mailbox_and_in_all():
     r = _run("mail")
-    assert r["perKey"] == [200] * 10 + [429]
-    assert r["perMailbox"] == [200] * 10 + [429]          # two keys, one verified mailbox
+    assert r["perKey"] == [200] * 5 + [429]
+    assert r["perMailbox"] == [200] * 5 + [429]           # two keys, one verified mailbox
     assert r["ceiling"] == [200, 429]
 
 
+def test_the_days_mail_fits_the_mail_plan_codes_first():
+    # The plan sends 100 mails a day and 3 000 a month: 60 codes, 24 invites
+    # and 12 acceptance mails make 96 (96 x 31 = 2 976).
+    assert _run("codes")["codeCeiling"] == [200, 429]
+    assert _run("mail")["ceiling"] == [200, 429]
+    assert _run("accepts")["notifyCeiling"] == [[200, True], [200, False]]
+
+
+def test_a_mail_ceiling_ends_at_midnight_utc_and_a_persons_count_a_day_after_its_first_use():
+    w = _run("codes")["window"]
+    assert w["ceiling"] in {(w["t0"] // DAY_MS + 1) * DAY_MS, (w["t1"] // DAY_MS + 1) * DAY_MS}
+    assert w["t0"] + DAY_MS <= w["person"] <= w["t1"] + DAY_MS
+
+
 def test_a_full_ceiling_sends_its_waiting_callers_back_at_spread_times():
-    retries = _run("mail")["ceilingRetries"]
-    assert all(86_000 <= t <= 86_400 + 3_600 for t in retries)
-    assert len(set(retries)) > 1
+    # to the end of the ceiling's window (a mail route's: 00:00 UTC), plus up
+    # to an hour each
+    r = _run("mail")
+    soonest = -(-(r["ceilingUntil"] - r["retriesTo"]) // 1000)
+    latest = -(-(r["ceilingUntil"] - r["retriesFrom"]) // 1000) + 3_600
+    assert all(soonest <= t <= latest for t in r["ceilingRetries"])
+    assert len(set(r["ceilingRetries"])) > 1
 
 
 def test_concurrent_requests_cannot_pass_a_counter_together():
