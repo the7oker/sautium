@@ -159,6 +159,7 @@ def cli(tmp_path, monkeypatch):
     # The demotion to the container's `agent` account is the one part of the
     # spawn a test process cannot take; everything else is the runner's own.
     monkeypatch.setattr(runner, "spawn_kwargs", lambda env: {"env": env})
+    monkeypatch.setattr(runner, "agent_workdir", lambda name: tmp_path)
     monkeypatch.setattr(claude_code, "auth",
                         claude_code.AgentAuth("Claude Code", claude_code._cli_status))
     monkeypatch.setattr(claude_code, "_signin", None)
@@ -286,7 +287,7 @@ def test_a_refusal_holds_until_a_call_or_a_look_says_otherwise(cli, monkeypatch)
     assert claude_code.auth.signed_in()
 
     monkeypatch.setenv("FAKE_CALL", "refused")
-    res = runner.call_claude_code("hi", "system", mcp=False)
+    res = runner.call_claude_code("hi", "system", tools=runner.TEXT)
     assert (res["answer"], res["is_error"]) == (runner.OAUTH_EXPIRED_MSG, True)
     v = claude_code.auth.verdict()
     assert (v["signed_in"], v["refused"], v["reason"]) == (False, True, REFUSAL)
@@ -296,10 +297,10 @@ def test_a_refusal_holds_until_a_call_or_a_look_says_otherwise(cli, monkeypatch)
     assert claude_code.auth.signed_in(fresh=True)
 
     # Tokens left dead in place read "logged in" only until the next call.
-    assert runner.call_claude_code("hi", "system", mcp=False)["answer"] == runner.OAUTH_EXPIRED_MSG
+    assert runner.call_claude_code("hi", "system", tools=runner.TEXT)["answer"] == runner.OAUTH_EXPIRED_MSG
     assert not claude_code.auth.signed_in()
     monkeypatch.setenv("FAKE_CALL", "ok")
-    res = runner.call_claude_code("hi", "system", mcp=False)
+    res = runner.call_claude_code("hi", "system", tools=runner.TEXT)
     assert (res["answer"], res["is_error"]) == ("ok", False)
     assert claude_code.auth.signed_in()
 
@@ -329,18 +330,18 @@ def test_a_look_that_a_call_overtook_does_not_apply():
 def test_not_logged_in_is_a_refusal_too(cli, monkeypatch):
     assert claude_code.auth.signed_in()
     monkeypatch.setenv("FAKE_CALL", "not_logged_in")
-    assert runner.call_claude_code("hi", "system", mcp=False)["answer"] == runner.OAUTH_EXPIRED_MSG
+    assert runner.call_claude_code("hi", "system", tools=runner.TEXT)["answer"] == runner.OAUTH_EXPIRED_MSG
     assert claude_code.auth.verdict()["reason"] == "Not logged in \u00b7 Please run /login"
 
 
 def test_any_other_failure_says_why_and_leaves_the_sign_in_alone(cli, monkeypatch):
     assert claude_code.auth.signed_in()
     monkeypatch.setenv("FAKE_CALL", "limit")
-    res = runner.call_claude_code("hi", "system", mcp=False)
+    res = runner.call_claude_code("hi", "system", tools=runner.TEXT)
     assert res["answer"] == "Claude Code error: Claude AI usage limit reached|1760000000"
     assert res["is_error"]
     monkeypatch.setenv("FAKE_CALL", "max_turns")
-    res = runner.call_claude_code("hi", "system", mcp=False)
+    res = runner.call_claude_code("hi", "system", tools=runner.TEXT)
     assert res["answer"] == "Claude Code error: error_max_turns"   # not "unknown error"
     assert claude_code.auth.signed_in()
 

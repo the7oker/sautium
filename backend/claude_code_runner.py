@@ -1,17 +1,19 @@
 """
 Claude Code subprocess wrapper for AI assistant.
 
-Calls `claude -p` in headless mode with MCP tools (PostgreSQL + HQPlayer).
-Returns the raw model answer (including any SAUTIUM_BLOCKS marker) — the chat
-router parses + hydrates the marker centrally so this wrapper stays
-format-agnostic.
+Calls `claude -p` in headless mode. Returns the raw model answer (including
+any SAUTIUM_BLOCKS marker) — the chat router parses + hydrates the marker
+centrally so this wrapper stays format-agnostic.
 
 Two flavours:
 - `call_claude_code` — synchronous, `--output-format json`, returns the
-  full answer in one go.
+  full answer in one go. Its `tools` profile says what the call may use:
+  the library (the assistant's MCP servers), research (the web pair) or
+  text (nothing).
 - `call_claude_code_stream` — streaming, `--output-format stream-json
   --include-partial-messages`, yields text deltas / tool starts / a
-  final done event so the chat router can pipe them into SSE.
+  final done event so the chat router can pipe them into SSE. Always the
+  library profile.
 """
 
 import json
@@ -49,35 +51,32 @@ ALLOWED_MODELS = {"sonnet", "haiku"}
 # long" message) instead of the stream dying as a raw "network error".
 TIMEOUT_SECONDS = 150
 # The node's user in Docker (node_user.NODE_USER): the backend and every
-# CLI agent (claude, codex) run as it — Claude refuses
-# --dangerously-skip-permissions as root, and codex gets the same treatment.
-# Its home holds both credential dirs (~/.claude, ~/.codex).
+# CLI agent (claude, codex) run as it. Its home holds both credential dirs
+# (~/.claude, ~/.codex).
 AGENT_USER = "agent"
 
-# The assistant must reach its MCP servers and nothing else. Chat text arrives as the
-# agent's prompt, and the chat is reachable by anyone holding the API secret —
-# which `GET /` hands to any browser that can load the page. Left unrestricted
-# the agent also carries Bash/Write/Edit/Read under
-# --dangerously-skip-permissions, while /app is a read-write bind mount of the
-# backend source: one prompt injection would be arbitrary code execution that
-# persists to the host, plus .env (ANTHROPIC_API_KEY, POSTGRES_PASSWORD) and
-# .api_secret in plain sight.
-#
-# DENY-list, not allow-list: --allowed-tools is enforced through the permission
-# system that --dangerously-skip-permissions turns off, so pairing the two is
-# silently useless — measured 2026-07-27, the agent happily wrote a file while
-# allow-listed to MCP only. --disallowed-tools is honoured regardless (same
-# probe answered "CANNOT" and wrote nothing). Keep this list in step with the
-# CLI's built-in tools; MCP tools stay reachable because they are never named
-# here. Nothing is lost — assistant_prompt.py drives search and playback
-# entirely through the MCP servers (the postgres one being read-only).
-_FILESYSTEM_AND_SHELL = ("Bash,Write,Edit,MultiEdit,NotebookEdit,Read,Glob,"
-                         "Grep,Task,KillShell,BashOutput")
-# The assistant never browses; the gear researcher exists to browse (mcp=False,
-# WebSearch/WebFetch are its whole toolset), so the web pair is denied only
-# on the library path.
-DISALLOWED_TOOLS_MCP = _FILESYSTEM_AND_SHELL + ",WebFetch,WebSearch"
-DISALLOWED_TOOLS_RESEARCH = _FILESYSTEM_AND_SHELL
+# What a call may use, named on every spawn. Chat text, tool results and the
+# catalogue's own names reach the model, so nothing may come from the CLI's
+# defaults or from the user's own configuration:
+#   --tools decides which built-in tools EXIST ("" = none). A deny-list of
+#     names could not follow the CLI's tool set — a PowerShell tool on Windows
+#     without Git Bash, Monitor, a REPL.
+#   --strict-mcp-config with an explicit --mcp-config decides which MCP
+#     servers load — never the user's own servers or the account's connectors.
+#   --allowedTools under --permission-mode dontAsk lets exactly the profile's
+#     tools run and refuses anything else without a prompt.
+# No spawn bypasses permissions: --allowedTools IS the permission system,
+# which --dangerously-skip-permissions switches off (measured 2026-07-27).
+# Measured 2026-11-02 against a fake of the API on loopback: a request offers
+# exactly the profile's tools, a tool of an unlisted server is refused, and
+# the user's own defaultMode and allow rules change neither.
+LIBRARY = "library"    # the assistant's turns: its MCP servers, no built-in tool
+RESEARCH = "research"  # gear research: the web pair, no MCP server
+TEXT = "text"          # titles and AI canon: text in, text out, one turn
+_NO_MCP = json.dumps({"mcpServers": {}})
+# The assistant's MCP servers by name — the keys of its MCP configuration;
+# assistant_prompt.py teaches the model their tools by these names.
+LIBRARY_SERVERS = ("postgres", "assistant")
 
 # assistant turns are SQL + list-building; unbounded interleaved thinking burned
 # ~75% of output tokens on a measured chat turn (4.9k-token final turn =
@@ -198,6 +197,46 @@ def _resolve_claude_executable() -> Optional[str]:
     return None
 
 
+def _tool_flags(tools: str) -> list[str]:
+    """The flags that name what a call of profile `tools` may use (above)."""
+    if tools == LIBRARY:
+        flags = ["--tools", "", "--mcp-config", MCP_CONFIG_PATH,
+                 "--allowedTools", ",".join(f"mcp__{name}" for name in LIBRARY_SERVERS)]
+    elif tools == RESEARCH:
+        flags = ["--tools", "WebSearch,WebFetch", "--mcp-config", _NO_MCP,
+                 "--allowedTools", "WebSearch,WebFetch"]
+    elif tools == TEXT:
+        flags = ["--tools", "", "--mcp-config", _NO_MCP, "--max-turns", "1"]
+    else:
+        raise ValueError(f"unknown tool profile {tools!r}")
+    return flags + ["--strict-mcp-config", "--permission-mode", "dontAsk"]
+
+
+def agent_workdir(name: str) -> Path:
+    """A Sautium-owned, otherwise empty working directory for an agent CLI.
+    The CLI shows the model its working directory and reads project files
+    from it and its parents (Claude Code loads every CLAUDE.md up the tree —
+    measured), so it is never the backend's own directory, which on the
+    launcher is the checkout."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        wd = base / "Sautium" / name
+    elif sys.platform == "darwin":
+        wd = Path.home() / "Library" / "Application Support" / "Sautium" / name
+    else:
+        wd = Path(pwd.getpwnam(AGENT_USER).pw_dir) / name
+    wd.mkdir(parents=True, exist_ok=True)
+    return wd
+
+
+def _agent_kwargs() -> dict:
+    """Popen setup of a call: spawn_kwargs, the agent's own working directory,
+    and stdin closed — with stdin open the CLI waits 3 s for piped input."""
+    kwargs = spawn_kwargs(_claude_env())
+    kwargs.update(cwd=str(agent_workdir("claude-agent")), stdin=subprocess.DEVNULL)
+    return kwargs
+
+
 def call_claude_code(
     message: str,
     system_prompt: str,
@@ -205,7 +244,7 @@ def call_claude_code(
     resume: bool = False,
     model: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
-    mcp: bool = True,
+    tools: str = LIBRARY,
     max_turns: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
@@ -220,9 +259,7 @@ def call_claude_code(
         timeout_seconds: Wallclock cap override. The 150s default exists
             for the chat SSE path; long-running non-interactive callers
             (gear research worker) pass their own budget.
-        mcp: Attach the library MCP config (PostgreSQL + HQPlayer tools).
-            Research-style callers that only need the built-in
-            WebSearch/WebFetch turn this off.
+        tools: What the call may use — LIBRARY, RESEARCH or TEXT (above).
 
     Returns:
         dict with keys: answer, claude_session_id, model, is_error — True
@@ -247,17 +284,8 @@ def call_claude_code(
         "--output-format", "json",
         "--model", use_model,
         "--system-prompt", system_prompt,
-        "--disallowed-tools",
-        DISALLOWED_TOOLS_MCP if mcp else DISALLOWED_TOOLS_RESEARCH,
-        "--dangerously-skip-permissions",
+        *_tool_flags(tools),
     ]
-    if mcp:
-        # strict: ONLY our servers. Without it the subprocess inherits the
-        # host user's personal user-scope MCP connectors (claude.ai Gmail/
-        # Drive/Calendar were observed in init on the launcher node) — a
-        # privacy leak if any of them is authed, and noise in the init
-        # status gate either way.
-        cmd[3:3] = ["--mcp-config", MCP_CONFIG_PATH, "--strict-mcp-config"]
     if max_turns:
         cmd.extend(["--max-turns", str(max_turns)])
 
@@ -267,9 +295,9 @@ def call_claude_code(
     logger.info(f"Claude Code call: message={message[:80]!r}, resume={resume}, session={session_id}")
 
     try:
-        kwargs = spawn_kwargs(_claude_env())
-        kwargs.update(capture_output=True, text=True, encoding="utf-8",
-                      errors="replace", timeout=wallclock)
+        kwargs = _agent_kwargs()
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                      encoding="utf-8", errors="replace", timeout=wallclock)
         result = subprocess.run(cmd, **kwargs)
 
         # A failed call still prints its result object: since CLI 2.1.x it
@@ -410,7 +438,7 @@ def spawn_kwargs(env: dict) -> dict:
 
 def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE):
     """A chat turn's subprocess. Returns the Popen handle."""
-    kwargs = spawn_kwargs(_claude_env())
+    kwargs = _agent_kwargs()
     kwargs.update(stdout=stdout, stderr=stderr, text=True,
                   encoding="utf-8", errors="replace")
     return subprocess.Popen(cmd, **kwargs)
@@ -452,12 +480,9 @@ def call_claude_code_stream(
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",  # required for stream-json
-        # strict: only our servers — see the run() spawn for why.
-        "--mcp-config", MCP_CONFIG_PATH, "--strict-mcp-config",
         "--model", use_model,
         "--system-prompt", system_prompt,
-        "--disallowed-tools", DISALLOWED_TOOLS_MCP,
-        "--dangerously-skip-permissions",
+        *_tool_flags(LIBRARY),
     ]
     if resume and session_id:
         cmd.extend(["--resume", session_id])

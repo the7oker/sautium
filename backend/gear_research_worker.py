@@ -179,13 +179,13 @@ def waits_for_claude(look: bool = True) -> bool:
 
 
 def _call_claude_code_research(system_prompt: str, user_msg: str) -> Optional[Dict[str, Any]]:
-    from claude_code_runner import call_claude_code
+    from claude_code_runner import RESEARCH, call_claude_code
     res = call_claude_code(
         message=user_msg,
         system_prompt=system_prompt,
         model=RESEARCH_MODEL,
         timeout_seconds=RESEARCH_TIMEOUT_SECONDS,
-        mcp=False,
+        tools=RESEARCH,
         max_turns=25,
     )
     answer = res.get("answer") or ""
