@@ -3762,25 +3762,33 @@ the device, keep its answer — not its make.
 - **PostgreSQL ENUM type changes** require drop default → drop constraint →
   `ALTER TYPE USING col::new_type` → set default. Straight `ALTER TYPE` fails.
 - **yt-dlp is a perishable dependency.** YouTube changes its side every few
-  weeks; upstream's *stable* channel lags and breaks (2026-08-18: every
+  weeks; upstream's *stable* channel lags at times (2026-08-18: every
   download 403'd on stable 2026.07.04 — the android_vr client was killed —
-  while nightly already carried the fix). Both runtimes track **nightly** and
-  refresh from ONE place — `streaming/service.py:ytdlp_refresh_loop`, which
-  every runtime gets because every runtime runs this backend: `pip install -U
-  --pre "yt-dlp[default]"` against its own interpreter at start, once a day
-  after that, and on demand when a download fails the way a stale build fails
-  (403 / signature — narrow on purpose, rate-limited to one pip run per 6 h).
-  Start-only refreshes were not enough: this node runs `restart:
-  unless-stopped` for weeks, the launcher's own update check is start-only
-  too, and `docker-compose.mac.yml` bypasses `entrypoint.py` entirely. The
-  provider invokes `<that interpreter> -m yt_dlp`. Standalone binaries were tried and dropped:
-  the Windows onefile burns 0.95 s per run unpacking itself into `%TEMP%`, the
-  ONEDIR zip reports variant `win_exe` so its own updater replaces it with the
-  onefile, and brew's macOS formula is stable-channel and cannot self-update at
-  all. **deno** ships as the sandboxed JS runtime for the player-challenge
-  solver — the runtime-less extraction path is deprecated upstream and is the
-  one that breaks. A node with a working lossless plugin masks a dead YouTube
-  provider: grep the log for `preview fetch failed … via youtube`.
+  while nightly already carried the fix). Every runtime refreshes it from ONE
+  place — `streaming/service.py:ytdlp_refresh_loop`, which every runtime gets
+  because every runtime runs this backend: at start, once a day after that,
+  and on demand when a download fails the way a stale build fails (403 /
+  signature — narrow on purpose, one pass per 6 h while a build is in place).
+  Start-only refreshes were not enough: a node runs `restart: unless-stopped`
+  for weeks. Until 2026-11-02 a pass ran `pip install -U --pre
+  "yt-dlp[default]"` — the NIGHTLY channel, unpinned and unchecked — into the
+  backend's own interpreter, which also let pip move requests, urllib3,
+  certifi and the rest under the running backend. Since then a pass installs
+  yt-dlp's latest STABLE release as upstream builds it for the platform (the
+  ONEDIR zip: its own Python, its dependencies and yt-dlp-ejs inside, no
+  unpacking per run), only once the release's SHA2-256SUMS verifies against
+  yt-dlp's release key (pinned in `streaming/ytdlp_release.py`) and the zip
+  against those sums, into the node's cache; the provider runs it with
+  `--ignore-config --no-plugin-dirs` in an environment without the node's
+  credentials, as the node's user. Stable over nightly is the trade for a
+  signed build: a YouTube change can take days to reach stable. The ONEDIR
+  zip reports variant `win_exe`, so its own updater (`-U`, never run here)
+  would replace it with the onefile, whose 0.95 s unpack per run is why the
+  Windows exe was dropped once. **deno** ships as the sandboxed JS runtime for
+  the player-challenge solver — the runtime-less extraction path is
+  deprecated upstream and is the one that breaks. A node with a working
+  lossless plugin masks a dead YouTube provider: grep the log for `preview
+  fetch failed … via youtube`.
 - **Time to first sound is not dominated by the network.** Measured on the
   Windows launcher, 4.5-min YouTube track: 6.1 s before, 2.6 s after, and only
   ~1.5 s of that was ever transfer. The rest was a resolve pass repeated

@@ -1,17 +1,15 @@
 """Process-wide streaming-preview service: the media proxy + provider registry,
 created once at app startup (``main.lifespan``) and shared by the player router.
 
-On by default — YouTube ships with the distribution (yt-dlp is a backend
-dependency on every runtime), so a fresh node streams phantoms out of the
-box. ``streaming_preview_enabled=false`` is an explicit opt-out for nodes
-that never preview."""
+On by default — YouTube ships with the distribution (the node installs
+yt-dlp's stable build itself, streaming/ytdlp_release.py), so a fresh node
+streams phantoms once its first build is in place.
+``streaming_preview_enabled=false`` is an explicit opt-out for nodes that
+never preview."""
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import logging
-import subprocess
-import sys
 import time
 from typing import Optional
 
@@ -37,17 +35,10 @@ def init(settings) -> bool:
         return False
 
     _registry = ProviderRegistry()
-    # yt-dlp is a dependency of the backend interpreter itself (requirements.txt,
-    # kept on the nightly channel at every start), and the provider runs it as
-    # `-m yt_dlp`. If the import is missing, skip the provider with a loud
-    # warning — registering it anyway would just fail every resolve one track
-    # at a time.
-    if importlib.util.find_spec("yt_dlp"):
-        _registry.register(YouTubeProvider(ffmpeg_location=settings.ffmpeg_location))
-    else:
-        logger.warning("yt-dlp is not installed in %s — YouTube streaming is "
-                       "unavailable until it is and the backend restarted",
-                       sys.executable)
+    # The provider runs the yt-dlp build the refresh loop puts in place (its
+    # first pass is at start); until one lands it answers "unavailable", and
+    # the excerpt provider below stands in.
+    _registry.register(YouTubeProvider(ffmpeg_location=settings.ffmpeg_location))
     # The excerpt provider ships in core and needs no tool: 30 s clips from the
     # public catalog API — the fallback when the demo channel is missing or a
     # track's one demo listen is spent (streaming/demo.py), and why a node
@@ -145,39 +136,19 @@ def stop_enrichers() -> None:
             enricher.stop()
 
 
-# yt-dlp is perishable: YouTube changes its side every few weeks and upstream's
-# stable channel lags behind the breakage, so every runtime keeps it on the
-# NIGHTLY channel. Refreshing only at start is not enough — this node runs for
-# weeks (restart: unless-stopped) and a nightly lands most days, which is
-# exactly how a working node wakes up unable to stream. One loop here covers
-# all three runtimes because all three run this backend; the launcher's own
-# "check for updates" is start-only too, and docker-compose.mac.yml bypasses
-# entrypoint.py entirely.
+# yt-dlp is perishable: YouTube changes its side every few weeks, and a node
+# runs for weeks (restart: unless-stopped), so refreshing only at start is not
+# enough. One loop here covers every runtime, as every runtime runs this
+# backend: a pass at start, then daily, and sooner when a download fails the
+# way an outdated build fails — never two passes within six hours while a
+# build is in place, a few minutes apart while there is none yet. A pass
+# installs yt-dlp's latest STABLE release, checked against the release key's
+# signature (streaming/ytdlp_release.py).
 _REFRESH_INTERVAL_S = 24 * 3600
-_REFRESH_MIN_GAP_S = 6 * 3600      # a burst of failures is still one pip run
+_REFRESH_MIN_GAP_S = 6 * 3600      # a burst of failures is still one pass
+_FIRST_BUILD_GAP_S = 5 * 60        # no build yet: a node that started offline gets one soon
 _refresh_wake: Optional[asyncio.Event] = None
 _refresh_loop: Optional[asyncio.AbstractEventLoop] = None
-
-
-def _pip_refresh() -> None:
-    """Move this interpreter's yt-dlp to the latest nightly. Blocking (pip) —
-    called in a worker thread. Offline or rate-limited → whatever is installed
-    stays; never raises."""
-    cmd = [sys.executable, "-m", "pip", "install", "-q", "-U", "--pre",
-           "--no-cache-dir", "--root-user-action=ignore",
-           "--retries", "2", "--timeout", "15", "yt-dlp[default]"]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        logger.warning("yt-dlp refresh timed out; keeping the installed build")
-        return
-    if r.returncode != 0:
-        tail = (r.stderr or r.stdout).strip().splitlines()
-        logger.warning("yt-dlp refresh skipped: %s",
-                       tail[-1] if tail else f"rc={r.returncode}")
-    ver = subprocess.run([sys.executable, "-m", "yt_dlp", "--version"],
-                         capture_output=True, text=True).stdout.strip()
-    logger.info("yt-dlp %s", ver or "not installed")
 
 
 def request_ytdlp_refresh() -> None:
@@ -193,15 +164,18 @@ def request_ytdlp_refresh() -> None:
 
 async def ytdlp_refresh_loop() -> None:
     """Daily refresh, plus whatever request_ytdlp_refresh() asks for, no more
-    often than _REFRESH_MIN_GAP_S apart."""
+    often than _REFRESH_MIN_GAP_S apart (_FIRST_BUILD_GAP_S while no build is
+    in place)."""
+    from . import ytdlp_release
     global _refresh_wake, _refresh_loop
     _refresh_wake = asyncio.Event()
     _refresh_loop = asyncio.get_running_loop()
     last = float("-inf")
     while True:
-        if time.monotonic() - last >= _REFRESH_MIN_GAP_S:
+        gap = _REFRESH_MIN_GAP_S if ytdlp_release.executable() else _FIRST_BUILD_GAP_S
+        if time.monotonic() - last >= gap:
             last = time.monotonic()
-            await asyncio.to_thread(_pip_refresh)
+            await asyncio.to_thread(ytdlp_release.refresh)
         _refresh_wake.clear()
         try:
             await asyncio.wait_for(_refresh_wake.wait(), timeout=_REFRESH_INTERVAL_S)

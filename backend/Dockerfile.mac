@@ -68,6 +68,17 @@ RUN pip install --no-cache-dir torch==2.12.0 torchvision==0.27.0 torchaudio==2.1
 # Install remaining Python dependencies (torch already installed above, pip will skip it)
 RUN pip install --no-cache-dir -r requirements.txt
 
+# deno: the sandboxed JS runtime yt-dlp solves YouTube's player challenges in
+# (yt-dlp itself the node installs into its cache: streaming/ytdlp_release.py)
+ARG DENO_VERSION=2.9.8
+ARG DENO_SHA256=d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905
+RUN curl -fsSLo /tmp/deno.zip \
+         https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-aarch64-unknown-linux-gnu.zip \
+    && echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
+    && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')" \
+    && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
+    && deno --version
+
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
 RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
 

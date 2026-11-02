@@ -6,21 +6,22 @@ HQPlayer doesn't decode AAC/m4a (tested), so we transcode YouTube's m4a/opus
 source to FLAC via yt-dlp's built-in ffmpeg pass (``-x --audio-format flac``) —
 lossless of the lossy source, and HQPlayer's native format.
 
-yt-dlp runs as ``<our interpreter> -m yt_dlp``: a child process (a wedged
-extraction dies on the timeout instead of hanging the single fetch worker),
-but OUR Python, so it is the pip package every runtime already installs
-rather than a binary to find on PATH. The standalone Windows exe it replaced
-is a PyInstaller onefile that unpacks itself into %TEMP% on every run —
-measured 0.95 s before the first line of Python, against 0.26 s here.
+yt-dlp runs as upstream's own self-contained build of its latest stable
+release (streaming/ytdlp_release.py: checked against yt-dlp's release key,
+unpacked into the node's cache, refreshed daily and on a stale-build
+failure), a child process — a wedged extraction dies on the timeout instead
+of hanging the single fetch worker — with none of the node's credentials in
+its environment, no configuration file and no plugin of anyone's read. It is
+the folder ("onedir") build, which starts without unpacking itself: the
+Windows onefile exe once used here unpacked into %TEMP% on every run, 0.95 s
+before its first line of Python.
 
-yt-dlp is a moving target by design: YouTube changes its side every few weeks
-and upstream's *stable* channel lags ("often stale and prone to external
-breakage" — their words; the 2026-08 android_vr 403 hit stable only). Every
-runtime therefore tracks the *nightly* channel and refreshes at start (Docker:
-entrypoint.py; launcher: desktop/db_init.py), and ships deno — the sandboxed
-JS runtime yt-dlp solves YouTube's player challenges in. Without a runtime
-yt-dlp falls back to a deprecated, runtime-less extraction path that is
-exactly what breaks when YouTube moves."""
+yt-dlp is a moving target by design: YouTube changes its side every few
+weeks, and the stable channel trails the breakage by days at times (upstream
+says so; the 2026-08 android_vr 403 hit stable only). Every runtime ships deno
+— the sandboxed JS runtime yt-dlp solves YouTube's player challenges in.
+Without a runtime yt-dlp falls back to a deprecated, runtime-less extraction
+path that is exactly what breaks when YouTube moves."""
 from __future__ import annotations
 
 import glob
@@ -29,11 +30,11 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 
+from . import ytdlp_release
 from .base import (FetchedAudio, ProviderError, ProviderManifest, ProviderUnavailable,
                    ResolvedSource, StreamProvider, TrackQuery, attested_lengths,
                    fits_length, length_offset, norm_key)
@@ -66,7 +67,6 @@ class YouTubeProvider(StreamProvider):
 
     def __init__(self, ffmpeg_location: str | None = None, timeout: float = 120.0):
         # ffmpeg_location: directory containing ffmpeg, or None to use PATH.
-        self._ytdlp = [sys.executable, "-m", "yt_dlp"]
         self._ffmpeg_location = ffmpeg_location
         self._timeout = timeout
         self._searches: dict = {}          # search string -> (ts, candidates)
@@ -77,6 +77,19 @@ class YouTubeProvider(StreamProvider):
             logger.warning("youtube: deno (yt-dlp's JS runtime) is not on PATH — "
                            "extraction runs on the deprecated runtime-less path "
                            "and breaks whenever YouTube moves")
+
+    @staticmethod
+    def _run(args: list, **kwargs) -> subprocess.CompletedProcess:
+        """yt-dlp with `args`: the build in place, reading no configuration
+        file and no plugin, in its minimal environment. Before the first
+        build lands the provider is unavailable, and a refresh is asked for."""
+        exe = ytdlp_release.executable()
+        if exe is None:
+            from . import service
+            service.request_ytdlp_refresh()
+            raise ProviderUnavailable("yt-dlp is not in place yet")
+        return subprocess.run([str(exe), "--ignore-config", "--no-plugin-dirs", *args],
+                              check=True, env=ytdlp_release.child_env(), **kwargs)
 
     # Candidates to score before downloading one. Deep enough that an archive
     # channel holding a whole album surfaces on SEVERAL of its tracks — that
@@ -318,12 +331,11 @@ class YouTubeProvider(StreamProvider):
             hit = self._searches.get(search)
         if hit and now - hit[0] < self._SEARCH_TTL_S:
             return hit[1]
-        cmd = [*self._ytdlp, f"ytsearch{self.SEARCH_N}:{search}", "--flat-playlist",
-               "--no-warnings", "--quiet",
-               "--print", "%(id)s\t%(title)s\t%(duration)s\t%(channel)s"]
+        args = [f"ytsearch{self.SEARCH_N}:{search}", "--flat-playlist",
+                "--no-warnings", "--quiet",
+                "--print", "%(id)s\t%(title)s\t%(duration)s\t%(channel)s"]
         try:
-            out = subprocess.run(cmd, check=True, timeout=self._timeout,
-                                 capture_output=True, text=True).stdout
+            out = self._run(args, timeout=self._timeout, capture_output=True, text=True).stdout
         except subprocess.TimeoutExpired as e:
             raise ProviderUnavailable(f"youtube search timeout: {search!r}") from e
         except subprocess.CalledProcessError as e:
@@ -381,16 +393,16 @@ class YouTubeProvider(StreamProvider):
             # 4.5-min track, byte-identical output). Fragments of ONE track a
             # listener is waiting on; the cross-track fetch stays sequential,
             # which is the part that must not look like a bulk pull.
-            cmd = [*self._ytdlp, url, "-x", "--audio-format", "flac",
-                   "--no-playlist", "--quiet",
-                   "--extractor-args", "youtube:formats=dashy",
-                   "--concurrent-fragments", "8",
-                   "-o", os.path.join(tmp, "t.%(ext)s")]
+            args = [url, "-x", "--audio-format", "flac",
+                    "--no-playlist", "--quiet",
+                    "--extractor-args", "youtube:formats=dashy",
+                    "--concurrent-fragments", "8",
+                    "-o", os.path.join(tmp, "t.%(ext)s")]
             if self._ffmpeg_location:
-                cmd += ["--ffmpeg-location", self._ffmpeg_location]
+                args += ["--ffmpeg-location", self._ffmpeg_location]
             try:
-                subprocess.run(cmd, check=True, timeout=self._timeout,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                self._run(args, timeout=self._timeout,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             except subprocess.TimeoutExpired as e:
                 raise ProviderError(f"youtube download timeout: {video_id}") from e
             except subprocess.CalledProcessError as e:

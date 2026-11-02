@@ -122,27 +122,19 @@ RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent
 # stack). Standalone late layer so it never busts the pip-install cache.
 RUN pip install --no-cache-dir "PyNaCl>=1.6.2"
 
-# yt-dlp — the core YouTube streaming-preview provider runs it as `-m yt_dlp`
-# on this same interpreter (streaming/youtube.py), and the launcher installs
-# it into its own the same way (desktop/db_init.py). NIGHTLY channel (--pre):
-# upstream calls stable "often stale and prone to external breakage" and
-# recommends nightly for regular users — the 2026-08 android_vr 403 was
-# stable-only. This layer is only the offline baseline: entrypoint.py re-runs
-# the install at every container start so a long-lived image keeps up with
-# YouTube. [default] brings yt-dlp-ejs, the player-challenge solver; deno is
-# the sandboxed runtime it runs in — node is in the image too, but the solver
-# executes YouTube's own JS, and deno gives it no permissions where node would
-# give it ours. Late standalone layer: a version bump must not re-run the pip
-# install above (which already pulled stable from requirements.txt — hence -U).
+# deno: the sandboxed JS runtime yt-dlp solves YouTube's player challenges in
+# — node is in the image too, but the solver executes YouTube's own JS, and
+# deno gives it no permissions where node would give it ours. yt-dlp itself is
+# not in the image: the node installs its stable build into its cache and
+# keeps it current (streaming/ytdlp_release.py).
 ARG DENO_VERSION=2.9.8
 ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
-RUN pip install --no-cache-dir -U --pre "yt-dlp[default]" \
-    && curl -fsSLo /tmp/deno.zip \
+RUN curl -fsSLo /tmp/deno.zip \
          https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip \
     && echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
     && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')" \
     && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
-    && deno --version && yt-dlp --version
+    && deno --version
 
 # Parallel bzip2 — fast MusicBrainz dump decompression (mb_dump_load). Kept in a
 # late, standalone layer so it never busts the expensive pip-install cache above.

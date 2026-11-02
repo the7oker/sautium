@@ -23,7 +23,7 @@ the user's machine, models are downloaded from Hugging Face on first use.
 | fpcalc (Chromaprint 1.5.1) | acoustid.org/chromaprint | LGPL-2.1-or-later | run as a separate process; fingerprints are computed locally |
 | Deno 2.9.8 | deno.com, from github.com/denoland/deno | MIT | JavaScript runtime for yt-dlp's player-challenge solver |
 | Node.js | nodejs.org | MIT | runtime for the optional AI-agent CLIs |
-| yt-dlp (+ yt-dlp-ejs) | PyPI, nightly channel | Unlicense | the built-in YouTube provider |
+| yt-dlp, its own build (with yt-dlp-ejs) | github.com/yt-dlp/yt-dlp, stable releases, checked against its release key | Unlicense; the build bundles GPL-3.0-or-later code, which makes the build GPL-3.0-or-later | the built-in YouTube provider: downloaded by the node, run as a separate process |
 | PyTorch wheels | download.pytorch.org | BSD-3-Clause | installed by pip |
 
 Optional, user-installed, not redistributed: Claude Code CLI
@@ -72,7 +72,8 @@ https://github.com/psycopg/psycopg2.
 
 ### Backend (`backend/requirements.txt`, installed by pip on the user's machine)
 
-fastapi (MIT) · uvicorn (BSD-3-Clause) · pydantic, pydantic-settings (MIT) ·
+fastapi (MIT) · starlette (BSD-3-Clause) · uvicorn (BSD-3-Clause) · h11 (MIT) ·
+anyio (MIT) · pydantic, pydantic-settings (MIT) ·
 SQLAlchemy (MIT) · psycopg2-binary (LGPL with exceptions) · pgvector (MIT) ·
 mutagen (GPL-2.0-or-later) · soundfile (BSD-3-Clause) · audioread (MIT) ·
 sounddevice (MIT) · async-upnp-client (Apache-2.0) · Pillow (MIT-CMU) ·
@@ -83,9 +84,10 @@ transformers (Apache-2.0) · sentence-transformers (Apache-2.0) · hear21passt
 argon2-cffi (MIT) · PyNaCl (Apache-2.0) · cryptography (Apache-2.0 OR BSD-3-Clause) · python-dotenv
 (BSD-3-Clause) · psutil (BSD-3-Clause) · click (BSD-3-Clause) · tqdm (MPL-2.0
 AND MIT) · numpy (BSD-3-Clause) · pandas (BSD-3-Clause) · scipy
-(BSD-3-Clause) · httpx (BSD-3-Clause) · zstandard (BSD-3-Clause) · requests (Apache-2.0) · aiohttp
+(BSD-3-Clause) · httpx (BSD-3-Clause) · zstandard (BSD-3-Clause) · requests (Apache-2.0) ·
+urllib3 (MIT) · certifi (MPL-2.0) · aiohttp
 (Apache-2.0 AND MIT) · python-json-logger (BSD-2-Clause) · pytest (MIT) ·
-pytest-asyncio (Apache-2.0) · yt-dlp (Unlicense) · anyascii (ISC) · pypinyin
+pytest-asyncio (Apache-2.0) · anyascii (ISC) · pypinyin
 (MIT) · cutlet (MIT) · koroman (MIT).
 
 mutagen is GPL-2.0-or-later. Sautium imports it for tag reading; it is

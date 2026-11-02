@@ -436,9 +436,9 @@ def _link_pgvector_to_pg(brew: str) -> None:
 # a deprecated runtime-less path that breaks whenever YouTube moves). The
 # launcher installs them all at first run so the app is self-contained.
 #
-# yt-dlp itself is NOT here: it is a dependency of the backend interpreter
-# (requirements.txt) which streaming/youtube.py runs as `-m yt_dlp`, and the
-# backend keeps it on the nightly channel itself (streaming/service.py).
+# yt-dlp itself is NOT here: the backend installs yt-dlp's own stable build
+# into the node's cache, checked against its release key, and keeps it
+# current itself (streaming/ytdlp_release.py).
 
 # (binary, macOS brew formula, macOS zip artifact, Windows zip artifact) — the
 # artifacts by their name in desktop/downloads.ARTIFACTS, which pins each one's
