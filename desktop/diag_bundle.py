@@ -31,7 +31,7 @@ from desktop.api_client import BackendAPIClient
 from desktop.p2p import contact_log, diag_events
 from desktop.p2p.diag_protocol import (
     BUNDLE_MAX_BYTES, CHAT_DEFAULT_DAYS, EVENTS_MAX_ROWS, LOG_TAIL_BYTES,
-    PROTOCOL_VERSION, scrub_personal,
+    PROTOCOL_VERSION, scrub_detail, scrub_personal,
 )
 from desktop.p2p.master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX
 
@@ -44,7 +44,7 @@ SETTINGS_KEYS = ("ai.provider", "ai.model", "ai.canonization_enabled",
 CONFIG_KEYS = ("version", "music_path", "provider", "hqplayer", "ports",
                "claude_code_available", "codex_available", "first_run_complete",
                "sync", "mb_slice")
-CONFIG_P2P_KEYS = ("node_name", "listen_port", "docker_ports", "chat_enabled")
+CONFIG_P2P_KEYS = ("listen_port", "docker_ports", "chat_enabled")
 LOG_FILES = ("launcher.log", "backend.log", "backend.log.1", "pgdata/server.log",
              "bootstrap.log")
 REPORT_LOG_TAIL_BYTES = 256 * 1024     # per log in a report sent by hand
@@ -162,14 +162,14 @@ def settings_allowlisted(conn) -> dict:
 
 
 def config_allowlisted(config: dict) -> dict:
+    """config.json's facts, names left out: a node's name is often its
+    owner's, a Last.fm username always is."""
     out = {k: config.get(k) for k in CONFIG_KEYS if k in config}
     p2p = config.get("p2p") or {}
     out["p2p"] = {k: p2p.get(k) for k in CONFIG_P2P_KEYS if k in p2p}
     compat = config.get("openai_compat") or {}
     out["openai_compat"] = {k: compat.get(k) for k in ("base_url", "model", "name") if k in compat}
-    lastfm = config.get("lastfm") or {}
-    out["lastfm"] = {"username": lastfm.get("username"),
-                     "authorized": bool(lastfm.get("username"))}
+    out["lastfm"] = {"authorized": bool((config.get("lastfm") or {}).get("username"))}
     return out
 
 
@@ -323,20 +323,24 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
                     fn()
                 except Exception as e:
                     logger.warning("diag bundle: scope %s failed: %s", name, e)
-                    manifest["errors"][name] = str(e)[:300]
+                    manifest["errors"][name] = scrub_personal(str(e))[:300]
 
-            scope("system", lambda: add("system.json", _json(system_facts(config, conn))))
-            scope("settings", lambda: add("settings.json", _json({
+            # The structural scopes are facts about the node, never where its
+            # files are or whom it talks to: every string in them is scrubbed
+            # (scrub_detail) — a folder becomes "[path]", an address its kind.
+            scope("system", lambda: add("system.json", _json(scrub_detail(
+                system_facts(config, conn)))))
+            scope("settings", lambda: add("settings.json", _json(scrub_detail({
                 "user_settings": settings_allowlisted(conn),
-                "config": config_allowlisted(config)})))
+                "config": config_allowlisted(config)}))))
 
             def _p2p() -> None:
-                add("p2p.json", _json(p2p_facts(conn, config, extra)))
-                add("p2p_contact_log.txt", contact_log.report(conn, 7))
+                add("p2p.json", _json(scrub_detail(p2p_facts(conn, config, extra))))
+                add("p2p_contact_log.txt", scrub_personal(contact_log.report(conn, 7)))
             scope("p2p", _p2p)
-            scope("jobs", lambda: add("jobs.json", _json(jobs_facts(conn, config))))
-            scope("events", lambda: add("events.json",
-                                        _json(diag_events.recent(conn, EVENTS_MAX_ROWS))))
+            scope("jobs", lambda: add("jobs.json", _json(scrub_detail(jobs_facts(conn, config)))))
+            scope("events", lambda: add("events.json", _json(scrub_detail(
+                diag_events.recent(conn, EVENTS_MAX_ROWS)))))
 
             def _logs() -> None:
                 for name in LOG_FILES:

@@ -26,12 +26,11 @@ def test_config_allowlist_drops_every_credential():
     flat = json.dumps(out)
     for secret in ("sk-ant-secret", "sk-openai-secret", "compat-secret", "pg-secret",
                    "lastfm-secret", "api_keys", "postgres_password", "session_key",
-                   "manual_peers"):
+                   "manual_peers", "vale", "node_name"):
         assert secret not in flat
-    assert out["p2p"] == {"node_name": "n", "listen_port": 20123, "docker_ports": [8801],
-                          "chat_enabled": True}
+    assert out["p2p"] == {"listen_port": 20123, "docker_ports": [8801], "chat_enabled": True}
     assert out["openai_compat"] == {"base_url": "http://x", "model": "m", "name": "n"}
-    assert out["lastfm"] == {"username": "vale", "authorized": True}
+    assert out["lastfm"] == {"authorized": True}
     assert out["ports"]["web"] == 18000 and out["hqplayer"]["host"] == "h"
 
 
