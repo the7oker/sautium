@@ -240,55 +240,84 @@ def test_the_prebuilt_translator_is_read_from_the_cache_alone_once_whole(madlad,
         return str(snapshot)
 
     monkeypatch.setattr(madlad.hub, "snapshot_download", download)
+    monkeypatch.setattr(madlad.hub, "hf_hub_download", lambda *a, **kw: pytest.fail("fetched"))
     assert madlad.translation.ensure_ct2_model() == snapshot
     assert calls == [True] and madlad.converted == []
+
+
+def _partial(madlad, monkeypatch, fetch):
+    """A cached snapshot of the prebuilt translator without its weights, and
+    `fetch` answering for each file the cache lacks."""
+    from huggingface_hub.errors import LocalEntryNotFoundError
+    snapshot = madlad.tmp / "snapshot"
+    snapshot.mkdir(exist_ok=True)
+    for name in madlad.translation.CT2_FILES:
+        if name != "model.bin":
+            (snapshot / name).write_bytes(b"")
+    source = madlad.tmp / "source-snapshot"
+
+    def download(repo, *, revision, local_files_only=False, allow_patterns=None):
+        if repo == madlad.translation.MODEL_ID:
+            return str(source)
+        if local_files_only:
+            return str(snapshot)
+        raise AssertionError("snapshot_download's answer is never taken for a fetch")
+
+    def one_file(repo, name, *, revision):
+        if (snapshot / name).exists():
+            return str(snapshot / name)
+        return fetch(repo, name)
+
+    monkeypatch.setattr(madlad.hub, "snapshot_download", download)
+    monkeypatch.setattr(madlad.hub, "hf_hub_download", one_file)
+    return snapshot, source, LocalEntryNotFoundError
 
 
 def test_a_network_that_failed_converts_nothing(madlad, monkeypatch):
     from huggingface_hub.errors import LocalEntryNotFoundError
 
-    def download(repo, *, revision, local_files_only=False, **kw):
-        if local_files_only:
-            raise LocalEntryNotFoundError("not cached")
-        raise ConnectionError("the Hub did not answer")
+    def offline(repo, name):
+        raise LocalEntryNotFoundError("the Hub did not answer")
 
-    monkeypatch.setattr(madlad.hub, "snapshot_download", download)
-    with pytest.raises(ConnectionError):
+    _partial(madlad, monkeypatch, offline)
+    with pytest.raises(LocalEntryNotFoundError):
         madlad.translation.ensure_ct2_model()
     assert madlad.converted == []
 
 
-def test_a_partial_prebuilt_translator_that_cannot_be_fetched_is_refused(madlad, monkeypatch):
-    """Offline, snapshot_download hands back the folder it has, unchecked."""
-    snapshot = madlad.tmp / "snapshot"
-    snapshot.mkdir()
-    for name in madlad.translation.CT2_FILES:
-        if name != "model.bin":
-            (snapshot / name).write_bytes(b"")
-    monkeypatch.setattr(madlad.hub, "snapshot_download",
-                        lambda repo, *, revision, local_files_only=False, **kw: str(snapshot))
-    with pytest.raises(OSError, match="model.bin"):
-        madlad.translation.ensure_ct2_model()
-    assert madlad.converted == []
+def test_a_fetched_file_completes_the_prebuilt_translator(madlad, monkeypatch):
+    snapshot, _, _ = _partial(madlad, monkeypatch, lambda repo, name: (
+        (madlad.tmp / "snapshot" / name).write_bytes(b"") or str(madlad.tmp / "snapshot" / name)))
+    assert madlad.translation.ensure_ct2_model() == snapshot and madlad.converted == []
 
 
 def test_a_prebuilt_translator_that_is_gone_is_converted_from_the_pinned_source(madlad, monkeypatch):
-    from huggingface_hub.errors import LocalEntryNotFoundError, RepositoryNotFoundError
-    source = madlad.translation.MODEL_ID
-    snapshot = madlad.tmp / "source-snapshot"
-    asked = []
+    """Its partial cache included: the repository gone, the conversion runs
+    from the pinned source's own snapshot folder."""
+    from huggingface_hub.errors import RepositoryNotFoundError
 
-    def download(repo, *, revision, local_files_only=False, allow_patterns=None):
-        if repo == source:
-            asked.append((revision, sorted(allow_patterns)))
-            return str(snapshot)
-        if local_files_only:
-            raise LocalEntryNotFoundError("not cached")
+    def gone(repo, name):
         raise RepositoryNotFoundError("no such repository")
 
-    monkeypatch.setattr(madlad.hub, "snapshot_download", download)
+    _, source, _ = _partial(madlad, monkeypatch, gone)
     out = madlad.translation.ensure_ct2_model()
     assert (out / "model.bin").exists()
-    assert asked == [(model_cache.HUB_REVISIONS[source],
-                      sorted([*model_cache.HUB_FILES[source], *madlad.translation.SOURCE_FILES]))]
-    assert madlad.converted == [(str(snapshot), None)]
+    assert madlad.converted == [(str(source), None)]
+
+
+@pytest.mark.parametrize("which", ["prebuilt", "converted"])
+def test_the_translators_tokenizer_comes_from_the_model_it_runs(madlad, monkeypatch, which):
+    """The prebuilt snapshot holds its tokenizer whole; a local conversion has
+    none, and takes the pinned source's."""
+    t = madlad.translation
+    model_dir = t._ct2_model_dir() if which == "converted" else madlad.tmp / "snapshot"
+    monkeypatch.setattr(t, "ensure_ct2_model", lambda: model_dir)
+    loaded = []
+    monkeypatch.setattr(t.AutoTokenizer, "from_pretrained",
+                        lambda name, **kw: loaded.append((str(name), kw)) or object())
+    monkeypatch.setattr(model_cache, "from_hub", lambda load, name, **kw: loaded.append(name))
+    sys.modules["ctranslate2"].Translator = lambda *a, **kw: object()
+    monkeypatch.setattr(t.QueryTranslator, "to_english", lambda self, text: text)
+    t.QueryTranslator().load_model()
+    assert loaded == ([t.MODEL_ID] if which == "converted"
+                      else [(str(model_dir), {"local_files_only": True})])

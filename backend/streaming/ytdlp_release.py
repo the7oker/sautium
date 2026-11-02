@@ -74,6 +74,10 @@ _CHILD_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "LC_ALL", "
 # where this node keeps it (a noexec mount, application control) — waits this
 # long before its next download
 _RETRY_FAILED_S = 24 * 3600
+# A build's folder: its release's tag and when it was unpacked. An install
+# never takes the folder of the build in place, which stays until its
+# replacement runs (`current` names the folder in place).
+_BUILD_FOLDER = re.compile(r"(\d{4}\.\d{2}\.\d{2}(?:\.\d+)?)-\d+")
 
 
 class Refused(Exception):
@@ -82,6 +86,10 @@ class Refused(Exception):
 
 def _tag_key(tag: str) -> tuple:
     return tuple(int(part) for part in tag.split("."))
+
+
+def _is_64bit() -> bool:
+    return sys.maxsize > 2 ** 32
 
 
 def _musl() -> bool:
@@ -105,10 +113,13 @@ def _asset() -> tuple:
         libc = "musllinux" if _musl() else "linux"
         if machine == "x86_64":
             return f"yt-dlp_{libc}.zip", f"yt-dlp_{libc}"
-        if machine in ("aarch64", "arm64"):
-            return f"yt-dlp_{libc}_aarch64.zip", f"yt-dlp_{libc}_aarch64"
-        if machine == "armv7l" and libc == "linux":
-            return "yt-dlp_linux_armv7l.zip", "yt-dlp_linux_armv7l"
+        # The kernel names the CPU: a 32-bit userland on a 64-bit ARM kernel
+        # says aarch64, and its programs are the 32-bit build's
+        if machine in ("aarch64", "arm64", "armv8l", "armv7l"):
+            if _is_64bit():
+                return f"yt-dlp_{libc}_aarch64.zip", f"yt-dlp_{libc}_aarch64"
+            if libc == "linux":
+                return "yt-dlp_linux_armv7l.zip", "yt-dlp_linux_armv7l"
     raise Refused(f"yt-dlp publishes no build this node runs ({sys.platform} {machine})")
 
 
@@ -126,22 +137,27 @@ def root() -> Path:
     return (Path(base) if base else Path.home() / ".cache") / "sautium" / "yt-dlp"
 
 
-def installed_tag() -> Optional[str]:
+def _build_folder() -> Optional[str]:
     try:
-        tag = (root() / "current").read_text(encoding="ascii").strip()
+        name = (root() / "current").read_text(encoding="ascii").strip()
     except FileNotFoundError:
         return None
-    return tag if _TAG.fullmatch(tag) else None
+    return name if _BUILD_FOLDER.fullmatch(name) else None
+
+
+def installed_tag() -> Optional[str]:
+    name = _build_folder()
+    return _BUILD_FOLDER.fullmatch(name).group(1) if name else None
 
 
 def executable() -> Optional[Path]:
     """The build in place; None before the first one lands, or on a platform
     yt-dlp publishes no build for."""
-    tag = installed_tag()
-    if tag is None:
+    name = _build_folder()
+    if name is None:
         return None
     try:
-        exe = root() / tag / _asset()[1]
+        exe = root() / name / _asset()[1]
     except Refused:
         return None
     return exe if exe.is_file() else None
@@ -155,7 +171,7 @@ def failed_tag() -> Optional[str]:
     """The release whose install failed within the last _RETRY_FAILED_S."""
     try:
         tag, at, _ = (root() / "failed").read_text(encoding="utf-8").split(" ", 2)
-        stale = time.time() - float(at) >= _RETRY_FAILED_S
+        stale = not 0 <= time.time() - float(at) < _RETRY_FAILED_S     # a clock set back too
     except (FileNotFoundError, ValueError):
         return None
     return None if stale or not _TAG.fullmatch(tag) else tag
@@ -165,7 +181,7 @@ def _record_failure(tag: str, reason: Exception) -> None:
     folder = root()
     folder.mkdir(parents=True, exist_ok=True)
     part = folder / "failed.part"
-    part.write_text(f"{tag} {time.time():.0f} {reason}", encoding="utf-8")
+    part.write_text(f"{tag} {int(time.time())} {reason}", encoding="utf-8")
     os.replace(part, folder / "failed")
 
 
@@ -297,9 +313,10 @@ def _install(client: httpx.Client, tag: str) -> None:
 
     folder = root()
     folder.mkdir(parents=True, exist_ok=True)
-    archive = folder / f"{tag}.zip.part"
+    build = folder / f"{tag}-{time.time_ns()}"
+    archive = folder / f"{build.name}.zip.part"
+    unpacked = folder / f"{build.name}.part"
     digest = hashlib.sha256()
-    target = folder / tag
     try:
         with client.stream("GET", _ASSET_URL.format(tag=tag, name=name)) as r:
             r.raise_for_status()
@@ -309,27 +326,25 @@ def _install(client: httpx.Client, tag: str) -> None:
                     digest.update(chunk)
         if digest.hexdigest() != expected:
             raise Refused(f"{name} of {tag} is not the archive its signed sums name")
-        unpacked = folder / f"{tag}.part"
-        shutil.rmtree(unpacked, ignore_errors=True)
         _unpack(archive, unpacked)
         if not (unpacked / exe).is_file():
             raise Refused(f"{name} of {tag} holds no {exe}")
-        # Moved into place before it first runs: a folder whose program has
-        # just run may stay locked on Windows a while (a scan on first run)
-        shutil.rmtree(target, ignore_errors=True)
-        os.replace(unpacked, target)
+        # Named before it first runs: a folder whose program has just run may
+        # stay locked on Windows a while (a scan on first run)
+        os.replace(unpacked, build)
     finally:
         archive.unlink(missing_ok=True)
-    said = _version(target / exe)
+        shutil.rmtree(unpacked, ignore_errors=True)
+    said = _version(build / exe)
     if said != tag:
-        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(build, ignore_errors=True)
         raise Refused(f"the build of {tag} says it is {said!r}")
-    previous = installed_tag()
+    previous = _build_folder()
     current = folder / "current.part"
-    current.write_text(tag, encoding="ascii")
+    current.write_text(build.name, encoding="ascii")
     os.replace(current, folder / "current")
     for old in folder.iterdir():
-        if old.is_dir() and old.name not in (tag, previous):
+        if old.is_dir() and old.name not in (build.name, previous):
             # A build still running on Windows cannot go yet: the next pass takes it
             shutil.rmtree(old, ignore_errors=True)
 
@@ -357,7 +372,7 @@ def refresh() -> Optional[str]:
     it is not there yet, or when the build there no longer starts. The tag in
     place after the pass, None when nothing works. A release refused, or a
     network that failed, leaves the build in place and says why in the log;
-    an install that failed past its download is recorded (failed_tag)."""
+    a release refused, its build's start included, is recorded (failed_tag)."""
     good = in_place()
     try:
         with _client() as client:
@@ -376,7 +391,10 @@ def refresh() -> Optional[str]:
                 else:
                     try:
                         _install(client, tag)
-                    except (Refused, OSError, zipfile.BadZipFile) as e:
+                    except (Refused, zipfile.BadZipFile) as e:
+                        # The release's own outcome; an OSError here (a full
+                        # disk, a folder held a moment) is the node's, and
+                        # the next pass tries again
                         _record_failure(tag, e)
                         raise
                     (root() / "failed").unlink(missing_ok=True)

@@ -78,7 +78,7 @@ def ensure_ct2_model() -> Path:
        conversion never leaves a half-model that loads.
     """
     import model_cache
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
     from huggingface_hub.errors import (LocalEntryNotFoundError, RepositoryNotFoundError,
                                         RevisionNotFoundError)
 
@@ -94,15 +94,15 @@ def ensure_ct2_model() -> Path:
     except LocalEntryNotFoundError:
         pass
     try:
-        path = Path(snapshot_download(CT2_REPO, revision=revision))
+        # File by file: snapshot_download hands back whatever folder it has,
+        # unchecked, when the Hub does not answer — or when the repository is
+        # gone; hf_hub_download says which (LocalEntryNotFoundError offline)
+        path = None
+        for name in CT2_FILES:
+            path = Path(hf_hub_download(CT2_REPO, name, revision=revision)).parent
     except (RepositoryNotFoundError, RevisionNotFoundError) as e:
         logger.warning(f"Prebuilt ct2 model is gone ({e}) — converting locally")
     else:
-        # Offline, snapshot_download hands back whatever folder it has, unchecked
-        missing = [name for name in CT2_FILES if not (path / name).exists()]
-        if missing:
-            raise OSError(f"{CT2_REPO} at {revision[:8]} is not in the cache whole and could "
-                          f"not be fetched: {', '.join(missing)}")
         logger.info(f"Using prebuilt ct2 int8 model {CT2_REPO}@{revision[:8]}")
         return path
 

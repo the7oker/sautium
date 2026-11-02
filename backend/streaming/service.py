@@ -160,9 +160,10 @@ def request_ytdlp_refresh() -> None:
     speaks its protocol. Never blocks the caller — the failing track is already
     lost, and the point is that the NEXT one isn't. Called from the proxy's
     fetch thread, hence call_soon_threadsafe."""
-    if _refresh_loop is None or _refresh_wake is None:
+    loop, wake = _refresh_loop, _refresh_wake
+    if loop is None or wake is None:
         return
-    _refresh_loop.call_soon_threadsafe(_refresh_wake.set)
+    loop.call_soon_threadsafe(wake.set)
 
 
 async def ytdlp_refresh_loop() -> None:
