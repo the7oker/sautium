@@ -3768,7 +3768,8 @@ the device, keep its answer — not its make.
   place — `streaming/service.py:ytdlp_refresh_loop`, which every runtime gets
   because every runtime runs this backend: at start, once a day after that,
   and on demand when a download fails the way a stale build fails (403 /
-  signature — narrow on purpose, one pass per 6 h while a build is in place).
+  signature — narrow on purpose, one pass per 6 h while a build is in place,
+  a request inside that gap answered as it ends).
   Start-only refreshes were not enough: a node runs `restart: unless-stopped`
   for weeks. Until 2026-11-02 a pass ran `pip install -U --pre
   "yt-dlp[default]"` — the NIGHTLY channel, unpinned and unchecked — into the
@@ -3778,9 +3779,11 @@ the device, keep its answer — not its make.
   ONEDIR zip: its own Python, its dependencies and yt-dlp-ejs inside, no
   unpacking per run), only once the release's SHA2-256SUMS verifies against
   yt-dlp's release key (pinned in `streaming/ytdlp_release.py`) and the zip
-  against those sums, into the node's cache; the provider runs it with
-  `--ignore-config --no-plugin-dirs` in an environment without the node's
-  credentials, as the node's user. Stable over nightly is the trade for a
+  against those sums, into the node's cache, and only once the new build
+  runs and names its own release; a release older than the one in place is
+  refused (old releases are validly signed too). The provider runs it with
+  `--ignore-config --no-plugin-dirs --encoding utf-8` in an environment
+  without the node's credentials, as the node's user. Stable over nightly is the trade for a
   signed build: a YouTube change can take days to reach stable. The ONEDIR
   zip reports variant `win_exe`, so its own updater (`-U`, never run here)
   would replace it with the onefile, whose 0.95 s unpack per run is why the

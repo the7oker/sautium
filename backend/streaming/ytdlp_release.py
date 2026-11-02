@@ -13,7 +13,9 @@ unpacked, and the build in place stays.
 How often: a pass at the backend's start, then once a day, and sooner when a
 download fails the way an outdated build fails (service.ytdlp_refresh_loop).
 A pass asks GitHub for the latest stable release and fetches it only when it
-is not the one in place.
+is not the one in place; a release older than the one in place is refused
+(an older release is validly signed too), and a build replaces the one in
+place only once it runs and names its own release.
 """
 
 import base64
@@ -70,6 +72,10 @@ class Refused(Exception):
     """A release that is not what yt-dlp's release key and its sums say."""
 
 
+def _tag_key(tag: str) -> tuple:
+    return tuple(int(part) for part in tag.split("."))
+
+
 def _asset() -> tuple:
     """(the release's archive for this platform, the executable in it)."""
     machine = platform.machine().lower()
@@ -82,6 +88,14 @@ def _asset() -> tuple:
     if sys.platform == "linux" and machine in ("aarch64", "arm64"):
         return "yt-dlp_linux_aarch64.zip", "yt-dlp_linux_aarch64"
     raise Refused(f"yt-dlp publishes no build this node runs ({sys.platform} {machine})")
+
+
+def supported() -> bool:
+    try:
+        _asset()
+    except Refused:
+        return False
+    return True
 
 
 def root() -> Path:
@@ -119,6 +133,12 @@ def child_env() -> dict:
 
 def _packets(data: bytes):
     """(tag, body) of each OpenPGP packet in `data`."""
+
+    def take(i: int, width: int) -> int:
+        if i + width > len(data):
+            raise Refused("a truncated packet header")
+        return int.from_bytes(data[i:i + width], "big")
+
     i = 0
     while i < len(data):
         first = data[i]
@@ -126,15 +146,15 @@ def _packets(data: bytes):
         if not first & 0x80:
             raise Refused("not an OpenPGP packet")
         if first & 0x40:                            # new format
-            tag, octet = first & 0x3F, data[i]
+            tag, octet = first & 0x3F, take(i, 1)
             i += 1
             if octet < 192:
                 length = octet
             elif octet < 224:
-                length = ((octet - 192) << 8) + data[i] + 192
+                length = ((octet - 192) << 8) + take(i, 1) + 192
                 i += 1
             elif octet == 255:
-                length = int.from_bytes(data[i:i + 4], "big")
+                length = take(i, 4)
                 i += 4
             else:
                 raise Refused("a partial-length packet")
@@ -143,7 +163,7 @@ def _packets(data: bytes):
             if kind == 3:
                 raise Refused("an indeterminate-length packet")
             width = (1, 2, 4)[kind]
-            length = int.from_bytes(data[i:i + width], "big")
+            length = take(i, width)
             i += width
         if i + length > len(data):
             raise Refused("a truncated packet")
@@ -253,6 +273,10 @@ def _install(client: httpx.Client, tag: str) -> None:
             raise Refused(f"{name} of {tag} holds no {exe}")
     finally:
         archive.unlink(missing_ok=True)
+    said = _version(unpacked / exe)
+    if said != tag:
+        shutil.rmtree(unpacked, ignore_errors=True)
+        raise Refused(f"the build of {tag} says it is {said!r}")
     target = folder / tag
     shutil.rmtree(target, ignore_errors=True)
     os.replace(unpacked, target)
@@ -266,6 +290,18 @@ def _install(client: httpx.Client, tag: str) -> None:
             shutil.rmtree(old, ignore_errors=True)
 
 
+def _version(exe: Path) -> Optional[str]:
+    """What the build says it is; None when it does not start."""
+    try:
+        out = subprocess.run([str(exe), "--version"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=120, env=child_env(),
+                             check=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.error("the yt-dlp build at %s does not start: %s", exe, e)
+        return None
+    return out.stdout.strip()
+
+
 def refresh() -> Optional[str]:
     """One pass: the latest stable release in place, fetched and checked when
     it is not there yet. The tag in place after the pass, None when there is
@@ -275,10 +311,14 @@ def refresh() -> Optional[str]:
         with _client() as client:
             latest = client.get(_LATEST, headers={"Accept": "application/vnd.github+json"})
             latest.raise_for_status()
-            tag = latest.json().get("tag_name", "")
-            if not _TAG.fullmatch(tag):
+            body = latest.json()
+            tag = body.get("tag_name") if isinstance(body, dict) else None
+            if not isinstance(tag, str) or not _TAG.fullmatch(tag):
                 raise Refused(f"the latest release is named {tag!r}")
-            if tag != installed_tag() or executable() is None:
+            current = installed_tag()
+            if current is not None and _tag_key(tag) < _tag_key(current):
+                raise Refused(f"the latest release, {tag}, is older than {current} in place")
+            if tag != current or executable() is None:
                 _install(client, tag)
     except Refused as e:
         logger.error("yt-dlp release refused, the build in place stays: %s", e)
@@ -288,11 +328,8 @@ def refresh() -> Optional[str]:
     if exe is None:
         logger.warning("yt-dlp is not in place")
         return None
-    try:
-        out = subprocess.run([str(exe), "--version"], capture_output=True, text=True,
-                             timeout=120, env=child_env(), check=True)
-    except (OSError, subprocess.SubprocessError) as e:
-        logger.error("the yt-dlp build in place does not start (%s): %s", exe, e)
+    said = _version(exe)
+    if said is None:
         return None
-    logger.info("yt-dlp %s (stable, %s)", out.stdout.strip(), exe)
+    logger.info("yt-dlp %s (stable, %s)", said, exe)
     return installed_tag()

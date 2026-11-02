@@ -81,15 +81,24 @@ class YouTubeProvider(StreamProvider):
     @staticmethod
     def _run(args: list, **kwargs) -> subprocess.CompletedProcess:
         """yt-dlp with `args`: the build in place, reading no configuration
-        file and no plugin, in its minimal environment. Before the first
-        build lands the provider is unavailable, and a refresh is asked for."""
+        file and no plugin, in its minimal environment, its words in UTF-8
+        both ways — a title in any script, whatever the system's code page.
+        While no build is in place, or the one in place does not start, the
+        provider is unavailable, and a refresh is asked for."""
+        from . import service
         exe = ytdlp_release.executable()
         if exe is None:
-            from . import service
             service.request_ytdlp_refresh()
             raise ProviderUnavailable("yt-dlp is not in place yet")
-        return subprocess.run([str(exe), "--ignore-config", "--no-plugin-dirs", *args],
-                              check=True, env=ytdlp_release.child_env(), **kwargs)
+        if kwargs.get("text"):
+            kwargs.update(encoding="utf-8", errors="replace")
+        try:
+            return subprocess.run([str(exe), "--ignore-config", "--no-plugin-dirs",
+                                   "--encoding", "utf-8", *args],
+                                  check=True, env=ytdlp_release.child_env(), **kwargs)
+        except OSError as e:
+            service.request_ytdlp_refresh()
+            raise ProviderUnavailable(f"the yt-dlp build in place does not start: {e}") from e
 
     # Candidates to score before downloading one. Deep enough that an archive
     # channel holding a whole album surfaces on SEVERAL of its tracks — that

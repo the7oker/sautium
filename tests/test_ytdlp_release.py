@@ -81,6 +81,16 @@ def test_sums_signed_by_the_release_key_are_taken_and_nothing_else_is(pinned):
         ytdlp_release.verify_signature(sums, b"\xc2\x02\x04\x00")
 
 
+def test_the_signature_parser_reads_both_packet_formats_and_refuses_a_header_cut_short(pinned):
+    sums = b"0" * 64 + b"  yt-dlp_linux.zip\n"
+    body = pinned.sign(sums)[3:]
+    old_format = bytes([0x80 | (2 << 2) | 1]) + len(body).to_bytes(2, "big") + body
+    ytdlp_release.verify_signature(sums, old_format)
+    for cut in (b"\xc2", b"\xc2\xc0", b"\xc2\xff\x00\x00", b"\x89", b"\x89\x01", b"\x8a\x00\x00"):
+        with pytest.raises(ytdlp_release.Refused):
+            ytdlp_release.verify_signature(sums, cut)
+
+
 # -- a pass against a fake GitHub -------------------------------------------------------
 
 def _build(version: str, extra: dict = None) -> bytes:
@@ -99,7 +109,7 @@ def _build(version: str, extra: dict = None) -> bytes:
 
 class FakeGitHub:
     def __init__(self, key):
-        self.key, self.releases, self.asked = key, {}, []
+        self.key, self.releases, self.asked, self.answer = key, {}, [], None
 
     def publish(self, tag, archive, sums_digest=None, signer=None):
         name, _ = ytdlp_release._asset()
@@ -111,7 +121,8 @@ class FakeGitHub:
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.asked.append(request.url.path)
         if request.url.path == "/repos/yt-dlp/yt-dlp/releases/latest":
-            return httpx.Response(200, json={"tag_name": self.latest})
+            return httpx.Response(200, json=self.answer if self.answer is not None
+                                  else {"tag_name": self.latest})
         _, tag, name = request.url.path.rsplit("/", 2)
         return httpx.Response(200, content=self.releases[tag][name])
 
@@ -152,6 +163,32 @@ def test_sums_another_key_signed_leave_the_build_in_place(github):
     github.publish("2026.11.02", _build("2026.11.02"), signer=SigningKey())
     assert ytdlp_release.refresh() == TAG
     assert sorted(p.name for p in ytdlp_release.root().iterdir()) == [TAG, "current"]
+    name, _ = ytdlp_release._asset()
+    assert not [p for p in github.asked if p.endswith(f"/2026.11.02/{name}")]   # never fetched
+
+
+def test_a_release_older_than_the_build_in_place_is_refused(github):
+    github.publish("2026.11.02", _build("2026.11.02"))
+    ytdlp_release.refresh()
+    github.publish(TAG, _build(TAG))                    # validly signed, and older
+    assert ytdlp_release.refresh() == "2026.11.02"
+    assert sorted(p.name for p in ytdlp_release.root().iterdir()) == ["2026.11.02", "current"]
+
+
+def test_a_build_that_does_not_name_its_own_release_never_replaces_the_one_in_place(github):
+    github.publish(TAG, _build(TAG))
+    ytdlp_release.refresh()
+    github.publish("2026.11.02", _build("2026.10.01"))
+    assert ytdlp_release.refresh() == TAG
+    assert sorted(p.name for p in ytdlp_release.root().iterdir()) == [TAG, "current"]
+
+
+def test_an_answer_that_names_no_release_leaves_the_build_in_place(github):
+    github.publish(TAG, _build(TAG))
+    ytdlp_release.refresh()
+    for answer in ([{"tag_name": "2026.11.02"}], {"tag_name": 20261102}, {}):
+        github.answer = answer
+        assert ytdlp_release.refresh() == TAG
 
 
 def test_a_release_whose_name_is_not_a_date_is_refused(github):
@@ -199,8 +236,20 @@ def test_the_provider_runs_the_build_in_place_reading_no_config_and_no_plugin(gi
                         type("Done", (), {"stdout": ""})())
     youtube.YouTubeProvider()._flat_search("an artist a title")
     cmd, kw = seen[0]
-    assert cmd[:3] == [str(ytdlp_release.executable()), "--ignore-config", "--no-plugin-dirs"]
+    assert cmd[:5] == [str(ytdlp_release.executable()), "--ignore-config", "--no-plugin-dirs",
+                       "--encoding", "utf-8"]
     assert kw["env"] == ytdlp_release.child_env()
+    assert (kw["encoding"], kw["errors"]) == ("utf-8", "replace")
+
+
+def test_a_build_in_place_that_does_not_start_makes_the_provider_unavailable(github):
+    from streaming import youtube
+    from streaming.base import ProviderUnavailable
+    github.publish(TAG, _build(TAG))
+    ytdlp_release.refresh()
+    ytdlp_release.executable().write_bytes(b"\x00\x01 not a program")
+    with pytest.raises(ProviderUnavailable):
+        youtube.YouTubeProvider()._flat_search("an artist a title")
 
 
 def test_before_the_first_build_lands_the_provider_is_unavailable(tmp_path, monkeypatch):
@@ -212,6 +261,49 @@ def test_before_the_first_build_lands_the_provider_is_unavailable(tmp_path, monk
 
 
 def test_yt_dlp_is_not_part_of_the_backends_interpreter_or_image():
-    assert "yt-dlp" not in (REPO / "backend" / "requirements.txt").read_text(encoding="utf-8")
+    lines = [line.split("#", 1)[0] for line in
+             (REPO / "backend" / "requirements.txt").read_text(encoding="utf-8").splitlines()]
+    assert not [line for line in lines if "yt-dlp" in line or "yt_dlp" in line]
     for name in ("Dockerfile", "Dockerfile.mac"):
         assert "yt-dlp[" not in (REPO / "backend" / name).read_text(encoding="utf-8")
+
+
+# -- when a pass runs (streaming/service.py) -----------------------------------------------
+
+def _loop(monkeypatch, supported=True):
+    import asyncio
+    from streaming import service
+    passes = []
+    monkeypatch.setattr(service, "_REFRESH_MIN_GAP_S", 0.3)
+    monkeypatch.setattr(service, "_REFRESH_INTERVAL_S", 30)
+    monkeypatch.setattr(ytdlp_release, "supported", lambda: supported)
+    monkeypatch.setattr(ytdlp_release, "installed_tag", lambda: TAG)
+    monkeypatch.setattr(ytdlp_release, "refresh", lambda: passes.append(time.monotonic()))
+
+    async def run():
+        task = asyncio.create_task(service.ytdlp_refresh_loop())
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if passes:
+                break
+        if passes:
+            service.request_ytdlp_refresh()          # inside the gap
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if len(passes) > 1:
+                    break
+        done = task.done()
+        task.cancel()
+        return done
+
+    return passes, asyncio.run(run())
+
+
+def test_a_refresh_asked_for_inside_the_gap_runs_as_the_gap_ends(monkeypatch):
+    passes, _ = _loop(monkeypatch)
+    assert len(passes) == 2 and passes[1] - passes[0] >= 0.25
+
+
+def test_a_platform_yt_dlp_builds_nothing_for_runs_no_pass(monkeypatch):
+    passes, ended = _loop(monkeypatch, supported=False)
+    assert passes == [] and ended
