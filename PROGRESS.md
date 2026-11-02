@@ -3569,6 +3569,19 @@ device on the network; none of them may hold for it more than a bound.
   library hash is a token of plain ASCII or none; an answer line past
   16 MiB ends the connection (`hqplayer_client.ANSWER_LIMIT`; the whole
   library's LibraryGet asks for a gigabyte).
+- **A renderer the node holds takes no new address while it answers where
+  it is known.** UPnP authenticates no device, and a renderer's UDN is in
+  its own announcements: a scan used to take whichever address claimed the
+  UDN of the chosen or a pinned renderer, first in its records, and the
+  next attach — which takes the first address to answer with that UDN —
+  could land there. Now an address the scan finds for such a renderer is
+  taken only when none it is known at answered the same scan — and every
+  address an answer names is described: the scan kept one address per USN,
+  the last multicast answer's, so a device answering under the same USN
+  put its address in the renderer's place before any check. The attach
+  already refuses an address where another UDN answers (since 2026-11-02).
+  Left: a renderer absent when a claimant answers — a phone asleep — moves
+  to it.
 
 ## Known Gotchas
 

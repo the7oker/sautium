@@ -787,7 +787,7 @@ async def _unicast_sweep(found: dict, found_hqp: dict) -> None:
             *(loop.run_in_executor(pool, _probe, ip) for ip in targets))
     for ip, (hits, hqp) in zip(targets, results):
         for usn, loc in hits:
-            found.setdefault(usn, loc)
+            found[(usn, loc)] = loc
         if hqp is not None:
             found_hqp[ip] = hqp
 
@@ -827,14 +827,18 @@ async def _scan_run():
     except ImportError:
         raise HTTPException(status_code=501, detail="async-upnp-client not installed")
 
-    found: dict[str, str] = {}
+    # Every address an answer names, by the USN it declared and the address:
+    # two answers under one USN — one device on two networks, or another
+    # device claiming its UDN — are two addresses to describe, never one
+    # put in the other's place
+    found: dict[tuple, str] = {}
     found_hqp: dict[str, dict] = {}
 
     async def _on_response(headers) -> None:
         loc = headers.get("location") or headers.get("LOCATION")
         usn = headers.get("usn") or headers.get("USN") or loc
         if loc and _from_source(str(loc), headers.get("_host")):
-            found[usn] = str(loc)
+            found[(usn, str(loc))] = str(loc)
 
     # Search from EVERY private interface: on a multi-homed host (Wi-Fi +
     # WSL/Hyper-V virtual adapters) the default-route multicast often egresses
@@ -916,31 +920,49 @@ async def _scan_run():
     pins = _dlna_pins()
     known = {**_dlna_discovered, **pins}
     from playback.dlna_backend import known_locations
+    from routers.settings import _read
     remembered = {loc for record in known.values() for loc in known_locations(record)}
     locations = _scan_locations(found, remembered)
     described = await asyncio.to_thread(_describe_all, locations)
+    active = _read("output.dlna_renderer") or {}
+    chosen = udn_key(active.get("udn"))
+    # Where the node knows each renderer it holds — pinned, or the output
+    held = {key: set(known_locations(record)) for key, record in pins.items()}
+    if chosen:
+        held.setdefault(chosen, set()).update(known_locations(active))
+    answers: dict[str, list] = {}
     for loc in locations:
         info = described.get(loc)
         if info is None or _is_hqplayer_renderer(info, found_hqp):
             continue
+        answers.setdefault(udn_key(info["udn"]), []).append(info)
+    for key, infos in answers.items():
+        # A renderer the node holds takes no new address while one it is
+        # known at answers with its UDN: UPnP authenticates no device, and a
+        # claim of the UDN — public in the renderer's own announcements — is
+        # all another device on the network needs. Only a renderer absent
+        # from where it was known moves where it is found now.
+        mine = held.get(key)
+        if mine and any(info["location"] in mine for info in infos):
+            elsewhere = [info["location"] for info in infos if info["location"] not in mine]
+            if elsewhere:
+                logger.info("%s answers where it is known; not taken at %s", key, ", ".join(elsewhere))
+            infos = [info for info in infos if info["location"] in mine]
+        reached[key] = [info["location"] for info in infos]
         # A scan finds the device where it is TODAY; whatever we knew about
         # where it used to be stays attached to it, so a phone found on the
-        # LAN keeps its tunnel address as a fallback and vice versa.
-        key = udn_key(info["udn"])
-        reached.setdefault(key, []).append(info["location"])
-        if key in fresh:
-            # The same renderer at another address in the same scan (a phone
-            # answering on the LAN and through the tunnel): one record, the
-            # address found first its own, this one behind it
-            row = fresh[key]
+        # LAN keeps its tunnel address as a fallback and vice versa. The
+        # same renderer at another address in the same scan (a phone
+        # answering on the LAN and through the tunnel): one record, the
+        # address found first its own, the others behind it
+        first, *rest = infos
+        row = {**remember_location(known.get(key, {}), first), "udn": key}
+        for info in rest:
             if info["location"] not in row["locations"]:
-                fresh[key] = {**row, "locations": [*row["locations"], info["location"]][:4]}
-            continue
-        fresh[key] = {**remember_location(known.get(key, {}), info), "udn": key}
+                row = {**row, "locations": [*row["locations"], info["location"]][:4]}
+        fresh[key] = row
     _dlna_discovered = fresh
     if fresh:
-        from routers.settings import _read
-        chosen = udn_key((_read("output.dlna_renderer") or {}).get("udn"))
         for key, info in fresh.items():
             if key in pins or key == chosen:
                 note_renderer_location(key, info["location"])

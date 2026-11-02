@@ -1189,6 +1189,29 @@ def test_a_scan_teaches_the_remembered_renderer_where_it_answers(renderers, mana
     assert chosen["locations"] == [lan.location, tunnel.location]
 
 
+def test_a_held_renderer_takes_no_new_address_while_it_answers_where_it_is_known(
+        renderers, manager, picker):
+    """A device that claims the chosen renderer's UDN at another address
+    takes nothing of its records while the renderer answers where it is
+    known; once the renderer answers there no more, the scan finds it where
+    it answers now."""
+    # the claimant's address sorts first: the order a scan took addresses in
+    claimant, real = sorted((renderers(name="Shelf"), renderers(name="Shelf")), key=lambda r: r.location)
+    claimant.udn = real.udn
+    manager.store.update({"output.dlna_pinned": [real.record], "output.type": "dlna",
+                          "output.dlna_renderer": real.record})
+    picker.found[:] = [claimant.location, real.location]
+    asyncio.run(picker._scan_run())
+    records = (manager.store["output.dlna_pinned"][0], manager.store["output.dlna_renderer"],
+               _rows(picker)[0])
+    for record in records:
+        assert record["location"] == real.location
+        assert claimant.location not in (record.get("locations") or [])
+    real.stop_answering()
+    asyncio.run(picker._scan_run())
+    assert manager.store["output.dlna_renderer"]["location"] == claimant.location
+
+
 def test_play_on_the_remembered_renderer_goes_where_it_answers_now(tmp_path, proxy, renderers,
                                                                    manager, picker, quality):
     """N-16: the output was chosen at one address and the renderer moved (a
