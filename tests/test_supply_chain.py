@@ -152,3 +152,47 @@ def test_the_launcher_installs_no_package_while_it_runs():
                 if {"pip", "install"} <= words:
                     offenders.append(f"{name}:{node.lineno}")
     assert offenders == []
+
+
+# -- first-run downloads -----------------------------------------------------------------
+
+def test_every_first_run_download_is_a_version_with_its_digest():
+    import re
+    from desktop.downloads import ARTIFACTS
+    for name, artifact in ARTIFACTS.items():
+        assert artifact.url.startswith("https://"), name
+        assert not re.search(r"latest|release-essentials", artifact.url), name
+        assert re.fullmatch(r"[0-9a-f]{64}", artifact.sha256), name
+
+
+def test_a_download_that_matches_lands_whole(tmp_path, monkeypatch):
+    import hashlib
+    from desktop import downloads
+    source = tmp_path / "upstream.zip"
+    source.write_bytes(b"the pinned bytes" * 1000)
+    monkeypatch.setitem(downloads.ARTIFACTS, "thing", downloads.Artifact(
+        source.as_uri(), hashlib.sha256(source.read_bytes()).hexdigest()))
+    seen = []
+    dest = downloads.fetch("thing", tmp_path / "got" / "thing.zip", lambda d, t: seen.append(d))
+    assert dest.read_bytes() == source.read_bytes()
+    assert seen[-1] == len(source.read_bytes())
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["thing.zip"]
+
+
+def test_a_download_that_does_not_match_is_refused_and_leaves_nothing(tmp_path, monkeypatch):
+    import pytest
+    from desktop import downloads
+    source = tmp_path / "upstream.zip"
+    source.write_bytes(b"something else")
+    monkeypatch.setitem(downloads.ARTIFACTS, "thing", downloads.Artifact(source.as_uri(), "0" * 64))
+    with pytest.raises(downloads.Refused, match="not the file this release pins"):
+        downloads.fetch("thing", tmp_path / "got" / "thing.zip")
+    assert list((tmp_path / "got").iterdir()) == []
+
+
+def test_the_embedded_pythons_pip_comes_from_the_pinned_wheel_not_a_script():
+    from desktop import python_env
+    from desktop.downloads import ARTIFACTS
+    assert ARTIFACTS["pip"].url.endswith("-py3-none-any.whl")
+    source = (REPO / "desktop" / "python_env.py").read_text(encoding="utf-8")
+    assert "get-pip" not in source and "--no-index" in python_env._PIP_FROM_WHEEL

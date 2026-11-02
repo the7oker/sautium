@@ -18,10 +18,10 @@ the user's machine, models are downloaded from Hugging Face on first use.
 | PostgreSQL | get.enterprisedb.com (Windows zip) / Homebrew (macOS) | PostgreSQL License | database server |
 | pgvector | github.com/andreiramani/pgvector_pgsql_windows / Homebrew | PostgreSQL License | vector index extension |
 | Python 3.12 (embeddable) | python.org | PSF-2.0 | the backend's interpreter on Windows |
-| FFmpeg ("release-essentials" build) | gyan.dev | GPL-3.0 (this build) | run as a separate process for decoding, slicing and transcoding; sources for the build are published by gyan.dev |
+| FFmpeg 9.0.2 ("essentials" build) | gyan.dev, from github.com/GyanD/codexffmpeg | GPL-3.0 (this build) | run as a separate process for decoding, slicing and transcoding; sources for the build are published by gyan.dev |
 | flac 1.4.3 | xiph.org | flac tool GPL-2.0-or-later; libFLAC BSD-3-Clause | run as a separate process |
 | fpcalc (Chromaprint 1.5.1) | acoustid.org/chromaprint | LGPL-2.1-or-later | run as a separate process; fingerprints are computed locally |
-| Deno | deno.com | MIT | JavaScript runtime for yt-dlp's player-challenge solver |
+| Deno 2.9.8 | deno.com, from github.com/denoland/deno | MIT | JavaScript runtime for yt-dlp's player-challenge solver |
 | Node.js | nodejs.org | MIT | runtime for the optional AI-agent CLIs |
 | yt-dlp (+ yt-dlp-ejs) | PyPI, nightly channel | Unlicense | the built-in YouTube provider |
 | PyTorch wheels | download.pytorch.org | BSD-3-Clause | installed by pip |

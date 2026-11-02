@@ -6,22 +6,15 @@ separately from whatever Python runs the launcher.
 """
 
 import logging
-import os
 import subprocess
 import sys
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Optional, Callable
 
-logger = logging.getLogger(__name__)
+from desktop.downloads import ARTIFACTS, fetch
 
-PYTHON_VERSION = "3.12.9"
-PYTHON_DOWNLOAD_URL = (
-    f"https://www.python.org/ftp/python/{PYTHON_VERSION}/"
-    f"python-{PYTHON_VERSION}-embed-amd64.zip"
-)
-GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+logger = logging.getLogger(__name__)
 
 
 def get_python_dir() -> Path:
@@ -97,19 +90,13 @@ def download_embedded_python(progress_cb: Optional[Callable] = None) -> bool:
 
             python_dir.mkdir(parents=True, exist_ok=True)
 
-            def _reporthook(block_num, block_size, total_size):
-                if total_size > 0 and progress_cb:
-                    downloaded = block_num * block_size
-                    pct = min(100, downloaded * 100 // total_size)
-                    mb_down = downloaded // (1024 * 1024)
-                    mb_total = total_size // (1024 * 1024)
-                    progress_cb(
-                        f"Downloading Python 3.12... {mb_down}/{mb_total} MB ({pct}%)"
-                    )
+            def _progress(done, total):
+                if total > 0 and progress_cb:
+                    pct = min(100, done * 100 // total)
+                    progress_cb(f"Downloading Python 3.12... {done // (1024 * 1024)}/"
+                                f"{total // (1024 * 1024)} MB ({pct}%)")
 
-            urllib.request.urlretrieve(
-                PYTHON_DOWNLOAD_URL, str(zip_path), reporthook=_reporthook
-            )
+            fetch("python", zip_path, _progress)
 
             if progress_cb:
                 progress_cb("Extracting Python 3.12...")
@@ -167,10 +154,21 @@ def _enable_site_packages(python_dir: Path) -> None:
         logger.info("site-packages already enabled")
 
 
+# pip run out of its own wheel, installing that wheel with no index. Its main
+# is called from -c: started as `<wheel>/pip`, pip on Windows refuses to
+# modify itself unless run as `-m pip`, which the embedded interpreter cannot
+# do before pip is installed (its ._pth ignores PYTHONPATH).
+_PIP_FROM_WHEEL = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                   "from pip._internal.cli.main import main; "
+                   "sys.exit(main(['install', '--no-index', '--quiet', '--disable-pip-version-check', "
+                   "'--no-warn-script-location', sys.argv[1]]))")
+
+
 def _install_pip(python_dir: Path, progress_cb: Optional[Callable] = None) -> bool:
-    """Download and run get-pip.py to install pip."""
+    """Install pip from its own wheel, the one this release pins."""
     python_exe = python_dir / "python.exe"
-    get_pip_path = python_dir / "get-pip.py"
+    # pip takes a wheel only under its own name: name-version-tags.whl
+    wheel = python_dir / ARTIFACTS["pip"].url.rsplit("/", 1)[1]
 
     # Check if pip already works
     check = subprocess.run(
@@ -184,9 +182,9 @@ def _install_pip(python_dir: Path, progress_cb: Optional[Callable] = None) -> bo
 
     try:
         if progress_cb:
-            progress_cb("Downloading pip installer...")
+            progress_cb("Downloading pip...")
 
-        urllib.request.urlretrieve(GET_PIP_URL, str(get_pip_path))
+        fetch("pip", wheel)
 
         if progress_cb:
             progress_cb("Installing pip (may take a minute)...")
@@ -195,13 +193,10 @@ def _install_pip(python_dir: Path, progress_cb: Optional[Callable] = None) -> bo
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-        result = subprocess.run(
-            [str(python_exe), str(get_pip_path), "--quiet"],
-            **kwargs,
-        )
+        result = subprocess.run([str(python_exe), "-c", _PIP_FROM_WHEEL, str(wheel)], **kwargs)
 
         if result.returncode != 0:
-            logger.error(f"get-pip.py failed: {result.stderr[:500]}")
+            logger.error(f"pip install from its wheel failed: {result.stderr[:500]}")
             return False
 
         logger.info("pip installed successfully")
@@ -212,4 +207,4 @@ def _install_pip(python_dir: Path, progress_cb: Optional[Callable] = None) -> bo
         return False
 
     finally:
-        get_pip_path.unlink(missing_ok=True)
+        wheel.unlink(missing_ok=True)

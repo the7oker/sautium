@@ -17,7 +17,6 @@ import subprocess
 import sys
 import tarfile
 import time
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Optional, Callable
@@ -26,6 +25,7 @@ import psycopg2
 import psycopg2.extras
 
 from desktop.config_manager import LOOPBACK
+from desktop.downloads import fetch
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +36,6 @@ MIGRATIONS_TABLE = "_schema_migrations"
 # tag (docker-compose*.yml) all track the SAME major — bump them together.
 # A datadir is bound to its major: new binaries refuse a mismatched cluster.
 EXPECTED_PG_MAJOR = 18
-
-# Windows portable PostgreSQL
-PG_DOWNLOAD_URL = (
-    "https://get.enterprisedb.com/postgresql/"
-    "postgresql-18.4-1-windows-x64-binaries.zip"
-)
-
-PGVECTOR_DOWNLOAD_URL = (
-    "https://github.com/andreiramani/pgvector_pgsql_windows/"
-    "releases/download/0.8.3_18.4/vector.v0.8.3-pg18.zip"
-)
 
 IS_MACOS = sys.platform == "darwin"
 IS_WINDOWS = sys.platform == "win32"
@@ -127,15 +116,13 @@ def download_portable_postgres(progress_cb: Optional[Callable] = None) -> bool:
         if progress_cb:
             progress_cb("Downloading PostgreSQL (~200 MB)...")
 
-        def _reporthook(block_num, block_size, total_size):
-            if total_size > 0 and progress_cb:
-                downloaded = block_num * block_size
-                pct = min(100, downloaded * 100 // total_size)
-                mb = downloaded // (1024 * 1024)
-                total_mb = total_size // (1024 * 1024)
-                progress_cb(f"Downloading PostgreSQL... {mb}/{total_mb} MB ({pct}%)")
+        def _progress(done, total):
+            if total > 0 and progress_cb:
+                pct = min(100, done * 100 // total)
+                progress_cb(f"Downloading PostgreSQL... {done // (1024 * 1024)}/"
+                            f"{total // (1024 * 1024)} MB ({pct}%)")
 
-        urllib.request.urlretrieve(PG_DOWNLOAD_URL, str(zip_path), reporthook=_reporthook)
+        fetch("postgresql", zip_path, _progress)
 
         if progress_cb:
             progress_cb("Extracting PostgreSQL...")
@@ -180,7 +167,7 @@ def _download_pgvector(pgsql_dir: Path, progress_cb: Optional[Callable] = None) 
         if progress_cb:
             progress_cb("Downloading pgvector extension...")
 
-        urllib.request.urlretrieve(PGVECTOR_DOWNLOAD_URL, str(zip_path))
+        fetch("pgvector", zip_path)
 
         if progress_cb:
             progress_cb("Installing pgvector...")
@@ -453,24 +440,20 @@ def _link_pgvector_to_pg(brew: str) -> None:
 # (requirements.txt) which streaming/youtube.py runs as `-m yt_dlp`, and the
 # backend keeps it on the nightly channel itself (streaming/service.py).
 
-# (binary, macOS brew formula, macOS zip URL, Windows static-build zip URL).
-# A tool with a macOS zip comes from upstream's own build there: deno, because
+# (binary, macOS brew formula, macOS zip artifact, Windows zip artifact) — the
+# artifacts by their name in desktop/downloads.ARTIFACTS, which pins each one's
+# version and digest. A tool with a macOS zip comes from upstream's own build
+# there: deno, because
 # Homebrew carries Intel Macs at Tier 3 — no bottles — and deno's formula then
 # demands a full Xcode to compile, so a fresh Intel install never got it and
 # paid ~40 s for the attempt on every launch (2026-10-05). {arch} is the
 # interpreter's, as the runtime under Rosetta is x86_64. The ffmpeg zip also
 # carries ffprobe; the Windows extractor copies every .exe beside it.
 _MEDIA_TOOLS = [
-    ("ffmpeg", "ffmpeg", None,
-     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),
-    ("fpcalc", "chromaprint", None,
-     "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/"
-     "chromaprint-fpcalc-1.5.1-windows-x86_64.zip"),
-    ("flac", "flac", None,
-     "https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.4.3-win.zip"),
-    ("deno", None,
-     "https://github.com/denoland/deno/releases/latest/download/deno-{arch}-apple-darwin.zip",
-     "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"),
+    ("ffmpeg", "ffmpeg", None, "ffmpeg"),
+    ("fpcalc", "chromaprint", None, "fpcalc"),
+    ("flac", "flac", None, "flac"),
+    ("deno", None, "deno-macos-{arch}", "deno-windows"),
 ]
 
 # brew installs into these on macOS; a GUI-launched .app has a minimal PATH
@@ -510,17 +493,17 @@ def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
     Idempotent per tool. Non-fatal — a failure leaves that one step degraded,
     never blocks setup. Returns {binary: present?}."""
     result = {}
-    for binary, formula, mac_url, win_url in _MEDIA_TOOLS:
+    for binary, formula, mac_zip, win_zip in _MEDIA_TOOLS:
         if _which_tool(binary):
             result[binary] = True
             continue
-        if IS_MACOS and mac_url:
+        if IS_MACOS and mac_zip:
             arch = "aarch64" if platform.machine() == "arm64" else "x86_64"
-            result[binary] = _download_tool(binary, mac_url.format(arch=arch), progress_cb)
+            result[binary] = _download_tool(binary, mac_zip.format(arch=arch), progress_cb)
         elif IS_MACOS:
             result[binary] = _brew_install(binary, formula, progress_cb)
         elif IS_WINDOWS:
-            result[binary] = _download_tool(binary, win_url, progress_cb)
+            result[binary] = _download_tool(binary, win_zip, progress_cb)
         else:
             logger.warning("%s not found on PATH — install it via your package manager", binary)
             result[binary] = False
@@ -528,12 +511,10 @@ def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
 
 
 # Node for the AI agents — Claude Code and Codex both ship as npm packages.
-# On Windows the official zip, unpacked beside the other tools as
-# <project_root>/node (utils.get_bundled_node_dir looks there first). Pinned
-# like PostgreSQL: the current LTS at the time of the bump.
+# On Windows the official zip (desktop/downloads.ARTIFACTS["node"], the
+# current LTS at the time of the bump), unpacked beside the other tools as
+# <project_root>/node (utils.get_bundled_node_dir looks there first).
 NODE_MIN_MAJOR = 18
-NODE_VERSION = "22.23.2"
-NODE_DOWNLOAD_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-win-x64.zip"
 
 
 def install_node(progress_cb: Optional[Callable] = None) -> bool:
@@ -559,8 +540,8 @@ def _download_win_node(progress_cb: Optional[Callable] = None) -> bool:
     zip_path = root / "_node_download.zip"
     try:
         if progress_cb:
-            progress_cb(f"Downloading Node.js {NODE_VERSION} (~35 MB)...")
-        urllib.request.urlretrieve(NODE_DOWNLOAD_URL, str(zip_path))
+            progress_cb("Downloading Node.js (~35 MB)...")
+        fetch("node", zip_path)
         # Unpacked beside its destination so the final move is a rename.
         with tempfile.TemporaryDirectory(dir=root) as tmp:
             with zipfile.ZipFile(zip_path, "r") as zf:
@@ -570,7 +551,7 @@ def _download_win_node(progress_cb: Optional[Callable] = None) -> bool:
                 raise RuntimeError("node-v*-win-x64 not found in the archive")
             shutil.rmtree(target, ignore_errors=True)
             shutil.move(str(unpacked), str(target))
-        logger.info("Node.js %s installed to %s", NODE_VERSION, target)
+        logger.info("Node.js installed to %s", target)
         return (target / "node.exe").exists()
     except Exception as e:
         logger.error("Failed to download Node.js: %s", e)
@@ -635,9 +616,10 @@ def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = N
     return True
 
 
-def _download_tool(binary: str, url: str, progress_cb: Optional[Callable] = None) -> bool:
-    """Upstream's zip, unpacked into <project root>/<binary>/bin: beside the
-    tree, gitignored, one of media_tool_dirs()."""
+def _download_tool(binary: str, artifact: str, progress_cb: Optional[Callable] = None) -> bool:
+    """Upstream's zip — `artifact` in desktop/downloads.ARTIFACTS, checked
+    before it is opened — unpacked into <project root>/<binary>/bin: beside
+    the tree, gitignored, one of media_tool_dirs()."""
     import tempfile
     from desktop.utils import get_project_root
     bin_dir = get_project_root() / binary / "bin"
@@ -649,10 +631,8 @@ def _download_tool(binary: str, url: str, progress_cb: Optional[Callable] = None
         if progress_cb:
             progress_cb(f"Downloading {binary}...")
         # Every backend start runs this until the tool is there: a stalled
-        # connection must fail after a minute of silence, not hold the start
-        # forever (urlretrieve has no timeout at all).
-        with urllib.request.urlopen(url, timeout=60) as resp, open(zip_path, "wb") as out:
-            shutil.copyfileobj(resp, out)
+        # connection fails after a minute of silence (fetch's timeout)
+        fetch(artifact, zip_path)
         bin_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmp:
             with zipfile.ZipFile(zip_path, "r") as zf:
