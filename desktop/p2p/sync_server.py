@@ -247,7 +247,7 @@ class SyncServer:
                 response = await handler(request)
                 return response
             peer_pubkey, status, lane, cert, refusal = await self._authenticate_peer(request)
-            query = request.query_string
+            query = request.rel_url.raw_query_string           # as sent: the shape reader decodes it once
             items, targets = contact_log.extract_request_shape(
                 route_path + (f"?{query}" if query else ""), await request.read())
             if refusal is not None:
