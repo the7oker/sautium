@@ -106,7 +106,8 @@ aiohttp>=3.14.4
 # Wherever Brotli is installed, aiohttp, urllib3 and httpx decode br with it.
 # The launcher's backend runtime (Windows, a Mac's shared one) may hold the
 # copy earlier releases installed (yt-dlp's extras): held above its decoder's
-# fix there. A Docker image, built afresh, has none and gets none.
+# fix there — a requirement line, so a fresh one gets it too, as the one way
+# to move an old copy. A Docker image, built afresh, has none and gets none.
 brotli>=1.2.1; sys_platform != "linux"
 
 # Logging

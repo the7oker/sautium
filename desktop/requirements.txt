@@ -16,7 +16,8 @@ aiohttp>=3.14.4
 # Wherever Brotli is installed, aiohttp decodes br with it, a peer's request
 # body included. A Mac's launcher shares its runtime with the backend, where
 # earlier releases installed it (yt-dlp's extras): held above its decoder's
-# fix there, and installed nowhere else (backend/requirements.txt).
+# fix there — a requirement line, so a fresh Mac's runtime gets it too, as
+# the one way to move an old copy. Not in the Windows launcher's runtime.
 brotli>=1.2.1; sys_platform == "darwin"
 # 2.0.13 is the first Windows wheel that carries its own OpenSSL (2.0.11 wanted
 # OpenSSL 1.1 DLLs from the system); the floor is the 2.0 line's last release,

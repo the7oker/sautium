@@ -85,7 +85,7 @@ def test_a_query_past_the_timeout_is_cancelled(sql, monkeypatch):
 
 def test_at_most_the_cap_comes_back_and_the_answer_says_it_was_cut(sql):
     answer = sql.run_query(f"SELECT generate_series(1, {sql.ROW_CAP + 100}) AS n")
-    rows, note = answer.split("\n", 1)
+    note, rows = answer.split("\n", 1)              # the note first: a CLI may cut the tail
     assert [r["n"] for r in json.loads(rows)] == list(range(1, sql.ROW_CAP + 1))
     assert "first 500 rows" in note
     assert "\n" not in sql.run_query(f"SELECT generate_series(1, {sql.ROW_CAP}) AS n")
@@ -117,11 +117,22 @@ def test_rows_come_back_as_postgresql_wrote_them(sql):
 
 def test_an_answer_stops_at_its_size_budget(sql):
     answer = sql.run_query("SELECT repeat('x', 1000) AS t FROM generate_series(1, 300)")
-    rows, note = answer.split("\n", 1)
+    note, rows = answer.split("\n", 1)
     assert len(rows) <= sql.CHAR_BUDGET and 70 <= len(json.loads(rows)) < 80
     assert "all an answer may carry" in note
-    rows, note = sql.run_query(f"SELECT repeat('x', {sql.CHAR_BUDGET}) AS t").split("\n", 1)
+    note, rows = sql.run_query(f"SELECT repeat('x', {sql.CHAR_BUDGET}) AS t").split("\n", 1)
     assert rows == "[]" and "fewer or narrower columns" in note
+    note, rows = sql.run_query("SELECT repeat('x', 30000000) AS t").split("\n", 1)
+    assert rows == "[]" and "fewer or narrower columns" in note
+
+
+def test_an_errors_words_are_cut_to_the_budget(sql):
+    """PostgreSQL quotes a value it could not read, whole."""
+    with pytest.raises(ValueError) as refused:
+        sql.run_query(f"SELECT repeat('9', {sql.CHAR_BUDGET * 3})::integer")
+    said = str(refused.value)
+    assert said.startswith('ERROR:  value "999') and said.endswith("(cut)")
+    assert len(said) <= sql.CHAR_BUDGET + 10
 
 
 def test_an_answer_of_exactly_the_budget_is_whole(sql):

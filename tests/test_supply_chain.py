@@ -110,8 +110,9 @@ _BELOW_THE_FIX = {"intel-mac": {"cryptography": "48.0.1"}}
 _LEFT_UNFIXED = r"x509\.verification|x509 import verification|pkcs7"
 # Wherever Brotli is installed the HTTP stack decodes br with it, a peer's
 # request body to the launcher's sync server included: it is held above its
-# decoder's fix (1.2.1) where an earlier release may have left a copy — the
-# launcher's backend runtime, a Mac's shared one — and installed nowhere else.
+# decoder's fix (1.2.1) on the runtimes where an earlier release may have
+# left a copy — the launcher's backend runtime, a Mac's shared one — and
+# required on no other.
 _BROTLI = {"backend": {"windows", "mac", "intel-mac"}, "desktop": {"mac", "intel-mac"}}
 # What a runtime has a wheel of (PyPI, read 2026-11-02): its requirement must
 # admit the first and none of the second, or that runtime builds from source.
