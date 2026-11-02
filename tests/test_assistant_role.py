@@ -321,6 +321,31 @@ def test_the_assistants_sessions_end_with_the_last_live_turn(
     tool._conn.close()
 
 
+def test_a_statement_left_by_a_stopped_backend_ends_at_the_next_start(owner, scratch_dsn):
+    """No turn of this process will end to end it; the migration runner,
+    which every start runs before its deltas, does."""
+    left = _as_assistant(scratch_dsn)
+    ended = []
+
+    def statement():
+        try:
+            with left.cursor() as cur:
+                cur.execute("SELECT pg_sleep(20)")
+        except psycopg2.Error as e:
+            ended.append(type(e).__name__)
+    running = threading.Thread(target=statement)
+    running.start()
+
+    conn = psycopg2.connect(scratch_dsn)
+    try:
+        db_init.apply_migrations(conn)
+    finally:
+        conn.close()
+    running.join(10)
+
+    assert not running.is_alive() and ended
+
+
 def test_the_launchers_mcp_file_logs_both_servers_in_as_the_assistant(tmp_path, monkeypatch):
     from desktop import config_manager, python_env
     monkeypatch.setattr(python_env, "get_backend_python", lambda: sys.executable)

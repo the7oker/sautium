@@ -233,12 +233,19 @@ def _write_instructions(workdir: Path) -> Path:
     return path
 
 
+# What codex hands its MCP servers from its own environment (`env_vars`)
+# rather than from its command line, which other local accounts can read
+# on macOS: the assistant login's password.
+_FORWARDED_ENV = ("DB_PASSWORD",)
+
+
 def _mcp_config_overrides() -> List[str]:
     """Translate the shared MCP configuration (claude_code_runner.
     library_mcp_config — the launcher's mcp-windows.json, the backend's
     /app/data/mcp-docker.json on Docker) into `-c` args for codex. Dotted keys only: per-key form is
     the robust subset of `-c` TOML parsing, and json.dumps of a
-    string/list is valid TOML for these values."""
+    string/list is valid TOML for these values. A _FORWARDED_ENV variable
+    is named here and valued in the spawn's environment (_mcp_env)."""
     args: List[str] = []
     try:
         cfg = library_mcp_config()
@@ -254,8 +261,13 @@ def _mcp_config_overrides() -> List[str]:
         names.append(name)
         args += ["-c", f"{base}.command={json.dumps(command)}"]
         args += ["-c", f"{base}.args={json.dumps(server.get('args') or [])}"]
-        for k, v in (server.get("env") or {}).items():
-            args += ["-c", f"{base}.env.{k}={json.dumps(str(v))}"]
+        env = server.get("env") or {}
+        for k, v in env.items():
+            if k not in _FORWARDED_ENV:
+                args += ["-c", f"{base}.env.{k}={json.dumps(str(v))}"]
+        forwarded = [k for k in env if k in _FORWARDED_ENV]
+        if forwarded:
+            args += ["-c", f"{base}.env_vars={json.dumps(forwarded)}"]
         # The assistant server imports torch-adjacent modules — give it
         # more than the 10s default before codex declares it dead.
         args += ["-c", f"{base}.startup_timeout_sec=30"]
@@ -318,8 +330,24 @@ def _base_flags(model: str, effort: str, with_mcp: bool,
     return flags
 
 
+def _mcp_env() -> dict:
+    """The _FORWARDED_ENV values of the MCP configuration, for the spawn's
+    environment — both servers carry the same login. An unreadable
+    configuration is _mcp_config_overrides' error: no server is configured."""
+    try:
+        cfg = library_mcp_config()
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: str(v) for server in (cfg.get("mcpServers") or {}).values()
+            for k, v in (server.get("env") or {}).items() if k in _FORWARDED_ENV}
+
+
 def _spawn_codex(cmd: List[str]):
-    kwargs = _spawn_kwargs(os.environ.copy())
+    """A chat turn's subprocess, its MCP servers' forwarded variables in its
+    environment."""
+    env = os.environ.copy()
+    env.update(_mcp_env())
+    kwargs = _spawn_kwargs(env)
     kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return subprocess.Popen(cmd, **kwargs)
 

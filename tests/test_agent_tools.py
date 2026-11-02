@@ -207,6 +207,17 @@ def _outputs(api) -> str:
     return " ".join(o for body in api.bodies("/responses") for o in codex_tool_outputs(body))
 
 
+def _codex_roster(body: dict) -> tuple[dict, list[str]]:
+    """Every tool a codex request offers: per namespace, and inside its
+    code-mode host. Codex has no allow-list of its own — its tools are the
+    CLI's defaults for the model less the features the runner turns off —
+    so a test names the whole set, and a tool a CLI update adds fails it.
+    (The fake answers codex's model-metadata request with 404: the set is
+    the CLI's own default for the model.)"""
+    return ({ns: sorted(names) for ns, names in codex_tools(body).items()},
+            codex_hosted_tools(body))
+
+
 def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(codex, shared):
     target = shared / "written.txt"
     api = codex([_patch_that_adds(target), {"text": "Evening Set"}])
@@ -219,6 +230,8 @@ def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(c
     first = api.bodies("/responses")[0]
     assert codex_instructions(first) == "You write short titles."
     assert "You are Codex" not in json.dumps(first)
+    assert _codex_roster(first) == ({"functions": ["exec", "request_user_input", "wait"]},
+                                    ["apply_patch", "update_plan"])
 
 
 def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared, monkeypatch):
@@ -234,9 +247,33 @@ def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared
     assert done.error is None
     assert _calls(shared, "postgres") == ["postgres"]
     assert not target.exists()
-    first = api.bodies("/responses")[0]
-    assert codex_tools(first)["mcp__postgres"] == ["ping"]
-    assert "view_image" not in codex_hosted_tools(first)
+    assert _codex_roster(api.bodies("/responses")[0]) == (
+        {"functions": ["exec", "request_user_input", "wait"], "mcp__postgres": ["ping"]},
+        ["apply_patch", "list_mcp_resource_templates", "list_mcp_resources",
+         "read_mcp_resource", "update_plan"])
+
+
+def test_a_codex_turn_hands_its_servers_the_login_password_off_its_command_line(
+        codex, shared, monkeypatch):
+    """Other local accounts can read a process's arguments on macOS."""
+    servers = _probes(shared, "postgres")
+    servers["mcpServers"]["postgres"]["env"].update(
+        DB_PASSWORD="the-login-password", PROBE_SEES="DB_PASSWORD",
+        PROBE_SEEN=str(shared / "seen.txt"))
+    library = shared / "mcp.json"
+    library.write_text(json.dumps(servers))
+    monkeypatch.setattr(runner, "MCP_CONFIG_PATH", str(library))
+    spawned = []
+    spawn = codex_runner._spawn_codex
+    monkeypatch.setattr(codex_runner, "_spawn_codex", lambda cmd: spawned.append(cmd) or spawn(cmd))
+    codex([{"tool": "ping", "namespace": "mcp__postgres", "input": {"note": "postgres"}},
+           {"text": "ok"}])
+
+    done = list(codex_runner.call_codex_stream("go"))[-1]
+
+    assert done.error is None
+    assert "the-login-password" not in " ".join(spawned[0])
+    assert (shared / "seen.txt").read_text() == "the-login-password"
 
 
 # ─── Work nobody watches: text in, text out ────────────────────────────────

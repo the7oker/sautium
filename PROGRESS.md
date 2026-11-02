@@ -530,12 +530,15 @@ implementation details live in the code, DB and git history.
   turn the same failure is a tool error the model retries lighter. The cap
   is a session setting the session may change, so since 2026-11-02 the
   backend also ends every session of the login still open when the last
-  live agent turn ends (`claude_code_runner.library_turn`);
+  live agent turn ends (`claude_code_runner.library_turn`), and every start
+  ends what a stopped backend's turn left, before its deltas;
   no `--mcp-config` → the
   SAME MCP configuration (the launcher's mcp-windows.json, the Docker
   backend's `/app/data/mcp-docker.json`) is translated at spawn into dotted `-c
   mcp_servers.*` overrides + `--ignore-user-config` (analog of
-  `--strict-mcp-config`); no `--disallowed-tools`. Until 2026-11-02 no
+  `--strict-mcp-config`), the login's password named in `env_vars` and
+  valued in codex's environment, never on its command line (other local
+  accounts read process arguments on macOS); no `--disallowed-tools`. Until 2026-11-02 no
   sandbox either — under any sandbox `codex exec` refused every MCP
   call ("requires approval, but approval policy is never", upstream
   openai/codex#24135), so the runner bypassed approvals and the sandbox.
@@ -1730,7 +1733,8 @@ implementation details live in the code, DB and git history.
   statement cap, but those are defaults a session may change — and
   PostgreSQL lets a role set its own password and defaults — so the bounds
   are the privileges, the backend ends the login's sessions when the agents'
-  turns are over (`claude_code_runner.library_turn`; the launcher's
+  turns are over (`claude_code_runner.library_turn`) and the migration
+  runner at every start (`db_init.end_assistant_sessions`; the launcher's
   `sautium` is a member of the role for that), `execute_query` cancels its
   statement at a deadline of its own, and every start re-states the login.
   Its password is derived from the owner's, so both writers of an MCP file

@@ -91,13 +91,21 @@ def _recreate(name: str, *, create: bool) -> bool:
     return True
 
 
+# The assistant's login is a cluster role, so the run makes one of its own,
+# named after its session database: a run on a node's own cluster never
+# touches the node's login (its password, its settings, its sessions).
+ASSISTANT_ROLE = "sautium_assistant_" + SESSION_DATABASE.removeprefix("sautium_")
+
+
 def pytest_sessionstart(session):
     if not _recreate(SESSION_DATABASE, create=True):
         return
-    # The assistant's login is a cluster role a node's setup makes before
-    # any database work (desktop/db_init.ensure_assistant_role); the code
-    # that grants to it (the migration runner, the LB loader's swap) expects it.
+    # A node's setup makes the login before any database work
+    # (desktop/db_init.ensure_assistant_role); the code that grants to it (the
+    # migration runner, the LB loader's swap) expects it. Every caller reads
+    # db_init.ASSISTANT_ROLE when it runs.
     from desktop import db_init
+    db_init.ASSISTANT_ROLE = ASSISTANT_ROLE
     admin = _admin()
     with admin.cursor() as cur:
         db_init.ensure_assistant_role(cur, PG["password"])
@@ -105,7 +113,12 @@ def pytest_sessionstart(session):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    _recreate(SESSION_DATABASE, create=False)
+    if _recreate(SESSION_DATABASE, create=False):
+        # Its grants went with the scratch databases and the session's own.
+        admin = _admin()
+        with admin.cursor() as cur:
+            cur.execute(f'DROP ROLE IF EXISTS "{ASSISTANT_ROLE}"')
+        admin.close()
     shutil.rmtree(HQPLAYER_DIR)
 
 

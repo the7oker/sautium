@@ -147,11 +147,9 @@ def _assistant_role(conn) -> None:
     setup did both before the backend started. Before the migrations, whose
     runner states the login's grants."""
     with conn.cursor() as cur:
-        cur.execute("SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user")
-        superuser, createrole = cur.fetchone()
-        if superuser or createrole:
+        cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+        if cur.fetchone()[0]:
             db_init.ensure_assistant_role(cur, settings.postgres_password)
-        if superuser:
             db_init.revoke_large_object_creation(cur)
     conn.commit()
 

@@ -274,24 +274,21 @@ def library_turn():
 
 
 def _end_assistant_sessions() -> None:
-    """End every session of the assistant's role but the query tool's own
-    connection (tools/execute_query, which the API providers' turns share
-    and which bounds its statements itself). The node's role is a member of
-    the assistant's (the launcher's setup) or a superuser (Docker). After a
-    turn that ended normally only its servers' closing sessions are left;
-    a statement still running is the case worth a warning."""
-    from db_pool import db_query
-    from desktop.db_init import ASSISTANT_ROLE
+    """End every session of the assistant's role in the node's database but
+    the query tool's own connection (tools/execute_query, which the API
+    providers' turns share and which bounds its statements itself) —
+    desktop/db_init.end_assistant_sessions. After a turn that ended
+    normally only its servers' closing sessions are left; a statement still
+    running is the case worth a warning."""
+    from db_pool import get_conn
+    from desktop.db_init import end_assistant_sessions
     from tools.execute_query import connection_pid
     try:
-        ended = db_query(
-            "SELECT state, pg_terminate_backend(pid) AS ended FROM pg_stat_activity "
-            "WHERE usename = %(role)s AND pid IS DISTINCT FROM %(keep)s",
-            {"role": ASSISTANT_ROLE, "keep": connection_pid()})
+        with get_conn() as conn, conn.cursor() as cur:
+            running = end_assistant_sessions(cur, keep=connection_pid())
     except psycopg2.Error as e:
         logger.error(f"could not end the assistant's sessions after its turns: {e}")
         return
-    running = sum(1 for row in ended if row["ended"] and row["state"] == "active")
     if running:
         logger.warning(f"ended {running} statement(s) of the assistant's role still "
                        "running after its turns")

@@ -26,9 +26,11 @@ this file carries the mechanics.
 - **A new table or view is a decision for the assistant's login.** It goes
   into `desktop/db_init.ASSISTANT_READS` (the agents' SQL may read it) or
   into the private set of `tests/test_assistant_role.py`; that test fails
-  until it is one or the other. The grants are no migration: the backend's
-  start re-states them (`db_migrate._assistant_role`), and a loader that
-  swaps a readable table in calls `db_init.grant_assistant_reads` itself.
+  until it is one or the other. The grants are no migration file: the
+  runner re-states them after the files (`apply_migrations` →
+  `db_init.grant_assistant_reads`), on every start and after a restore, and
+  a loader that swaps a readable table in calls `grant_assistant_reads`
+  itself.
 - **One runner, every node.** `desktop/db_init.apply_migrations` applies
   pending files in name order and records them in `_schema_migrations`.
   The launcher calls it at service start and after an update

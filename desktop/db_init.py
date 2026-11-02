@@ -39,8 +39,9 @@ MIGRATIONS_TABLE = "_schema_migrations"
 # object in the schema, no temporary one, no large object. Its session
 # defaults (read-only, 30 s statements) are only defaults, a session may
 # change them, so the backend ends whatever session of it is still open
-# when the agents' turns are over (claude_code_runner.library_turn) and
-# cancels the query tool's statement at its deadline. The role and its
+# when the agents' turns are over (claude_code_runner.library_turn) and at
+# every start (apply_migrations: end_assistant_sessions), and cancels the
+# query tool's statement at its deadline. The role and its
 # login are the cluster administrator's (the launcher's setup, the Docker
 # backend's bootstrap superuser: ensure_assistant_role,
 # revoke_large_object_creation); the grants are re-stated from
@@ -147,6 +148,20 @@ def grant_assistant_reads(cur) -> None:
     cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
     cur.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(
         sql.SQL(", ").join(sql.Identifier(t) for t in ASSISTANT_READS), role))
+
+
+def end_assistant_sessions(cur, keep: Optional[int] = None) -> int:
+    """End every session of the assistant's login in this database but the
+    one whose server pid is `keep`. Its session defaults are its own to
+    change, so a statement of it can run on with no client — after a turn,
+    after the backend that spawned it stopped — holding what it locked. On
+    a cursor of a superuser or of a member of the login's role (the
+    launcher's sautium: create_database). Returns how many were running a
+    statement."""
+    cur.execute("SELECT state, pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE usename = %s AND datname = current_database() "
+                "AND pid IS DISTINCT FROM %s", (ASSISTANT_ROLE, keep))
+    return sum(1 for state, ended in cur.fetchall() if ended and state == "active")
 
 
 def revoke_large_object_creation(cur) -> None:
@@ -1303,6 +1318,9 @@ def apply_migrations(conn, progress_cb: Optional[Callable] = None) -> int:
     created. Applied files are tracked in _schema_migrations; the same
     runner serves the launcher (service start, post-update), the backend
     (backend/db_migrate.py at startup, Docker included) and a restore.
+    Before the files it ends whatever session of the assistant's login is
+    left in this database (end_assistant_sessions): a statement a stopped
+    backend's turn left running would hold the locks a delta waits for.
     After the files it states the assistant's grants (grant_assistant_reads):
     a new table gets its decision, a restored database its lost grants.
 
@@ -1321,6 +1339,9 @@ def apply_migrations(conn, progress_cb: Optional[Callable] = None) -> int:
 
     ensure_migrations_table(conn)
     with conn.cursor() as cur:
+        ended = end_assistant_sessions(cur)
+        if ended:
+            logger.warning(f"ended {ended} statement(s) of the assistant's login left running")
         # Get already applied migrations
         cur.execute(f"SELECT filename FROM {MIGRATIONS_TABLE}")
         applied = {row[0] for row in cur.fetchall()}
