@@ -52,10 +52,18 @@ def test_a_select_answers_its_rows_as_json(sql):
     "DELETE FROM sql_tool_rows",
     "WITH gone AS (DELETE FROM sql_tool_rows RETURNING n) SELECT n FROM gone",
     "CREATE TABLE sql_tool_other (n integer)",
+    "EXPLAIN ANALYZE INSERT INTO sql_tool_rows VALUES (5)",
 ])
 def test_a_statement_that_writes_is_refused(sql, statement):
     with pytest.raises(ValueError):
         sql.run_query(statement)
+    assert sql.check() == [1, 2, 3]
+
+
+def test_a_write_the_read_only_rule_lets_through_leaves_nothing(sql):
+    """PostgreSQL runs EXPLAIN ANALYZE of CREATE TABLE AS in a read-only
+    transaction; the call's transaction rolls back, and the table with it."""
+    sql.run_query("EXPLAIN ANALYZE CREATE TABLE sql_tool_other AS SELECT 1 AS n")
     assert sql.check() == [1, 2, 3]
 
 
@@ -87,3 +95,49 @@ def test_an_error_leaves_the_tool_answering(sql):
     with pytest.raises(ValueError, match="sql_tool_nowhere"):
         sql.run_query("SELECT * FROM sql_tool_nowhere")
     assert json.loads(sql.run_query("SELECT count(*) AS c FROM sql_tool_rows")) == [{"c": 3}]
+
+
+def test_a_session_advisory_lock_ends_with_the_call(sql, scratch_dsn):
+    """The node's own jobs wait on advisory locks; one an agent's query took
+    must not outlive its call."""
+    import psycopg2
+    sql.run_query("SELECT pg_advisory_lock(424242)")
+    with psycopg2.connect(scratch_dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(424242)")
+        assert cur.fetchone()[0]
+        cur.execute("SELECT pg_advisory_unlock(424242)")
+
+
+def test_rows_come_back_as_postgresql_wrote_them(sql):
+    answer = sql.run_query("SELECT 0.1000000000000000055511151231257827::numeric AS x, "
+                           "123456789012345678901234567890 AS big, 1 AS id, 2 AS id")
+    assert answer == ('[{"x":0.1000000000000000055511151231257827,'
+                      '"big":123456789012345678901234567890,"id":1,"id":2}]')
+
+
+def test_an_answer_stops_at_its_size_budget(sql):
+    answer = sql.run_query("SELECT repeat('x', 1000) AS t FROM generate_series(1, 300)")
+    rows, note = answer.split("\n", 1)
+    assert len(rows) <= sql.CHAR_BUDGET and 90 <= len(json.loads(rows)) < 100
+    assert "all an answer may carry" in note
+    rows, note = sql.run_query(f"SELECT repeat('x', {sql.CHAR_BUDGET}) AS t").split("\n", 1)
+    assert rows == "[]" and "fewer or narrower columns" in note
+
+
+def test_the_function_is_made_whatever_the_roles_default_transaction(sql, monkeypatch):
+    """A role whose transactions are read-only by default still gets its
+    session's function."""
+    if sql._conn is not None:
+        sql._conn.close()
+    monkeypatch.setitem(sql.DB, "options", "-c default_transaction_read_only=on")
+    assert json.loads(sql.run_query("SELECT 1 AS one")) == [{"one": 1}]
+    sql._conn.close()
+
+
+def test_an_unreachable_database_is_said_as_the_tools_error(sql, monkeypatch):
+    if sql._conn is not None:
+        sql._conn.close()
+    monkeypatch.setitem(sql.DB, "host", "127.0.0.1")
+    monkeypatch.setitem(sql.DB, "port", "1")
+    with pytest.raises(ValueError, match="not reachable"):
+        sql.run_query("SELECT 1")

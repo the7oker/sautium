@@ -8,14 +8,19 @@ resolved by name at every agent spawn.
 
 One statement: the text is opened as a cursor inside pg_temp.sautium_query
 (`FOR … IN EXECUTE`), which PostgreSQL does only for a single statement that
-returns rows, in a READ ONLY transaction under a statement timeout, and at
-most ROW_CAP rows come back. What the connection may read at all is its
-role's business — its grants — not this file's.
+returns rows, in a READ ONLY transaction under a statement timeout. At most
+ROW_CAP rows and CHAR_BUDGET characters come back, each row as PostgreSQL
+wrote its JSON: numbers exact, every column there, two of one name included.
+Nothing of a call outlives it: the transaction rolls back — what the
+read-only rule lets run, EXPLAIN ANALYZE of CREATE TABLE AS, goes with it —
+and a session-level advisory lock it took, which a rollback keeps, is
+released. What the connection may read at all is its role's business — its
+grants — not this file's; the role needs TEMP on the database for the
+function.
 
 All logging goes to stderr (stdout is the STDIO MCP transport).
 """
 
-import json
 import logging
 import os
 import sys
@@ -41,12 +46,16 @@ DB = {
 # instead of spending the chat's wall clock.
 TIMEOUT_MS = int(os.getenv("DB_QUERY_TIMEOUT", "30000"))
 ROW_CAP = 500
+# Wide rows — a lyric, an embedding — fill the agent's context long before
+# the row cap does
+CHAR_BUDGET = 100_000
 
 # A session's own function: created where the role may write (pg_temp), once
-# per connection, outside the read-only transactions that call it. The loop
-# reads one row past the cap, so a cut answer can say so.
+# per connection, in a transaction of its own that is writable whatever the
+# role's default. The loop reads one row past the cap, so a cut answer can
+# say so.
 _QUERY_FUNCTION = """
-CREATE FUNCTION pg_temp.sautium_query(q text, cap integer) RETURNS SETOF json
+CREATE FUNCTION pg_temp.sautium_query(q text, cap integer) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
     r record;
@@ -55,7 +64,7 @@ BEGIN
     FOR r IN EXECUTE q LOOP
         n := n + 1;
         EXIT WHEN n > cap + 1;
-        RETURN NEXT row_to_json(r);
+        RETURN NEXT row_to_json(r)::text;
     END LOOP;
 END
 $$
@@ -70,20 +79,35 @@ def _connection():
     global _conn
     if _conn is None or _conn.closed:
         conn = psycopg2.connect(connect_timeout=10, **DB)
-        conn.autocommit = True
         with conn.cursor() as cur:
+            cur.execute("SET TRANSACTION READ WRITE")
             cur.execute(_QUERY_FUNCTION)
-        conn.autocommit = False
+        conn.commit()
         _conn = conn
     return _conn
 
 
+def _end(conn) -> None:
+    try:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock_all()")
+        conn.rollback()
+    except psycopg2.Error as e:
+        # A closed session holds no lock either
+        logger.warning("the database connection broke (%s); the next query reconnects", e)
+        conn.close()
+
+
 def run_query(sql: str) -> str:
     """The rows of one read-only statement, as a JSON array; a note follows
-    when more than ROW_CAP rows matched. Raises ValueError with the
-    database's own words on an error."""
+    when more matched than ROW_CAP or CHAR_BUDGET let through. Raises
+    ValueError with the database's own words on an error."""
     text = sql.strip().rstrip(";").strip()
-    conn = _connection()
+    try:
+        conn = _connection()
+    except psycopg2.Error as e:
+        raise ValueError(f"the database is not reachable: {str(e).strip()}") from None
     try:
         with conn.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
@@ -93,13 +117,18 @@ def run_query(sql: str) -> str:
     except psycopg2.Error as e:
         raise ValueError((e.pgerror or str(e)).strip()) from None
     finally:
-        try:
-            conn.rollback()
-        except psycopg2.Error as e:
-            logger.warning("the database connection broke (%s); the next query reconnects", e)
-            conn.close()
-    answer = json.dumps(rows[:ROW_CAP], ensure_ascii=False, default=str)
-    if len(rows) > ROW_CAP:
+        _end(conn)
+    kept, size = [], 2
+    for row in rows[:ROW_CAP]:
+        if size + len(row) + 1 > CHAR_BUDGET:
+            break
+        kept.append(row)
+        size += len(row) + 1
+    answer = "[" + ",".join(kept) + "]"
+    if len(kept) < min(len(rows), ROW_CAP):
+        answer += (f"\n(the first {len(kept)} rows, all an answer may carry; "
+                   "select fewer or narrower columns, or fewer rows)")
+    elif len(rows) > ROW_CAP:
         answer += f"\n(the first {ROW_CAP} rows; narrow the query or add a LIMIT)"
     return answer
 
@@ -108,7 +137,8 @@ def run_query(sql: str) -> str:
 def query(sql: str) -> str:
     """Run one read-only SQL statement (SELECT, WITH … SELECT, VALUES, TABLE,
     EXPLAIN, SHOW) against the music library database and return its rows as
-    JSON. One statement per call; at most 500 rows come back."""
+    JSON. One statement per call; at most 500 rows, and about 100,000
+    characters, come back."""
     return run_query(sql)
 
 

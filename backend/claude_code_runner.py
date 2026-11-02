@@ -374,6 +374,14 @@ def write_docker_mcp_config() -> None:
         pw = pwd.getpwnam(AGENT_USER)
         os.chown(path, pw.pw_uid, pw.pw_gid)
     logger.info("MCP config written to %s", path)
+    # Where releases before 2026-11 wrote it: the code's folder, the host's
+    stale = backend_dir / "mcp-docker.json"
+    if stale.exists():
+        try:
+            stale.unlink()
+        except OSError as e:
+            logger.warning("%s holds the database password from an earlier release and "
+                           "could not be removed here (%s): delete it on the host", stale, e)
 
 
 def spawn_kwargs(env: dict) -> dict:
