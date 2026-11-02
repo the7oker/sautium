@@ -773,9 +773,8 @@ def _ai_state() -> Dict[str, Any]:
     # AI canonization: default On only when the AI is "free" (subscription /
     # OAuth) — a paid API key bills per token, so default Off + the user opts in.
     # The tier runs on claude_code/anthropic only (ai_canon._provider skips
-    # codex — the registry stub cannot .chat()), so with codex selected it is
-    # available exactly when Claude Code is ready underneath; codex auth alone
-    # must not enable it.
+    # codex), so with codex selected it is available exactly when Claude Code
+    # is ready underneath; codex auth alone must not enable it.
     if provider == "codex":
         try:
             import claude_code

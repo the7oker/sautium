@@ -35,3 +35,9 @@ class CodexProvider(BaseProvider):
             "CodexProvider.chat() is not used. The chat router "
             "dispatches Codex via call_codex_stream()."
         )
+
+    def complete(self, prompt: str, system_prompt: str, model: Optional[str] = None) -> str:
+        raise NotImplementedError(
+            "CodexProvider.complete() is not used: providers.complete_text "
+            "runs the CLI's one-shot."
+        )

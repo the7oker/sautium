@@ -99,8 +99,18 @@ class AnthropicProvider(BaseProvider):
     def models(self) -> list[str]:
         # Current-generation ids carry no date suffix. Order matters:
         # models[0] is the chat default, models[-1] is the cheap tier
-        # title generation picks (chat._title_via_provider).
+        # title generation picks (chat._generate_session_title).
         return ["claude-sonnet-5", "claude-haiku-4-5"]
+
+    def complete(self, prompt: str, system_prompt: str, model: Optional[str] = None) -> str:
+        use_model = model if model in self.models() else self.models()[0]
+        response = self._get_client().messages.create(
+            model=use_model,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "".join(block.text for block in response.content if block.type == "text")
 
     def chat(
         self,

@@ -34,3 +34,9 @@ class ClaudeCodeProvider(BaseProvider):
             "ClaudeCodeProvider.chat() is not used. The chat router "
             "dispatches Claude Code via call_claude_code_stream()."
         )
+
+    def complete(self, prompt: str, system_prompt: str, model: Optional[str] = None) -> str:
+        raise NotImplementedError(
+            "ClaudeCodeProvider.complete() is not used: providers.complete_text "
+            "runs the CLI's text profile."
+        )

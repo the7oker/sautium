@@ -381,17 +381,15 @@ def _compute_session_card(cur, active: dict,
 def _schedule_mix_title(session_id: str) -> None:
     """Generate an AI title for an archived mix in a background daemon thread
     (the codebase's background-work idiom — chat-stream-worker, status poller).
-    Graceful no-op when no AI provider is configured: the card stays 'Mix'."""
+    It runs on the provider the owner picked and on none other: with no pick
+    ("no AI") or a pick that is gone the card stays 'Mix'. Text in, text out
+    (routers.chat.generate_title) — the model is offered no tool."""
     def _worker():
         try:
-            from routers.chat import (
-                _resolve_provider, _title_via_provider,
-                _title_via_claude_code, _title_via_codex, _clean_title,
-            )
-            try:
-                provider = _resolve_provider(None)
-            except Exception:
-                return  # no provider → leave 'Mix'
+            from routers.chat import generate_title, picked_provider
+            provider = picked_provider()
+            if provider is None:
+                return
 
             rows = _db_query("""
                 SELECT a.name AS artist, t.title AS title
@@ -407,22 +405,13 @@ def _schedule_mix_title(session_id: str) -> None:
                 return
 
             lines = "\n".join(f"{r['artist']} — {r['title']}" for r in rows)
-            prompt = (
-                "Below is a playlist of tracks. Produce a short, evocative "
-                "playlist name — 2-4 words, max 6 — in the same language as the "
-                "track titles. No quotes, no trailing punctuation, do not use "
-                "the words 'playlist' or 'mix'. Output ONLY the name.\n\n" + lines
-            )
-            # Same dispatch as the chat-session titler: the two CLI providers
-            # have their own one-shot subprocess paths (BaseProvider.chat() is
-            # a sentinel there), everything else goes through the SDK.
-            if provider == "claude_code":
-                title = _title_via_claude_code(prompt)
-            elif provider == "codex":
-                title = _title_via_codex(prompt)
-            else:
-                title = _title_via_provider(provider, prompt)
-            title = _clean_title(title) if title else None
+            title = generate_title(provider, (
+                "Between the <tracks> tags is a playlist, one 'artist — title' "
+                "per line. Produce a short, evocative playlist name — 2-4 words, "
+                "max 6 — in the same language as the track titles. No quotes, no "
+                "trailing punctuation, do not use the words 'playlist' or 'mix'. "
+                "Output ONLY the name.\n\n<tracks>\n" + lines + "\n</tracks>"
+            ))
             if title:
                 # Only overwrite the placeholder — a later user edit wins.
                 _db_execute(

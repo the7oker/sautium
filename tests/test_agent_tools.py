@@ -215,3 +215,144 @@ def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared
     first = api.bodies("/responses")[0]
     assert codex_tools(first)["mcp__postgres"] == ["ping"]
     assert "view_image" not in codex_hosted_tools(first)
+
+
+# ─── Work nobody watches: text in, text out ────────────────────────────────
+
+@pytest.fixture
+def api_keys(monkeypatch):
+    """Both API providers registered, with keys that only the fake accepts."""
+    import providers
+    from config import settings
+    monkeypatch.setattr(settings, "anthropic_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    providers.reset()
+    yield
+    providers.reset()
+
+
+@pytest.fixture
+def db(scratch_dsn, monkeypatch):
+    """The connection pool on the module's scratch database; a cursor on it."""
+    import db_pool
+    import psycopg2
+    import psycopg2.pool
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 4, dsn=scratch_dsn)
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    conn = psycopg2.connect(scratch_dsn)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM listening_sessions")
+        cur.execute("DELETE FROM user_settings")
+        yield cur
+    conn.close()
+    pool.closeall()
+
+
+def _archived_mix(cur) -> str:
+    """An archived mix awaiting its name: two tracks of one artist."""
+    import uuid
+    artist, sid = str(uuid.uuid4()), str(uuid.uuid4())
+    cur.execute("INSERT INTO artists (id, name) VALUES (%s, %s)", (artist, f"Artist {artist[:8]}"))
+    cur.execute("INSERT INTO listening_sessions (id, origin, title, track_count, ended_at) "
+                "VALUES (%s, 'mix', 'Mix', 2, now())", (sid,))
+    for pos, title in enumerate(("Night Bus", "Harbour Lights")):
+        track = str(uuid.uuid4())
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, %s)", (track, title))
+        cur.execute("INSERT INTO track_artists (track_id, artist_id) VALUES (%s, %s)", (track, artist))
+        cur.execute("INSERT INTO session_tracks (session_id, position, track_id) "
+                    "VALUES (%s, %s, %s)", (sid, pos, track))
+    return sid
+
+
+def _name_the_mix(sid: str) -> None:
+    import threading
+    from playback import sessions
+    sessions._schedule_mix_title(sid)
+    for worker in [t for t in threading.enumerate() if t.name == "mix-title-worker"]:
+        worker.join(120)
+
+
+def _mix_title(cur, sid: str) -> str:
+    cur.execute("SELECT title FROM listening_sessions WHERE id = %s", (sid,))
+    return cur.fetchone()[0]
+
+
+def test_a_chat_title_offers_the_model_no_tool_and_no_file_of_the_checkout(claude):
+    """The checkout's own CLAUDE.md sits above the backend's directory; a CLI
+    started there would send it along."""
+    from routers import chat
+    api = claude([{"text": "Jazz From Tashkent"}])
+
+    title = chat._generate_session_title("Any jazz from Uzbekistan?", "Yes, three albums.",
+                                         "claude_code")
+
+    assert title == "Jazz From Tashkent"
+    first = api.bodies("/messages")[0]
+    assert anthropic_tools(first) == []
+    assert "Senior-engineer level only" not in json.dumps(first)
+
+
+def test_an_ai_canon_batch_offers_the_model_no_tool(claude, shared, monkeypatch):
+    import providers
+    from canon import ai_canon
+    library = shared / "mcp.json"
+    library.write_text(json.dumps(_probes(shared, "postgres", "assistant")))
+    monkeypatch.setattr(runner, "MCP_CONFIG_PATH", str(library))
+    api = claude([{"text": '[{"n": 1, "pick": "SKIP", "conf": "low", "why": "no signal"}]'}])
+
+    decisions = ai_canon._ask("Library artists: #1 ...", "sonnet",
+                              providers.get_provider("claude_code"))
+
+    assert decisions == [{"n": 1, "pick": "SKIP", "conf": "low", "why": "no signal"}]
+    assert anthropic_tools(api.bodies("/messages")[0]) == []
+
+
+def test_an_ai_canon_batch_on_an_api_key_offers_the_model_no_tool(claude, api_keys, monkeypatch):
+    import providers
+    from canon import ai_canon
+    api = claude([{"text": "[]"}])
+    monkeypatch.setenv("OPENAI_BASE_URL", f"{api.url}/v1")
+    providers.reset()
+
+    assert ai_canon._ask("Library artists: #1 ...", "gpt-5.6-terra",
+                         providers.get_provider("openai")) == []
+
+    sent = api.bodies("/chat/completions")[0]
+    assert "tools" not in sent
+    assert [m["role"] for m in sent["messages"]] == ["system", "user"]
+
+
+def test_a_title_on_an_api_key_offers_the_model_no_tool(claude, api_keys):
+    from routers import chat
+    api = claude([{"text": "Jazz From Tashkent"}])
+
+    assert chat._generate_session_title("Any jazz from Uzbekistan?", "Yes.",
+                                        "anthropic") == "Jazz From Tashkent"
+
+    assert "tools" not in api.bodies("/messages")[0]
+
+
+def test_a_mix_with_no_provider_picked_keeps_its_name_and_asks_no_model(claude, db):
+    """No pick is the wizard's "no AI": the agent CLIs being installed is
+    no reason to send the owner's listening anywhere."""
+    api = claude([{"text": "Harbour Nights"}])
+    sid = _archived_mix(db)
+
+    _name_the_mix(sid)
+
+    assert api.requests == []
+    assert _mix_title(db, sid) == "Mix"
+
+
+def test_a_mix_is_named_by_the_picked_provider_with_no_tool_offered(claude, db, api_keys):
+    api = claude([{"text": "Harbour Nights"}])
+    db.execute("INSERT INTO user_settings (key, value) VALUES ('ai.provider', '\"anthropic\"')")
+    sid = _archived_mix(db)
+
+    _name_the_mix(sid)
+
+    assert _mix_title(db, sid) == "Harbour Nights"
+    sent = api.bodies("/messages")[0]
+    assert "tools" not in sent
+    assert "<tracks>\nArtist" in sent["messages"][0]["content"]

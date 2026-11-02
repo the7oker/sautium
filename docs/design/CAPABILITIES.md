@@ -189,6 +189,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 - [UI] Chat: sessions, a streamed reply that survives a dropped connection, tiles and track rows in replies that open and play — `POST /api/chat/sessions/{id}/messages`, `GET …/stream`; `static/app-shell.js` (blocks `artist`, `album`, `tracks`)
 - [auto] The assistant is told what is playing; it is not told which screen is open — `routers/chat.py: _get_player_context`
 - [auto] A turn is capped at 150 s. A Claude Code turn may use the assistant's own MCP servers and nothing else: no built-in tool exists, the user's own servers and connectors never load, and a tool outside that list is refused — `claude_code_runner.py: _tool_flags`. A Codex turn runs in a read-only sandbox with approvals refused, only the assistant's servers pre-approved, its shell and web tools off — `codex_runner.py: _base_flags`, `_DISABLED_FEATURES`
+- [auto] Chat titles, mix names and the AI canon tier are text in, text out: the model is offered no tool, on every provider; a mix is named only by the provider the owner picked, so with no pick it stays "Mix" — `providers/__init__.py: complete_text`; `routers/chat.py: picked_provider`
 - [UI][L] Agent sign-in without a console, from the Web UI or the wizard — `desktop/agent_login.py: AgentLogin`; `POST /api/settings/ai/claude/signin`, `/ai/codex/signin`
 
 ## 8. Gear advisor

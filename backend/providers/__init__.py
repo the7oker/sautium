@@ -134,3 +134,25 @@ def available_providers() -> list[dict]:
             "models": provider.models(),
         })
     return result
+
+
+def complete_text(name: str, prompt: str, system_prompt: str,
+                  model: Optional[str] = None, timeout: int = 60) -> Optional[str]:
+    """One call, text in and text out, on provider `name`: the model is
+    offered no tool, whichever provider it is. The work nobody watches —
+    chat titles, mix names, AI canon — runs through here and nowhere else.
+    Returns the answer; None when the provider is not registered or a CLI
+    call failed (it logs why). An API provider's own error propagates."""
+    provider = get_provider(name)
+    if provider is None:
+        return None
+    if name == "claude_code":
+        from claude_code_runner import TEXT, call_claude_code
+        res = call_claude_code(prompt, system_prompt, model=model,
+                               timeout_seconds=timeout, tools=TEXT)
+        return None if res["is_error"] else res["answer"]
+    if name == "codex":
+        from codex_runner import TITLE_MODEL, call_codex_oneshot
+        return call_codex_oneshot(prompt, system_prompt, model=model or TITLE_MODEL,
+                                  timeout_seconds=timeout)
+    return provider.complete(prompt, system_prompt, model)
