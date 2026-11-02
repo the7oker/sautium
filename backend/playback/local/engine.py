@@ -64,7 +64,7 @@ def _probe(src: str) -> Optional[tuple[int, int, Optional[float]]]:
         out = subprocess.run(
             [ffprobe, "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=sample_rate,channels:format=duration",
-             "-of", "csv=p=0:nk=1", src],
+             "-of", "csv=p=0:nk=1", "-i", src],
             capture_output=True, text=True, timeout=10)
         lines = [l for l in out.stdout.strip().splitlines() if l]
         rate_str, ch_str = lines[0].split(",")[:2]
@@ -366,7 +366,11 @@ class Engine:
         return True
 
     def _source_url(self, item: QueueItem) -> Optional[str]:
-        # What THIS output opens (QueueItem.play, playback.substitute).
+        # What THIS output opens (QueueItem.play, playback.substitute): a rip
+        # here, or the proxy's stream. A slot of any other kind — a URI an
+        # HQPlayer's playlist held, a file the library let go — is nothing
+        # this output opens, as for the DLNA and browser outputs: ffmpeg
+        # would open whatever such a string names.
         src = item.opener()
         if src["kind"] == "file":
             return settings.translate_to_local_path(src["path"])
@@ -374,7 +378,7 @@ class Engine:
             from streaming import service as streaming_service
             proxy = streaming_service.get_proxy()
             return proxy.url_for(src["token"]) if proxy else None
-        return src.get("uri")
+        return None
 
     def _spawn_ffmpeg(self, src: str, rate: int, channels: int, seek_to: float,
                       cue_start: float = 0.0, cue_dur: Optional[float] = None) -> None:

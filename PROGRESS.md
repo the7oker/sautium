@@ -3583,6 +3583,16 @@ device on the network; none of them may hold for it more than a bound.
   Left: a renderer absent when a claimant answers — a phone asleep — moves
   to it.
 
+### What a string or a picture from outside makes the node open (2026-11-03)
+
+- **The built-in output opens a rip here or the proxy's stream, nothing
+  else.** A queue slot can hold a URI the node did not make — an entry of
+  the HQPlayer playlist adopted at attach, a file the library let go —
+  and the local engine handed it to ffprobe and ffmpeg as it stood: any
+  path, any protocol the build carries. The DLNA and browser outputs
+  never opened one; the local engine skips such a slot as unplayable
+  now, as they do. ffprobe takes its source after `-i`.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build
