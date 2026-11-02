@@ -183,7 +183,7 @@ services:
     volumes:
       - ./backend:/app
       - ./mcp:/app/mcp
-      - ./data/cache:/root/.cache
+      - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
       - ./data/generated_eq:/app/generated_eq
       # Measurement-registry clones (AutoEq sparse checkout) — read-only
       # source for gear_registry.py imports; refreshed via git pull.

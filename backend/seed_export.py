@@ -41,8 +41,8 @@ mtime=0 — re-exporting unchanged data is byte-identical and makes no git
 churn.
 
 Run inside the backend container, then publish from the host:
-    docker exec sautium-backend python seed_export.py --report   # coverage only
-    docker exec sautium-backend python seed_export.py            # export
+    docker exec -u agent sautium-backend python seed_export.py --report   # coverage only
+    docker exec -u agent sautium-backend python seed_export.py            # export
     scripts/seed-publish.sh                                      # release asset
     git commit backend/seed/bundle.json
 """

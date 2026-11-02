@@ -17,7 +17,7 @@ same scores). Per-track error isolation: failures land in the .failed file
 and the walk continues.
 
 Run inside the backend container:
-    docker exec sautium-backend python /app/backfill_instruments.py \
+    docker exec -u agent sautium-backend python /app/backfill_instruments.py \
         [--limit N] [--ids 1,2,3] [--reset]
 """
 

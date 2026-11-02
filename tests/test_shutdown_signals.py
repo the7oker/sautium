@@ -186,6 +186,24 @@ def fake_main(tmp_path):
 
 
 @pytest.fixture
+def node_main(fake_main):
+    """fake_main where the node's user reads it: started as root, the
+    entrypoint drops root before it imports the app, and pytest's own
+    temporary folders are root's alone."""
+    if os.geteuid() != 0:
+        yield fake_main
+        return
+    import shutil
+    import tempfile
+    folder = Path(tempfile.mkdtemp(prefix="sautium-test-main-"))
+    shutil.copy(fake_main / "main.py", folder / "main.py")
+    folder.chmod(0o755)
+    (folder / "main.py").chmod(0o644)
+    yield folder
+    shutil.rmtree(folder)
+
+
+@pytest.fixture
 def database():
     """The settings a backend process reads for PostgreSQL: the test
     cluster's own database."""
@@ -407,13 +425,13 @@ def test_the_entrypoint_says_a_stop_during_its_wait_for_the_database(fake_main):
     (signal.SIGTERM, ["SIGTERM received: the backend shuts down"]),
     (signal.SIGHUP, ["SIGHUP received: taken as SIGTERM", "SIGTERM received: the backend shuts down"]),
 ])
-def test_the_entrypoint_serves_and_says_the_signal_that_stops_it(fake_main, database, sig, said):
+def test_the_entrypoint_serves_and_says_the_signal_that_stops_it(node_main, database, sig, said):
     """The Docker entrypoint's own main(), past the wait: its server is
     serving.Server with the app's logging, and a hangup stops it as SIGTERM
     does, the lifespan's shutdown whole with an event stream open. Not PID 1
     here: the SIGTERM raised again as the server leaves ends the process."""
-    p = Proc(ENTRYPOINT, "", ready=LISTENING, cwd=fake_main,
-             env=_env(fake_main, **database, UVICORN_HOST="127.0.0.1", UVICORN_PORT="0",
+    p = Proc(ENTRYPOINT, "", ready=LISTENING, cwd=node_main,
+             env=_env(node_main, **database, UVICORN_HOST="127.0.0.1", UVICORN_PORT="0",
                       UVICORN_RELOAD="false"))
     stream = socket.create_connection(("127.0.0.1", _port(p.ready)), timeout=WAIT_S)
     try:

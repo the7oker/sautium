@@ -141,7 +141,7 @@ services:
     volumes:
       - ./backend:/app
       - ./mcp:/app/mcp
-      - ./data/cache:/root/.cache
+      - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
       - ./data/generated_eq:/app/generated_eq
       - ./data/tls:/app/data/tls
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)

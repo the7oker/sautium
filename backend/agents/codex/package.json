@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "The Codex CLI the Docker image installs (npm ci): the version moves with a release, never at start.",
+  "dependencies": {
+    "@openai/codex": "0.166.0"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "The Claude Code CLI the Docker image installs (npm ci): the version moves with a release, never at start.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.316"
+  }
+}

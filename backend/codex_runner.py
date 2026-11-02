@@ -72,7 +72,7 @@ if sys.platform not in ("win32", "darwin"):
 
 import codex_cli
 from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
-from claude_code_runner import AGENT_USER, MCP_CONFIG_PATH
+from claude_code_runner import AGENT_USER, MCP_CONFIG_PATH, spawn_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -156,31 +156,15 @@ def _resolve_codex_executable() -> Optional[str]:
 
 
 def _spawn_kwargs(env: dict) -> dict:
-    """Popen setup shared by every codex spawn — cwd pinned to the
-    Sautium workdir (`exec resume` takes no `--cd`; without this the
-    process inherits the backend's cwd, which on the launcher is the
-    repo), non-root demote on Linux/Docker, no console flash on Windows,
-    stdin closed (the CLI reads piped stdin as extra prompt context
-    otherwise)."""
-    kwargs: dict = {
-        "cwd": str(_codex_workdir()),
-        "stdin": subprocess.DEVNULL,
-        "env": env,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
-    }
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    elif sys.platform != "darwin":
-        pw = pwd.getpwnam(AGENT_USER)
-
-        def demote():
-            os.setgid(pw.pw_gid)
-            os.setuid(pw.pw_uid)
-
-        kwargs["preexec_fn"] = demote
-        env["HOME"] = pw.pw_dir
+    """Popen setup shared by every codex spawn — every agent spawn's
+    (claude_code_runner.spawn_kwargs: the node's secrets out, never root, no
+    console flash on Windows), plus cwd pinned to the Sautium workdir (`exec
+    resume` takes no `--cd`; without this the process inherits the backend's
+    cwd, which on the launcher is the repo) and stdin closed (the CLI reads
+    piped stdin as extra prompt context otherwise)."""
+    kwargs = spawn_kwargs(env)
+    kwargs.update(cwd=str(_codex_workdir()), stdin=subprocess.DEVNULL,
+                  text=True, encoding="utf-8", errors="replace")
     return kwargs
 
 

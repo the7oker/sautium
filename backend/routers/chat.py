@@ -520,39 +520,22 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
     if _get_provider("claude_code") is None:
         return None
     try:
-        from claude_code_runner import _resolve_claude_executable, AGENT_USER
+        from claude_code_runner import _resolve_claude_executable, spawn_kwargs
         import subprocess
-        import sys
         import os
 
         claude_exe = _resolve_claude_executable()
         if claude_exe is None:
             return None
 
-        env = os.environ.copy()
-        env.pop("ANTHROPIC_API_KEY", None)
-
         # `text=True` without `encoding=` falls back to the platform's
         # ANSI codepage on Windows (cp1251 for many Ukrainian/Russian
         # locales), which mangles UTF-8 output from the CLI. Force
         # UTF-8 + errors="replace" so we get printable glyphs even on
         # the rare line that includes something un-decodable.
-        kwargs = dict(
-            capture_output=True, text=True, timeout=20, env=env,
-            encoding="utf-8", errors="replace",
-        )
-        if sys.platform != "win32" and sys.platform != "darwin":
-            # Linux/Docker — same demote path as call_claude_code.
-            import pwd
-
-            pw = pwd.getpwnam(AGENT_USER)
-
-            def demote():
-                os.setgid(pw.pw_gid)
-                os.setuid(pw.pw_uid)
-
-            kwargs["preexec_fn"] = demote
-            env["HOME"] = pw.pw_dir
+        kwargs = spawn_kwargs(os.environ.copy())
+        kwargs.update(capture_output=True, text=True, timeout=20,
+                      encoding="utf-8", errors="replace")
 
         cmd = [
             claude_exe,

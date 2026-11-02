@@ -38,36 +38,55 @@ RUN apt-get update && apt-get install -y software-properties-common \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 (for the Claude Code / Codex CLIs)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && npm install -g @anthropic-ai/claude-code \
-    && npm install -g @openai/codex \
+# Every download below names its version and is checked against its SHA-256
+# before it is unpacked or run; a version moves with its digest, in a release.
+
+# Node.js 22, the official build (for the Claude Code / Codex CLIs)
+ARG NODE_VERSION=22.23.2
+ARG NODE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
+RUN curl -fsSLo /tmp/node.tar.xz \
+        https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+    && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+    && rm /tmp/node.tar.xz && node --version
+
+# The agent CLIs at the exact versions and integrity hashes their lockfiles
+# name (agents/*/package-lock.json). They move with a release — a new
+# lockfile and a rebuilt image — never at a container's start, and the CLI's
+# own updater stays off: the node's user cannot write here.
+COPY agents/ /opt/agents/
+RUN npm ci --prefix /opt/agents/claude-code --no-audit --no-fund \
+    && npm ci --prefix /opt/agents/codex --no-audit --no-fund \
     && npm cache clean --force
+ENV PATH=/opt/agents/claude-code/node_modules/.bin:/opt/agents/codex/node_modules/.bin:$PATH
+ENV DISABLE_AUTOUPDATER=1
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
-
-# Non-root user for the CLI agents (Claude Code refuses
-# --dangerously-skip-permissions as root; codex runs demoted the same
-# way). codex-agent is the codex working root — AGENTS.md lands there.
+# The node's user: the backend and the agent CLIs run as it (entrypoint.py
+# hands it the node's folders and drops root before anything else runs).
+# codex-agent is the codex working root — its instructions file lands there.
 RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.claude/debug \
     && mkdir -p /home/agent/.claude/projects \
     && echo '{}' > /home/agent/.claude/settings.json \
-    && mkdir -p /home/agent/.codex /home/agent/codex-agent \
+    && mkdir -p /home/agent/.codex /home/agent/codex-agent /home/agent/.cache \
     && chown -R agent:agent /home/agent/.claude \
-        /home/agent/.codex /home/agent/codex-agent
+        /home/agent/.codex /home/agent/codex-agent /home/agent/.cache
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
 
 # Bootstrap pip for the deadsnakes interpreter (it ships without pip; the jammy
-# python3-pip package would target the system python3.10 instead).
-RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
-    && python${PYTHON_VERSION} -m pip install --upgrade pip setuptools wheel
+# python3-pip package would target the system python3.10 instead): pip's own
+# wheel, which installs itself.
+ARG PIP_WHEEL=pip-26.2.2-py3-none-any.whl
+ARG PIP_URL=https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl
+ARG PIP_SHA256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
+RUN curl -fsSLo /tmp/${PIP_WHEEL} ${PIP_URL} \
+    && echo "${PIP_SHA256}  /tmp/${PIP_WHEEL}" | sha256sum -c - \
+    && python${PYTHON_VERSION} /tmp/${PIP_WHEEL}/pip install --no-index /tmp/${PIP_WHEEL} \
+    && rm /tmp/${PIP_WHEEL} \
+    && python${PYTHON_VERSION} -m pip install setuptools==78.1.0 wheel==0.48.0
 
 # Set working directory
 WORKDIR /app
@@ -97,11 +116,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir unidic-lite && touch /usr/local/etc/mecabrc
 
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
-RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
+RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
 
 # PyNaCl for the peer-chat surface (E2E Box, mirrors the launcher's chat
 # stack). Standalone late layer so it never busts the pip-install cache.
-RUN pip install --no-cache-dir pynacl
+RUN pip install --no-cache-dir "PyNaCl>=1.6.2"
 
 # yt-dlp — the core YouTube streaming-preview provider runs it as `-m yt_dlp`
 # on this same interpreter (streaming/youtube.py), and the launcher installs
@@ -115,9 +134,12 @@ RUN pip install --no-cache-dir pynacl
 # executes YouTube's own JS, and deno gives it no permissions where node would
 # give it ours. Late standalone layer: a version bump must not re-run the pip
 # install above (which already pulled stable from requirements.txt — hence -U).
+ARG DENO_VERSION=2.9.8
+ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
 RUN pip install --no-cache-dir -U --pre "yt-dlp[default]" \
-    && curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
-         -o /tmp/deno.zip \
+    && curl -fsSLo /tmp/deno.zip \
+         https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip \
+    && echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
     && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')" \
     && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
     && deno --version && yt-dlp --version
@@ -132,9 +154,13 @@ RUN apt-get update && apt-get install -y lbzip2 \
 # server ("server version mismatch"), so the tools come from PGDG. Same
 # late standalone layer as lbzip2; PG_BIN pins the 18 binaries for the
 # backend whatever pg_wrapper would pick.
+# The repository's key is checked like any download (its fingerprint is
+# B97B 0AFC AA1A 47F0 44F2 44A0 7FCC 7D46 ACCC 4CF8).
+ARG PGDG_SIGNER_SHA256=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76
 RUN apt-get update && apt-get install -y --no-install-recommends gnupg ca-certificates \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-         | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+    && curl -fsSLo /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && echo "${PGDG_SIGNER_SHA256}  /tmp/pgdg.asc" | sha256sum -c - \
+    && gpg --dearmor -o /usr/share/keyrings/postgresql.gpg /tmp/pgdg.asc && rm /tmp/pgdg.asc \
     && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt jammy-pgdg main" \
          > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update && apt-get install -y --no-install-recommends postgresql-client-18 \
@@ -144,8 +170,6 @@ ENV PG_BIN=/usr/lib/postgresql/18/bin
 # Copy application code
 COPY . .
 
-# Create cache directory for models
-RUN mkdir -p /root/.cache
 
 # Expose FastAPI port and DHT UDP port
 EXPOSE 8000

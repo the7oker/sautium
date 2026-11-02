@@ -23,7 +23,7 @@ curl -fsSL --max-time 120 "https://www.spinorama.org/json/metadata.json" \
 mv data/registry/spinorama/metadata.json.new data/registry/spinorama/metadata.json
 
 echo "== import (guardrails inside) =="
-docker exec -e PYTHONPATH=/app -w /app sautium-backend \
+docker exec -u agent -e PYTHONPATH=/app -w /app sautium-backend \
     python gear_registry.py \
     --import-autoeq /app/registry/autoeq \
     --import-spinorama /app/registry/spinorama/metadata.json \

@@ -56,7 +56,7 @@ identity migration (930k records on the master, 2026-08-25) took the whole
 VM down with them. A backlog beyond the cap simply takes several calls —
 `--until-done` loops them.
 
-    docker exec sautium-backend python /app/sign_audio.py [--stage sign|stamp|both] [--limit N] [--dry-run] [--until-done]
+    docker exec -u agent sautium-backend python /app/sign_audio.py [--stage sign|stamp|both] [--limit N] [--dry-run] [--until-done]
 """
 
 import argparse

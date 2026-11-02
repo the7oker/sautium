@@ -17,29 +17,42 @@ RUN apt-get update && apt-get install -y \
     curl \
     # PostgreSQL client
     postgresql-client \
+    # Node's archive is .tar.xz
+    xz-utils \
     # Cleanup
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 (for the Claude Code CLI)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && npm install -g @anthropic-ai/claude-code \
-    && npm cache clean --force
+# Every download below names its version and is checked against its SHA-256
+# before it is unpacked or run; a version moves with its digest, in a release.
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
+# Node.js 22, the official build (for the Claude Code CLI)
+ARG NODE_VERSION=22.23.2
+ARG NODE_SHA256=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8
+RUN curl -fsSLo /tmp/node.tar.xz \
+        https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.xz \
+    && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+    && rm /tmp/node.tar.xz && node --version
 
-# Non-root user for Claude Code (--dangerously-skip-permissions requires non-root)
+# The Claude Code CLI at the exact version and integrity hashes its lockfile
+# names (agents/claude-code/package-lock.json): it moves with a release, never
+# at a container's start, and its own updater stays off.
+COPY agents/claude-code/ /opt/agents/claude-code/
+RUN npm ci --prefix /opt/agents/claude-code --no-audit --no-fund && npm cache clean --force
+ENV PATH=/opt/agents/claude-code/node_modules/.bin:$PATH
+ENV DISABLE_AUTOUPDATER=1
+
+# The node's user: the backend and the agent CLI run as it (entrypoint.py
+# hands it the node's folders and drops root before anything else runs)
 RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.claude/debug \
     && mkdir -p /home/agent/.claude/projects \
     && echo '{}' > /home/agent/.claude/settings.json \
-    && chown -R agent:agent /home/agent/.claude
+    && mkdir -p /home/agent/.cache \
+    && chown -R agent:agent /home/agent/.claude /home/agent/.cache
 
-# Upgrade pip
-RUN python3 -m pip install --upgrade pip setuptools wheel
+RUN python3 -m pip install pip==26.2.2 setuptools==78.1.0 wheel==0.48.0
 
 # Set working directory
 WORKDIR /app
@@ -49,19 +62,17 @@ COPY requirements.txt .
 
 # Install PyTorch CPU-only for ARM64 (no CUDA available on Apple Silicon in Docker)
 # This avoids downloading ~2GB of CUDA libraries
-RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 \
+    --index-url https://download.pytorch.org/whl/cpu
 
 # Install remaining Python dependencies (torch already installed above, pip will skip it)
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
-RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
+RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
 
 # Copy application code
 COPY . .
-
-# Create cache directory for models
-RUN mkdir -p /root/.cache
 
 # Expose FastAPI port and DHT UDP port
 EXPOSE 8000
@@ -70,9 +81,13 @@ EXPOSE 19001/udp
 # Set environment variables
 # PostgreSQL 18 client — pg_dump / pg_restore for node backups (backup.py);
 # bookworm's own client is the 15 series, which cannot dump an 18 server.
+# The repository's key is checked like any download (its fingerprint is
+# B97B 0AFC AA1A 47F0 44F2 44A0 7FCC 7D46 ACCC 4CF8).
+ARG PGDG_SIGNER_SHA256=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76
 RUN apt-get update && apt-get install -y --no-install-recommends gnupg ca-certificates curl \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-         | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+    && curl -fsSLo /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && echo "${PGDG_SIGNER_SHA256}  /tmp/pgdg.asc" | sha256sum -c - \
+    && gpg --dearmor -o /usr/share/keyrings/postgresql.gpg /tmp/pgdg.asc && rm /tmp/pgdg.asc \
     && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
          > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update && apt-get install -y --no-install-recommends postgresql-client-18 \

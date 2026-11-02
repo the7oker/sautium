@@ -120,7 +120,7 @@ services:
     volumes:
       - ./backend:/app
       - ./mcp:/app/mcp
-      - ./data/cache:/root/.cache
+      - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
       - ./data/generated_eq:/app/generated_eq
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       - ./data/lbdump:/app/data/lbdump   # ListenBrainz statistics dump (download + aggregate)
@@ -176,7 +176,9 @@ services:
     # a benchmark run puts the owner's HQPlayer back. The Web UI's event
     # streams never end on their own: 2 s for them, then the shutdown runs.
     stop_grace_period: 10s
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 2
+    # entrypoint.py drops root before the backend starts, as the other compose
+    # files have it; UVICORN_RELOAD unset keeps uvicorn's reload here
+    command: python entrypoint.py
 
 networks:
   sautium-network:

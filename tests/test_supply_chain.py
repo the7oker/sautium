@@ -239,3 +239,47 @@ def test_the_docker_node_writes_the_same_servers_from_its_own_settings(tmp_path,
     assert (env["DB_HOST"], env["DB_NAME"], env["DB_USER"]) == (
         settings.postgres_host, settings.postgres_db, settings.postgres_user)
     assert servers["assistant"]["env"]["P2P_IDENTITY_DIR"] == settings.p2p_identity_dir
+
+
+# -- the Docker image --------------------------------------------------------------------
+
+def _dockerfile(name: str) -> str:
+    return (REPO / "backend" / name).read_text(encoding="utf-8")
+
+
+def test_the_image_installs_its_agent_clis_from_their_lockfiles_only():
+    import json
+    for name, clis in (("Dockerfile", ("claude-code", "codex")), ("Dockerfile.mac", ("claude-code",))):
+        text = _dockerfile(name)
+        assert "npm install" not in text and "@latest" not in text and "nodesource" not in text
+        for cli in clis:
+            assert f"npm ci --prefix /opt/agents/{cli}" in text
+    for cli in ("claude-code", "codex"):
+        folder = REPO / "backend" / "agents" / cli
+        wanted = json.loads((folder / "package.json").read_text(encoding="utf-8"))["dependencies"]
+        assert all(v[0].isdigit() for v in wanted.values()), "an exact version, not a range"
+        lock = json.loads((folder / "package-lock.json").read_text(encoding="utf-8"))
+        packages = {k: v for k, v in lock["packages"].items() if k}
+        assert packages and all(p["integrity"].startswith("sha512-")
+                                and p["resolved"].startswith("https://registry.npmjs.org/")
+                                for p in packages.values())
+
+
+def test_every_download_the_image_makes_is_checked_before_it_is_used():
+    import re
+    for name in ("Dockerfile", "Dockerfile.mac"):
+        text = _dockerfile(name)
+        assert "| bash" not in text and "| python" not in text
+        assert "get-pip" not in text and "/latest/" not in text
+        fetched = re.findall(r"curl -fsSLo (\S+)", text)
+        for target in fetched:
+            assert f'echo "${{' in text and f"  {target}\" | sha256sum -c -" in text, (name, target)
+
+
+def test_nothing_in_the_image_updates_or_runs_a_cli_as_root_at_start():
+    assert not (REPO / "backend" / "entrypoint.sh").exists()
+    for name in ("Dockerfile", "Dockerfile.mac"):
+        assert "ENTRYPOINT" not in _dockerfile(name)
+    for compose in ("docker-compose.yml", "docker-compose.wsl.yml", "docker-compose.mac.yml"):
+        text = (REPO / compose).read_text(encoding="utf-8")
+        assert "command: python entrypoint.py" in text and "/root/.cache" not in text

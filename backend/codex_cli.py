@@ -120,8 +120,8 @@ def get_codex_executable() -> Optional[Path]:
 
 def codex_home() -> Path:
     """$CODEX_HOME, defaulting to <agent user home>/.codex. On Linux
-    (incl. Docker) the CLI runs demoted to AGENT_USER, so the home is
-    that user's — not the backend process's (/root under Docker)."""
+    (incl. Docker) the CLI runs as AGENT_USER, the node's user, so the home
+    is that user's, whoever the backend process runs as."""
     env_home = os.environ.get("CODEX_HOME")
     if env_home:
         return Path(env_home)
