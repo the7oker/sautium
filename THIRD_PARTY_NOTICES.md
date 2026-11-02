@@ -62,8 +62,8 @@ Web UI has no build step, and asks no font service for its type.
 customtkinter (MIT) · pystray (LGPL-3.0) · Pillow (MIT-CMU) · qrcode (BSD) ·
 psutil (BSD-3-Clause) · psycopg2-binary (LGPL with exceptions) · cryptography
 (Apache-2.0 OR BSD-3-Clause) · aiohttp (Apache-2.0 AND MIT) · libtorrent (BSD) ·
-argon2-cffi (MIT) · PyNaCl (Apache-2.0) · miniupnpc (BSD-3-Clause, installed
-by the launcher on first start for the UPnP port mapping).
+argon2-cffi (MIT) · PyNaCl (Apache-2.0) · miniupnpc (BSD-3-Clause, the UPnP
+port mapping).
 
 pystray and psycopg2-binary are LGPL. They are installed by pip on the
 user's machine as separate, replaceable modules (not statically linked);

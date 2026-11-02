@@ -15,7 +15,6 @@ import os
 import queue
 import secrets
 import shutil
-import subprocess
 import sys
 import threading
 import webbrowser
@@ -1813,40 +1812,6 @@ class SetupWizard(ctk.CTkToplevel):
             wraplength=330, justify="left")
         self._report_note.pack(side="left", padx=(12, 0))
 
-    @staticmethod
-    def _ensure_crypto_deps(progress_cb=None):
-        """Install cryptography dependencies if missing."""
-        missing = []
-        for pkg, pip_name in [
-            ("cryptography", "cryptography>=41.0.0"),
-            ("argon2", "argon2-cffi>=23.1.0"),
-            ("nacl", "PyNaCl>=1.5.0"),
-        ]:
-            try:
-                __import__(pkg)
-            except ImportError:
-                missing.append(pip_name)
-
-        if not missing:
-            return
-
-        if progress_cb:
-            progress_cb(f"Installing: {', '.join(missing)}...")
-        logger.info(f"Installing crypto deps: {missing}")
-
-        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + missing
-        kwargs = {"capture_output": True, "text": True, "timeout": 300}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-        result = subprocess.run(cmd, **kwargs)
-        if result.returncode != 0:
-            logger.error(f"Crypto deps install failed: {result.stderr[:300]}")
-            raise RuntimeError(
-                f"Failed to install dependencies: {', '.join(missing)}"
-            )
-        logger.info("Crypto dependencies installed")
-
     def _check_macos_homebrew(self) -> bool:
         """On macOS, check if Homebrew is installed. Show dialog if not."""
         if sys.platform != "darwin":
@@ -1982,9 +1947,6 @@ class SetupWizard(ctk.CTkToplevel):
             try:
                 def progress(msg):
                     self.ui_call(lambda: self._progress_label.configure(text=msg))
-
-                # Install crypto dependencies if missing
-                self._ensure_crypto_deps(progress)
 
                 # Ensure the media CLI tools (ffmpeg, fpcalc, flac). Non-fatal:
                 # setup continues; a missing tool only degrades that step

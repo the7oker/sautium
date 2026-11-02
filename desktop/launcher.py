@@ -646,114 +646,6 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_gen, daemon=True).start()
 
-    @staticmethod
-    def _ensure_p2p_deps(progress_cb=None):
-        """Install P2P dependencies if missing."""
-        missing = []
-        try:
-            import aiohttp  # noqa: F401
-        except ImportError:
-            missing.append("aiohttp>=3.9.1")
-
-        need_libtorrent = False
-        try:
-            import libtorrent  # noqa: F401
-        except ImportError:
-            missing.append("libtorrent>=2.0.0")
-            need_libtorrent = True
-
-        try:
-            import miniupnpc  # noqa: F401
-        except ImportError:
-            missing.append("miniupnpc")
-
-        if missing:
-            if progress_cb:
-                progress_cb(f"Installing P2P deps: {', '.join(missing)}...")
-            logger.info(f"Installing P2P deps: {missing}")
-
-            cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + missing
-            kwargs = {"capture_output": True, "text": True, "timeout": 300}
-            if sys.platform == "win32":
-                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-            result = subprocess.run(cmd, **kwargs)
-            if result.returncode != 0:
-                logger.warning(
-                    f"P2P deps install failed: {result.stderr[:200]}")
-                if progress_cb:
-                    progress_cb("P2P deps install failed (non-critical)")
-                return False
-
-            logger.info("P2P dependencies installed")
-
-        # On Windows, libtorrent needs OpenSSL 1.1 DLLs that aren't
-        # bundled in the pip wheel.
-        if sys.platform == "win32" and need_libtorrent:
-            LauncherApp._fix_libtorrent_openssl(progress_cb)
-
-        return True
-
-    @staticmethod
-    def _fix_libtorrent_openssl(progress_cb=None):
-        """Copy OpenSSL 1.1 DLLs into the libtorrent package on Windows.
-
-        The libtorrent pip wheel links against libssl-1_1-x64.dll and
-        libcrypto-1_1-x64.dll but doesn't include them.
-        """
-        try:
-            import importlib.util
-            spec = importlib.util.find_spec("libtorrent")
-            if not spec or not spec.origin:
-                return
-            lt_dir = Path(spec.origin).parent
-
-            needed = ["libssl-1_1-x64.dll", "libcrypto-1_1-x64.dll"]
-            if all((lt_dir / dll).exists() for dll in needed):
-                return  # already fixed
-
-            if progress_cb:
-                progress_cb("Fixing libtorrent OpenSSL DLLs...")
-            logger.info("libtorrent needs OpenSSL 1.1 DLLs")
-
-            # Strategy 1: search system for existing DLLs
-            import glob
-            search_paths = [
-                r"C:\Program Files\**",
-                r"C:\Program Files (x86)\**",
-                r"C:\Windows\System32",
-            ]
-            for dll_name in needed:
-                if (lt_dir / dll_name).exists():
-                    continue
-                found = False
-                for pattern in search_paths:
-                    matches = glob.glob(
-                        f"{pattern}\\{dll_name}", recursive=True
-                    )
-                    if matches:
-                        import shutil
-                        shutil.copy2(matches[0], lt_dir / dll_name)
-                        logger.info(f"Copied {dll_name} from {matches[0]}")
-                        found = True
-                        break
-                if not found:
-                    # Strategy 2: download from Python embedded package
-                    logger.warning(
-                        f"{dll_name} not found on system. "
-                        "libtorrent may not work (DHT disabled)."
-                    )
-
-            # Verify it works
-            try:
-                import libtorrent  # noqa: F811
-                logger.info(f"libtorrent {libtorrent.version} loaded OK")
-            except ImportError as e:
-                logger.warning(f"libtorrent still can't load: {e}")
-
-        except Exception as e:
-            logger.warning(f"OpenSSL DLL fix failed: {e}")
-
     def _on_identity_rotated(self):
         """The backend rotated this node's key (Profile → name / password).
         Everything the P2P manager holds is built on the old one — the chat
@@ -784,9 +676,6 @@ class LauncherApp(ctk.CTk):
                 def progress(msg):
                     self.ui_call(lambda: self._progress_text.configure(text=msg),
                     )
-
-                # Auto-install P2P deps if missing
-                self._ensure_p2p_deps(progress_cb=progress)
 
                 from desktop.p2p.p2p_manager import P2PManager
                 from desktop.node_identity import get_node_id

@@ -3730,9 +3730,12 @@ the device, keep its answer — not its make.
   — without this flag `dht_get_peers_alert` is silently not generated.
 - **libtorrent `dht_announce()`** in 2.0.11 Python bindings takes 3 args
   (sha1, port, flags=0) — flags parameter is required.
-- **libtorrent on Windows** needs OpenSSL 1.1 DLLs its wheel does not carry —
-  the launcher copies them into the package from wherever the system has
-  them (`_fix_libtorrent_openssl`) and logs a warning when it finds none.
+- **libtorrent on Windows** carries its own OpenSSL from the 2.0.13 wheel on;
+  2.0.11's wanted OpenSSL 1.1 DLLs from the system, which the launcher used to
+  copy in from whatever folder held a file of that name. Since 2026-11-02 the
+  floor is past it (`desktop/requirements.txt`) and nothing is copied: the
+  launcher installs no package and no DLL of its own at run time — every one
+  comes from the requirements the bootstrap installs.
 - **`regexp_count`** needs double-escaped word boundaries in Python strings
   (`\\yword\\y`) but single-escape in raw SQL files (`\yword\y`).
 - **Bulk COPY into indexed tables is the slow path.** The MB dump loader
