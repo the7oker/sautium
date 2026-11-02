@@ -218,6 +218,27 @@ def test_witness_rows_alone_wait_for_the_permission(worker, conn, stage):
     assert sign_audio.verify_all()
 
 
+def test_a_retired_keys_rows_wait_for_the_backstop_and_stamp_under_their_own_key(worker, conn, stage,
+                                                                                monkeypatch):
+    retired = Ed25519PrivateKey.generate()
+    retired_pub = retired.public_key().public_bytes_raw().hex()
+    monkeypatch.setattr(p2p_identity, "_signing_key_cache", retired)
+    subject = _sighting()
+    sign_audio.sign_witness(stage)                       # signed by the key in force then
+    monkeypatch.setattr(p2p_identity, "_signing_key_cache", NODE)
+    _analysis_row(conn)                                  # analysis by the key in force now
+    result = sign_audio.stamp(stage)
+    assert result.stamped == 1                           # the analysis alone: another author's batch
+    assert not _stamped(_row(conn, subject))
+    assert result.witness_waiting == _row(conn, subject)["seen_at"]   # it arms the backstop
+    assert sign_audio.stamp(stage, witness_only=True).stamped == 1
+    row = _row(conn, subject)
+    with conn.cursor() as cur:
+        cur.execute("SELECT author_pubkey FROM signing_batches WHERE batch_root = %s", (row["batch_root"],))
+        assert cur.fetchone()["author_pubkey"] == retired_pub == row["author_pubkey"]
+    assert sign_audio.verify_all()
+
+
 def test_a_stamp_under_an_untrusted_authority_is_refused(worker, conn, stage, monkeypatch):
     subject = _sighting()
     sign_audio.sign_witness(stage)
@@ -726,9 +747,23 @@ def test_the_docker_handshake_records_an_accepted_token_only(conn, monkeypatch):
         assert http.post("/api/chat/handshake", json=guest_body(stranger)).status_code == 403
         r = http.post("/api/chat/handshake", json=guest_body(friend))           # classic, accepted
         assert r.status_code == 200 and r.json()["accepted"]
-    gpub = guest.public_key().public_bytes_raw().hex()
+        gpub = guest.public_key().public_bytes_raw().hex()
+        grant = http.post("/api/chat/handshake", json=guest_body(guest, token=tid)).json()["grant"]
+        upgraded = guest_body(guest, token=tid)                                   # the re-accept…
+        upgraded["birth_cert"] = certificate(gpub, method="email", email_token="ab" * 32, email_class="major")
+        assert http.post("/api/chat/handshake", json=upgraded).status_code == 200
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM friends WHERE public_key_hex = %s", (gpub,))
+        recovered = guest_body(guest)                                             # …and the grant recovery
+        ts = int(time.time())
+        recovered.update(grant=grant, ts=ts, birth_cert=certificate(
+            gpub, method="email", email_token="cd" * 32, email_class="other"), signature=guest.sign(
+            f"grant_handshake:{ts}:{grant['token_id']}:{IDENTITY['invite_code']}".encode()).hex())
+        assert http.post("/api/chat/handshake", json=recovered).status_code == 200
     spub = stranger.public_key().public_bytes_raw().hex()
-    assert _row(conn, gpub, "handshake") is not None
     with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM p2p_witness WHERE subject = %s AND channel = 'handshake'",
+                    (gpub,))
+        assert cur.fetchone()["n"] == 3                  # the accept, the re-accept's and the recovery's
         cur.execute("SELECT count(*) AS n FROM p2p_witness WHERE subject = ANY(%s)", ([spub, fpub.hex()],))
         assert cur.fetchone()["n"] == 0

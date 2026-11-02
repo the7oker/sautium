@@ -648,8 +648,9 @@ def merge_backup(path: Path, password: str, *, target: nb.PgTarget, pubkey: str,
         manifest = reader.read_manifest()
         nb.check_compatible(manifest)
         check_same_account(manifest, pubkey=pubkey, previous=previous)
-        in_dump = set((manifest.get("database") or {}).get("tables") or {})
-        tables = [t for t in LIFE_TABLES if t in in_dump] if in_dump else list(LIFE_TABLES)
+        # Every life table, those the backup predates included: pg_restore
+        # selects nothing for them, and load_scratch makes them empty.
+        tables = list(LIFE_TABLES)
         conn = target.connect()
         conn.autocommit = False
         try:
@@ -658,12 +659,6 @@ def merge_backup(path: Path, password: str, *, target: nb.PgTarget, pubkey: str,
                                             cancel=cancel, file_size=file_size)
             if cancel.is_set():
                 raise nb.Cancelled("merge cancelled")
-            with conn.cursor() as cur:
-                # A life table the backup predates has nothing to merge.
-                for table in LIFE_TABLES:
-                    if table not in loaded:
-                        _create_scratch_table(cur, table, [])
-                        loaded[table] = 0
             backup_key = str((manifest.get("node") or {}).get("pubkey") or "").lower()
             result = merge_life(conn, progress=report, own_keys=[pubkey, *previous],
                                 same_key=backup_key == pubkey.lower())

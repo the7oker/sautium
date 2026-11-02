@@ -126,23 +126,32 @@ def own_keys(current: str, identity_dir: Optional[Path]) -> frozenset:
     return frozenset(k.lower() for k in keys if k)
 
 
+# A re-sign does not count against a ceiling: a format bump re-presents every
+# known subject, once on each channel it is met on, and that wave is bounded
+# by the subjects known before the bump. A re-sign is a sighting of a subject
+# recorded under an older format, on a channel with nothing of its own under
+# this format or a newer one yet — a second certificate under the new format
+# (an upgrade, another email) is an ordinary sighting again.
 _PROBE_SQL = """
     SELECT EXISTS (SELECT 1 FROM p2p_node_bans WHERE pubkey = %(subject)s),
            EXISTS (SELECT 1 FROM p2p_witness
                     WHERE subject = %(subject)s AND cert_sig = %(cert_sig)s
                       AND channel = %(channel)s),
-           (SELECT max(cert_v) FROM p2p_witness WHERE subject = %(subject)s)"""
+           EXISTS (SELECT 1 FROM p2p_witness WHERE subject = %(subject)s AND cert_v < %(cert_v)s)
+           AND NOT EXISTS (SELECT 1 FROM p2p_witness
+                            WHERE subject = %(subject)s AND channel = %(channel)s
+                              AND cert_v >= %(cert_v)s)"""
 
-# A day's rows of a channel that count. A re-sign row does not: one whose
-# subject was on record before it, under older certificate formats only — a
-# format bump re-presents every known subject once, and that wave is bounded
-# by the subjects already known.
+# A day's rows of a channel that count: all but those that were re-signs when
+# they went in.
 _TODAY_SQL = """
     SELECT count(*) FROM p2p_witness w
      WHERE w.channel = %(channel)s AND w.seen_at >= %(since)s
-       AND (NOT EXISTS (SELECT 1 FROM p2p_witness o WHERE o.subject = w.subject AND o.id < w.id)
-            OR EXISTS (SELECT 1 FROM p2p_witness o
-                        WHERE o.subject = w.subject AND o.id < w.id AND o.cert_v >= w.cert_v))"""
+       AND NOT (EXISTS (SELECT 1 FROM p2p_witness o
+                         WHERE o.subject = w.subject AND o.id < w.id AND o.cert_v < w.cert_v)
+                AND NOT EXISTS (SELECT 1 FROM p2p_witness o
+                                 WHERE o.subject = w.subject AND o.channel = w.channel
+                                   AND o.id < w.id AND o.cert_v >= w.cert_v))"""
 
 _INSERT_SQL = """
     INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v, issued_at,
@@ -212,13 +221,11 @@ class Recorder:
         }
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(_PROBE_SQL, row)
-            banned, known, newest_v = cur.fetchone()
+            banned, known, resign = cur.fetchone()
             if banned:
                 return False
             if not known:
-                # A re-sign — a known subject's certificate under a format
-                # newer than any recorded for it — does not count.
-                counts = newest_v is None or newest_v >= cert["v"]
+                counts = not resign
                 if counts and self._over_ceiling(cur, channel, today):
                     return False
                 # The check and the insert are two statements: sightings that

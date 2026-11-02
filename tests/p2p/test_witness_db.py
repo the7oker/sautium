@@ -362,3 +362,20 @@ def test_a_second_certificate_under_a_new_format_counts(recorder, conn, monkeypa
     upgraded = certificate(subject, method="email", email_token="ab" * 32, email_class="major")
     assert recorder.record(upgraded, "probe", subject) is False                     # a v5 like the last
     assert len(_rows(conn, subject)) == 2
+
+
+def test_a_format_bump_re_presents_each_known_subject_once_per_channel(recorder, conn, monkeypatch):
+    """The bump-day wave: a subject known under the old format re-presented on
+    each channel it is met on does not count; one known only under the new
+    format is no re-sign anywhere."""
+    old_timer, newcomer = _key_hex(), _key_hex()
+    for channel in ("probe", "introduced"):
+        assert recorder.record(certificate(old_timer), channel, old_timer)
+    monkeypatch.setattr(birth_cert, "CERT_VERSION", 5)
+    assert recorder.record(certificate(newcomer), "probe", newcomer)                # first met at v5
+    monkeypatch.setattr(witness, "CEILINGS", {"probe": _counting_today(conn, "probe"),
+                                              "introduced": _counting_today(conn, "introduced")})
+    for channel in ("probe", "introduced"):
+        assert recorder.record(certificate(old_timer), channel, old_timer)          # the wave: exempt
+    assert recorder.record(certificate(newcomer), "introduced", newcomer) is False  # counts: the day is full
+    assert sorted(r[0] for r in _rows(conn, old_timer)) == ["introduced", "introduced", "probe", "probe"]

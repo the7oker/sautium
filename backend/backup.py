@@ -589,7 +589,8 @@ MERGE_LABELS = (("listens", "listens"), ("sessions", "listening sessions"), ("fr
                 ("rights", "friend rights"), ("messages", "messages"), ("chats", "AI chats"),
                 ("chat_messages", "chat messages"), ("gear", "gear"), ("pair_notes", "gear pair notes"),
                 ("tokens", "invite tokens"), ("identities", "identities"), ("bans", "bans"),
-                ("settings", "settings"), ("profile", "profile fields"), ("rotations", "rotation records"))
+                ("settings", "settings"), ("profile", "profile fields"), ("rotations", "rotation records"),
+                ("demo_plays", "demo plays"), ("witness", "witness records"))
 
 
 def _cmd_merge(args) -> int:
