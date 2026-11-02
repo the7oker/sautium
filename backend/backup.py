@@ -299,8 +299,8 @@ def create(password: str, *, out_dir: Optional[Path] = None,
 
 def _password(args, *, prompt: str) -> str:
     """The account password: from the variable named, which then leaves this
-    process's environment — pg_dump and pg_restore, started after, never
-    carry it — or asked for."""
+    process's environment, so pg_dump and pg_restore, started after, never
+    inherit it — or asked for."""
     var = args.password_env or ("SAUTIUM_BACKUP_PASSWORD"
                                 if os.environ.get("SAUTIUM_BACKUP_PASSWORD") else None)
     if var:
@@ -654,6 +654,10 @@ def _cmd_selftest(args) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # The account password may sit in this process's environment from its
+    # start (--password-env); no other process of its user reads it there
+    from serving import undumpable
+    undumpable()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # A Windows console on a legacy code page cannot encode the arrows and
     # ellipses in the help and progress text; a hand-run CLI must not die on

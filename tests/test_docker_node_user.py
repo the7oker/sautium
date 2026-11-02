@@ -128,13 +128,31 @@ def test_the_openai_providers_key_never_signs_codex_in(monkeypatch):
     from config import Settings
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "key-of-the-environment")
-    built = Settings()
+    built = Settings(_env_file=None)
     built.openai_api_key = "key-the-web-ui-saved"           # routers/settings.py
     assert built.codex_mint_key == "key-of-the-environment"
     monkeypatch.delenv("OPENAI_API_KEY")
-    built = Settings()
+    built = Settings(_env_file=None)
     built.openai_api_key = "key-the-web-ui-saved"
     assert built.codex_mint_key is None
+
+
+def test_a_key_the_web_ui_saved_never_runs_a_codex_sign_in(tmp_path, monkeypatch):
+    import codex_cli
+    import codex_runner
+    from config import settings
+    monkeypatch.setattr(settings, "_env_openai_api_key", None)
+    monkeypatch.setattr(settings, "codex_api_key", None)
+    monkeypatch.setattr(settings, "openai_api_key", "key-the-web-ui-saved")
+    monkeypatch.setattr(codex_cli, "codex_home", lambda: tmp_path / "codex-home")
+    monkeypatch.setattr(codex_runner, "_codex_home", lambda: tmp_path / "codex-home")
+    monkeypatch.setattr(codex_cli, "get_codex_executable", lambda: None)
+    fake = tmp_path / "codex"
+    fake.write_text(f"#!/bin/sh\ntouch {tmp_path}/ran\n")
+    fake.chmod(0o755)
+    assert codex_cli.codex_auth_method() is None
+    assert codex_runner._ensure_auth(str(fake)) == codex_runner.CODEX_LOGIN_MSG
+    assert not (tmp_path / "ran").exists()
 
 
 def test_codex_signs_in_with_the_settings_key_on_its_stdin_alone(tmp_path, monkeypatch):
@@ -245,14 +263,48 @@ def test_a_path_the_filesystem_will_not_read_is_counted_not_fatal(tmp_path, node
 
 
 @as_root_with_the_node_user
-def test_only_a_folder_docker_made_as_roots_is_handed_never_one_of_the_owners(tmp_path, node_user):
+def test_only_an_empty_folder_docker_made_as_roots_is_handed(tmp_path, node_user, capfd):
+    """Not a host user's own folder, nor root's own Codex folder on a host
+    where compose runs as root: each is left, and said."""
     agent = pwd.getpwnam("agent")
-    made_by_docker, the_owners = tmp_path / "codex-made", tmp_path / "codex-owned"
-    made_by_docker.mkdir()
-    the_owners.mkdir()
+    made_by_docker = tmp_path / "codex-made"
+    the_owners = tmp_path / "codex-owned"
+    roots_own = tmp_path / "codex-roots"
+    for folder in (made_by_docker, the_owners, roots_own):
+        folder.mkdir()
     os.chown(the_owners, 4242, 4242)                 # a host user other than the image's
-    assert node_user.hand_over(agent, (), (str(made_by_docker), str(the_owners))) == (1, 0)
-    assert (made_by_docker.stat().st_uid, the_owners.stat().st_uid) == (agent.pw_uid, 4242)
+    (roots_own / "config.toml").write_text("")
+    folders = tuple(map(str, (made_by_docker, the_owners, roots_own)))
+    assert node_user.hand_over(agent, (), folders) == (1, 0)
+    assert [f.stat().st_uid for f in (made_by_docker, the_owners, roots_own)] == [agent.pw_uid, 4242, 0]
+    said = capfd.readouterr().err
+    assert f"{the_owners} is uid 4242's" in said and f"{roots_own} is uid 0's and holds files" in said
+
+
+@as_root_with_the_node_user
+def test_a_folder_the_filesystem_will_not_describe_or_list_is_counted_and_named(
+        tmp_path, node_user, monkeypatch, capfd):
+    import errno
+    agent = pwd.getpwnam("agent")
+    data = tmp_path / "data"
+    (data / "mount").mkdir()
+    (data / "listing").mkdir()
+    real_statvfs, real_scandir = os.statvfs, os.scandir
+
+    def statvfs(path):
+        if str(path).endswith("mount"):
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return real_statvfs(path)
+
+    def scandir(path="."):
+        if str(path).endswith("listing"):
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(node_user.os, "statvfs", statvfs)
+    monkeypatch.setattr(node_user.os, "scandir", scandir)
+    assert node_user.hand_over(agent, (str(data),), ()) == (1, 2)    # data alone
+    assert f"not handed over: {data / 'mount'}: Input/output error" in capfd.readouterr().err
 
 
 @as_root_with_the_node_user

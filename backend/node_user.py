@@ -8,8 +8,8 @@ can write on its path. It imports the standard library alone, so at the
 container's start nothing the node's user could change — /app is the host's
 ./backend, which that user can write — runs as root. The command it runs
 after the drop (`python entrypoint.py`) is the backend, as the node's user.
-A `docker exec` is root's unless it says `-u agent`, and then runs /app's
-code as root: a hand-run command says `-u agent`.
+A `docker exec` without `-u agent` runs as root, and so runs /app's code as
+root: the maintenance commands documented in the tree say `-u agent`.
 """
 
 import os
@@ -38,38 +38,49 @@ def _say(message: str) -> None:
 
 def hand_over(pw, trees, folders) -> tuple:
     """Chown to the node's user what is not its own under `trees`, and each
-    of `folders` itself while it is root's; read-only mounts and symlinks
-    left as they are. (handed, refused): a path the filesystem would not
-    read or hand over — a drvfs mount's passing EIO, a file gone meanwhile —
-    is counted, not fatal; what the user then cannot write fails where it is
-    written."""
+    of `folders` itself while it is root's and empty — what Docker makes for
+    a host folder that did not exist; read-only mounts and symlinks left as
+    they are. (handed, refused): a path the filesystem would not read or
+    hand over — a drvfs mount's passing EIO, a file gone meanwhile — is
+    counted, not fatal, and the first is said with why; a folder left as
+    another user's is said too. What the node's user then cannot write
+    fails where it is written."""
     handed = refused = 0
 
-    def refuse(_error=None) -> None:
+    def refuse(error: OSError) -> None:
         nonlocal refused
+        if not refused:
+            _say(f"not handed over: {error.filename or '?'}: {error.strerror or error}")
         refused += 1
 
     def writable(path: str) -> bool:
         try:
             return not os.statvfs(path).f_flag & os.ST_RDONLY
-        except OSError:
-            refuse()
+        except OSError as e:
+            refuse(e)
             return False
 
-    def take(path: str, roots_only: bool = False) -> None:
+    def take(path: str) -> None:
         nonlocal handed
         try:
             st = os.lstat(path)
-            if (stat.S_ISLNK(st.st_mode) or st.st_uid == pw.pw_uid
-                    or (roots_only and st.st_uid != 0)):
+            if stat.S_ISLNK(st.st_mode) or st.st_uid == pw.pw_uid:
                 return
             os.chown(path, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
             handed += 1
-        except OSError:
-            refuse()
+        except OSError as e:
+            refuse(e)
 
     for tree in trees:
-        if not os.path.isdir(tree) or not writable(tree):
+        try:
+            if not stat.S_ISDIR(os.stat(tree).st_mode):
+                continue
+        except FileNotFoundError:
+            continue                        # not mounted on this node
+        except OSError as e:
+            refuse(e)
+            continue
+        if not writable(tree):
             continue
         for top, dirs, files in os.walk(tree, onerror=refuse):
             dirs[:] = [d for d in dirs if writable(os.path.join(top, d))]
@@ -77,8 +88,21 @@ def hand_over(pw, trees, folders) -> tuple:
             for name in files:
                 take(os.path.join(top, name))
     for folder in folders:
-        if os.path.isdir(folder) and writable(folder):
-            take(folder, roots_only=True)
+        try:
+            st = os.lstat(folder)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid == pw.pw_uid or not writable(folder):
+                continue
+            empty = not os.listdir(folder)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            refuse(e)
+            continue
+        if st.st_uid == 0 and empty:
+            take(folder)
+        else:
+            _say(f"{folder} is uid {st.st_uid}'s{'' if empty else ' and holds files'}: "
+                 f"left as it is, which uid {pw.pw_uid} may not write")
     return handed, refused
 
 

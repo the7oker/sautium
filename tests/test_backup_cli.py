@@ -147,3 +147,25 @@ def test_the_password_named_leaves_the_environment_once_read(backup_mod, monkeyp
     child = subprocess.run([sys.executable, "-c", "import os; print('P2P_PASSWORD' in os.environ)"],
                            capture_output=True, text=True, check=True)
     assert child.stdout.strip() == "False" and "P2P_PASSWORD" not in os.environ
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="prctl is Linux's")
+def test_the_backup_cli_is_undumpable_from_its_start(backup_mod):
+    """Its password may sit in its environment from the start: no other
+    process of its user reads it there."""
+    import ctypes
+    import os
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            backup_mod.main(["--help"])
+        except SystemExit:
+            pass
+        os.write(w, str(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)).encode())
+        os._exit(0)
+    os.close(w)
+    out = os.read(r, 16).decode()
+    os.waitpid(pid, 0)
+    assert out == "0"

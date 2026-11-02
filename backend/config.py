@@ -207,7 +207,8 @@ class Settings(BaseSettings):
     def codex_mint_key(self) -> Optional[str]:
         """The key Codex's sign-in is minted from when it has none: the
         environment's OPENAI_API_KEY or CODEX_API_KEY as the node started —
-        never a key the Web UI saved for the OpenAI provider."""
+        on the launcher, the key its wizard was given for the OpenAI
+        provider (backend.env) — never a key the Web UI saved later."""
         return self._env_openai_api_key or self.codex_api_key
 
     @property
