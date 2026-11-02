@@ -38,8 +38,9 @@ RUN apt-get update && apt-get install -y software-properties-common \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Every download below names its version and is checked against its SHA-256
-# before it is unpacked or run; a version moves with its digest, in a release.
+# Every file fetched with curl below names its version and is checked against
+# its SHA-256 before it is unpacked or run; a version moves with its digest, in
+# a release. (The pip installs further down resolve from PyPI at build time.)
 
 # Node.js 22, the official build (for the Claude Code / Codex CLIs)
 ARG NODE_VERSION=22.23.2
@@ -61,8 +62,9 @@ RUN npm ci --prefix /opt/agents/claude-code --no-audit --no-fund \
 ENV PATH=/opt/agents/claude-code/node_modules/.bin:/opt/agents/codex/node_modules/.bin:$PATH
 ENV DISABLE_AUTOUPDATER=1
 
-# The node's user: the backend and the agent CLIs run as it (entrypoint.py
-# hands it the node's folders and drops root before anything else runs).
+# The node's user: the backend and the agent CLIs run as it. The image's
+# entrypoint (node_user.py, root's, outside /app — which that user can write)
+# hands it the node's folders and drops root, then runs the command.
 # codex-agent is the codex working root — its instructions file lands there.
 RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.claude/debug \
@@ -71,6 +73,8 @@ RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.codex /home/agent/codex-agent /home/agent/.cache \
     && chown -R agent:agent /home/agent/.claude \
         /home/agent/.codex /home/agent/codex-agent /home/agent/.cache
+COPY node_user.py /usr/local/lib/sautium/node_user.py
+ENTRYPOINT ["python3", "-I", "-S", "/usr/local/lib/sautium/node_user.py"]
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
@@ -86,7 +90,7 @@ RUN curl -fsSLo /tmp/${PIP_WHEEL} ${PIP_URL} \
     && echo "${PIP_SHA256}  /tmp/${PIP_WHEEL}" | sha256sum -c - \
     && python${PYTHON_VERSION} /tmp/${PIP_WHEEL}/pip install --no-index /tmp/${PIP_WHEEL} \
     && rm /tmp/${PIP_WHEEL} \
-    && python${PYTHON_VERSION} -m pip install setuptools==78.1.0 wheel==0.48.0
+    && python${PYTHON_VERSION} -m pip install setuptools==78.1.1 wheel==0.48.0
 
 # Set working directory
 WORKDIR /app
@@ -113,7 +117,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # launcher installs that with --only-binary=:all:); install it here for full
 # Japanese romanization. fugashi/MeCab also needs an mecabrc to exist. Where this
 # is absent (launcher), transliterate._japanese degrades to anyascii, not a crash.
-RUN pip install --no-cache-dir unidic-lite && touch /usr/local/etc/mecabrc
+RUN pip install --no-cache-dir unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc
 
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
 RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"

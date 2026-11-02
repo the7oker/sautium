@@ -57,6 +57,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile.mac
     container_name: sautium-backend
+    # The image's entrypoint drops root itself; nothing in the container may
+    # take a privilege back (a setuid binary, a file capability).
+    security_opt:
+      - no-new-privileges:true
     environment:
       # Database configuration
       POSTGRES_HOST: postgres
@@ -176,8 +180,8 @@ services:
     # a benchmark run puts the owner's HQPlayer back. The Web UI's event
     # streams never end on their own: 2 s for them, then the shutdown runs.
     stop_grace_period: 10s
-    # entrypoint.py drops root before the backend starts, as the other compose
-    # files have it; UVICORN_RELOAD unset keeps uvicorn's reload here
+    # The backend's own entrypoint, as the other compose files have it;
+    # UVICORN_RELOAD unset keeps uvicorn's reload here
     command: python entrypoint.py
 
 networks:

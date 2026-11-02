@@ -137,9 +137,12 @@ def get_claude_executable() -> Optional[Path]:
         Path("node_modules") / "@anthropic-ai" / "claude-code"
         / "bin" / "claude.exe"
     )
-    bundled = get_claude_prefix() / bin_rel
-    if bundled.is_file():
-        return bundled
+    # Linux is the Docker node, whose CLI is the image's, on PATH: a prefix
+    # under the node user's home is a folder that user's own agents can write
+    if sys.platform != "linux":
+        bundled = get_claude_prefix() / bin_rel
+        if bundled.is_file():
+            return bundled
 
     shim = shutil.which("claude")
     if shim:

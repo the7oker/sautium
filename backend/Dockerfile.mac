@@ -23,8 +23,9 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Every download below names its version and is checked against its SHA-256
-# before it is unpacked or run; a version moves with its digest, in a release.
+# Every file fetched with curl below names its version and is checked against
+# its SHA-256 before it is unpacked or run; a version moves with its digest, in
+# a release. (The pip installs further down resolve from PyPI at build time.)
 
 # Node.js 22, the official build (for the Claude Code CLI)
 ARG NODE_VERSION=22.23.2
@@ -43,16 +44,19 @@ RUN npm ci --prefix /opt/agents/claude-code --no-audit --no-fund && npm cache cl
 ENV PATH=/opt/agents/claude-code/node_modules/.bin:$PATH
 ENV DISABLE_AUTOUPDATER=1
 
-# The node's user: the backend and the agent CLI run as it (entrypoint.py
-# hands it the node's folders and drops root before anything else runs)
+# The node's user: the backend and the agent CLI run as it. The image's
+# entrypoint (node_user.py, root's, outside /app — which that user can write)
+# hands it the node's folders and drops root, then runs the command.
 RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.claude/debug \
     && mkdir -p /home/agent/.claude/projects \
     && echo '{}' > /home/agent/.claude/settings.json \
     && mkdir -p /home/agent/.cache \
     && chown -R agent:agent /home/agent/.claude /home/agent/.cache
+COPY node_user.py /usr/local/lib/sautium/node_user.py
+ENTRYPOINT ["python3", "-I", "-S", "/usr/local/lib/sautium/node_user.py"]
 
-RUN python3 -m pip install pip==26.2.2 setuptools==78.1.0 wheel==0.48.0
+RUN python3 -m pip install pip==26.2.2 setuptools==78.1.1 wheel==0.48.0
 
 # Set working directory
 WORKDIR /app

@@ -16,6 +16,7 @@ Light at import: the entrypoint imports it before the database is up.
 import asyncio
 import logging
 import signal
+import sys
 import threading
 import weakref
 
@@ -106,6 +107,21 @@ class Server(uvicorn.Server):
     async def shutdown(self, sockets=None) -> None:
         _end_streams()
         await super().shutdown(sockets=sockets)
+
+
+def undumpable() -> None:
+    """Linux: this process becomes undumpable — its memory and its
+    /proc/<pid>/environ readable by root alone, not by the agent CLIs it
+    starts, which run as the same user. A process exec'd as that user is
+    dumpable again, so every server process says it for itself: the Docker
+    entrypoint's, and the app's (main.lifespan) — the one a reload supervisor
+    spawns too. Elsewhere nothing to do."""
+    if sys.platform != "linux":
+        return
+    import ctypes
+    PR_SET_DUMPABLE = 4
+    if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE) failed")
 
 
 def heard_until_served() -> None:

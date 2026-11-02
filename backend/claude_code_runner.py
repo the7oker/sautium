@@ -48,7 +48,7 @@ ALLOWED_MODELS = {"sonnet", "haiku"}
 # so the graceful timeout `done` event reaches the client (a clean "took too
 # long" message) instead of the stream dying as a raw "network error".
 TIMEOUT_SECONDS = 150
-# The node's user in Docker (entrypoint.NODE_USER): the backend and every
+# The node's user in Docker (node_user.NODE_USER): the backend and every
 # CLI agent (claude, codex) run as it — Claude refuses
 # --dangerously-skip-permissions as root, and codex gets the same treatment.
 # Its home holds both credential dirs (~/.claude, ~/.codex).
@@ -393,7 +393,7 @@ def spawn_kwargs(env: dict) -> dict:
     """Popen setup shared by every agent CLI spawn — Claude's and Codex's
     chat turns, their one-shots, the sign-ins and status looks: the node's
     secrets out of `env`; never root — a backend that still runs as root (a
-    Docker container from an older compose file) starts the child as the
+    Docker image from before the node's own user) starts the child as the
     node's user, with no group but its own, and that user's HOME, where the
     CLIs keep their sign-ins and sessions; no flashing console window on
     Windows."""

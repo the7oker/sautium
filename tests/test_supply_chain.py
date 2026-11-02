@@ -277,9 +277,15 @@ def test_every_download_the_image_makes_is_checked_before_it_is_used():
 
 
 def test_nothing_in_the_image_updates_or_runs_a_cli_as_root_at_start():
+    """The image's one entrypoint is root's own copy of node_user.py, run
+    isolated: it drops root before the command — the backend — starts."""
     assert not (REPO / "backend" / "entrypoint.sh").exists()
     for name in ("Dockerfile", "Dockerfile.mac"):
-        assert "ENTRYPOINT" not in _dockerfile(name)
+        text = _dockerfile(name)
+        assert "COPY node_user.py /usr/local/lib/sautium/node_user.py" in text
+        assert [line for line in text.splitlines() if line.startswith("ENTRYPOINT")] == [
+            'ENTRYPOINT ["python3", "-I", "-S", "/usr/local/lib/sautium/node_user.py"]']
     for compose in ("docker-compose.yml", "docker-compose.wsl.yml", "docker-compose.mac.yml"):
         text = (REPO / compose).read_text(encoding="utf-8")
         assert "command: python entrypoint.py" in text and "/root/.cache" not in text
+        assert "no-new-privileges:true" in text

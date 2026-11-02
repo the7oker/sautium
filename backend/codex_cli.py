@@ -85,17 +85,21 @@ def get_codex_executable() -> Optional[Path]:
     argv anywhere near cmd.exe's 8191-char cap (the assistant prompt travels
     as an instructions file on disk). Shim priority: the prefix's own
     node_modules/.bin before whatever is on PATH."""
-    prefix_nm = get_codex_prefix() / "node_modules"
-    nm_candidates = [
-        prefix_nm,                                          # local --prefix: hoisted
-        prefix_nm / "@openai" / "codex" / "node_modules",   # nested variant
-    ]
+    nm_candidates: list = []
     shim_candidates: list = []
-    shim_names = ("codex.cmd", "codex") if sys.platform == "win32" else ("codex",)
-    for name in shim_names:
-        cand = prefix_nm / ".bin" / name
-        if cand.is_file():
-            shim_candidates.append(cand)
+    # Linux is the Docker node, whose CLI is the image's, on PATH: a prefix
+    # under the node user's home is a folder that user's own agents can write
+    if sys.platform != "linux":
+        prefix_nm = get_codex_prefix() / "node_modules"
+        nm_candidates += [
+            prefix_nm,                                          # local --prefix: hoisted
+            prefix_nm / "@openai" / "codex" / "node_modules",   # nested variant
+        ]
+        shim_names = ("codex.cmd", "codex") if sys.platform == "win32" else ("codex",)
+        for name in shim_names:
+            cand = prefix_nm / ".bin" / name
+            if cand.is_file():
+                shim_candidates.append(cand)
 
     path_shim = shutil.which("codex.cmd") if sys.platform == "win32" else None
     path_shim = path_shim or shutil.which("codex")

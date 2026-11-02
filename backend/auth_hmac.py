@@ -256,6 +256,21 @@ def _read_existing(secret_path: Path) -> Optional[str]:
             raise
 
 
+def _owners_only(path: Path, mode: int) -> None:
+    """`mode` on `path` where this process may set it — it owns the path, or
+    is root. A path another user owns (a mount that refused the hand-over to
+    the node's user) keeps its mode, and the log says so."""
+    if sys.platform != "win32":
+        st = os.stat(path)
+        if st.st_mode & 0o777 == mode:
+            return
+        if st.st_uid != os.geteuid() and os.geteuid() != 0:
+            logger.warning("%s is another user's (uid %d): its mode stays %o", path, st.st_uid,
+                           st.st_mode & 0o777)
+            return
+    os.chmod(path, mode)
+
+
 def ensure_secret(secret_path: Path) -> bytes:
     """Return the secret bytes; generate the file if missing.
 
@@ -269,25 +284,30 @@ def ensure_secret(secret_path: Path) -> bytes:
     (a restore or an earlier release may have left wider modes). Its other
     readers, the agents' MCP servers and the launcher, run as the same user
     — the desktop user, or the Docker node's own; a Docker backend still
-    running as root (an older Mac compose file starts uvicorn itself) gives
-    the file to the user its agents run as.
+    running as root (an image from before the node's own user) gives the
+    file to the user its agents run as. A new secret is written whole or not
+    at all, and an empty file — a write that did not finish — counts as none.
     """
-    secret_path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(secret_path.parent, 0o700)
+    folder = secret_path.parent
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _owners_only(folder, 0o700)
     data = _read_existing(secret_path)
     if data:
-        os.chmod(secret_path, 0o600)
+        _owners_only(secret_path, 0o600)
     else:
         data = secrets.token_urlsafe(32)
-        fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        part = secret_path.with_name(secret_path.name + ".part")
+        part.unlink(missing_ok=True)
+        fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="ascii") as f:
             f.write(data)
+        os.replace(part, secret_path)
         logger.info(f"Generated new API secret at {secret_path}")
     if sys.platform == "linux" and os.geteuid() == 0:
         import pwd
         from claude_code_runner import AGENT_USER
         pw = pwd.getpwnam(AGENT_USER)
-        for path in (secret_path.parent, secret_path):
+        for path in (folder, secret_path):
             os.chown(path, pw.pw_uid, pw.pw_gid)
     return data.encode("ascii")
 

@@ -67,6 +67,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: sautium-backend
+    # The image's entrypoint drops root itself; nothing in the container may
+    # take a privilege back (a setuid binary, a file capability).
+    security_opt:
+      - no-new-privileges:true
     environment:
       # Database configuration
       POSTGRES_HOST: postgres

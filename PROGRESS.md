@@ -1909,8 +1909,8 @@ The short version of the hard-learned lessons:
   image and `~/.claude` / `~/.codex` are host mounts, so `host_unsupported`
   shrank to "a container without the CLI"; the sign-in process runs as the
   agent user like every chat turn, which is what puts the credentials in the
-  mounted HOME (since 2026-11-02 the backend itself runs as that user:
-  entrypoint.py drops root before it starts).
+  mounted HOME (since 2026-11-02 the backend itself runs as that user: the
+  image's entrypoint, `node_user.py`, drops root before it starts).
 - **Completion is an event, not a poll.** The driver's reader thread wakes
   the settings SSE stream on every parsed change and on exit — the wizard's
   2-second credential poll (5 minutes, then "click Refresh") and the Web

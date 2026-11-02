@@ -320,6 +320,8 @@ async def lifespan(app: FastAPI):
     # read the same value, and warm the module-level cache. Reading at
     # startup surfaces filesystem errors here rather than on first
     # 401, and populating the cache means GET / never re-reads drvfs.
+    from serving import undumpable
+    undumpable()
     _get_api_secret()
     _get_index_html()
     if sys.platform == "linux":
