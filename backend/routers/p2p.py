@@ -159,6 +159,21 @@ def _sign_message(message: str) -> Optional[str]:
     return sig.hex()
 
 
+def _busy(resp) -> HTTPException:
+    """A Worker refusal for volume (429) as the person reads it, with the
+    wait the Worker gave in Retry-After: a minute behind its per-minute
+    brakes, hours once a daily cap is reached."""
+    retry = resp.headers.get("Retry-After", "")
+    wait = int(retry) if retry.isdigit() else 0
+    if wait <= 90:
+        when = "in a minute"
+    elif wait < 90 * 60:
+        when = f"in about {round(wait / 60)} minutes"
+    else:
+        when = f"in about {round(wait / 3600)} hours"
+    return HTTPException(429, f"The verification service is busy — please try again {when}.")
+
+
 async def _worker_post(path: str, payload: dict) -> Optional[dict]:
     """POST to the Cloudflare Worker. Returns the response dict, or None on a
     non-200. A 429 (Worker anti-spam) surfaces as HTTPException so the calling
@@ -175,7 +190,7 @@ async def _worker_post(path: str, payload: dict) -> Optional[dict]:
                 return resp.json()
             if resp.status_code == 429:
                 logger.warning(f"Worker {path} rate-limited (429): {resp.text}")
-                raise HTTPException(429, "The verification service is busy — please wait a minute and try again.")
+                raise _busy(resp)
             logger.warning(f"Worker {path} returned {resp.status_code}: {resp.text}")
             return None
     except HTTPException:
@@ -200,7 +215,7 @@ async def _worker_get(path: str, params: dict) -> Optional[dict]:
                 return resp.json()
             if resp.status_code == 429:
                 logger.warning(f"Worker GET {path} rate-limited (429): {resp.text}")
-                raise HTTPException(429, "The verification service is busy — please wait a minute and try again.")
+                raise _busy(resp)
             logger.warning(f"Worker GET {path} returned {resp.status_code}: {resp.text}")
             return None
     except HTTPException:

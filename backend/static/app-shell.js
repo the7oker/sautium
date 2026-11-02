@@ -11904,8 +11904,8 @@
   /* Email verification — two-step Worker-mediated flow.
      POST /api/p2p/email/send-code sends a 6-char code to the
      account's email; POST /api/p2p/email/verify-code redeems it
-     and registers the email on the Cloudflare Worker so future
-     invites can claim the ✅ Verified badge. */
+     and registers the email on the Cloudflare Worker — invites by
+     email go out only from a verified address. */
   // One flow at a time: each call mails a code and the Worker keeps only
   // the latest hash per invite code, so a double-tap killed its own code.
   let _emailVerifyFlow = null;
