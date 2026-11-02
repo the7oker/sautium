@@ -348,7 +348,7 @@ class _Refusing(BaseHTTPRequestHandler):
     status, retry_after, calls = 503, None, None
 
     def do_POST(self):
-        self.calls.append(time.monotonic())
+        self.calls.append(time.time())                  # the notary schedules by this clock
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.send_response(self.status)
         if self.retry_after is not None:
@@ -384,8 +384,8 @@ def _running(n):
 
 
 def _calls_reach(handler, n: int, within: float = 15.0) -> None:
-    deadline = time.monotonic() + within
-    while len(handler.calls) < n and time.monotonic() < deadline:
+    deadline = time.time() + within
+    while len(handler.calls) < n and time.time() < deadline:
         time.sleep(0.02)
     assert len(handler.calls) >= n
 

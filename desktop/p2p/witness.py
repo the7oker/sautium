@@ -128,10 +128,11 @@ def own_keys(current: str, identity_dir: Optional[Path]) -> frozenset:
 
 # A re-sign does not count against a ceiling: a format bump re-presents every
 # known subject, once on each channel it is met on, and that wave is bounded
-# by the subjects known before the bump. A re-sign is a sighting of a subject
-# recorded under an older format, on a channel with nothing of its own under
-# this format or a newer one yet — a second certificate under the new format
-# (an upgrade, another email) is an ordinary sighting again.
+# by the subjects known before the bump times the channels. A re-sign is a
+# sighting of a subject recorded under an older format, on a channel with
+# nothing of its own under this format or a newer one yet — so a second
+# certificate under the new format (an upgrade, another email) counts again on
+# a channel that already holds one.
 _PROBE_SQL = """
     SELECT EXISTS (SELECT 1 FROM p2p_node_bans WHERE pubkey = %(subject)s),
            EXISTS (SELECT 1 FROM p2p_witness

@@ -348,10 +348,11 @@ def test_one_certificate_is_one_row_however_its_signature_is_spelled(recorder, p
 
 
 def test_a_second_certificate_under_a_new_format_counts(recorder, conn, monkeypatch):
-    """The re-sign exemption is for a known subject's certificate under a
-    format newer than ANY recorded for it: a bump re-presents every subject
-    once. A second certificate under that format (an upgrade, a new email)
-    is an ordinary sighting and meets the ceiling."""
+    """A re-sign — a subject recorded under an older format, met on a channel
+    that holds nothing of it under the new one yet — does not count: a bump
+    re-presents every known subject once per channel. A second certificate
+    under the new format on that channel (an upgrade, a new email) is an
+    ordinary sighting and meets the ceiling."""
     subject = _key_hex()
     assert recorder.record(certificate(subject), "probe", subject)                  # known at v4
     monkeypatch.setattr(birth_cert, "CERT_VERSION", 5)
@@ -379,3 +380,6 @@ def test_a_format_bump_re_presents_each_known_subject_once_per_channel(recorder,
         assert recorder.record(certificate(old_timer), channel, old_timer)          # the wave: exempt
     assert recorder.record(certificate(newcomer), "introduced", newcomer) is False  # counts: the day is full
     assert sorted(r[0] for r in _rows(conn, old_timer)) == ["introduced", "introduced", "probe", "probe"]
+    # A recount — another process, a restart — leaves the wave out just the same.
+    assert _counting_today(conn, "probe") == witness.CEILINGS["probe"]
+    assert _counting_today(conn, "introduced") == witness.CEILINGS["introduced"]

@@ -835,8 +835,10 @@ certificate, channel), the first sighting of each.
   (frozen; `witness_v` per row), then a self-contained copy of the Worker
   stamp of the batch it rode. The stamp is the "no later than" a third
   party can check: testimony about the network's first weeks had to be
-  committed in them. No addresses, no request content, no proof of work
-  (its difficulty is pinned at issuance, so dating it buys nothing).
+  committed in them. No addresses, no request content, no proof of work:
+  its difficulty is pinned at issuance, and all a dated proof would add —
+  that a certificate could not age unmined — is negligible at today's
+  difficulty (about a core-minute).
 - **Sealed on the notary's terms.** A recorded row NOTIFYs; the backend
   signs it alone on that wake (no catalogue scan), and it rides the next
   stamp made for analysis. A node with nothing else to stamp stamps
@@ -851,10 +853,12 @@ certificate, channel), the first sighting of each.
   migration empties `signing_batches`, and the rows stay verifiable
   (`sign_audio.py --verify` checks them against their own copy).
   Growth is bounded where rows come in — per channel and UTC day, 5 000
-  `introduced`, 6 000 `probe`, 5 000 `carried` (a re-sign of a known
-  subject under a certificate format newer than any recorded for it does
-  not count; a `handshake` row is a friend's certificate, and a stranger
-  becomes a friend only through a token accept, capped per hour) — and
+  `introduced`, 6 000 `probe`, 5 000 `carried` (a re-sign does not count:
+  a subject recorded under an older certificate format, met on a channel
+  that holds nothing of it under the new format yet — once per known
+  subject and channel after a format bump; a `handshake` row is a friend's
+  certificate, and a stranger becomes a friend only through a token
+  accept, capped per hour) — and
   never by deletion. One spelling per certificate: its signature as the
   authority writes it (lower-case hex), the only field the authority's
   signature cannot cover.

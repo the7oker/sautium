@@ -115,7 +115,8 @@ def describe_event(ev: dict, job: str = "Backup") -> str:
 
 _MERGE_LABELS = (("listens", "listens"), ("sessions", "sessions"), ("friends", "friends"),
                  ("messages", "messages"), ("chats", "AI chats"), ("gear", "gear"),
-                 ("settings", "settings"), ("rotations", "rotation records"))
+                 ("settings", "settings"), ("rotations", "rotation records"),
+                 ("demo_plays", "demo plays"), ("witness", "witness records"))
 
 
 def _describe_merge(ev: dict, job: str) -> str:
