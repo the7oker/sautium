@@ -270,6 +270,9 @@ async def rotate_identity(username: str, password: str) -> dict:
     async with _create_lock:
         if not account_configured():
             raise RuntimeError("no account to change")
+        if not (d / "node_info.json").exists():
+            raise RuntimeError("This identity comes from the node's environment "
+                               "(P2P_USERNAME, P2P_PASSWORD): change it there")
         anonymous = not password
         await asyncio.to_thread(notary.drain_witness)
         result = await asyncio.to_thread(

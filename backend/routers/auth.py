@@ -47,6 +47,9 @@ class ChangeIdentityRequest(BaseModel):
     username: str = Field(default="", max_length=32)
     # Empty = minted, as in the wizard: the identity stays this machine's.
     password: str = Field(default="", max_length=256)
+    # The account's password as it is now — a device token alone does not
+    # change who the node is. An anonymous account has none anyone knows.
+    current_password: str = Field(default="", max_length=256)
 
 
 class BoxedRequest(BaseModel):
@@ -171,14 +174,22 @@ async def change_identity(boxed: BoxedRequest) -> dict:
     — this one gets a fresh token in the reply, like logout-all.
 
     Signature-protected (not whitelisted): only a paired browser or the
-    host can rotate. Boxed all the same — the new password goes in and the
-    new token comes out."""
+    host can rotate, and an account with a password has it typed again —
+    checked before anything else is derived. Boxed all the same — the
+    passwords go in and the new token comes out."""
     req, reply = _open(boxed, ChangeIdentityRequest)
     username = req.username.strip()
     if not username:
         raise HTTPException(status_code=422, detail="Nickname required")
     if req.password and len(req.password) < 8:
         raise HTTPException(status_code=422, detail="Password: 8+ characters")
+    if not device_auth.account_anonymous():
+        try:
+            confirmed = await device_auth.verify_password(req.current_password)
+        except device_auth.Busy:
+            raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
+        if not confirmed:
+            raise HTTPException(status_code=403, detail="The current password is not this account's")
     try:
         info = await device_auth.rotate_identity(username, req.password)
     except ValueError as e:                       # username shape / same pair

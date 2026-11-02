@@ -325,13 +325,15 @@
       setToken(r.data.token);
       return true;
     },
-    async changeIdentity(username, password) {
+    async changeIdentity(username, password, currentPassword) {
       // A new name or password is a new key, and the token is bound to the
       // key — every paired browser is out, this one takes the fresh token
-      // from the same reply and pins the new key. Returns the reply, or
+      // from the same reply and pins the new key. An account with a password
+      // has it typed again (`currentPassword`). Returns the reply, or
       // {ok:false, error}.
-      const r = await boxedPost("/api/auth/change-identity", { username, password }, true);
-      if (!r.ok) return { ok: false, error: await errorDetail(r, `HTTP ${r.status}`) };
+      const r = await boxedPost("/api/auth/change-identity",
+                                { username, password, current_password: currentPassword || "" }, true);
+      if (!r.ok) return { ok: false, error: r.status === 503 ? BUSY : await errorDetail(r, `HTTP ${r.status}`) };
       setToken(r.data.token);
       pinNode(r.data.public_key_hex);
       return { ok: true, ...r.data };

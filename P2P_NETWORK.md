@@ -275,9 +275,13 @@ KDF inputs, so either change is a new key; the old one is kept:
    next to `rotation.json`, and writes the new identity with
    `email_verified: false` and a `previous` list. Empty password = minted
    (`anonymous: true`, the PIN stays the only door), as in the wizard.
-2. `POST /api/auth/change-identity` (signed) runs it under the account lock,
+2. `POST /api/auth/change-identity` (signed; an account with a password has
+   it typed again in the box, checked before anything is derived — since
+   2026-11-03) runs it under the account lock,
    drops the process caches, bumps the token epoch, hands the caller a fresh
    token (tokens are bound to the pubkey) and `NOTIFY sautium_identity_rotated`.
+   An identity the environment configures (`P2P_USERNAME`/`P2P_PASSWORD`, no
+   `node_info.json`) is changed there; the route answers 409.
    The launcher restarts its P2P manager on the notify; a Docker node reports
    `restart_required` — its peer surface is TLS-bound to the key at start.
 3. `friends.bound_identity` (delta 014) records which of OUR keys each

@@ -168,3 +168,61 @@ def test_the_page_seals_a_box_again_once_to_a_fresh_handshake_and_says_busy():
     assert out["result"] is False and out["asked"].count("/api/auth/login") == 2
     out = _gate([[401, None]])
     assert out["result"] is False and out["asked"].count("/api/auth/login") == 1
+
+
+@pytest.fixture
+def rotations(doors, monkeypatch):
+    """The change-identity door with the rotation itself recorded, not run."""
+    from routers import auth
+    done = []
+
+    async def rotate(username, password):
+        done.append((username, password))
+        return {"username": username, "invite_code": "x", "public_key_hex": "cd" * 32,
+                "anonymous": not password}
+    monkeypatch.setattr(device_auth, "rotate_identity", rotate)
+    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
+    monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
+
+    async def verify(password):
+        return password == "the right one"
+    monkeypatch.setattr(device_auth, "verify_password", verify)
+
+    def change(**payload):
+        return doors.post("/api/auth/change-identity",
+                          json=_seal(doors.get("/api/auth/handshake").json(), payload))
+    return change, done
+
+
+def test_a_named_account_changes_only_with_its_current_password(rotations, monkeypatch):
+    change, done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    for wrong in ({}, {"current_password": ""}, {"current_password": "a guess"}):
+        r = change(username="second", password="new password", **wrong)
+        assert r.status_code == 403, wrong
+    assert done == []
+    assert change(username="second", password="new password",
+                  current_password="the right one").status_code == 200
+    assert done == [("second", "new password")]
+    # an anonymous account has no password anyone knows to type again
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: True)
+    assert change(username="named", password="a password now").status_code == 200
+    assert done[-1] == ("named", "a password now")
+
+
+def test_a_busy_node_says_so_at_the_change(rotations, monkeypatch):
+    change, done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+
+    async def busy(_password):
+        raise device_auth.Busy()
+    monkeypatch.setattr(device_auth, "verify_password", busy)
+    assert change(username="second", current_password="the right one").status_code == 503
+    assert done == []
+
+
+def test_an_identity_from_the_environment_is_changed_there(tmp_path, monkeypatch):
+    monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
+    monkeypatch.setattr(device_auth, "account_configured", lambda: True)
+    with pytest.raises(RuntimeError, match="environment"):
+        asyncio.run(device_auth.rotate_identity("second", "new password"))

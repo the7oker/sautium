@@ -2285,6 +2285,14 @@ user brings.
   400 marked `channel` (the handshake table keeps 64 and lets the oldest
   go), and the page seals it once more to a fresh handshake. The Host guard
   reads the interfaces at most once a second, whatever the literals.
+- **Who the node is changes only with its password (2026-11-03).** A
+  device token signs a browser in; it does not rotate the identity. On an
+  account with a password, change-identity takes the current one in the
+  same box and checks it before anything else is derived — the token is
+  one value every paired browser shares, never expires, and travels in a
+  page's storage, while the password is the identity's own key. An
+  anonymous account has no password anyone has seen: what its rotation
+  asks for instead is undecided (2026-11-03) and unchanged meanwhile.
 - **Found on the way:** `portmap._serves_web_ui` still looked for the
   inlined-secret marker of the 2026-08 page, so it recognised no port as
   the Web UI; it now reads the `sautium-webui` health type.

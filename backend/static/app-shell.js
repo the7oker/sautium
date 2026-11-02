@@ -11281,7 +11281,7 @@
     if (lfmRow) lfmRow.addEventListener('click', () => openLastfmAuthFlow());
 
     const identityRow = root.querySelector('[data-action="change-identity"]');
-    if (identityRow) identityRow.addEventListener('click', () => openChangeIdentityFlow(account));
+    if (identityRow) identityRow.addEventListener('click', () => openChangeIdentityFlow(account, authStatus));
 
     const signOutRow = root.querySelector('[data-action="logout-all"]');
     if (signOutRow) signOutRow.addEventListener('click', () => onceInFlight(signOutRow, async () => {
@@ -12081,9 +12081,13 @@
   // the sheet says what that costs before the tap. Same shape as the
   // wizard's identity step: the password is optional, the confirmation
   // appears only once there is a password (a login form never asks for
-  // one, so its arrival is what says "you are creating this").
-  async function openChangeIdentityFlow(account) {
+  // one, so its arrival is what says "you are creating this"). An account
+  // with a password has it typed again: a signed-in browser alone does not
+  // change who the node is (routers/auth.py). Asked whenever the status is
+  // unknown — the node says what it needs either way.
+  async function openChangeIdentityFlow(account, authStatus) {
     const current = (account && account.username) || '';
+    const asksCurrent = !authStatus || authStatus.password_login !== false;
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
@@ -12118,6 +12122,11 @@
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Confirm password</span>
             <input class="add-gear-input" id="idPass2" type="password" autocomplete="new-password">
           </label>
+          ${asksCurrent ? `
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Current password</span>
+            <input class="add-gear-input" id="idCurrent" type="password" autocomplete="current-password">
+          </label>` : ''}
           <button class="profile-btn primary" data-confirm>Change</button>
           <div id="idMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
         </div>
@@ -12130,6 +12139,7 @@
     const nameInput = overlay.querySelector('#idName');
     const passInput = overlay.querySelector('#idPass');
     const pass2Input = overlay.querySelector('#idPass2');
+    const currentInput = overlay.querySelector('#idCurrent');
     const confirmRow = overlay.querySelector('#idConfirmRow');
     const msg = overlay.querySelector('#idMsg');
     const confirmBtn = overlay.querySelector('[data-confirm]');
@@ -12141,13 +12151,15 @@
       if (confirmBtn.disabled) return;   // Enter arrives here too — same latch as the button
       const username = nameInput.value.trim();
       const password = passInput.value;
+      const currentPassword = currentInput ? currentInput.value : '';
       if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Nickname: 3-32 Latin letters, digits, - or _.');
       if (password && password.length < 8) return fail('Password must be at least 8 characters.');
       if (password && password !== pass2Input.value) return fail("Passwords don't match.");
+      if (currentInput && !currentPassword) return fail('Enter the current password.');
       confirmBtn.disabled = true;
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = 'Deriving the new key…';
-      const result = await window.Sautium.auth.changeIdentity(username, password);
+      const result = await window.Sautium.auth.changeIdentity(username, password, currentPassword);
       if (!result.ok) { confirmBtn.disabled = false; return fail(result.error); }
       close();
       if (result.restart_required) {
@@ -12163,8 +12175,9 @@
       render();
     };
     confirmBtn.addEventListener('click', submit);
-    pass2Input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
-    nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    for (const input of [pass2Input, nameInput, currentInput].filter(Boolean)) {
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    }
   }
 
   async function openLastfmAuthFlow() {
