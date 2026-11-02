@@ -5,15 +5,26 @@ Replaces per-module psycopg2 singleton connections with a shared
 ThreadedConnectionPool. Each call gets its own connection from the pool,
 ensuring thread safety across concurrent requests and background threads.
 
+The peer lanes: the peer surface (p2p_app) runs its blocking work — SQL,
+parsing, crypto — on threads of its own, and every connection taken on one
+of them comes from a pool of its own. Two lanes, because a peer sends two
+kinds of traffic: bulk data (inventory, pulls, slices, carry) in
+`in_peer_lane`, and the small, waited-on exchanges of chat, relay and
+diagnostics in `in_chat_lane`. A flood of either queues behind its own
+threads; the other lane, the Web UI's loop and its pool keep serving.
+
 And Listener, the one way a backend module hears NOTIFY: a thread of its
 own on a connection of its own, stopped at once.
 """
 
+import asyncio
 import atexit
+import functools
 import logging
 import selectors
 import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Callable, Optional
 
@@ -36,19 +47,48 @@ _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 IDLE_CONNECTIONS = 8
 MAX_CONNECTIONS = 20
 
+# The peer lanes' threads; each lane's pool holds two connections per
+# thread — a job may take a second inside its first (a helper that opens
+# its own) — so a job never waits for a connection, only for a thread.
+PEER_LANES = {"peer": 6, "chat": 4}
+_lane_pools: dict = {}
+_pool_lock = threading.Lock()
+_lane = threading.local()
+
+
+def _lane_executor(name: str) -> ThreadPoolExecutor:
+    def mark():
+        _lane.name = name
+    return ThreadPoolExecutor(max_workers=PEER_LANES[name], thread_name_prefix=f"{name}-lane",
+                              initializer=mark)
+
+
+_lane_executors = {name: _lane_executor(name) for name in PEER_LANES}
+
 
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
-    if _pool is None or _pool.closed:
-        _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=IDLE_CONNECTIONS,
-            maxconn=MAX_CONNECTIONS,
-            dsn=settings.database_url,
-            options="-c timezone=UTC",
-        )
-        logger.info("Database connection pool initialized (%d-%d connections)",
-                    IDLE_CONNECTIONS, MAX_CONNECTIONS)
-    return _pool
+    lane = getattr(_lane, "name", None)
+    with _pool_lock:
+        if lane is not None:
+            pool = _lane_pools.get(lane)
+            if pool is None or pool.closed:
+                pool = _lane_pools[lane] = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=1, maxconn=2 * PEER_LANES[lane],
+                    dsn=settings.database_url, options="-c timezone=UTC")
+                logger.info("%s-lane connection pool initialized (1-%d connections)",
+                            lane, 2 * PEER_LANES[lane])
+            return pool
+        if _pool is None or _pool.closed:
+            _pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=IDLE_CONNECTIONS,
+                maxconn=MAX_CONNECTIONS,
+                dsn=settings.database_url,
+                options="-c timezone=UTC",
+            )
+            logger.info("Database connection pool initialized (%d-%d connections)",
+                        IDLE_CONNECTIONS, MAX_CONNECTIONS)
+        return _pool
 
 
 def close_pool():
@@ -57,14 +97,34 @@ def close_pool():
         _pool.closeall()
         logger.info("Database connection pool closed")
         _pool = None
+    for lane, pool in list(_lane_pools.items()):
+        if not pool.closed:
+            pool.closeall()
+        _lane_pools.pop(lane, None)
 
 
 atexit.register(close_pool)
 
 
+async def _in_lane(name: str, fn, args, kwargs):
+    return await asyncio.get_running_loop().run_in_executor(
+        _lane_executors[name], functools.partial(fn, *args, **kwargs))
+
+
+async def in_peer_lane(fn, *args, **kwargs):
+    """`fn(*args, **kwargs)` on the bulk peer lane — a peer's data requests."""
+    return await _in_lane("peer", fn, args, kwargs)
+
+
+async def in_chat_lane(fn, *args, **kwargs):
+    """`fn(*args, **kwargs)` on the chat lane — chat, relay, diagnostics."""
+    return await _in_lane("chat", fn, args, kwargs)
+
+
 @contextmanager
 def get_conn():
-    """Get a connection from the pool. Returns to pool on exit."""
+    """Get a connection from the pool — a peer lane's own on one of its
+    threads. Returns to pool on exit."""
     pool = _get_pool()
     conn = pool.getconn()
     try:

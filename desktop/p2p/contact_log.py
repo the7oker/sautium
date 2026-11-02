@@ -134,20 +134,21 @@ def extract_request_shape(path: str, body: bytes):
     family = endpoint_family(path)
     try:
         if family == "mb.search":
-            q = parse_qs(urlsplit(path).query).get("q", [""])[0].strip().lower()
-            return (1, [q[:200]]) if q else (None, None)
+            q = _target(parse_qs(urlsplit(path).query).get("q", [""])[0], 200)
+            return (1, [q]) if q else (None, None)
         if not body:
             return None, None
-        data = json.loads(body)
+        from desktop.p2p import wire
+        data = wire.loads(body)
         if not isinstance(data, dict):
             return None, None
         if family == "mb.slice":
             names = data.get("names") or []
-            keys = [k for k in (str(n).strip().lower()[:200] for n in names) if k][:MAX_TARGETS]
+            keys = [k for k in (_target(n, 200) for n in names) if k][:MAX_TARGETS]
             return len(names), keys or None
         if family == "lb.slice":
             mbids = data.get("artist_mbids") or []
-            keys = [k for k in (str(m).strip().lower()[:36] for m in mbids) if k][:MAX_TARGETS]
+            keys = [k for k in (_target(m, 36) for m in mbids) if k][:MAX_TARGETS]
             return len(mbids), keys or None
         for key in ("track_uuids", "uuids", "recordings", "items"):
             if isinstance(data.get(key), list):
@@ -155,6 +156,17 @@ def extract_request_shape(path: str, body: bytes):
     except (ValueError, TypeError):
         pass
     return None, None
+
+
+def _target(value, width: int) -> str:
+    """One name or id as the log keeps it: trimmed, lowercased, cut to
+    `width`, without the NULs the database refuses in text."""
+    return str(value).replace("\x00", "").strip().lower()[:width]
+
+
+# bytes_in/bytes_out are INTEGER columns; a declared length past it would
+# fail the whole batch it rides in.
+_INT_MAX = 2 ** 31 - 1
 
 
 class ContactLog:
@@ -192,7 +204,8 @@ class ContactLog:
                gate_price: Optional[int] = None, gate_status: Optional[str] = None) -> None:
         addr_id, subnet_id = addr_ids(addr)
         row = (datetime.now(timezone.utc), pubkey.lower() if pubkey else None, addr_id, subnet_id,
-               endpoint, lane, int(status), int(bytes_in or 0), int(bytes_out or 0),
+               endpoint, lane, int(status), min(int(bytes_in or 0), _INT_MAX),
+               min(int(bytes_out or 0), _INT_MAX),
                float(wall_ms), float(cpu_ms), items, targets, gate_price, gate_status)
         with self._lock:
             self._queue.append(row)

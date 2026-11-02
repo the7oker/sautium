@@ -27,6 +27,8 @@ Two signing modes, chosen at construction:
 import gzip
 import hashlib
 import hmac
+import http.client
+import itertools
 import json
 import logging
 import secrets
@@ -40,10 +42,137 @@ import urllib.error
 from pathlib import Path
 from typing import Iterator, Optional
 
-from desktop.p2p import admission, peer_auth
+from desktop.p2p import admission, peer_auth, wire
 from desktop.p2p.contact_log import endpoint_family
 
 logger = logging.getLogger(__name__)
+
+# What a peer may answer, per endpoint family: (bytes after inflation,
+# seconds for the whole exchange — connect, TLS, headers and body). A reply
+# past its bound is refused at the chunk that crosses it, and an exchange
+# past its deadline has its socket shut down (_Watchdog). urllib's timeout
+# bounds each read, never the exchange: a peer that sent a byte inside every
+# timeout held the request — and the walk or slice run waiting on it — for as
+# long as it liked.
+_PEER_BOUNDS = {
+    "health": (256 * wire.KiB, 15),
+    "gate.quote": (256 * wire.KiB, 15),
+    "sync.inventory": (16 * wire.MiB, 300),
+    "sync.holdings": (64 * wire.MiB, 300),
+    "sync.pull": (64 * wire.MiB, 300),
+    "sync.offer": (16 * wire.MiB, 60),
+    "sync.push": (256 * wire.KiB, 300),
+    "mb.slice": (128 * wire.MiB, 600),
+    "lb.slice": (32 * wire.MiB, 120),
+}
+_PEER_DEFAULT_BOUND = (4 * wire.MiB, 60)
+# A refusal's body is read for its message and Retry-After only.
+_ERROR_BODY_CAP = 64 * wire.KiB
+# One peer's whole session — a sync then its carry offer, or a slice run's
+# batches — ends by this, whatever each exchange in it took
+# (BackendAPIClient.session_deadline). What it leaves undone waits for the
+# next run: the walk and the cycles fill gaps, no one session must finish.
+PEER_SESSION_S = 20 * 60
+
+
+class _Watchdog:
+    """Shuts a peer exchange's socket down once its deadline has passed, so
+    the read blocked on it returns. One thread for the process, asleep until
+    the nearest deadline or the next one armed."""
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._armed: dict = {}
+        self._tokens = itertools.count()
+        self._thread: Optional[threading.Thread] = None
+
+    def arm(self, sock: socket.socket, deadline: float) -> int:
+        with self._cond:
+            token = next(self._tokens)
+            self._armed[token] = (deadline, sock)
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run, daemon=True, name="peer-deadlines")
+                self._thread.start()
+            self._cond.notify()
+            return token
+
+    def disarm(self, token: int) -> None:
+        with self._cond:
+            self._armed.pop(token, None)
+
+    def _run(self) -> None:
+        with self._cond:
+            while True:
+                now = time.monotonic()
+                for token in [t for t, (d, _) in self._armed.items() if d <= now]:
+                    _, sock = self._armed.pop(token)
+                    logger.info("peer exchange past its deadline — connection closed")
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass   # the exchange ended in between and its reader closed the socket
+                nearest = min((d for d, _ in self._armed.values()), default=None)
+                self._cond.wait(None if nearest is None else max(0.0, nearest - now))
+
+
+_WATCHDOG = _Watchdog()
+
+
+class _Exchange:
+    """One peer request's deadline. The watchdog holds a duplicate of each
+    socket the request opens — taken before TLS wraps (and detaches) the
+    original, so the handshake is inside the deadline too; shutdown() on the
+    duplicate ends the connection for every descriptor of it."""
+
+    def __init__(self, seconds: float):
+        self.deadline = time.monotonic() + seconds
+        self._held: list = []
+
+    def watched(self, sock: socket.socket) -> socket.socket:
+        dup = sock.dup()
+        self._held.append((dup, _WATCHDOG.arm(dup, self.deadline)))
+        return sock
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self.deadline
+
+    def close(self) -> None:
+        for dup, token in self._held:
+            _WATCHDOG.disarm(token)
+            dup.close()
+        self._held = []
+
+
+def _peer_opener(ssl_ctx, exchange: _Exchange) -> urllib.request.OpenerDirector:
+    """An opener whose connections are watched by `exchange` and which
+    follows no redirect: the peer protocol has none, and a 3xx would hand
+    the request to an address the peer chose — over plain HTTP, outside the
+    node-key pin."""
+
+    def watched(base):
+        class _Connection(base):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._create_connection = (
+                    lambda *a, **kw: exchange.watched(socket.create_connection(*a, **kw)))
+        return _Connection
+
+    class _HTTP(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(watched(http.client.HTTPConnection), req)
+
+    class _HTTPS(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(watched(http.client.HTTPSConnection), req,
+                                context=self._context)
+
+    opener = urllib.request.OpenerDirector()
+    for handler in (urllib.request.ProxyHandler(), _HTTP(), _HTTPS(context=ssl_ctx),
+                    urllib.request.HTTPDefaultErrorHandler(),
+                    urllib.request.HTTPErrorProcessor()):
+        opener.add_handler(handler)
+    return opener
 
 # Secret file is written by the backend on first startup, beside the node's
 # identity — the launcher and its backend are the same node, so they share it
@@ -98,14 +227,36 @@ def _sign_headers(method: str, path_and_query: str, body: bytes) -> dict:
             "X-Sautium-Body-Sha256": body_hash, "X-Sautium-Sig": sig}
 
 
-def _read_json_body(resp) -> dict:
+def _read_json_body(resp, limit: Optional[int] = None,
+                    exchange: Optional["_Exchange"] = None) -> dict:
     """Read a (possibly gzip-encoded) JSON response body. Both servers we
     talk to compress large payloads when the client advertises gzip: the
-    backend via GZipMiddleware, the P2P sync server in _json_response."""
-    data = resp.read()
-    if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
-        data = gzip.decompress(data)
-    return json.loads(data.decode("utf-8"))
+    backend via GZipMiddleware, the P2P sync server in _json_response.
+
+    With a `limit` (every peer reply) the body is read in chunks and
+    inflated as it arrives; past `limit` bytes either way, truncated, or
+    past the exchange's deadline, it is refused (wire.WireError)."""
+    gzipped = (resp.headers.get("Content-Encoding") or "").lower() == "gzip"
+    if limit is None:
+        data = resp.read()
+        if gzipped:
+            data = gzip.decompress(data)
+        return json.loads(data.decode("utf-8"))
+    inflater = wire.Inflater(limit) if gzipped else None
+    parts, size = [], 0
+    while True:
+        chunk = resp.read(256 * wire.KiB)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            raise wire.WireError("reply over its bound")
+        parts.append(inflater.feed(chunk) if inflater else chunk)
+    if exchange is not None and exchange.expired():
+        raise wire.WireError("reply past its deadline")
+    if inflater:
+        inflater.finish()
+    return wire.loads(b"".join(parts).decode("utf-8"))
 
 
 def _read_breaker(resp) -> socket.socket:
@@ -151,6 +302,10 @@ class BackendAPIClient:
         self.last_peer_lane: Optional[str] = None
         self.last_gate_result: Optional[str] = None
         self._gate_header: Optional[str] = None       # a solved quote, attached to the next request once
+        # time.monotonic() past which no further request to this peer is
+        # started: one peer's whole session (a sync, a slice run) is
+        # bounded, not only each exchange in it.
+        self.session_deadline: Optional[float] = None
 
     def _auth_headers(self, method: str, path: str, data: bytes) -> dict:
         if self.peer is None:
@@ -221,20 +376,45 @@ class BackendAPIClient:
         """Update the backend port."""
         self.base_url = f"http://127.0.0.1:{port}"
 
+    def _bound(self, path: str):
+        """(reply bound, exchange) for a request to `path`: a peer request
+        is bounded in bytes and in time (_PEER_BOUNDS, and what is left of
+        `session_deadline`) and its connection is watched; the local
+        backend is not a peer — (None, None)."""
+        if self.peer is None:
+            return None, None
+        limit, seconds = _PEER_BOUNDS.get(endpoint_family(path), _PEER_DEFAULT_BOUND)
+        if self.session_deadline is not None:
+            seconds = min(seconds, self.session_deadline - time.monotonic())
+            if seconds <= 0:
+                raise TimeoutError("peer session past its deadline")
+        return limit, _Exchange(seconds)
+
+    def _open(self, req, timeout: int, exchange: Optional[_Exchange]):
+        if exchange is None:
+            return urllib.request.urlopen(req, timeout=timeout, context=self._ssl_ctx)
+        return _peer_opener(self._ssl_ctx, exchange).open(req, timeout=timeout)
+
+    def _error_body(self, e: urllib.error.HTTPError) -> dict:
+        body = _read_json_body(e, _ERROR_BODY_CAP if self.peer is not None else None)
+        if not isinstance(body, dict):
+            raise ValueError("refusal body is not an object")
+        return body
+
     def _get_json(self, path: str, timeout: int = 5, _paid: bool = False) -> Optional[dict]:
         """GET request returning parsed JSON, or None on failure."""
         url = f"{self.base_url}{path}"
+        exchange = None
         try:
+            limit, exchange = self._bound(path)
             req = urllib.request.Request(url, method="GET")
             req.add_header("Accept-Encoding", "gzip")
             for k, v in self._auth_headers("GET", path, b"").items():
                 req.add_header(k, v)
-            resp = urllib.request.urlopen(
-                req, timeout=timeout, context=self._ssl_ctx
-            )
+            resp = self._open(req, timeout, exchange)
             self.last_http_error = None
             self._note_peer_response(resp.headers)
-            return _read_json_body(resp)
+            return _read_json_body(resp, limit, exchange)
         except urllib.error.HTTPError as e:
             self.last_http_error = e.code
             self._note_peer_response(e.headers)
@@ -246,12 +426,17 @@ class BackendAPIClient:
             self.last_http_error = None
             logger.debug(f"API request failed: {url} — {e}")
             return None
+        finally:
+            if exchange is not None:
+                exchange.close()
 
     def _post_json(self, path: str, body: dict = None, timeout: int = 600,
                    _paid: bool = False) -> Optional[dict]:
         """POST request returning parsed JSON, or None on failure."""
         url = f"{self.base_url}{path}"
+        exchange = None
         try:
+            limit, exchange = self._bound(path)
             if body is not None:
                 data = json.dumps(body).encode("utf-8")
                 req = urllib.request.Request(
@@ -264,34 +449,38 @@ class BackendAPIClient:
             req.add_header("Accept-Encoding", "gzip")
             for k, v in self._auth_headers("POST", path, data).items():
                 req.add_header(k, v)
-            resp = urllib.request.urlopen(
-                req, timeout=timeout, context=self._ssl_ctx
-            )
+            resp = self._open(req, timeout, exchange)
             self._note_peer_response(resp.headers)
-            return _read_json_body(resp)
+            return _read_json_body(resp, limit, exchange)
         except urllib.error.HTTPError as e:
             self._note_peer_response(e.headers)
             if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay(endpoint_family(path)):
                 return self._post_json(path, body, timeout, _paid=True)   # priced: pay once and retry
             try:
-                body_resp = _read_json_body(e)
+                body_resp = self._error_body(e)
             except Exception:
                 body_resp = {"detail": f"HTTP {e.code}"}
             if e.code == 429:
                 # The peer says when the oldest stamp leaves its window —
                 # the earliest a retry can succeed. A peer on older code
                 # sends neither the header nor the body field; the caller
-                # then falls back to the window length.
-                try:
-                    body_resp.setdefault(
-                        "retry_after", int(e.headers.get("Retry-After") or 0) or None)
-                except (TypeError, ValueError):
-                    body_resp.setdefault("retry_after", None)
-            logger.warning(f"API POST {url} returned {e.code}: {body_resp}")
+                # then falls back to the window length. Whole seconds, an
+                # hour at most: the callers sleep on it.
+                wait = body_resp.get("retry_after")
+                if not isinstance(wait, int) or isinstance(wait, bool):
+                    try:
+                        wait = int(e.headers.get("Retry-After") or 0)
+                    except (TypeError, ValueError):
+                        wait = 0
+                body_resp["retry_after"] = min(max(wait, 1), 3600) if wait > 0 else None
+            logger.warning(f"API POST {url} returned {e.code}: {str(body_resp)[:300]}")
             return body_resp
         except Exception as e:
             logger.debug(f"API POST failed: {url} — {e}")
             return None
+        finally:
+            if exchange is not None:
+                exchange.close()
 
     def get_stats(self) -> Optional[dict]:
         """Fetch library statistics from GET /stats."""

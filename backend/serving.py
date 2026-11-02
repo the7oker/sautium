@@ -266,6 +266,54 @@ class Server(uvicorn.Server):
         await super().shutdown(sockets=sockets)
 
 
+def header_deadline(base: type, seconds: float) -> type:
+    """uvicorn's HTTP protocol class `base` with a deadline on every
+    request's head: a connection whose request line and headers are not
+    whole within `seconds` of its opening — or of its first byte after the
+    previous response — is closed. uvicorn has none of its own, so a
+    connection that sent nothing, or a byte at a time, held its place (and
+    a place under limit_concurrency) for good. A request in progress, a
+    long event stream included, is never cut: the clock runs only while no
+    request is."""
+
+    class HeadDeadline(base):
+        def connection_made(self, transport):
+            self._head_timer = None
+            super().connection_made(transport)
+            self._arm_head()
+
+        def _between_requests(self) -> bool:
+            return self.cycle is None or self.cycle.response_complete
+
+        def _arm_head(self) -> None:
+            if self._head_timer is None:
+                self._head_timer = self.loop.call_later(seconds, self._head_expired)
+
+        def _disarm_head(self) -> None:
+            if self._head_timer is not None:
+                self._head_timer.cancel()
+                self._head_timer = None
+
+        def _head_expired(self) -> None:
+            self._head_timer = None
+            if self._between_requests() and not self.transport.is_closing():
+                logger.info("connection closed: no request head within %s s", seconds)
+                self.transport.close()
+
+        def data_received(self, data: bytes) -> None:
+            if self._between_requests():
+                self._arm_head()
+            super().data_received(data)
+            if not self._between_requests():
+                self._disarm_head()
+
+        def connection_lost(self, exc) -> None:
+            self._disarm_head()
+            super().connection_lost(exc)
+
+    return HeadDeadline
+
+
 def undumpable() -> None:
     """Linux: this process becomes undumpable — its memory and its
     /proc/<pid>/environ readable by root alone, not by the agent CLIs, which

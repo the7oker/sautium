@@ -49,7 +49,7 @@ from typing import Awaitable, Callable, Optional
 
 import psycopg2
 
-from desktop.api_client import BackendAPIClient
+from desktop.api_client import PEER_SESSION_S, BackendAPIClient
 from desktop.p2p import lb_slice_queries
 from desktop.p2p.slice_sources import SourceFinder
 from desktop.p2p.sync_walk import DeadAddresses
@@ -445,6 +445,7 @@ class LbSliceCycle:
             if not (remaining["stale"] or remaining["fresh"]):
                 break
             source_addr = lb_slice_queries.addr_uuid(api.base_url)
+            api.session_deadline = time.monotonic() + PEER_SESSION_S
             leftovers = {"stale": [], "fresh": []}
             waited = limited = False
             for lane, min_version in (("stale", newest), ("fresh", None)):
@@ -513,12 +514,14 @@ class LbSliceCycle:
             logger.warning(f"LB slice from {node[:16]}: incompatible protocol — rejected")
             return {"error": "incompatible slice protocol"}
         slices = resp.get("slices") or {}
+        if not isinstance(slices, dict):
+            return {"error": "malformed slice answer"}
         verified: list = []
         missing: list = []
         dropped = 0
         for mbid in batch:
             entry = slices.get(mbid)
-            if entry is None:
+            if not isinstance(entry, dict):
                 missing.append(mbid)
                 continue
             out = lb_slice_queries.verify_slice_entry(mbid, entry, min_version)

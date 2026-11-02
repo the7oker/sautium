@@ -102,11 +102,14 @@ class MBSliceClient:
             return {"error": "incompatible slice protocol"}
 
         slices = resp.get("slices") or {}
+        missing_here = resp.get("missing") or []
+        if not isinstance(slices, dict) or not isinstance(missing_here, list):
+            return {"error": "malformed slice answer"}
         verified: dict[str, tuple] = {}
         dropped = 0
         for name in names:
             entry = slices.get(name)
-            if entry is None:
+            if not isinstance(entry, dict):
                 continue                      # missing at this peer
             out = verify_slice_entry(name, entry)
             if out is None:
@@ -121,7 +124,7 @@ class MBSliceClient:
         stats = {"names": len(names), "matched": 0, "rows_received": 0,
                  "rows_inserted": 0, "truncated": [],
                  "missing": [n for n in names
-                             if n not in verified and n in (resp.get("missing") or [])
+                             if n not in verified and n in missing_here
                              or (n not in slices and n not in verified)]}
 
         conn = self._get_conn()

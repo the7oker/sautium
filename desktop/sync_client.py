@@ -263,7 +263,9 @@ class SyncClient:
 
         key = self.api.peer_pubkey or self.api.base_url
         cached = self.holdings_cache.get(key)
-        summary = health.get("holdings") or None
+        summary = health.get("holdings")
+        if not (isinstance(summary, dict) and isinstance(summary.get("tracks", 0), int)):
+            summary = None
         fresh = cached and time.time() - cached["fetched_at"] < HOLDINGS_MAX_AGE_S
         if fresh or (cached and summary
                      and summary.get("version") == cached["version"]):
@@ -287,9 +289,14 @@ class SyncClient:
                 filters = cached
                 filters["fetched_at"] = time.time()
             else:
+                try:
+                    held = BloomFilter.from_dict(payload.get("tracks"))
+                except ValueError as e:
+                    self._progress(f"  holdings filter refused: {e}")
+                    return None
                 filters = {"version": payload["version"],
                            "fetched_at": time.time(),
-                           "tracks": BloomFilter.from_dict(payload["tracks"])}
+                           "tracks": held}
                 self.holdings_cache[key] = filters
                 self._progress(
                     f"  holdings filter fetched: {filters['tracks'].n} tracks "

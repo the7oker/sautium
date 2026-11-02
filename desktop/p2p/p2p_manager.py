@@ -24,7 +24,7 @@ import psycopg2
 import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
-from desktop.p2p import diag_protocol, lb_slice_cycle, mb_slice_queries, sync_walk
+from desktop.p2p import diag_protocol, lb_slice_cycle, mb_slice_queries, sync_walk, wire
 from desktop.p2p.addrs import fmt_addr, is_internet_vantage
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
@@ -44,6 +44,25 @@ FORWARD_TIMEOUT = FORWARD_ACK_TIMEOUT + 10
 from desktop.p2p.upnp_service import UPnPService
 
 logger = logging.getLogger(__name__)
+
+# What a friend, relay or probed node may answer a chat or relay request
+# with (wire.read_json): a history export is the largest, the rest are a few
+# fields. Each request's session already bounds its time.
+PEER_ANSWER_CAP = 8 * wire.MiB
+PEER_HEALTH_CAP = 256 * wire.KiB
+
+
+def replied_friends(notes) -> set:
+    """The friends a reply was just stored for: the msg:{friend_id}:out
+    payloads among `notes` on sautium_chat (trg_p2p_messages_notify) — the
+    backend mirror's rule, routers/p2p._on_chat_notify."""
+    out = set()
+    for note in notes:
+        parts = (note.payload or "").split(":")
+        if (note.channel == "sautium_chat" and len(parts) == 3 and parts[0] == "msg"
+                and parts[2] == "out" and parts[1].isdigit()):
+            out.add(int(parts[1]))
+    return out
 
 
 class _ProbeResult(NamedTuple):
@@ -288,9 +307,6 @@ class P2PManager:
                 )
                 self._sync_server.set_chat_service(
                     self._chat_service, self._on_message_cb
-                )
-                self._sync_server.set_delivery_trigger(
-                    self._deliver_pending_fast
                 )
                 self._sync_server.set_inbound_cb(
                     self._note_inbound_reachable
@@ -1041,7 +1057,7 @@ class P2PManager:
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
                         if resp.status == 200:
-                            result = await resp.json()
+                            result = await wire.read_json(resp, PEER_ANSWER_CAP)
                             if result.get("accepted"):
                                 peer_pubkey = self._accepted_pubkey(
                                     result, invite_code)
@@ -1269,7 +1285,7 @@ class P2PManager:
                     ) as resp:
                         if resp.status != 200:
                             continue
-                        data = await resp.json()
+                        data = await wire.read_json(resp, PEER_ANSWER_CAP)
                         self._note_peer_alive(
                             friend.get("id"), friend_pubkey, ip, port)
             except Exception as e:
@@ -1446,7 +1462,7 @@ class P2PManager:
                             timeout=aiohttp.ClientTimeout(total=10),
                         ) as resp:
                             if resp.status == 200:
-                                result = await resp.json()
+                                result = await wire.read_json(resp, PEER_ANSWER_CAP)
                                 if result.get("accepted"):
                                     peer_pubkey = self._accepted_pubkey(
                                         result, invite,
@@ -1512,7 +1528,7 @@ class P2PManager:
                             if resp.status == 403:
                                 err = ""
                                 try:
-                                    err = (await resp.json()).get("error", "")
+                                    err = (await wire.read_json(resp, PEER_ANSWER_CAP)).get("error", "")
                                 except Exception:
                                     pass
                                 if err.startswith("identity"):
@@ -1565,7 +1581,7 @@ class P2PManager:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status == 200:
-                    result = await resp.json()
+                    result = await wire.read_json(resp, PEER_ANSWER_CAP)
                     if result.get("accepted"):
                         peer_pubkey = self._accepted_pubkey(result, invite)
                         if not peer_pubkey:
@@ -1937,7 +1953,7 @@ class P2PManager:
                     async with session.get(
                             f"https://{fmt_addr(ip, port)}/health",
                             ssl=channel_ctx) as r:
-                        node_id = (await r.json()).get("node_id", "")
+                        node_id = (await wire.read_json(r, PEER_HEALTH_CAP)).get("node_id", "")
                 except Exception:
                     continue
                 if not node_id or node_id.lower() != pinned_pubkey(channel_ctx):
@@ -2334,7 +2350,7 @@ class P2PManager:
                                 retry_soon=True)
                         if resp.status != 200:
                             continue
-                        data = await resp.json()
+                        data = await wire.read_json(resp, PEER_ANSWER_CAP)
                         self._note_peer_alive(master.get("id"),
                                               MASTER_PUBKEY_HEX, ip, mport)
                         seen = fmt_addr(data.get("observed_ip") or "unknown",
@@ -2491,55 +2507,6 @@ class P2PManager:
         """Blocking: fetch pending accepts from Worker."""
         from desktop.p2p.email_verify import check_pending_accepts
         return check_pending_accepts()
-
-    async def _deliver_pending_fast(self):
-        """Fast path: push pending messages first, pull history in background.
-
-        Called directly from sync_server trigger-send endpoint.
-        Always pushes immediately. Schedules a one-time history pull per
-        friend per session (for identity restoration / multi-device sync).
-        """
-        if not self._chat_service:
-            return
-        pending = self._chat_service.get_pending_messages()
-        if not pending:
-            return
-
-        seen_friends: set[int] = set()
-        for msg in pending:
-            fid = msg["friend_id"]
-            if fid in seen_friends:
-                continue
-            seen_friends.add(fid)
-
-            pubkey = msg["public_key_hex"]
-            if pubkey.startswith("pending:"):
-                continue
-
-            friend_info = {
-                "id": fid,
-                "invite_code": msg["invite_code"],
-                "public_key_hex": pubkey,
-                "username": "",
-            }
-            # No `continue` on an empty peer list: an unreachable friend
-            # suppresses its own DHT announces, so "no address" is exactly
-            # the case the relay fallback exists for. _push_pending_messages
-            # degrades correctly — its inner loop just doesn't run.
-            peers = await self._find_friend_peers(friend_info)
-
-            # Push first (fast) — don't block on history pull
-            friend_pending = [m for m in pending if m["friend_id"] == fid]
-            await self._push_pending_messages(
-                fid, pubkey, friend_pending, peers
-            )
-
-            # Schedule background history pull once per session
-            if peers and fid not in self._history_synced_friends:
-                self._history_synced_friends.add(fid)
-                asyncio.ensure_future(
-                    self._sync_chat_history(friend_info, peers)
-                )
 
     async def _push_pending_messages(
         self,
@@ -2739,7 +2706,7 @@ class P2PManager:
                             return delivered_any
                         if resp.status != 200:
                             continue
-                        data = await resp.json()
+                        data = await wire.read_json(resp, PEER_ANSWER_CAP)
                         if relay_row:
                             self._note_peer_alive(
                                 relay_row.get("id"), relay_pubkey, ip, port)
@@ -2844,7 +2811,7 @@ class P2PManager:
         try:
             async with session.get(f"https://{fmt_addr(ip, port)}/health",
                                    ssl=channel_ctx) as r:
-                node_id = (await r.json()).get("node_id", "")
+                node_id = (await wire.read_json(r, PEER_HEALTH_CAP)).get("node_id", "")
             if (not node_id
                     or node_id.lower() != pinned_pubkey(channel_ctx)
                     or node_id.lower() == friend_pubkey.lower()):
@@ -2856,7 +2823,7 @@ class P2PManager:
                     f"?invite={quote(invite)}", ssl=channel_ctx) as r:
                 if r.status != 200:
                     return None
-                v = await r.json()
+                v = await wire.read_json(r, PEER_ANSWER_CAP)
             if (v.get("client_pubkey", "").lower() != friend_pubkey.lower()
                     or v.get("relay_pubkey", "").lower() != node_id.lower()
                     or int(v.get("until") or 0) <= int(time.time())):
@@ -2898,11 +2865,15 @@ class P2PManager:
                     )
                     if ready[0]:
                         conn.poll()
-                        channels = set()
+                        notes = []
                         while conn.notifies:
-                            channels.add(conn.notifies.pop(0).channel)
+                            notes.append(conn.notifies.pop(0))
+                        channels = {note.channel for note in notes}
                         if "sautium_chat" in channels and self._chat_notify:
                             self._chat_notify.set()
+                        replies = replied_friends(notes)
+                        if replies:
+                            await self._ping_wake_for(replies)
                         if "sautium_diag" in channels:
                             self._diag_queue.put_nowait(("report",))
                         if ("sautium_identity_rotated" in channels
@@ -2917,6 +2888,25 @@ class P2PManager:
                         conn.close()
                     except Exception:
                         pass
+
+    async def _ping_wake_for(self, friend_ids: set) -> None:
+        """Signal the wake streams of friends a reply was just stored for —
+        the ones that hold a stream here pull at once."""
+        if not self._sync_server or not self._sync_server.has_wake_streams():
+            return
+
+        def keys() -> list:
+            conn = psycopg2.connect(self.db_dsn)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT public_key_hex FROM friends WHERE id = ANY(%s)",
+                                (list(friend_ids),))
+                    return [r[0] for r in cur.fetchall()]
+            finally:
+                conn.close()
+
+        for pubkey in await asyncio.get_event_loop().run_in_executor(None, keys):
+            self._sync_server.ping_wake(pubkey)
 
     async def _sync_chat_histories(self):
         """Sync chat histories with friends who have pending messages.
@@ -2966,8 +2956,10 @@ class P2PManager:
                     "public_key_hex": pubkey,
                     "username": "",
                 }
-                # No `continue` on an empty peer list — see the same rule in
-                # _deliver_pending_fast: no address IS the relay case.
+                # No `continue` on an empty peer list: an unreachable friend
+                # suppresses its own DHT announces, so "no address" is exactly
+                # the case the relay fallback exists for — _push_pending_messages
+                # degrades correctly, its direct loop just does not run.
                 peers = await self._find_friend_peers(friend_info)
 
                 # Step 1: Push undelivered messages first (fast)

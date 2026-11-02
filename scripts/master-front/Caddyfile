@@ -17,13 +17,19 @@
 #
 # Nothing else lives here on purpose: no rate limits, no auth, no caching.
 # Policy stays in backend/p2p_app.py, the single source of truth for the
-# peer surface. Paths are relative to this directory, which is the service's
-# working directory (sautium-front.xml).
+# peer surface. Two transport bounds stand here as well, so the front never
+# holds what the upstream would refuse: a request head within 10 s, and a
+# body no larger than the largest the peer app takes (a support bundle,
+# p2p_app.BODY_CAPS). Paths are relative to this directory, which is the
+# service's working directory (sautium-front.xml).
 {
 	admin off
 	auto_https off
 	servers {
 		protocols h1 h2
+		timeouts {
+			read_header 10s
+		}
 	}
 }
 
@@ -38,5 +44,8 @@ https://:8801 {
 	# A hostless site serves this one certificate to clients without SNI —
 	# which is what aiohttp/httpx send when they connect by IP.
 	tls ../../data/tls/cert.pem ../../data/tls/key.pem
+	request_body {
+		max_size 33MiB
+	}
 	reverse_proxy 127.0.0.1:18801
 }

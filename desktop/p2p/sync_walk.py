@@ -51,7 +51,7 @@ from urllib.parse import urlsplit
 import psycopg2
 import psycopg2.extensions
 
-from desktop.api_client import BackendAPIClient
+from desktop.api_client import PEER_SESSION_S, BackendAPIClient
 from desktop.p2p import master_hint, network_size, node_hints, sync_queries
 from desktop.p2p.addrs import canon_host, fmt_addr
 from desktop.sync_client import SEGMENT_PULL_BATCH, SyncClient
@@ -78,6 +78,11 @@ UNREACHABLE_BACKOFF_BASE = 30 * 60
 UNREACHABLE_BACKOFF_MAX = 24 * 3600
 EMPTY_PEER_TTL = 6 * 3600
 PROBE_CONCURRENCY = 8
+
+# Each exchange with a peer has its own deadline, and each peer's session
+# one too (desktop/api_client.py, PEER_SESSION_S); a run ends by this, so
+# no set of peers holds the walk — or the triggers merged behind it.
+RUN_MAX_S = 60 * 60
 
 # Mirrors _DEFAULTS["sync.auto_interval_min"] in backend/routers/settings.py
 # — keep in sync so the UI's displayed default and the actual cadence match
@@ -387,6 +392,7 @@ class SyncWalk:
         self._lock: Optional[asyncio.Lock] = None
         self.first_source: Optional[asyncio.Event] = None      # LAN peer seen / DHT ready
         self._running = False
+        self._run_deadline = float("inf")                      # time.monotonic() the current run ends by
 
     # ------------------------------------------------------------ lifecycle
 
@@ -504,6 +510,8 @@ class SyncWalk:
             logger.info(msg)
             if progress_cb:
                 progress_cb(msg)
+
+        self._run_deadline = time.monotonic() + RUN_MAX_S
 
         # Step 1: the gap set — artists missing data in ANY category.
         # Inventory + _compute_needed inside the peer sync handle the
@@ -887,6 +895,9 @@ class SyncWalk:
         SyncClient.run_sync. `peer_api`: a client the caller already
         probed — skips the probe."""
         core_tracks, bulk_tracks = gaps
+        if time.monotonic() >= self._run_deadline:
+            _progress(f"  the run is past its deadline — {peer_addr} waits for the next one")
+            return {"error": "run_deadline"}
         if peer_api is None:
             _progress(f"Connecting to {peer_addr}...")
             peer_api = await self.connect_peer(peer_addr, is_lan=is_lan)
@@ -896,6 +907,8 @@ class SyncWalk:
             _progress(f"  {peer_addr} not reachable, skipping")
             return {"error": "unreachable"}
 
+        peer_api.session_deadline = min(time.monotonic() + PEER_SESSION_S,
+                                        self._run_deadline)
         _progress(f"Syncing from {peer_addr} ({len(core_tracks)} core + "
                   f"{len(bulk_tracks)} bulk tracks)...")
 

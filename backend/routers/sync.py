@@ -28,12 +28,12 @@ from datetime import timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import record_sig
 from config import settings
-from db_pool import db_query as _db_query, db_query_one as _db_query_one, get_conn
+from db_pool import db_query as _db_query, db_query_one as _db_query_one, get_conn, in_peer_lane
 
 logger = logging.getLogger(__name__)
 
@@ -191,19 +191,22 @@ async def carry_offer(req: CarryOffer) -> dict:
     _require_sharing()
     if carry_queries is None:
         return {"wanted": {}}
-    with get_conn() as conn:
-        wanted = carry_queries.wanted_tracks(
-            conn, req.recordings, _carry_budget())
-    return {"wanted": wanted}
+
+    def _run():
+        with get_conn() as conn:
+            return carry_queries.wanted_tracks(conn, req.recordings, _carry_budget())
+
+    return {"wanted": await in_peer_lane(_run)}
 
 
 @router.post("/push/{category}")
-async def carry_push(category: str, payload: dict) -> dict:
+async def carry_push(category: str, request: Request) -> dict:
     """Accept a pushed payload — byte-for-byte what pull/{category} returns,
     so the peer serialises once and we verify through the ordinary import
     gate. A push is unsolicited, which is exactly why nothing here is
     trusted: every record must carry a seal that checks out, or the importer
-    drops it."""
+    drops it. The body — the largest a peer sends — is parsed on the peer
+    lane, never on the loop."""
     _require_sharing()
     if carry_importer is None:
         raise HTTPException(status_code=404, detail="carry not supported")
@@ -214,15 +217,26 @@ async def carry_push(category: str, payload: dict) -> dict:
     if category not in carry_queries.CARRY_CATEGORIES:
         raise HTTPException(
             status_code=404, detail=f"category not carryable: {category}")
-    items = payload.get("items")
-    if not isinstance(items, list) or len(items) > 10000:
-        raise HTTPException(status_code=400, detail="items must be a bounded list")
+    raw = await request.body()
 
-    import asyncio
-    from functools import partial
-    imported = await asyncio.get_event_loop().run_in_executor(
-        None, partial(carry_importer.import_pushed,
-                      settings.database_url, category, payload))
+    def _run():
+        from desktop.p2p import wire
+        try:
+            payload = wire.loads(raw)
+        except ValueError:
+            return None
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or len(items) > 10000:
+            return None
+        return carry_importer.import_pushed(settings.database_url, category, payload)
+
+    try:
+        imported = await in_peer_lane(_run)
+    except Exception as e:
+        logger.error(f"Carry push {category} failed: {e}")
+        raise HTTPException(status_code=500, detail="internal error")
+    if imported is None:
+        raise HTTPException(status_code=400, detail="items must be a bounded list")
     if imported:
         logger.info(f"Carrying {imported} {category} record(s) pushed by a peer")
     return {"imported": imported}
@@ -338,7 +352,7 @@ class LBSliceRequest(BaseModel):
 
 
 @lb_router.post("/slice")
-def lb_slice(req: LBSliceRequest) -> dict:
+async def lb_slice(req: LBSliceRequest) -> dict:
     """Per-artist-MBID signed ListenBrainz statistics blobs (v1) — mirrors
     desktop/p2p/sync_server.handle_lb_slice. Dump holders compute+sign+
     cache misses; a replica answers what it holds, misses land in
@@ -346,62 +360,86 @@ def lb_slice(req: LBSliceRequest) -> dict:
     _require_sharing()
     if lb_slice_queries is None:
         raise HTTPException(status_code=404, detail="lb slices unavailable")
-    sign_fn, author = None, ""
-    if lb_dump_version():
-        try:
-            key = node_signing_key()
-            author = node_pubkey_hex() or ""
-            sign_fn = key.sign
-        except Exception as e:
-            logger.warning(f"LB slice signing unavailable: {e}")
-    try:
+
+    def _run():
+        sign_fn, author = None, ""
+        if lb_dump_version():
+            try:
+                key = node_signing_key()
+                author = node_pubkey_hex() or ""
+                sign_fn = key.sign
+            except Exception as e:
+                logger.warning(f"LB slice signing unavailable: {e}")
         with get_conn() as conn:
             return lb_slice_queries.serve_slices(
                 conn, req.artist_mbids, req.min_version, sign_fn, author)
+
+    try:
+        return await in_peer_lane(_run)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except lb_slice_queries.DumpBusy:
         raise HTTPException(status_code=503, detail="dump_reloading")
+    except Exception as e:
+        logger.error(f"LB slice query failed: {e}")
+        raise HTTPException(status_code=500, detail="internal error")
 
 
 @mb_router.get("/search")
-def mb_search(q: str = Query(..., min_length=2, max_length=255)) -> dict:
+async def mb_search(q: str = Query(..., min_length=2, max_length=255)) -> dict:
     """Artist candidates from the FULL local dump — mirrors
     desktop/p2p/sync_server.handle_mb_search. Full-dump only: a replica's
     partial mb_* world would answer "not found" for names it never saw.
     Indexed-only matching keeps the volunteer cost of one human search
     at a few index probes."""
     _require_sharing()
-    if not mb_dump_version():
+
+    def _run():
+        if not mb_dump_version():
+            return None
+        with get_conn() as conn:
+            return {"artists": mb_slice_queries.search_artists(conn, q)}
+
+    try:
+        found = await in_peer_lane(_run)
+    except Exception as e:
+        logger.error(f"MB search failed: {e}")
+        raise HTTPException(status_code=500, detail="internal error")
+    if found is None:
         raise HTTPException(status_code=404, detail="no full dump")
-    with get_conn() as conn:
-        return {"artists": mb_slice_queries.search_artists(conn, q)}
+    return found
 
 
 @mb_router.post("/slice")
-def mb_slice(req: MBSliceRequest) -> dict:
+async def mb_slice(req: MBSliceRequest) -> dict:
     """Per-name signed blobs (v3) — mirrors
     desktop/p2p/sync_server.handle_mb_slice. Dump holders compute+sign+
     cache misses; a replica answers what it holds, misses land in
     `missing`. Blobs carry the ORIGINAL author's signature either way."""
     _require_sharing()
-    sign_fn, author = None, ""
-    if mb_dump_version():
-        try:
-            key = node_signing_key()
-            author = node_pubkey_hex() or ""
-            sign_fn = key.sign
-        except Exception as e:
-            logger.warning(f"MB slice signing unavailable: {e}")
-    try:
+
+    def _run():
+        sign_fn, author = None, ""
+        if mb_dump_version():
+            try:
+                key = node_signing_key()
+                author = node_pubkey_hex() or ""
+                sign_fn = key.sign
+            except Exception as e:
+                logger.warning(f"MB slice signing unavailable: {e}")
         with get_conn() as conn:
             mb_slice_queries.ensure_blob_table(conn)
-            return mb_slice_queries.serve_slices(
-                conn, req.names, sign_fn, author)
+            return mb_slice_queries.serve_slices(conn, req.names, sign_fn, author)
+
+    try:
+        return await in_peer_lane(_run)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except mb_slice_queries.DumpBusy:
         raise HTTPException(status_code=503, detail="dump_reloading")
+    except Exception as e:
+        logger.error(f"MB slice query failed: {e}")
+        raise HTTPException(status_code=500, detail="internal error")
 
 
 
@@ -439,7 +477,7 @@ async def get_inventory(req: InventoryRequest) -> dict:
     if not req.track_uuids:
         return dict(_EMPTY_INVENTORY)
 
-    try:
+    def _run():
         row = _db_query_one("""
             WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id)
             SELECT
@@ -463,9 +501,11 @@ async def get_inventory(req: InventoryRequest) -> dict:
         return {"tracks": row["tracks"], "embeddings": row["embeddings"],
                 "audio_features": row["audio_features"]}
 
+    try:
+        return await in_peer_lane(_run)
     except Exception as e:
         logger.error(f"Inventory query failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error")
 
 
 @router.get("/holdings")
@@ -479,17 +519,16 @@ async def get_holdings(have: Optional[str] = None) -> dict:
     _require_sharing()
     if carry_queries is None:
         raise HTTPException(status_code=404, detail="holdings unavailable")
-    import asyncio
 
     def _run():
         with get_conn() as conn:
             return carry_queries.get_holdings(conn, have)
 
     try:
-        return await asyncio.to_thread(_run)
+        return await in_peer_lane(_run)
     except Exception as e:
         logger.error(f"Holdings query failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error")
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +551,7 @@ async def pull_tracks(req: PullRequest) -> dict:
     if not req.uuids:
         return {"category": "tracks", "items": []}
 
-    try:
+    def _run():
         # Get tracks
         tracks = _db_query(
             "SELECT id::text AS track_uuid, title FROM tracks WHERE id = ANY(%s::uuid[])",
@@ -551,9 +590,11 @@ async def pull_tracks(req: PullRequest) -> dict:
 
         return {"category": "tracks", "items": items}
 
+    try:
+        return await in_peer_lane(_run)
     except Exception as e:
         logger.error(f"Pull tracks failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error")
 
 
 def _provenance_item(r: dict) -> Optional[dict]:
@@ -628,7 +669,7 @@ async def pull_segments(req: PullRequest) -> dict:
             status_code=400,
             detail=f"segments pull is capped at {SEGMENTS_MAX_UUIDS} tracks per request")
 
-    try:
+    def _run():
         rows = _db_query(
             f"""SELECT e.track_id::text AS track_uuid,
                        em.id::text AS model_uuid, em.name AS model_name,
@@ -676,9 +717,11 @@ async def pull_segments(req: PullRequest) -> dict:
         return {"category": "segments", "items": list(items_by_track.values()),
                 "batches": _batches_map(roots)}
 
+    try:
+        return await in_peer_lane(_run)
     except Exception as e:
         logger.error(f"Pull segments failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error")
 
 
 @router.post("/pull/embeddings")
@@ -689,7 +732,7 @@ async def pull_embeddings(req: PullRequest) -> dict:
     if not req.uuids:
         return {"category": "embeddings", "items": []}
 
-    try:
+    def _run():
         rows = _db_query(
             f"""SELECT e.track_id::text AS track_uuid,
                        em.id::text AS model_uuid, em.name AS model_name,
@@ -715,9 +758,11 @@ async def pull_embeddings(req: PullRequest) -> dict:
 
         return {"category": "embeddings", "items": items}
 
+    try:
+        return await in_peer_lane(_run)
     except Exception as e:
         logger.error(f"Pull embeddings failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error")
 
 
 @router.post("/pull/audio-features")
@@ -729,7 +774,7 @@ async def pull_audio_features(req: PullRequest) -> dict:
     if not req.uuids:
         return {"category": "audio_features", "items": [], "batches": {}}
 
-    try:
+    def _run():
         rows = _db_query(
             f"""SELECT a.track_id::text AS track_uuid,
                        a.bpm, a.key, a.mode, a.key_confidence,
@@ -754,6 +799,8 @@ async def pull_audio_features(req: PullRequest) -> dict:
         return {"category": "audio_features", "items": items,
                 "batches": _batches_map(roots)}
 
+    try:
+        return await in_peer_lane(_run)
     except Exception as e:
         logger.error(f"Pull audio features failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="internal error")

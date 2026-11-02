@@ -25,6 +25,12 @@ from typing import Iterable
 _LN2 = math.log(2)
 _LN2_SQ = _LN2 * _LN2
 
+# What a filter received from a peer may be: its bit count and positions
+# are the peer's choice, and every local lookup pays k of them. 2^28 bits
+# holds ~28M elements at 1% (k = 7); a filter sized here never needs more.
+MAX_BITS = 1 << 28
+MAX_HASHES = 32
+
 
 def _halves(uuid_str: str) -> tuple[int, int]:
     b = bytes.fromhex(uuid_str.replace("-", ""))
@@ -89,8 +95,18 @@ class BloomFilter:
 
     @classmethod
     def from_dict(cls, d: dict) -> "BloomFilter":
-        m, k, n = int(d["m"]), int(d["k"]), int(d.get("n", 0))
-        bits = bytearray(base64.b64decode(d["bits"]))
+        """A filter as a peer published it — refused (ValueError) when its
+        size or hash count is outside what this module would ever build."""
+        if not isinstance(d, dict) or not isinstance(d.get("bits"), str):
+            raise ValueError("not a filter")
+        m, k, n = d.get("m"), d.get("k"), d.get("n", 0)
+        if not all(isinstance(x, int) and not isinstance(x, bool) for x in (m, k, n)):
+            raise ValueError("filter fields must be integers")
+        if not (0 < m <= MAX_BITS and 0 < k <= MAX_HASHES and n >= 0):
+            raise ValueError("filter outside its bounds")
+        if len(d["bits"]) != 4 * (((m + 7) // 8 + 2) // 3):
+            raise ValueError("bit array length does not match m")
+        bits = bytearray(base64.b64decode(d["bits"], validate=True))
         if len(bits) != (m + 7) // 8:
             raise ValueError("bit array length does not match m")
         return cls(m, k, bits, n)

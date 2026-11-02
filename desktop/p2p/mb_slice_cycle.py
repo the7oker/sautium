@@ -47,7 +47,7 @@ from typing import Awaitable, Callable, Optional
 
 import psycopg2
 
-from desktop.api_client import BackendAPIClient
+from desktop.api_client import PEER_SESSION_S, BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import mb_slice_queries
 from desktop.p2p.lb_slice_cycle import (clear_status, load_bans, notify, publish_status,
@@ -327,6 +327,7 @@ class MbSliceCycle:
         for api, node in peers:
             if not remaining:
                 break
+            api.session_deadline = time.monotonic() + PEER_SESSION_S
             client = MBSliceClient(api, db_dsn=self.db_dsn, source_node=node)
             leftovers: list[str] = []
             waited = False

@@ -722,27 +722,12 @@ async def send_message(friend_id: int, req: SendMessageRequest) -> Dict[str, Any
             """, (friend_id, content, datetime.now(timezone.utc), msg_uuid))
             msg_id = cur.fetchone()[0]
 
-    # Wake SSE clients immediately (sender sees own message)
+    # Wake SSE clients immediately (sender sees own message). Delivery is
+    # the insert's NOTIFY (trg_p2p_messages_notify): the launcher's delivery
+    # loop and its relay pings, and this backend's own, wake on it.
     _wake_chat_sse_clients()
 
-    # Trigger P2P delivery via sync server (fire-and-forget)
-    asyncio.create_task(_trigger_sync_server_delivery())
-
     return {"id": msg_id, "message_uuid": msg_uuid, "status": "queued"}
-
-
-async def _trigger_sync_server_delivery():
-    """Fire-and-forget: tell the desktop sync server to push pending messages."""
-    port = settings.p2p_listen_port
-    if not port:
-        return
-    try:
-        async with httpx.AsyncClient(
-            verify=False, timeout=httpx.Timeout(3.0),
-        ) as client:
-            await client.post(f"https://127.0.0.1:{port}/api/chat/trigger-send")
-    except Exception:
-        pass  # Fallback: pending loop will pick it up
 
 
 @router.post("/invite-by-email")

@@ -30,10 +30,11 @@ from fastapi.responses import JSONResponse
 
 import invite_tokens
 from config import settings
-from db_pool import db_query_one, get_conn
+from db_pool import db_query_one, get_conn, in_chat_lane
 from p2p_chat import MAX_ENCRYPTED_CHARS, get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity, verify_invite_code, witness_recorder
 from serving import EventStream
+from desktop.p2p import wire
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,10 @@ relay_router = APIRouter(prefix="/api/relay", tags=["peer-relay"])
 TS_WINDOW = 60                 # seconds, mirrors auth_hmac's replay window
 TOKEN_FRIENDS_PER_HOUR = 30    # soft cap on token auto-accepts
 PROBE_COOLDOWN = 60            # seconds per pubkey
+# The probe's call-back: its whole exchange, and what the prober's /health
+# may answer (a few hundred bytes) — mirrors desktop/p2p/sync_server.py.
+PROBE_TIMEOUT = 3.0
+PROBE_HEALTH_CAP = 256 * 1024
 # Forwarding: how long a sender's request waits for the recipient's signed
 # receipt and how many forwards one sender may have in flight. The envelope
 # queue per stream (wake_registry.QUEUE_MAX) is the ONLY resource a relay
@@ -68,6 +73,22 @@ def voucher_payload(client_pubkey: str, relay_pubkey: str, until: int) -> str:
 
 def _err(message: str, status: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
+
+
+async def _json_body(request: Request) -> Optional[dict]:
+    """The request's JSON object, or None: malformed, not an object, or
+    nested past the parser's limit (desktop/p2p/wire). p2p_app's guard has
+    already bounded the body; it is parsed on the chat lane."""
+    raw = await request.body()
+
+    def parse():
+        try:
+            data = wire.loads(raw)
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    return await in_chat_lane(parse)
 
 
 _gate = None
@@ -207,7 +228,7 @@ def set_subscribe_hook(cb) -> None:
 # Handshake (classic + token + grant-recovery paths)
 # ---------------------------------------------------------------------------
 
-async def _witness_handshake(body: dict, peer_pubkey: str) -> None:
+def _witness_handshake(body: dict, peer_pubkey: str) -> None:
     """An accepted token or grant handshake is a sighting of the guest when
     it carried its certificate (desktop/p2p/witness.py) — the guest's
     signature was checked, the use was burned. Never the classic mutual-add
@@ -215,22 +236,31 @@ async def _witness_handshake(body: dict, peer_pubkey: str) -> None:
     there. Mirrors sync_server._witness_handshake."""
     cert = body.get("birth_cert")
     if isinstance(cert, dict):
-        await asyncio.to_thread(witness_recorder(settings).note, cert, "handshake", peer_pubkey)
+        witness_recorder(settings).note(cert, "handshake", peer_pubkey)
 
 
 @chat_router.post("/handshake")
 async def chat_handshake(request: Request):
+    body = await _json_body(request)
+    if body is None:
+        return _err("invalid JSON", 400)
+    return await in_chat_lane(_handshake, body,
+                              request.client.host if request.client else None,
+                              asyncio.get_running_loop())
+
+
+def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
+    """The handshake on the chat lane; the identity gate's async check is
+    run on the serving loop, where its semaphore lives."""
     svc = get_peer_chat()
     ident = resolve_identity(settings)
     if svc is None or not ident:
         return _err("no account configured", 503)
-
-    try:
-        body = await request.json()
-        peer_pubkey = body.get("public_key_hex", "")
-        peer_username = body.get("username", "")
-        peer_invite = body.get("invite_code", "")
-    except Exception:
+    peer_pubkey = body.get("public_key_hex", "")
+    peer_username = body.get("username", "")
+    peer_invite = body.get("invite_code", "")
+    if not isinstance(peer_pubkey, str) or not isinstance(peer_invite, str) \
+            or not isinstance(peer_username, str):
         return _err("invalid JSON", 400)
     if not peer_pubkey or not peer_invite:
         return _err("missing public_key_hex or invite_code", 400)
@@ -286,7 +316,7 @@ async def chat_handshake(request: Request):
                           if token_id else grant_in.get("rights", []))
                 invite_tokens.snapshot_rights(conn, resolved["id"], rights)
         svc.update_friend_last_seen(peer_pubkey)
-        await _witness_handshake(body, peer_pubkey)
+        _witness_handshake(body, peer_pubkey)
         return _accept(_mint(tid, rights))
 
     if token_id:
@@ -298,10 +328,9 @@ async def chat_handshake(request: Request):
             # Identity gate BEFORE the use is burned (mirror of sync_server):
             # certificate v2 + the mined proof for method:pow, verified once
             # and cached in p2p_identities; "busy" → 503 with Retry-After.
-            admission = await _identity_gate().admit(
+            admission = asyncio.run_coroutine_threadsafe(_identity_gate().admit(
                 peer_pubkey, body.get("birth_cert") or {},
-                body.get("identity_proof"),
-                request.client.host if request.client else None)
+                body.get("identity_proof"), addr), loop).result()
             if admission.status != "verified":
                 headers = ({"Retry-After": str(admission.retry_after)}
                            if admission.retry_after else None)
@@ -328,7 +357,7 @@ async def chat_handshake(request: Request):
         svc.update_friend_last_seen(peer_pubkey)
         logger.info("Token handshake accepted from %s (%s...)",
                     peer_username, peer_pubkey[:16])
-        await _witness_handshake(body, peer_pubkey)
+        _witness_handshake(body, peer_pubkey)
         return _accept(_mint(token_id, tok["rights"]))
 
     if grant_in:
@@ -352,7 +381,7 @@ async def chat_handshake(request: Request):
         svc.update_friend_last_seen(peer_pubkey)
         logger.info("Grant recovery accepted from %s (%s...)",
                     peer_username, peer_pubkey[:16])
-        await _witness_handshake(body, peer_pubkey)
+        _witness_handshake(body, peer_pubkey)
         return _accept(_mint(grant_in["token_id"],
                              grant_in.get("rights", [])))
 
@@ -376,16 +405,21 @@ async def chat_handshake(request: Request):
 
 @chat_router.post("/message")
 async def chat_message(request: Request):
+    body = await _json_body(request)
+    if body is None:
+        return _err("invalid JSON", 400)
+    return await in_chat_lane(_message, body)
+
+
+def _message(body: dict) -> JSONResponse:
     svc = get_peer_chat()
     if svc is None:
         return _err("chat not available", 503)
-    try:
-        body = await request.json()
-        sender_pubkey = body.get("from_public_key", "")
-        encrypted = body.get("encrypted", "")
-        timestamp = body.get("timestamp", "")
-        message_uuid = body.get("message_uuid", "")
-    except Exception:
+    sender_pubkey = body.get("from_public_key", "")
+    encrypted = body.get("encrypted", "")
+    timestamp = body.get("timestamp", "")
+    message_uuid = body.get("message_uuid", "")
+    if not all(isinstance(v, str) for v in (sender_pubkey, encrypted, timestamp, message_uuid)):
         return _err("invalid JSON", 400)
     if not sender_pubkey or not encrypted or not timestamp:
         return _err("missing fields", 400)
@@ -440,6 +474,13 @@ async def chat_key_rotation(request: Request):
     desktop/p2p/sync_server.handle_chat_key_rotation: every field comes out
     of the signed notice, both the old key (continuity) and the new one
     (possession) must have signed it, and it is applied at once."""
+    body = await _json_body(request)
+    if body is None:
+        return _err("invalid JSON", 400)
+    return await in_chat_lane(_key_rotation, body)
+
+
+def _key_rotation(body: dict) -> JSONResponse:
     import base64
 
     from desktop.node_identity import parse_rotation_notice
@@ -448,11 +489,10 @@ async def chat_key_rotation(request: Request):
     if svc is None:
         return _err("chat not available", 503)
     try:
-        body = await request.json()
         rotation_msg = base64.b64decode(body.get("rotation_message", ""))
         old_signature = bytes.fromhex(body.get("old_signature", ""))
         new_signature = bytes.fromhex(body.get("new_signature", ""))
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError):
         return _err("invalid JSON", 400)
 
     notice = parse_rotation_notice(rotation_msg, old_signature, new_signature)
@@ -473,17 +513,22 @@ async def chat_key_rotation(request: Request):
 
 @chat_router.post("/history")
 async def chat_history(request: Request):
+    body = await _json_body(request)
+    if body is None:
+        return _err("invalid JSON", 400)
+    return await in_chat_lane(_history, body)
+
+
+def _history(body: dict) -> JSONResponse:
     svc = get_peer_chat()
     if svc is None:
         return _err("chat not available", 503)
-    try:
-        body = await request.json()
-        requester_pubkey = body.get("public_key_hex", "")
-        since_iso = body.get("since")
-        signature_hex = body.get("signature", "")
-        nonce = body.get("nonce", "")
-        ts = body.get("ts")
-    except Exception:
+    requester_pubkey = body.get("public_key_hex", "")
+    since_iso = body.get("since")
+    signature_hex = body.get("signature", "")
+    nonce = body.get("nonce", "")
+    ts = body.get("ts")
+    if not all(isinstance(v, str) for v in (requester_pubkey, signature_hex, nonce)):
         return _err("invalid JSON", 400)
     if not requester_pubkey:
         return _err("missing public_key_hex", 400)
@@ -569,7 +614,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     # friendship first silently dropped exactly that — two friendly
     # launchers could never relay for each other. Mirror of
     # desktop/p2p/sync_server.py.
-    friend = svc.friend_for_key(pubkey)
+    friend = await in_chat_lane(svc.friend_for_key, pubkey)
     if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
     voucher = None
@@ -615,7 +660,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
             # UPDATE matches nothing for a voucher-only stranger, and a
             # friendship that appears while the stream is up starts
             # bumping at the next cycle, not at the next reconnect.
-            svc.update_friend_last_seen(pubkey)
+            await in_chat_lane(svc.update_friend_last_seen, pubkey)
             if _subscribe_hook is not None:
                 try:
                     await _subscribe_hook(pubkey)
@@ -642,7 +687,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     yield ": keepalive\n\n"
                 cycles += 1
                 if cycles >= 8:          # ~2 min — passive presence bump
-                    svc.update_friend_last_seen(pubkey)
+                    await in_chat_lane(svc.update_friend_last_seen, pubkey)
                     cycles = 0
         finally:
             # The announce lives exactly as long as the key holds a stream
@@ -695,22 +740,22 @@ async def probe_connect(request: Request):
     ident = resolve_identity(settings)
     if svc is None or not ident:
         return _err("relay not available", 503)
+    body = await _json_body(request)
     try:
-        body = await request.json()
         pubkey = body.get("public_key_hex", "")
         port = int(body.get("port", 0))
         ts = body.get("ts")
         sig = body.get("signature", "")
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return _err("invalid JSON", 400)
-    if not pubkey or not (0 < port < 65536):
+    if not isinstance(pubkey, str) or not pubkey or not (0 < port < 65536):
         return _err("missing fields", 400)
     if not _ts_ok(ts):
         return _err("stale timestamp", 403)
     signed = f"probe_request:{int(ts)}:{ident['public_key_hex']}:{port}"
     if not _verify_ed25519(pubkey, signed, sig):
         return _err("invalid signature", 403)
-    friend = svc.friend_for_key(pubkey)
+    friend = await in_chat_lane(svc.friend_for_key, pubkey)
     if not friend or friend.get("is_blocked"):
         return _err("not a friend", 403)
 
@@ -741,14 +786,31 @@ async def probe_connect(request: Request):
 
     host = f"[{source_ip}]" if ":" in source_ip else source_ip
     reachable, error = False, None
-    try:
+
+    async def _fetch_health():
         import httpx
-        async with httpx.AsyncClient(verify=False, timeout=3.0) as client:
-            resp = await client.get(f"https://{host}:{port}/health")
-            reachable = (resp.status_code == 200
-                         and resp.json().get("node_id") == pubkey)
-            if not reachable:
-                error = "identity mismatch"
+        from desktop.p2p import peer_auth
+        # Pinned to the prober's key: "reachable" must mean THE PROBER
+        # answers at that address, not whoever squats on the port. Read
+        # raw and uncompressed, to a cap: the answer is a few hundred bytes.
+        async with httpx.AsyncClient(verify=peer_auth.pinned_ssl_context(pubkey),
+                                     timeout=PROBE_TIMEOUT) as client:
+            async with client.stream("GET", f"https://{host}:{port}/health",
+                                     headers={"Accept-Encoding": "identity"}) as resp:
+                body = bytearray()
+                async for chunk in resp.aiter_raw():
+                    body += chunk
+                    if len(body) > PROBE_HEALTH_CAP:
+                        raise wire.WireError("health answer over its bound")
+                return resp.status_code, wire.loads(bytes(body))
+
+    try:
+        from desktop.p2p import wire
+        status, data = await asyncio.wait_for(_fetch_health(), PROBE_TIMEOUT)
+        reachable = (status == 200 and isinstance(data, dict)
+                     and data.get("node_id") == pubkey)
+        if not reachable:
+            error = "identity mismatch"
     except Exception as e:
         error = type(e).__name__
 
@@ -792,8 +854,8 @@ async def relay_forward(request: Request):
     ident = resolve_identity(settings)
     if svc is None or not ident:
         return _err("relay not available", 503)
+    body = await _json_body(request)
     try:
-        body = await request.json()
         sender = body.get("public_key_hex", "")
         recipient = body.get("to_public_key", "")
         envelope = body.get("envelope") or {}
@@ -801,7 +863,9 @@ async def relay_forward(request: Request):
         sig = body.get("signature", "")
         message_uuid = envelope.get("message_uuid", "")
         encrypted = envelope.get("encrypted", "")
-    except Exception:
+    except AttributeError:
+        return _err("invalid JSON", 400)
+    if not all(isinstance(v, str) for v in (sender, recipient, sig, message_uuid, encrypted)):
         return _err("invalid JSON", 400)
     if not (sender and recipient and message_uuid and encrypted
             and envelope.get("timestamp")):
@@ -819,7 +883,7 @@ async def relay_forward(request: Request):
     # a STRANGER may forward only to a voucher-registered client — that is
     # the point of being someone's relay, and the client's E2E decrypt is
     # what actually rejects mail from non-friends.
-    friend = svc.friend_for_key(sender)
+    friend = await in_chat_lane(svc.friend_for_key, sender)
     if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
     if not friend:
@@ -868,13 +932,14 @@ async def relay_ack(request: Request):
     svc = get_peer_chat()
     if svc is None:
         return _err("relay not available", 503)
-    try:
-        body = await request.json()
-        pubkey = body.get("public_key_hex", "")
-        message_uuid = body.get("message_uuid", "")
-        ct_hash = body.get("ciphertext_sha256", "")
-        sig = body.get("signature", "")
-    except Exception:
+    body = await _json_body(request)
+    if body is None:
+        return _err("invalid JSON", 400)
+    pubkey = body.get("public_key_hex", "")
+    message_uuid = body.get("message_uuid", "")
+    ct_hash = body.get("ciphertext_sha256", "")
+    sig = body.get("signature", "")
+    if not all(isinstance(v, str) for v in (pubkey, message_uuid, ct_hash, sig)):
         return _err("invalid JSON", 400)
     if not (pubkey and message_uuid and ct_hash and sig):
         return _err("missing fields", 400)
@@ -884,7 +949,7 @@ async def relay_ack(request: Request):
     # A receipt may come from a friend OR a voucher-registered client
     # (Phase D) — the real gate is below: the uuid must match a pending
     # forward addressed to exactly this pubkey.
-    friend = svc.get_friend_by_public_key(pubkey)
+    friend = await in_chat_lane(svc.get_friend_by_public_key, pubkey)
     if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
     if not friend:

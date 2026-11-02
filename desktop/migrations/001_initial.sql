@@ -3374,8 +3374,14 @@ CREATE TABLE IF NOT EXISTS mb_slice_blobs (
     author_pubkey CHAR(64) NOT NULL,
     sig           CHAR(128) NOT NULL,
     blob_gz       BYTEA NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- On a dump node, the key of what its own build covers (the matched
+    -- artist ids, mb_slice_queries.match_key): one subtree is built per
+    -- match set and a few spellings kept. NULL for a blob a replica keeps.
+    match_key     TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_mb_slice_blobs_match
+    ON mb_slice_blobs (match_key, dump_version) WHERE match_key IS NOT NULL;
 
 -- ListenBrainz listening statistics (CC0, the listenbrainz.org statistics
 -- dump — backend/lb_dump_load.py). Per recording: SUM/COUNT over every LB

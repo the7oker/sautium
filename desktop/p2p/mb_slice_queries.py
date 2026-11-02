@@ -13,13 +13,19 @@ dump nodes cheap (every probe here is an indexed exact lookup).
 Framework-agnostic like sync_queries: functions take a psycopg2 connection.
 """
 
+import gzip
 import hashlib
 import ipaddress
 import json
 import logging
 import os
 import re
+import threading
+import time
+import unicodedata
+from collections import deque
 from datetime import date, datetime
+from typing import Optional
 from urllib.parse import urlsplit
 from uuid import UUID, uuid5
 
@@ -31,6 +37,31 @@ logger = logging.getLogger(__name__)
 MB_LOAD_LOCK_KEY = 0x6D626C64
 
 MAX_NAMES_PER_REQUEST = 50
+
+# What one received blob may inflate to: TABLE_ROW_LIMITS keep an honest
+# subtree near 30 MB raw at its largest (one prolific artist, measured), and
+# the author's bytes are inflated before their signature can be checked. A
+# dump node builds nothing larger: no requester would take it.
+BLOB_RAW_MAX = 64 * 1024 * 1024
+
+# What a dump node builds a slice for: a name of at most NAME_MAX_CHARS with
+# no control character, and not one of MB's special-purpose artists
+# ([unknown], [traditional], Various Artists…), whose subtree is every record
+# on Earth — the requester never asks for those (pending_slice_names). Any
+# other name in a request is `missing` in the answer.
+NAME_MAX_CHARS = 255
+_SPECIAL_PURPOSE = re.compile(r"^\[.*\]$|^various artists$")
+
+# A dump node's builds, node-wide: BUILD_CONCURRENCY at once and
+# BUILDS_PER_MINUTE in any minute; a miss past either is `missing` for that
+# answer, and the requester asks elsewhere or later. A stored blob is served
+# whatever the budget. Per match set (the matched artist ids, `match_key`)
+# one subtree is built and at most VARIANTS_PER_MATCH spellings are kept;
+# any other spelling is cut from that stored subtree and served unkept, and
+# a zero-match is served signed and never kept.
+BUILD_CONCURRENCY = 2
+BUILDS_PER_MINUTE = 120
+VARIANTS_PER_MATCH = 4
 
 # Oversized-artist guard: a prolific matched set (think "Mozart" namesakes) can
 # explode the release/track walk. Responses carry a `truncated` list so the
@@ -197,6 +228,52 @@ def name_blob(name: str, slice_one: dict) -> bytes:
 def receipt_message_for(blob: bytes) -> bytes:
     """The exact bytes the dump node signs / every recipient verifies."""
     return RECEIPT_CONTEXT + hashlib.sha256(blob).digest()
+
+
+def servable_name(name: str) -> bool:
+    """A name a slice is served for (NAME_MAX_CHARS, no control character,
+    not a special-purpose artist)."""
+    n = name.strip()
+    return (0 < len(n) <= NAME_MAX_CHARS
+            and not any(unicodedata.category(c) == "Cc" for c in n)
+            and not _SPECIAL_PURPOSE.match(n.lower()))
+
+
+def match_key(artist_ids) -> str:
+    """The key of what a slice covers — its matched artist ids. Names that
+    fold to one match set (case, spacing, accents, "&"/"and", MB's
+    punctuation) share it, whatever their spelling."""
+    return hashlib.sha256(",".join(str(i) for i in sorted(artist_ids)).encode()).hexdigest()
+
+
+class BuildBudget:
+    """A dump node's slice builds, node-wide (both families keep one each):
+    at most `concurrency` at once and `per_minute` in any minute. take()
+    never waits — a build past the budget is a miss in that answer."""
+
+    def __init__(self, concurrency: int, per_minute: int):
+        self._slots = threading.BoundedSemaphore(concurrency)
+        self._lock = threading.Lock()
+        self._times: deque = deque()
+        self._per_minute = per_minute
+
+    def take(self) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            while self._times and now - self._times[0] >= 60:
+                self._times.popleft()
+            if len(self._times) >= self._per_minute:
+                return False
+            if not self._slots.acquire(blocking=False):
+                return False
+            self._times.append(now)
+            return True
+
+    def release(self) -> None:
+        self._slots.release()
+
+
+_builds = BuildBudget(BUILD_CONCURRENCY, BUILDS_PER_MINUTE)
 
 
 # Sautium UUID v5 namespace — mirrors backend/uuid_utils.py (desktop must not
@@ -429,14 +506,9 @@ def _fetch(cur, table: str, where_sql: str, params, truncated: list):
     return [[_ser(v) for v in row] for row in rows]
 
 
-def get_slice_one(conn, name: str) -> dict:
-    """ONE artist's slice subtree — the v2 signing unit. Batch requests are
-    served as a loop of these on the server (with the blob cache in
-    between), never as a merged payload: a merged payload cannot carry
-    per-name signatures."""
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError("name must be a non-empty string")
-
+def match_artist_ids(conn, name: str) -> list:
+    """The mb_artist ids the slice of `name` covers, sorted. Raises DumpBusy
+    while the loader runs."""
     with conn.cursor() as cur:
         # The loader holds this lock exclusive for its whole TRUNCATE+COPY pass —
         # serving half-truncated tables would poison the requester, so answer
@@ -445,8 +517,19 @@ def get_slice_one(conn, name: str) -> dict:
         if not cur.fetchone()[0]:
             raise DumpBusy()
         cur.execute("SELECT pg_advisory_unlock_shared(%s)", (MB_LOAD_LOCK_KEY,))
+        return sorted(set(_match_artist_ids(cur, name.strip())))
 
-        all_ids = set(_match_artist_ids(cur, name.strip()))
+
+def get_slice_one(conn, name: str, artist_ids: Optional[list] = None) -> dict:
+    """ONE artist's slice subtree — the v2 signing unit. Batch requests are
+    served as a loop of these on the server (with the blob cache in
+    between), never as a merged payload: a merged payload cannot carry
+    per-name signatures. `artist_ids`: the match already made."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name must be a non-empty string")
+
+    all_ids = set(match_artist_ids(conn, name) if artist_ids is None else artist_ids)
+    with conn.cursor() as cur:
         matched = {name: sorted(all_ids)}
 
         version = dump_version_file()
@@ -668,12 +751,18 @@ def pending_slice_names(conn, limit: int = 200) -> list:
             )
             SELECT p.name, MIN(p.tier) FROM pending p
             WHERE p.name IS NOT NULL AND btrim(p.name) <> ''
+              -- what a dump node serves (servable_name): asked otherwise,
+              -- a name would come back `missing` every cycle
+              AND length(btrim(p.name)) <= %(name_max)s
+              AND p.name !~ '[[:cntrl:]]'
+              AND lower(btrim(p.name)) !~ '^\[.*\]$'
+              AND lower(btrim(p.name)) <> 'various artists'
               AND NOT EXISTS (SELECT 1 FROM mb_slice_fetches f
                               WHERE f.name_key = lower(btrim(p.name)))
             GROUP BY p.name
             ORDER BY MIN(p.tier), MAX(p.weight) DESC NULLS LAST, p.name
             LIMIT %(lim)s
-        """, {"lim": limit})
+        """, {"lim": limit, "name_max": NAME_MAX_CHARS})
         return [(r[0], r[1]) for r in cur.fetchall()]
 
 
@@ -710,6 +799,10 @@ def ensure_blob_table(conn) -> None:
                 blob_gz       BYTEA NOT NULL,
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
             )""")
+        cur.execute("ALTER TABLE mb_slice_blobs ADD COLUMN IF NOT EXISTS match_key TEXT")
+        cur.execute("""CREATE INDEX IF NOT EXISTS idx_mb_slice_blobs_match
+                         ON mb_slice_blobs (match_key, dump_version)
+                         WHERE match_key IS NOT NULL""")
 
 
 def cached_slice(conn, nk: str):
@@ -724,24 +817,76 @@ def cached_slice(conn, nk: str):
 
 
 def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
-                     sig: str, blob_gz: bytes, cap: bool = True) -> bool:
+                     sig: str, blob_gz: bytes, cap: bool = True,
+                     match: Optional[str] = None) -> bool:
     """Upsert one verified blob. `cap=True` is the replica posture (skip
-    oversized); a dump node stores its own regardless — that is the cache."""
+    oversized); a dump node stores its own regardless — that is the cache,
+    each blob under the `match` key of what it covers."""
     if cap and len(blob_gz) > RESERVE_BLOB_MAX_GZ:
         return False
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO mb_slice_blobs
-                   (name_key, dump_version, author_pubkey, sig, blob_gz)
-            VALUES (%s, %s, %s, %s, %s)
+                   (name_key, dump_version, author_pubkey, sig, blob_gz, match_key)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (name_key) DO UPDATE SET
                 dump_version = EXCLUDED.dump_version,
                 author_pubkey = EXCLUDED.author_pubkey,
                 sig = EXCLUDED.sig,
                 blob_gz = EXCLUDED.blob_gz,
+                match_key = EXCLUDED.match_key,
                 created_at = now()""",
-            (nk, dump_version, author_pubkey, sig, blob_gz))
+            (nk, dump_version, author_pubkey, sig, blob_gz, match))
     return True
+
+
+def _stored_match(conn, match: str, dump_version: str):
+    """(spellings kept for `match` at `dump_version`, one blob of them)."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT count(*), min(name_key) FROM mb_slice_blobs
+                        WHERE match_key = %s AND dump_version = %s""", (match, dump_version))
+        n, nk = cur.fetchone()
+        if not n:
+            return 0, None
+        cur.execute("SELECT blob_gz FROM mb_slice_blobs WHERE name_key = %s", (nk,))
+        return int(n), bytes(cur.fetchone()[0])
+
+
+def _respelled(blob_gz: bytes, name: str, artist_ids: list) -> bytes:
+    """The canonical blob of `name` cut from a stored blob of the same match
+    set: only name_key and artists_matched differ, the rows stay as signed."""
+    core = json.loads(gzip.decompress(blob_gz))
+    core["name_key"] = name_key(name)
+    core["artists_matched"] = {name: list(artist_ids)}
+    return json.dumps(core, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def _build(conn, name: str, version: str, sign_fn, author_pubkey: str) -> Optional[dict]:
+    """A dump node's signed slice of `name`, kept when it is the first few
+    spellings of its match set — None past the build budget, or for a
+    subtree larger than any requester takes."""
+    if not _builds.take():
+        return None
+    try:
+        ids = match_artist_ids(conn, name)          # may raise DumpBusy
+        match = match_key(ids) if ids else None
+        kept, twin = _stored_match(conn, match, version) if match else (0, None)
+        blob = (_respelled(twin, name, ids) if twin is not None
+                else name_blob(name, get_slice_one(conn, name, ids)))
+        if len(blob) > BLOB_RAW_MAX:
+            logger.warning("MB slice for %r: %d bytes, over what requesters take — not served",
+                           name[:64], len(blob))
+            return None
+        sig = sign_fn(receipt_message_for(blob)).hex()
+        blob_gz = gzip.compress(blob)
+        if match and kept < VARIANTS_PER_MATCH:
+            store_slice_blob(conn, name_key(name), version, author_pubkey, sig, blob_gz,
+                             cap=False, match=match)
+        return {"dump_version": version, "author_pubkey": author_pubkey,
+                "sig": sig, "blob_gz": blob_gz}
+    finally:
+        _builds.release()
 
 
 def count_slice_blobs(conn) -> int:
@@ -761,7 +906,6 @@ def serve_slices(conn, names: list, sign_fn=None,
     response entry carries the ORIGINAL author's pubkey+sig, which on a
     replica is not this node's identity — and that is the point."""
     import base64
-    import gzip as _gzip
 
     if not isinstance(names, list) or not names \
             or len(names) > MAX_NAMES_PER_REQUEST:
@@ -769,21 +913,18 @@ def serve_slices(conn, names: list, sign_fn=None,
     if not all(isinstance(n, str) and n.strip() for n in names):
         raise ValueError("names must be non-empty strings")
 
-    can_build = sign_fn is not None and local_dump_available(conn)
+    version = (dump_version_file() or "") if (
+        sign_fn is not None and local_dump_available(conn)) else None
     slices, missing = {}, []
     for name in names:
-        nk = name_key(name)
-        entry = cached_slice(conn, nk)
-        if entry is None and can_build:
-            one = get_slice_one(conn, name)          # may raise DumpBusy
-            blob = name_blob(name, one)
-            sig = sign_fn(receipt_message_for(blob)).hex()
-            blob_gz = _gzip.compress(blob)
-            store_slice_blob(conn, nk, one.get("dump_version") or "",
-                             author_pubkey, sig, blob_gz, cap=False)
-            entry = {"dump_version": one.get("dump_version") or "",
-                     "author_pubkey": author_pubkey, "sig": sig,
-                     "blob_gz": blob_gz}
+        if not servable_name(name):
+            missing.append(name)
+            continue
+        entry = cached_slice(conn, name_key(name))
+        if version is not None and (entry is None or entry["dump_version"] != version):
+            # A miss, or a blob cut from an earlier dump: built from this
+            # one when the budget allows — a stale blob still beats none.
+            entry = _build(conn, name, version, sign_fn, author_pubkey) or entry
         if entry is None:
             missing.append(name)
             continue
@@ -802,19 +943,19 @@ def verify_slice_entry(name: str, entry: dict):
     Returns (core_dict, blob_gz_bytes) or None. Every hop runs exactly
     this, against the ORIGINAL author's key."""
     import base64
-    import gzip as _gzip
 
     from desktop.node_identity import verify_signature
+    from desktop.p2p import wire
     try:
         blob_gz = base64.b64decode(entry.get("blob_gz") or "")
-        blob = _gzip.decompress(blob_gz)
+        blob = wire.gunzip(blob_gz, BLOB_RAW_MAX)
         author = entry.get("author_pubkey") or ""
         sig = entry.get("sig") or ""
         if not verify_signature(receipt_message_for(blob),
                                 bytes.fromhex(sig), author):
             return None
-        core = json.loads(blob)
-        if core.get("name_key") != name_key(name):
+        core = wire.loads(blob)
+        if not isinstance(core, dict) or core.get("name_key") != name_key(name):
             return None
         return core, blob_gz
     except Exception:

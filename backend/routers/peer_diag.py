@@ -30,7 +30,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from config import settings
-from db_pool import db_execute, db_query, db_query_one, get_conn
+from db_pool import db_execute, db_query, db_query_one, get_conn, in_chat_lane
 from desktop.p2p import diag_protocol, peer_auth
 from p2p_chat import get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity
@@ -67,6 +67,34 @@ async def _read_capped(request: Request, cap: int) -> Optional[bytes]:
     return b"".join(chunks)
 
 
+def _is_master() -> bool:
+    """Only the master reads reports and bundles — a node never serves a
+    diag route (P2P_NETWORK.md § "Support diagnostics")."""
+    from master_node import MASTER_PUBKEY_HEX
+    ident = resolve_identity(settings)
+    return bool(ident) and ident.get("public_key_hex") == MASTER_PUBKEY_HEX
+
+
+def _signer_is_friend(pubkey: str) -> bool:
+    svc = get_peer_chat()
+    friend = svc.friend_for_key(pubkey) if svc else None
+    return friend is not None and not friend["is_blocked"]
+
+
+async def _admitted(request: Request) -> Optional[JSONResponse]:
+    """The refusal owed BEFORE a body is read, or None: not the master, or a
+    claimed signer that is no friend of ours. The signature itself is
+    checked once the body is in (_verify)."""
+    if not _is_master():
+        return _err("not found", 404)
+    claimed = (request.headers.get(peer_auth.HDR_PUBKEY) or "").lower()
+    if not claimed:
+        return _err("signature required", 403)
+    if not await in_chat_lane(_signer_is_friend, claimed):
+        return _err("not a friend", 403)
+    return None
+
+
 def _verify(request: Request, body: bytes):
     """(signer pubkey, None) for a friend's valid signature, else
     (None, response)."""
@@ -80,9 +108,7 @@ def _verify(request: Request, body: bytes):
         return None, _err(err, 403)
     if not pubkey:
         return None, _err("signature required", 403)
-    svc = get_peer_chat()
-    friend = svc.friend_for_key(pubkey) if svc else None
-    if friend is None or friend["is_blocked"]:
+    if not _signer_is_friend(pubkey):
         return None, _err("not a friend", 403)
     return pubkey, None
 
@@ -108,11 +134,18 @@ def _report_allowed(pubkey: str) -> bool:
 
 @diag_router.post("/report")
 async def diag_report(request: Request):
-    from nacl.exceptions import CryptoError
-
+    refusal = await _admitted(request)
+    if refusal is not None:
+        return refusal
     body = await _read_capped(request, diag_protocol.REPORT_MAX_BYTES)
     if body is None:
         return _err("report too large", 413)
+    return await in_chat_lane(_store_report, request, body)
+
+
+def _store_report(request: Request, body: bytes):
+    from nacl.exceptions import CryptoError
+
     pubkey, failure = _verify(request, body)
     if failure:
         return failure
@@ -121,8 +154,8 @@ async def diag_report(request: Request):
     try:
         events = diag_protocol.decode_report(
             diag_protocol.decrypt_from(own_seed(), pubkey, body))
-    except (CryptoError, ValueError) as e:
-        return _err(f"unreadable report: {e}", 400)
+    except (CryptoError, ValueError):
+        return _err("unreadable report", 400)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.executemany("""
@@ -140,9 +173,16 @@ async def diag_bundle(request: Request, warrant: str = ""):
         warrant_id = str(uuid.UUID(warrant))
     except ValueError:
         return _err("warrant id required", 400)
+    refusal = await _admitted(request)
+    if refusal is not None:
+        return refusal
     body = await _read_capped(request, diag_protocol.BUNDLE_MAX_BYTES)
     if body is None:
         return _err("bundle too large", 413)
+    return await in_chat_lane(_store_bundle, request, body, warrant_id)
+
+
+def _store_bundle(request: Request, body: bytes, warrant_id: str):
     pubkey, failure = _verify(request, body)
     if failure:
         return failure
@@ -228,6 +268,6 @@ def dispatch_pending(pubkey: str) -> int:
 
 
 async def on_wake_subscribed(pubkey: str) -> None:
-    sent = await asyncio.to_thread(dispatch_pending, pubkey)
+    sent = await in_chat_lane(dispatch_pending, pubkey)
     if sent:
         logger.info("support: %d warrant(s) pushed to %s… on subscribe", sent, pubkey[:8])

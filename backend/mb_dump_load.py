@@ -585,6 +585,9 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
     # mb_release_country is populated).
     from db_pool import db_execute
     db_execute("UPDATE artists SET last_album_sync = NULL")
+    # Blobs cut from an earlier dump: a dump node serves its own builds from
+    # this one (mb_slice_queries.serve_slices), so the rest only takes room.
+    db_execute("DELETE FROM mb_slice_blobs WHERE dump_version <> %s", (version,))
     with open(VERSION_PATH, "w") as f:
         f.write(version)
     # Completion marker IN THE DB — the per-DSN truth that a FULL load

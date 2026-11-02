@@ -228,6 +228,16 @@ def _default_gateway() -> Optional[str]:
 # killed.
 _PEER_GRACE_S = 1
 
+# The peer surface's connections, each a place for a stranger. Every
+# launcher keeps a wake stream open to the master, so the ceiling is sized
+# for the network rather than for a request load; past it uvicorn answers
+# 503. A connection must send its request head within _PEER_HEAD_S
+# (serving.header_deadline) and is closed _PEER_KEEPALIVE_S after its last
+# response.
+_PEER_CONNECTIONS = 4096
+_PEER_HEAD_S = 10
+_PEER_KEEPALIVE_S = 5
+
 
 async def _serve_p2p(port: int) -> None:
     """Serve the peer surface (p2p_app) on its own port, HTTPS pinned to the
@@ -257,7 +267,8 @@ async def _serve_p2p(port: int) -> None:
     import os
     import socket
 
-    from serving import PeerSurfaceConfig, Server
+    from uvicorn.protocols.http.auto import AutoHTTPProtocol
+    from serving import PeerSurfaceConfig, Server, header_deadline
     from tls_gen import ensure_cert
     from p2p_app import app as peer_app
 
@@ -274,6 +285,8 @@ async def _serve_p2p(port: int) -> None:
     finally:
         probe.close()
 
+    bounds = dict(limit_concurrency=_PEER_CONNECTIONS, timeout_keep_alive=_PEER_KEEPALIVE_S,
+                  http=header_deadline(AutoHTTPProtocol, _PEER_HEAD_S))
     if settings.p2p_trusted_front:
         gateway = _default_gateway()
         if gateway is None:
@@ -285,7 +298,7 @@ async def _serve_p2p(port: int) -> None:
         config = PeerSurfaceConfig(
             peer_app, host="0.0.0.0", port=port,
             proxy_headers=True, forwarded_allow_ips=gateway,
-            timeout_graceful_shutdown=_PEER_GRACE_S,
+            timeout_graceful_shutdown=_PEER_GRACE_S, **bounds,
         )
     else:
         from p2p_identity import tls_binding
@@ -296,7 +309,7 @@ async def _serve_p2p(port: int) -> None:
         config = PeerSurfaceConfig(
             peer_app, host="0.0.0.0", port=port,
             ssl_keyfile=str(key_path), ssl_certfile=str(cert_path),
-            timeout_graceful_shutdown=_PEER_GRACE_S,
+            timeout_graceful_shutdown=_PEER_GRACE_S, **bounds,
         )
     try:
         await Server(config, what="the peer surface").serve()

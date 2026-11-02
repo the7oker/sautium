@@ -69,9 +69,10 @@ def encode_cert_bundle(cert: dict, proof: Optional[dict]) -> str:
 def decode_cert_bundle(value: str) -> Optional[dict]:
     """{"cert": …, "proof": …|None} or None for anything malformed. The
     certificate itself is verified by the caller with its authority mirror."""
+    from desktop.p2p import wire
     try:
         padded = value + "=" * (-len(value) % 4)
-        data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        data = wire.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
     except (ValueError, TypeError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("cert"), dict):

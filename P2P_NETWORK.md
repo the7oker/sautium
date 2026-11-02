@@ -877,6 +877,18 @@ already served from dump-node caches for pennies, while the body of the
 distribution (tens of KB) spreads — and the most popular names replicate
 fastest.
 
+**What a dump node builds for strangers (since 2026-11-03).** A request names
+the spelling; the storage follows what the slice covers. A dump node builds
+one subtree per *match set* (the matched artist ids, `match_key`), keeps at
+most four spellings of it and cuts any other spelling from the stored blob,
+served unkept; a zero-match is served signed and never kept; a name over 255
+characters, with a control character, or one of MB's special-purpose artists
+is `missing`. Builds have a node-wide budget (two at once, 120 a minute; LB:
+300), and both slice routes a node-wide window of 300 requests a minute on top
+of the per-address one — a miss past either is `missing`, and the requester
+asks elsewhere or later. A finished dump load drops the blobs cut from the
+dump before it.
+
 **Who answers.** `/health` reports `mb_slices` (inventory size);
 `MbSliceCycle.find_sources` puts **replicas BEFORE dump nodes**, and misses (`missing`
 in the response) carry over to the next candidate. A dump node no longer 404s:
@@ -1068,9 +1080,15 @@ similarity, the registry's addr axes, probe-connect's call-back target. Never
 auth (CLAUDE.md Security Posture rule #5 still stands). Consequence to accept:
 the master's per-IP 60/min limiter stops being an accidental global cap and
 becomes per-peer, like on every launcher node (`/health` has its own 60/min
-window since 2026-09-24, so probes never spend the work's); the global
-`mb/search` window,
-the load meter and the gate's backstops remain the node-wide protection.
+window since 2026-09-24, so probes never spend the work's). The node-wide
+bounds (since 2026-11-03) do not depend on the address: a body cap per route
+before anything reads it (1 MiB for the API, a support bundle's 32 MiB on the
+master; the front holds the same ceiling and a 10 s request head), a
+connection ceiling and a request-head deadline on the peer server, the peer
+surface's SQL and parsing on two lanes of their own (`db_pool.in_peer_lane`
+for data, `in_chat_lane` for chat, relay and diagnostics) beside the Web UI's
+loop and pool, the global `mb/search` and slice windows and the dump node's
+build budget; the load meter and the gate's backstops come on top.
 
 ### Support diagnostics — SHIPPED 2026-08-26
 

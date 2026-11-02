@@ -36,7 +36,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
-from desktop.p2p.mb_slice_queries import addr_uuid  # noqa: F401 — the one node_addr formula
+from desktop.p2p.mb_slice_queries import BuildBudget, addr_uuid  # noqa: F401 — the one node_addr formula
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,17 @@ MAX_RECORDINGS_PER_SLICE = 5000
 # Replicas keep blobs below this — LB blobs are tens of KB, so in practice
 # everything; the cap is the mb_slice_blobs posture kept for symmetry.
 RESERVE_BLOB_MAX_GZ = 2 * 1024 * 1024
+# What one received blob may inflate to — MAX_RECORDINGS_PER_SLICE rows are
+# well under a megabyte; the author's bytes are inflated before their
+# signature can be checked.
+BLOB_RAW_MAX = 16 * 1024 * 1024
+
+# A dump node's builds, node-wide (mb_slice_queries.BuildBudget): a miss past
+# the budget is `missing` for that answer. An MBID ListenBrainz does not know
+# is answered signed and never kept — any well-formed UUID is one.
+BUILD_CONCURRENCY = 2
+BUILDS_PER_MINUTE = 300
+_builds = BuildBudget(BUILD_CONCURRENCY, BUILDS_PER_MINUTE)
 
 # Domain separation: a receipt can never be replayed as a chat/sync/birth
 # or MB-slice signature. Widening the payload later means bumping this AND
@@ -133,7 +144,9 @@ def get_slice_one(conn, artist_mbid: str, version: str) -> dict:
     """One artist's totals + credited recordings from the local dump. Raises
     DumpBusy while the loader holds its lock."""
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_try_advisory_lock(%s)", (LB_LOAD_LOCK_KEY,))
+        # Shared: builds side by side are no conflict; the loader's exclusive
+        # hold still keeps every build out while it swaps the tables.
+        cur.execute("SELECT pg_try_advisory_lock_shared(%s)", (LB_LOAD_LOCK_KEY,))
         if not cur.fetchone()[0]:
             raise DumpBusy()
         try:
@@ -148,7 +161,7 @@ def get_slice_one(conn, artist_mbid: str, version: str) -> dict:
                         (artist_mbid,))
             artist = cur.fetchone()
         finally:
-            cur.execute("SELECT pg_advisory_unlock(%s)", (LB_LOAD_LOCK_KEY,))
+            cur.execute("SELECT pg_advisory_unlock_shared(%s)", (LB_LOAD_LOCK_KEY,))
     truncated = len(rows) > MAX_RECORDINGS_PER_SLICE
     return {
         "dump_version": version,
@@ -241,12 +254,16 @@ def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
         if entry is not None and ((min_version is not None and entry["dump_version"] < min_version)
                                   or (local is not None and entry["dump_version"] < local)):
             entry = None
-        if entry is None and can_build:
-            one = get_slice_one(conn, key, local)          # may raise DumpBusy
+        if entry is None and can_build and _builds.take():
+            try:
+                one = get_slice_one(conn, key, local)          # may raise DumpBusy
+            finally:
+                _builds.release()
             blob = slice_blob(key, one)
             sig = sign_fn(receipt_message_for(blob)).hex()
             blob_gz = gzip.compress(blob)
-            store_slice_blob(conn, key, local, author_pubkey, sig, blob_gz, cap=False)
+            if one["artist"] or one["recordings"]:
+                store_slice_blob(conn, key, local, author_pubkey, sig, blob_gz, cap=False)
             entry = {"dump_version": local, "author_pubkey": author_pubkey,
                      "sig": sig, "blob_gz": blob_gz}
         if entry is None:
@@ -273,14 +290,15 @@ def verify_slice_entry(artist_mbid: str, entry: dict,
     this, against the ORIGINAL author's key. Anything malformed on the wire
     is a rejection, never an exception — the peer is untrusted."""
     from desktop.node_identity import verify_signature
+    from desktop.p2p import wire
     try:
         blob_gz = base64.b64decode(entry.get("blob_gz") or "")
-        blob = gzip.decompress(blob_gz)
+        blob = wire.gunzip(blob_gz, BLOB_RAW_MAX)
         author = entry.get("author_pubkey") or ""
         sig = entry.get("sig") or ""
         if not verify_signature(receipt_message_for(blob), bytes.fromhex(sig), author):
             return None
-        core = json.loads(blob)
+        core = wire.loads(blob)
         if not isinstance(core, dict) or core.get("v") != PROTOCOL_VERSION:
             return None
         if core.get("artist_mbid") != mbid_key(artist_mbid):

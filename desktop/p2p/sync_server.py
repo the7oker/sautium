@@ -17,7 +17,6 @@ import json
 import logging
 import threading
 import time
-from collections import defaultdict
 from contextlib import contextmanager
 from functools import partial
 from typing import Callable, Optional
@@ -30,7 +29,7 @@ import psycopg2.pool
 from aiohttp import web
 
 from desktop.p2p import (addrs, admission, contact_log, lb_slice_queries, mb_slice_queries,
-                         peer_auth, sync_queries, witness)
+                         peer_auth, sync_queries, wire, witness)
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
@@ -49,6 +48,7 @@ def _response_bytes(response) -> int:
 # Rate limiting: max requests per IP per minute
 RATE_LIMIT_PER_MINUTE = 60
 RATE_LIMIT_WINDOW = 60  # seconds
+_BUCKET_ADDRS = 10_000
 
 # MB search is limited RESOURCE-first, not identity-first: one IP can be a
 # whole CGNAT of different people, so per-IP alone is both too coarse (it
@@ -70,6 +70,9 @@ RATE_LIMIT_WINDOW = 60  # seconds
 # verified ones — never tighter IP math.
 SEARCH_RATE_PER_IP = 60
 SEARCH_RATE_GLOBAL = 120
+# Slice requests node-wide, per family, on top of the per-address window —
+# mirrors backend/p2p_app.py.
+SLICE_RATE_GLOBAL = 300
 
 # Max UUIDs per request (prevents memory/DB DoS)
 MAX_UUIDS_PER_REQUEST = 10_000
@@ -82,6 +85,8 @@ DB_POOL_MAX = 32
 TS_WINDOW = 60
 TOKEN_FRIENDS_PER_HOUR = 30
 PROBE_COOLDOWN = 60
+PROBE_TIMEOUT = 3
+PROBE_HEALTH_CAP = 256 * 1024
 # Forwarding caps — mirror backend/routers/peer_chat.py, keep in step (the
 # stream caps live in desktop/p2p/wake_registry.py, which both import).
 FORWARD_ACK_TIMEOUT = 10
@@ -132,12 +137,17 @@ class SyncServer:
         self.mb_dump_version = mb_dump_version  # full-dump version served via /api/mb/slice
         self._chat_service = None  # set via set_chat_service()
         self._on_message_cb: Optional[Callable] = None
-        self._delivery_trigger_cb: Optional[Callable] = None
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
-        # Rate limiting state
-        self._request_counts: dict[str, list[float]] = defaultdict(list)
+        # Rate limiting state: per-address windows (requests, /health,
+        # MB search) and the search's node-wide one
+        self._request_counts: dict[str, list[float]] = {}
+        self._health_counts: dict[str, list[float]] = {}
+        self._search_counts: dict[str, list[float]] = {}
+        self._search_global: list[float] = []
+        self._slice_global: dict[str, list[float]] = {
+            "/api/mb/slice": [], "/api/lb/slice": []}
         self._sharing = True
         self._sharing_checked = 0.0
         self._pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
@@ -243,6 +253,22 @@ class SyncServer:
         gate_price = gate_status = None
         response = None
         try:
+            # The per-address windows first: a request over its window costs
+            # no body read, no signature check, no registry write and no
+            # parse (mirrors backend/p2p_app.py, where the limiter is the
+            # outermost middleware).
+            ip = request.remote or "unknown"
+            bucket = (self._search_counts if route_path == "/api/mb/search"
+                      else self._health_counts if route_path == "/health"
+                      else self._request_counts)
+            if not (self._check_search_limit(ip) if bucket is self._search_counts
+                    else self._admit(bucket, ip, RATE_LIMIT_PER_MINUTE)):
+                response = self._rate_limited(request, ip, bucket)
+                return response
+            if route_path in self._slice_global and not self._admit(
+                    self._slice_global, route_path, SLICE_RATE_GLOBAL):
+                response = self._rate_limited(request, route_path, self._slice_global)
+                return response
             if not peer_auth.is_identity_bound(route_path):
                 response = await handler(request)
                 return response
@@ -369,10 +395,6 @@ class SyncServer:
         self._chat_service = chat_service
         self._on_message_cb = on_message_cb
 
-    def set_delivery_trigger(self, cb: Callable):
-        """Set callback to trigger immediate P2P message delivery."""
-        self._delivery_trigger_cb = cb
-
     def _admission(self):
         """The admission gate of this surface (dormant: price 0). Lazy — the
         asyncio semaphore inside must be born on the serving loop."""
@@ -451,9 +473,6 @@ class SyncServer:
     async def handle_gate_quote(self, request: web.Request) -> web.Response:
         """GET /api/gate/quote?pubkey=… — a free, O(1), signed, client-bound
         quote (wire format v1 § 4). Dormant → n = 0."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         pubkey = (request.query.get("pubkey") or "").lower()
         try:
             if len(bytes.fromhex(pubkey)) != 32:
@@ -538,29 +557,34 @@ class SyncServer:
             self._sharing = False
         return self._sharing
 
+    @staticmethod
+    def _admit(bucket: dict, ip: str, limit: int) -> bool:
+        """One request into `ip`'s window of `bucket`, or False when the
+        window is full. Past _BUCKET_ADDRS addresses the stale entries go:
+        a flood from many addresses must not grow the table for good."""
+        now = time.time()
+        stamps = [t for t in bucket.get(ip, ()) if now - t < RATE_LIMIT_WINDOW]
+        if len(stamps) >= limit:
+            bucket[ip] = stamps
+            return False
+        stamps.append(now)
+        bucket[ip] = stamps
+        if len(bucket) > _BUCKET_ADDRS:
+            for k in [k for k, v in bucket.items() if not v or now - v[-1] >= RATE_LIMIT_WINDOW]:
+                bucket.pop(k, None)
+        return True
+
     def _check_search_limit(self, ip: str) -> bool:
         """MB-search budget: global window first (the node's hard spend
         ceiling), then a per-IP bucket separate from the main one."""
         now = time.time()
-        glob = [t for t in getattr(self, "_search_global", [])
-                if now - t < RATE_LIMIT_WINDOW]
-        if len(glob) >= SEARCH_RATE_GLOBAL:
-            self._search_global = glob
+        self._search_global = [t for t in self._search_global
+                               if now - t < RATE_LIMIT_WINDOW]
+        if len(self._search_global) >= SEARCH_RATE_GLOBAL:
             return False
-        per_ip = getattr(self, "_search_counts", {})
-        stamps = [t for t in per_ip.get(ip, []) if now - t < RATE_LIMIT_WINDOW]
-        if len(stamps) >= SEARCH_RATE_PER_IP:
-            per_ip[ip] = stamps
-            self._search_counts = per_ip
-            self._search_global = glob
+        if not self._admit(self._search_counts, ip, SEARCH_RATE_PER_IP):
             return False
-        glob.append(now)
-        stamps.append(now)
-        per_ip[ip] = stamps
-        if not stamps:
-            per_ip.pop(ip, None)
-        self._search_counts = per_ip
-        self._search_global = glob
+        self._search_global.append(now)
         return True
 
     def _rate_limited(self, request: web.Request, ip: str,
@@ -576,24 +600,6 @@ class SyncServer:
         return self._json_response(
             request, {"error": "rate limited", "retry_after": wait}, status=429,
             headers={"Retry-After": str(wait)})
-
-    def _check_rate_limit(self, ip: str) -> bool:
-        """Return True if the request is allowed, False if rate-limited."""
-        now = time.time()
-        # Clean old entries
-        timestamps = [
-            t for t in self._request_counts.get(ip, [])
-            if now - t < RATE_LIMIT_WINDOW
-        ]
-        if not timestamps:
-            # Remove empty entries to prevent unbounded dict growth
-            self._request_counts.pop(ip, None)
-        if len(timestamps) >= RATE_LIMIT_PER_MINUTE:
-            self._request_counts[ip] = timestamps
-            return False
-        timestamps.append(now)
-        self._request_counts[ip] = timestamps
-        return True
 
     def _json_response(self, request: web.Request, data: dict,
                        status: int = 200,
@@ -698,9 +704,6 @@ class SyncServer:
 
     async def handle_inventory(self, request: web.Request) -> web.Response:
         """POST /api/sync/inventory — what this node holds for these tracks."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self._sharing_enabled():
             return self._json_response(
@@ -738,9 +741,6 @@ class SyncServer:
         (sync_queries.get_holdings): what this node holds, compressed, so a
         peer with millions of gaps tests them locally and asks the exact
         inventory only about the hits."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
@@ -757,9 +757,6 @@ class SyncServer:
 
     async def handle_pull(self, request: web.Request) -> web.Response:
         """POST /api/sync/pull/{category} — pull enrichment data."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self._sharing_enabled():
             return self._json_response(
@@ -825,9 +822,6 @@ class SyncServer:
         The round trip exists so a pusher never ships what we already hold
         or never cared about: 16 bytes per recording to ask, ~46 KB per
         track to send blind."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
@@ -855,8 +849,6 @@ class SyncServer:
         every record must carry a seal that checks out, or the importer
         drops it."""
         ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
@@ -901,9 +893,6 @@ class SyncServer:
         matching (see mb_slice_queries.search_artists) keeps one query per
         human search cheap for the volunteer node. Budgeted separately
         from the main per-IP bucket — see SEARCH_RATE_* rationale."""
-        ip = request.remote or "unknown"
-        if not self._check_search_limit(ip):
-            return self._rate_limited(request, ip, getattr(self, "_search_counts", {}))
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
@@ -934,9 +923,6 @@ class SyncServer:
         `missing` — no 404: partially useful is useful, and the requester
         takes misses to the next candidate. Blobs carry the ORIGINAL
         author's signature either way."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self._sharing_enabled():
             return self._json_response(
@@ -981,9 +967,6 @@ class SyncServer:
         computes+signs+caches misses, a replica answers what it holds and
         lists the rest in `missing`; ``min_version`` keeps a stale cache
         from answering a requester that knows a newer dump exists."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self._sharing_enabled():
             return self._json_response(
@@ -1078,9 +1061,6 @@ class SyncServer:
         - grant:   recovery — our own past signature over their grant
                    replaces the friends row this device lost.
         """
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self.account_info or not self._chat_service:
             return self._json_response(
@@ -1279,9 +1259,6 @@ class SyncServer:
 
     async def handle_chat_message(self, request: web.Request) -> web.Response:
         """POST /api/chat/message — receive an encrypted message."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self._chat_service:
             return self._json_response(
@@ -1357,9 +1334,6 @@ class SyncServer:
         a captured signature used to replay forever. Hard cutover on both
         surfaces (backend/routers/peer_chat mirrors this).
         """
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self._chat_service:
             return self._json_response(
@@ -1479,9 +1453,6 @@ class SyncServer:
         must have signed it — node_identity.parse_rotation_notice. Applied
         at once: the old key vouching is the consent, the same one a
         password change on our side asks nobody for."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self._chat_service:
             return self._json_response(
@@ -1531,21 +1502,6 @@ class SyncServer:
         )
         return self._json_response(request, {"status": "accepted"})
 
-    async def handle_trigger_send(self, request: web.Request) -> web.Response:
-        """POST /api/chat/trigger-send — trigger immediate P2P delivery.
-
-        Called by the backend after a new outgoing message is saved.
-        Returns immediately; delivery runs in the background.
-        """
-        if self._delivery_trigger_cb:
-            asyncio.ensure_future(self._run_delivery_trigger())
-        # Relay contract: a stored outgoing message may be for a wake
-        # subscriber — ping them all (they pull history; a no-op pull is
-        # cheap). Phase D refines this to per-friend pings off the
-        # NOTIFY payload, like the backend mirror already does.
-        self.ping_wake()
-        return self._json_response(request, {"ok": True})
-
     # -----------------------------------------------------------------------
     # Relay protocol: wake stream + reachability probe
     # (MIRRORS backend/routers/peer_chat.py — keep contracts in step)
@@ -1556,12 +1512,13 @@ class SyncServer:
         """Signal every stream of `pubkey` (of every key when None)."""
         self._wake.ping(pubkey, kind)
 
+    def has_wake_streams(self) -> bool:
+        return bool(self._wake.keys())
+
     async def handle_wake_stream(self, request: web.Request) -> web.Response:
         """GET /api/relay/wake-stream?pubkey=&ts=&sig=&instance= — SSE wake
         channel, one stream per node of a key (desktop/p2p/wake_registry.py)."""
         ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         if not self.account_info or not self._chat_service:
             return self._json_response(
                 request, {"error": "relay not available"}, status=503)
@@ -1698,9 +1655,6 @@ class SyncServer:
         A verdict exists only from an internet vantage: a source that is
         not globally routable gets `reachable: null` and spends no cooldown
         (mirrors backend/routers/peer_chat.py)."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         if not self.account_info or not self._chat_service:
             return self._json_response(
                 request, {"error": "relay not available"}, status=503)
@@ -1758,11 +1712,11 @@ class SyncServer:
             async with _aiohttp.ClientSession(
                 connector=_aiohttp.TCPConnector(
                     ssl=peer_auth.pinned_ssl_context(pubkey)),
-                timeout=_aiohttp.ClientTimeout(total=3),
+                timeout=_aiohttp.ClientTimeout(total=PROBE_TIMEOUT),
             ) as session:
                 async with session.get(
                         f"https://{host}:{port}/health") as r:
-                    data = await r.json()
+                    data = await wire.read_json(r, PROBE_HEALTH_CAP)
                     reachable = (r.status == 200
                                  and data.get("node_id") == pubkey)
                     if not reachable:
@@ -1796,9 +1750,6 @@ class SyncServer:
     async def handle_relay_forward(self, request: web.Request) -> web.Response:
         """POST /api/relay/forward — forward one envelope to a connected
         recipient and return their signed receipt."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         if not self.account_info or not self._chat_service:
             return self._json_response(
                 request, {"error": "relay not available"}, status=503)
@@ -1888,9 +1839,6 @@ class SyncServer:
         {client_pubkey, our_pubkey, until}; we cannot forge it, so a
         black-hole impostor announcing someone else's invite has nothing to
         answer with here — and the sender drops the candidate."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         invite = request.query.get("invite", "")
         for pubkey, rec in self._relay_clients.items():
             if rec["invite_code"] == invite:
@@ -1907,9 +1855,6 @@ class SyncServer:
 
     async def handle_relay_ack(self, request: web.Request) -> web.Response:
         """POST /api/relay/ack — the recipient's signed receipt."""
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
         if not self._chat_service:
             return self._json_response(
                 request, {"error": "relay not available"}, status=503)
@@ -1953,13 +1898,6 @@ class SyncServer:
                 "ciphertext_sha256": ct_hash, "signature": sig})
         return self._json_response(request, {"ok": True})
 
-    async def _run_delivery_trigger(self):
-        """Run the delivery trigger callback with error handling."""
-        try:
-            await self._delivery_trigger_cb()
-        except Exception as e:
-            logger.debug(f"Delivery trigger error: {e}")
-
     async def handle_invite_accepted(self, request: web.Request) -> web.Response:
         """POST /api/chat/invite-accepted — peer nudge after accepting our invite.
 
@@ -1971,9 +1909,6 @@ class SyncServer:
         Request:  {public_key_hex, username, invite_code}
         Response: {accepted: true/false, public_key_hex, username, invite_code}
         """
-        ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
-            return self._rate_limited(request, ip)
 
         if not self.account_info:
             return self._json_response(
@@ -2144,9 +2079,6 @@ class SyncServer:
         )
         self._app.router.add_post(
             "/api/chat/key-rotation", self.handle_chat_key_rotation
-        )
-        self._app.router.add_post(
-            "/api/chat/trigger-send", self.handle_trigger_send
         )
         self._app.router.add_post(
             "/api/chat/invite-accepted", self.handle_invite_accepted

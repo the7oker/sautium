@@ -30,12 +30,13 @@ import logging
 import re
 import time
 from collections import defaultdict
+from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
-from db_pool import get_conn
+from db_pool import get_conn, in_peer_lane
 from routers.sync import (
     SYNC_CAPABILITIES, carry_queries, lb_dump_version, lb_inventory, lb_router,
     mb_dump_version, mb_router, node_pubkey_hex, router, sharing_enabled,
@@ -54,6 +55,11 @@ RATE_LIMIT_WINDOW = 60
 # cert — never tighter IP math).
 SEARCH_RATE_PER_IP = 60
 SEARCH_RATE_GLOBAL = 120
+# Slice requests node-wide, per family, on top of the per-address window:
+# what the node's upload and its build budget (mb_slice_queries.BuildBudget)
+# serve together, whoever asks. Mirrors desktop/p2p/sync_server.py.
+SLICE_RATE_GLOBAL = 300
+SLICE_PATHS = ("/api/mb/slice", "/api/lb/slice")
 
 
 app = FastAPI(
@@ -133,19 +139,36 @@ class PeerAuthMiddleware:
         if not peer_auth.is_identity_bound(scope["path"]):
             try:
                 await self.app(scope, receive, send_wrapper)
+            except _BodyRefused as refused:
+                outcome["status"] = refused.status
+                raise
             finally:
                 _record()
             return
 
         chunks, more = [], True
-        while more:
-            message = await receive()
-            if message["type"] == "http.disconnect":
-                return
-            chunks.append(message.get("body", b""))
-            more = message.get("more_body", False)
+        try:
+            while more:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    return
+                chunks.append(message.get("body", b""))
+                more = message.get("more_body", False)
+        except _BodyRefused as refused:
+            outcome["status"] = refused.status
+            _record()
+            raise
         body = b"".join(chunks)
-        items, targets = contact_log.extract_request_shape(raw_target, body)
+        own = self._own()
+
+        def _shape_and_signer():
+            # Off the loop: a body is up to its route's cap, and both its
+            # parse and its hash cost per byte.
+            return (contact_log.extract_request_shape(raw_target, body),
+                    peer_auth.verify_request(headers, own, scope["method"], raw_target, body)
+                    if own else (None, None))
+
+        (items, targets), (pubkey, err) = await in_peer_lane(_shape_and_signer)
 
         async def replay():
             return {"type": "http.request", "body": body, "more_body": False}
@@ -158,9 +181,6 @@ class PeerAuthMiddleware:
             await send_wrapper({"type": "http.response.body", "body": payload})
             _record()
 
-        own = self._own()
-        pubkey, err = (peer_auth.verify_request(headers, own, scope["method"], raw_target, body)
-                       if own else (None, None))
         if err is not None:
             return await refuse(403, err)
 
@@ -185,7 +205,7 @@ class PeerAuthMiddleware:
                     return None, identity_registry.touch(conn, pubkey, addr)
 
             try:
-                banned, row = await asyncio.to_thread(_registry)
+                banned, row = await in_peer_lane(_registry)
             except Exception as e:
                 logger.warning(f"identity registry unavailable: {e}")
                 banned, row = None, None
@@ -201,7 +221,7 @@ class PeerAuthMiddleware:
         gate["price"] = pricer.would_be(pubkey or "", action, lane)
         payment = headers.get(HDR_GATE)
         if payment:
-            keys = await asyncio.to_thread(_client_keys, pubkey, addr) if pubkey else None
+            keys = await in_peer_lane(_client_keys, pubkey, addr) if pubkey else None
             verdict = await _gate().check_payment(payment, pubkey, keys, action)
             gate["status"] = verdict.status
             if verdict.status not in ("ok", "none"):
@@ -231,8 +251,8 @@ class PeerAuthMiddleware:
             # (desktop/p2p/witness.py). Off the loop, like the registry.
             from config import settings
             from p2p_identity import witness_recorder
-            await asyncio.to_thread(witness_recorder(settings).note,
-                                    bundle["cert"], "introduced", pubkey)
+            await in_peer_lane(witness_recorder(settings).note,
+                               bundle["cert"], "introduced", pubkey)
 
         state = scope.setdefault("state", {})
         state["peer_pubkey"] = pubkey
@@ -344,10 +364,10 @@ async def gate_quote(request: Request, pubkey: str = "", action: str = "") -> JS
         action = ""
     try:
         addr = request.client.host if request.client else None
-        keys = await asyncio.to_thread(_client_keys, pubkey, addr)
-        lane = await asyncio.to_thread(_lane_of, pubkey)
+        keys = await in_peer_lane(_client_keys, pubkey, addr)
+        lane = await in_peer_lane(_lane_of, pubkey)
         n = _price().price(pubkey, action, lane)
-        return JSONResponse(await asyncio.to_thread(_gate().quote, pubkey, keys, action, n))
+        return JSONResponse(await in_peer_lane(_gate().quote, pubkey, keys, action, n))
     except Exception as e:                       # no identity configured → no gate
         logger.warning(f"gate quote unavailable: {e}")
         return JSONResponse({"error": "gate unavailable"}, status_code=503)
@@ -372,12 +392,136 @@ class _CIHeaders(dict):
         return super().get(key.lower(), default)
 
 
+# What a request body may be, by route prefix — the first match wins. Every
+# peer request is a few fields, a list of at most 10 000 ids, or a sealed
+# payload; the largest is a support bundle, and only the master takes one
+# (routers/peer_diag). Mirrors the launcher's 1 MiB client_max_size.
+BODY_CAPS = (
+    ("/api/diag/bundle", 32 * 1024 * 1024 + 4096),
+    ("/api/sync/push/", 16 * 1024 * 1024),
+    ("/api/", 1024 * 1024),
+)
+BODY_CAP_DEFAULT = 64 * 1024
+# A body arrives whole within this, or the request ends (408).
+BODY_DEADLINE_S = 60
+# Bodies read at once — what the caps can cost together. Larger bodies
+# take their own few slots, so a flood of them never holds the small ones.
+BODY_SLOTS = 256
+BODY_SLOTS_LARGE = 4
+BODY_SLOT_WAIT_S = 10
+
+
+def body_cap(path: str) -> int:
+    return next((cap for prefix, cap in BODY_CAPS if path.startswith(prefix)), BODY_CAP_DEFAULT)
+
+
+class _BodyRefused(Exception):
+    def __init__(self, status: int, error: str):
+        self.status, self.error = status, error
+
+
+class PeerBodyGuard:
+    """The body cap, before anything reads a body: a declared length over
+    the route's cap is refused unread, a body that grows past it is refused
+    at the chunk that crosses it, and one that has not arrived whole within
+    BODY_DEADLINE_S is refused too. A request with a body takes one of the
+    slots first, so the bodies held at once are bounded together. Sits
+    inside the per-address limiter and outside PeerAuthMiddleware, which
+    buffers identity-bound bodies to check their signatures."""
+
+    def __init__(self, app):
+        self.app = app
+        self._slots = None
+
+    def _semaphores(self):
+        if self._slots is None:          # born on the serving loop
+            self._slots = (asyncio.Semaphore(BODY_SLOTS), asyncio.Semaphore(BODY_SLOTS_LARGE))
+        return self._slots
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = _CIHeaders(scope["headers"])
+        cap = body_cap(scope["path"])
+        declared = headers.get("content-length")
+        chunked = "chunked" in (headers.get("transfer-encoding") or "").lower()
+        if declared is None and not chunked:
+            return await self.app(scope, receive, send)
+        try:
+            declared_n = int(declared) if declared is not None else None
+        except ValueError:
+            return await _refuse(send, 400, "invalid content-length")
+        if declared_n is not None and (declared_n < 0 or declared_n > cap):
+            return await _refuse(send, 413, "body too large")
+        if declared_n == 0:
+            return await self.app(scope, receive, send)
+
+        slot = self._semaphores()[1 if cap > 1024 * 1024 else 0]
+        try:
+            await asyncio.wait_for(slot.acquire(), BODY_SLOT_WAIT_S)
+        except asyncio.TimeoutError:
+            return await _refuse(send, 503, "busy", retry_after=5)
+
+        deadline = time.monotonic() + BODY_DEADLINE_S
+        state = {"read": 0, "done": False, "started": False}
+
+        async def bounded_receive():
+            if state["done"]:
+                return await receive()          # the body is whole: disconnect only
+            left = deadline - time.monotonic()
+            try:
+                message = await asyncio.wait_for(receive(), max(left, 0.001))
+            except asyncio.TimeoutError:
+                raise _BodyRefused(408, "body not received in time") from None
+            if message["type"] == "http.request":
+                state["read"] += len(message.get("body", b""))
+                if state["read"] > cap:
+                    raise _BodyRefused(413, "body too large")
+                state["done"] = not message.get("more_body", False)
+            return message
+
+        async def tracking_send(message):
+            if message["type"] == "http.response.start":
+                state["started"] = True
+            await send(message)
+
+        try:
+            await self.app(scope, bounded_receive, tracking_send)
+        except _BodyRefused as refused:
+            if not state["started"]:
+                await _refuse(send, refused.status, refused.error)
+        finally:
+            slot.release()
+
+
+async def _refuse(send, status: int, error: str, retry_after: Optional[int] = None) -> None:
+    payload = json.dumps({"error": error}).encode()
+    headers = [(b"content-type", b"application/json"),
+               (b"content-length", str(len(payload)).encode()),
+               (b"connection", b"close")]
+    if retry_after:
+        headers.append((b"retry-after", str(retry_after).encode()))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": payload})
+
+
 app.add_middleware(PeerAuthMiddleware)
+app.add_middleware(PeerBodyGuard)
 
 _hits: dict[str, list[float]] = defaultdict(list)
 _health_hits: dict[str, list[float]] = defaultdict(list)
 _search_hits: dict[str, list[float]] = defaultdict(list)
 _search_global: list[float] = []
+_slice_global: dict[str, list[float]] = {p: [] for p in SLICE_PATHS}
+
+
+def _slice_allowed(path: str, now: float) -> bool:
+    stamps = [t for t in _slice_global[path] if now - t < RATE_LIMIT_WINDOW]
+    _slice_global[path] = stamps
+    if len(stamps) >= SLICE_RATE_GLOBAL:
+        return False
+    stamps.append(now)
+    return True
 
 
 def _search_allowed(ip: str, now: float) -> bool:
@@ -425,6 +569,8 @@ async def rate_limit(request: Request, call_next):
     if len(recent) >= RATE_LIMIT_PER_MINUTE:
         bucket[ip] = recent
         return _rate_limited(recent, now)
+    if request.url.path in _slice_global and not _slice_allowed(request.url.path, now):
+        return _rate_limited(_slice_global[request.url.path], now)
     recent.append(now)
     bucket[ip] = recent
     if len(bucket) > 10_000:                   # bound the tables under a flood
@@ -432,6 +578,28 @@ async def rate_limit(request: Request, call_next):
             for k in [k for k, v in table.items() if not v or now - v[-1] > RATE_LIMIT_WINDOW]:
                 table.pop(k, None)
     return await call_next(request)
+
+
+HEALTH_TTL_S = 60.0
+_health_counts_at = {"at": float("-inf"), "value": None}
+
+
+def _dump_and_slice_counts() -> dict:
+    """What /health says about the dumps and the slice inventories — five
+    queries, so read at most once a HEALTH_TTL_S (every requester probes
+    before it asks) and on the peer lane, like the launcher's."""
+    from routers.sync import mb_slice_queries
+    mb_slices = 0
+    if mb_slice_queries is not None:
+        try:
+            with get_conn() as conn:
+                mb_slices = mb_slice_queries.count_slice_blobs(conn)
+        except Exception as e:
+            logger.debug(f"slice inventory unreadable ({e}) — 0")   # absent until the first slice lands
+    lb_slices, lb_slices_version = lb_inventory()
+    return {"mb_dump": mb_dump_version(), "mb_slices": mb_slices,
+            "lb_dump": lb_dump_version(), "lb_slices": lb_slices,
+            "lb_slices_version": lb_slices_version}
 
 
 @app.get("/health")
@@ -444,16 +612,9 @@ async def health() -> dict:
     in its LAN beacon only while it is on (desktop/p2p/lan_discovery.py)."""
     from config import settings
     from p2p_identity import served_certificate
-    mb_slices = 0
-    try:
-        from db_pool import get_conn
-        from routers.sync import mb_slice_queries
-        if mb_slice_queries is not None:
-            with get_conn() as conn:
-                mb_slices = mb_slice_queries.count_slice_blobs(conn)
-    except Exception:
-        pass   # table absent until the first slice lands — 0 is the truth
-    lb_slices, lb_slices_version = lb_inventory()
+    now = time.monotonic()
+    if now - _health_counts_at["at"] >= HEALTH_TTL_S:
+        _health_counts_at.update(at=now, value=await in_peer_lane(_dump_and_slice_counts))
     node_id = node_pubkey_hex()
     cert = served_certificate(settings)
     return {
@@ -462,11 +623,7 @@ async def health() -> dict:
         "node_id": node_id,
         "sharing": sharing_enabled(),
         "birth_cert": cert if cert is not None and node_id and cert["pubkey"] == node_id else None,
-        "mb_dump": mb_dump_version(),
-        "mb_slices": mb_slices,
-        "lb_dump": lb_dump_version(),
-        "lb_slices": lb_slices,
-        "lb_slices_version": lb_slices_version,
+        **_health_counts_at["value"],
         "capabilities": SYNC_CAPABILITIES,
         # Version + counts of the holdings filter (None until built): the
         # asker prices fetching it against sending its own gaps.
