@@ -643,9 +643,10 @@ def call_codex_oneshot(
 ) -> Optional[str]:
     """One-shot codex call, text in and text out — `system_prompt` as its
     instructions; no MCP server, no shell, no web. The harness's own tools
-    have no off switch and stay: apply_patch (the read-only sandbox refuses
-    it), wait, request_user_input and, by version, update_plan or the MCP
-    resource readers (with no server to read). `--ephemeral` so title
+    have no off switch and stay: exec (the code-mode host the others sit
+    in), apply_patch (the read-only sandbox refuses it), wait,
+    request_user_input and, by version, update_plan or the MCP resource
+    readers (with no server to read). `--ephemeral` so title
     generations don't litter session storage. Returns the final agent
     message text, or None on any failure — callers treat title generation
     as best-effort."""

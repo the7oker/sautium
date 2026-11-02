@@ -252,7 +252,7 @@ def _codex_rosters() -> dict:
     return _CODEX_ROSTERS[version]
 
 
-def test_the_codex_the_image_installs_has_its_tool_sets_measured():
+def test_the_codex_the_lockfile_pins_has_its_tool_sets_measured():
     pinned = json.loads((BACKEND / "agents" / "codex" / "package.json").read_text(
         encoding="utf-8"))["dependencies"]["@openai/codex"]
     assert pinned in _CODEX_ROSTERS
@@ -512,7 +512,8 @@ def test_a_docker_library_turn_reads_the_catalogue_and_is_refused_the_settings(
         server["args"] = [str(BACKEND.parent / "mcp" / Path(server["args"][0]).name)]
     path.write_text(json.dumps(config), encoding="utf-8")
     api = claude([
-        {"tool": "mcp__postgres__query", "input": {"sql": "SELECT count(*) AS n FROM artists"}},
+        {"tool": "mcp__postgres__query",
+         "input": {"sql": "SELECT 'artists-read:' || count(*) AS n FROM artists"}},
         {"tool": "mcp__postgres__query", "input": {"sql": "SELECT value FROM user_settings"}},
         {"text": "ok"},
     ])
@@ -521,6 +522,7 @@ def test_a_docker_library_turn_reads_the_catalogue_and_is_refused_the_settings(
 
     assert done.error is None
     results = _results(api)
-    assert '[{"n":' in results
+    # A token without quotes: each CLI wraps and escapes an MCP answer its own way
+    assert "artists-read:" in results
     assert results.count("permission denied") == 1
     assert "permission denied for table user_settings" in results

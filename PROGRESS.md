@@ -566,7 +566,8 @@ implementation details live in the code, DB and git history.
   and no key reaches the CLI's environment — the backend drops the
   node's credentials before any child starts (`serving.hold_secrets`,
   2026-11-02; before it the runner popped the keys when auth.json
-  existed): billing must not silently leave the subscription. Resume handle: `chat_sessions.codex_thread_id` next to
+  existed): billing must not silently leave the subscription. Resume
+  handle: `chat_sessions.codex_thread_id` next to
   `claude_session_id` — per-agent columns, switching providers
   mid-session resumes each agent's own thread. No sessions sub-mount for
   `~/.codex` (unlike claude_sessions): codex indexes threads in sqlite
