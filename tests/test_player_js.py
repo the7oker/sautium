@@ -632,3 +632,29 @@ def test_the_transport_offers_play_while_another_app_holds_the_output():
         [True, True, "Another app is playing through HQPlayer Desktop — Play takes it back"],
         [True, True, "Another app took HQPlayer Desktop — Play takes it back at 1:23"],
         [False, False, ""]]
+
+
+def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():
+    """N-20: while the play gate — or a scan that found the renderer
+    elsewhere — attaches the renderer again where it answers now, Now
+    Playing says so beside the track, and both transport buttons spin and
+    take no tap: a press waiting on it is seen as one in flight. The phone
+    stood silent for 9 s, and the person picked it again (2026-11-01)."""
+    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
+            "position_formatted": "6:45", "length_formatted": "7:22",
+            "output": {"type": "dlna", "label": "Sautium Player", "attached": True}}
+    statuses = [{**base, "state": "stopped", "connecting": "Sautium Player"},
+                {**base, "state": "paused", "connecting": "Sautium Player"},
+                {**base, "state": "paused"}]
+    proc = subprocess.run([NODE, "-e", _BUTTONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
+                          input=json.dumps(statuses).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert json.loads(proc.stdout) == [[True, True, False, False, True], [True, True, False, False, True],
+                                       [False, False, True, True, True]]
+    # The spot the lost renderer left is said once it is attached; not before
+    statuses[0]["resume"] = {"index": 1, "position": 405}
+    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
+                          input=json.dumps(statuses).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert [tag for _np, _mp, tag in json.loads(proc.stdout)] == [
+        "Connecting to Sautium Player…", "Connecting to Sautium Player…", ""]

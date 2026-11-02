@@ -774,6 +774,7 @@ async def _scan_run():
     _hqp_discovered = hqps
 
     fresh: dict[str, dict] = {}
+    reached: dict[str, list] = {}      # every address this scan described each renderer at
     pins = _dlna_pins()
     known = {**_dlna_discovered, **pins}
     for loc in sorted(set(found.values())):
@@ -788,6 +789,7 @@ async def _scan_run():
         # where it used to be stays attached to it, so a phone found on the
         # LAN keeps its tunnel address as a fallback and vice versa.
         key = udn_key(info["udn"])
+        reached.setdefault(key, []).append(info["location"])
         if key in fresh:
             # The same renderer at another address in the same scan (a phone
             # answering on the LAN and through the tunnel): one record, the
@@ -804,6 +806,14 @@ async def _scan_run():
         for key, info in fresh.items():
             if key in pins or key == chosen:
                 note_renderer_location(key, info["location"])
+        if chosen in reached:
+            # The active output follows the renderer to where the scan
+            # reached it, when its own address no longer answers
+            try:
+                await asyncio.to_thread(manager.renderer_reached, chosen, reached[chosen])
+            except Exception as e:
+                logger.warning("the output did not move to %s, where the scan reached %s (%s)",
+                               reached[chosen][0], fresh[chosen].get("name"), e)
     renderers = list(fresh.values())
     return {"renderers": renderers, "hqplayers": _hqplayer_entries()}
 

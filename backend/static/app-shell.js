@@ -991,10 +991,11 @@
 
   // The transport button spins while a start is in flight — a slow output's
   // track change (a renderer's `loading`), HQPlayer making a start before
-  // any sound leaves (`starting`) — and takes no tap meanwhile (.is-loading):
+  // any sound leaves (`starting`), a renderer attached again where it
+  // answers now (`connecting`) — and takes no tap meanwhile (.is-loading):
   // a second press would only ask for it again.
   function transportBusy(data) {
-    return data.state === 'loading' || !!data.starting;
+    return data.state === 'loading' || !!data.starting || !!data.connecting;
   }
 
   const sheet = {
@@ -1339,10 +1340,13 @@
       // or, for a stopped HQPlayer, the spot the play press resumes (a
       // paused one whose playlist was taken afresh is left stopped: never
       // "paused"). Another app on the output (`source` external): the track
-      // its takeover cut, at the second Play takes the output back at.
+      // its takeover cut, at the second Play takes the output back at. A
+      // renderer being attached again where it answers now (`connecting`,
+      // its name): said while it lasts, so a press waiting on it is seen.
       const b = data.building, r = data.resume;
       const out = (data.output && data.output.label) || 'this output';
-      const tag = b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
+      const tag = data.connecting ? `Connecting to ${data.connecting}…`
+        : b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
         : data.not_answering ? 'HQPlayer is not answering'
         : data.rebuilding ? 'HQPlayer is taking the queue again'
         : data.source === 'external'

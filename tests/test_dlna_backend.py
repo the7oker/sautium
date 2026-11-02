@@ -1908,3 +1908,118 @@ def test_a_renderer_picked_again_while_the_play_gate_attaches_it_loads_the_track
     assert len(tunnel.called("SetAVTransportURI")) == 1
     wait_for(lambda: tunnel.called("Seek"), what="the start sought")
     assert [s["Target"] for s in tunnel.called("Seek")] == [dlna_backend._rel_time(left_at)]
+
+
+# -- N-20: the play gate — where the renderer answers now, said while it attaches ----
+
+
+class _Swallowing:
+    """An address a device has left: it neither answers nor refuses — a
+    connect there waits out its whole timeout. A listener whose backlog is
+    full drops every further SYN; the address is the renderer's own, so its
+    fake must have stopped answering first."""
+
+    def __init__(self, port: int):
+        self._hole = socket.socket()
+        self._hole.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._hole.bind(("127.0.0.1", port))
+        self._hole.listen(0)
+        self._held = [socket.create_connection(("127.0.0.1", port), timeout=1)]
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+
+    def close(self) -> None:
+        for s in [*self._held, self._hole]:
+            s.close()
+
+
+def _lost_paused(manager, r: FakeRenderer) -> float:
+    """Paused, the renderer leaves the network: the node loses it there.
+    Returns the second it was left at."""
+    manager.backend().pause()
+    wait_for(lambda: manager.latest_status.get("state") == "paused" and r.state == "PAUSED_PLAYBACK",
+             what="paused")
+    r.stop_answering()
+    wait_for(lambda: manager.latest_status.get("resume"), timeout=15, what="the renderer lost")
+    return manager.latest_status["resume"]["position"]
+
+
+def _pressed(picker) -> float:
+    """Play, as the person presses it; the seconds the press took."""
+    started = time.monotonic()
+    assert picker.play() == {"ok": True}
+    return time.monotonic() - started
+
+
+def _statuses(manager) -> list:
+    """Every status the manager publishes from now on, as published."""
+    seen, push = [], manager._push_status
+    manager._push_status = lambda data: (push(data), seen.append(dict(data)))[0]
+    return seen
+
+
+def test_a_scan_that_reaches_the_renderer_through_a_tunnel_moves_the_output_there(
+        tmp_path, proxy, renderers, manager, picker, quality):
+    """N-20, the owner's Tailscale requirement, there: the phone, paused on
+    the LAN, goes off Wi-Fi onto a tunnel. A scan that reaches it through
+    the tunnel moves the output there at once — at the spot, nothing
+    started, saying meanwhile that it connects — and the first Play goes
+    there with no wait on the LAN address it left (9 s, 2026-11-01): the
+    track starts once, at the second it was left at."""
+    lan, tunnel = renderers(name="Phone"), renderers(name="Phone")
+    tunnel.udn = lan.udn
+    _on_renderer(manager, lan, [track(tmp_path, 1, seconds=90.0)])
+    _playing_at(manager, lan, 3)
+    left_at = _lost_paused(manager, lan)                  # Wi-Fi off
+    gone = _Swallowing(lan.port)
+    seen = _statuses(manager)
+    picker.found[:] = [tunnel.location]                   # the tunnel up; the person scans
+    asyncio.run(picker._scan_run())
+    moved = manager.active
+    assert moved._renderer["location"] == tunnel.location and moved.healthy(), "the output moved at the scan"
+    st = manager.latest_status
+    assert (st["state"], st["track_index"], st["position"]) == ("paused", 1, left_at)
+    assert "connecting" not in st and not tunnel.called("SetAVTransportURI")
+    moving = [s for s in seen if s.get("state") != "paused"]
+    assert moving and all(s.get("connecting") == "Phone" for s in moving)
+    assert "disconnected" not in [s.get("state") for s in seen]
+    changes = manager.output_changes()
+    assert _pressed(picker) < dlna_backend._PROBE_TIMEOUT - 1, "the press waited on the address left"
+    assert manager.output_changes() == changes and manager.active is moved
+    wait_for(lambda: tunnel.state == "PLAYING" and tunnel.called("Seek"), what="the phone playing at the tunnel")
+    assert [s["Target"] for s in tunnel.called("Seek")] == [dlna_backend._rel_time(left_at)]
+    assert len(tunnel.called("SetAVTransportURI")) == 1
+    gone.close()
+
+
+def test_back_on_the_lan_the_first_play_attaches_the_renderer_there_with_no_wait_on_the_tunnel(
+        tmp_path, proxy, renderers, manager, picker, quality):
+    """N-20, the owner's Tailscale requirement, back: the phone played
+    through the tunnel, paused, and came back on Wi-Fi, the tunnel down; no
+    scan. The first Play attaches it at its LAN address with no wait on the
+    tunnel address (11 s, 2026-11-01: a probe, an UNSUBSCRIBE and an attach
+    each waited out the address it had left), saying meanwhile that it
+    connects — never "disconnected" — and starts the track once, at the
+    second it was left at."""
+    lan, tunnel = renderers(name="Phone"), renderers(name="Phone")
+    tunnel.udn = lan.udn
+    # Attached through the tunnel, the LAN address known behind it, as a
+    # scan through the tunnel leaves the chosen record
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": {
+        **tunnel.record, "locations": [tunnel.location, lan.location]}})
+    manager.activate("dlna", renderer=manager.store["output.dlna_renderer"])
+    assert manager.replace_queue([track(tmp_path, 1, seconds=90.0)], play=True)[0] == 1
+    _playing_at(manager, tunnel, 3)
+    left_at = _lost_paused(manager, tunnel)               # the tunnel down
+    gone = _Swallowing(tunnel.port)
+    seen = _statuses(manager)
+    assert _pressed(picker) < dlna_backend._PROBE_TIMEOUT - 1, "the press waited on the address left"
+    assert manager.active._renderer["location"] == lan.location
+    wait_for(lambda: lan.state == "PLAYING" and lan.called("Seek"), what="the phone playing on the LAN")
+    assert [s["Target"] for s in lan.called("Seek")] == [dlna_backend._rel_time(left_at)]
+    assert len(lan.called("SetAVTransportURI")) == 1
+    connecting = [s for s in seen if s.get("connecting")]
+    assert connecting and all(s["connecting"] == "Phone" for s in connecting)
+    assert "disconnected" not in [s.get("state") for s in seen]
+    assert not manager.latest_status.get("connecting")
+    gone.close()

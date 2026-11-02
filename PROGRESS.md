@@ -3356,6 +3356,33 @@ answers, so a play press made on it goes on there. Lesson: an intent
 belongs to the instance it was made on — letting the instance go must end
 what it was doing, at the one place every request passes.
 
+### The play gate goes where the renderer answers, and says so (2026-11-02)
+
+Off Wi-Fi onto a tunnel, the phone's first Play reached it after 9 s, and
+back on the LAN after 11 s, with nothing on screen meanwhile. A scan had
+already reached the phone through the tunnel, but the output stayed attached
+at the LAN address until a press found it lost there, and each re-attach
+waited out the address left three times: the gate probed it first
+(`reachable`, 5 s), the lost instance's UNSUBSCRIBE went to it (3 s), and
+the attach probed every known address together and waited for the slowest
+(5 s). An address a device has left swallows what is sent to it: any wait
+on it costs its whole timeout.
+
+Now a scan that reaches the active renderer elsewhere moves the output there
+at once when its own address no longer answers — lost, or a probe it fails
+— at the spot, nothing started (`PlaybackManager.renderer_reached`): the
+first Play then goes at once. The gate does not probe an instance known lost
+again, the attach describes the first address that answers
+(`DlnaBackend._create_device`), and a lost instance's UNSUBSCRIBE is not
+waited for. While the output attaches again every status says so
+(`connecting`, the renderer's name) and never "disconnected", which hid the
+mini player: Now Playing says "Connecting to ‹renderer›…" beside the track,
+and both transport buttons spin as for a start in flight. Still waited for:
+the probe of the address a renderer is attached at while the node has no
+word that it left — a renderer stopped, not paused, whose network changed
+(no poll ran to lose it); a scan moves it first. Lesson: wait on an
+address only while nothing says the device is elsewhere, and say the wait.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

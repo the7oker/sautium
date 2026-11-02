@@ -78,6 +78,9 @@ class PlaybackManager:
         # What the output is lent to (hold), with the job's progress; every
         # status payload carries it while it lasts.
         self._hold: Optional[dict] = None
+        # The renderer the output is being attached to again (_attach_again),
+        # by name: every status payload says so while it lasts.
+        self._connecting: Optional[str] = None
         # Output changes so far, told as each is over: work one cut short — a
         # filler's add the link did not send — goes on through the output
         # there is then (wait_for_output_change)
@@ -227,42 +230,90 @@ class PlaybackManager:
         """The active output where its device answers, under the output-change
         locks (ensure_active; output_change for a renderer picked again): the
         instance as it is when it answers where it talks to its device —
-        `probed` was asked already — else the output attached again from the
-        persisted settings, at the spot the instance left."""
+        `probed` was asked already, and one known lost is not asked again: its
+        address is the one that stopped answering — else the output attached
+        again from the persisted settings, at the spot the instance left."""
         b = self._active
-        if b is not None and b is not probed:
+        if b is not None and b is not probed and b.healthy():
             self._probe(b)
         if b is not None and b.healthy():
             return b
         from routers.settings import _read
-        otype = _read("output.type")
-        if otype is None:
+        if _read("output.type") is None:
             return self.backend()   # legacy: honest ConnectionError
+        self._attach_again(b)
+        return self.backend()
+
+    def renderer_reached(self, udn: str, locations: list) -> None:
+        """A scan reached the renderer `udn` at `locations`
+        (routers.player._scan_run). When it is the active output and its
+        instance talks to it elsewhere — at an address it was lost at, or one
+        that does not answer a probe — the output moves to where the scan
+        reached it, its spot kept, nothing started: the first Play then goes
+        at once, with no probe of the address it left (a phone moved to a
+        tunnel waited 9 s on its LAN address first, 2026-11-01). An instance
+        whose own address still answers stays as it is."""
+        def stays(b: Optional[PlayerBackend]) -> bool:
+            return (b is None or b.id != "dlna" or not b.drives({"udn": udn})
+                    or b.location in locations)
+        if stays(self._active):
+            return
+        with self._mutate_lock, self._ensure_lock:
+            b = self._active
+            if stays(b) or (b.healthy() and b.answers_here()):
+                return
+            logger.info("a scan reached %s at %s — the output moves there", b.label, locations[0])
+            self._attach_again(b)
+
+    def _attach_again(self, b: Optional[PlayerBackend]) -> None:
+        """The output attached again from the persisted settings, under the
+        output-change locks, at the spot the instance `b` left (None: nothing
+        was attached). A renderer is first looked for where it answers now —
+        every address it is known at, at once: offline only when none does —
+        and while it attaches every status says so (`connecting`: its name),
+        never "disconnected": it is the same output, and a press waiting on
+        it shows as one in flight. The instance let go sends no Stop; the
+        attach resumes at the spot and starts nothing."""
+        from routers.settings import _read
+        otype = _read("output.type")
+        renderer = None
         if otype == "dlna":
             renderer = _read("output.dlna_renderer")
             if not renderer:
                 raise ConnectionError("No DLNA renderer configured")
-            from playback.dlna_backend import renderer_online
-            if not renderer_online(renderer):
-                raise ConnectionError(
-                    f"'{renderer.get('name', 'DLNA renderer')}' is offline "
-                    "— turn it on, or pick another output in "
-                    "Settings → Audio output")
-        logger.info("%s '%s' output — (re)attaching",
-                    "unhealthy" if b is not None else "inactive", otype)
-        spot = None
-        if b is not None:
+        label = (renderer.get("name") or "DLNA renderer") if renderer is not None else None
+        with self._connecting_to(label):
+            if renderer is not None:
+                from playback.dlna_backend import renderer_online
+                if not renderer_online(renderer):
+                    raise ConnectionError(
+                        f"'{label}' is offline — turn it on, or pick another "
+                        "output in Settings → Audio output")
+            logger.info("%s '%s' output — attaching it again",
+                        "unhealthy" if b is not None else "inactive", otype)
             # Where the lost instance left the queue: the attach resumes
             # there, the queue and the second as they were
-            spot = self.spot()
-            # A clean detach of the dead instance — no Stop, and no switch
-            # away: the same output is attached again
-            self.activate(None, stop_old=False)
-        self.activate(otype, spot=spot,
-                      device_id=_read("output.local_device"),
-                      exclusive=bool(_read("output.local_exclusive")),
-                      renderer=_read("output.dlna_renderer"))
-        return self.backend()
+            spot = self.spot() if b is not None else None
+            self.activate(otype, spot=spot, stop_old=False, again=True,
+                          device_id=_read("output.local_device"),
+                          exclusive=bool(_read("output.local_exclusive")),
+                          renderer=renderer)
+
+    @contextmanager
+    def _connecting_to(self, label: Optional[str]) -> Iterator[None]:
+        """While the output attaches again to the renderer `label`: every
+        status payload names it (`connecting`) — said at once, taken back
+        once the attach is over, however it ends. None: nothing to say."""
+        if label is None:
+            yield
+            return
+        self._connecting = label
+        self._push_status(dict(self._latest_status))
+        try:
+            yield
+        finally:
+            self._connecting = None
+            self._push_status(dict(self._latest_status))
 
     @staticmethod
     def _probe(b: PlayerBackend) -> None:
@@ -300,7 +351,7 @@ class PlaybackManager:
 
     def activate(self, output_type: Optional[str], *, stop_old: bool = True,
                  by_hold: bool = False, spot: Optional[Spot] = None,
-                 **cfg) -> Optional[str]:
+                 again: bool = False, **cfg) -> Optional[str]:
         """Switch the active output. The old backend is stopped (while it
         still believes its device reachable) and shut down; the canonical
         queue survives the switch; playback does NOT resume here — a
@@ -324,12 +375,16 @@ class PlaybackManager:
 
         `spot` — where the output before it stood (spot(), read by the
         caller before the detach) — is where the new one resumes, the second
-        in the track included; without it, the last slot from 0."""
+        in the track included; without it, the last slot from 0.
+
+        `again` — the output of this type attached afresh, the instance
+        before it let go (the play gate, a renderer a scan found elsewhere):
+        no "disconnected" between them, as an output that stays chosen."""
         with self._active_lock, self._changing_output():
             if not by_hold:
                 self._refuse_if_held()
             if (output_type is not None and self._active is not None
-                    and self._active.id == output_type):
+                    and self._active.id == output_type and not again):
                 return None
             # The slot that was active on the OLD output — seeded into the
             # new backend after attach so play continues from the same track.
@@ -597,6 +652,10 @@ class PlaybackManager:
             new_data["hold"] = self._hold
         else:
             new_data.pop("hold", None)      # a re-published payload from the held stretch
+        if self._connecting is not None:
+            new_data["connecting"] = self._connecting
+        else:
+            new_data.pop("connecting", None)
         if new_data != self._latest_status:
             self._latest_status = new_data
             self._status_version += 1

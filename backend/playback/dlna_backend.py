@@ -167,6 +167,16 @@ _shared_lock = threading.Lock()
 _shared_loop: Optional[asyncio.AbstractEventLoop] = None
 _shared_notify = None
 _shared_notify_host: Optional[str] = None   # address its callback URL names
+# The UNSUBSCRIBEs of instances let go while lost, which nobody waits for
+# (_async_shutdown): held until they end — the loop keeps only weak
+# references to its tasks
+_detaching: set = set()
+
+
+def _unsubscribed(task: asyncio.Task) -> None:
+    _detaching.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.debug("GENA unsubscribe: %s", task.exception())
 
 
 def _ensure_loop() -> asyncio.AbstractEventLoop:
@@ -486,6 +496,16 @@ class DlnaBackend(PlayerBackend):
         from routers.player import udn_key
         return bool(renderer) and udn_key(renderer.get("udn")) == udn_key(self._renderer.get("udn"))
 
+    @property
+    def location(self) -> Optional[str]:
+        """The address this instance talks to its renderer at."""
+        return self._renderer.get("location")
+
+    def answers_here(self) -> bool:
+        """Does the renderer answer at the address this instance talks to it
+        at (a TCP connect, the probe window at most)?"""
+        return renderer_reachable(self.location)
+
     def capabilities(self) -> Capabilities:
         return Capabilities(volume=True, volume_kind="percent", seek=True,
                             gapless=False)
@@ -592,32 +612,38 @@ class DlnaBackend(PlayerBackend):
         self._emit_now("paused")
 
     async def _create_device(self, factory):
-        """Build the device from whichever known address answers.
+        """Build the device from whichever known address answers first.
 
         A renderer moves between networks — the same phone is on the LAN at
-        home and on a tunnel from a train — so the stored address is a guess
-        with a good prior, not a fact. Trying it first and the rest after
-        costs nothing when the guess holds and is the difference between
-        working and "device unavailable" when it does not."""
+        home and on a tunnel from a train — so a stored address is a guess,
+        not a fact: every known one is asked at once.
+
+        A device that has left a network does not refuse the connection, it
+        swallows it, so walking the list with full description fetches let one
+        dead address spend the entire attach budget before a live one was
+        ever tried. Probed together, they still waited for the slowest: the
+        dead address's whole probe window, 5 s of every attach of a phone
+        moved to a tunnel (2026-11-01). The first address that answers is
+        described now; the others are let go."""
         known = known_locations(self._renderer)
 
-        # Probe first, and all at once. A device that has left a network does
-        # not refuse the connection, it swallows it, so walking the list with
-        # full description fetches lets one dead address spend the entire
-        # attach budget before a live one is ever tried — which is precisely
-        # how this failed. A TCP connect costs the probe window worst case
-        # and they overlap.
-        alive = [loc for loc, ok in zip(known, await asyncio.gather(
-            *(asyncio.to_thread(renderer_reachable, loc) for loc in known)
-        )) if ok]
-
-        for loc in alive:
-            try:
-                return await factory.async_create_device(loc), loc
-            except Detached:
-                raise
-            except Exception as e:
-                logger.debug("renderer answered at %s but described badly: %s", loc, e)
+        async def probe(loc: str) -> tuple:
+            return loc, await asyncio.to_thread(renderer_reachable, loc)
+        probes = [asyncio.ensure_future(probe(loc)) for loc in known]
+        try:
+            for answer in asyncio.as_completed(probes):
+                loc, ok = await answer
+                if not ok:
+                    continue
+                try:
+                    return await factory.async_create_device(loc), loc
+                except Detached:
+                    raise
+                except Exception as e:
+                    logger.debug("renderer answered at %s but described badly: %s", loc, e)
+        finally:
+            for p in probes:
+                p.cancel()
         raise DlnaAttachError(
             f"'{self.label}' did not answer at any known address "
             f"({', '.join(urlparse(t).hostname or t for t in known) or 'none'})"
@@ -689,11 +715,22 @@ class DlnaBackend(PlayerBackend):
             self._preload_task.cancel()
         if self._resubscribe_task:
             self._resubscribe_task.cancel()
+        if self._dmr is None:
+            return
+        unsubscribe = asyncio.ensure_future(self._dmr.async_unsubscribe_services())
+        if self._gone:
+            # Lost where it was attached: the subscriptions are let go at
+            # the call's first step, before any request — no renewal after
+            # this — and the renderer's answer at that address is not waited
+            # for. Every attach of a phone moved to a tunnel waited 3 s on its
+            # LAN address here first (2026-11-01).
+            _detaching.add(unsubscribe)
+            unsubscribe.add_done_callback(_unsubscribed)
+            return
         try:
-            if self._dmr:
-                # Unsubscribe is HTTP to the renderer — a powered-off or
-                # dozing device would hang it far past the shutdown budget.
-                await asyncio.wait_for(self._dmr.async_unsubscribe_services(), 3)
+            # Unsubscribe is HTTP to the renderer — a powered-off or
+            # dozing device would hang it far past the shutdown budget.
+            await asyncio.wait_for(unsubscribe, 3)
         except Exception as e:
             logger.debug("GENA unsubscribe: %s", e)
 
