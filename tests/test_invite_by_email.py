@@ -1,9 +1,13 @@
 """The Web UI's calls to the Worker (backend/routers/p2p.py): the Worker sends
 invites only from an account with a verified email, so an account without one
-is told so before any request leaves the node; and a refusal for volume tells
-the person how long to wait, as the Worker said it."""
+is told so before any request leaves the node, and the Friends screen says
+where to verify; and a refusal for volume tells the person how long to wait,
+as the Worker said it."""
 
 import asyncio
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +53,29 @@ def test_an_invite_needs_a_verified_email_before_it_leaves_the_node(monkeypatch)
     sent = _account(monkeypatch, verified=True)
     assert asyncio.run(p2p.invite_by_email(request))["status"] == "sent"
     assert sent == ["/send-invite"]
+
+
+_HINTS = r"""
+for (const status of [{ verified: true, email: 'a@example.org' }, { verified: false, email: 'a@example.org' },
+                      { verified: false, email: '' }, {}]) {
+  process.stdout.write(friendsInviteHint(status) + '\n');
+}
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_friends_screen_tells_an_account_without_a_verified_email_where_to_verify():
+    """No hint promises an invite the Worker would refuse: an address not yet
+    verified, or none, is told where to verify. app-shell.js's own function,
+    run as written."""
+    src = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
+    assert "unverified badge" not in src
+    fn = re.search(r"\n  function friendsInviteHint\(.*?\) \{\n.*?\n  \}\n", src, re.S).group(0)
+    out = subprocess.run([shutil.which("node"), "-e", "'use strict';" + fn + _HINTS],
+                         capture_output=True, text=True, check=True).stdout.splitlines()
+    unverified = "Verify your email in Profile to send invites — they go out under your verified address."
+    none = "Add and verify an email in Profile to send invites — they go out under your verified address."
+    assert out == ["Send invite — they get a verified email with a link.", unverified, none, none]
 
 
 class _Refusing:

@@ -7413,6 +7413,15 @@
       </div>`;
   }
 
+  // The Friends screen's steady hint. The Worker sends an invite only under
+  // a verified address, so an account without one is told where to verify.
+  function friendsInviteHint(status) {
+    if (status.verified) return 'Send invite — they get a verified email with a link.';
+    return status.email
+      ? 'Verify your email in Profile to send invites — they go out under your verified address.'
+      : 'Add and verify an email in Profile to send invites — they go out under your verified address.';
+  }
+
   async function renderFriends(root) {
     const screen = document.createElement('div');
     screen.className = 'screen friends-screen';
@@ -7497,20 +7506,7 @@
 
     try {
       const status = emailResp && emailResp.ok ? await emailResp.json() : {};
-      // Email invites work in both directions: with a verified sender
-      // the recipient sees a ✅ Verified badge, otherwise ⚠️ Unverified.
-      // We never block — the recipient still gets the invite + intro
-      // text either way; verification just buys trust. The hint
-      // explains the difference so the user can decide whether to
-      // set up email first.
-      if (status.verified) {
-        defaultHint =
-          'Send invite — they get a verified email with a link.';
-      } else {
-        defaultHint = status.email
-          ? 'Email not verified — recipients see an ⚠️ unverified badge. Verify in Settings to remove it.'
-          : 'Without your email recipients see an ⚠️ unverified badge. Set a verified email in Settings for trust.';
-      }
+      defaultHint = friendsInviteHint(status);
       hintEl.textContent = defaultHint;
     } catch (_) {
       // Status check failed; leave the inputs enabled — sending may
