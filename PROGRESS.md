@@ -2271,6 +2271,20 @@ user brings.
   keyed on the signature itself and filled only once one verifies. The
   page signs a read again after `replayed` (the browser's own retry of a
   dropped connection); it never sends a change twice.
+- **What a request may cost before it is judged (2026-11-03).** A body is
+  read whole before anything of the app runs (`serving.BodyLimit`, the
+  outermost middleware): 12 MiB at most — the largest the Web UI sends is a
+  10 MiB avatar — within 120 s, the bodies in flight sharing 48 MiB; past
+  them 413, 408 or 503, and the signature check never meets such a body.
+  The Argon2id derivations are bounded in flight (`device_auth.DERIVE_QUEUE`,
+  four, two running): past that the login is told 503, and the page says
+  the node is busy, not that the password is wrong. A derivation whose
+  caller went stays counted until its thread ends — a thread cannot be
+  stopped. A password login on an anonymous account is refused before any
+  derivation: its door is the PIN. A box the node could not open answers
+  400 marked `channel` (the handshake table keeps 64 and lets the oldest
+  go), and the page seals it once more to a fresh handshake. The Host guard
+  reads the interfaces at most once a second, whatever the literals.
 - **Found on the way:** `portmap._serves_web_ui` still looked for the
   inlined-secret marker of the 2026-08 page, so it recognised no port as
   the Web UI; it now reads the `sautium-webui` health type.

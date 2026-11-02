@@ -12,7 +12,8 @@ five of the ten seconds the launcher gives a stop (2026-10-25).
 
 And what a request names (request_target): every check that admits a
 request reads the scope uvicorn routes on, never a URL Starlette builds
-again from the Host header.
+again from the Host header. And what a request may weigh (BodyLimit): its
+body is read whole, within bounds, before anything else of the app runs.
 
 Light at import: the entrypoint imports it before the database is up.
 """
@@ -48,6 +49,76 @@ def request_target(scope) -> str:
     target = (scope.get("raw_path") or scope["path"].encode()).decode("latin-1")
     query = scope.get("query_string") or b""
     return target + "?" + query.decode("latin-1") if query else target
+
+
+class BodyLimit:
+    """Pure ASGI, outermost: an HTTP request's body is read whole before the
+    app sees the request — at most `cap` bytes, within `deadline` seconds,
+    and the bodies being read or held at once share `budget` bytes. A
+    declared length over the cap is refused before a byte is read (413); a
+    body that grows past it is refused there (413), one still arriving at
+    the deadline is refused (408), one the budget cannot hold is refused
+    (503), and a client that leaves mid-body is answered 400 for the
+    record; the app never runs for any of them. Uvicorn reads a body only
+    as the app asks for it, and Starlette joins what it is given with no
+    ceiling: this is the ceiling, ahead of the signature check that has to
+    read the body."""
+
+    def __init__(self, app, *, cap: int, budget: int, deadline: float) -> None:
+        self.app = app
+        self.cap, self.budget, self.deadline = cap, budget, deadline
+        self.held = 0            # bytes of the bodies read or held now; event-loop only
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        declared = next((v for k, v in scope["headers"] if k == b"content-length"), b"")
+        if declared.isdigit() and int(declared) > self.cap:
+            return await _refuse(send, 413, "request body too large")
+        chunks, size, reserved = [], 0, 0
+        try:
+            try:
+                async with asyncio.timeout(self.deadline):
+                    while True:
+                        message = await receive()
+                        if message["type"] == "http.disconnect":
+                            return await _refuse(send, 400, "request body not received")
+                        chunk = message.get("body", b"")
+                        size += len(chunk)
+                        if size > self.cap:
+                            return await _refuse(send, 413, "request body too large")
+                        if self.held + len(chunk) > self.budget:
+                            return await _refuse(send, 503, "busy: too many bodies in flight")
+                        self.held += len(chunk)
+                        reserved += len(chunk)
+                        chunks.append(chunk)
+                        if not message.get("more_body", False):
+                            break
+            except TimeoutError:
+                return await _refuse(send, 408, "request body not received in time")
+            body = b"".join(chunks)
+            chunks = None
+            handed = False
+
+            async def replay():
+                nonlocal handed
+                if handed:
+                    return await receive()
+                handed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            await self.app(scope, replay, send)
+        finally:
+            self.held -= reserved
+
+
+async def _refuse(send, status: int, detail: str) -> None:
+    payload = ('{"detail": "%s"}' % detail).encode()
+    await send({"type": "http.response.start", "status": status,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(payload)).encode()),
+                            (b"connection", b"close")]})
+    await send({"type": "http.response.body", "body": payload})
 
 
 class EventStream(StreamingResponse):

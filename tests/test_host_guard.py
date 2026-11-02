@@ -23,16 +23,22 @@ TUNNEL = "100.101.102.103"
 @pytest.fixture
 def interfaces(monkeypatch):
     """The addresses `tls_gen.detect_own_ipv4s` reports, mutable per test, with
-    the guard's caches reset and no operator configuration in the way."""
-    state = SimpleNamespace(own=[LAN], scans=0)
+    the guard's caches reset, its clock the test's (`tick`), and no operator
+    configuration in the way."""
+    state = SimpleNamespace(own=[LAN], scans=0, now=1000.0)
 
     def own_ipv4s():
         state.scans += 1
         return list(state.own)
 
+    def tick(seconds):
+        state.now += seconds
+    state.tick = tick
     monkeypatch.setattr(tls_gen, "detect_own_ipv4s", own_ipv4s)
+    monkeypatch.setattr(auth_hmac.time, "monotonic", lambda: state.now)
     monkeypatch.setattr(auth_hmac, "_allowed_hosts", None)
     monkeypatch.setattr(auth_hmac, "_host_misses", {})
+    monkeypatch.setattr(auth_hmac, "_last_scan", float("-inf"))
     monkeypatch.delenv("SAUTIUM_HOST_IPS", raising=False)
     monkeypatch.delenv("SAUTIUM_ALLOWED_HOSTS", raising=False)
     return state
@@ -52,29 +58,42 @@ def test_address_that_comes_up_after_startup_is_learned_once(interfaces):
     interfaces.own.append(TUNNEL)
     assert not auth_hmac.host_allowed(f"{TUNNEL}:18000")   # the refusal is still cached
     auth_hmac._host_misses.clear()
+    interfaces.tick(auth_hmac._SCAN_GAP_S)
     assert auth_hmac.host_allowed(f"{TUNNEL}:18000")
     scans = interfaces.scans
     assert auth_hmac.host_allowed(f"{TUNNEL}:18000")
     assert interfaces.scans == scans                          # in the set now — no rescan
 
 
-def test_unbound_literal_is_refused_and_the_miss_expires(interfaces, monkeypatch):
+def test_unbound_literal_is_refused_and_the_miss_expires(interfaces):
     assert not auth_hmac.host_allowed(f"{TUNNEL}:18000")
     scans = interfaces.scans
     assert not auth_hmac.host_allowed(f"{TUNNEL}:18000")
     assert not auth_hmac.host_allowed(TUNNEL)
     assert interfaces.scans == scans                          # one enumeration per literal
 
-    later = auth_hmac.time.monotonic() + auth_hmac._MISS_TTL_S + 1
-    monkeypatch.setattr(auth_hmac.time, "monotonic", lambda: later)
+    interfaces.tick(auth_hmac._MISS_TTL_S + 1)
     assert not auth_hmac.host_allowed(TUNNEL)
     assert interfaces.scans == scans + 1
 
 
 def test_miss_cache_stays_bounded(interfaces):
     for i in range(auth_hmac._MISS_CAP + 40):
+        interfaces.tick(auth_hmac._SCAN_GAP_S)
         assert not auth_hmac.host_allowed(f"10.9.{i // 256}.{i % 256}")
     assert len(auth_hmac._host_misses) <= auth_hmac._MISS_CAP
+
+
+def test_the_interfaces_are_read_once_per_gap_whatever_the_literals(interfaces):
+    assert auth_hmac.host_allowed(f"{LAN}:8800")
+    startup = interfaces.scans
+    for i in range(50):
+        assert not auth_hmac.host_allowed(f"10.8.0.{i}")
+    assert interfaces.scans == startup + 1
+    interfaces.own.append("10.8.0.7")
+    interfaces.tick(auth_hmac._SCAN_GAP_S)
+    assert auth_hmac.host_allowed("10.8.0.7:8800")            # asked again past the gap: read
+    assert interfaces.scans == startup + 2
 
 
 def test_a_name_is_never_resolved_nor_rescanned(interfaces, monkeypatch):

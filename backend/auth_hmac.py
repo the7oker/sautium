@@ -144,6 +144,8 @@ _allowed_hosts: set | None = None
 _host_misses: dict[str, float] = {}     # IP literal -> monotonic time its refusal expires
 _MISS_TTL_S = 10.0
 _MISS_CAP = 256
+_SCAN_GAP_S = 1.0
+_last_scan = float("-inf")              # monotonic time the interfaces were last read
 
 
 def _allowed_host_set() -> set:
@@ -207,7 +209,10 @@ def _own_ipv4_literal(host: str, allowed: set) -> bool:
     """A literal the startup set does not hold may be an interface that came
     up since. Re-read the interfaces and learn every address they carry; a
     refusal is held for _MISS_TTL_S so a flood of bogus Host headers costs one
-    enumeration per literal, not one per request."""
+    enumeration per literal, not one per request — and the interfaces are
+    read at most once per _SCAN_GAP_S whatever the literals: a literal asked
+    inside the gap is refused unread, and asked again after it, read."""
+    global _last_scan
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
@@ -215,8 +220,9 @@ def _own_ipv4_literal(host: str, allowed: set) -> bool:
     if not isinstance(addr, ipaddress.IPv4Address):
         return False
     now = time.monotonic()
-    if _host_misses.get(host, 0.0) > now:
+    if _host_misses.get(host, 0.0) > now or now - _last_scan < _SCAN_GAP_S:
         return False
+    _last_scan = now
     from tls_gen import detect_own_ipv4s
     new = set(detect_own_ipv4s()) - allowed
     if new:

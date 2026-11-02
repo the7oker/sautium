@@ -240,8 +240,10 @@
   // POST `payload` sealed to a fresh handshake and open the sealed reply.
   // `viaSigned` sends it through the signing wrapper, for the routes that
   // want a signature on top of the box (logout-all, change-identity).
-  // Resolves {ok:true, data, nodePubkey} or {ok:false, status, resp}.
-  async function boxedPost(path, payload, viaSigned) {
+  // Resolves {ok:true, data, nodePubkey} or {ok:false, status, resp}. A box
+  // the node could not open (`channel`: its handshake let go meanwhile — the
+  // node keeps a bounded number) is sealed again once, to a fresh handshake.
+  async function boxedPost(path, payload, viaSigned, again = true) {
     const hs = await handshake();
     const kp = nacl.box.keyPair();
     const nonce = nacl.randomBytes(nacl.box.nonceLength);
@@ -253,12 +255,17 @@
       body: JSON.stringify({ eph: hs.ephB64, client: b64(kp.publicKey),
                              nonce: b64(nonce), box: b64(sealed) }),
     });
+    if (again && r.status === 400 && r.headers.get("X-Sautium-Auth-Error") === "channel") {
+      return boxedPost(path, payload, viaSigned, false);
+    }
     if (!r.ok) return { ok: false, status: r.status, resp: r };
     const env = await r.json();
     const plain = nacl.box.open(unb64(env.box), unb64(env.nonce), hs.eph, kp.secretKey);
     if (!plain) throw new Error("reply box does not open");
     return { ok: true, data: JSON.parse(dec.decode(plain)), nodePubkey: hs.nodePubkey };
   }
+
+  const BUSY = "The node is busy — try again in a moment.";
 
   async function errorDetail(r, fallback) {
     try {
@@ -276,7 +283,8 @@
   //
   // login / pair / createAccount resolve false (or a message) on a refusal
   // and throw NodeChanged when the node answering is not the one this
-  // browser knows; the gate asks the user and retries.
+  // browser knows; the gate asks the user and retries. A busy node (503) is
+  // said as such, never as a wrong password.
   window.Sautium = window.Sautium || {};
   window.Sautium.auth = {
     hasToken: () => !!storedToken(),
@@ -286,7 +294,7 @@
     acceptNode: (pubkey) => pinNode(pubkey),
     async login(password) {
       const r = await boxedPost("/api/auth/login", { password });
-      if (!r.ok) return false;
+      if (!r.ok) return r.status === 503 ? BUSY : false;
       setToken(r.data.token);
       pinNode(r.nodePubkey);
       return true;
@@ -494,9 +502,10 @@
           ok = res === true;
           why = typeof res === "string" ? res : "Could not create the account.";
         } else if (mode === "password") {
-          ok = await window.Sautium.auth.login(
+          const res = await window.Sautium.auth.login(
             overlay.querySelector("#auth-pass").value);
-          why = "Wrong password.";
+          ok = res === true;
+          why = typeof res === "string" ? res : "Wrong password.";
         } else {
           ok = await window.Sautium.auth.pair(
             overlay.querySelector("#auth-pin").value.trim());

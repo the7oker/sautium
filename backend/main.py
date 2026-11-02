@@ -34,6 +34,7 @@ import csp
 import device_auth
 import lastfm_auth
 from dht_service import DHTService, HAS_LIBTORRENT
+from serving import BodyLimit
 
 _API_SECRET_PATH = _secret_path()
 _INDEX_HTML_PATH = _Path(__file__).parent / "static" / "index.html"
@@ -1908,6 +1909,13 @@ async def no_cache_static(request, call_next):
     if request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return response
+
+
+# Added last, so it runs first: no body is read past these bounds by anything
+# of the app — the signature check reads the whole body before it can judge
+# it. The largest body the Web UI sends is an avatar (routers/profile.py,
+# 10 MiB); the deadline leaves one that size two minutes on a slow uplink.
+app.add_middleware(BodyLimit, cap=12 * 1024 * 1024, budget=48 * 1024 * 1024, deadline=120.0)
 
 
 if __name__ == "__main__":

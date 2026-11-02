@@ -43,7 +43,11 @@ BRUTE FORCE. The two doors need different locks:
   * password — Argon2id at 256 MB already makes guessing hopeless (a thousand
     parallel attempts would need 250 GB). The danger runs the other way: that
     same cost turns an unbounded login endpoint into a memory DoS, so
-    derivations run under a semaphore.
+    derivations run under a semaphore, and past DERIVE_QUEUE of them in
+    flight a request is turned away (Busy) instead of waiting — a derivation
+    runs to its end even when its caller has gone. An anonymous account has
+    no password anyone knows: its door is the PIN, and a password login there
+    is refused before any derivation.
 """
 
 import asyncio
@@ -72,8 +76,11 @@ MAX_PIN_ATTEMPTS = 5
 PIN_ROTATE_GRACE = 30
 
 # One Argon2id derivation is ~256 MB; two concurrent is already half a gig.
-# Everything else waits rather than racing the container into an OOM kill.
+# Everything else waits rather than racing the container into an OOM kill —
+# up to DERIVE_QUEUE in flight, running or waiting; past that, Busy.
 _derive_semaphore = asyncio.Semaphore(2)
+DERIVE_QUEUE = 4
+_derive_in_flight = 0
 _pin_lock = asyncio.Lock()
 # First-run setup is check-then-write around a ~1s Argon2id derivation — a
 # wide enough window for two concurrent requests to both pass the "no account
@@ -212,6 +219,10 @@ class AccountExists(Exception):
     """Raised when setup is attempted on a node that already has an identity."""
 
 
+class Busy(Exception):
+    """DERIVE_QUEUE derivations are already in flight."""
+
+
 async def create_account(username: str, password: str) -> dict:
     """Create the node's identity from username+password and persist it.
 
@@ -343,14 +354,18 @@ async def verify_password(password: str) -> bool:
     username is not a choice the person signing in makes — the server reads
     it from its own settings. The account is deterministic
     (username+password -> Argon2id -> Ed25519), so the derivation itself is
-    the check; there is no password hash to store, leak or rotate."""
+    the check; there is no password hash to store, leak or rotate. An
+    anonymous account is refused before any derivation. Raises Busy
+    (derive_guarded)."""
     expected = _expected_pubkey()
     username = account_username()
-    if not expected or not username or not password:
+    if not expected or not username or not password or account_anonymous():
         return False
     from p2p_identity import derive_identity
     try:
         got = await derive_guarded(derive_identity, username, password)
+    except Busy:
+        raise
     except Exception as e:
         logger.info("password verification failed: %s", e)
         return False
@@ -360,9 +375,25 @@ async def verify_password(password: str) -> bool:
 async def derive_guarded(fn, *args):
     """Run one Argon2id derivation off the loop, under the memory semaphore
     (module doc, BRUTE FORCE) — every request-path derivation goes through
-    here: login, and the backup key that shares the password."""
-    async with _derive_semaphore:
-        return await asyncio.to_thread(fn, *args)
+    here: login, and the backup key that shares the password. Raises Busy
+    when DERIVE_QUEUE are in flight already. A caller that goes leaves its
+    derivation counted, and holding its semaphore slot, until its thread
+    ends: a thread cannot be stopped, so it is what the bound counts."""
+    global _derive_in_flight
+    if _derive_in_flight >= DERIVE_QUEUE:
+        raise Busy()
+    _derive_in_flight += 1
+
+    async def run():
+        global _derive_in_flight
+        try:
+            async with _derive_semaphore:
+                return await asyncio.to_thread(fn, *args)
+        finally:
+            _derive_in_flight -= 1
+    task = asyncio.ensure_future(run())
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    return await asyncio.shield(task)
 
 
 # ---------------------------------------------------------------------------

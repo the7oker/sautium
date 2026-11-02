@@ -60,12 +60,15 @@ class BoxedRequest(BaseModel):
 
 def _open(req: BoxedRequest, model):
     """The payload inside the box, validated as `model`, plus the reply
-    sealer. A box that does not open is a 400; a payload of the wrong shape
-    is the 422 the plain body used to get."""
+    sealer. A box that does not open is a 400 marked `channel` — a handshake
+    the table has let go since, as often as a broken one: the page asks for
+    a fresh one once; a payload of the wrong shape is the 422 the plain body
+    used to get."""
     try:
         payload, reply = device_auth.unbox(req.eph, req.client, req.nonce, req.box)
     except device_auth.ChannelError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e),
+                            headers={"X-Sautium-Auth-Error": "channel"})
     try:
         return model.model_validate(payload), reply
     except ValidationError as e:
@@ -139,7 +142,11 @@ async def create_account(boxed: BoxedRequest) -> dict:
 async def login(boxed: BoxedRequest) -> dict:
     """Exchange the account password for a device token."""
     req, reply = _open(boxed, LoginRequest)
-    if not await device_auth.verify_password(req.password):
+    try:
+        ok = await device_auth.verify_password(req.password)
+    except device_auth.Busy:
+        raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
+    if not ok:
         raise HTTPException(status_code=401, detail="invalid credentials")
     return reply({"token": device_auth.current_token(_secret())})
 
