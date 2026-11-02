@@ -21,7 +21,7 @@ mirror leaves (a replace that plays) goes once it is let go
 
 import logging
 import threading
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict
 from typing import Any, Callable, Iterator, Optional
 
@@ -79,8 +79,11 @@ class PlaybackManager:
         # status payload carries it while it lasts.
         self._hold: Optional[dict] = None
         # The renderer the output is being attached to again (_attach_again),
-        # by name: every status payload says so while it lasts.
+        # or waited on where it is attached (_probe), by name: every status
+        # payload says so while anyone holds it (_connecting_to).
         self._connecting: Optional[str] = None
+        self._connecting_held = 0
+        self._connecting_lock = threading.Lock()
         # Output changes so far, told as each is over: work one cut short — a
         # filler's add the link did not send — goes on through the output
         # there is then (wait_for_output_change)
@@ -216,15 +219,18 @@ class PlaybackManager:
         no mutation in flight."""
         self._refuse_if_held()
         b = probed = self._active
-        if b is not None and b.healthy():
-            self._probe(b)
-            if b.healthy():
-                return b
-        else:
-            probed = None
-        with self._mutate_lock, self._ensure_lock:
-            self._refuse_if_held()
-            return self.answering(probed)
+        # A wait the probe says ("connecting") is said through the attach a
+        # move then needs: one word, never taken back in between
+        with ExitStack() as saying:
+            if b is not None and b.healthy():
+                self._probe(b, saying)
+                if b.healthy():
+                    return b
+            else:
+                probed = None
+            with self._mutate_lock, self._ensure_lock:
+                self._refuse_if_held()
+                return self.answering(probed)
 
     def answering(self, probed: Optional[PlayerBackend] = None) -> PlayerBackend:
         """The active output where its device answers, under the output-change
@@ -264,8 +270,11 @@ class PlaybackManager:
         if stays(b) or (b.healthy() and b.answers_here()):
             return
         with self._mutate_lock, self._ensure_lock:
-            if self._active is not b:
-                return      # attached again meanwhile, by a press or another scan
+            if self._active is not b or b.healthy():
+                # Attached again meanwhile by a press or another scan — or
+                # caught attaching by the look above (no device yet), and
+                # attached since: no instance to move
+                return
             logger.info("a scan reached %s elsewhere — the output moves where it answers", b.label)
             self._attach_again(b)
 
@@ -306,21 +315,32 @@ class PlaybackManager:
 
     @contextmanager
     def _connecting_to(self, label: Optional[str]) -> Iterator[None]:
-        """While the output attaches again to the renderer `label`: every
-        status payload names it (`connecting`) — said at once, taken back
-        once the attach is over, however it ends. None: nothing to say."""
+        """While the output is waited on or attached again — the renderer
+        `label`: every status payload names it (`connecting`), said once the
+        first holder takes it and taken back once the last lets it go (a
+        press's probe and a scan's move may overlap), however each ends.
+        None: nothing to say."""
         if label is None:
             yield
             return
-        self._connecting = label
-        self._push_status(dict(self._latest_status))
+        with self._connecting_lock:
+            self._connecting_held += 1
+            first = self._connecting_held == 1
+            self._connecting = label
+        if first:
+            self._push_status(dict(self._latest_status))
         try:
             yield
         finally:
-            self._connecting = None
-            self._push_status(dict(self._latest_status))
+            with self._connecting_lock:
+                self._connecting_held -= 1
+                last = not self._connecting_held
+                if last:
+                    self._connecting = None
+            if last:
+                self._push_status(dict(self._latest_status))
 
-    def _probe(self, b: PlayerBackend) -> None:
+    def _probe(self, b: PlayerBackend, saying: Optional[ExitStack] = None) -> None:
         """Fast offline-fail: a powered-off DLNA renderer must 503 within
         the probe window with a clear message, not after stacked SOAP +
         re-attach timeouts (34s, live) — and the first attempt must not
@@ -328,8 +348,14 @@ class PlaybackManager:
         failure is async). A dozing-but-networked renderer passes the
         probe: its window is sized for a sleeping radio. A wait on a
         renderer already found elsewhere is said, as its attach is
-        (_connecting_to)."""
-        if not b.reachable(waiting=lambda: self._connecting_to(b.label)):
+        (_connecting_to) — held in `saying`, the caller's, when given, so
+        it lasts through the attach that follows."""
+        def waiting():
+            if saying is None:
+                return self._connecting_to(b.label)
+            saying.enter_context(self._connecting_to(b.label))
+            return nullcontext()
+        if not b.reachable(waiting=waiting):
             b._gone = True
             hint = getattr(b, "offline_hint",
                            "turn it on, or pick another output in "

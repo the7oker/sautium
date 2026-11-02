@@ -418,6 +418,38 @@ def note_renderer_location(udn: str, location: str) -> None:
                             key: remember_location(_dlna_discovered[key], {"location": location})}
 
 
+def _without_location(record: dict, location: str) -> dict:
+    """`record` with `location` no longer among its addresses: the next one
+    it is known at becomes its own (remember_location's order)."""
+    known = [loc for loc in dict.fromkeys([record.get("location"), *(record.get("locations") or [])])
+             if loc and loc != location]
+    return {**record, "location": known[0] if known else None, "locations": known}
+
+
+def forget_renderer_location(udn: str, location: str) -> None:
+    """Drop an address a renderer is remembered at — its pin, the chosen
+    output, the last scan's row — once another device answers there
+    (DlnaBackend._create_device). Kept, it was probed at every press, and a
+    LAN address that answered drew the renderer off its tunnel each time,
+    only for its attach to find the other device and land back."""
+    global _dlna_discovered
+    from routers.settings import _read, _write
+    key = udn_key(udn)
+
+    def remembered(record: dict) -> bool:
+        return location in (record.get("location"), *(record.get("locations") or []))
+    pins = _dlna_pins()
+    if key in pins and remembered(pins[key]):
+        pins[key] = _without_location(pins[key], location)
+        _dlna_save_pins(pins)
+    active = _read("output.dlna_renderer")
+    if active and udn_key(active.get("udn")) == key and remembered(active):
+        _write("output.dlna_renderer", _without_location(active, location))
+    if key in _dlna_discovered and remembered(_dlna_discovered[key]):
+        _dlna_discovered = {**_dlna_discovered,
+                            key: _without_location(_dlna_discovered[key], location)}
+
+
 def _dlna_save_pins(pins: dict[str, dict]) -> None:
     from routers.settings import _write
     _write("output.dlna_pinned", list(pins.values()))

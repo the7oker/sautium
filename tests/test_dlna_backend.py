@@ -2259,6 +2259,12 @@ def test_play_waiting_on_the_address_it_is_attached_at_says_it_connects(
     assert picker.play() == {"ok": True}
     said = next((at for at, data in seen if data.get("connecting") == "Phone"), None)
     assert said is not None and said - pressed < 1.5, (said and said - pressed)
+    # One word from the wait through the attach the move needs, never
+    # taken back in between (it was: the wait's own, then the loss and the
+    # attach's)
+    connecting = [i for i, (_at, data) in enumerate(seen) if data.get("connecting")]
+    assert all(seen[i][1].get("connecting") == "Phone" for i in range(connecting[0], connecting[-1] + 1)), \
+        [data.get("connecting") for _at, data in seen]
     assert "disconnected" not in [data.get("state") for _at, data in seen]
     assert manager.active._renderer["location"] == there.location
     wait_for(lambda: there.state == "PLAYING", what="playing at the other address")
@@ -2428,3 +2434,129 @@ def test_a_play_on_its_way_at_a_switch_away_is_answered_before_the_last_word(
     wait_for(lambda: b.state == "PLAYING", what="the new renderer playing")
     assert a.state == "STOPPED", a.state
     assert [act for act in a.answered if act in ("Play", "Stop")][-2:] == ["Play", "Stop"]
+
+
+# -- the review's second round ---------------------------------------------------
+
+
+def test_a_scan_that_ends_while_the_play_gate_attaches_the_renderer_moves_nothing(
+        tmp_path, proxy, renderers, manager, picker, quality, monkeypatch, swallowing):
+    """N-20: the phone lost on the LAN, the person presses Play — the gate
+    attaches it through the tunnel — and opens the Output picker, whose scan
+    ends while that attach is under way. The scan finds the output being
+    attached and leaves it: one attach, the press played once. It used to
+    take the attach under way for one to move, attach the renderer a second
+    time, and drop the press (or play it while the node said "paused")."""
+    lan, tunnel = renderers(name="Phone"), renderers(name="Phone")
+    tunnel.udn = lan.udn
+    _on_renderer(manager, lan, [track(tmp_path, 1, seconds=90.0)])
+    _playing_at(manager, lan, 3)
+    _lost_paused(manager, lan)                              # Wi-Fi off
+    swallowing(lan.port)
+    # Known through the tunnel too, behind its LAN address — as before the
+    # scan that follows teaches the record otherwise
+    manager.store["output.dlna_renderer"] = {**lan.record, "locations": [lan.location, tunnel.location]}
+    entered, go, create = threading.Event(), threading.Event(), DlnaBackend._create_device
+
+    async def held(self, factory):
+        if not entered.is_set():                            # the gate's attach, half way
+            entered.set()
+            await asyncio.to_thread(go.wait, 20)
+        return await create(self, factory)
+    monkeypatch.setattr(DlnaBackend, "_create_device", held)
+    manager._mutate_lock = lock = _Awaited(manager._mutate_lock)
+    changes, answers = manager.output_changes(), []
+    press = threading.Thread(target=lambda: answers.append(picker.play()))
+    try:
+        press.start()
+        assert entered.wait(15), "the gate attaches the phone"
+        attaching = manager.active
+        picker.found[:] = [tunnel.location]                 # the picker's scan
+        scan = threading.Thread(target=lambda: asyncio.run(picker._scan_run()))
+        scan.start()
+        assert lock.waiting.wait(15), "the scan waits for the gate"
+    finally:
+        go.set()
+    press.join(30)
+    scan.join(30)
+    assert answers == [{"ok": True}]
+    wait_for(lambda: tunnel.state == "PLAYING" and manager.latest_status.get("state") == "playing",
+             timeout=15, what="the press played")
+    assert manager.active is attaching and manager.output_changes() == changes + 1
+    assert len(tunnel.called("SetAVTransportURI")) == 1
+
+
+def test_another_device_at_a_renderers_old_address_is_forgotten_for_it(
+        tmp_path, proxy, renderers, manager, picker, quality, monkeypatch):
+    """The phone attached through the tunnel; its old LAN address, still
+    remembered, now answers as another device, faster than the tunnel. The
+    first press finds the other device there, attaches the phone at the
+    tunnel again, and forgets that address for it: the presses after it are
+    plain resumes — it was drawn off its tunnel and attached afresh at every
+    press, each a reload."""
+    tunnel, other = renderers(name="Phone"), renderers(name="Another phone")     # its own UDN
+    other.stop_answering()
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": {
+        **tunnel.record, "locations": [tunnel.location, other.location]}})
+    manager.activate("dlna", renderer=manager.store["output.dlna_renderer"])
+    assert manager.active._renderer["location"] == tunnel.location
+    other.answer_again()                                    # another device holds the old LAN address
+    monkeypatch.setattr(dlna_backend, "_tunnel_address", lambda location: location == tunnel.location,
+                        raising=False)
+    reachable = dlna_backend.renderer_reachable
+
+    def the_tunnel_a_little_later(location, timeout=dlna_backend._PROBE_TIMEOUT):
+        if location == tunnel.location:
+            time.sleep(0.2)
+        return reachable(location, timeout)
+    monkeypatch.setattr(dlna_backend, "renderer_reachable", the_tunnel_a_little_later)
+    assert manager.replace_queue([track(tmp_path, 1, seconds=90.0)], play=True)[0] == 1
+    _playing_at(manager, tunnel, 3)
+    changes, loads = manager.output_changes(), len(tunnel.called("SetAVTransportURI"))
+    for _press in range(3):
+        _paused(manager, tunnel)
+        assert picker.play() == {"ok": True}
+        wait_for(lambda: manager.latest_status.get("state") == "playing" and tunnel.state == "PLAYING",
+                 timeout=15, what="playing again")
+    assert manager.output_changes() - changes <= 1, manager.output_changes() - changes
+    assert len(tunnel.called("SetAVTransportURI")) - loads <= 1
+    assert other.location not in manager.store["output.dlna_renderer"]["locations"]
+    assert not other.called("SetAVTransportURI")
+
+
+def test_an_attach_that_finds_another_device_where_the_renderer_was_says_so(renderers, manager):
+    """Every address the renderer is known at answers as another device (a
+    phone set up again, a new UDN): the attach says so, and the address is
+    no longer the renderer's — it used to say the renderer did not answer at
+    all."""
+    phone, other = renderers(name="Phone"), renderers(name="Another phone")
+    phone.stop_answering()
+    record = {**phone.record, "location": other.location, "locations": [other.location]}
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": record})
+    with pytest.raises(dlna_backend.DlnaAttachError, match="another device answers"):
+        manager.activate("dlna", renderer=record)
+    assert other.location not in (manager.store["output.dlna_renderer"].get("locations") or [])
+
+
+def test_a_seek_near_the_end_on_a_renderer_that_ignores_it_teaches_nothing(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7 near a track's end: a judged Seek in an Opus stream that the
+    renderer ignores, playing on. Where it would read had it stayed is the
+    clock less the distance, uncapped: capped at the track's length, it
+    stopped there while the renderer played on into the Seek's window, and
+    was remembered as one that seeks."""
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK)
+    r.opus_seek = "ignores"
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=20.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.position >= 4
+             and getattr(n.backend, "_heard_on_load", 2) >= 2, what="playing past 4 s, heard twice")
+    assert n.backend.seek(int(n.last.position) + 8)
+    wait_for(lambda: r.called("Seek"), what="the Seek")
+    wait_for(lambda: r.state == "STOPPED", timeout=25, what="the track played out")
+    assert (stored.get("output.dlna_opus_seek") or {}).get(r.udn.lower()) is not True
+

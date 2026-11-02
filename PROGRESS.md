@@ -3381,10 +3381,11 @@ address decides first while nothing has failed there — a renderer
 answering at two addresses about as fast is never moved between them press
 after press — and the wait for it, once another has answered, is said.
 The attach describes the first address that answers and is that renderer
-(its UDN, `_create_device`), and a lost instance's UNSUBSCRIBE is not
-waited for. An attach that fails keeps the
-spot it was to resume at, said with the output disconnected, for the next
-Play. While the output attaches again every status says so (`connecting`,
+(its UDN, `_create_device`) — an address where another device answers now
+is forgotten for it, else it drew the renderer off its tunnel at every
+press — and a lost instance's UNSUBSCRIBE is not waited for. An attach
+that fails keeps the spot it was to resume at, said with the output
+disconnected, for the next Play. While the output attaches again every status says so (`connecting`,
 the renderer's name) and never "disconnected", which hid the mini player:
 Now Playing says "Connecting to ‹renderer›…" beside the track, and both
 transport buttons spin as for a start in flight. Lesson: never wait on one

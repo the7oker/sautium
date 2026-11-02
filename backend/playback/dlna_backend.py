@@ -691,9 +691,10 @@ class DlnaBackend(PlayerBackend):
         its UDN, the device's own or one it embeds: another device holding an
         address this one has left answers first as well; the others are let
         go."""
-        from routers.player import udn_key
+        from routers.player import forget_renderer_location, udn_key
         known = known_locations(self._renderer)
         udn = udn_key(self._renderer.get("udn"))
+        others = []
 
         async def probe(loc: str) -> tuple:
             return loc, await asyncio.to_thread(renderer_reachable, loc)
@@ -712,10 +713,23 @@ class DlnaBackend(PlayerBackend):
                     continue
                 if udn in {udn_key(d.udn) for d in (device, *device.embedded_devices.values())}:
                     return device, loc
-                logger.info("another device answers at %s now, not %s", loc, self.label)
+                # Another device holds an address this renderer has left: no
+                # address of its from now on — probed at every press, a LAN
+                # address answering there drew the renderer off its tunnel
+                # each time (reachable)
+                logger.info("another device answers at %s now, not %s — forgotten for it", loc, self.label)
+                others.append(loc)
+                forget_renderer_location(self._renderer["udn"], loc)
+                self._renderer = {**self._renderer, "locations": [
+                    known_loc for known_loc in self._renderer.get("locations") or [] if known_loc != loc]}
         finally:
             for p in probes:
                 p.cancel()
+        if others:
+            raise DlnaAttachError(
+                f"'{self.label}' is not where it was known: another device answers at "
+                f"{', '.join(urlparse(t).hostname or t for t in others)} now — if it was set up "
+                "again, add it again by its current address")
         raise DlnaAttachError(
             f"'{self.label}' did not answer at any known address "
             f"({', '.join(urlparse(t).hostname or t for t in known) or 'none'})"
@@ -953,9 +967,11 @@ class DlnaBackend(PlayerBackend):
         age = time.monotonic() - asked
         # Where the renderer would read had it stayed: the clock, which runs
         # from the Seek's second while it plays and holds while it is paused,
-        # less the distance asked
+        # less the distance asked — uncapped: capped at the track's length,
+        # it stopped where a renderer playing on near the end went on
         stayed = (distance is not None
-                  and abs(real - (self._wall_estimate() - distance)) <= _RELTIME_TOLERANCE)
+                  and abs(real - (self._wall_base + (self._clock() - self._wall_t0) - distance))
+                  <= _RELTIME_TOLERANCE)
         if second - _RELTIME_TOLERANCE <= real <= second + age + _RELTIME_TOLERANCE and not stayed:
             self._seek_due = None
             self._heard(real)
