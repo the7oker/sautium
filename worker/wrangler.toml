@@ -46,7 +46,8 @@ storage = "sqlite"
 # counters a write or a mail passes first (per key, per mailbox, per address,
 # the route's daily ceiling); the instance "names" the username each key
 # speaks under, "code" the pending email codes — atomic there, so a refused
-# request writes nothing to KV.
+# request writes nothing to KV. The master's mailbox counts its drops in its
+# own object.
 [[durable_objects.bindings]]
 name = "LIMITER"
 class_name = "Limiter"

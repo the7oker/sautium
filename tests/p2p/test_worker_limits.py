@@ -17,10 +17,10 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not i
 
 
 @functools.cache
-def _run(scenario: str) -> dict:
+def _run(scenario: str, *flags: str) -> dict:
     out = subprocess.run(
         ["node", str(HERE / "worker_harness.mjs"), os.urandom(32).hex(), "test-email-pepper",
-         "--scenario", scenario],
+         "--scenario", scenario, *flags],
         capture_output=True, text=True, timeout=120, check=True,
     ).stdout
     return json.loads(out)
@@ -159,6 +159,13 @@ def test_acceptances_and_their_mail_and_pickups_are_capped_before_any_write():
     assert r["pickupAtCap"]["status"] == 429 and r["writesByPickupRefusal"] == 0
 
 
+def test_the_acceptance_mails_one_address_sets_off_are_capped():
+    r = _run("accepts")
+    assert r["acceptAtNotifyAddrCap"]["body"] == {"status": "accepted", "notified": False}
+    assert r["mailsAtNotifyAddrCap"] == 0
+    assert r["acceptFromOtherAddr"]["body"] == {"status": "accepted", "notified": True}
+
+
 def test_a_pickup_takes_a_page_and_leaves_the_rest_for_the_next():
     assert _run("accepts")["pages"] == [300, 100]
 
@@ -195,6 +202,32 @@ def test_the_roots_a_timestamp_asks_about_are_counted_before_they_are_read():
     assert r["lookupsUnderKeyCap"]["status"] == 200
     # a request that brings no new root leaves no row in the ledger
     assert r["knownRootAgain"]["status"] == 200 and r["ledgerRowsByKnownRoot"] == 0
+
+
+def test_a_root_re_signed_from_an_older_format_counts_like_a_new_one():
+    r = _run("stamps")
+    assert r["resignOverKeyCap"]["status"] == 429
+    assert r["resignAtKeyCap"]["status"] == 200
+    assert r["resignedRecord"]["v"] == 2
+    assert r["resignedRecord"]["date"] == "2026-01-01T00:00:00Z"     # the first date is kept
+
+
+def test_armed_the_budget_holds_for_requests_at_one_moment():
+    r = _run("armed", "--armed")
+    assert r["statuses"] == [200] * 6 + [429] * 2              # a new identity's burst is six
+    assert r["tsKeys"] == 6
+
+
+def test_armed_a_spent_budget_is_refused_before_the_caps_and_leaves_nothing():
+    r = _run("armed", "--armed")
+    assert r["spent"]["status"] == 429
+    assert r["ledgerUntouched"] is True and r["countersUntouched"] is True
+    assert r["spentWrote"] is False
+
+
+def test_armed_no_verdict_is_no_stamp():
+    r = _run("armed", "--armed")
+    assert r["ledgerDown"]["status"] == 503 and r["ledgerDownWrote"] is False
 
 
 # --- the stores and the request ----------------------------------------------
@@ -251,6 +284,16 @@ def test_a_full_master_mailbox_refuses_and_drops_nothing():
     r = _run("mailbox")
     assert r["answer"]["status"] == 429 and r["answer"]["body"] == {"error": "mailbox full"}
     assert r["oldestKept"] == 1 and r["rows"] == 20000
+
+
+def test_the_master_mailbox_counts_the_mail_it_stores_per_sender_address_and_day():
+    r = _run("drops")
+    assert r["senderRefusals"] == [429] * 3 and r["dropsByRefusals"] == 0
+    assert r["afterDrain"] == 429                          # drained mail still counts for the day
+    assert r["addressCap"] == [[200, None], [429, "address cap reached"]]
+    assert r["otherAddress"] == 200
+    assert r["dayCap"]["status"] == 429 and r["dayCap"]["body"] == {"error": "mailbox busy"}
+    assert r["nextDay"] == 200 and r["dropsNextDay"] == 1
 
 
 def test_any_other_failure_is_a_500_without_its_text():
@@ -311,6 +354,13 @@ def test_directory_registrations_are_limited_per_ipv6_slash64_before_any_write()
     r = _run("directory")
     assert r["sameSlash64"] == [200] * 12 + [429]
     assert r["writesByRefusal"] == 0 and r["rowsUnchangedByRefusal"] is True
+
+
+def test_directory_registrations_are_capped_per_address_and_in_all_a_day():
+    r = _run("directory")
+    assert r["firstOfDay"] == 200
+    assert r["addrDayCap"] == 429 and r["rowsUnchangedByDayCap"] is True
+    assert r["dayCeiling"] == 429
 
 
 # --- the birth ledger --------------------------------------------------------

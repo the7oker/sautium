@@ -116,20 +116,21 @@ const FROM_NAME = "Sautium";
 // person's use and far below the ceiling: filling a route's ceiling takes at
 // least 50 addresses on every route. `addr` is volumeToken(): the exact IPv4,
 // the IPv6 /48. The mail ceilings must also sit inside the mail provider's
-// plan.
+// plan. The master's mailbox keeps its daily caps in its own object
+// (MAIL_PER_*), where they count only the drops it stores.
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const LIMITS = {
-  birth:    { addr: 50, all: 20000 },                          // new identities
-  stamp:    { key: 500, addr: 1000, all: 50000 },              // new timestamp roots
-  lookup:   { key: 2000, addr: 5000, all: 250000 },            // roots a /timestamp asks about (KV reads)
-  code:     { key: 5, to: 5, addr: 10, all: 500 },             // verification mails
-  register: { key: 10, addr: 50, all: 5000 },                  // tries; `all` = registrations written
-  invite:   { key: 10, from: 10, to: 3, addr: 10, all: 500 },  // invite mails
-  accept:   { key: 20, addr: 20, all: 10000 },                 // stored acceptances
-  notify:   { key: 20, to: 20, addr: 10, all: 500 },           // acceptance mails
-  pending:  { key: 100, addr: 200, all: 20000 },               // pickups (a KV list each)
-  mailbox:  { addr: 30 },                                      // drops for the master (its own caps beside)
+  birth:     { addr: 50, all: 20000 },                          // new identities
+  stamp:     { key: 500, addr: 1000, all: 50000 },              // roots written: new, or re-signed
+  lookup:    { key: 2000, addr: 5000, all: 250000 },            // roots a /timestamp asks about (KV reads)
+  code:      { key: 5, to: 5, addr: 10, all: 500 },             // verification mails
+  register:  { key: 10, addr: 50, all: 5000 },                  // tries; `all` = registrations written
+  invite:    { key: 10, from: 10, to: 3, addr: 10, all: 500 },  // invite mails
+  accept:    { key: 20, addr: 20, all: 10000 },                 // stored acceptances
+  notify:    { key: 20, to: 20, addr: 10, all: 500 },           // acceptance mails
+  pending:   { key: 100, addr: 200, all: 20000 },               // pickups (a KV list each)
+  directory: { addr: 400, all: 50000 },                         // registrations (volunteers renew hourly)
 };
 // A route's ceiling, once met, refuses everyone until its window ends; each
 // refusal's Retry-After adds up to this much at random, so the waiting
@@ -185,7 +186,10 @@ const LEDGER_RETENTION_MS = 90 * 24 * 3600 * 1000;
 // achieves nothing; the master being offline costs nothing.
 const MASTER_PUBKEY = "3aa2ae91bc41863468ea4df3346811bcb0f7e0d6a9644b931cfd628d81247042";
 const MAIL_MAX_CHARS = 8192;             // encrypted payload (chat caps are far below)
+// Drops stored in the last 24 h, drained or not, per sender, per address
+// (volumeToken) and in all; a refused drop counts for none of them.
 const MAIL_PER_SENDER_DAY = 30;
+const MAIL_PER_ADDR_DAY = 100;
 const MAIL_PER_DAY = 5000;
 const MAIL_CAP = 20000;                  // rows kept; a full mailbox refuses, it never drops accepted mail
 const MAIL_TTL_MS = 30 * 24 * 3600 * 1000;
@@ -1084,7 +1088,8 @@ async function birthFacts(env, request, pubkey, issuedAtIso) {
 
 export class Limiter {
   /**
-   * The state every limit of the Worker keys on. One instance per route
+   * The state the Worker's route limits key on (the master's mailbox counts
+   * its drops itself). One instance per route
    * (its name is the route's: "birth", "invite", …), so a check and its
    * increment are one synchronous step, and one route's load or failure
    * never reaches another's; two more instances hold what spans routes:
@@ -1348,8 +1353,9 @@ async function handleMailboxPut(request, env) {
    * — the exact chat wire payload plus a sender signature over
    *   mailbox:v1:{to}:{message_uuid}:{timestamp}:{sha256hex(encrypted)}
    * `to` must be the master; the sender must hold a certificate issued
-   * here (no free keys); per-address, per-sender and global caps bound the
-   * storage. The Worker never sees plaintext.
+   * here (no free keys); the mailbox object's daily caps — per sender, per
+   * address, in all — and its row cap bound the storage. The Worker never
+   * sees plaintext.
    */
   if (!env.MAILBOX) return json({ error: "mailbox not configured" }, 503);
   const braked = await routeBrake(env, request, "mailbox");
@@ -1381,10 +1387,9 @@ async function handleMailboxPut(request, env) {
   if (!await env.RATE_LIMITS.get(`born:${sender}`, "json")) {
     return json({ error: "sender has no certificate" }, 403);
   }
-  const limited = await admit(env, [daily("mailbox", "addr", await volumeToken(env, clientIp(request)))]);
-  if (limited) return limited;
   const r = await mailboxCall(env, "/put", {
-    uuid: message_uuid, sender, encrypted, ts: timestamp, now: Date.now(),
+    uuid: message_uuid, sender, addr: await volumeToken(env, clientIp(request)),
+    encrypted, ts: timestamp, now: Date.now(),
   });
   return json(r.body, r.status);
 }
@@ -1504,7 +1509,8 @@ async function handleNodeRegister(request, env) {
    * two guards the master hint uses). Requires a certificate issued here;
    * the master itself is refused — it has /master-hint, and clients keep
    * it as the LAST tier by design. One network holds at most
-   * DIRECTORY_PER_NETWORK fresh entries.
+   * DIRECTORY_PER_NETWORK fresh entries; registrations are capped per /64
+   * an hour, and per address and in all a day (LIMITS.directory).
    */
   const braked = await routeBrake(env, request, "node-register");
   if (braked) return braked;
@@ -1543,8 +1549,10 @@ async function handleNodeRegister(request, env) {
   const nonce = `directory:sig:${signature.toLowerCase()}`;
   const taken = await limiterCall(env, "directory", "/take", { now: Date.now(), counters: [
     { key: nonce, limit: 1, window: 2 * MAIL_SIG_SKEW_S * 1000, amount: 1 },
-    { key: `directory:addr:${await ipHashUuid(env, ip)}`, limit: DIRECTORY_REG_PER_IP_HOUR,
+    { key: `directory:hour:${await ipHashUuid(env, ip)}`, limit: DIRECTORY_REG_PER_IP_HOUR,
       window: HOUR_MS, amount: 1 },
+    daily("directory", "addr", await volumeToken(env, ip)),
+    daily("directory", "all"),
   ] });
   if (!taken.ok) {
     return taken.refused === nonce
@@ -1672,8 +1680,16 @@ export class MasterMailbox {
       id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL UNIQUE,
       sender TEXT NOT NULL, encrypted TEXT NOT NULL, ts TEXT NOT NULL,
       received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
-    this.sql.exec("CREATE INDEX IF NOT EXISTS mail_sender_recv ON mail (sender, received_at)");
-    this.sql.exec("CREATE INDEX IF NOT EXISTS mail_recv ON mail (received_at)");
+    // The daily caps count `drops`, kept a day whether or not the master has
+    // drained the mail. The two mail indexes the caps once read go where an
+    // older object still has them.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS drops (
+      sender TEXT NOT NULL, addr TEXT NOT NULL, at INTEGER NOT NULL)`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS drops_at ON drops (at)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS drops_sender ON drops (sender)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS drops_addr ON drops (addr)");
+    this.sql.exec("DROP INDEX IF EXISTS mail_sender_recv");
+    this.sql.exec("DROP INDEX IF EXISTS mail_recv");
     if (typeof WebSocketRequestResponsePair !== "undefined" && this.state.setWebSocketAutoResponse) {
       // Keepalives answered by the runtime without waking the object.
       this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -1717,17 +1733,20 @@ export class MasterMailbox {
     return Number(this.sql.exec(query, ...params).one().n);
   }
 
-  put({ uuid, sender, encrypted, ts, now }) {
+  put({ uuid, sender, addr, encrypted, ts, now }) {
     now = Number(now) || Date.now();
     this.sql.exec("DELETE FROM mail WHERE expires_at <= ?", now);
-    const day = now - 86400 * 1000;
+    this.sql.exec("DELETE FROM drops WHERE at <= ?", now - DAY_MS);
     if (this._count("SELECT count(*) AS n FROM mail WHERE uuid = ?", uuid) > 0) {
       return { status: 200, body: { stored: false, duplicate: true } };
     }
-    if (this._count("SELECT count(*) AS n FROM mail WHERE sender = ? AND received_at > ?", sender, day) >= MAIL_PER_SENDER_DAY) {
+    if (this._count("SELECT count(*) AS n FROM drops WHERE sender = ?", sender) >= MAIL_PER_SENDER_DAY) {
       return { status: 429, body: { error: "sender cap reached" } };
     }
-    if (this._count("SELECT count(*) AS n FROM mail WHERE received_at > ?", day) >= MAIL_PER_DAY) {
+    if (this._count("SELECT count(*) AS n FROM drops WHERE addr = ?", addr) >= MAIL_PER_ADDR_DAY) {
+      return { status: 429, body: { error: "address cap reached" } };
+    }
+    if (this._count("SELECT count(*) AS n FROM drops") >= MAIL_PER_DAY) {
       return { status: 429, body: { error: "mailbox busy" } };
     }
     // Full, it refuses: the sender keeps the message and retries, where an
@@ -1738,6 +1757,7 @@ export class MasterMailbox {
     const id = Number(this.sql.exec(
       "INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
       uuid, sender, encrypted, ts, now, now + MAIL_TTL_MS).one().id);
+    this.sql.exec("INSERT INTO drops (sender, addr, at) VALUES (?, ?, ?)", sender, addr, now);
     this._wake();
     return { status: 200, body: { stored: true, id } };
   }
@@ -1787,8 +1807,8 @@ async function handleTimestamp(request, env) {
    *           sautium-timestamp-request:v{STAMP_REQUEST_VERSION}:{ts}:{roots joined by ","}
    *         with ts within MAIL_SIG_SKEW_S. Required, and the key must hold a
    *         certificate issued here: only a known identity writes `ts:` keys,
-   *         at most LIMITS.stamp new roots a day per key, per address and in
-   *         all.
+   *         at most LIMITS.stamp roots a day (new, or re-signed from an
+   *         older format) per key, per address and in all.
    * Returns {root, date, ip_hash, sig, authority, v, not_before} for the batch
    * shape, {stamps: [...], v, not_before} for the re-stamp shape; sig is over
    *   sautium-timestamp:v{TIMESTAMP_VERSION}:{root}:{date}:{ip_hash}
@@ -1846,8 +1866,8 @@ async function handleTimestamp(request, env) {
   // Every root asked about is a KV read: the lookups are counted before any
   // is made. Of those, a known root costs nothing more (idempotent
   // re-submission); a record in an older format is re-signed, a write the
-  // route's ceiling counts. The budget charges new roots only, and the
-  // ledger hears only of requests that bring one.
+  // stamp caps count like a new root. The budget charges new roots only,
+  // and the ledger hears only of requests that bring one.
   const ipToken = await volumeToken(env, ip);
   const looked = await admit(env, [
     daily("lookup", "key", pubkey, roots.length),
@@ -1874,29 +1894,37 @@ async function handleTimestamp(request, env) {
     asn: Number(cf.asn) || 0,
     now: Date.now(),
   };
-  if (fresh && STAMP_BUDGET_ARMED) {
-    // Armed, the budget is a refusal: read before the daily caps are spent,
-    // charged only after them. No verdict is no stamp.
-    const score = await ledgerCall(env, "/stamp-score", stampFacts);
-    if (!score) {
+  // Armed, the budget is a refusal, and no verdict is no stamp.
+  const budgetRefusal = (verdict) => {
+    if (!verdict) {
       return json({ error: "notary budget unavailable" }, 503,
                   { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
     }
-    if (score.allowed === false) {
-      const wait = Math.max(1, Math.ceil(score.not_before - Date.now() / 1000));
-      return throttled("notary budget spent for this identity", wait, score.not_before);
-    }
-  }
-  const counters = fresh ? [daily("stamp", "key", pubkey, fresh),
-                            daily("stamp", "addr", ipToken, fresh)] : [];
-  if (fresh + resigned) counters.push(daily("stamp", "all", "", fresh + resigned));
-  if (counters.length) {
-    const refusal = await admit(env, counters);
+    if (verdict.allowed !== false) return null;
+    const wait = Math.max(1, Math.ceil(verdict.not_before - Date.now() / 1000));
+    return throttled("notary budget spent for this identity", wait, verdict.not_before);
+  };
+  if (fresh && STAMP_BUDGET_ARMED) {
+    // Read before the daily caps are spent, so a spent budget spends none.
+    const refusal = budgetRefusal(await ledgerCall(env, "/stamp-score", stampFacts));
     if (refusal) return refusal;
   }
-  // The ledger records — and in shadow charges — only a request that will
-  // be stamped.
+  const written = fresh + resigned;
+  if (written) {
+    const refusal = await admit(env, [daily("stamp", "key", pubkey, written),
+                                      daily("stamp", "addr", ipToken, written),
+                                      daily("stamp", "all", "", written)]);
+    if (refusal) return refusal;
+  }
+  // The ledger records — and charges — only a request that passed the caps.
+  // Armed, this call is the budget's check and charge in one step: requests
+  // in flight together can all pass the read above, and only one step that
+  // both checks and charges keeps them inside the budget.
   const verdict = fresh ? await ledgerCall(env, "/stamp", stampFacts) : null;
+  if (fresh && STAMP_BUDGET_ARMED) {
+    const refusal = budgetRefusal(verdict);
+    if (refusal) return refusal;
+  }
 
   // Idempotent per root, but re-sign any record still in an older format so a
   // re-submitted root upgrades. The date is the FIRST-issuance moment —

@@ -3,10 +3,11 @@
 // is sent and a throwaway authority key, so the Python side can check what
 // the Worker code actually does (test_birth_cert.py, test_worker_limits.py).
 //
-// usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--scenario NAME]
+// usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--scenario NAME] [--armed]
 //        node worker_harness.mjs <authority_seed_hex> <email_pepper> --serve [--stamp-brake N]
 // Without --serve: runs one scenario (default: contract) and prints one JSON
-// object on stdout. With --serve: answers HTTP on 127.0.0.1 (a free port) with
+// object on stdout; --armed runs it with the stamp budget armed, as a refusal
+// (shipped shadow). With --serve: answers HTTP on 127.0.0.1 (a free port) with
 // the same Worker code and env — what a node's notary is pointed at in a test
 // (sign_audio.WORKER_URL) — prints {"url", "authority_pub"} as its first line
 // and serves until killed. Its address brake on /timestamp lets N stamps
@@ -28,6 +29,7 @@ const scenarioName = scenarioAt >= 0 ? harnessArgs[scenarioAt + 1] : "contract";
 const serveMode = harnessArgs.includes("--serve");
 const brakeAt = harnessArgs.indexOf("--stamp-brake");
 const stampBrake = brakeAt >= 0 ? Number(harnessArgs[brakeAt + 1]) : Infinity;
+const armed = harnessArgs.includes("--armed");
 const here = dirname(fileURLToPath(import.meta.url));
 const workerPath = resolve(here, "../../worker/verify.js");
 
@@ -71,6 +73,11 @@ const swapped2 = swapped.replace(/const MASTER_PUBKEY = "[0-9a-f]{64}";/, `const
 if (swapped2 === swapped) throw new Error("MASTER_PUBKEY pattern not found");
 swapped = swapped2.replace("const MAIL_PER_SENDER_DAY = 30;", "const MAIL_PER_SENDER_DAY = 3;");
 if (swapped === swapped2) throw new Error("MAIL_PER_SENDER_DAY pattern not found");
+if (armed) {
+  const shadow = swapped;
+  swapped = shadow.replace("const STAMP_BUDGET_ARMED = false;", "const STAMP_BUDGET_ARMED = true;");
+  if (swapped === shadow) throw new Error("STAMP_BUDGET_ARMED pattern not found");
+}
 const tmp = join(mkdtempSync(join(tmpdir(), "sautium-worker-")), "verify.mjs");
 writeFileSync(tmp, swapped);
 const workerModule = await import(pathToFileURL(tmp).href);
@@ -695,6 +702,16 @@ async function accepts() {
   const sent2 = mails.length;
   out.acceptAtNotifyCap = await accept(pasha, "pasha", typed, { ip: "198.51.100.52" });
   out.mailsAtNotifyCap = mails.length - sent2;
+  // the acceptance mails one address may set off in a day
+  if (notifyTo) unset(notifyTo);
+  const notifyAddrsBefore = new Set(counterKeys("notify:addr:"));
+  await accept(await newKey(), "kasia", typed, { ip: "198.51.100.53" });
+  const notifyAddr = counterKeys("notify:addr:").find((key) => !notifyAddrsBefore.has(key));
+  if (notifyAddr) preset(notifyAddr, 10);
+  const sent3 = mails.length;
+  out.acceptAtNotifyAddrCap = await accept(await newKey(), "lena", typed, { ip: "198.51.100.53" });
+  out.mailsAtNotifyAddrCap = mails.length - sent3;
+  out.acceptFromOtherAddr = await accept(await newKey(), "olha", typed, { ip: "198.51.100.54" });
   // a pickup takes a page at a time (KV: a thousand operations a call)
   const mashaKv = (await inviteOf(masha, "masha")).replace("#", ":");
   await pending(masha, "masha", { ip: "198.51.100.50" });            // what the steps above left
@@ -765,6 +782,16 @@ async function stamps() {
   out.lookupsOverKeyCap = await stamp(k3, Array.from({ length: 100 }, (_, i) => root(1000 + i)), { ip: "198.51.100.61" });
   out.readsByLookupRefusal = kvState.reads - reads;
   out.lookupsUnderKeyCap = await stamp(k3, Array.from({ length: 99 }, (_, i) => root(1000 + i)), { ip: "198.51.100.61" });
+  // a root re-signed from an older format is a write, counted like a new root
+  const k4 = await newKey();
+  await issue(k4, { ip: "198.51.100.62" });
+  for (const n of [5000, 5001]) {
+    store.set(`ts:${root(n)}`, JSON.stringify({ v: 1, date: "2026-01-01T00:00:00Z", ip_hash: "x", sig: "y" }));
+  }
+  preset(`stamp:key:${k4.pubHex}`, 499);
+  out.resignOverKeyCap = await stamp(k4, [root(5000), root(5001)], { ip: "198.51.100.62" });
+  out.resignAtKeyCap = await stamp(k4, [root(5000)], { ip: "198.51.100.62" });
+  out.resignedRecord = JSON.parse(store.get(`ts:${root(5000)}`));
   return out;
 }
 
@@ -869,6 +896,19 @@ async function directoryLimits() {
   const crowdBefore = nodes();
   out.crowdRefusal = (await reg(keys[16], "192.0.2.200", 20000, ts() + 3)).status;     // its /24 holds sixteen
   out.rowsUnchangedByCrowdRefusal = JSON.stringify(nodes()) === JSON.stringify(crowdBefore);
+  // a day's registrations, per address and in all
+  const k5 = await newKey();
+  await issue(k5, { ip: "198.51.100.230" });
+  const dayKeysBefore = new Set(counterKeys("directory:addr:"));
+  out.firstOfDay = (await reg(k5, "203.0.113.230")).status;
+  const dayKey = counterKeys("directory:addr:").find((key) => !dayKeysBefore.has(key));
+  if (dayKey) preset(dayKey, 400);
+  const dayRowsBefore = nodes();
+  out.addrDayCap = (await reg(k5, "203.0.113.230", 20000, ts() + 4)).status;
+  out.rowsUnchangedByDayCap = JSON.stringify(nodes()) === JSON.stringify(dayRowsBefore);
+  preset("directory:all:", 50000);
+  out.dayCeiling = (await reg(k5, "203.0.113.231", 20000, ts() + 5)).status;
+  unset("directory:all:");
   // a directory kept before the network columns existed: its rows get them
   const oldDb = new DatabaseSync(":memory:");
   oldDb.exec(`CREATE TABLE nodes (pubkey TEXT PRIMARY KEY, host4 TEXT, host6 TEXT, port INTEGER NOT NULL,
@@ -984,6 +1024,100 @@ async function mailboxFull() {
 }
 
 // -------------------------------------------------------------------------
+// drops: the mailbox's daily caps count the mail it stores
+// -------------------------------------------------------------------------
+
+async function mailboxDrops() {
+  const out = {};
+  const drop = async (sender, n, ip) => {
+    const encrypted = Buffer.from(`box:${n}`).toString("base64");
+    const uuid = `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const timestamp = "2026-11-02T14:00:00Z";
+    return call("POST", "/mailbox", {
+      to: master.pubHex, from_public_key: sender.pubHex, encrypted, timestamp, message_uuid: uuid,
+      signature: await sign(sender, `mailbox:v1:${master.pubHex}:${uuid}:${timestamp}:${await sha256Hex(encrypted)}`),
+    }, { ip });
+  };
+  const drops = () => mailDb.prepare("SELECT count(*) AS n FROM drops").get().n;
+  const fill = (n, addr) => {
+    const insert = mailDb.prepare("INSERT INTO drops (sender, addr, at) VALUES (?, ?, ?)");
+    for (let i = 0; i < n; i++) insert.run(`filler${i}`, addr, Date.now());
+  };
+  const a = await newKey(), b = await newKey();
+  await issue(a, { ip: "198.51.100.120" });
+  await issue(b, { ip: "198.51.100.121" });
+  // a sender at its cap (three in the harness): what it is refused counts for nothing
+  for (let i = 1; i <= 3; i++) await drop(a, i, "198.51.100.120");
+  const before = drops();
+  out.senderRefusals = [];
+  for (let i = 4; i <= 6; i++) out.senderRefusals.push((await drop(a, i, "198.51.100.120")).status);
+  out.dropsByRefusals = drops() - before;
+  // mail the master has drained still counts for the day
+  const t = String(Math.floor(Date.now() / 1000));
+  const drained = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${t}&after=0&signature=${await sign(master, `mailbox-drain:v1:${t}:0`)}`);
+  const last = drained.body.messages[drained.body.messages.length - 1].id;
+  await call("DELETE", `/mailbox?public_key_hex=${master.pubHex}&ts=${t}&upto=${last}&signature=${await sign(master, `mailbox-ack:v1:${t}:${last}`)}`);
+  out.afterDrain = (await drop(a, 7, "198.51.100.120")).status;
+  // an address: one drop left there, then another sender from it is refused
+  fill(100 - 3 - 1, mailDb.prepare("SELECT addr FROM drops WHERE sender = ?").get(a.pubHex).addr);
+  out.addressCap = [await drop(b, 10, "198.51.100.120"), await drop(b, 11, "198.51.100.120")]
+    .map((r) => [r.status, r.body.error ?? null]);
+  out.otherAddress = (await drop(b, 12, "198.51.100.121")).status;
+  // the day's drops in all
+  fill(5000 - drops(), "elsewhere");
+  out.dayCap = await drop(b, 13, "198.51.100.122");
+  // a day later none of them counts
+  mailDb.prepare("UPDATE drops SET at = ?").run(Date.now() - 25 * 3600e3);
+  out.nextDay = (await drop(a, 14, "198.51.100.120")).status;
+  out.dropsNextDay = drops();
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// armed: the stamp budget as a refusal (--armed)
+// -------------------------------------------------------------------------
+
+async function armedStamps() {
+  const out = {};
+  const k = await newKey();
+  await issue(k, { ip: "198.51.100.90" });
+  // More one-root requests at one moment than a new identity's burst, every
+  // one reading the verdict before any is charged: the ledger holds each
+  // charge until all eight have read theirs.
+  let read = 0, allRead;
+  const reads = new Promise((resolve) => { allRead = resolve; });
+  const atOneMoment = { idFromName: (n) => n, get: () => ({ fetch: async (url, init) => {
+    const path = new URL(url).pathname;
+    if (path === "/stamp") await reads;
+    const res = await ledger.stub.fetch(url, init);
+    if (path === "/stamp-score" && ++read === 8) allRead();
+    return res;
+  } }) };
+  const answers = await Promise.all(Array.from({ length: 8 }, (_, i) =>
+    stamp(k, [root(7000 + i)], { ip: "198.51.100.90", useEnv: { ...env, BIRTH_LEDGER: atOneMoment } })));
+  out.statuses = answers.map((a) => a.status).sort();
+  out.tsKeys = Array.from({ length: 8 }, (_, i) => store.has(`ts:${root(7000 + i)}`)).filter(Boolean).length;
+  // the budget spent: refused before the caps, nothing recorded or charged
+  const ledgerOf = () => JSON.stringify([
+    db.prepare("SELECT count(*) AS n FROM stamps WHERE pubkey = ?").get(k.pubHex).n,
+    db.prepare("SELECT tokens, updated FROM notary_budget WHERE pubkey = ?").get(k.pubHex)]);
+  const countersOf = () => JSON.stringify(counterKeys("stamp:").map((key) => [key, shardOf(key).db
+    .prepare("SELECT n FROM counters WHERE key = ?").get(key).n]));
+  const ledgerBefore = ledgerOf(), countersBefore = countersOf();
+  out.spent = await stamp(k, [root(7100)], { ip: "198.51.100.91" });
+  out.ledgerUntouched = ledgerOf() === ledgerBefore;
+  out.countersUntouched = countersOf() === countersBefore;
+  out.spentWrote = store.has(`ts:${root(7100)}`);
+  // no verdict, no stamp
+  const brokenLedger = { idFromName: (n) => n, get: () => ({ fetch: async () => { throw new Error("Durable Object is overloaded"); } }) };
+  const k2 = await newKey();
+  await issue(k2, { ip: "198.51.100.92" });
+  out.ledgerDown = await stamp(k2, [root(7200)], { ip: "198.51.100.92", useEnv: { ...env, BIRTH_LEDGER: brokenLedger } });
+  out.ledgerDownWrote = store.has(`ts:${root(7200)}`);
+  return out;
+}
+
+// -------------------------------------------------------------------------
 // shards: one route's limiter failing leaves the others working
 // -------------------------------------------------------------------------
 
@@ -1019,6 +1153,7 @@ const scenarios = {
   contract, mail, codes, accepts, stamps, store: storeFaults,
   directory: directoryLimits, ledger: ledgerWave, burst: birthBurst, paused: pausedWrites,
   names: nameRetention, mailbox: mailboxFull, shards: shardFailure, history: issuanceHistory,
+  drops: mailboxDrops, armed: armedStamps,
 };
 if (serveMode) {
   const { createServer } = await import("node:http");

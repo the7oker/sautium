@@ -1184,8 +1184,10 @@ ordinary chat wire payload — NaCl Box ciphertext to the master's chat
 key, the Worker never sees plaintext — signed by the sender
 (`mailbox:v1:{to}:{message_uuid}:{timestamp}:{sha256(encrypted)}`),
 gated by a birth certificate issued there (no free keys) and by
-per-address (30/day, the IPv6 /48), per-sender (30/day) and global
-(5 000/day) caps, in a SQLite-backed Durable Object (`MasterMailbox`: TTL
+per-sender (30/day), per-address (100/day, the IPv6 /48) and global
+(5 000/day) caps on the mail it stores — counted in the object with each
+stored drop, drained or not, so a refused drop costs nothing (since
+2026-11-02) — in a SQLite-backed Durable Object (`MasterMailbox`: TTL
 30 d, 20 k rows — full, it refuses new mail, since 2026-11-02, and never
 drops mail it accepted; one instance, keyed by the pinned master pubkey —
 the only mailbox that exists). The master drains on an EVENT, never a timer:
@@ -1593,8 +1595,10 @@ verdict is recorded (`/issuance-stats` → `ledger.notary`) and returned as
 bringing no new root is not recorded and gets none); what answers 429 is
 the per-address brake (Rate Limiting bindings, exact IPv4 / IPv6 /64, no KV
 write — WAF-grade, sized for a cohort), a brake per network beside it, and
-the hard daily caps on the roots a request asks about and on new roots
-(per key, per address, per Worker), far above a node's pace.
+the hard daily caps on the roots a request asks about and on the roots it
+writes, new or re-signed (per key, per address, per Worker), far above a
+node's pace. Armed, the ledger's verdict is read before those caps and
+enforced once more by the step that charges it, after them.
 Since 2026-11-02 only a signed request from a key with a certificate
 issued by the Worker is stamped (the clients have signed since Ф20).
 `ip_hash` hashes the /64 for IPv6 (v3); `signing_batches.timestamp_version`
