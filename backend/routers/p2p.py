@@ -732,10 +732,16 @@ async def _trigger_sync_server_delivery():
 
 @router.post("/invite-by-email")
 async def invite_by_email(req: InviteByEmailRequest) -> Dict[str, Any]:
-    """Send an invite email to someone via the Cloudflare Worker."""
+    """Send an invite email to someone via the Cloudflare Worker. The Worker
+    sends invites only from an account with a verified email, so one
+    without hears why here, before any request leaves the node."""
     identity = _get_identity()
     if not identity:
         raise HTTPException(status_code=400, detail="No P2P account configured")
+    if not (await email_status())["verified"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Verify your email in Profile first — an invite goes out under your verified address.")
 
     invite_code = identity["invite_code"]
     public_key_hex = identity["public_key_hex"]
