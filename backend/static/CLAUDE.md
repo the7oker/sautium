@@ -328,8 +328,9 @@ The guided control needs an opaque background for the tuck to read
 ### What the page may load
 
 Every page of the Web UI carries a Content-Security-Policy
-(`backend/csp.py`, enforced after a report-only stage) naming the node's own
-origin alone: the browser refuses any other load it governs. Every load must be
+(`backend/csp.py`, enforced since 2026-11-03 after a report-only stage)
+naming the node's own origin alone: the browser refuses any other load it
+governs, and any frame around the page (`X-Frame-Options: DENY` beside it). Every load must be
 the node's: a script, sheet or typeface under `/static/`, a cover through
 `coverUrl`/`artSrc` (an outside one is fetched by the node), an API call or
 event stream by its node path. A new kind of load — a `data:` or `blob:`

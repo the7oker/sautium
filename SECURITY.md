@@ -52,8 +52,8 @@ Every page of the Web UI carries a Content-Security-Policy
 (`backend/csp.py`) that names the node's own origin alone — for its scripts,
 styles, typefaces, images, media and API calls — and allows no frame around
 the page; the browser is also told not to look up the hosts of the page's
-links before one is followed. Enforced, after a report-only stage from
-2026-10-25: a browser refuses a load from elsewhere, or a frame around the
+links before one is followed. Enforced since 2026-11-03, after a
+report-only stage from 2026-10-25: a browser refuses a load from elsewhere, or a frame around the
 page, and reports it to the node's log.
 
 There is no TLS on the Web UI, by design: a certificate a stock phone trusts

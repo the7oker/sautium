@@ -20,8 +20,8 @@ It allows what the pages hold today and no more:
 - no form the browser sends (every submit is the page's script), no frame
   around a page, no <base>, no plugin.
 
-Enforced, after a report-only stage: a load the policy does not name is
-refused, reported and logged.
+Enforced since 2026-11-03, after a report-only stage from 2026-10-25: a load
+the policy does not name is refused, reported and logged.
 """
 
 import json
@@ -77,8 +77,10 @@ _EXTENSIONS = {"chrome-extension", "moz-extension", "safari-extension", "safari-
 class PolicyMiddleware:
     """The policy on every HTML document the Web UI sends — the shell at /,
     the same file under /static/, the Last.fm callback page, a page added
-    later — whichever route made it. Pure ASGI: the headers join the
-    response as it starts; the body passes untouched."""
+    later — whichever route made it, with `X-Frame-Options: DENY` beside it:
+    the frame refusal a browser older than frame-ancestors knows. Pure
+    ASGI: the headers join the response as it starts; the body passes
+    untouched."""
 
     def __init__(self, app):
         self.app = app
@@ -92,6 +94,7 @@ class PolicyMiddleware:
                 headers = MutableHeaders(scope=message)
                 if headers.get("content-type", "").startswith("text/html"):
                     headers.append(HEADER, POLICY)
+                    headers.append("X-Frame-Options", "DENY")
                     headers.append("X-DNS-Prefetch-Control", "off")
             await send(message)
 

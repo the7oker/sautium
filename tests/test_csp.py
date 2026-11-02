@@ -82,6 +82,7 @@ def test_every_page_the_node_serves_carries_the_policy(node):
         assert response.headers["content-type"].startswith("text/html"), path
         assert response.headers["content-security-policy"] == csp.POLICY, path     # enforced
         assert "content-security-policy-report-only" not in response.headers, path
+        assert response.headers["x-frame-options"] == "DENY", path
         assert response.headers["x-dns-prefetch-control"] == "off", path
     # FastAPI's interactive docs are no page of the node's: theirs load from a CDN
     assert node.app.docs_url is None and node.app.redoc_url is None
@@ -92,6 +93,21 @@ def test_what_is_not_a_page_carries_no_policy(node):
                      node.get("/api/settings/sync")):                 # unsigned: a 401 in JSON
         assert csp.HEADER not in response.headers
         assert "content-security-policy" not in response.headers
+
+
+def test_a_page_is_refused_a_frame_by_both_headers_and_nothing_else_is():
+    """frame-ancestors in the enforced policy, and X-Frame-Options for a
+    browser older than it — on a page, whichever route made it."""
+    from fastapi.responses import HTMLResponse, JSONResponse
+    app = FastAPI()
+    app.add_middleware(csp.PolicyMiddleware)
+    app.get("/page")(lambda: HTMLResponse("<p>a page</p>"))
+    app.get("/data")(lambda: JSONResponse({}))
+    client = TestClient(app)
+    page, data = client.get("/page"), client.get("/data")
+    assert page.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in page.headers["content-security-policy"].split("; ")
+    assert "x-frame-options" not in data.headers and "content-security-policy" not in data.headers
 
 
 def test_the_policy_names_the_nodes_origin_alone():
