@@ -104,14 +104,21 @@ def _get_scrobbler():
     return _scrobbler
 
 
-def _scrobble_async(method: str, **kwargs) -> None:
-    """Fire a Last.fm call (scrobble / update_now_playing) off the poller thread
-    — the network round-trip must never stall status polling."""
+def _scrobble_async(method: str, **kwargs) -> bool:
+    """Fire a Last.fm play report (scrobble / update_now_playing) off the
+    poller thread — the network round-trip must never stall status polling.
+
+    The one gate of the Scrobbling switch: every report passes here, so the
+    live now-playing obeys it as the scrobble does. False when the switch held
+    the report back — the caller keeps the listen unscrobbled, and a switch
+    turned on before the listen's threshold still scrobbles it."""
+    if not _scrobbling_enabled():
+        return False
     net = _get_scrobbler()
     if net is None:
-        return
+        return True
     if cooling_down('lastfm'):
-        return  # Last.fm is rate-limiting us — skip the scrobble, keep polling
+        return True  # Last.fm is rate-limiting us — skip the scrobble, keep polling
 
     def _work():
         try:
@@ -125,15 +132,19 @@ def _scrobble_async(method: str, **kwargs) -> None:
                 lastfm_auth.session_rejected()
 
     threading.Thread(target=_work, daemon=True, name="lastfm").start()
+    return True
 
 
 def _scrobbling_enabled() -> bool:
+    """The Scrobbling switch. One that cannot be read holds every report back:
+    the owner may have turned it off, and Last.fm shows plays publicly."""
+    import psycopg2
     from routers.profile import _read_scrobbling
     try:
         return _read_scrobbling()
-    except Exception as e:
-        logger.warning("scrobbling toggle read failed: %s", e)
-        return True
+    except psycopg2.Error as e:
+        logger.error("Scrobbling switch unreadable — nothing sent to Last.fm: %s", e)
+        return False
 
 
 def carry_listen(carried: bool) -> None:
@@ -203,11 +214,10 @@ def _save_play_session(s: "_PlaySession") -> None:
         )
         _db_execute(PLAY_STATS_SQL, {"ids": [s.track_id]})
         if completed:
-            if not s.scrobbled and _scrobbling_enabled():
-                _scrobble_async(
+            if not s.scrobbled and _scrobble_async(
                     "scrobble", artist=s.artist, title=s.title,
                     timestamp=int(s.started_at.timestamp()), album=s.album,
-                    duration=int(s.duration) if s.duration else None)
+                    duration=int(s.duration) if s.duration else None):
                 s.scrobbled = True
             logger.info("play: %s — %s (%.0f%%) track=%s",
                         s.artist, s.title, s.percent_listened, s.track_id)
@@ -304,10 +314,9 @@ def track_play_event(state_name: str, position: float, length: float,
 
     _play_session.update(position, length)
     if (not _play_session.scrobbled and _play_session.scrobble_ready
-            and _scrobbling_enabled()):
-        _scrobble_async(
-            "scrobble", artist=_play_session.artist, title=_play_session.title,
-            timestamp=int(_play_session.started_at.timestamp()),
-            album=_play_session.album,
-            duration=int(_play_session.duration) if _play_session.duration else None)
+            and _scrobble_async(
+                "scrobble", artist=_play_session.artist, title=_play_session.title,
+                timestamp=int(_play_session.started_at.timestamp()),
+                album=_play_session.album,
+                duration=int(_play_session.duration) if _play_session.duration else None)):
         _play_session.scrobbled = True
