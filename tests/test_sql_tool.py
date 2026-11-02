@@ -118,10 +118,27 @@ def test_rows_come_back_as_postgresql_wrote_them(sql):
 def test_an_answer_stops_at_its_size_budget(sql):
     answer = sql.run_query("SELECT repeat('x', 1000) AS t FROM generate_series(1, 300)")
     rows, note = answer.split("\n", 1)
-    assert len(rows) <= sql.CHAR_BUDGET and 90 <= len(json.loads(rows)) < 100
+    assert len(rows) <= sql.CHAR_BUDGET and 70 <= len(json.loads(rows)) < 80
     assert "all an answer may carry" in note
     rows, note = sql.run_query(f"SELECT repeat('x', {sql.CHAR_BUDGET}) AS t").split("\n", 1)
     assert rows == "[]" and "fewer or narrower columns" in note
+
+
+def test_an_answer_of_exactly_the_budget_is_whole(sql):
+    width = sql.CHAR_BUDGET - len('[{"t":""}]')
+    answer = sql.run_query(f"SELECT repeat('x', {width}) AS t")
+    assert len(answer) == sql.CHAR_BUDGET and json.loads(answer) == [{"t": "x" * width}]
+
+
+def test_no_more_than_the_budget_leaves_the_database(sql):
+    """Counted where the rows are made: rows wider than the budget never
+    reach the tool's process."""
+    with sql._connection().cursor() as cur:
+        cur.execute("SELECT count(*), coalesce(sum(length(answer_row)), 0) FROM pg_temp.sautium_query("
+                    "'SELECT repeat(''x'', 2000000) AS t FROM generate_series(1, 50)', %s, %s)",
+                    (sql.ROW_CAP, sql.CHAR_BUDGET))
+        assert cur.fetchone() == (1, 0)                 # the note's row alone
+    sql._conn.rollback()
 
 
 def test_the_function_is_made_whatever_the_roles_default_transaction(sql, monkeypatch):
@@ -140,4 +157,12 @@ def test_an_unreachable_database_is_said_as_the_tools_error(sql, monkeypatch):
     monkeypatch.setitem(sql.DB, "host", "127.0.0.1")
     monkeypatch.setitem(sql.DB, "port", "1")
     with pytest.raises(ValueError, match="not reachable"):
+        sql.run_query("SELECT 1")
+
+
+def test_a_session_whose_function_cannot_be_made_says_so(sql, monkeypatch):
+    if sql._conn is not None:
+        sql._conn.close()
+    monkeypatch.setattr(sql, "_QUERY_FUNCTION", "CREATE FUNCTION pg_temp.broken( RETURNS")
+    with pytest.raises(ValueError, match="session function could not be made"):
         sql.run_query("SELECT 1")

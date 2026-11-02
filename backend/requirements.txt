@@ -103,9 +103,11 @@ requests>=2.33.0
 urllib3>=2.8.0
 certifi>=2026.10.18
 aiohttp>=3.14.4
-# Earlier releases installed it (yt-dlp's extras), and wherever it is aiohttp,
-# urllib3 and httpx decode a server's br responses with it
-brotli>=1.2.1
+# Wherever Brotli is installed, aiohttp, urllib3 and httpx decode br with it.
+# The launcher's backend runtime (Windows, a Mac's shared one) may hold the
+# copy earlier releases installed (yt-dlp's extras): held above its decoder's
+# fix there. A Docker image, built afresh, has none and gets none.
+brotli>=1.2.1; sys_platform != "linux"
 
 # Logging
 python-json-logger>=2.0.7

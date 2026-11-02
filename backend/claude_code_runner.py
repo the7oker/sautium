@@ -350,6 +350,11 @@ def call_claude_code(
         }
 
 
+# Where releases before 2026-11 wrote the Docker node's MCP config: the code's
+# folder, the host's ./backend
+STALE_MCP_CONFIG = Path(__file__).resolve().parent / "mcp-docker.json"
+
+
 def write_docker_mcp_config() -> None:
     """The Docker node's MCP config, from its own settings and the servers
     the tree carries (desktop.config_manager.mcp_servers, the launcher's
@@ -374,14 +379,13 @@ def write_docker_mcp_config() -> None:
         pw = pwd.getpwnam(AGENT_USER)
         os.chown(path, pw.pw_uid, pw.pw_gid)
     logger.info("MCP config written to %s", path)
-    # Where releases before 2026-11 wrote it: the code's folder, the host's
-    stale = backend_dir / "mcp-docker.json"
-    if stale.exists():
+    if STALE_MCP_CONFIG.exists():
         try:
-            stale.unlink()
+            STALE_MCP_CONFIG.unlink()
         except OSError as e:
             logger.warning("%s holds the database password from an earlier release and "
-                           "could not be removed here (%s): delete it on the host", stale, e)
+                           "could not be removed here (%s): delete it on the host",
+                           STALE_MCP_CONFIG, e)
 
 
 def spawn_kwargs(env: dict) -> dict:

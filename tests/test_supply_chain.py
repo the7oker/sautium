@@ -24,15 +24,15 @@ _DISTRIBUTIONS = {
 # The interpreters a node runs its packages on: the launcher's (Windows, both
 # kinds of Mac) and the Docker image's (Linux, both architectures)
 _RUNTIMES = {
-    "windows": {"sys_platform": "win32", "platform_system": "Windows",
+    "windows": {"sys_platform": "win32", "platform_system": "Windows", "os_name": "nt",
                 "platform_machine": "AMD64", "python_version": "3.12"},
-    "mac": {"sys_platform": "darwin", "platform_system": "Darwin",
+    "mac": {"sys_platform": "darwin", "platform_system": "Darwin", "os_name": "posix",
             "platform_machine": "arm64", "python_version": "3.12"},
-    "intel-mac": {"sys_platform": "darwin", "platform_system": "Darwin",
+    "intel-mac": {"sys_platform": "darwin", "platform_system": "Darwin", "os_name": "posix",
                   "platform_machine": "x86_64", "python_version": "3.12"},
-    "linux": {"sys_platform": "linux", "platform_system": "Linux",
+    "linux": {"sys_platform": "linux", "platform_system": "Linux", "os_name": "posix",
               "platform_machine": "x86_64", "python_version": "3.11"},
-    "linux-arm": {"sys_platform": "linux", "platform_system": "Linux",
+    "linux-arm": {"sys_platform": "linux", "platform_system": "Linux", "os_name": "posix",
                   "platform_machine": "aarch64", "python_version": "3.11"},
 }
 
@@ -84,9 +84,14 @@ def test_the_launcher_requirements_carry_every_package_its_p2p_layer_imports():
 
 def test_the_libtorrent_floor_is_a_windows_wheel_with_its_own_openssl():
     # 2.0.11's Windows wheel imported OpenSSL 1.1 DLLs from the system;
-    # 2.0.13's and every later one link OpenSSL in.
-    req = _requirements(REPO / "desktop" / "requirements.txt", "windows")["libtorrent"]
-    assert _floor(req) >= Version("2.0.13")
+    # 2.0.13's and every later one link OpenSSL in. The floor is the 2.0
+    # line's last release wherever a wheel of it exists (_WHEELS: not on an
+    # Intel Mac before macOS 15).
+    for runtime in _RUNTIMES:
+        req = _requirements(REPO / "desktop" / "requirements.txt", runtime)["libtorrent"]
+        assert _floor(req) >= Version("2.0.11" if runtime == "intel-mac" else "2.0.15"), runtime
+    assert _floor(_requirements(REPO / "desktop" / "requirements.txt", "windows")["libtorrent"]) \
+        >= Version("2.0.13")
 
 
 # The last published fix of each package that faces the internet, as OSV
@@ -95,15 +100,23 @@ def test_the_libtorrent_floor_is_a_windows_wheel_with_its_own_openssl():
 _FIXED = {
     "backend": {"aiohttp": "3.14.4", "starlette": "1.3.1", "h11": "0.16.0", "anyio": "4.14.2",
                 "cryptography": "50.0.0", "pynacl": "1.6.2", "certifi": "2026.10.18",
-                "urllib3": "2.8.0", "requests": "2.33.0", "brotli": "1.2.1"},
-    "desktop": {"aiohttp": "3.14.4", "cryptography": "50.0.0", "pynacl": "1.6.2",
-                "brotli": "1.2.1"},
+                "urllib3": "2.8.0", "requests": "2.33.0"},
+    "desktop": {"aiohttp": "3.14.4", "cryptography": "50.0.0", "pynacl": "1.6.2"},
 }
 # Where a runtime has no wheel of the fix: cryptography publishes none for an
 # Intel Mac past 48; 49 and 50 fixed its X.509 path validation and PKCS#7
 # decryption, which no node may call while that holds.
 _BELOW_THE_FIX = {"intel-mac": {"cryptography": "48.0.1"}}
 _LEFT_UNFIXED = r"x509\.verification|x509 import verification|pkcs7"
+# Wherever Brotli is installed the HTTP stack decodes br with it, a peer's
+# request body to the launcher's sync server included: it is held above its
+# decoder's fix (1.2.1) where an earlier release may have left a copy — the
+# launcher's backend runtime, a Mac's shared one — and installed nowhere else.
+_BROTLI = {"backend": {"windows", "mac", "intel-mac"}, "desktop": {"mac", "intel-mac"}}
+# What a runtime has a wheel of (PyPI, read 2026-11-02): its requirement must
+# admit the first and none of the second, or that runtime builds from source.
+_WHEELS = {"intel-mac": {"cryptography": "48.0.1", "libtorrent": "2.0.11"}}
+_NO_WHEEL = {"intel-mac": {"cryptography": "49.0.0"}}
 
 
 def test_what_faces_the_internet_is_held_above_its_last_published_fix():
@@ -115,11 +128,32 @@ def test_what_faces_the_internet_is_held_above_its_last_published_fix():
             for name, version in dict(fixed, **_BELOW_THE_FIX.get(runtime, {})).items():
                 if name not in required or _floor(required[name]) < Version(version):
                     low.append(f"{tree} on {runtime}: {name} below {version}")
+            if runtime in _BROTLI[tree]:
+                if "brotli" not in required or _floor(required["brotli"]) < Version("1.2.1"):
+                    low.append(f"{tree} on {runtime}: brotli below 1.2.1")
+            elif "brotli" in required:
+                low.append(f"{tree} on {runtime}: brotli installed where no copy was")
     assert low == []
     unfixed = re.compile(_LEFT_UNFIXED, re.IGNORECASE)
     assert [str(path.relative_to(REPO)) for tree in ("backend", "desktop", "mcp")
             for path in (REPO / tree).rglob("*.py")
             if unfixed.search(path.read_text(encoding="utf-8", errors="replace"))] == []
+
+
+def test_each_runtime_admits_a_version_it_has_a_wheel_of_and_none_it_has_not():
+    wrong = []
+    for tree in ("backend", "desktop"):
+        for runtime, versions in _WHEELS.items():
+            required = _requirements(REPO / tree / "requirements.txt", runtime)
+            wrong += [f"{tree} on {runtime}: {name} {version} not admitted"
+                      for name, version in versions.items()
+                      if name in required and not required[name].specifier.contains(version)]
+        for runtime, versions in _NO_WHEEL.items():
+            required = _requirements(REPO / tree / "requirements.txt", runtime)
+            wrong += [f"{tree} on {runtime}: {name} {version} admitted"
+                      for name, version in versions.items()
+                      if name in required and required[name].specifier.contains(version)]
+    assert wrong == []
 
 
 def test_a_runtime_in_a_folder_of_any_script_is_found_whatever_the_locale(tmp_path):
@@ -285,6 +319,7 @@ def test_the_docker_node_writes_the_same_servers_from_its_own_settings(tmp_path,
     import claude_code_runner
     from config import settings
     monkeypatch.setattr(claude_code_runner, "MCP_CONFIG_PATH", str(tmp_path / "mcp-docker.json"))
+    monkeypatch.setattr(claude_code_runner, "STALE_MCP_CONFIG", tmp_path / "stale" / "mcp-docker.json")
     monkeypatch.setattr(claude_code_runner.os, "geteuid", lambda: 1000)
     claude_code_runner.write_docker_mcp_config()
     servers = json.loads((tmp_path / "mcp-docker.json").read_text(encoding="utf-8"))["mcpServers"]
@@ -296,6 +331,32 @@ def test_the_docker_node_writes_the_same_servers_from_its_own_settings(tmp_path,
     assert (env["DB_HOST"], env["DB_NAME"], env["DB_USER"]) == (
         settings.postgres_host, settings.postgres_db, settings.postgres_user)
     assert servers["assistant"]["env"]["P2P_IDENTITY_DIR"] == settings.p2p_identity_dir
+
+
+def test_the_config_an_earlier_release_left_in_the_code_folder_is_removed(tmp_path, monkeypatch,
+                                                                         caplog):
+    """It holds the database password; a mount that will not let it go is said
+    in the log, and the start goes on."""
+    import claude_code_runner
+    stale = tmp_path / "backend" / "mcp-docker.json"
+    stale.parent.mkdir()
+    stale.write_text("{}")
+    monkeypatch.setattr(claude_code_runner, "MCP_CONFIG_PATH", str(tmp_path / "mcp-docker.json"))
+    monkeypatch.setattr(claude_code_runner, "STALE_MCP_CONFIG", stale)
+    monkeypatch.setattr(claude_code_runner.os, "geteuid", lambda: 1000)
+    claude_code_runner.write_docker_mcp_config()
+    assert not stale.exists()
+    stale.write_text("{}")
+    real = Path.unlink
+
+    def unlink(self, *a, **kw):
+        if self == stale:
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    claude_code_runner.write_docker_mcp_config()
+    assert stale.exists() and "delete it on the host" in caplog.text
 
 
 # -- the Docker image --------------------------------------------------------------------

@@ -9,14 +9,16 @@ resolved by name at every agent spawn.
 One statement: the text is opened as a cursor inside pg_temp.sautium_query
 (`FOR … IN EXECUTE`), which PostgreSQL does only for a single statement that
 returns rows, in a READ ONLY transaction under a statement timeout. At most
-ROW_CAP rows and CHAR_BUDGET characters come back, each row as PostgreSQL
-wrote its JSON: numbers exact, every column there, two of one name included.
-Nothing of a call outlives it: the transaction rolls back — what the
-read-only rule lets run, EXPLAIN ANALYZE of CREATE TABLE AS, goes with it —
-and a session-level advisory lock it took, which a rollback keeps, is
-released. What the connection may read at all is its role's business — its
-grants — not this file's; the role needs TEMP on the database for the
-function.
+ROW_CAP rows and CHAR_BUDGET characters leave the database — the function
+counts them — each row as PostgreSQL wrote its JSON: numbers exact, every
+column there, two of one name included. Nothing of a call stays in its
+session: the transaction rolls back — what the read-only rule lets run,
+EXPLAIN ANALYZE of CREATE TABLE AS, goes with it — and a session-level
+advisory lock it took, which a rollback keeps, is released. What the
+connection may read or do at all is its role's business — its grants — not
+this file's: a superuser's server functions act outside any transaction (a
+replication slot made, another session ended), and a rollback undoes none of
+that. The role needs TEMP on the database for the function.
 
 All logging goes to stderr (stdout is the STDIO MCP transport).
 """
@@ -47,24 +49,36 @@ DB = {
 TIMEOUT_MS = int(os.getenv("DB_QUERY_TIMEOUT", "30000"))
 ROW_CAP = 500
 # Wide rows — a lyric, an embedding — fill the agent's context long before
-# the row cap does
-CHAR_BUDGET = 100_000
+# the row cap does. Below the 100,000 characters at which Claude Code cuts an
+# MCP answer of its own accord, so the note on a cut answer is read.
+CHAR_BUDGET = 80_000
 
 # A session's own function: created where the role may write (pg_temp), once
 # per connection, in a transaction of its own that is writable whatever the
-# role's default. The loop reads one row past the cap, so a cut answer can
-# say so.
+# role's default. It returns the rows that fit — the array's brackets and
+# commas counted — and, when more matched, one last row naming what cut them:
+# 'rows' (the cap) or 'size' (the budget).
 _QUERY_FUNCTION = """
-CREATE FUNCTION pg_temp.sautium_query(q text, cap integer) RETURNS SETOF text
+CREATE FUNCTION pg_temp.sautium_query(q text, cap integer, budget integer)
+RETURNS TABLE (answer_row text, cut text)
 LANGUAGE plpgsql AS $$
 DECLARE
     r record;
     n integer := 0;
+    used bigint := 2;
 BEGIN
     FOR r IN EXECUTE q LOOP
+        IF n = cap THEN
+            answer_row := NULL; cut := 'rows'; RETURN NEXT; RETURN;
+        END IF;
+        answer_row := row_to_json(r)::text;
+        used := used + length(answer_row) + CASE WHEN n > 0 THEN 1 ELSE 0 END;
+        IF used > budget THEN
+            answer_row := NULL; cut := 'size'; RETURN NEXT; RETURN;
+        END IF;
         n := n + 1;
-        EXIT WHEN n > cap + 1;
-        RETURN NEXT row_to_json(r)::text;
+        cut := NULL;
+        RETURN NEXT;
     END LOOP;
 END
 $$
@@ -78,11 +92,19 @@ _conn = None
 def _connection():
     global _conn
     if _conn is None or _conn.closed:
-        conn = psycopg2.connect(connect_timeout=10, **DB)
-        with conn.cursor() as cur:
-            cur.execute("SET TRANSACTION READ WRITE")
-            cur.execute(_QUERY_FUNCTION)
-        conn.commit()
+        try:
+            conn = psycopg2.connect(connect_timeout=10, **DB)
+        except psycopg2.OperationalError as e:
+            raise ValueError(f"the database is not reachable: {str(e).strip()}") from None
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET TRANSACTION READ WRITE")
+                cur.execute(_QUERY_FUNCTION)
+            conn.commit()
+        except psycopg2.Error as e:
+            conn.close()
+            raise ValueError("the tool's session function could not be made: "
+                             f"{(e.pgerror or str(e)).strip()}") from None
         _conn = conn
     return _conn
 
@@ -104,31 +126,25 @@ def run_query(sql: str) -> str:
     when more matched than ROW_CAP or CHAR_BUDGET let through. Raises
     ValueError with the database's own words on an error."""
     text = sql.strip().rstrip(";").strip()
-    try:
-        conn = _connection()
-    except psycopg2.Error as e:
-        raise ValueError(f"the database is not reachable: {str(e).strip()}") from None
+    conn = _connection()
     try:
         with conn.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
             cur.execute("SET LOCAL statement_timeout = %s", (TIMEOUT_MS,))
-            cur.execute("SELECT q FROM pg_temp.sautium_query(%s, %s) AS q", (text, ROW_CAP))
-            rows = [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT answer_row, cut FROM pg_temp.sautium_query(%s, %s, %s)",
+                        (text, ROW_CAP, CHAR_BUDGET))
+            rows = cur.fetchall()
     except psycopg2.Error as e:
         raise ValueError((e.pgerror or str(e)).strip()) from None
     finally:
         _end(conn)
-    kept, size = [], 2
-    for row in rows[:ROW_CAP]:
-        if size + len(row) + 1 > CHAR_BUDGET:
-            break
-        kept.append(row)
-        size += len(row) + 1
+    kept = [row for row, cut in rows if cut is None]
+    cut = rows[-1][1] if rows else None
     answer = "[" + ",".join(kept) + "]"
-    if len(kept) < min(len(rows), ROW_CAP):
+    if cut == "size":
         answer += (f"\n(the first {len(kept)} rows, all an answer may carry; "
                    "select fewer or narrower columns, or fewer rows)")
-    elif len(rows) > ROW_CAP:
+    elif cut == "rows":
         answer += f"\n(the first {ROW_CAP} rows; narrow the query or add a LIMIT)"
     return answer
 
@@ -137,7 +153,7 @@ def run_query(sql: str) -> str:
 def query(sql: str) -> str:
     """Run one read-only SQL statement (SELECT, WITH … SELECT, VALUES, TABLE,
     EXPLAIN, SHOW) against the music library database and return its rows as
-    JSON. One statement per call; at most 500 rows, and about 100,000
+    JSON. One statement per call; at most 500 rows, and about 80,000
     characters, come back."""
     return run_query(sql)
 
