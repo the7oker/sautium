@@ -9,7 +9,8 @@ Never in a bundle: p2p_messages (friends' private E2E chat — the master
 already has its own thread with this node), credentials of any kind
 (ai.api_key, the Last.fm session, config.json api_keys / postgres_password,
 node keys, TLS keys, .api_secret, the agents' auth files). Log tails go
-through diag_protocol.scrub_secrets. The `playback` scope — the HQPlayer
+through diag_protocol.scrub_personal: no credential, email, address or
+absolute path. The `playback` scope — the HQPlayer
 output's playback traces and HQPlayer's own log, which are content — comes
 from the backend with every path already cut to its last two components.
 """
@@ -30,7 +31,7 @@ from desktop.api_client import BackendAPIClient
 from desktop.p2p import contact_log, diag_events
 from desktop.p2p.diag_protocol import (
     BUNDLE_MAX_BYTES, CHAT_DEFAULT_DAYS, EVENTS_MAX_ROWS, LOG_TAIL_BYTES,
-    PROTOCOL_VERSION, scrub_personal, scrub_secrets,
+    PROTOCOL_VERSION, scrub_personal,
 )
 from desktop.p2p.master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX
 
@@ -343,7 +344,7 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
                     if not path.exists():
                         continue
                     text, truncated = tail(path)
-                    add(f"logs/{Path(name).name}", scrub_secrets(text), truncated)
+                    add(f"logs/{Path(name).name}", scrub_personal(text), truncated)
             scope("logs", _logs)
             scope("chat", lambda: add("chat/sessions.json", _json(chat_export(conn, since))))
 
@@ -354,7 +355,7 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
                     "/api/player/diagnostics/hqplayer/bundle", timeout=30)
                 if data is None:
                     raise RuntimeError("the backend did not return its playback traces")
-                add("playback/hqplayer.json", scrub_secrets(_json(data)))
+                add("playback/hqplayer.json", scrub_personal(_json(data)))
             scope("playback", _playback)
             add("manifest.json", _json(manifest))
     finally:
@@ -405,7 +406,7 @@ def save_report(*, data_dir: Path, config: dict, state: str, detail: str) -> Pat
     out_dir = data_dir / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"sautium-report-{now:%Y%m%d-%H%M%S}.txt"
-    out.write_text(scrub_secrets("\n".join(parts)), encoding="utf-8")
+    out.write_text(scrub_personal("\n".join(parts)), encoding="utf-8")
     logger.info("Diagnostic report saved: %s", out)
     return out
 

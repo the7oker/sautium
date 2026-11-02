@@ -437,7 +437,7 @@ def _codex_stream(
     cmd += ["--", _prefix_player_context(message, player_context)]
 
     logger.info(
-        f"Codex stream call: message={message[:80]!r}, resume={resume}, "
+        f"Codex stream call: message of {len(message)} chars, resume={resume}, "
         f"thread={thread_id}, model={use_model}"
     )
 

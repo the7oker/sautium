@@ -360,7 +360,8 @@ def call_claude_code(
     if resume and session_id:
         cmd.extend(["--resume", session_id])
 
-    logger.info(f"Claude Code call: message={message[:80]!r}, resume={resume}, session={session_id}")
+    logger.info(f"Claude Code call: message of {len(message)} chars, resume={resume}, "
+                f"session={session_id}")
 
     try:
         kwargs = _agent_kwargs()
@@ -573,7 +574,8 @@ def _claude_code_stream(
         cmd.extend(["--resume", session_id])
 
     logger.info(
-        f"Claude Code stream call: message={message[:80]!r}, resume={resume}, session={session_id}"
+        f"Claude Code stream call: message of {len(message)} chars, resume={resume}, "
+        f"session={session_id}"
     )
 
     try:

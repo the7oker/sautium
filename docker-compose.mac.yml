@@ -7,6 +7,15 @@
 #   - No CUDA_VISIBLE_DEVICES env var
 #   - Mac-friendly path defaults
 
+# Docker keeps a container's output with no bound unless told, and the
+# backend's says what the node does — requests, errors: three files of 10 MB
+# per container, the oldest dropped first.
+x-logging: &bounded-log
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     # Official pgvector image (ankane/pgvector is abandoned at 0.5.1). Same
@@ -51,6 +60,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *bounded-log
 
   backend:
     build:
@@ -175,6 +185,7 @@ services:
         condition: service_healthy
     # No GPU reservation — Apple Silicon GPU (MPS) is not available inside Docker
     restart: unless-stopped
+    logging: *bounded-log
     # Docker kills a container ~3 s after SIGTERM unless told otherwise
     # (Docker 29, measured 2026-10-03); the backend's shutdown needs more —
     # a benchmark run puts the owner's HQPlayer back. The Web UI's event

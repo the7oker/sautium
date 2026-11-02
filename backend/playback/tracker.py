@@ -100,7 +100,7 @@ def _get_scrobbler():
     if _scrobbler is None or _scrobbler.session_key != session_key:
         from lastfm import lastfm_network
         _scrobbler = lastfm_network(session_key, settings.lastfm_username or "")
-        logger.info("Last.fm scrobbler initialized (user=%s)", settings.lastfm_username or "?")
+        logger.info("Last.fm scrobbler initialized")
     return _scrobbler
 
 
@@ -123,8 +123,10 @@ def _scrobble_async(method: str, **kwargs) -> bool:
     def _work():
         try:
             getattr(net, method)(**kwargs)
-            logger.info("Last.fm %s: %s — %s", method,
-                        kwargs.get("artist"), kwargs.get("title"))
+            # What was played is the listener's, not the log's (INFO lines
+            # travel in support bundles' log excerpts).
+            logger.debug("Last.fm %s: %s — %s", method,
+                         kwargs.get("artist"), kwargs.get("title"))
         except Exception as e:
             logger.error("Last.fm %s failed: %s", method, e)
             import lastfm_auth
@@ -219,11 +221,11 @@ def _save_play_session(s: "_PlaySession") -> None:
                     timestamp=int(s.started_at.timestamp()), album=s.album,
                     duration=int(s.duration) if s.duration else None):
                 s.scrobbled = True
-            logger.info("play: %s — %s (%.0f%%) track=%s",
-                        s.artist, s.title, s.percent_listened, s.track_id)
+            logger.debug("play: %s — %s (%.0f%%) track=%s",
+                         s.artist, s.title, s.percent_listened, s.track_id)
         else:
-            logger.info("skip: %s — %s (%.0f%%) track=%s",
-                        s.artist, s.title, s.percent_listened, s.track_id)
+            logger.debug("skip: %s — %s (%.0f%%) track=%s",
+                         s.artist, s.title, s.percent_listened, s.track_id)
     except Exception as e:
         logger.error("save play session failed: %s", e)
 

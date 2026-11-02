@@ -3,6 +3,7 @@ Configuration management for Sautium.
 Loads settings from environment variables with sensible defaults.
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -350,10 +351,25 @@ def get_settings() -> Settings:
     return settings
 
 
+class AccessLineWithoutQuery(logging.Filter):
+    """uvicorn's access line without the request's query string. Queries
+    carry what a person searched, signed media URLs and one-use tokens; none
+    of it is the log's, which travels in a support bundle's excerpts."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            record.args = (args[0], args[1], args[2].split("?", 1)[0], args[3], args[4])
+        return True
+
+
 # Logging configuration
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "access_without_query": {"()": AccessLineWithoutQuery},
+    },
     "formatters": {
         "default": {
             "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -384,7 +400,12 @@ LOGGING_CONFIG = {
         "uvicorn.access": {
             "level": "INFO",
             "handlers": ["console"],
+            "filters": ["access_without_query"],
             "propagate": False,
         },
+        # httpx names every request's whole URL at INFO: an address being
+        # verified, a search, a lookup's artist and title.
+        "httpx": {"level": "WARNING"},
+        "httpcore": {"level": "WARNING"},
     },
 }

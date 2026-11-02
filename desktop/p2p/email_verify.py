@@ -143,7 +143,7 @@ def is_email_already_verified(
         "signature": ctx["sign"](message.encode("utf-8")).hex(),
     })
     if result and result.get("verified"):
-        logger.info(f"Email {email} already verified for {ctx['invite_code']}")
+        logger.info("Email already verified for this identity")
         if result.get("birth_cert"):
             from desktop.p2p import birth_cert
             birth_cert.save_certificate(result["birth_cert"])
@@ -180,7 +180,7 @@ def send_verification_email(
         "from_username": from_username,
     })
     if result and result.get("status") == "sent":
-        logger.info(f"Verification email sent to {to_email}")
+        logger.info("Verification email sent")
         return True
     return False
 
@@ -223,7 +223,7 @@ def register_verified_email(
         "birth_cert": cert,
     })
     if result and result.get("status") == "registered":
-        logger.info(f"Email {email} registered for {ctx['invite_code']}")
+        logger.info("Email registered for this identity")
         # The Worker upgraded our record to method:email — persist the new
         # certificate now instead of discovering it on the next re-fetch.
         if result.get("birth_cert"):
