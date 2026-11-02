@@ -2,7 +2,8 @@ name = "sautium-verify"
 main = "verify.js"
 compatibility_date = "2024-01-01"
 
-# KV namespace for rate limiting
+# KV namespace: the Worker's records (certificates, stamps, verified email,
+# acceptances); its binding keeps the historic name. No limit counts here.
 [[kv_namespaces]]
 binding = "RATE_LIMITS"
 id = "bf74d396ca6c4b1cb46ff216ff2aa585"
@@ -38,6 +39,18 @@ class_name = "NodeDirectory"
 type = "durable-object"
 storage = "sqlite"
 
+# Admission: one SQLite-backed Durable Object ("limits") holds every counter
+# a write or a mail passes first (per key, per mailbox, per address, the
+# route's daily ceiling), the username each key speaks under, and the pending
+# email codes — atomic there, so a refused request writes nothing to KV.
+[[durable_objects.bindings]]
+name = "LIMITER"
+class_name = "Limiter"
+
+[exports.Limiter]
+type = "durable-object"
+storage = "sqlite"
+
 # Custom domain (optional): verify.sautium.net
 # Configure in Cloudflare dashboard: Workers → Triggers → Custom Domains
 
@@ -53,3 +66,10 @@ simple = { limit = 30, period = 60 }
 name = "BRAKE_BIRTH"
 namespace_id = "1002"
 simple = { limit = 10, period = 60 }
+
+# The per-minute brake of every other route, each in a bucket of its own
+# (the route name is in the key), in front of the limiter object.
+[[ratelimits]]
+name = "BRAKE_ROUTE"
+namespace_id = "1003"
+simple = { limit = 30, period = 60 }

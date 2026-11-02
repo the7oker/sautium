@@ -337,10 +337,10 @@ def test_worker_mailbox_contract():
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_worker_timestamp_contract():
-    """The timestamp notary (Ф20): identity-signed requests are priced by the
-    ledger in shadow and answered with pace advice, unsigned ones still stamp,
-    the address brake answers 429 — and every stamp verifies with the client's
-    own timestamp verifier."""
+    """The timestamp notary (Ф20): only signed requests from keys with a
+    certificate are stamped, priced by the ledger in shadow and answered with
+    pace advice; the address brake answers 429 — and every stamp verifies with
+    the client's own timestamp verifier."""
     from backend import record_sig
 
     seed, _, issuer = _authority()
@@ -362,12 +362,10 @@ def test_worker_timestamp_contract():
     m = r["tsMulti"]["body"]
     assert [x["root"] for x in m["stamps"]] == ["a1" * 32, "b2" * 32]
     assert m["stamps"][0]["sig"] == b["sig"] and m["v"] == 2
-    # an unsigned (older client) request stamps, with no identity to pace
-    assert r["tsUnsigned"]["status"] == 200 and r["tsUnsigned"]["body"]["not_before"] is None
+    # unsigned, or signed by a key with no certificate issued here: refused
+    assert r["tsUnsigned"]["status"] == 400 and r["tsStranger"]["status"] == 403
     assert r["tsBadSig"]["status"] == 403 and r["tsStale"]["status"] == 403
     assert r["tsBadRoot"]["status"] == 400 and r["tsTooMany"]["status"] == 400
-    # no certificate: a ledger signal while the budget is shadow, not a refusal
-    assert r["tsStranger"]["status"] == 200
     # the address brake: one IPv6 /64 across interface ids, 8 pass then 429
     assert [x["status"] for x in r["tsBrake"]] == [200] * 8 + [429, 429]
     assert r["tsBrake"][-1]["retry"] == 60
@@ -376,16 +374,19 @@ def test_worker_timestamp_contract():
     assert r["ipHash64a"] == r["ipHash64b"] and r["ipHash64a"] != r["ipHash64c"]
 
     rows = r["stampRows"]
-    assert [(row["n_new"], row["n_roots"], row["allowed"]) for row in rows[:5]] == [
-        (1, 1, 1), (0, 1, 1), (1, 2, 1), (1, 1, 1), (1, 1, 1)]
-    assert rows[0]["pubkey"] == r["issue1"]["body"]["pubkey"] and rows[3]["pubkey"] == ""
+    assert [(row["n_new"], row["n_roots"], row["allowed"]) for row in rows[:4]] == [
+        (1, 1, 1), (0, 1, 1), (1, 2, 1), (1, 1, 1)]
+    assert rows[0]["pubkey"] == r["s1_pub"] and rows[3]["pubkey"] == r["s3_pub"]
+    assert all(row["pubkey"] for row in rows)
     assert all(row["m"] == 1 for row in rows)
-    # the bucket: 6 deep, one token per NEW root (a re-submitted root is free)
+    # the bucket: 6 deep, one token per NEW root (a re-submitted root is free);
+    # shadow, so the seventh and eighth new roots in a row are only counted
     assert 3.9 < r["budgetRow"]["tokens"] < 4.1
+    assert [row["allowed"] for row in rows[3:]] == [1] * 6 + [0, 0]
 
     n = r["stats"]["body"]["ledger"]["notary"]["last_24h"]
-    assert n == {"requests": 16, "new_roots": 15, "unsigned": 12, "identities": 2,
-                 "would_throttle": 0, "m2": 0}
+    assert n == {"requests": 14, "new_roots": 13, "unsigned": 0, "identities": 3,
+                 "would_throttle": 2, "m2": 3}
     policy = r["stats"]["body"]["policy"]
     assert policy["stamp_budget_armed"] is False
     assert policy["stamp_base_per_day"] == 48 and policy["stamp_burst"] == 6

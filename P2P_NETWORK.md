@@ -124,8 +124,9 @@ flip in the same era without coordinating. The estimate: `p2p_nodes_seen`
 records every reachable peer met (by the TLS-verified `/health` node key), and
 each run's discovery-key reply is a capture-recapture sample against it
 (Chapman); a reply under the 100-peer cap was exhaustive and IS the live
-population; the directory's fresh-volunteer count (`total` on `/node-hints`)
-is an exact floor. Verdict and estimate live in `user_settings`
+population; the directory's `total` on `/node-hints` — its fresh
+volunteers counted once per network (IPv4 /24, IPv6 /48), since 2026-11-02
+— is a floor. Verdict and estimate live in `user_settings`
 (`p2p.rare_mode`, `p2p.network_estimate`); a restart starts from the last
 verdict. Both runtimes measure the same way: the walk is one module
 (`desktop/p2p/sync_walk.py`, shared since 2026-09-08 — before that the Docker
@@ -308,7 +309,9 @@ KDF inputs, so either change is a new key; the old one is kept:
 Cloudflare Worker (`sautium-verify.sautium.workers.dev`) + Resend:
 - Signed requests (Ed25519) — a modified client cannot forge one
 - KV store maps `invite_code → verified_email`
-- Invite emails show a ✅ Verified / ⚠️ Unverified badge
+- Invite emails go out only from a key with a certificate and a verified
+  email, and name that address (since 2026-11-02); every mail is capped per
+  key, per mailbox and per route, the email code is spent by five wrong tries
 - Auto-reciprocate when both accounts are verified through the Worker KV
 
 ### Mutual invite exchange (anti-impersonation)

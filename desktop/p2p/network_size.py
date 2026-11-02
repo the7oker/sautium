@@ -28,13 +28,14 @@ run's DHT sample is a capture-recapture experiment against it — the share of
 the sample already known says how much of the population the ledger covers
 (Chapman's estimator, which stays finite when the overlap is empty). A
 sample under the reply cap was exhaustive and IS the live population. The
-Worker directory's fresh-volunteer count, when it comes back with the hints,
-is an exact floor. Nodes unseen for SIGHTING_WINDOW_DAYS leave the ledger so
+Worker directory's `total`, when it comes back with the hints, is a floor:
+its fresh volunteers counted once per network, so entries one network mints
+cannot raise it. Nodes unseen for SIGHTING_WINDOW_DAYS leave the ledger so
 churn does not inflate it forever.
 
-Shared by both runtimes: the launcher runs the sync walk and the whole
-estimate; the Docker backend has no walk and gates its tail on the directory
-count alone through rare_mode().
+Shared by both runtimes: each runs the sync walk and the whole estimate
+(the Docker backend since 2026-09-08; before that it had no walk and gated
+its tail on the directory count alone through rare_mode()).
 """
 
 from __future__ import annotations

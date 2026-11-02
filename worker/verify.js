@@ -21,12 +21,19 @@
  * All state-changing requests require Ed25519 signature verification.
  * Masha can't impersonate Alice because she can't sign with Alice's keys.
  *
+ * Admission (Durable Object LIMITER, SQLite): every KV write and every mail
+ * passes its route's counters there first — per key, per mailbox, per
+ * address and a ceiling for the route — so a refused request writes nothing,
+ * and concurrent requests cannot pass a counter together. A store that fails
+ * answers 503, never an error's text. Callers are nodes, never browsers: no
+ * CORS grant, and a body is application/json or it is refused.
+ *
  * KV key naming: invite codes contain '#', which is a URL fragment marker and
  * breaks wrangler CLI (list silently hides such keys, get truncates at '#').
  * Storage keys therefore use ':' in place of '#' (kvKey()); the invite code
  * itself is unchanged everywhere else in the product. Usernames are
  * restricted to [A-Za-z0-9_-]{3,32} at both boundaries (client account
- * creation and verifyInviteCode here), so the substitution is unambiguous.
+ * creation and ownInviteName here), so the substitution is unambiguous.
  *
  * Deploy: wrangler deploy
  * Secrets: wrangler secret put RESEND_API_KEY
@@ -43,7 +50,8 @@
  *   POST /register-email       — store verified email (requires code + birth cert);
  *                                the mailbox moves to this key, the previous
  *                                holder becomes the certificate's predecessor
- *   POST /send-invite          — send signed invite email with verified sender
+ *   POST /send-invite          — send signed invite email from a key with a
+ *                                certificate and a verified email
  *   GET  /check-email          — check if email already verified for invite code
  *   POST /accept-invite        — accept an invite (stores reciprocal + notifies sender)
  *   GET  /pending-accepts      — poll for accepted invites (one-time pickup)
@@ -78,18 +86,42 @@
  * ADAPTIVE_DIFFICULTY_ARMED flips: certificates keep the base difficulty,
  * the ledger just measures — a botnet is a mass event, and only the notary
  * sees the whole birth process (docs/design/P2P-SYNC-INTEGRITY.md
- * § "Defense strategy"; plan phase Ф2b). Pricing is per CLUSTER (same /24,
- * same ASN, then a mild capped global term), never a global switch — an
- * honest launch wave from one ISP must not pay for a cloud flood.
+ * § "Defense strategy"; plan phase Ф2b). Pricing is per CLUSTER (same
+ * address, same /24, same ASN), never a global term — an honest launch wave
+ * from one ISP must not pay for a cloud flood, and free births must not raise
+ * everyone's price. The global count is recorded and reported, never priced.
  */
 
-const RATE_LIMIT_PER_IP = 20;
-const RATE_LIMIT_PER_RECIPIENT = 10;
-const RATE_LIMIT_WINDOW = 3600;
 const ACCEPT_TTL_SECONDS = 30 * 24 * 3600; // 30 days — must match SENT_INVITES_TTL_DAYS on backend/desktop
-const VERIFY_CODE_TTL_SECONDS = 15 * 60;
+const VERIFY_CODE_TTL_MS = 15 * 60 * 1000;
+// Wrong tries that spend a pending verification code: after them even the
+// right code is refused, and only a new code (its own caps) opens another round.
+const VERIFY_CODE_TRIES = 5;
+const INVITE_MESSAGE_MAX_CHARS = 500;     // the backend's own cap on the intro line
+const MAX_BODY_BYTES = 16 * 1024;         // the largest real body is a full mailbox drop
 const FROM_EMAIL = "noreply@sautium.net";
 const FROM_NAME = "Sautium";
+
+// Admission (the Limiter object): a route's counters, per 24 h from a
+// counter's first use. Sized for the Workers Paid plan: `all` is the route's
+// ceiling — it bounds the route's KV writes (or its mail) and their cost on a
+// bad day — and the per-key, per-mailbox and per-address caps sit far above
+// one person's use, so that one source cannot spend a ceiling everyone
+// shares. `addr` is volumeToken(): the exact IPv4, the IPv6 /48. The mail
+// ceilings must also sit inside the mail provider's plan.
+const HOUR_MS = 3600 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const LIMITS = {
+  birth:    { addr: 50, all: 20000 },                        // new identities
+  stamp:    { key: 500, addr: 5000, all: 100000 },           // new timestamp roots
+  code:     { key: 5, to: 5, addr: 20, all: 500 },           // verification mails
+  register: { key: 10, addr: 50, all: 5000 },                // tries; `all` = registrations written
+  invite:   { key: 20, from: 20, to: 3, addr: 50, all: 300 },  // invite mails
+  accept:   { key: 50, addr: 200, all: 20000 },              // stored acceptances
+  notify:   { key: 20, to: 20, all: 300 },                   // acceptance mails
+  pending:  { key: 200, addr: 500, all: 50000 },             // pickups (a KV list each)
+  check:    { key: 100, addr: 500 },
+};
 
 // Birth certificate authority keys. MIRRORS backend/birth_authority.py and
 // desktop/p2p/birth_cert.py — update all three together. [0] is the active
@@ -139,7 +171,7 @@ const MASTER_PUBKEY = "3aa2ae91bc41863468ea4df3346811bcb0f7e0d6a9644b931cfd628d8
 const MAIL_MAX_CHARS = 8192;             // encrypted payload (chat caps are far below)
 const MAIL_PER_SENDER_DAY = 30;
 const MAIL_PER_DAY = 5000;
-const MAIL_CAP = 20000;                  // rows kept; oldest evicted beyond this
+const MAIL_CAP = 20000;                  // rows kept; a full mailbox refuses, it never drops accepted mail
 const MAIL_TTL_MS = 30 * 24 * 3600 * 1000;
 const MAIL_IP_PER_HOUR = 60;
 const MAIL_SIG_SKEW_S = 300;
@@ -154,6 +186,13 @@ const DIRECTORY_TTL_MS = 2 * 3600 * 1000;
 const DIRECTORY_K = 20;
 const DIRECTORY_CAPS = new Set(["sync", "mbdump", "relay", "mbslices", "lbdump", "lbslices"]);
 const DIRECTORY_REG_PER_IP_HOUR = 12;
+// Fresh entries one network (IPv4 /24, IPv6 /48) may hold: a provider's block
+// shared by honest volunteers fits, and one network cannot fill the directory
+// with entries that do not answer.
+const DIRECTORY_PER_NETWORK = 16;
+// /issuance-stats costs some forty statements across two objects; an isolate
+// answers it from memory for this long.
+const STATS_MEMO_MS = 60 * 1000;
 // email_class is a coarse, Worker-side hint (the node never sees the domain):
 // disposable → reduced similarity weight, major → shared-provider (many honest
 // users collide on it), other → custom/ISP domains.
@@ -203,10 +242,13 @@ const IP_HASH_VERSION = 3;
 // spent as a token bucket STAMP_BURST deep, refilled at budget/day, so a
 // re-seal's back-to-back batches pass and a day-old key still gets its first
 // batch. Shadow until armed: the ledger records the verdict and the response
-// carries it as `not_before` advice; only the per-address brake bindings
-// (BRAKE_STAMP / BRAKE_BIRTH in wrangler.toml — WAF-grade, no KV write, sized
-// for a cohort) answer 429. Inputs the Worker can vouch for itself: the
-// mailbox class it verified, the birth it witnessed, the stamps it issued.
+// carries it as `not_before` advice; what answers 429 today is the
+// per-address brake (BRAKE_STAMP in wrangler.toml — WAF-grade, no KV write,
+// sized for a cohort) and the hard daily caps on new roots (LIMITS.stamp —
+// per key, per address, the route's ceiling), far above a node's pace.
+// Only a key with a certificate issued here is stamped at all. Inputs the
+// Worker can vouch for itself: the mailbox class it verified, the birth it
+// witnessed, the stamps it issued.
 const STAMP_BUDGET_ARMED = false;
 const STAMP_BASE_PER_DAY = 48;
 const STAMP_BURST = 6;
@@ -222,87 +264,103 @@ const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
 
 export default {
   async fetch(request, env) {
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
-
-    const url = new URL(request.url);
-
     try {
-      if (url.pathname === "/health" && request.method === "GET") {
-        return json({ status: "ok", service: "sautium-verify" }, corsHeaders);
-      }
-
-      if (url.pathname === "/send-verification" && request.method === "POST") {
-        return await handleVerification(request, env, corsHeaders);
-      }
-
-      if (url.pathname === "/register-email" && request.method === "POST") {
-        return await handleRegisterEmail(request, env, corsHeaders);
-      }
-
-      if (url.pathname === "/send-invite" && request.method === "POST") {
-        return await handleInvite(request, env, corsHeaders);
-      }
-
-      if (url.pathname === "/check-email" && request.method === "GET") {
-        return await handleCheckEmail(url, env, corsHeaders);
-      }
-
-      if (url.pathname === "/accept-invite" && request.method === "POST") {
-        return await handleAcceptInvite(request, env, corsHeaders);
-      }
-
-      if (url.pathname === "/pending-accepts" && request.method === "GET") {
-        return await handlePendingAccepts(url, env, corsHeaders);
-      }
-
-      if (url.pathname === "/mailbox" && request.method === "POST") {
-        return await handleMailboxPut(request, env, corsHeaders);
-      }
-      if (url.pathname === "/mailbox" && (request.method === "GET" || request.method === "DELETE")) {
-        return await handleMailboxDrain(request, url, env, corsHeaders);
-      }
-      if (url.pathname === "/mailbox/wake" && request.method === "GET") {
-        return await handleMailboxWake(request, url, env, corsHeaders);
-      }
-      if (url.pathname === "/master-hint" && request.method === "GET") {
-        return await handleMasterHint(env, corsHeaders);
-      }
-      if (url.pathname === "/node-register" && request.method === "POST") {
-        return await handleNodeRegister(request, env, corsHeaders);
-      }
-      if (url.pathname === "/node-hints" && request.method === "GET") {
-        return await handleNodeHints(url, env, corsHeaders);
-      }
-
-      if (url.pathname === "/birth-certificate" && request.method === "POST") {
-        return await handleBirthCertificate(request, env, corsHeaders);
-      }
-
-      if (url.pathname === "/issuance-stats" && request.method === "GET") {
-        return await handleIssuanceStats(env, corsHeaders);
-      }
-      if (url.pathname === "/birth-certificate" && request.method === "GET") {
-        return await handleBirthCertificateGet(url, env, corsHeaders);
-      }
-
-      if (url.pathname === "/timestamp" && request.method === "POST") {
-        return await handleTimestamp(request, env, corsHeaders);
-      }
-
-      return json({ error: "not found" }, corsHeaders, 404);
+      return await route(request, guardStore(env));
     } catch (e) {
-      return json({ error: e.message }, corsHeaders, 500);
+      if (e instanceof StoreUnavailable) {
+        console.error("store unavailable:", e.cause);
+        return json({ error: "temporarily unavailable" }, 503,
+                    { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
+      }
+      console.error("unhandled:", e);
+      return json({ error: "internal error" }, 500);
     }
   },
 };
+
+class StoreUnavailable extends Error {
+  // A KV or Durable Object call that failed: the request answers 503 and the
+  // cause goes to the log only.
+  constructor(cause) {
+    super("store unavailable");
+    this.cause = cause;
+  }
+}
+
+function guardStore(env) {
+  // The KV binding as every handler sees it: a failing call throws
+  // StoreUnavailable, whatever the runtime's own error says.
+  const kv = env.RATE_LIMITS;
+  const guarded = (method) => async (...args) => {
+    try {
+      return await kv[method](...args);
+    } catch (e) {
+      throw new StoreUnavailable(e);
+    }
+  };
+  return Object.create(env, {
+    RATE_LIMITS: { value: { get: guarded("get"), put: guarded("put"),
+                            delete: guarded("delete"), list: guarded("list") } },
+  });
+}
+
+async function route(request, env) {
+  const url = new URL(request.url);
+  const { pathname } = url;
+  const method = request.method;
+  if (pathname === "/health" && method === "GET") {
+    return json({ status: "ok", service: "sautium-verify" });
+  }
+  if (pathname === "/send-verification" && method === "POST") {
+    return await handleVerification(request, env);
+  }
+  if (pathname === "/register-email" && method === "POST") {
+    return await handleRegisterEmail(request, env);
+  }
+  if (pathname === "/send-invite" && method === "POST") {
+    return await handleInvite(request, env);
+  }
+  if (pathname === "/check-email" && method === "GET") {
+    return await handleCheckEmail(request, url, env);
+  }
+  if (pathname === "/accept-invite" && method === "POST") {
+    return await handleAcceptInvite(request, env);
+  }
+  if (pathname === "/pending-accepts" && method === "GET") {
+    return await handlePendingAccepts(request, url, env);
+  }
+  if (pathname === "/mailbox" && method === "POST") {
+    return await handleMailboxPut(request, env);
+  }
+  if (pathname === "/mailbox" && (method === "GET" || method === "DELETE")) {
+    return await handleMailboxDrain(request, url, env);
+  }
+  if (pathname === "/mailbox/wake" && method === "GET") {
+    return await handleMailboxWake(request, url, env);
+  }
+  if (pathname === "/master-hint" && method === "GET") {
+    return await handleMasterHint(request, env);
+  }
+  if (pathname === "/node-register" && method === "POST") {
+    return await handleNodeRegister(request, env);
+  }
+  if (pathname === "/node-hints" && method === "GET") {
+    return await handleNodeHints(request, url, env);
+  }
+  if (pathname === "/birth-certificate" && method === "POST") {
+    return await handleBirthCertificate(request, env);
+  }
+  if (pathname === "/issuance-stats" && method === "GET") {
+    return await handleIssuanceStats(request, env);
+  }
+  if (pathname === "/birth-certificate" && method === "GET") {
+    return await handleBirthCertificateGet(request, url, env);
+  }
+  if (pathname === "/timestamp" && method === "POST") {
+    return await handleTimestamp(request, env);
+  }
+  return json({ error: "not found" }, 404);
+}
 
 // -----------------------------------------------------------------------
 // Birth certificates
@@ -469,28 +527,36 @@ async function bumpIssuance(env, field) {
   await env.RATE_LIMITS.put("stats:issuance", JSON.stringify(stats));
 }
 
-async function handleIssuanceStats(env, corsHeaders) {
-  const stats = (await env.RATE_LIMITS.get("stats:issuance", "json")) || {};
-  return json({
-    policy: {
-      cert_version: BIRTH_CERT_VERSION,
-      pow_difficulty: POW_DIFFICULTY,
-      pow_params_version: POW_PARAMS_VERSION,
-      adaptive_armed: ADAPTIVE_DIFFICULTY_ARMED,
-      adaptive_cap: ADAPTIVE_MULT_CAP,
-      stamp_budget_armed: STAMP_BUDGET_ARMED,
-      stamp_base_per_day: STAMP_BASE_PER_DAY,
-      stamp_burst: STAMP_BURST,
-    },
-    days: stats,
-    ledger: await ledgerCall(env, "/stats"),
-    // Live reachable-volunteer count (fresh directory entries) — the
-    // relay/volunteer share the T-points want, visible for free.
-    directory: (await directoryCall(env, `/stats?now=${Date.now()}`)).body,
-  }, corsHeaders);
+let statsMemo = null;      // {at, body}: this isolate's last /issuance-stats answer
+
+async function handleIssuanceStats(request, env) {
+  const refusal = await routeBrake(env, request, "stats");
+  if (refusal) return refusal;
+  const now = Date.now();
+  if (!statsMemo || now - statsMemo.at > STATS_MEMO_MS) {
+    const stats = (await env.RATE_LIMITS.get("stats:issuance", "json")) || {};
+    statsMemo = { at: now, body: {
+      policy: {
+        cert_version: BIRTH_CERT_VERSION,
+        pow_difficulty: POW_DIFFICULTY,
+        pow_params_version: POW_PARAMS_VERSION,
+        adaptive_armed: ADAPTIVE_DIFFICULTY_ARMED,
+        adaptive_cap: ADAPTIVE_MULT_CAP,
+        stamp_budget_armed: STAMP_BUDGET_ARMED,
+        stamp_base_per_day: STAMP_BASE_PER_DAY,
+        stamp_burst: STAMP_BURST,
+      },
+      days: stats,
+      ledger: await ledgerCall(env, "/stats"),
+      // Live reachable-volunteer count (fresh directory entries) — the
+      // relay/volunteer share the T-points want, visible for free.
+      directory: (await directoryCall(env, `/stats?now=${now}`)).body,
+    } };
+  }
+  return json(statsMemo.body);
 }
 
-async function handleBirthCertificate(request, env, corsHeaders) {
+async function handleBirthCertificate(request, env) {
   /**
    * Issue (or return the existing) birth certificate for an identity.
    *
@@ -503,42 +569,52 @@ async function handleBirthCertificate(request, env, corsHeaders) {
    * the stored certificate. Ed25519 is deterministic and born_at has second
    * precision, so even a same-second concurrent first issuance produces
    * byte-identical certificates — KV needs no transaction.
+   *
+   * The birth is in KV before the ledger records it: a write that fails
+   * leaves no ledger row for a birth that never happened.
    */
-  const body = await request.json();
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
   const { pubkey_hex, signature } = body;
-
-  if (!pubkey_hex || !signature) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (!isText(pubkey_hex) || !isText(signature)) {
+    return json({ error: "missing fields" }, 400);
   }
 
   const pubkey = pubkey_hex.toLowerCase();
   if (!isValidPubkeyHex(pubkey)) {
-    return json({ error: "invalid pubkey" }, corsHeaders, 400);
+    return json({ error: "invalid pubkey" }, 400);
   }
 
   const valid = await verifySignature(`birth:${pubkey}`, signature, pubkey);
   if (!valid) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
+    return json({ error: "invalid signature" }, 403);
   }
 
-  // Per-address emergency brake only (plan invariant 6): a birth is a
+  // Per-address limits as brakes only (plan invariant 6): a birth is a
   // once-per-life event, its real price is the proof peers verify and the
-  // ledger's adaptive difficulty — a CGNAT cohort onboarding together must
-  // never meet a 429 here.
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  // ledger's adaptive difficulty. Ten a minute, and LIMITS.birth.addr a day —
+  // far above what a cohort behind one address onboards, low enough that one
+  // address cannot spend the route's daily ceiling.
+  const ip = clientIp(request);
   if (!await brake(env.BRAKE_BIRTH, `birth:${addrKey(ip)}`)) {
     return throttled("rate limited (too many requests from your address)",
-                     corsHeaders, BRAKE_RETRY_AFTER_S);
+                     BRAKE_RETRY_AFTER_S);
   }
 
   let record = await loadBirthRecord(env, pubkey);
   if (!record) {
-    const issuedAt = nowIsoSeconds();
-    const verdict = await ledgerBirth(env, request, pubkey, issuedAt);
-    const mult = ADAPTIVE_DIFFICULTY_ARMED && verdict ? verdict.m_shadow : 1;
+    const refusal = await admit(env, [
+      daily("birth", "addr", await volumeToken(env, ip)),
+      daily("birth", "all"),
+    ]);
+    if (refusal) return refusal;
+    const facts = await birthFacts(env, request, pubkey, nowIsoSeconds());
+    // Armed, the price is read before signing; the birth is recorded after.
+    const score = ADAPTIVE_DIFFICULTY_ARMED ? await ledgerCall(env, "/birth-score", facts) : null;
+    const mult = score ? score.m_shadow : 1;
     record = {
       v: BIRTH_CERT_VERSION,
-      issued_at: issuedAt,
+      issued_at: facts.issued_at,
       method: "pow",
       difficulty: Math.min(POW_DIFFICULTY * mult, POW_DIFFICULTY * ADAPTIVE_MULT_CAP),
       params_version: POW_PARAMS_VERSION,
@@ -549,29 +625,32 @@ async function handleBirthCertificate(request, env, corsHeaders) {
     record[SIG_FIELD] = await signBirthRecord(env, pubkey, record);
     await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(record));
     await bumpIssuance(env, "births");
+    await ledgerCall(env, "/birth", facts);
   }
 
-  return json(certFromRecord(pubkey, record), corsHeaders);
+  return json(certFromRecord(pubkey, record));
 }
 
-async function handleBirthCertificateGet(url, env, corsHeaders) {
+async function handleBirthCertificateGet(request, url, env) {
   /**
    * Public read of an issued certificate: certificates are public facts
    * (anyone may relay/verify one), so no signature is required.
    *
    * GET /birth-certificate?pubkey=HEX
    */
+  const refusal = await routeBrake(env, request, "birth-read");
+  if (refusal) return refusal;
   const pubkey = (url.searchParams.get("pubkey") || "").toLowerCase();
   if (!isValidPubkeyHex(pubkey)) {
-    return json({ error: "invalid pubkey" }, corsHeaders, 400);
+    return json({ error: "invalid pubkey" }, 400);
   }
 
   const record = await loadBirthRecord(env, pubkey);
   if (!record) {
-    return json({ error: "not issued" }, corsHeaders, 404);
+    return json({ error: "not issued" }, 404);
   }
 
-  return json(certFromRecord(pubkey, record), corsHeaders);
+  return json(certFromRecord(pubkey, record));
 }
 
 // -----------------------------------------------------------------------
@@ -649,14 +728,14 @@ function shadowMultiplier(c) {
   // these with measured distributions (/issuance-stats). Counts are PRIOR
   // births in the window that share the axis with this one. Conjunction
   // over single axis: same /24 within a day (CGNAT-tolerant: the 3rd birth
-  // from one /24 in 24 h doubles), an ASN minting fast, and a mild global
-  // term for a flood that is spread across networks.
+  // from one /24 in 24 h doubles), an ASN minting fast. No global term: one
+  // address — or an honest launch wave — would raise the price of every
+  // birth in its window, for life (n_glob1/n_glob24 stay measurements).
   let m = 1;
   if (c.n_addr24 >= 2) m *= 2;          // 3rd birth from one exact address in a day
   if (c.n_sub24 >= 2) m *= 2;
   if (c.n_sub24 >= 5) m *= 2;
   if (c.n_asn1 >= 20) m *= 2;
-  if (c.n_glob1 >= 60) m *= 2;
   return Math.min(m, ADAPTIVE_MULT_CAP);
 }
 
@@ -708,6 +787,9 @@ export class BirthLedger {
     if (request.method === "POST" && url.pathname === "/birth") {
       return Response.json(this.recordBirth(await request.json()));
     }
+    if (request.method === "POST" && url.pathname === "/birth-score") {
+      return Response.json(this.scoreBirth(await request.json()));
+    }
     if (request.method === "POST" && url.pathname === "/stamp") {
       return Response.json(this.recordStamp(await request.json()));
     }
@@ -726,11 +808,8 @@ export class BirthLedger {
     return Number(this.sql.exec(query, ...params).one().n);
   }
 
-  recordBirth({ pubkey, ts, asn, cc, sub, addr, fam }) {
-    const prior = this.sql.exec(
-      "SELECT m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, n_addr24 FROM births WHERE pubkey = ?",
-      pubkey).toArray();
-    if (prior.length) return prior[0];               // idempotent, like issuance
+  scoreBirth({ ts, asn, sub, addr }) {
+    // The births that look like this one, and its multiplier — read only.
     addr = addr || "";
     const hour = ts - 3600 * 1000, day = ts - 86400 * 1000;
     const counts = {
@@ -741,7 +820,16 @@ export class BirthLedger {
       n_glob1: this._count("SELECT count(*) AS n FROM births WHERE ts > ?", hour),
       n_glob24: this._count("SELECT count(*) AS n FROM births WHERE ts > ?", day),
     };
-    const m_shadow = shadowMultiplier(counts);
+    return { m_shadow: shadowMultiplier(counts), ...counts };
+  }
+
+  recordBirth({ pubkey, ts, asn, cc, sub, addr, fam }) {
+    const prior = this.sql.exec(
+      "SELECT m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, n_addr24 FROM births WHERE pubkey = ?",
+      pubkey).toArray();
+    if (prior.length) return prior[0];               // idempotent, like issuance
+    addr = addr || "";
+    const { m_shadow, ...counts } = this.scoreBirth({ ts, asn, sub, addr });
     this.sql.exec(
       `INSERT INTO births (pubkey, ts, asn, cc, sub, method, m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, addr, n_addr24, fam)
        VALUES (?, ?, ?, ?, ?, 'pow', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -754,8 +842,9 @@ export class BirthLedger {
 
   recordStamp({ pubkey, issued_at, method, email_class, n_new, n_roots, addr, sub, asn, now }) {
     // The per-identity verdict for one /timestamp request (see the STAMP_*
-    // constants). Unsigned requests are recorded and never priced: there is
-    // no identity to charge, only the address brake in front of them.
+    // constants). Only signed requests from certified keys reach the ledger
+    // now; a row with no pubkey is one recorded before the Worker refused
+    // unsigned requests.
     pubkey = pubkey || ""; addr = addr || ""; sub = sub || "";
     n_new = Number(n_new) || 0; n_roots = Number(n_roots) || 0;
     let verdict = { allowed: true, not_before: null, budget_per_day: null,
@@ -829,9 +918,9 @@ export class BirthLedger {
     const topAsn = this.sql.exec(
       "SELECT asn, cc, count(*) AS n FROM births WHERE ts > ? GROUP BY asn, cc ORDER BY n DESC LIMIT 5",
       week).toArray().map((r) => ({ asn: Number(r.asn), cc: r.cc, births: Number(r.n) }));
-    // The notary in shadow: what the budget WOULD have refused, and the share
-    // of requests still arriving unsigned (older clients) — both read at T1
-    // before arming.
+    // The notary in shadow: what the budget WOULD have refused — read at T1
+    // before arming. `unsigned` counts requests recorded before the Worker
+    // refused them.
     const notary = (since) => ({
       requests: this._count("SELECT count(*) AS n FROM stamps WHERE ts > ?", since),
       new_roots: this._count("SELECT coalesce(sum(n_new), 0) AS n FROM stamps WHERE ts > ?", since),
@@ -867,11 +956,13 @@ async function ledgerCall(env, path, body) {
   }
 }
 
-async function ledgerBirth(env, request, pubkey, issuedAtIso) {
+async function birthFacts(env, request, pubkey, issuedAtIso) {
+  // What the ledger scores and records about one birth.
   const cf = request.cf || {};
-  const ip = request.headers.get("CF-Connecting-IP") || "";
-  return await ledgerCall(env, "/birth", {
+  const ip = clientIp(request);
+  return {
     pubkey,
+    issued_at: issuedAtIso,
     ts: Date.parse(issuedAtIso),
     asn: Number(cf.asn) || 0,
     cc: String(cf.country || ""),
@@ -885,12 +976,217 @@ async function ledgerBirth(env, request, pubkey, issuedAtIso) {
     // client supports v6. Tunneled/ULA v6 counts as 4: it is not a v6-peer
     // signal (isNativeGlobalV6).
     fam: isNativeGlobalV6(ip) ? 6 : 4,
-  });
+  };
 }
 
 // -----------------------------------------------------------------------
-// Timestamp notary (authorship priority for signed enrichment records)
+// Admission — the Limiter object, the brakes, the request body
 // -----------------------------------------------------------------------
+
+export class Limiter {
+  /**
+   * The state every limit of the Worker keys on, in one object so that a
+   * check and its increment are one synchronous step:
+   *   counters — `take` is all or nothing: every counter is read, and only
+   *              when all have room are all incremented. A window runs from
+   *              a counter's first use (a single-use nonce is limit 1 for
+   *              its lifetime).
+   *   names    — the username each key speaks under (a peppered token of
+   *              it), fixed at its first use of an invite-family route (the
+   *              username is the salt the key was derived from: an honest
+   *              key never has two).
+   *   codes    — pending email verification codes (their hash) and the wrong
+   *              tries each has taken.
+   * Counter keys and names hold public keys and peppered tokens, never an
+   * address, a mailbox or a username.
+   */
+  constructor(state, env) {
+    this.state = state;
+    this.sql = state.storage.sql;
+    state.blockConcurrencyWhile(async () => this._init());
+  }
+
+  _init() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS counters (
+      key TEXT PRIMARY KEY, n INTEGER NOT NULL, until INTEGER NOT NULL)`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS counters_until ON counters (until)");
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS names (
+      pubkey TEXT PRIMARY KEY, name TEXT NOT NULL, since INTEGER NOT NULL)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS codes (
+      invite TEXT PRIMARY KEY, email TEXT NOT NULL, hash TEXT NOT NULL,
+      tries INTEGER NOT NULL, expires INTEGER NOT NULL)`);
+  }
+
+  async fetch(request) {
+    const path = new URL(request.url).pathname;
+    const body = await request.json();
+    if (path === "/take") return Response.json(this.take(body));
+    if (path === "/code/put") return Response.json(this.putCode(body));
+    if (path === "/code/check") return Response.json(this.checkCode(body));
+    if (path === "/code/drop") {
+      this.sql.exec("DELETE FROM codes WHERE invite = ?", body.invite);
+      return Response.json({ ok: true });
+    }
+    return new Response("not found", { status: 404 });
+  }
+
+  take({ now, counters, bind }) {
+    this.sql.exec("DELETE FROM counters WHERE until <= ?", now);
+    let bound = null;
+    if (bind) {
+      bound = this.sql.exec("SELECT name FROM names WHERE pubkey = ?", bind.pubkey).toArray()[0];
+      if (bound && bound.name !== bind.name) return { ok: false, refused: "name" };
+    }
+    const rows = counters.map((c) => this.sql.exec(
+      "SELECT n, until FROM counters WHERE key = ?", c.key).toArray()[0]);
+    for (let i = 0; i < counters.length; i++) {
+      const c = counters[i], row = rows[i];
+      if ((row ? Number(row.n) : 0) + c.amount > c.limit) {
+        const until = row ? Number(row.until) : now + c.window;
+        return { ok: false, refused: c.key, retry_after: Math.max(1, Math.ceil((until - now) / 1000)) };
+      }
+    }
+    for (const c of counters) {
+      this.sql.exec(
+        `INSERT INTO counters (key, n, until) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET n = n + excluded.n`,
+        c.key, c.amount, now + c.window);
+    }
+    if (bind && !bound) {
+      this.sql.exec("INSERT INTO names (pubkey, name, since) VALUES (?, ?, ?)",
+                    bind.pubkey, bind.name, now);
+    }
+    return { ok: true };
+  }
+
+  putCode({ invite, email, hash, now }) {
+    // A new code replaces the pending one, and its tries start again.
+    this.sql.exec("DELETE FROM codes WHERE expires <= ?", now);
+    this.sql.exec(
+      `INSERT INTO codes (invite, email, hash, tries, expires) VALUES (?, ?, ?, 0, ?)
+       ON CONFLICT(invite) DO UPDATE SET email = excluded.email, hash = excluded.hash,
+         tries = 0, expires = excluded.expires`,
+      invite, email, hash, now + VERIFY_CODE_TTL_MS);
+    return { ok: true };
+  }
+
+  checkCode({ invite, email, hash, now }) {
+    // Every wrong try counts against the pending code; past VERIFY_CODE_TRIES
+    // the code is spent, the right one included. A right code stays until
+    // the registration it proves is written (/code/drop).
+    const row = this.sql.exec(
+      "SELECT email, hash, tries FROM codes WHERE invite = ? AND expires > ?",
+      invite, now).toArray()[0];
+    if (!row) return { ok: false, spent: false };
+    if (Number(row.tries) >= VERIFY_CODE_TRIES) return { ok: false, spent: true };
+    if (row.email === email && row.hash === hash) return { ok: true };
+    this.sql.exec("UPDATE codes SET tries = tries + 1 WHERE invite = ?", invite);
+    return { ok: false, spent: Number(row.tries) + 1 >= VERIFY_CODE_TRIES };
+  }
+}
+
+async function objectCall(namespace, name, path, body) {
+  // One call to a Durable Object the request cannot do without: a failure is
+  // the store's (503), never an error text in the answer.
+  try {
+    const stub = namespace.get(namespace.idFromName(name));
+    const res = await stub.fetch(`https://object${path}`, body === undefined ? undefined : {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() };
+  } catch (e) {
+    throw new StoreUnavailable(e);
+  }
+}
+
+async function limiterCall(env, path, body) {
+  return (await objectCall(env.LIMITER, "limits", path, body)).body;
+}
+
+function daily(route, axis, id = "", amount = 1) {
+  // One of a route's counters (LIMITS) over 24 h.
+  return { key: `${route}:${axis}:${id}`, limit: LIMITS[route][axis], window: DAY_MS, amount };
+}
+
+async function admit(env, counters, bind) {
+  // Take the counters (and check the key's name when `bind` is given):
+  // null when admitted, else the refusal to answer with.
+  const r = await limiterCall(env, "/take", {
+    now: Date.now(), counters,
+    bind: bind && { pubkey: bind.pubkey, name: await nameToken(env, bind.username) },
+  });
+  if (r.ok) return null;
+  if (r.refused === "name") {
+    return json({ error: "this key is registered under another username" }, 403);
+  }
+  return throttled("rate limited", r.retry_after);
+}
+
+async function routeBrake(env, request, route) {
+  // The per-minute brake every route without one of its own stands behind:
+  // its own bucket per route and address, no KV, so what one address sends
+  // past it never reaches the stores.
+  if (await brake(env.BRAKE_ROUTE, `${route}:${addrKey(clientIp(request))}`)) return null;
+  return throttled("rate limited (too many requests from your address)", BRAKE_RETRY_AFTER_S);
+}
+
+function clientIp(request) {
+  return request.headers.get("CF-Connecting-IP") || "";
+}
+
+async function volumeToken(env, ip) {
+  // The per-address axis of the daily caps: the exact IPv4, the IPv6 /48 —
+  // one customer allocation (a /64 axis would hand one allocation 65 536
+  // buckets). Peppered like every address the Worker keeps.
+  return ip.includes(":") ? `6.${await subnetToken(env, ip)}` : `4.${await ipHashUuid(env, ip)}`;
+}
+
+async function readJson(request) {
+  // A POST body as the Worker's callers send it — application/json, a JSON
+  // object, at most MAX_BODY_BYTES — as {body}, or {refusal}.
+  const type = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+  if (type !== "application/json") {
+    return { refusal: json({ error: "expected application/json" }, 415) };
+  }
+  if (!request.body) {
+    return { refusal: json({ error: "empty body" }, 400) };
+  }
+  if (Number(request.headers.get("Content-Length")) > MAX_BODY_BYTES) {
+    return { refusal: json({ error: "body too large" }, 413) };
+  }
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel();
+      return { refusal: json({ error: "body too large" }, 413) };
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) { bytes.set(c, at); at += c.byteLength; }
+  let body;
+  try {
+    body = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return { refusal: json({ error: "invalid JSON" }, 400) };
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { refusal: json({ error: "expected a JSON object" }, 400) };
+  }
+  return { body };
+}
+
+function isText(value) {
+  return typeof value === "string" && value.length > 0;
+}
 
 // -----------------------------------------------------------------------
 // Master mailbox (Ф16) — store-and-forward for ONE recipient, E2E opaque
@@ -900,14 +1196,8 @@ function mailboxStub(env) {
   return env.MAILBOX.get(env.MAILBOX.idFromName(MASTER_PUBKEY));
 }
 
-async function mailboxCall(env, path, body, init) {
-  const stub = mailboxStub(env);
-  const res = await stub.fetch(`https://mailbox${path}`, init || {
-    method: body === undefined ? "GET" : "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  return { status: res.status, body: await res.json() };
+async function mailboxCall(env, path, body) {
+  return await objectCall(env.MAILBOX, MASTER_PUBKEY, path, body);
 }
 
 function tsFresh(ts) {
@@ -915,57 +1205,54 @@ function tsFresh(ts) {
   return Number.isFinite(n) && Math.abs(Date.now() / 1000 - n) <= MAIL_SIG_SKEW_S;
 }
 
-async function bumpWindow(env, key, limit, ttlSeconds) {
-  // Same pessimistic KV counter as checkRateLimit, on its own key.
-  const count = (parseInt(await env.RATE_LIMITS.get(key)) || 0) + 1;
-  await env.RATE_LIMITS.put(key, String(count), { expirationTtl: ttlSeconds });
-  return count > limit;
-}
-
-async function handleMailboxPut(request, env, corsHeaders) {
+async function handleMailboxPut(request, env) {
   /**
    * Body: {to, from_public_key, encrypted, timestamp, message_uuid, signature}
    * — the exact chat wire payload plus a sender signature over
    *   mailbox:v1:{to}:{message_uuid}:{timestamp}:{sha256hex(encrypted)}
    * `to` must be the master; the sender must hold a certificate issued
-   * here (no free keys); per-IP, per-sender and global caps bound the
+   * here (no free keys); per-address, per-sender and global caps bound the
    * storage. The Worker never sees plaintext.
    */
-  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, corsHeaders, 503);
-  const body = await request.json();
+  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, 503);
+  const braked = await routeBrake(env, request, "mailbox");
+  if (braked) return braked;
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
   const { to, from_public_key, encrypted, timestamp, message_uuid, signature } = body;
-  if (!to || !from_public_key || !encrypted || !timestamp || !message_uuid || !signature) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (![to, from_public_key, encrypted, timestamp, message_uuid, signature].every(isText)) {
+    return json({ error: "missing fields" }, 400);
   }
   if (to.toLowerCase() !== MASTER_PUBKEY) {
-    return json({ error: "no mailbox for this recipient" }, corsHeaders, 404);
+    return json({ error: "no mailbox for this recipient" }, 404);
   }
   const sender = from_public_key.toLowerCase();
   if (!isValidPubkeyHex(sender) || sender === MASTER_PUBKEY) {
-    return json({ error: "invalid sender" }, corsHeaders, 400);
+    return json({ error: "invalid sender" }, 400);
   }
   if (typeof encrypted !== "string" || encrypted.length > MAIL_MAX_CHARS) {
-    return json({ error: "message too large" }, corsHeaders, 413);
+    return json({ error: "message too large" }, 413);
   }
   if (!/^[0-9a-f-]{36}$/.test(message_uuid) || typeof timestamp !== "string" || timestamp.length > 40) {
-    return json({ error: "invalid message" }, corsHeaders, 400);
+    return json({ error: "invalid message" }, 400);
   }
   const digest = await sha256Hex(encrypted);
   const message = `mailbox:v1:${MASTER_PUBKEY}:${message_uuid}:${timestamp}:${digest}`;
   if (!await verifySignature(message, signature, sender)) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
-  }
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  if (await bumpWindow(env, `rl:mbx:${ip}`, MAIL_IP_PER_HOUR, 3600)) {
-    return json({ error: "rate limited" }, corsHeaders, 429);
+    return json({ error: "invalid signature" }, 403);
   }
   if (!await env.RATE_LIMITS.get(`born:${sender}`, "json")) {
-    return json({ error: "sender has no certificate" }, corsHeaders, 403);
+    return json({ error: "sender has no certificate" }, 403);
   }
+  const limited = await admit(env, [{
+    key: `mailbox:addr:${await ipHashUuid(env, clientIp(request))}`,
+    limit: MAIL_IP_PER_HOUR, window: HOUR_MS, amount: 1,
+  }]);
+  if (limited) return limited;
   const r = await mailboxCall(env, "/put", {
     uuid: message_uuid, sender, encrypted, ts: timestamp, now: Date.now(),
   });
-  return json(r.body, corsHeaders, r.status);
+  return json(r.body, r.status);
 }
 
 async function verifyMasterRequest(url, label, extra) {
@@ -981,7 +1268,7 @@ async function verifyMasterRequest(url, label, extra) {
   return null;
 }
 
-async function handleMailboxDrain(request, url, env, corsHeaders) {
+async function handleMailboxDrain(request, url, env) {
   /**
    * GET  /mailbox?public_key_hex&ts&signature&after=N  → {messages, more}
    *      signature over mailbox-drain:v1:{ts}:{after}
@@ -990,22 +1277,22 @@ async function handleMailboxDrain(request, url, env, corsHeaders) {
    * The master imports what it drains (dedup by message_uuid on its side)
    * and acks by id; an unacked batch is served again next time.
    */
-  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, corsHeaders, 503);
+  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, 503);
   if (request.method === "GET") {
     const after = String(parseInt(url.searchParams.get("after") || "0") || 0);
     const err = await verifyMasterRequest(url, "mailbox-drain", after);
-    if (err) return json({ error: err }, corsHeaders, 403);
+    if (err) return json({ error: err }, 403);
     const r = await mailboxCall(env, `/drain?after=${after}`);
-    return json(r.body, corsHeaders, r.status);
+    return json(r.body, r.status);
   }
   const upto = String(parseInt(url.searchParams.get("upto") || "0") || 0);
   const err = await verifyMasterRequest(url, "mailbox-ack", upto);
-  if (err) return json({ error: err }, corsHeaders, 403);
+  if (err) return json({ error: err }, 403);
   const r = await mailboxCall(env, "/ack", { upto: Number(upto) });
-  return json(r.body, corsHeaders, r.status);
+  return json(r.body, r.status);
 }
 
-async function handleMailboxWake(request, url, env, corsHeaders) {
+async function handleMailboxWake(request, url, env) {
   /**
    * GET /mailbox/wake?public_key_hex&ts&signature[&peer_port] (Upgrade: websocket)
    *   signature over mailbox-wake:v1:{ts}[:{peer_port}]
@@ -1020,17 +1307,17 @@ async function handleMailboxWake(request, url, env, corsHeaders) {
    * a captured URL replayed from another host can neither change the port
    * nor point the hint at the replayer's address.
    */
-  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, corsHeaders, 503);
+  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, 503);
   const peerPort = url.searchParams.get("peer_port") || "";
   const err = await verifyMasterRequest(url, "mailbox-wake",
                                         peerPort === "" ? undefined : peerPort);
-  if (err) return json({ error: err }, corsHeaders, 403);
+  if (err) return json({ error: err }, 403);
   // The hint is recorded on the SIGNED request itself (before the upgrade
   // gate): the signature is the authority, the upgrade only carries the
   // wake stream.
   const port = parseInt(peerPort);
   if (Number.isInteger(port) && port > 0 && port < 65536) {
-    const sigNonce = `wakesig:${await sha256Hex(url.searchParams.get("signature") || "")}`;
+    const sigNonce = `wakesig:${await sha256Hex((url.searchParams.get("signature") || "").toLowerCase())}`;
     if (!await env.RATE_LIMITS.get(sigNonce)) {
       await env.RATE_LIMITS.put(sigNonce, "1", { expirationTtl: 2 * MAIL_SIG_SKEW_S });
       const host = request.headers.get("CF-Connecting-IP") || "";
@@ -1049,12 +1336,12 @@ async function handleMailboxWake(request, url, env, corsHeaders) {
     }
   }
   if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") {
-    return json({ error: "websocket upgrade required" }, corsHeaders, 426);
+    return json({ error: "websocket upgrade required" }, 426);
   }
   return await mailboxStub(env).fetch(new Request("https://mailbox/wake", request));
 }
 
-async function handleMasterHint(env, corsHeaders) {
+async function handleMasterHint(request, env) {
   /**
    * The master's last known peer address — a DISCOVERY tier of last
    * resort, never a trust statement: whoever dials it still faces the
@@ -1062,86 +1349,90 @@ async function handleMasterHint(env, corsHeaders) {
    * the address itself is public anyway through the master's own DHT
    * announces. Empty until the master's wake socket has connected once.
    */
+  const refusal = await routeBrake(env, request, "master-hint");
+  if (refusal) return refusal;
   const hint = await env.RATE_LIMITS.get("master:hint", "json");
-  return json(hint || {}, corsHeaders);
+  return json(hint || {});
 }
 
 async function directoryCall(env, path, body) {
-  if (!env.NODE_DIRECTORY) return { status: 503, body: { error: "directory not configured" } };
-  const stub = env.NODE_DIRECTORY.get(env.NODE_DIRECTORY.idFromName("nodes"));
-  const res = await stub.fetch(`https://directory${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  return { status: res.status, body: await res.json() };
+  return await objectCall(env.NODE_DIRECTORY, "nodes", path, body);
 }
 
-async function handleNodeRegister(request, env, corsHeaders) {
+async function handleNodeRegister(request, env) {
   /**
    * Body: {pubkey, port, capabilities: [..], ts, signature}
    *   signature over sautium-directory:v1:{port}:{caps sorted, comma}:{ts}
    * The ADDRESS is never taken from the client: the edge observed it
    * (CF-Connecting-IP), so a registration cannot point at somebody else —
-   * and the signature is single-use (KV nonce), so a captured request
+   * and the signature is single-use (a limiter nonce), so a captured request
    * replayed from another host cannot re-point the entry either (the same
    * two guards the master hint uses). Requires a certificate issued here;
    * the master itself is refused — it has /master-hint, and clients keep
-   * it as the LAST tier by design.
+   * it as the LAST tier by design. One network holds at most
+   * DIRECTORY_PER_NETWORK fresh entries.
    */
-  const body = await request.json();
+  const braked = await routeBrake(env, request, "node-register");
+  if (braked) return braked;
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
   const { pubkey, port, capabilities, ts, signature } = body;
   const key = String(pubkey || "").toLowerCase();
-  if (!isValidPubkeyHex(key) || !signature) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (!isValidPubkeyHex(key) || !isText(signature)) {
+    return json({ error: "missing fields" }, 400);
   }
   if (key === MASTER_PUBKEY) {
-    return json({ error: "the master publishes /master-hint" }, corsHeaders, 403);
+    return json({ error: "the master publishes /master-hint" }, 403);
   }
   const p = parseInt(port);
   if (!Number.isInteger(p) || p <= 0 || p >= 65536) {
-    return json({ error: "invalid port" }, corsHeaders, 400);
+    return json({ error: "invalid port" }, 400);
   }
   if (!Array.isArray(capabilities) || capabilities.length === 0
       || capabilities.length > DIRECTORY_CAPS.size
       || !capabilities.every((c) => DIRECTORY_CAPS.has(c))) {
-    return json({ error: "invalid capabilities" }, corsHeaders, 400);
+    return json({ error: "invalid capabilities" }, 400);
   }
   if (!tsFresh(ts)) {
-    return json({ error: "stale timestamp" }, corsHeaders, 403);
+    return json({ error: "stale timestamp" }, 403);
   }
   const caps = [...new Set(capabilities)].sort();
   const message = `sautium-directory:v1:${p}:${caps.join(",")}:${Number(ts)}`;
   if (!await verifySignature(message, signature, key)) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
+    return json({ error: "invalid signature" }, 403);
   }
-  const ip = request.headers.get("CF-Connecting-IP") || "";
-  if (await bumpWindow(env, `rl:dir:${ip}`, DIRECTORY_REG_PER_IP_HOUR, 3600)) {
-    return json({ error: "rate limited" }, corsHeaders, 429);
-  }
+  const ip = clientIp(request);
+  if (!ip) return json({ error: "no source address" }, 400);
   if (!await env.RATE_LIMITS.get(`born:${key}`, "json")) {
-    return json({ error: "node has no certificate" }, corsHeaders, 403);
+    return json({ error: "node has no certificate" }, 403);
   }
-  const sigNonce = `dirsig:${await sha256Hex(signature)}`;
-  if (await env.RATE_LIMITS.get(sigNonce)) {
-    return json({ error: "signature already used" }, corsHeaders, 403);
+  const nonce = `directory:sig:${signature.toLowerCase()}`;
+  const taken = await limiterCall(env, "/take", { now: Date.now(), counters: [
+    { key: nonce, limit: 1, window: 2 * MAIL_SIG_SKEW_S * 1000, amount: 1 },
+    { key: `directory:addr:${await ipHashUuid(env, ip)}`, limit: DIRECTORY_REG_PER_IP_HOUR,
+      window: HOUR_MS, amount: 1 },
+  ] });
+  if (!taken.ok) {
+    return taken.refused === nonce
+      ? json({ error: "signature already used" }, 403)
+      : throttled("rate limited", taken.retry_after);
   }
-  await env.RATE_LIMITS.put(sigNonce, "1", { expirationTtl: 2 * MAIL_SIG_SKEW_S });
-  if (!ip) return json({ error: "no source address" }, corsHeaders, 400);
   const r = await directoryCall(env, "/register", {
     pubkey: key, host: ip, fam: ip.includes(":") ? 6 : 4, port: p,
     caps: caps.join(","), now: Date.now(),
   });
-  return json(r.body, corsHeaders, r.status);
+  return json(r.body, r.status);
 }
 
-async function handleNodeHints(url, env, corsHeaders) {
+async function handleNodeHints(request, url, env) {
+  const refusal = await routeBrake(env, request, "node-hints");
+  if (refusal) return refusal;
   const cap = url.searchParams.get("cap") || "";
   if (!DIRECTORY_CAPS.has(cap)) {
-    return json({ error: "unknown capability" }, corsHeaders, 400);
+    return json({ error: "unknown capability" }, 400);
   }
   const r = await directoryCall(env, `/hints?cap=${cap}&now=${Date.now()}`);
-  return json(r.body, corsHeaders, r.status);
+  return json(r.body, r.status);
 }
 
 export class NodeDirectory {
@@ -1152,24 +1443,49 @@ export class NodeDirectory {
   }
 
   _init() {
+    // net4/net6: the network of each address (subnetOf — IPv4 /24, IPv6 /48),
+    // the axis the per-network cap and the distinct-network total count on.
     this.sql.exec(`CREATE TABLE IF NOT EXISTS nodes (
       pubkey TEXT PRIMARY KEY, host4 TEXT, host6 TEXT, port INTEGER NOT NULL,
-      caps TEXT NOT NULL, ts INTEGER NOT NULL)`);
+      caps TEXT NOT NULL, ts INTEGER NOT NULL, net4 TEXT, net6 TEXT)`);
+    // Columns added after the first deployment (SQLite: ADD COLUMN only).
+    for (const ddl of ["ALTER TABLE nodes ADD COLUMN net4 TEXT",
+                       "ALTER TABLE nodes ADD COLUMN net6 TEXT"]) {
+      try { this.sql.exec(ddl); } catch (e) { /* already there */ }
+    }
+    for (const r of this.sql.exec(
+        `SELECT pubkey, host4, host6 FROM nodes
+          WHERE (host4 IS NOT NULL AND net4 IS NULL) OR (host6 IS NOT NULL AND net6 IS NULL)`).toArray()) {
+      this.sql.exec("UPDATE nodes SET net4 = ?, net6 = ? WHERE pubkey = ?",
+                    r.host4 ? subnetOf(r.host4) : null, r.host6 ? subnetOf(r.host6) : null, r.pubkey);
+    }
     this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_ts ON nodes (ts)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_net4_ts ON nodes (net4, ts)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_net6_ts ON nodes (net6, ts)");
   }
 
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/register") {
       const { pubkey, host, fam, port, caps, now } = await request.json();
+      const net = subnetOf(host);
+      const crowd = Number(this.sql.exec(
+        `SELECT count(*) AS n FROM nodes
+          WHERE ${fam === 6 ? "net6" : "net4"} = ? AND ts > ? AND pubkey <> ?`,
+        net, now - DIRECTORY_TTL_MS, pubkey).one().n);
+      if (crowd >= DIRECTORY_PER_NETWORK) {
+        return Response.json({ error: "this network lists enough volunteers" }, { status: 429 });
+      }
       const prev = this.sql.exec("SELECT host4, host6 FROM nodes WHERE pubkey = ?", pubkey).toArray()[0] || {};
       const host4 = fam === 4 ? host : (prev.host4 || null);
       const host6 = fam === 6 ? host : (prev.host6 || null);
       this.sql.exec(
-        `INSERT INTO nodes (pubkey, host4, host6, port, caps, ts) VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO nodes (pubkey, host4, host6, port, caps, ts, net4, net6) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(pubkey) DO UPDATE SET host4 = excluded.host4, host6 = excluded.host6,
-           port = excluded.port, caps = excluded.caps, ts = excluded.ts`,
-        pubkey, host4, host6, port, caps, now);
+           port = excluded.port, caps = excluded.caps, ts = excluded.ts,
+           net4 = excluded.net4, net6 = excluded.net6`,
+        pubkey, host4, host6, port, caps, now,
+        host4 ? subnetOf(host4) : null, host6 ? subnetOf(host6) : null);
       this.sql.exec("DELETE FROM nodes WHERE ts < ?", now - 7 * 24 * 3600 * 1000);
       return Response.json({ registered: true });
     }
@@ -1181,11 +1497,13 @@ export class NodeDirectory {
           WHERE ts > ? AND (',' || caps || ',') LIKE ?
           ORDER BY RANDOM() LIMIT ?`,
         now - DIRECTORY_TTL_MS, `%,${cap},%`, DIRECTORY_K).toArray();
-      // `total`: how many fresh volunteers the sample was drawn from — the
-      // exact size of the reachable network for this capability, which
-      // clients take as the floor of their network-size estimate.
+      // `total`: how many distinct networks the fresh volunteers for this
+      // capability sit in — never more than the reachable nodes, so clients
+      // can take it as a floor of their network-size estimate, and entries
+      // one network mints cannot raise it.
       const total = Number(this.sql.exec(
-        `SELECT count(*) AS n FROM nodes WHERE ts > ? AND (',' || caps || ',') LIKE ?`,
+        `SELECT count(DISTINCT coalesce(net4, net6)) AS n FROM nodes
+          WHERE ts > ? AND (',' || caps || ',') LIKE ?`,
         now - DIRECTORY_TTL_MS, `%,${cap},%`).one().n);
       return Response.json({ nodes: rows.map((r) => ({
         pubkey: r.pubkey, host: r.host4 || null, host6: r.host6 || null, port: Number(r.port),
@@ -1278,9 +1596,10 @@ export class MasterMailbox {
     if (this._count("SELECT count(*) AS n FROM mail WHERE received_at > ?", day) >= MAIL_PER_DAY) {
       return { status: 429, body: { error: "mailbox busy" } };
     }
-    const total = this._count("SELECT count(*) AS n FROM mail");
-    if (total >= MAIL_CAP) {
-      this.sql.exec("DELETE FROM mail WHERE id IN (SELECT id FROM mail ORDER BY id LIMIT ?)", total - MAIL_CAP + 1);
+    // Full, it refuses: the sender keeps the message and retries, where an
+    // eviction dropped mail already accepted as delivered.
+    if (this._count("SELECT count(*) AS n FROM mail") >= MAIL_CAP) {
+      return { status: 429, body: { error: "mailbox full" } };
     }
     const id = Number(this.sql.exec(
       "INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
@@ -1320,7 +1639,7 @@ export class MasterMailbox {
   }
 }
 
-async function handleTimestamp(request, env, corsHeaders) {
+async function handleTimestamp(request, env) {
   /**
    * Notarize Merkle batch roots at the current date — the "when" a signed
    * enrichment record needs for authorship priority (see docs/design/
@@ -1332,9 +1651,10 @@ async function handleTimestamp(request, env, corsHeaders) {
    *       + pubkey, ts, signature — the submitter's identity (Ф20): sig by the
    *         node key over
    *           sautium-timestamp-request:v{STAMP_REQUEST_VERSION}:{ts}:{roots joined by ","}
-   *         with ts within MAIL_SIG_SKEW_S. Optional while the budget is
-   *         shadow (older clients send none): an unsigned request rides the
-   *         address brake alone and is recorded as such.
+   *         with ts within MAIL_SIG_SKEW_S. Required, and the key must hold a
+   *         certificate issued here: only a known identity writes `ts:` keys,
+   *         at most LIMITS.stamp new roots a day per key, per address and in
+   *         all.
    * Returns {root, date, ip_hash, sig, authority, v, not_before} for the batch
    * shape, {stamps: [...], v, not_before} for the re-stamp shape; sig is over
    *   sautium-timestamp:v{TIMESTAMP_VERSION}:{root}:{date}:{ip_hash}
@@ -1347,61 +1667,83 @@ async function handleTimestamp(request, env, corsHeaders) {
    * every peer's signing_batches — and notarizing a hash still reveals
    * nothing about the records.
    */
-  const body = await request.json();
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
   const single = body.roots === undefined;
   const raw = single ? [body.root] : body.roots;
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > STAMP_MAX_ROOTS) {
-    return json({ error: "invalid roots" }, corsHeaders, 400);
+    return json({ error: "invalid roots" }, 400);
   }
   const roots = raw.map((r) => String(r || "").toLowerCase());
   if (roots.some((r) => !/^[0-9a-f]{64}$/.test(r))) {
-    return json({ error: "invalid root" }, corsHeaders, 400);
+    return json({ error: "invalid root" }, 400);
   }
 
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const ip = clientIp(request);
   if (!await brake(env.BRAKE_STAMP, `ts:${addrKey(ip)}`)) {
     return throttled("rate limited (too many requests from your address)",
-                     corsHeaders, BRAKE_RETRY_AFTER_S);
+                     BRAKE_RETRY_AFTER_S);
   }
 
-  let identity = null;
-  if (body.pubkey !== undefined || body.signature !== undefined) {
-    const pubkey = String(body.pubkey || "").toLowerCase();
-    if (!isValidPubkeyHex(pubkey)) {
-      return json({ error: "invalid pubkey" }, corsHeaders, 400);
-    }
-    if (!tsFresh(body.ts)) {
-      return json({ error: "stale timestamp" }, corsHeaders, 403);
-    }
-    const message = `sautium-timestamp-request:v${STAMP_REQUEST_VERSION}:${body.ts}:${roots.join(",")}`;
-    if (!await verifySignature(message, String(body.signature || ""), pubkey)) {
-      return json({ error: "invalid signature" }, corsHeaders, 403);
-    }
-    identity = { pubkey, born: await loadBirthRecord(env, pubkey) };
+  if (body.pubkey === undefined || body.signature === undefined || body.ts === undefined) {
+    return json({ error: "a signed request is required" }, 400);
+  }
+  const pubkey = String(body.pubkey).toLowerCase();
+  if (!isValidPubkeyHex(pubkey)) {
+    return json({ error: "invalid pubkey" }, 400);
+  }
+  if (!tsFresh(body.ts)) {
+    return json({ error: "stale timestamp" }, 403);
+  }
+  const message = `sautium-timestamp-request:v${STAMP_REQUEST_VERSION}:${body.ts}:${roots.join(",")}`;
+  if (!await verifySignature(message, String(body.signature), pubkey)) {
+    return json({ error: "invalid signature" }, 403);
+  }
+  const born = await loadBirthRecord(env, pubkey);
+  if (!born) {
+    return json({ error: "no certificate for this key" }, 403);
   }
 
-  // A known root costs nothing (idempotent re-submission, a format refresh):
-  // the budget charges new roots only.
+  // A known root costs nothing (idempotent re-submission); a record in an
+  // older format is re-signed, a write the route's ceiling counts. The
+  // budget charges new roots only.
   const records = await Promise.all(
     roots.map((r) => env.RATE_LIMITS.get(`ts:${r}`, "json")));
+  const fresh = records.filter((r) => !r).length;
+  const resigned = records.filter((r) => r && (r.v !== TIMESTAMP_VERSION
+                                               || r.ipv !== IP_HASH_VERSION)).length;
+  const counters = fresh ? [daily("stamp", "key", pubkey, fresh),
+                            daily("stamp", "addr", await volumeToken(env, ip), fresh)] : [];
+  if (fresh + resigned) counters.push(daily("stamp", "all", "", fresh + resigned));
+  if (counters.length) {
+    const refusal = await admit(env, counters);
+    if (refusal) return refusal;
+  }
   const ipHash = await ipHashUuid(env, ip);
   const cf = request.cf || {};
   const verdict = await ledgerCall(env, "/stamp", {
-    pubkey: identity?.pubkey || "",
-    issued_at: identity?.born ? Date.parse(identity.born.issued_at) : 0,
-    method: identity?.born?.method || "",
-    email_class: identity?.born?.email_class || "",
-    n_new: records.filter((r) => !r).length,
+    pubkey,
+    issued_at: Date.parse(born.issued_at),
+    method: born.method || "",
+    email_class: born.email_class || "",
+    n_new: fresh,
     n_roots: roots.length,
     addr: ipHash,
     sub: await subnetToken(env, ip),
     asn: Number(cf.asn) || 0,
     now: Date.now(),
   });
-  if (STAMP_BUDGET_ARMED && verdict && verdict.allowed === false) {
-    const wait = Math.max(1, Math.ceil(verdict.not_before - Date.now() / 1000));
-    return throttled("notary budget spent for this identity", corsHeaders,
-                     wait, verdict.not_before);
+  if (STAMP_BUDGET_ARMED) {
+    // Armed, the budget is a refusal: no verdict is no stamp.
+    if (!verdict) {
+      return json({ error: "notary budget unavailable" }, 503,
+                  { "Retry-After": String(BRAKE_RETRY_AFTER_S) });
+    }
+    if (verdict.allowed === false) {
+      const wait = Math.max(1, Math.ceil(verdict.not_before - Date.now() / 1000));
+      return throttled("notary budget spent for this identity",
+                       wait, verdict.not_before);
+    }
   }
 
   // Idempotent per root, but re-sign any record still in an older format so a
@@ -1433,71 +1775,81 @@ async function handleTimestamp(request, env, corsHeaders) {
     });
   }
   const policy = { v: TIMESTAMP_VERSION, not_before: verdict?.not_before ?? null };
-  return json(single ? { ...stamps[0], ...policy } : { stamps, ...policy },
-              corsHeaders);
+  return json(single ? { ...stamps[0], ...policy } : { stamps, ...policy });
 }
 
 // -----------------------------------------------------------------------
 // Email verification & invites
 // -----------------------------------------------------------------------
 
-async function handleVerification(request, env, corsHeaders) {
+async function inviteCaller(inviteCode, publicKeyHex, message, signature) {
+  // The caller of an invite-family route: its own invite code, exactly as
+  // its client builds it, and a signature over the route's message. →
+  // {pubkey, bind} (bind: the name the limiter holds the key to), or
+  // {refusal}.
+  const pubkey = publicKeyHex.toLowerCase();
+  const username = await ownInviteName(inviteCode, pubkey);
+  if (!username) {
+    return { refusal: json({ error: "invite code doesn't match public key" }, 403) };
+  }
+  if (!await verifySignature(message, signature, pubkey)) {
+    return { refusal: json({ error: "invalid signature" }, 403) };
+  }
+  return { pubkey, bind: { pubkey, username } };
+}
+
+async function handleVerification(request, env) {
   /**
    * Generate a verification code, remember its hash, email it.
    *
    * Body: {to, invite_code, public_key_hex, signature, from_username?}
    * Signature is over: "sendcode:{invite_code}:{to}"
    *
-   * The code is generated HERE and only its hash is stored (KV, 15 min TTL).
-   * The client never learns the expected value, so possession of the mailbox
-   * is proven to the Worker at /register-email — not asserted by the client.
+   * The code is generated HERE and only its hash is stored (the limiter,
+   * 15 min, VERIFY_CODE_TRIES wrong tries). The client never learns the
+   * expected value, so possession of the mailbox is proven to the Worker at
+   * /register-email — not asserted by the client.
    */
-  const body = await request.json();
+  const braked = await routeBrake(env, request, "code");
+  if (braked) return braked;
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
   const { to, invite_code, public_key_hex, signature, from_username } = body;
-
-  if (!to || !invite_code || !public_key_hex || !signature) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (![to, invite_code, public_key_hex, signature].every(isText)) {
+    return json({ error: "missing fields" }, 400);
   }
-
   if (!isValidEmail(to)) {
-    return json({ error: "invalid email" }, corsHeaders, 400);
+    return json({ error: "invalid email" }, 400);
   }
+  const caller = await inviteCaller(invite_code, public_key_hex,
+                                    `sendcode:${invite_code}:${to}`, signature);
+  if (caller.refusal) return caller.refusal;
 
-  if (!await verifyInviteCode(invite_code, public_key_hex)) {
-    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
-  }
-
-  const sigMessage = `sendcode:${invite_code}:${to}`;
-  const valid = await verifySignature(sigMessage, signature, public_key_hex);
-  if (!valid) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
-  }
-
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const rateLimitResult = await checkRateLimit(env, ip, to, "mail");
-  if (rateLimitResult) {
-    return json({ error: rateLimitResult }, corsHeaders, 429);
-  }
+  const refusal = await admit(env, [
+    daily("code", "key", caller.pubkey),
+    daily("code", "to", await emailToken(env, normalizeEmail(to))),
+    daily("code", "addr", await volumeToken(env, clientIp(request))),
+    daily("code", "all"),
+  ], caller.bind);
+  if (refusal) return refusal;
 
   const code = randomCode(6);
-  await env.RATE_LIMITS.put(
-    `emailcode:${kvKey(invite_code)}`,
-    JSON.stringify({ hash: await sha256Hex(code), email: to }),
-    { expirationTtl: VERIFY_CODE_TTL_SECONDS },
-  );
+  await limiterCall(env, "/code/put", {
+    invite: invite_code, email: to, hash: await sha256Hex(code), now: Date.now(),
+  });
 
   const html = verificationEmailHtml(code, from_username, invite_code);
   const subject = `Sautium — Verification code`;
 
   const result = await sendEmail(env, to, subject, html);
   if (!result.ok) {
-    return json({ error: "email send failed" }, corsHeaders, 502);
+    return json({ error: "email send failed" }, 502);
   }
 
-  return json({ status: "sent" }, corsHeaders);
+  return json({ status: "sent" });
 }
 
-async function handleRegisterEmail(request, env, corsHeaders) {
+async function handleRegisterEmail(request, env) {
   /**
    * Register a verified email for an invite code.
    *
@@ -1506,7 +1858,8 @@ async function handleRegisterEmail(request, env, corsHeaders) {
    *
    * Requires:
    * - the verification code the Worker generated and emailed (proves mailbox
-   *   ownership to the Worker, not to the client itself);
+   *   ownership to the Worker, not to the client itself); every wrong try
+   *   counts against the pending code;
    * - a valid identity certificate for the same pubkey (the KV record carries
    *   born_at, so a verified badge can cite identity age).
    *
@@ -1515,38 +1868,42 @@ async function handleRegisterEmail(request, env, corsHeaders) {
    * email_token + email_class (issued_at unchanged) and the new certificate is
    * returned as `birth_cert` so the client persists it in one round-trip.
    */
-  const body = await request.json();
+  const braked = await routeBrake(env, request, "register");
+  if (braked) return braked;
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
   const { invite_code, email, public_key_hex, signature, code, birth_cert } = body;
-
-  if (!invite_code || !email || !public_key_hex || !signature || !code || !birth_cert) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (![invite_code, email, public_key_hex, signature, code].every(isText)
+      || !birth_cert || typeof birth_cert !== "object") {
+    return json({ error: "missing fields" }, 400);
   }
+  const caller = await inviteCaller(invite_code, public_key_hex,
+                                    `register:${invite_code}:${email}`, signature);
+  if (caller.refusal) return caller.refusal;
+  const pubkey = caller.pubkey;
 
-  if (!await verifyInviteCode(invite_code, public_key_hex)) {
-    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
-  }
-
-  const message = `register:${invite_code}:${email}`;
-  const valid = await verifySignature(message, signature, public_key_hex);
-  if (!valid) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
-  }
-
-  const codeKey = `emailcode:${kvKey(invite_code)}`;
-  const pending = await env.RATE_LIMITS.get(codeKey, "json");
-  if (!pending || pending.email !== email ||
-      pending.hash !== await sha256Hex(code.trim().toUpperCase())) {
-    return json({ error: "invalid or expired code" }, corsHeaders, 403);
-  }
-
-  const pubkey = public_key_hex.toLowerCase();
   if (!await verifyBirthCertificate(birth_cert) || birth_cert.pubkey !== pubkey) {
-    return json({ error: "invalid birth certificate" }, corsHeaders, 403);
+    return json({ error: "invalid birth certificate" }, 403);
   }
   const record = await loadBirthRecord(env, pubkey);
   if (!record) {
-    return json({ error: "certificate not issued here" }, corsHeaders, 403);
+    return json({ error: "certificate not issued here" }, 403);
   }
+
+  const tries = await admit(env, [
+    daily("register", "key", pubkey),
+    daily("register", "addr", await volumeToken(env, clientIp(request))),
+  ], caller.bind);
+  if (tries) return tries;
+  const check = await limiterCall(env, "/code/check", {
+    invite: invite_code, email, hash: await sha256Hex(code.trim().toUpperCase()), now: Date.now(),
+  });
+  if (!check.ok) {
+    return json({ error: check.spent ? "too many wrong codes: request a new one"
+                                     : "invalid or expired code" }, 403);
+  }
+  const full = await admit(env, [daily("register", "all")]);
+  if (full) return full;
 
   const normalized = normalizeEmail(email);
   const token = await emailToken(env, normalized);
@@ -1576,63 +1933,75 @@ async function handleRegisterEmail(request, env, corsHeaders) {
     born_at: upgraded.issued_at,
     verified_at: nowIsoSeconds(),
   }));
-  await env.RATE_LIMITS.delete(codeKey);
+  await limiterCall(env, "/code/drop", { invite: invite_code });
 
   return json({
     status: "registered", invite_code, email,
     birth_cert: certFromRecord(pubkey, upgraded),
-  }, corsHeaders);
+  });
 }
 
-async function handleInvite(request, env, corsHeaders) {
+async function handleInvite(request, env) {
   /**
-   * Send an invite email with verified sender information.
+   * Send an invite email from a key that holds a certificate issued here
+   * and a verified email for this very invite code: the mail names that
+   * address as its sender.
    *
    * Body: {to, invite_code, public_key_hex, signature, message?}
    * Signature is over: "invite:{invite_code}:to:{to}"
+   * `message`: optional plain text, at most INVITE_MESSAGE_MAX_CHARS.
    */
-  const body = await request.json();
+  const braked = await routeBrake(env, request, "invite");
+  if (braked) return braked;
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
   const { to, invite_code, public_key_hex, signature, message: userMessage } = body;
-
-  if (!to || !invite_code || !public_key_hex || !signature) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (![to, invite_code, public_key_hex, signature].every(isText)) {
+    return json({ error: "missing fields" }, 400);
   }
-
+  if (userMessage != null && typeof userMessage !== "string") {
+    return json({ error: "invalid message" }, 400);
+  }
+  if (userMessage && userMessage.length > INVITE_MESSAGE_MAX_CHARS) {
+    return json({ error: "message too long" }, 400);
+  }
   if (!isValidEmail(to)) {
-    return json({ error: "invalid email" }, corsHeaders, 400);
+    return json({ error: "invalid email" }, 400);
+  }
+  const caller = await inviteCaller(invite_code, public_key_hex,
+                                    `invite:${invite_code}:to:${to}`, signature);
+  if (caller.refusal) return caller.refusal;
+
+  if (!await env.RATE_LIMITS.get(`born:${caller.pubkey}`, "json")) {
+    return json({ error: "no certificate for this key" }, 403);
+  }
+  const verified = await getVerified(env, invite_code);
+  if (!verified || verified.pubkey !== caller.pubkey) {
+    return json({ error: "a verified email is required to send invites" }, 403);
   }
 
-  if (!await verifyInviteCode(invite_code, public_key_hex)) {
-    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
-  }
+  const refusal = await admit(env, [
+    daily("invite", "key", caller.pubkey),
+    daily("invite", "from", await emailToken(env, normalizeEmail(verified.email))),
+    daily("invite", "to", await emailToken(env, normalizeEmail(to))),
+    daily("invite", "addr", await volumeToken(env, clientIp(request))),
+    daily("invite", "all"),
+  ], caller.bind);
+  if (refusal) return refusal;
 
-  const sigMessage = `invite:${invite_code}:to:${to}`;
-  const valid = await verifySignature(sigMessage, signature, public_key_hex);
-  if (!valid) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
-  }
-
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const rateLimitResult = await checkRateLimit(env, ip, to, "mail");
-  if (rateLimitResult) {
-    return json({ error: rateLimitResult }, corsHeaders, 429);
-  }
-
-  const verifiedEmail = (await getVerified(env, invite_code))?.email;
-  const username = invite_code.split("#")[0];
-
-  const html = inviteEmailHtml(username, invite_code, verifiedEmail, userMessage);
+  const username = caller.bind.username;
+  const html = inviteEmailHtml(username, invite_code, verified.email, userMessage);
   const subject = `${username} invites you to Sautium`;
 
   const result = await sendEmail(env, to, subject, html);
   if (!result.ok) {
-    return json({ error: "email send failed" }, corsHeaders, 502);
+    return json({ error: "email send failed" }, 502);
   }
 
-  return json({ status: "sent", verified_sender: !!verifiedEmail }, corsHeaders);
+  return json({ status: "sent", verified_sender: true });
 }
 
-async function handleCheckEmail(url, env, corsHeaders) {
+async function handleCheckEmail(request, url, env) {
   /**
    * Check if an email is already verified for an invite code.
    *
@@ -1644,30 +2013,29 @@ async function handleCheckEmail(url, env, corsHeaders) {
    * When verified for this very pubkey, also returns (and, if needed,
    * upgrades to) the method:email identity certificate.
    */
+  const braked = await routeBrake(env, request, "check");
+  if (braked) return braked;
   const inviteCode = url.searchParams.get("invite_code");
   const email = url.searchParams.get("email");
   const publicKeyHex = url.searchParams.get("public_key_hex");
   const signature = url.searchParams.get("signature");
-
-  if (!inviteCode || !email || !publicKeyHex || !signature) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (![inviteCode, email, publicKeyHex, signature].every(isText)) {
+    return json({ error: "missing fields" }, 400);
   }
-
-  if (!await verifyInviteCode(inviteCode, publicKeyHex)) {
-    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
-  }
-
-  const message = `check-email:${inviteCode}:${email}`;
-  const valid = await verifySignature(message, signature, publicKeyHex);
-  if (!valid) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
-  }
+  const caller = await inviteCaller(inviteCode, publicKeyHex,
+                                    `check-email:${inviteCode}:${email}`, signature);
+  if (caller.refusal) return caller.refusal;
+  const pubkey = caller.pubkey;
+  const refusal = await admit(env, [
+    daily("check", "key", pubkey),
+    daily("check", "addr", await volumeToken(env, clientIp(request))),
+  ], caller.bind);
+  if (refusal) return refusal;
 
   const stored = await getVerified(env, inviteCode);
-  const pubkey = publicKeyHex.toLowerCase();
   const verified = stored?.email === email;
   if (!verified || stored.pubkey !== pubkey) {
-    return json({ verified }, corsHeaders);
+    return json({ verified });
   }
   // Mailbox ownership was already proven for THIS key when the record was
   // stored, so an identity verified before certificate v2 gets its
@@ -1697,10 +2065,10 @@ async function handleCheckEmail(url, env, corsHeaders) {
   return json({
     verified: true,
     birth_cert: record ? certFromRecord(pubkey, record) : null,
-  }, corsHeaders);
+  });
 }
 
-async function handleAcceptInvite(request, env, corsHeaders) {
+async function handleAcceptInvite(request, env) {
   /**
    * Accept an invite: store reciprocal mapping + notify sender via email.
    *
@@ -1710,28 +2078,36 @@ async function handleAcceptInvite(request, env, corsHeaders) {
    *
    * Body: {my_invite_code, their_invite_code, public_key_hex, signature}
    * Signature is over: "accept:{my_invite_code}:{their_invite_code}"
+   * Masha's code is stored in the form her own client builds, so her
+   * pickup finds it however Sasha typed it.
    */
-  const body = await request.json();
+  const braked = await routeBrake(env, request, "accept");
+  if (braked) return braked;
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
   const { my_invite_code, their_invite_code, public_key_hex, signature } = body;
-
-  if (!my_invite_code || !their_invite_code || !public_key_hex || !signature) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (![my_invite_code, their_invite_code, public_key_hex, signature].every(isText)) {
+    return json({ error: "missing fields" }, 400);
+  }
+  const caller = await inviteCaller(my_invite_code, public_key_hex,
+                                    `accept:${my_invite_code}:${their_invite_code}`, signature);
+  if (caller.refusal) return caller.refusal;
+  const theirs = canonicalInviteCode(their_invite_code);
+  if (!theirs || theirs === my_invite_code) {
+    return json({ error: "invalid invite code" }, 400);
   }
 
-  if (!await verifyInviteCode(my_invite_code, public_key_hex)) {
-    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
-  }
-
-  const message = `accept:${my_invite_code}:${their_invite_code}`;
-  const valid = await verifySignature(message, signature, public_key_hex);
-  if (!valid) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
-  }
+  const refusal = await admit(env, [
+    daily("accept", "key", caller.pubkey),
+    daily("accept", "addr", await volumeToken(env, clientIp(request))),
+    daily("accept", "all"),
+  ], caller.bind);
+  if (refusal) return refusal;
 
   // Store acceptance in KV (TTL 30 days). The acceptor's invite code lives
   // in the VALUE — storage keys are '#'-free (kvKey), so the key alone can't
   // reconstruct it.
-  const acceptKey = `accepted:${kvKey(their_invite_code)}:${kvKey(my_invite_code)}`;
+  const acceptKey = `accepted:${kvKey(theirs)}:${kvKey(my_invite_code)}`;
   await env.RATE_LIMITS.put(acceptKey, JSON.stringify({
     invite_code: my_invite_code,
     accepted_at: new Date().toISOString(),
@@ -1739,24 +2115,27 @@ async function handleAcceptInvite(request, env, corsHeaders) {
 
   // Try to notify the sender (Masha) via their verified email
   let notified = false;
-  const senderEmail = (await getVerified(env, their_invite_code))?.email;
-  if (senderEmail) {
-    const myUsername = my_invite_code.split("#")[0];
-    const myVerifiedEmail = (await getVerified(env, my_invite_code))?.email;
-
-    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-    const rateLimitResult = await checkRateLimit(env, ip, senderEmail, "mail");
-    if (!rateLimitResult) {
+  const sender = await getVerified(env, theirs);
+  if (sender?.email) {
+    const myUsername = caller.bind.username;
+    const mine = await getVerified(env, my_invite_code);
+    const myVerifiedEmail = mine && mine.pubkey === caller.pubkey ? mine.email : null;
+    const limited = await admit(env, [
+      daily("notify", "key", caller.pubkey),
+      daily("notify", "to", await emailToken(env, normalizeEmail(sender.email))),
+      daily("notify", "all"),
+    ]);
+    if (!limited) {
       const html = acceptNotificationEmailHtml(myUsername, my_invite_code, myVerifiedEmail);
-      const result = await sendEmail(env, senderEmail, `${myUsername} accepted your Sautium invite`, html);
+      const result = await sendEmail(env, sender.email, `${myUsername} accepted your Sautium invite`, html);
       notified = result.ok;
     }
   }
 
-  return json({ status: "accepted", notified }, corsHeaders);
+  return json({ status: "accepted", notified });
 }
 
-async function handlePendingAccepts(url, env, corsHeaders) {
+async function handlePendingAccepts(request, url, env) {
   /**
    * Check who accepted my invites (polling endpoint).
    *
@@ -1764,23 +2143,23 @@ async function handlePendingAccepts(url, env, corsHeaders) {
    *
    * Returns list of invite codes that accepted, then deletes them (one-time pickup).
    */
+  const braked = await routeBrake(env, request, "pending");
+  if (braked) return braked;
   const inviteCode = url.searchParams.get("invite_code");
   const publicKeyHex = url.searchParams.get("public_key_hex");
   const signature = url.searchParams.get("signature");
-
-  if (!inviteCode || !publicKeyHex || !signature) {
-    return json({ error: "missing fields" }, corsHeaders, 400);
+  if (![inviteCode, publicKeyHex, signature].every(isText)) {
+    return json({ error: "missing fields" }, 400);
   }
-
-  if (!await verifyInviteCode(inviteCode, publicKeyHex)) {
-    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
-  }
-
-  const message = `pending-accepts:${inviteCode}`;
-  const valid = await verifySignature(message, signature, publicKeyHex);
-  if (!valid) {
-    return json({ error: "invalid signature" }, corsHeaders, 403);
-  }
+  const caller = await inviteCaller(inviteCode, publicKeyHex,
+                                    `pending-accepts:${inviteCode}`, signature);
+  if (caller.refusal) return caller.refusal;
+  const refusal = await admit(env, [
+    daily("pending", "key", caller.pubkey),
+    daily("pending", "addr", await volumeToken(env, clientIp(request))),
+    daily("pending", "all"),
+  ], caller.bind);
+  if (refusal) return refusal;
 
   const prefix = `accepted:${kvKey(inviteCode)}:`;
   const listed = await env.RATE_LIMITS.list({ prefix });
@@ -1796,7 +2175,7 @@ async function handlePendingAccepts(url, env, corsHeaders) {
     await env.RATE_LIMITS.delete(key.name);
   }
 
-  return json({ accepts }, corsHeaders);
+  return json({ accepts });
 }
 
 // -----------------------------------------------------------------------
@@ -1810,6 +2189,13 @@ async function verifySignature(message, signatureHex, publicKeyHex) {
 }
 
 async function verifySignatureBytes(messageBytes, signatureHex, publicKeyHex) {
+  // One spelling per key and per signature — exact length, hex digits only,
+  // either case — so a nonce taken over a signature's lower-case text is
+  // single-use for the signature, not for one of its spellings.
+  if (typeof publicKeyHex !== "string" || typeof signatureHex !== "string"
+      || !/^[0-9a-fA-F]{64}$/.test(publicKeyHex) || !/^[0-9a-fA-F]{128}$/.test(signatureHex)) {
+    return false;
+  }
   try {
     const publicKeyBytes = hexToBytes(publicKeyHex);
     const signatureBytes = hexToBytes(signatureHex);
@@ -1834,30 +2220,33 @@ async function verifySignatureBytes(messageBytes, signatureHex, publicKeyHex) {
   }
 }
 
-async function verifyInviteCode(inviteCode, publicKeyHex) {
+async function ownInviteName(inviteCode, publicKeyHex) {
   /**
-   * Verify that invite code matches the public key.
-   * invite_code = "username#XXXX-XXXX-XXXX"
-   * where XXXX-XXXX-XXXX = SHA256(public_key_bytes)[:6] in uppercase hex
-   * and username matches USERNAME_RE (enforced at account creation too).
+   * The caller's own invite code, exactly as every client builds it:
+   * "username#XXXX-XXXX-XXXX", where XXXX-XXXX-XXXX = SHA256(public key)[:6]
+   * in upper-case hex and username matches USERNAME_RE (enforced at account
+   * creation too). → the username, or null for any other spelling: one key,
+   * one code.
    */
-  try {
-    const parts = inviteCode.split("#");
-    if (parts.length !== 2) return false;
-    if (!USERNAME_RE.test(parts[0])) return false;
+  if (!isValidPubkeyHex(publicKeyHex)) return null;
+  const parts = inviteCode.split("#");
+  if (parts.length !== 2 || !USERNAME_RE.test(parts[0])) return null;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", hexToBytes(publicKeyHex)));
+  const h = bytesToHex(digest.slice(0, 6)).toUpperCase();
+  return parts[1] === `${h.slice(0, 4)}-${h.slice(4, 8)}-${h.slice(8)}` ? parts[0] : null;
+}
 
-    const hashPart = parts[1].replace(/-/g, "").toUpperCase();
-    if (hashPart.length !== 12) return false;
-
-    const publicKeyBytes = hexToBytes(publicKeyHex);
-    const hashBuffer = await crypto.subtle.digest("SHA-256", publicKeyBytes);
-    const hashArray = new Uint8Array(hashBuffer);
-    const first6Hex = bytesToHex(hashArray.slice(0, 6)).toUpperCase();
-
-    return first6Hex === hashPart;
-  } catch {
-    return false;
-  }
+function canonicalInviteCode(inviteCode) {
+  /**
+   * Somebody else's invite code as a person typed it → the form its owner's
+   * client builds, or null. Whose key the digest names is not known here, so
+   * only its shape is checked.
+   */
+  const parts = inviteCode.trim().split("#");
+  if (parts.length !== 2 || !USERNAME_RE.test(parts[0])) return null;
+  const h = parts[1].replace(/-/g, "").toUpperCase();
+  if (!/^[0-9A-F]{12}$/.test(h)) return null;
+  return `${parts[0]}#${h.slice(0, 4)}-${h.slice(4, 8)}-${h.slice(8)}`;
 }
 
 async function sha256Hex(text) {
@@ -1894,19 +2283,28 @@ async function getVerified(env, inviteCode) {
 // -----------------------------------------------------------------------
 
 async function sendEmail(env, to, subject, html) {
-  return await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: `${FROM_NAME} <${FROM_EMAIL}>`,
-      to: [to],
-      subject,
-      html,
-    }),
-  });
+  // → the provider's Response, or {ok: false} when it could not be reached
+  // (the route answers 502 either way; the reason goes to the log).
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: `${FROM_NAME} <${FROM_EMAIL}>`,
+        to: [to],
+        subject,
+        html,
+      }),
+    });
+    if (!res.ok) console.error("mail provider refused:", res.status);
+    return res;
+  } catch (e) {
+    console.error("mail provider unreachable:", e);
+    return { ok: false };
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -1923,50 +2321,9 @@ async function brake(binding, key) {
   return success;
 }
 
-function throttled(error, corsHeaders, retryAfterS, notBefore = null) {
-  return new Response(
-    JSON.stringify({ error, retry_after: retryAfterS, not_before: notBefore }), {
-      status: 429,
-      headers: { "Content-Type": "application/json",
-                 "Retry-After": String(retryAfterS), ...corsHeaders },
-    });
-}
-
-async function checkRateLimit(env, ip, recipient, route) {
-  // The mail routes' KV limiter. The address bucket is per ROUTE: it used to
-  // be one bucket for every route, and a CGNAT cohort's stamps could spend
-  // its neighbours' email verifications.
-  if (!env.RATE_LIMITS) return null;
-
-  const ipKey = `rl:ip:${route}:${ip}`;
-  const recipientKey = `rl:to:${recipient}`;
-
-  // Increment FIRST, then check (pessimistic).
-  // KV has no atomic increment; concurrent requests may read
-  // the same base value.  By writing the incremented value
-  // before the check we ensure that at least one racing writer
-  // sees the over-limit value on its next request.  Worst case:
-  // N concurrent requests all read count C and all write C+1,
-  // allowing up to N extra emails — but the NEXT wave sees
-  // the (still only C+1) value and blocks.  Halved limits
-  // compensate for this one-burst tolerance.
-  const ipCount = (parseInt(await env.RATE_LIMITS.get(ipKey)) || 0) + 1;
-  await env.RATE_LIMITS.put(ipKey, String(ipCount), {
-    expirationTtl: RATE_LIMIT_WINDOW,
-  });
-  if (ipCount > RATE_LIMIT_PER_IP) {
-    return "rate limited (too many requests from your IP)";
-  }
-
-  const recipientCount = (parseInt(await env.RATE_LIMITS.get(recipientKey)) || 0) + 1;
-  await env.RATE_LIMITS.put(recipientKey, String(recipientCount), {
-    expirationTtl: RATE_LIMIT_WINDOW,
-  });
-  if (recipientCount > RATE_LIMIT_PER_RECIPIENT) {
-    return "rate limited (too many emails to this address)";
-  }
-
-  return null;
+function throttled(error, retryAfterS, notBefore = null) {
+  return json({ error, retry_after: retryAfterS, not_before: notBefore }, 429,
+              { "Retry-After": String(retryAfterS) });
 }
 
 // -----------------------------------------------------------------------
@@ -1993,12 +2350,9 @@ function verificationEmailHtml(code, fromUsername, inviteCode) {
 }
 
 function inviteEmailHtml(fromUsername, inviteCode, verifiedEmail, message) {
-  const verifiedBadge = verifiedEmail
-    ? `<div style="background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
+  const verifiedBadge =
+    `<div style="background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
         &#9989; Verified sender: <strong>${escapeHtml(verifiedEmail)}</strong>
-       </div>`
-    : `<div style="background: #fff3e0; border: 1px solid #ffcc80; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
-        &#9888; Unverified sender — verify this person through another channel
        </div>`;
 
   return `<!DOCTYPE html>
@@ -2121,7 +2475,11 @@ async function ipHashUuid(env, ip) {
 }
 
 function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  // One plain address: no whitespace, no list, quoting or display-name
+  // syntax — each of those would spell one mailbox several ways past its
+  // per-mailbox caps.
+  return email.length <= 254
+    && /^[^\s@,;:<>()[\]\\"]{1,64}@[^\s@,;:<>()[\]\\"]+\.[^\s@,;:<>()[\]\\"]{2,}$/.test(email);
 }
 
 function normalizeEmail(email) {
@@ -2168,6 +2526,19 @@ async function emailDomainToken(env, normalizedEmail) {
   return bytesToHex(mac);
 }
 
+async function nameToken(env, username) {
+  // A key's username as the limiter keeps it: equal names, equal tokens, and
+  // no name in the table. Same construction as emailToken, its own prefix.
+  const pepper = env.EMAIL_PEPPER;
+  if (!pepper) throw new Error("EMAIL_PEPPER is not configured");
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(pepper),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode(`name:${username}`)));
+  return bytesToHex(mac);
+}
+
 async function emailToken(env, normalizedEmail) {
   // Same construction as ipHashUuid: HMAC under a Worker-only pepper keeps
   // equality (same token = same mailbox = a hard similarity link and the
@@ -2192,9 +2563,9 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-function json(data, corsHeaders, status = 200) {
+function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json", ...corsHeaders },
+    headers: { "Content-Type": "application/json", ...headers },
   });
 }

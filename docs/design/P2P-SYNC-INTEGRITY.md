@@ -1159,8 +1159,8 @@ The attacks worth pricing against, on a single-user home appliance:
   spoofed victim). Audit any "we contact X because Y asked" endpoint.
   Current state: `probe-connect` is safe (connects only to the
   *observed* TCP source, unspoofable, + per-pubkey cooldown); DHT
-  announce-on-behalf is voucher-gated; Worker email is per-recipient
-  capped.
+  announce-on-behalf is voucher-gated; Worker email is capped per key,
+  per mailbox and per route, invites only from a verified address.
 - **(e) State-growth** — bloat queues / tables / the task pool. Every
   new store needs a cap (the pool included).
 - **(f) Pricer griefing** — hold a node near its ceiling so legit
@@ -1552,9 +1552,11 @@ Worker never sees the data. At Roon scale (100k nodes × ~2 requests/day
 ≈ 1–2 req/s) this sits in the $5–10/month Cloudflare tier; MB-scale
 track counts are irrelevant because stamps cover *computation batches
 per node*, not tracks. The genuinely expensive part would be the
-transparency log (KV writes cost more than signatures): solved by the
+transparency log (KV writes cost more than signatures): the plan is the
 Worker keeping its own Merkle log of issued stamps, publishing only the
-head (CT-style) and archiving raw entries to R2 — cents per month.
+head (CT-style) and archiving raw entries to R2 — cents per month. Not
+built (2026-11-02): each new root is one KV key, bounded by the Worker's
+daily caps on new roots per key, per address and in all.
 Funding closes structurally: donation certificates pay for the notary
 that certifies them; one free stamp per node per day (a rate limit that
 doubles as anti-spam), more for weighted keys. Nor is the notary a
@@ -1582,10 +1584,12 @@ address that were also born in the same window (the address alone is a
 CGNAT cohort; address and birth window together is a farm). Only NEW roots
 are charged, so a re-stamp is free. Shadow until `STAMP_BUDGET_ARMED`: the
 verdict is recorded (`/issuance-stats` → `ledger.notary`) and returned as
-`not_before`, which the client's notary obeys as its pace; per-address
-brakes (Rate Limiting bindings, exact IPv4 / IPv6 /64, no KV write) are the
-only 429 — WAF-grade, sized for a cohort. Unsigned requests (older clients)
-still stamp and are counted, so the arming decision can read the share.
+`not_before`, which the client's notary obeys as its pace; what answers
+429 is the per-address brake (Rate Limiting bindings, exact IPv4 / IPv6
+/64, no KV write — WAF-grade, sized for a cohort) and the hard daily caps
+on new roots (per key, per address, per Worker), far above a node's pace.
+Since 2026-11-02 only a signed request from a key with a certificate
+issued by the Worker is stamped (the clients have signed since Ф20).
 `ip_hash` hashes the /64 for IPv6 (v3); `signing_batches.timestamp_version`
 travels with every batch so a payload bump invalidates nothing issued.
 

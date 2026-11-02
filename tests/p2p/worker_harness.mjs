@@ -1,16 +1,18 @@
-// Drives the REAL worker/verify.js fetch handler in Node with an in-memory KV
-// and a throwaway authority key, so the Python mirrors can be checked against
-// certificates the Worker code actually emits (see test_birth_cert.py).
+// Drives the REAL worker/verify.js fetch handler in Node with an in-memory KV,
+// its Durable Objects on node:sqlite, a mail provider that records what it
+// is sent and a throwaway authority key, so the Python side can check what
+// the Worker code actually does (test_birth_cert.py, test_worker_limits.py).
 //
-// usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--serve [--stamp-brake N]]
-// Without --serve: runs one scripted scenario and prints one JSON object on
-// stdout. With --serve: answers HTTP on 127.0.0.1 (a free port) with the same
-// Worker code and env — what a node's notary is pointed at in a test
-// (sign_audio.WORKER_URL) — prints {"url", "authority_pub"} as its first
-// line and serves until killed. Its address brake on /timestamp lets N
-// stamps through (default: no limit; the scenario's 8 would turn the ninth
-// stamp of a test into a 429), and GET /__harness/calls answers how many
-// /timestamp requests reached the Worker.
+// usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--scenario NAME]
+//        node worker_harness.mjs <authority_seed_hex> <email_pepper> --serve [--stamp-brake N]
+// Without --serve: runs one scenario (default: contract) and prints one JSON
+// object on stdout. With --serve: answers HTTP on 127.0.0.1 (a free port) with
+// the same Worker code and env — what a node's notary is pointed at in a test
+// (sign_audio.WORKER_URL) — prints {"url", "authority_pub"} as its first line
+// and serves until killed. Its address brake on /timestamp lets N stamps
+// through (default: no limit; the scenario's 8 would turn the ninth stamp of a
+// test into a 429), and GET /__harness/calls answers how many /timestamp
+// requests reached the Worker.
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -21,6 +23,8 @@ import { DatabaseSync } from "node:sqlite";
 const subtle = webcrypto.subtle;
 const harnessArgs = process.argv.slice(2);
 const [authoritySeedHex, emailPepper] = harnessArgs;
+const scenarioAt = harnessArgs.indexOf("--scenario");
+const scenarioName = scenarioAt >= 0 ? harnessArgs[scenarioAt + 1] : "contract";
 const serveMode = harnessArgs.includes("--serve");
 const brakeAt = harnessArgs.indexOf("--stamp-brake");
 const stampBrake = brakeAt >= 0 ? Number(harnessArgs[brakeAt + 1]) : Infinity;
@@ -39,18 +43,24 @@ async function keyFromSeed(seedHex) {
   const pub = Buffer.from(jwk.x, "base64url");
   return { priv, pubHex: hex(pub), pubBytes: pub };
 }
+const newKey = () => keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
 async function sign(key, message) {
   return hex(new Uint8Array(await subtle.sign("Ed25519", key.priv, new TextEncoder().encode(message))));
 }
 async function sha256Hex(text) {
   return hex(new Uint8Array(await subtle.digest("SHA-256", new TextEncoder().encode(text))));
 }
+async function inviteOf(key, name) {
+  // The invite code a client builds for this key and username.
+  const d = hex(new Uint8Array(await subtle.digest("SHA-256", key.pubBytes))).slice(0, 12).toUpperCase();
+  return `${name}#${d.slice(0, 4)}-${d.slice(4, 8)}-${d.slice(8, 12)}`;
+}
 
 const authority = await keyFromSeed(authoritySeedHex);
 
 // Swap the pinned authority and master for test keys (and shrink the
 // per-sender mailbox cap so the harness can hit it), then import the module.
-const master = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
+const master = await newKey();
 const src = readFileSync(workerPath, "utf-8");
 let swapped = src.replace(
   /const TRUSTED_AUTHORITIES = \[\n  "[0-9a-f]{64}",\n\];/,
@@ -66,45 +76,58 @@ writeFileSync(tmp, swapped);
 const workerModule = await import(pathToFileURL(tmp).href);
 const worker = workerModule.default;
 
-// The birth-ledger Durable Object, run in-process on node:sqlite through the
-// same class the Worker exports — the SQL is exercised for real, only the
-// storage handle is emulated.
+// SQL handles for the Durable Objects: each class the Worker exports runs
+// in-process on node:sqlite — its SQL is exercised for real, only the storage
+// handle is emulated.
+function sqlHandle(db) {
+  return {
+    exec(query, ...params) {
+      const stmt = db.prepare(query);
+      const rows = /^\s*(SELECT|INSERT[\s\S]*RETURNING)/i.test(query) ? stmt.all(...params) : (stmt.run(...params), []);
+      return { toArray: () => rows, one: () => rows[0] };
+    },
+  };
+}
+function objectOf(Cls, db) {
+  const obj = new Cls({ storage: { sql: sqlHandle(db) }, blockConcurrencyWhile: (fn) => fn() }, {});
+  const stub = { fetch: (url, init) => obj.fetch(url instanceof Request ? url : new Request(url, init)) };
+  return { obj, stub, namespace: { idFromName: (name) => name, get: () => stub } };
+}
 const db = new DatabaseSync(":memory:");
-const sqlAdapter = {
-  exec(query, ...params) {
-    const rows = db.prepare(query).all(...params);
-    return { toArray: () => rows, one: () => rows[0] };
-  },
-};
-const ledger = new workerModule.BirthLedger(
-  { storage: { sql: sqlAdapter }, blockConcurrencyWhile: (fn) => fn() }, {});
-const ledgerStub = { fetch: (url, init) => ledger.fetch(new Request(url, init)) };
-// The master mailbox DO on its own in-memory database (no WebSockets in Node —
-// the wake path is exercised for its refusal codes only).
+const ledger = objectOf(workerModule.BirthLedger, db);
 const mailDb = new DatabaseSync(":memory:");
-const mailSql = {
-  exec(query, ...params) {
-    const stmt = mailDb.prepare(query);
-    const rows = /^\s*(SELECT|INSERT[\s\S]*RETURNING)/i.test(query) ? stmt.all(...params) : (stmt.run(...params), []);
-    return { toArray: () => rows, one: () => rows[0] };
-  },
-};
-const mailbox = new workerModule.MasterMailbox(
-  { storage: { sql: mailSql }, blockConcurrencyWhile: (fn) => fn() }, {});
-const mailboxStub = { fetch: (url, init) => mailbox.fetch(url instanceof Request ? url : new Request(url, init)) };
+const mailbox = objectOf(workerModule.MasterMailbox, mailDb);
 const dirDb = new DatabaseSync(":memory:");
-const dirSql = {
-  exec(query, ...params) {
-    const stmt = dirDb.prepare(query);
-    const rows = /^\s*SELECT/i.test(query) ? stmt.all(...params) : (stmt.run(...params), []);
-    return { toArray: () => rows, one: () => rows[0] };
+const directory = objectOf(workerModule.NodeDirectory, dirDb);
+const limDb = new DatabaseSync(":memory:");
+const limiter = workerModule.Limiter ? objectOf(workerModule.Limiter, limDb) : null;
+
+// KV: a Map, every write counted, and a switch that makes calls fail the way
+// the runtime's own KV errors do.
+const store = new Map();
+const kvState = { writes: 0, fail: null };          // fail: null | "put" | "get"
+const kv = {
+  async get(k, type) {
+    if (kvState.fail === "get") throw new Error("KV GET failed: 429 Too Many Requests");
+    const v = store.get(k);
+    if (v === undefined) return null;
+    return type === "json" ? JSON.parse(v) : v;
+  },
+  async put(k, v) {
+    if (kvState.fail === "put") throw new Error("KV PUT failed: 429 Too Many Requests");
+    kvState.writes += 1;
+    store.set(k, v);
+  },
+  async delete(k) {
+    if (kvState.fail === "put") throw new Error("KV DELETE failed: 429 Too Many Requests");
+    kvState.writes += 1;
+    store.delete(k);
+  },
+  async list({ prefix }) {
+    return { keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })) };
   },
 };
-const directory = new workerModule.NodeDirectory(
-  { storage: { sql: dirSql }, blockConcurrencyWhile: (fn) => fn() }, {});
-const directoryStub = { fetch: (url, init) => directory.fetch(url instanceof Request ? url : new Request(url, init)) };
 
-const store = new Map();
 // Rate Limiting bindings emulated as plain counters (the real ones count per
 // location over a 60 s window; the contract is only `limit({key}) → {success}`).
 const brakeCounts = new Map();
@@ -115,37 +138,658 @@ const fakeBrake = (limit) => ({
     return { success: c <= limit };
   },
 });
+
+// The mail provider: every mail the Worker sends, as the provider got it.
+const mails = [];
+const mailState = { down: false };
+globalThis.fetch = async (url, init) => {
+  if (String(url) !== "https://api.resend.com/emails") throw new Error(`unexpected fetch ${url}`);
+  if (mailState.down) throw new Error("connect ECONNREFUSED");
+  const m = JSON.parse(init.body);
+  mails.push({ to: m.to, subject: m.subject, html: m.html });
+  return new Response(JSON.stringify({ id: `m${mails.length}` }), { status: 200 });
+};
+const codeIn = (mail) => mail.html.match(/font-family: monospace;">([A-Z0-9]{6})</)[1];
+
 const env = {
   BIRTH_SIGNING_KEY: authoritySeedHex,
   EMAIL_PEPPER: emailPepper,
   IP_PEPPER: "test-ip-pepper",
   BRAKE_STAMP: fakeBrake(serveMode ? stampBrake : 8),
   BRAKE_BIRTH: fakeBrake(100),
-  BIRTH_LEDGER: { idFromName: (name) => name, get: () => ledgerStub },
-  MAILBOX: { idFromName: (name) => name, get: () => mailboxStub },
-  NODE_DIRECTORY: { idFromName: (name) => name, get: () => directoryStub },
-  RATE_LIMITS: {
-    async get(k, type) {
-      const v = store.get(k);
-      if (v === undefined) return null;
-      return type === "json" ? JSON.parse(v) : v;
-    },
-    async put(k, v) { store.set(k, v); },
-    async delete(k) { store.delete(k); },
-  },
+  BRAKE_ROUTE: fakeBrake(serveMode ? Infinity : 1000),
+  BIRTH_LEDGER: ledger.namespace,
+  MAILBOX: mailbox.namespace,
+  NODE_DIRECTORY: directory.namespace,
+  ...(limiter ? { LIMITER: limiter.namespace } : {}),
+  RATE_LIMITS: kv,
 };
 
-async function call(method, path, body, { ip = "203.0.113.7", cf } = {}) {
-  const req = new Request(`https://worker.test${path}`, {
-    method,
-    headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+async function call(method, path, body, { ip = "203.0.113.7", cf, type = "application/json", raw, headers = {}, useEnv = env } = {}) {
+  const init = { method, headers: { "Content-Type": type, "CF-Connecting-IP": ip, ...headers } };
+  if (raw !== undefined) init.body = raw;
+  else if (body !== undefined) init.body = JSON.stringify(body);
+  const req = new Request(`https://worker.test${path}`, init);
   if (cf) req.cf = cf;                       // request.cf as the edge would set it
-  const res = await worker.fetch(req, env);
-  return { status: res.status, body: await res.json() };
+  const res = await worker.fetch(req, useEnv);
+  const text = await res.text();
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { parsed = text; }
+  return { status: res.status, body: parsed, headers: Object.fromEntries(res.headers) };
 }
 
+const issue = async (key, opts) => call("POST", "/birth-certificate", {
+  pubkey_hex: key.pubHex, signature: await sign(key, `birth:${key.pubHex}`),
+}, opts);
+const certOf = async (key) => (await call("GET", `/birth-certificate?pubkey=${key.pubHex}`)).body;
+
+async function sendCode(key, name, email, opts) {
+  const invite = await inviteOf(key, name);
+  return call("POST", "/send-verification", {
+    to: email, invite_code: invite, public_key_hex: key.pubHex,
+    signature: await sign(key, `sendcode:${invite}:${email}`),
+  }, opts);
+}
+async function register(key, name, email, code, opts) {
+  const invite = await inviteOf(key, name);
+  return call("POST", "/register-email", {
+    invite_code: invite, email, public_key_hex: key.pubHex,
+    signature: await sign(key, `register:${invite}:${email}`),
+    code, birth_cert: await certOf(key),
+  }, opts);
+}
+async function verifyEmail(key, name, email, opts) {
+  // The whole round: a code mailed by the Worker, read from the mail, entered.
+  await sendCode(key, name, email, opts);
+  return register(key, name, email, codeIn(mails[mails.length - 1]), opts);
+}
+async function invite(key, name, to, opts = {}, message = "") {
+  const code = opts.invite || await inviteOf(key, name);
+  return call("POST", "/send-invite", {
+    to, invite_code: code, public_key_hex: key.pubHex,
+    signature: await sign(key, `invite:${code}:to:${to}`), message,
+  }, opts);
+}
+async function accept(key, name, theirs, opts) {
+  const mine = await inviteOf(key, name);
+  return call("POST", "/accept-invite", {
+    my_invite_code: mine, their_invite_code: theirs, public_key_hex: key.pubHex,
+    signature: await sign(key, `accept:${mine}:${theirs}`),
+  }, opts);
+}
+async function pending(key, name, opts) {
+  const mine = await inviteOf(key, name);
+  const q = `invite_code=${encodeURIComponent(mine)}&public_key_hex=${key.pubHex}`
+    + `&signature=${await sign(key, `pending-accepts:${mine}`)}`;
+  return call("GET", `/pending-accepts?${q}`, undefined, opts);
+}
+async function stamp(key, roots, opts, ts = Math.floor(Date.now() / 1000)) {
+  return call("POST", "/timestamp", {
+    ...(roots.length === 1 ? { root: roots[0] } : { roots }),
+    pubkey: key.pubHex, ts,
+    signature: await sign(key, `sautium-timestamp-request:v1:${ts}:${roots.join(",")}`),
+  }, opts);
+}
+const root = (n) => n.toString(16).padStart(64, "0");
+
+// A counter of the limiter set by hand: how close a route already is to its
+// ceiling, without making the requests that brought it there.
+function preset(key, n) {
+  if (!limiter) return;
+  limDb.prepare(`INSERT INTO counters (key, n, until) VALUES (?, ?, ?)
+                 ON CONFLICT(key) DO UPDATE SET n = excluded.n`).run(key, n, Date.now() + 86400e3);
+}
+function unset(key) {
+  if (limiter) limDb.prepare("DELETE FROM counters WHERE key = ?").run(key);
+}
+const counterKeys = (prefix) => limiter
+  ? limDb.prepare("SELECT key FROM counters WHERE key LIKE ? ORDER BY key").all(`${prefix}%`).map((r) => r.key)
+  : [];
+
+// -------------------------------------------------------------------------
+// contract: what the Worker emits, checked by the Python mirrors
+// -------------------------------------------------------------------------
+
+async function contract() {
+  // --- subject 1: fresh identity, then email upgrade ---
+  const s1 = await newKey();
+  const issue1 = await issue(s1);
+  const issue1Again = await issue(s1);
+  const read1 = await call("GET", `/birth-certificate?pubkey=${s1.pubHex}`);
+
+  const inviteCode = await inviteOf(s1, "alice");
+  const email = "Alice.Example+tag@GoogleMail.com";
+  const register1 = await verifyEmail(s1, "alice", email);
+  const read1AfterEmail = await call("GET", `/birth-certificate?pubkey=${s1.pubHex}`);
+
+  // A second identity verifying the SAME mailbox (dots/tag/case differ) must
+  // get the same email_token — that equality is the whole point of the token.
+  const s3 = await newKey();
+  await issue(s3);
+  const register3 = await verifyEmail(s3, "bob", "aliceexample@gmail.com");
+  // the mailbox owner index moved to s3; s1 is named as s3's predecessor
+  const mailboxAfter3 = JSON.parse(store.get(`mailbox:${register3.body.birth_cert.email_token}`));
+
+  // --- subject 2: legacy v1 record already in KV ---
+  const s2 = await newKey();
+  store.set(`born:${s2.pubHex}`, JSON.stringify({ born_at: "2026-07-05T10:11:12Z", sig: "ab".repeat(64) }));
+  const legacyRead = await call("GET", `/birth-certificate?pubkey=${s2.pubHex}`);
+  const legacyRecord = JSON.parse(store.get(`born:${s2.pubHex}`));
+
+  // --- subject 6: a v2 EMAIL record from before the domain token existed ---
+  const s6 = await newKey();
+  store.set(`born:${s6.pubHex}`, JSON.stringify({
+    v: 2, issued_at: "2026-07-06T00:00:00Z", method: "email", difficulty: 32, params_version: 1,
+    email_token: "ef".repeat(32), email_class: "other", sig_v2: "cd".repeat(64) }));
+  const legacyV2Read = await call("GET", `/birth-certificate?pubkey=${s6.pubHex}`);
+  const legacyV2Record = JSON.parse(store.get(`born:${s6.pubHex}`));
+  const inviteCode6 = await inviteOf(s6, "frank");
+  const email6 = "frank@example.net";
+  store.set(`verified:${inviteCode6.replace("#", ":")}`,
+    JSON.stringify({ email: email6, pubkey: s6.pubHex, born_at: "2026-07-06T00:00:00Z", verified_at: "2026-07-06T00:10:00Z" }));
+  const legacyV2Check = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode6)}&email=${encodeURIComponent(email6)}&public_key_hex=${s6.pubHex}&signature=${await sign(s6, `check-email:${inviteCode6}:${email6}`)}`);
+
+  // --- a disposable-domain registration for the class marker ---
+  const s4 = await newKey();
+  await issue(s4);
+  const register4 = await verifyEmail(s4, "carol", "x@mailinator.com");
+
+  // check-email for an already-upgraded identity returns the email cert…
+  const check1 = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode)}&email=${encodeURIComponent(email)}&public_key_hex=${s1.pubHex}&signature=${await sign(s1, `check-email:${inviteCode}:${email}`)}`);
+  // …and for a pre-v2 identity (v1 born record + existing verified: record)
+  // it upgrades the certificate without a second code round.
+  const inviteCode2 = await inviteOf(s2, "dave");
+  const email2 = "dave@example.org";
+  store.set(`verified:${inviteCode2.replace("#", ":")}`,
+    JSON.stringify({ email: email2, pubkey: s2.pubHex, born_at: "2026-07-05T10:11:12Z", verified_at: "2026-07-05T10:20:00Z" }));
+  const check2 = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode2)}&email=${encodeURIComponent(email2)}&public_key_hex=${s2.pubHex}&signature=${await sign(s2, `check-email:${inviteCode2}:${email2}`)}`);
+  const legacyRecordAfterCheck = JSON.parse(store.get(`born:${s2.pubHex}`));
+  // a verified: record bound to ANOTHER pubkey must not upgrade anything
+  const s5 = await newKey();
+  const inviteCode5 = await inviteOf(s5, "eve");
+  store.set(`verified:${inviteCode5.replace("#", ":")}`,
+    JSON.stringify({ email: email2, pubkey: s2.pubHex, born_at: "2026-07-05T10:11:12Z", verified_at: "2026-07-05T10:20:00Z" }));
+  const check5 = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode5)}&email=${encodeURIComponent(email2)}&public_key_hex=${s5.pubHex}&signature=${await sign(s5, `check-email:${inviteCode5}:${email2}`)}`);
+
+  // --- birth ledger (shadow): a burst from one /24 + one ASN ---
+  const burst = [];
+  for (let i = 0; i < 4; i++) {
+    burst.push(await issue(await newKey(), { ip: `198.51.100.${10 + i}`, cf: { asn: 64500, country: "UA" } }));
+  }
+  const ledgerRows = db.prepare("SELECT asn, cc, method, m_shadow, n_sub24, n_asn1, n_glob1, addr, n_addr24, sub, fam FROM births ORDER BY rowid").all();
+
+  // s1 takes the mailbox back (a second registration by the earlier holder):
+  // its certificate now names s3 as predecessor, the anchor does not move
+  const retake = await verifyEmail(s1, "alice", email);
+  const mailboxAfterRetake = JSON.parse(store.get(`mailbox:${register3.body.birth_cert.email_token}`));
+  // …and registering the same mailbox for the same key again changes nothing
+  const retakeAgain = await verifyEmail(s1, "alice", email);
+
+  // --- master mailbox: s1 (certified) parks messages for the offline master ---
+  const mailPayload = async (sender, uuid, text) => {
+    const encrypted = Buffer.from(`box:${text}`).toString("base64");
+    const timestamp = "2026-08-18T14:00:00Z";
+    const digest = await sha256Hex(encrypted);
+    return {
+      to: master.pubHex, from_public_key: sender.pubHex, encrypted, timestamp, message_uuid: uuid,
+      signature: await sign(sender, `mailbox:v1:${master.pubHex}:${uuid}:${timestamp}:${digest}`),
+    };
+  };
+  const mailUuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const mail1 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(1), "hello"));
+  const mail2 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(2), "again"));
+  const mailDup = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(1), "hello"));
+  const mail3 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(3), "third"));
+  const mailCap = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(4), "fourth"));   // per-sender cap 3
+  const stranger = await newKey();
+  const mailNoCert = await call("POST", "/mailbox", await mailPayload(stranger, mailUuid(5), "x"));
+  const forged = await mailPayload(s3, mailUuid(6), "x");
+  forged.signature = "00".repeat(64);
+  const mailBadSig = await call("POST", "/mailbox", forged);
+  const wrongTo = await mailPayload(s3, mailUuid(7), "x");
+  wrongTo.to = s1.pubHex;
+  const mailWrongTo = await call("POST", "/mailbox", wrongTo);
+  const big = await mailPayload(s3, mailUuid(8), "x".repeat(9000));
+  const mailTooBig = await call("POST", "/mailbox", big);
+  const nowTs = String(Math.floor(Date.now() / 1000));
+  const drainSig = await sign(master, `mailbox-drain:v1:${nowTs}:0`);
+  const drain = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&after=0&signature=${drainSig}`);
+  const drainForeign = await call("GET", `/mailbox?public_key_hex=${s1.pubHex}&ts=${nowTs}&after=0&signature=${await sign(s1, `mailbox-drain:v1:${nowTs}:0`)}`);
+  const staleTs = String(Math.floor(Date.now() / 1000) - 3600);
+  const drainStale = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${staleTs}&after=0&signature=${await sign(master, `mailbox-drain:v1:${staleTs}:0`)}`);
+  const lastId = drain.body.messages[drain.body.messages.length - 1].id;
+  const ack = await call("DELETE", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&upto=${lastId}&signature=${await sign(master, `mailbox-ack:v1:${nowTs}:${lastId}`)}`);
+  const drainAfterAck = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&after=0&signature=${drainSig}`);
+  const wakeNoUpgrade = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&signature=${await sign(master, `mailbox-wake:v1:${nowTs}`)}`);
+
+  // --- master address hint: set by a signed wake with peer_port, replay-proof ---
+  const hintEmpty = await call("GET", "/master-hint");
+  const wakeSig = await sign(master, `mailbox-wake:v1:${nowTs}:8801`);
+  const wakeWithPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=8801&signature=${wakeSig}`, undefined, { ip: "198.51.100.77" });
+  const hintSet = await call("GET", "/master-hint");
+  // the same signature replayed from another address with another port: refused by
+  // the signature (port differs) …
+  const hintReplayPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=9999&signature=${wakeSig}`, undefined, { ip: "203.0.113.99" });
+  // …and replayed verbatim from another address: signature valid, but the
+  // single-use nonce blocks the hint update
+  const hintReplaySame = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=8801&signature=${wakeSig}`, undefined, { ip: "203.0.113.99" });
+  const hintAfterReplay = await call("GET", "/master-hint");
+  const hintBadPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=abc&signature=${await sign(master, `mailbox-wake:v1:${nowTs}:abc`)}`);
+
+  // --- births over IPv6: the fam sensor + the canonical /48 bucket ---
+  const v6birth = await issue(await newKey(), { ip: "2a00:db8::210e", cf: { asn: 64502, country: "DE" } });
+  const v6birth2 = await issue(await newKey(), { ip: "2a00:db8:0:beef::7", cf: { asn: 64502, country: "DE" } });   // same /48, another spelling shape
+  // tunneled/ULA v6 must NOT count as native v6 (2002::/16 6to4, 2001:0::/32 Teredo)
+  const tun6to4 = await issue(await newKey(), { ip: "2002:5be3:b5b3::1", cf: { asn: 64503, country: "DE" } });
+  const tunTeredo = await issue(await newKey(), { ip: "2001:0:5ef5:79fb:0:59d3:1234:5678", cf: { asn: 64504, country: "DE" } });
+  const ledgerRowsV6 = db.prepare("SELECT sub, fam, n_sub24 FROM births WHERE fam = 6 ORDER BY rowid").all();
+  const tunnelFams = db.prepare("SELECT fam FROM births WHERE asn IN (64503, 64504)").all();
+
+  // --- a wake over IPv6 fills host6 and PRESERVES the v4 slot ---
+  const ts6 = String(Math.floor(Date.now() / 1000) + 1);
+  const wake6 = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${ts6}&peer_port=8801&signature=${await sign(master, `mailbox-wake:v1:${ts6}:8801`)}`, undefined, { ip: "2a00:db8::99" });
+  const hintDual = await call("GET", "/master-hint");
+
+  // --- capability directory (Ф16c): certified volunteers register, K random served ---
+  const dirTs = Math.floor(Date.now() / 1000);
+  const regPayload = async (key, port, caps, ts = dirTs) => ({
+    pubkey: key.pubHex, port, capabilities: caps, ts,
+    signature: await sign(key, `sautium-directory:v1:${port}:${[...caps].sort().join(",")}:${ts}`),
+  });
+  const reg1 = await call("POST", "/node-register", await regPayload(s1, 20246, ["sync", "mbdump"]), { ip: "198.51.100.50" });
+  const reg3 = await call("POST", "/node-register", await regPayload(s3, 20300, ["sync", "relay"]), { ip: "2a00:db8::77" });
+  const stranger2 = await newKey();
+  const regNoCert = await call("POST", "/node-register", await regPayload(stranger2, 20000, ["sync"]));
+  const regBadSig = await call("POST", "/node-register",
+    { ...(await regPayload(s4, 20400, ["sync"])), signature: "00".repeat(64) });
+  const masterReg = await call("POST", "/node-register", await regPayload(master, 8801, ["sync"]));
+  const regReplay = await call("POST", "/node-register", await regPayload(s1, 20246, ["sync", "mbdump"]), { ip: "203.0.113.66" });
+  const hintsDump = await call("GET", "/node-hints?cap=mbdump");
+  const hintsRelay = await call("GET", "/node-hints?cap=relay");
+  const hintsSlices = await call("GET", "/node-hints?cap=mbslices");
+  const hintsBadCap = await call("GET", "/node-hints?cap=nonsense");
+  // an expired entry (older than the TTL) is never served
+  dirDb.prepare("INSERT INTO nodes (pubkey, host4, host6, port, caps, ts) VALUES (?, ?, NULL, ?, ?, ?)")
+    .run("ee".repeat(32), "203.0.113.200", 21000, "mbdump", Date.now() - 3 * 3600 * 1000);
+  const hintsAfterStale = await call("GET", "/node-hints?cap=mbdump");
+
+  // --- timestamp notary (Ф20): identity-signed stamps, ledger-priced in shadow ---
+  const tsNow = Math.floor(Date.now() / 1000);
+  const rootA = "a1".repeat(32), rootB = "b2".repeat(32), rootC = "c3".repeat(32);
+  const tsSigned = await stamp(s1, [rootA], { ip: "198.51.100.90" }, tsNow);
+  const tsSignedAgain = await stamp(s1, [rootA], { ip: "198.51.100.90" }, tsNow);
+  const tsMulti = await stamp(s1, [rootA, rootB], { ip: "198.51.100.90" }, tsNow);
+  const tsUnsigned = await call("POST", "/timestamp", { root: rootC }, { ip: "198.51.100.91" });
+  const tsBadSig = await call("POST", "/timestamp",
+    { root: rootA, pubkey: s1.pubHex, ts: tsNow, signature: "00".repeat(64) }, { ip: "198.51.100.90" });
+  const tsStale = await stamp(s1, [rootA], { ip: "198.51.100.90" }, tsNow - 3600);
+  const tsBadRoot = await call("POST", "/timestamp", { root: "zz" }, { ip: "198.51.100.90" });
+  const tsTooMany = await stamp(s1, Array.from({ length: 101 }, (_, i) => root(i)), { ip: "198.51.100.90" }, tsNow);
+  // no certificate issued here: not stamped
+  const tsStranger = await stamp(stranger2, ["d4".repeat(32)], { ip: "198.51.100.92" }, tsNow);
+  // the address brake (8 per window in the harness), one IPv6 /64 across many interface ids
+  const tsBrake = [];
+  for (let i = 0; i < 10; i++) {
+    const r = await stamp(s3, [(i + 0x10).toString(16).padStart(64, "e")], { ip: `2a00:db8:1:2::${i + 1}` }, tsNow);
+    tsBrake.push({ status: r.status, retry: r.body.retry_after ?? null });
+  }
+  const stampRows = db.prepare("SELECT pubkey, n_new, n_roots, m, allowed, addr FROM stamps ORDER BY id").all();
+  const budgetRow = db.prepare("SELECT tokens FROM notary_budget WHERE pubkey = ?").get(s1.pubHex);
+  // ip_hash merges a /64: two interface ids, one pseudonym; another /64, another one
+  const ipHash64a = (await stamp(s4, ["f0".repeat(32)], { ip: "2a00:db8:1:9::1" }, tsNow)).body.ip_hash;
+  const ipHash64b = (await stamp(s4, ["f1".repeat(32)], { ip: "2a00:db8:1:9:aaaa:bbbb:cccc:dddd" }, tsNow)).body.ip_hash;
+  const ipHash64c = (await stamp(s4, ["f2".repeat(32)], { ip: "2a00:db8:1:a::1" }, tsNow)).body.ip_hash;
+
+  const stats = await call("GET", "/issuance-stats");
+  const badSig = await call("POST", "/birth-certificate", {
+    pubkey_hex: s1.pubHex, signature: "00".repeat(64),
+  });
+
+  return {
+    authority_pub: authority.pubHex,
+    issue1, issue1Again, read1, register: register1, read1AfterEmail,
+    register3, mailboxAfter3, retake, retakeAgain, mailboxAfterRetake,
+    legacyRead, legacyRecord,
+    register4,
+    check1, check2, legacyRecordAfterCheck, check5,
+    legacyV2Read, legacyV2Record, legacyV2Check,
+    burst, ledgerRows,
+    stats, badSig,
+    master_pub: master.pubHex,
+    mail1, mail2, mailDup, mail3, mailCap, mailNoCert, mailBadSig, mailWrongTo, mailTooBig,
+    drain, drainForeign, drainStale, ack, drainAfterAck, wakeNoUpgrade,
+    hintEmpty, wakeWithPort, hintSet, hintReplayPort, hintReplaySame, hintAfterReplay, hintBadPort,
+    v6birth, v6birth2, tun6to4, tunTeredo, tunnelFams, wake6, hintDual, ledgerRowsV6,
+    reg1, reg3, regNoCert, regBadSig, masterReg, regReplay,
+    hintsDump, hintsRelay, hintsSlices, hintsBadCap, hintsAfterStale,
+    tsSigned, tsSignedAgain, tsMulti, tsUnsigned, tsBadSig, tsStale, tsBadRoot, tsTooMany,
+    tsStranger, tsBrake, stampRows, budgetRow, ipHash64a, ipHash64b, ipHash64c,
+    s1_pub: s1.pubHex, s3_pub: s3.pubHex,
+    brakeStampKey: [...brakeCounts.keys()].find((k) => k.startsWith("ts:2a00:db8:1:2")) ?? null,
+    verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),
+  };
+}
+
+// -------------------------------------------------------------------------
+// mail: who may make the Worker send mail, and how much
+// -------------------------------------------------------------------------
+
+async function mail() {
+  const out = {};
+  // A certified key with a verified mailbox, a certified one without, and a
+  // key with no certificate at all.
+  const alice = await newKey();
+  await issue(alice);
+  await verifyEmail(alice, "alice", "alice@example.org", { ip: "198.51.100.1" });
+  const plain = await newKey();
+  await issue(plain);
+  const bare = await newKey();
+
+  let sent = mails.length;
+  out.invited = await invite(alice, "alice", "friend@example.net", { ip: "198.51.100.1" }, "hello there");
+  out.invitedMail = mails.slice(sent);
+  sent = mails.length;
+  out.unverified = await invite(plain, "pat", "friend@example.net", { ip: "198.51.100.2" });
+  out.uncertified = await invite(bare, "bart", "friend@example.net", { ip: "198.51.100.3" });
+  out.mailsAfterRefusals = mails.length - sent;
+
+  // the free text: capped, plain
+  out.messageAtCap = await invite(alice, "alice", "cap@example.net", { ip: "198.51.100.1" }, "x".repeat(500));
+  out.messageOverCap = await invite(alice, "alice", "cap2@example.net", { ip: "198.51.100.1" }, "x".repeat(501));
+  out.messageNotText = await invite(alice, "alice", "cap3@example.net", { ip: "198.51.100.1" }, { html: "<b>" });
+
+  // the code must be the key's own, spelled as its client builds it, under
+  // the one name the key speaks under
+  const aliceCode = await inviteOf(alice, "alice");
+  out.lowercaseCode = await invite(alice, "alice", "a1@example.net",
+    { ip: "198.51.100.1", invite: aliceCode.replace(/#.*/, (m) => m.toLowerCase()) });
+  out.otherName = await invite(alice, "mallory", "a2@example.net", { ip: "198.51.100.1" });
+  out.otherNameCode = await sendCode(alice, "mallory", "a3@example.net", { ip: "198.51.100.1" });
+  const fresh = await newKey();
+  await call("GET", `/check-email?invite_code=${encodeURIComponent(await inviteOf(fresh, "first"))}&email=x%40example.org&public_key_hex=${fresh.pubHex}&signature=${await sign(fresh, `check-email:${await inviteOf(fresh, "first")}:x@example.org`)}`);
+  out.boundByFirstUse = await sendCode(fresh, "second", "b@example.org", { ip: "198.51.100.4" });
+  out.firstNameStill = await sendCode(fresh, "first", "b@example.org", { ip: "198.51.100.4" });
+
+  // the recipient: one plain address, counted by its normalised mailbox
+  out.listSyntax = await invite(alice, "alice", "a@example.net,b@example.net", { ip: "198.51.100.1" });
+  out.displayName = await invite(alice, "alice", "<bob@example.net>", { ip: "198.51.100.1" });
+  out.sameMailbox = [];
+  for (const to of ["Bob.Smith+x@GoogleMail.com", "bobsmith@gmail.com", "BOBSMITH+y@gmail.com", "b.o.b.smith@gmail.com"]) {
+    out.sameMailbox.push((await invite(alice, "alice", to, { ip: "198.51.100.1" })).status);
+  }
+
+  // per key: twenty invites a day
+  const many = await newKey();
+  await issue(many);
+  await verifyEmail(many, "many", "many@example.org", { ip: "198.51.100.5" });
+  out.perKey = [];
+  for (let i = 0; i < 21; i++) {
+    out.perKey.push((await invite(many, "many", `p${i}@example.net`, { ip: "198.51.100.5" })).status);
+  }
+
+  // per sender mailbox: two keys verified on one mailbox share its twenty
+  const k1 = await newKey(), k2 = await newKey();
+  await issue(k1); await issue(k2);
+  await verifyEmail(k1, "kim", "shared@example.org", { ip: "198.51.100.6" });
+  await verifyEmail(k2, "kai", "shared@example.org", { ip: "198.51.100.7" });
+  out.perMailbox = [];
+  for (let i = 0; i < 12; i++) out.perMailbox.push((await invite(k1, "kim", `m${i}@example.net`, { ip: "198.51.100.6" })).status);
+  for (let i = 12; i < 21; i++) out.perMailbox.push((await invite(k2, "kai", `m${i}@example.net`, { ip: "198.51.100.7" })).status);
+
+  // concurrent requests cannot pass a counter together: twelve invites to one
+  // mailbox at once, three may go
+  const crowd = await newKey();
+  await issue(crowd);
+  await verifyEmail(crowd, "crowd", "crowd@example.org", { ip: "198.51.100.8" });
+  sent = mails.length;
+  const burst = await Promise.all(Array.from({ length: 12 }, () =>
+    invite(crowd, "crowd", "target@example.net", { ip: "198.51.100.8" })));
+  out.concurrentStatuses = burst.map((r) => r.status).sort();
+  out.concurrentMails = mails.length - sent;
+
+  // the route's ceiling
+  preset("invite:all:", 299);
+  out.ceiling = [(await invite(alice, "alice", "c1@example.net", { ip: "198.51.100.1" })).status,
+                 (await invite(alice, "alice", "c2@example.net", { ip: "198.51.100.1" })).status];
+
+  // one limiter per route: codes to a mailbox spend nothing of its invites
+  const coder = await newKey();
+  await issue(coder);
+  for (let i = 0; i < 10; i++) await sendCode(coder, "coder", "shared-route@example.net", { ip: `198.51.100.${100 + i}` });
+  unset("invite:all:");
+  out.inviteAfterCodes = await invite(alice, "alice", "shared-route@example.net", { ip: "198.51.100.1" });
+
+  // a refusal writes nothing to KV
+  const writes = kvState.writes;
+  out.refusedCode = await sendCode(coder, "coder", "shared-route@example.net", { ip: "198.51.100.120" });
+  out.refusedInvite = await invite(plain, "pat", "z@example.net", { ip: "198.51.100.2" });
+  out.writesByRefusals = kvState.writes - writes;
+  const held = counterKeys("");
+  const names = limiter ? limDb.prepare("SELECT name FROM names").all().map((r) => r.name) : [];
+  out.counterKeysHoldNoAddress = held.length > 0 && names.length > 0
+    && held.every((k) => !k.includes("@") && !k.includes("198.51.100"))
+    && names.every((n) => /^[0-9a-f]{64}$/.test(n));
+
+  // the provider unreachable: a 502, never an error's text
+  mailState.down = true;
+  out.providerDown = await invite(alice, "alice", "down@example.net", { ip: "198.51.100.1" });
+  mailState.down = false;
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// codes: the email code's tries
+// -------------------------------------------------------------------------
+
+async function codes() {
+  const out = {};
+  const k = await newKey();
+  await issue(k);
+  await sendCode(k, "tess", "tess@example.org", { ip: "198.51.100.30" });
+  const right = codeIn(mails[mails.length - 1]);
+  const wrong = right === "AAAAAA" ? "BBBBBB" : "AAAAAA";
+  out.wrong = [];
+  for (let i = 0; i < 5; i++) out.wrong.push((await register(k, "tess", "tess@example.org", wrong, { ip: "198.51.100.30" })).status);
+  out.rightAfterFive = await register(k, "tess", "tess@example.org", right, { ip: "198.51.100.30" });
+  await sendCode(k, "tess", "tess@example.org", { ip: "198.51.100.30" });
+  out.newCode = await register(k, "tess", "tess@example.org", codeIn(mails[mails.length - 1]), { ip: "198.51.100.30" });
+  // four wrong, then the right one: still good
+  const k2 = await newKey();
+  await issue(k2);
+  await sendCode(k2, "toni", "toni@example.org", { ip: "198.51.100.31" });
+  const right2 = codeIn(mails[mails.length - 1]);
+  for (let i = 0; i < 4; i++) await register(k2, "toni", "toni@example.org", wrong === right2 ? "CCCCCC" : wrong, { ip: "198.51.100.31" });
+  out.rightAfterFour = await register(k2, "toni", "toni@example.org", right2, { ip: "198.51.100.31" });
+  // a code for one mailbox proves nothing for another
+  const k3 = await newKey();
+  await issue(k3);
+  await sendCode(k3, "tara", "tara@example.org", { ip: "198.51.100.32" });
+  out.otherMailbox = await register(k3, "tara", "someone-else@example.org", codeIn(mails[mails.length - 1]), { ip: "198.51.100.32" });
+  // five codes a day to one mailbox, however many keys ask, however spelled
+  out.codesToOneMailbox = [];
+  for (let i = 0; i < 6; i++) {
+    out.codesToOneMailbox.push((await sendCode(await newKey(), "tom", i % 2 ? "tom@example.org" : "Tom+x@example.org",
+                                               { ip: `198.51.100.${40 + i}` })).status);
+  }
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// accepts: the acceptance and its pickup
+// -------------------------------------------------------------------------
+
+async function accepts() {
+  const out = {};
+  const masha = await newKey(), sasha = await newKey();
+  await issue(masha); await issue(sasha);
+  await verifyEmail(masha, "masha", "masha@example.org", { ip: "198.51.100.50" });
+  const mashaCode = await inviteOf(masha, "masha");
+  const typed = mashaCode.toLowerCase().replace(/-/g, "");            // as a person might type it
+  out.invalidTheirs = await accept(sasha, "sasha", "nonsense", { ip: "198.51.100.51" });
+  out.ownCode = await accept(sasha, "sasha", await inviteOf(sasha, "sasha"), { ip: "198.51.100.51" });
+  const sent = mails.length;
+  out.accepted = await accept(sasha, "sasha", typed, { ip: "198.51.100.51" });
+  out.notifiedTo = mails.slice(sent).map((m) => m.to);
+  out.pickup = await pending(masha, "masha", { ip: "198.51.100.50" });
+  out.pickupAgain = await pending(masha, "masha", { ip: "198.51.100.50" });
+  out.pickupUnderAnotherName = await pending(masha, "mallory", { ip: "198.51.100.50" });
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// stamps: who writes a ts: key, and how often
+// -------------------------------------------------------------------------
+
+async function stamps() {
+  const out = {};
+  const k = await newKey();
+  await issue(k);
+  const uncertified = await newKey();
+  out.unsigned = await call("POST", "/timestamp", { root: root(1) });
+  out.uncertified = await stamp(uncertified, [root(2)]);
+  out.certified = await stamp(k, [root(3)]);
+  out.certifiedAgain = await stamp(k, [root(3)]);
+  // the key's daily cap on NEW roots; a known root stays free
+  preset(`stamp:key:${k.pubHex}`, 499);
+  const writes = kvState.writes;
+  out.keyCapTwo = await stamp(k, [root(4), root(5)]);
+  out.writesByRefusal = kvState.writes - writes;
+  out.keyCapOne = await stamp(k, [root(4)]);
+  out.keyCapFull = await stamp(k, [root(6)]);
+  out.knownRootAtCap = await stamp(k, [root(3)]);
+  // the address's daily cap, another key from the same address
+  const k2 = await newKey();
+  await issue(k2, { ip: "198.51.100.60" });
+  await stamp(k2, [root(10)], { ip: "198.51.100.60" });
+  const addrKey = counterKeys("stamp:addr:").find((key) => key.startsWith("stamp:addr:4."));
+  out.addrKeyShape = addrKey ? addrKey.slice(0, 13) : null;
+  if (addrKey) preset(addrKey, 5000);
+  const k3 = await newKey();
+  await issue(k3, { ip: "198.51.100.61" });
+  out.addrCapFull = await stamp(k3, [root(11)], { ip: "198.51.100.60" });
+  out.otherAddr = await stamp(k3, [root(11)], { ip: "198.51.100.61" });
+  // the route's ceiling
+  preset("stamp:all:", 99999);
+  out.ceiling = [(await stamp(k3, [root(12)], { ip: "198.51.100.61" })).status,
+                 (await stamp(k3, [root(13)], { ip: "198.51.100.61" })).status];
+  out.knownAtCeiling = await stamp(k3, [root(12)], { ip: "198.51.100.61" });
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// store: what a failing store and a malformed request get
+// -------------------------------------------------------------------------
+
+async function storeFaults() {
+  const out = {};
+  const k = await newKey();
+  kvState.fail = "put";
+  out.birthKvDown = await issue(k);
+  kvState.fail = null;
+  out.ledgerRowsAfterFailedBirth = db.prepare("SELECT count(*) AS n FROM births WHERE pubkey = ?").get(k.pubHex).n;
+  out.birthAfter = await issue(k);
+  out.ledgerRowsAfterBirth = db.prepare("SELECT count(*) AS n FROM births WHERE pubkey = ?").get(k.pubHex).n;
+  kvState.fail = "get";
+  out.readKvDown = await call("GET", `/birth-certificate?pubkey=${k.pubHex}`);
+  kvState.fail = null;
+  // an object that fails: the same 503
+  const brokenLimiter = { idFromName: (n) => n, get: () => ({ fetch: async () => { throw new Error("Durable Object reset because its code was updated"); } }) };
+  out.limiterDown = await issue(await newKey(), { useEnv: { ...env, LIMITER: brokenLimiter } });
+  // any other failure: a 500 that carries no error text
+  const { IP_PEPPER, ...noPepper } = env;
+  out.internal = await stamp(k, [root(1)], { useEnv: noPepper });
+  // the ceiling refuses before any write
+  preset("birth:all:", 20000);
+  const writes = kvState.writes;
+  const k2 = await newKey();
+  out.birthAtCeiling = await issue(k2, { ip: "198.51.100.70" });
+  out.writesByRefusal = kvState.writes - writes;
+  out.ledgerRowsAfterRefusal = db.prepare("SELECT count(*) AS n FROM births WHERE pubkey = ?").get(k2.pubHex).n;
+  unset("birth:all:");
+  // births per address and day
+  out.perAddress = [];
+  preset(counterKeys("birth:addr:")[0] || "none", 49);
+  out.perAddress.push((await issue(await newKey())).status, (await issue(await newKey())).status);
+  // the request itself
+  const k3 = await newKey();
+  const body = { pubkey_hex: k3.pubHex, signature: await sign(k3, `birth:${k3.pubHex}`) };
+  out.textPlain = await call("POST", "/birth-certificate", undefined, { type: "text/plain", raw: JSON.stringify(body) });
+  out.formPost = await call("POST", "/birth-certificate", undefined, { type: "application/x-www-form-urlencoded", raw: "a=1" });
+  out.badJson = await call("POST", "/birth-certificate", undefined, { raw: "{not json" });
+  out.notObject = await call("POST", "/birth-certificate", undefined, { raw: "[1,2]" });
+  out.tooLarge = await call("POST", "/birth-certificate", undefined, { raw: JSON.stringify({ ...body, pad: "x".repeat(17000) }) });
+  out.charsetJson = await call("POST", "/birth-certificate", body,
+                              { type: "application/json; charset=utf-8", ip: "198.51.100.71" });
+  out.preflight = await call("OPTIONS", "/birth-certificate", undefined, { headers: { Origin: "https://example.com" } });
+  out.anyAnswerCors = Object.keys(out.charsetJson.headers).filter((h) => h.startsWith("access-control"));
+  // signatures: one spelling each
+  const k4 = await newKey();
+  const sig4 = await sign(k4, `birth:${k4.pubHex}`);
+  out.sigOddLength = await call("POST", "/birth-certificate", { pubkey_hex: k4.pubHex, signature: sig4 + "0" },
+                                { ip: "198.51.100.72" });
+  out.sigUpper = await call("POST", "/birth-certificate", { pubkey_hex: k4.pubHex, signature: sig4.toUpperCase() },
+                            { ip: "198.51.100.72" });
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// directory: entries per network, the total, the registration limit
+// -------------------------------------------------------------------------
+
+async function directoryLimits() {
+  const out = {};
+  const ts = () => Math.floor(Date.now() / 1000);
+  const reg = async (key, ip, port = 20000, t = ts()) => call("POST", "/node-register", {
+    pubkey: key.pubHex, port, capabilities: ["sync"], ts: t,
+    signature: await sign(key, `sautium-directory:v1:${port}:sync:${t}`),
+  }, { ip });
+  const keys = [];
+  for (let i = 0; i < 18; i++) {
+    const key = await newKey();
+    await issue(key, { ip: `198.51.100.${200 + i}` });
+    keys.push(key);
+  }
+  // seventeen volunteers in one IPv4 /24: sixteen are listed
+  out.v4 = [];
+  for (let i = 0; i < 17; i++) out.v4.push((await reg(keys[i], `192.0.2.${i + 1}`)).status);
+  out.v4Again = await reg(keys[0], "192.0.2.1", 20000, ts() + 1);     // a listed one renews
+  out.v4Elsewhere = await reg(keys[16], "198.51.100.199", 20000, ts() + 2);   // a refused signature is spent
+  out.total = (await call("GET", "/node-hints?cap=sync")).body.total;
+  // IPv6: one /48 across its /64s
+  const v6keys = [];
+  for (let i = 0; i < 17; i++) {
+    const key = await newKey();
+    await issue(key, { ip: `203.0.113.${100 + i}` });
+    v6keys.push(key);
+  }
+  out.v6 = [];
+  for (let i = 0; i < 17; i++) out.v6.push((await reg(v6keys[i], `2001:db8:77:${(i + 1).toString(16)}::1`)).status);
+  // the registration limit is one /64's, whatever its interface ids
+  const one = keys[17];
+  out.sameSlash64 = [];
+  for (let i = 0; i < 13; i++) out.sameSlash64.push((await reg(one, `2001:db8:99:1::${(i + 1).toString(16)}`, 20000 + i)).status);
+  const writes = kvState.writes;
+  await reg(one, "2001:db8:99:1::ff", 20100);
+  out.writesByRefusal = kvState.writes - writes;
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// ledger: births in one hour, spread over networks
+// -------------------------------------------------------------------------
+
+async function ledgerWave() {
+  for (let i = 0; i < 61; i++) {
+    await issue(await newKey(), { ip: `2001:db8:${(i + 1).toString(16)}::1`, cf: { asn: 65000 + i, country: "UA" } });
+  }
+  const rows = db.prepare("SELECT n_glob1, m_shadow FROM births ORDER BY rowid").all();
+  return { last: rows[rows.length - 1], count: rows.length };
+}
+
+const scenarios = {
+  contract, mail, codes, accepts, stamps, store: storeFaults,
+  directory: directoryLimits, ledger: ledgerWave,
+};
 if (serveMode) {
   const { createServer } = await import("node:http");
   let timestampCalls = 0;
@@ -177,293 +821,7 @@ if (serveMode) {
   console.log(JSON.stringify({ url: `http://127.0.0.1:${server.address().port}`,
                                authority_pub: authority.pubHex }));
   await new Promise(() => {});        // serves until the test ends the process
+} else {
+  if (!scenarios[scenarioName]) throw new Error(`unknown scenario ${scenarioName}`);
+  console.log(JSON.stringify(await scenarios[scenarioName]()));
 }
-
-// --- subject 1: fresh identity, then email upgrade ---
-const s1 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const issue1 = await call("POST", "/birth-certificate", {
-  pubkey_hex: s1.pubHex, signature: await sign(s1, `birth:${s1.pubHex}`),
-});
-const issue1Again = await call("POST", "/birth-certificate", {
-  pubkey_hex: s1.pubHex, signature: await sign(s1, `birth:${s1.pubHex}`),
-});
-const read1 = await call("GET", `/birth-certificate?pubkey=${s1.pubHex}`);
-
-const pubDigest = hex(new Uint8Array(await subtle.digest("SHA-256", s1.pubBytes))).slice(0, 12).toUpperCase();
-const inviteCode = `alice#${pubDigest.slice(0, 4)}-${pubDigest.slice(4, 8)}-${pubDigest.slice(8, 12)}`;
-const email = "Alice.Example+tag@GoogleMail.com";
-const code = "ABCD1234";
-store.set(`emailcode:${inviteCode.replace("#", ":")}`,
-  JSON.stringify({ email, hash: await sha256Hex(code) }));
-const register = await call("POST", "/register-email", {
-  invite_code: inviteCode, email, public_key_hex: s1.pubHex,
-  signature: await sign(s1, `register:${inviteCode}:${email}`),
-  code, birth_cert: issue1.body,
-});
-const read1AfterEmail = await call("GET", `/birth-certificate?pubkey=${s1.pubHex}`);
-
-// A second identity verifying the SAME mailbox (dots/tag/case differ) must
-// get the same email_token — that equality is the whole point of the token.
-const s3 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const issue3 = await call("POST", "/birth-certificate", {
-  pubkey_hex: s3.pubHex, signature: await sign(s3, `birth:${s3.pubHex}`),
-});
-const pubDigest3 = hex(new Uint8Array(await subtle.digest("SHA-256", s3.pubBytes))).slice(0, 12).toUpperCase();
-const inviteCode3 = `bob#${pubDigest3.slice(0, 4)}-${pubDigest3.slice(4, 8)}-${pubDigest3.slice(8, 12)}`;
-const email3 = "aliceexample@gmail.com";
-store.set(`emailcode:${inviteCode3.replace("#", ":")}`,
-  JSON.stringify({ email: email3, hash: await sha256Hex(code) }));
-const register3 = await call("POST", "/register-email", {
-  invite_code: inviteCode3, email: email3, public_key_hex: s3.pubHex,
-  signature: await sign(s3, `register:${inviteCode3}:${email3}`),
-  code, birth_cert: issue3.body,
-});
-// the mailbox owner index moved to s3; s1 is named as s3's predecessor
-const mailboxAfter3 = JSON.parse(store.get(`mailbox:${register3.body.birth_cert.email_token}`));
-
-// --- subject 2: legacy v1 record already in KV ---
-const s2 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-store.set(`born:${s2.pubHex}`, JSON.stringify({ born_at: "2026-07-05T10:11:12Z", sig: "ab".repeat(64) }));
-const legacyRead = await call("GET", `/birth-certificate?pubkey=${s2.pubHex}`);
-const legacyRecord = JSON.parse(store.get(`born:${s2.pubHex}`));
-
-// --- subject 6: a v2 EMAIL record from before the domain token existed ---
-const s6 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-store.set(`born:${s6.pubHex}`, JSON.stringify({
-  v: 2, issued_at: "2026-07-06T00:00:00Z", method: "email", difficulty: 32, params_version: 1,
-  email_token: "ef".repeat(32), email_class: "other", sig_v2: "cd".repeat(64) }));
-const legacyV2Read = await call("GET", `/birth-certificate?pubkey=${s6.pubHex}`);
-const legacyV2Record = JSON.parse(store.get(`born:${s6.pubHex}`));
-const pubDigest6 = hex(new Uint8Array(await subtle.digest("SHA-256", s6.pubBytes))).slice(0, 12).toUpperCase();
-const inviteCode6 = `frank#${pubDigest6.slice(0, 4)}-${pubDigest6.slice(4, 8)}-${pubDigest6.slice(8, 12)}`;
-const email6 = "frank@example.net";
-store.set(`verified:${inviteCode6.replace("#", ":")}`,
-  JSON.stringify({ email: email6, pubkey: s6.pubHex, born_at: "2026-07-06T00:00:00Z", verified_at: "2026-07-06T00:10:00Z" }));
-const legacyV2Check = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode6)}&email=${encodeURIComponent(email6)}&public_key_hex=${s6.pubHex}&signature=${await sign(s6, `check-email:${inviteCode6}:${email6}`)}`);
-
-// --- a disposable-domain registration for the class marker ---
-const s4 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const issue4 = await call("POST", "/birth-certificate", {
-  pubkey_hex: s4.pubHex, signature: await sign(s4, `birth:${s4.pubHex}`),
-});
-const pubDigest4 = hex(new Uint8Array(await subtle.digest("SHA-256", s4.pubBytes))).slice(0, 12).toUpperCase();
-const inviteCode4 = `carol#${pubDigest4.slice(0, 4)}-${pubDigest4.slice(4, 8)}-${pubDigest4.slice(8, 12)}`;
-const email4 = "x@mailinator.com";
-store.set(`emailcode:${inviteCode4.replace("#", ":")}`,
-  JSON.stringify({ email: email4, hash: await sha256Hex(code) }));
-const register4 = await call("POST", "/register-email", {
-  invite_code: inviteCode4, email: email4, public_key_hex: s4.pubHex,
-  signature: await sign(s4, `register:${inviteCode4}:${email4}`),
-  code, birth_cert: issue4.body,
-});
-
-// check-email for an already-upgraded identity returns the email cert…
-const check1 = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode)}&email=${encodeURIComponent(email)}&public_key_hex=${s1.pubHex}&signature=${await sign(s1, `check-email:${inviteCode}:${email}`)}`);
-// …and for a pre-v2 identity (v1 born record + existing verified: record)
-// it upgrades the certificate without a second code round.
-const pubDigest2 = hex(new Uint8Array(await subtle.digest("SHA-256", s2.pubBytes))).slice(0, 12).toUpperCase();
-const inviteCode2 = `dave#${pubDigest2.slice(0, 4)}-${pubDigest2.slice(4, 8)}-${pubDigest2.slice(8, 12)}`;
-const email2 = "dave@example.org";
-store.set(`verified:${inviteCode2.replace("#", ":")}`,
-  JSON.stringify({ email: email2, pubkey: s2.pubHex, born_at: "2026-07-05T10:11:12Z", verified_at: "2026-07-05T10:20:00Z" }));
-const check2 = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode2)}&email=${encodeURIComponent(email2)}&public_key_hex=${s2.pubHex}&signature=${await sign(s2, `check-email:${inviteCode2}:${email2}`)}`);
-const legacyRecordAfterCheck = JSON.parse(store.get(`born:${s2.pubHex}`));
-// a verified: record bound to ANOTHER pubkey must not upgrade anything
-const s5 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const pubDigest5 = hex(new Uint8Array(await subtle.digest("SHA-256", s5.pubBytes))).slice(0, 12).toUpperCase();
-const inviteCode5 = `eve#${pubDigest5.slice(0, 4)}-${pubDigest5.slice(4, 8)}-${pubDigest5.slice(8, 12)}`;
-store.set(`verified:${inviteCode5.replace("#", ":")}`,
-  JSON.stringify({ email: email2, pubkey: s2.pubHex, born_at: "2026-07-05T10:11:12Z", verified_at: "2026-07-05T10:20:00Z" }));
-const check5 = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode5)}&email=${encodeURIComponent(email2)}&public_key_hex=${s5.pubHex}&signature=${await sign(s5, `check-email:${inviteCode5}:${email2}`)}`);
-
-// --- birth ledger (shadow): a burst from one /24 + one ASN ---
-const burst = [];
-for (let i = 0; i < 4; i++) {
-  const k = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-  const r = await call("POST", "/birth-certificate", {
-    pubkey_hex: k.pubHex, signature: await sign(k, `birth:${k.pubHex}`),
-  }, { ip: `198.51.100.${10 + i}`, cf: { asn: 64500, country: "UA" } });
-  burst.push(r);
-}
-const ledgerRows = db.prepare("SELECT asn, cc, method, m_shadow, n_sub24, n_asn1, n_glob1, addr, n_addr24, sub, fam FROM births ORDER BY rowid").all();
-
-// s1 takes the mailbox back (a second registration by the earlier holder):
-// its certificate now names s3 as predecessor, the anchor does not move
-store.set(`emailcode:${inviteCode.replace("#", ":")}`,
-  JSON.stringify({ email, hash: await sha256Hex(code) }));
-const retake = await call("POST", "/register-email", {
-  invite_code: inviteCode, email, public_key_hex: s1.pubHex,
-  signature: await sign(s1, `register:${inviteCode}:${email}`),
-  code, birth_cert: register.body.birth_cert,
-});
-const mailboxAfterRetake = JSON.parse(store.get(`mailbox:${register3.body.birth_cert.email_token}`));
-// …and registering the same mailbox for the same key again changes nothing
-store.set(`emailcode:${inviteCode.replace("#", ":")}`,
-  JSON.stringify({ email, hash: await sha256Hex(code) }));
-const retakeAgain = await call("POST", "/register-email", {
-  invite_code: inviteCode, email, public_key_hex: s1.pubHex,
-  signature: await sign(s1, `register:${inviteCode}:${email}`),
-  code, birth_cert: retake.body.birth_cert,
-});
-
-// --- master mailbox: s1 (certified) parks messages for the offline master ---
-const mailPayload = async (sender, uuid, text) => {
-  const encrypted = Buffer.from(`box:${text}`).toString("base64");
-  const timestamp = "2026-08-18T14:00:00Z";
-  const digest = await sha256Hex(encrypted);
-  return {
-    to: master.pubHex, from_public_key: sender.pubHex, encrypted, timestamp, message_uuid: uuid,
-    signature: await sign(sender, `mailbox:v1:${master.pubHex}:${uuid}:${timestamp}:${digest}`),
-  };
-};
-const mailUuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const mail1 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(1), "hello"));
-const mail2 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(2), "again"));
-const mailDup = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(1), "hello"));
-const mail3 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(3), "third"));
-const mailCap = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(4), "fourth"));   // per-sender cap 3
-const stranger = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const mailNoCert = await call("POST", "/mailbox", await mailPayload(stranger, mailUuid(5), "x"));
-const forged = await mailPayload(s3, mailUuid(6), "x");
-forged.signature = "00".repeat(64);
-const mailBadSig = await call("POST", "/mailbox", forged);
-const wrongTo = await mailPayload(s3, mailUuid(7), "x");
-wrongTo.to = s1.pubHex;
-const mailWrongTo = await call("POST", "/mailbox", wrongTo);
-const big = await mailPayload(s3, mailUuid(8), "x".repeat(9000));
-const mailTooBig = await call("POST", "/mailbox", big);
-const nowTs = String(Math.floor(Date.now() / 1000));
-const drainSig = await sign(master, `mailbox-drain:v1:${nowTs}:0`);
-const drain = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&after=0&signature=${drainSig}`);
-const drainForeign = await call("GET", `/mailbox?public_key_hex=${s1.pubHex}&ts=${nowTs}&after=0&signature=${await sign(s1, `mailbox-drain:v1:${nowTs}:0`)}`);
-const staleTs = String(Math.floor(Date.now() / 1000) - 3600);
-const drainStale = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${staleTs}&after=0&signature=${await sign(master, `mailbox-drain:v1:${staleTs}:0`)}`);
-const lastId = drain.body.messages[drain.body.messages.length - 1].id;
-const ack = await call("DELETE", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&upto=${lastId}&signature=${await sign(master, `mailbox-ack:v1:${nowTs}:${lastId}`)}`);
-const drainAfterAck = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&after=0&signature=${drainSig}`);
-const wakeNoUpgrade = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&signature=${await sign(master, `mailbox-wake:v1:${nowTs}`)}`);
-
-// --- master address hint: set by a signed wake with peer_port, replay-proof ---
-const hintEmpty = await call("GET", "/master-hint");
-const wakeSig = await sign(master, `mailbox-wake:v1:${nowTs}:8801`);
-const wakeWithPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=8801&signature=${wakeSig}`, undefined, { ip: "198.51.100.77" });
-const hintSet = await call("GET", "/master-hint");
-// the same signature replayed from another address with another port: refused by
-// the signature (port differs) …
-const hintReplayPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=9999&signature=${wakeSig}`, undefined, { ip: "203.0.113.99" });
-// …and replayed verbatim from another address: signature valid, but the
-// single-use nonce blocks the hint update
-const hintReplaySame = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=8801&signature=${wakeSig}`, undefined, { ip: "203.0.113.99" });
-const hintAfterReplay = await call("GET", "/master-hint");
-const hintBadPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=abc&signature=${await sign(master, `mailbox-wake:v1:${nowTs}:abc`)}`);
-
-// --- births over IPv6: the fam sensor + the canonical /48 bucket ---
-const s8 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const v6birth = await call("POST", "/birth-certificate", {
-  pubkey_hex: s8.pubHex, signature: await sign(s8, `birth:${s8.pubHex}`),
-}, { ip: "2a00:db8::210e", cf: { asn: 64502, country: "DE" } });
-const s9 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const v6birth2 = await call("POST", "/birth-certificate", {
-  pubkey_hex: s9.pubHex, signature: await sign(s9, `birth:${s9.pubHex}`),
-}, { ip: "2a00:db8:0:beef::7", cf: { asn: 64502, country: "DE" } });   // same /48, another spelling shape
-// tunneled/ULA v6 must NOT count as native v6 (2002::/16 6to4, 2001:0::/32 Teredo)
-const sT1 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const tun6to4 = await call("POST", "/birth-certificate", {
-  pubkey_hex: sT1.pubHex, signature: await sign(sT1, `birth:${sT1.pubHex}`),
-}, { ip: "2002:5be3:b5b3::1", cf: { asn: 64503, country: "DE" } });
-const sT2 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const tunTeredo = await call("POST", "/birth-certificate", {
-  pubkey_hex: sT2.pubHex, signature: await sign(sT2, `birth:${sT2.pubHex}`),
-}, { ip: "2001:0:5ef5:79fb:0:59d3:1234:5678", cf: { asn: 64504, country: "DE" } });
-const ledgerRowsV6 = db.prepare("SELECT sub, fam, n_sub24 FROM births WHERE fam = 6 ORDER BY rowid").all();
-const tunnelFams = db.prepare("SELECT fam FROM births WHERE asn IN (64503, 64504)").all();
-
-// --- a wake over IPv6 fills host6 and PRESERVES the v4 slot ---
-const ts6 = String(Math.floor(Date.now() / 1000) + 1);
-const wake6 = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${ts6}&peer_port=8801&signature=${await sign(master, `mailbox-wake:v1:${ts6}:8801`)}`, undefined, { ip: "2a00:db8::99" });
-const hintDual = await call("GET", "/master-hint");
-
-// --- capability directory (Ф16c): certified volunteers register, K random served ---
-const dirTs = Math.floor(Date.now() / 1000);
-const regPayload = async (key, port, caps, ts = dirTs) => ({
-  pubkey: key.pubHex, port, capabilities: caps, ts,
-  signature: await sign(key, `sautium-directory:v1:${port}:${[...caps].sort().join(",")}:${ts}`),
-});
-const reg1 = await call("POST", "/node-register", await regPayload(s1, 20246, ["sync", "mbdump"]), { ip: "198.51.100.50" });
-const reg3 = await call("POST", "/node-register", await regPayload(s3, 20300, ["sync", "relay"]), { ip: "2a00:db8::77" });
-const stranger2 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const regNoCert = await call("POST", "/node-register", await regPayload(stranger2, 20000, ["sync"]));
-const regBadSig = await call("POST", "/node-register",
-  { ...(await regPayload(s4, 20400, ["sync"])), signature: "00".repeat(64) });
-const masterReg = await call("POST", "/node-register", await regPayload(master, 8801, ["sync"]));
-const regReplay = await call("POST", "/node-register", await regPayload(s1, 20246, ["sync", "mbdump"]), { ip: "203.0.113.66" });
-const hintsDump = await call("GET", "/node-hints?cap=mbdump");
-const hintsRelay = await call("GET", "/node-hints?cap=relay");
-const hintsSlices = await call("GET", "/node-hints?cap=mbslices");
-const hintsBadCap = await call("GET", "/node-hints?cap=nonsense");
-// an expired entry (older than the TTL) is never served
-dirDb.prepare("INSERT INTO nodes (pubkey, host4, host6, port, caps, ts) VALUES (?, ?, NULL, ?, ?, ?)")
-  .run("ee".repeat(32), "203.0.113.200", 21000, "mbdump", Date.now() - 3 * 3600 * 1000);
-const hintsAfterStale = await call("GET", "/node-hints?cap=mbdump");
-
-// --- timestamp notary (Ф20): identity-signed stamps, ledger-priced in shadow ---
-const tsNow = Math.floor(Date.now() / 1000);
-const rootA = "a1".repeat(32), rootB = "b2".repeat(32), rootC = "c3".repeat(32);
-const stampReq = async (key, roots, ts = tsNow) => ({
-  ...(roots.length === 1 ? { root: roots[0] } : { roots }),
-  pubkey: key.pubHex, ts,
-  signature: await sign(key, `sautium-timestamp-request:v1:${ts}:${roots.join(",")}`),
-});
-const tsSigned = await call("POST", "/timestamp", await stampReq(s1, [rootA]), { ip: "198.51.100.90" });
-const tsSignedAgain = await call("POST", "/timestamp", await stampReq(s1, [rootA]), { ip: "198.51.100.90" });
-const tsMulti = await call("POST", "/timestamp", await stampReq(s1, [rootA, rootB]), { ip: "198.51.100.90" });
-const tsUnsigned = await call("POST", "/timestamp", { root: rootC }, { ip: "198.51.100.91" });
-const tsBadSig = await call("POST", "/timestamp",
-  { ...(await stampReq(s1, [rootA])), signature: "00".repeat(64) }, { ip: "198.51.100.90" });
-const tsStale = await call("POST", "/timestamp", await stampReq(s1, [rootA], tsNow - 3600), { ip: "198.51.100.90" });
-const tsBadRoot = await call("POST", "/timestamp", { root: "zz" }, { ip: "198.51.100.90" });
-const tsTooMany = await call("POST", "/timestamp",
-  await stampReq(s1, Array.from({ length: 101 }, (_, i) => i.toString(16).padStart(64, "0"))), { ip: "198.51.100.90" });
-// no certificate: a signal in the ledger, not a refusal, while the budget is shadow
-const tsStranger = await call("POST", "/timestamp", await stampReq(stranger2, ["d4".repeat(32)]), { ip: "198.51.100.92" });
-// the address brake (8 per window in the harness), one IPv6 /64 across many interface ids
-const tsBrake = [];
-for (let i = 0; i < 10; i++) {
-  const r = await call("POST", "/timestamp", { root: (i + 0x10).toString(16).padStart(64, "e") },
-    { ip: `2a00:db8:1:2::${i + 1}` });
-  tsBrake.push({ status: r.status, retry: r.body.retry_after ?? null });
-}
-const stampRows = db.prepare("SELECT pubkey, n_new, n_roots, m, allowed, addr FROM stamps ORDER BY id").all();
-const budgetRow = db.prepare("SELECT tokens FROM notary_budget WHERE pubkey = ?").get(s1.pubHex);
-// ip_hash merges a /64: two interface ids, one pseudonym; another /64, another one
-const ipHash64a = (await call("POST", "/timestamp", { root: "f0".repeat(32) }, { ip: "2a00:db8:1:9::1" })).body.ip_hash;
-const ipHash64b = (await call("POST", "/timestamp", { root: "f1".repeat(32) }, { ip: "2a00:db8:1:9:aaaa:bbbb:cccc:dddd" })).body.ip_hash;
-const ipHash64c = (await call("POST", "/timestamp", { root: "f2".repeat(32) }, { ip: "2a00:db8:1:a::1" })).body.ip_hash;
-
-const stats = await call("GET", "/issuance-stats");
-const badSig = await call("POST", "/birth-certificate", {
-  pubkey_hex: s1.pubHex, signature: "00".repeat(64),
-});
-
-console.log(JSON.stringify({
-  authority_pub: authority.pubHex,
-  issue1, issue1Again, read1, register, read1AfterEmail,
-  register3, mailboxAfter3, retake, retakeAgain, mailboxAfterRetake,
-  legacyRead, legacyRecord,
-  register4,
-  check1, check2, legacyRecordAfterCheck, check5,
-  legacyV2Read, legacyV2Record, legacyV2Check,
-  burst, ledgerRows,
-  stats, badSig,
-  master_pub: master.pubHex,
-  mail1, mail2, mailDup, mail3, mailCap, mailNoCert, mailBadSig, mailWrongTo, mailTooBig,
-  drain, drainForeign, drainStale, ack, drainAfterAck, wakeNoUpgrade,
-  hintEmpty, wakeWithPort, hintSet, hintReplayPort, hintReplaySame, hintAfterReplay, hintBadPort,
-  v6birth, v6birth2, tun6to4, tunTeredo, tunnelFams, wake6, hintDual, ledgerRowsV6,
-  reg1, reg3, regNoCert, regBadSig, masterReg, regReplay,
-  hintsDump, hintsRelay, hintsSlices, hintsBadCap, hintsAfterStale,
-  tsSigned, tsSignedAgain, tsMulti, tsUnsigned, tsBadSig, tsStale, tsBadRoot, tsTooMany,
-  tsStranger, tsBrake, stampRows, budgetRow, ipHash64a, ipHash64b, ipHash64c,
-  brakeStampKey: tsBrake.length ? [...brakeCounts.keys()].find((k) => k.startsWith("ts:2a00:db8:1:2")) : null,
-  verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),
-}));

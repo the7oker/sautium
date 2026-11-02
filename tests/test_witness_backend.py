@@ -133,6 +133,13 @@ def harness():
     proc = subprocess.Popen(["node", str(HARNESS), os.urandom(32).hex(), "test-email-pepper", "--serve"],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     info = json.loads(proc.stdout.readline())
+    # The node's certificate, asked for as a node does on its first start:
+    # the Worker stamps only for a key it issued a certificate to.
+    urllib.request.urlopen(urllib.request.Request(
+        info["url"] + "/birth-certificate", method="POST",
+        data=json.dumps({"pubkey_hex": NODE_PUB,
+                         "signature": NODE.sign(f"birth:{NODE_PUB}".encode()).hex()}).encode(),
+        headers={"Content-Type": "application/json"}), timeout=10).read()
     yield info
     proc.terminate()
     proc.wait(10)
