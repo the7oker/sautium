@@ -161,6 +161,18 @@ SLICE_TABLES = {
 # Type dictionaries: tiny, shipped whole in every response (idempotent on import).
 _DICT_TABLES = ("mb_release_group_primary_type", "mb_release_group_secondary_type")
 
+# The one store a Buy button opens (docs/design/PHANTOM-DISCOVERY.md D5): a
+# Bandcamp shop's own page. daily.bandcamp.com is editorial, bare
+# bandcamp.com is the site itself. The rule for every mb_url row this node
+# keeps — the dump loader's (backend/mb_dump_load), a slice's import, the
+# Buy resolver's (backend/routers/albums._buy_link).
+BANDCAMP_PAGE = r"^https?://(?!daily\.)[a-z0-9-]+\.bandcamp\.com/"
+_BANDCAMP_PAGE = re.compile(BANDCAMP_PAGE, re.IGNORECASE)
+
+
+def bandcamp_page(url) -> bool:
+    return isinstance(url, str) and _BANDCAMP_PAGE.match(url) is not None
+
 
 class DumpBusy(Exception):
     """A full dump load is in progress on the serving node — retry later."""
@@ -938,18 +950,22 @@ def serve_slices(conn, names: list, sign_fn=None,
 
 
 def verify_slice_entry(name: str, entry: dict):
-    """Full per-name verification on the receiving side: gunzip → hash →
-    author signature → the blob's own name_key matches the asked name.
-    Returns (core_dict, blob_gz_bytes) or None. Every hop runs exactly
-    this, against the ORIGINAL author's key."""
+    """Full per-name verification on the receiving side: the author is one
+    the release names (master_node.SLICE_AUTHORS) → gunzip → hash → author
+    signature → the blob's own name_key matches the asked name. Returns
+    (core_dict, blob_gz_bytes) or None. Every hop runs exactly this, against
+    the ORIGINAL author's key."""
     import base64
 
     from desktop.node_identity import verify_signature
     from desktop.p2p import wire
+    from desktop.p2p.master_node import SLICE_AUTHORS
     try:
+        author = entry.get("author_pubkey") or ""
+        if author.lower() not in SLICE_AUTHORS:
+            return None                       # no dump holder the release names
         blob_gz = base64.b64decode(entry.get("blob_gz") or "")
         blob = wire.gunzip(blob_gz, BLOB_RAW_MAX)
-        author = entry.get("author_pubkey") or ""
         sig = entry.get("sig") or ""
         if not verify_signature(receipt_message_for(blob),
                                 bytes.fromhex(sig), author):

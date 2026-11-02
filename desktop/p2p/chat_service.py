@@ -21,6 +21,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from desktop.p2p import chat_wire
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -107,20 +109,25 @@ class ChatService:
             )
         return self._boxes[friend_public_key_hex]
 
-    def encrypt_message(self, plaintext: str, friend_public_key_hex: str) -> str:
-        """Encrypt a message for a friend. Returns base64(nonce + ciphertext)."""
+    def encrypt_envelope(self, text: str, message_uuid: str, ts_iso: str,
+                         friend_public_key_hex: str) -> str:
+        """One message boxed for a friend with its uuid and time inside
+        (chat_wire.envelope) — every message this node sends, any path."""
         box = self._get_box(friend_public_key_hex)
-        encrypted = box.encrypt(plaintext.encode("utf-8"))
+        encrypted = box.encrypt(chat_wire.envelope(text, message_uuid, ts_iso))
         return base64.b64encode(encrypted).decode("ascii")
 
-    def decrypt_message(self, encrypted_b64: str, sender_public_key_hex: str) -> str:
-        """Decrypt a message from a friend. Returns plaintext string.
+    def decrypt_envelope(self, encrypted_b64: str, sender_public_key_hex: str) -> dict:
+        """{uuid, ts, text} of a message a friend boxed — CryptoError for a
+        box that does not open, ValueError for one that holds no envelope."""
+        return chat_wire.open_envelope(self._open(encrypted_b64, sender_public_key_hex))
 
-        Tries the live key first, then every retired one: the sender may
+    def _open(self, encrypted_b64: str, sender_public_key_hex: str) -> bytes:
+        """Tries the live key first, then every retired one: the sender may
         still hold the key this node rotated away from."""
         encrypted = base64.b64decode(encrypted_b64)
         try:
-            return self._get_box(sender_public_key_hex).decrypt(encrypted).decode("utf-8")
+            return self._get_box(sender_public_key_hex).decrypt(encrypted)
         except CryptoError:
             if not self._previous_curve:
                 raise
@@ -135,7 +142,7 @@ class ChatService:
             logger.info("Message from %s… was encrypted to a retired key — "
                         "they have not applied the rotation yet",
                         sender_public_key_hex[:16])
-            return plaintext.decode("utf-8")
+            return plaintext
 
     # -------------------------------------------------------------------
     # Friend management (DB operations)
@@ -541,16 +548,30 @@ class ChatService:
         finally:
             self._return_db(conn)
 
-    def _has_message_uuid(self, message_uuid: str) -> bool:
-        """Check if a message with this UUID already exists."""
+    def give_uuid(self, message_id: int) -> str:
+        """The uuid of an outgoing row from before uuids, given now: a
+        message travels in an envelope that carries one."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE p2p_messages
+                                  SET message_uuid = COALESCE(message_uuid, %s::uuid)
+                                WHERE id = %s RETURNING message_uuid::text""",
+                            (str(uuid.uuid4()), message_id))
+                return cur.fetchone()[0]
+        finally:
+            self._return_db(conn)
+
+    def _stored_message(self, message_uuid: str) -> Optional[tuple]:
+        """(friend_id, content) of the message stored under this uuid."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT 1 FROM p2p_messages WHERE message_uuid = %s",
+                    "SELECT friend_id, content FROM p2p_messages WHERE message_uuid = %s",
                     (message_uuid,),
                 )
-                return cur.fetchone() is not None
+                return cur.fetchone()
         finally:
             self._return_db(conn)
 
@@ -559,29 +580,23 @@ class ChatService:
     # -------------------------------------------------------------------
 
     def get_history_for_export(
-        self, friend_id: int, since: Optional[datetime] = None,
+        self, friend_id: int, since: Optional[datetime] = None, limit: int = 2000,
     ) -> list[dict]:
-        """Get all messages for a friend, for history sync export.
+        """A friend's thread for history sync export, oldest first from
+        `since`, at most `limit` messages (the requester pages on).
 
         Returns messages from our perspective (direction as stored).
         """
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
-                if since:
-                    cur.execute("""
-                        SELECT id, message_uuid, direction, content, timestamp
-                        FROM p2p_messages
-                        WHERE friend_id = %s AND timestamp > %s
-                        ORDER BY timestamp
-                    """, (friend_id, since))
-                else:
-                    cur.execute("""
-                        SELECT id, message_uuid, direction, content, timestamp
-                        FROM p2p_messages
-                        WHERE friend_id = %s
-                        ORDER BY timestamp
-                    """, (friend_id,))
+                cur.execute("""
+                    SELECT id, message_uuid, direction, content, timestamp
+                    FROM p2p_messages
+                    WHERE friend_id = %s AND (%s::timestamptz IS NULL OR timestamp > %s)
+                    ORDER BY timestamp
+                    LIMIT %s
+                """, (friend_id, since, since, limit))
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
@@ -634,17 +649,22 @@ class ChatService:
 
                     # Check if we already have this message
                     cur.execute(
-                        "SELECT id, direction, delivered FROM p2p_messages "
+                        "SELECT id, direction, delivered, friend_id FROM p2p_messages "
                         "WHERE message_uuid = %s",
                         (msg_uuid,),
                     )
                     existing = cur.fetchone()
 
+                    if existing and existing[3] != friend_id:
+                        # A uuid of another thread: this export says
+                        # nothing about it, and nothing of it is touched.
+                        skipped += 1
+                        continue
                     if existing:
                         # We already have it — but if it's our outgoing
                         # message and not yet marked delivered, mark it now
                         # (the peer confirmed they have it)
-                        ex_id, ex_dir, ex_delivered = existing
+                        ex_id, ex_dir, ex_delivered, _ = existing
                         if ex_dir == "out" and not ex_delivered:
                             cur.execute(
                                 "UPDATE p2p_messages SET delivered = TRUE "
@@ -820,7 +840,7 @@ class ChatService:
 
         ts = datetime.now(timezone.utc)
         msg_uuid = str(uuid.uuid4())
-        encrypted = self.encrypt_message(content, friend_pubkey)
+        encrypted = self.encrypt_envelope(content, msg_uuid, ts.isoformat(), friend_pubkey)
 
         # Store plaintext locally (not yet delivered)
         self.store_message(
@@ -854,25 +874,39 @@ class ChatService:
             logger.warning(f"Oversized ciphertext from {friend.get('username', '?')} rejected")
             return None
 
-        # Dedup by message_uuid
-        if message_uuid and self._has_message_uuid(message_uuid):
-            logger.debug(f"Duplicate message {message_uuid[:8]}, skipping")
-            return {"friend_id": friend["id"], "content": "", "timestamp": None,
-                    "duplicate": True}
-
         try:
-            content = self.decrypt_message(encrypted_b64, sender_public_key)
-        except CryptoError:
-            logger.error(f"Failed to decrypt message from {sender_public_key[:16]}...")
+            env = self.decrypt_envelope(encrypted_b64, sender_public_key)
+        except (CryptoError, ValueError):
+            logger.error(f"Failed to open a message from {sender_public_key[:16]}...")
+            return None
+        content = env["text"]
+        # The uuid and the time are the box's: the one the request names
+        # must agree, and neither can be another's (chat_wire.envelope).
+        if message_uuid and message_uuid != env["uuid"]:
+            logger.warning(f"Message from {friend.get('username', '?')} names another "
+                           f"uuid than its box — rejected")
             return None
         if len(content) > MAX_PLAINTEXT_CHARS:
             logger.warning(f"Oversized plaintext from {friend.get('username', '?')} rejected")
             return None
 
-        ts = _sender_timestamp(timestamp_iso)
+        # One message per uuid in a thread: the same message again is a
+        # duplicate (and answered so); anything else under its uuid — or a
+        # uuid another thread holds — is refused.
+        stored = self._stored_message(env["uuid"])
+        if stored is not None:
+            if stored[0] == friend["id"] and stored[1] == content:
+                logger.debug(f"Duplicate message {env['uuid'][:8]}, skipping")
+                return {"friend_id": friend["id"], "content": "", "timestamp": None,
+                        "duplicate": True}
+            logger.warning(f"Message {env['uuid'][:8]} from {friend.get('username', '?')} "
+                           f"reuses a uuid — rejected")
+            return None
+
+        ts = _sender_timestamp(env["ts"])
         self.store_message(
             friend["id"], "in", content, ts,
-            delivered=True, message_uuid=message_uuid,
+            delivered=True, message_uuid=env["uuid"],
         )
         self.update_friend_last_seen(sender_public_key)
 

@@ -739,6 +739,9 @@ def test_the_docker_handshake_records_an_accepted_token_only(conn, monkeypatch):
             ts = int(time.time())
             body.update(token_id=token, ts=ts, signature=key.sign(
                 f"token_handshake:{ts}:{token}:{IDENTITY['invite_code']}".encode()).hex())
+        else:
+            from desktop.p2p import chat_wire
+            body = chat_wire.sign_handshake(key.sign, body, IDENTITY["invite_code"])
         return body
 
     tid = str(uuid.uuid4())

@@ -36,17 +36,19 @@ from desktop.api_client import BackendAPIClient
 from desktop.p2p import record_sig as rs
 from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES
 from desktop.p2p.bloom import BloomFilter
+from desktop.p2p import sync_queries
 from desktop.p2p.sync_queries import CARRY_CATEGORIES, EMPTY_INVENTORY
 
 logger = logging.getLogger(__name__)
 
-# Categories and their pull endpoint names. Exactly one of segments/embeddings
-# runs per sync: `segments` when the peer advertises the capability,
-# `embeddings` as the legacy mean-vector fallback.
+# Categories and their pull endpoint names. Audio analysis is pulled as
+# sealed `segments` only, from a peer that advertises the capability; a peer
+# without it is asked for none (the unsealed mean-vector pull is gone,
+# 2026-11-03: its rows took no seal, so a peer chose the vectors a track
+# got and nothing named who).
 CATEGORIES = [
     # (category_key_in_inventory, pull_endpoint, uuid_column_hint)
     ("segments", "segments", "track"),
-    ("embeddings", "embeddings", "track"),
     ("audio_features", "audio-features", "track"),
 ]
 
@@ -62,6 +64,31 @@ SEGMENT_PULL_BATCH = 100
 # Both server implementations reject inventory requests above 10k UUIDs —
 # the client slices its library and merges the responses.
 INVENTORY_CHUNK = 10_000
+
+# The canonical grid's window (mirrors backend/embeddings.WINDOW_SECONDS) and
+# the most windows a bundle may hold — 24 h of track: the importer stores
+# every segment it is given, so a bundle is bounded by its track's length.
+GRID_WINDOW_S = 10
+MAX_GRID_WINDOWS = 24 * 3600 // GRID_WINDOW_S
+
+
+def _on_the_grid(segments, duration) -> bool:
+    """A bundle's segments fit the canonical grid of the duration its seals
+    declare: indices unique, each inside it, no more of them than it has
+    windows."""
+    if not isinstance(segments, list) or not segments:
+        return False
+    if duration is None:
+        windows = MAX_GRID_WINDOWS
+    elif isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
+        windows = min(max(1, duration // GRID_WINDOW_S), MAX_GRID_WINDOWS)
+    else:
+        return False
+    idx = [s.get("i") if isinstance(s, dict) else None for s in segments]
+    return (len(idx) <= windows and len(set(idx)) == len(idx)
+            and all(isinstance(i, int) and not isinstance(i, bool) and 0 <= i < windows
+                    for i in idx))
+
 
 # A fetched holdings filter is used as-is for this long before the peer's
 # version is even compared: a peer's version moves with every analysis
@@ -185,13 +212,13 @@ class SyncClient:
             + (f" + {len(bulk_track_uuids)} phantom-bulk tracks"
                if bulk_track_uuids else "") + "...")
 
-        # Step 2: Capability probe — which audio category does the peer speak?
+        # Step 2: Capability probe — does the peer serve sealed segments?
         health = self.api.get_health() or {}
         self.peer_capabilities = set(health.get("capabilities") or [])
         use_segments = "segments" in self.peer_capabilities
         if not use_segments:
             self._progress(
-                "  peer has no `segments` capability — legacy mean-vector pull")
+                "  peer has no `segments` capability — no audio analysis from it")
 
         # Step 3: Inventory — what the peer holds of our gaps, core and bulk
         # alike: the exact inventory when our ask weighs less than the
@@ -212,9 +239,8 @@ class SyncClient:
 
         # Step 5: Pull and import each category in batches
         stats = {}
-        inactive = {"embeddings"} if use_segments else {"segments"}
         for cat_key, pull_endpoint, _ in CATEGORIES:
-            if cat_key in inactive:
+            if cat_key == "segments" and not use_segments:
                 continue
             uuids_to_pull = needed.get(cat_key, [])
             if not uuids_to_pull:
@@ -327,30 +353,48 @@ class SyncClient:
             )
             return {row[0] for row in cur.fetchall()}
 
+    def _local_segment_versions(self, candidates) -> dict[str, int]:
+        """Of `candidates`, uuid -> local analysis_version for the tracks
+        whose analysis carries segments here. A mean without segments is a
+        gap: nothing seals it, so sealed segments are pulled to replace it
+        (first-hand analysis is protected separately)."""
+        candidates = list(candidates)
+        if not candidates:
+            return {}
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("""SELECT e.track_id::text, MAX(e.analysis_version)
+                             FROM embeddings e
+                            WHERE e.track_id = ANY(%s::uuid[])
+                              AND EXISTS (SELECT 1 FROM embedding_segments es
+                                          WHERE es.embedding_id = e.id)
+                            GROUP BY e.track_id""", [candidates])
+            return {row[0]: row[1] for row in cur.fetchall()}
+
     def _compute_needed(self, inventory: dict, use_segments: bool) -> dict:
         """Compare inventory with local data to find what's missing.
 
-        Both audio categories check the local `embeddings` table and read
-        the `embeddings` inventory key. The inventory carries [uuid,
-        analysis_version] pairs — [uuid, analysis_version, segment_count]
-        triples from segments-capable peers — and a locally-present row is
-        still pulled when the source's methodology is newer: existence
-        alone never delivers upgrades."""
-        emb_cat = "segments" if use_segments else "embeddings"
-        local_check = {
-            emb_cat: ("embeddings", "track_id"),
-            "audio_features": ("audio_features", "track_id"),
-        }
+        Segments are planned from the `embeddings` inventory key, whose rows
+        are [uuid, analysis_version, sealed segment count] — a row with no
+        sealed segment offers nothing to pull — against the local rows that
+        carry segments. A locally-present row is still pulled when the
+        source's methodology is newer: existence alone never delivers
+        upgrades."""
         needed = {}
-        for cat_key, (table, uuid_col) in local_check.items():
+        checks = [("audio_features", "audio_features",
+                   lambda c: self._get_existing_versions("audio_features", "track_id", c))]
+        if use_segments:
+            checks.insert(0, ("segments", "embeddings", self._local_segment_versions))
+        for cat_key, inv_key, local_versions in checks:
             t0 = time.monotonic()
-            inv_key = "embeddings" if cat_key == "segments" else cat_key
-            available_versions = {row[0]: row[1]
-                                  for row in inventory.get(inv_key, [])}
+            rows = inventory.get(inv_key) or []
+            available_versions = {
+                row[0]: row[1] for row in rows
+                if isinstance(row, list) and len(row) >= 2
+                and (cat_key != "segments" or (len(row) > 2 and row[2]))}
             if not available_versions:
                 continue
-            local = self._get_existing_versions(
-                table, uuid_col, available_versions)
+            local = local_versions(available_versions)
             new = [u for u in available_versions if u not in local]
             outdated = [u for u, v in available_versions.items()
                         if u in local and local[u] < v]
@@ -446,11 +490,14 @@ class SyncClient:
         return total_imported
 
     def _import_items(self, category: str, result: dict) -> int:
-        """Import a pull response into the local database."""
-        importer = getattr(self, f"_import_{category}", None)
-        if not importer:
+        """Import a pull response into the local database — a category of
+        _IMPORTERS only, whatever a payload names itself (a pull, a push,
+        a share file)."""
+        importer = self._IMPORTERS.get(category)
+        if importer is None:
             logger.warning(f"No importer for category: {category}")
             return 0
+        importer = importer.__get__(self)
 
         conn = self._get_conn()
         try:
@@ -633,6 +680,10 @@ class SyncClient:
         decoded = []
         for item in items:
             prov = item.get("provenance") or {}
+            if not _on_the_grid(item.get("segments"), prov.get("duration_seconds")):
+                logger.warning("sync import: dropping track %s — segments off the grid",
+                               str(item.get("track_uuid", "?"))[:8])
+                continue
             segs, bad = [], None
             for s in item.get("segments", []):
                 try:
@@ -821,70 +872,6 @@ class SyncClient:
             return None
         return source_map.get((item["track_uuid"], p["chromaprint"]))
 
-    def _import_embeddings(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            # Batch upsert embedding models (deduplicated)
-            models_seen = {}
-            for item in items:
-                mid = item.get("model_uuid")
-                if mid and mid not in models_seen:
-                    models_seen[mid] = (
-                        mid, item.get("model_name", "unknown"),
-                        len(item.get("vector", [])),
-                    )
-            if models_seen:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO embedding_models (id, name, dimension)
-                       VALUES %s ON CONFLICT (id) DO NOTHING""",
-                    list(models_seen.values()),
-                    template="(%s, %s, %s)",
-                )
-
-            # Provenance registers for ALL items (universal material facts);
-            # the data write skips rows that carry MY OWN segments — importing
-            # only the mean would re-point the provenance those segments
-            # inherit through their embeddings row (lying segments, broken
-            # segment seals). Peer-imported rows have no segments, so imports
-            # keep refreshing each other freely.
-            source_map = self._upsert_analysis_sources(cur, items)
-            items = self._drop_protected(
-                cur, items,
-                """SELECT e.track_id::text FROM embeddings e
-                   WHERE e.track_id = ANY(%s::uuid[])
-                     AND EXISTS (SELECT 1 FROM embedding_segments es
-                                 WHERE es.embedding_id = e.id)""",
-                "embeddings")
-            if not items:
-                return 0
-
-            # Batch upsert embeddings
-            values = [
-                (
-                    item["track_uuid"], item.get("model_uuid"),
-                    str(item.get("vector", [])),
-                    self._source_id(source_map, item),
-                    item.get("analysis_version", 1),
-                )
-                for item in items
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO embeddings
-                   (track_id, model_id, vector, analysis_source_id,
-                    analysis_version)
-                   VALUES %s
-                   ON CONFLICT (track_id, model_id) DO UPDATE SET
-                       vector = EXCLUDED.vector,
-                       analysis_source_id = EXCLUDED.analysis_source_id,
-                       analysis_version = EXCLUDED.analysis_version,
-                       updated_at = CURRENT_TIMESTAMP""",
-                values,
-                template="(%s, %s, %s::vector, %s, %s)",
-                page_size=200,
-            )
-        return len(items)
-
     def _import_audio_features(self, conn, items: list[dict],
                                batches: dict) -> int:
         batch_ok = self._batch_verifier(batches)
@@ -1031,20 +1018,40 @@ class SyncClient:
                          " %s::timestamptz, %s, %s, %s, %s, TRUE)")
         return len(values)
 
+    # The categories an import takes, and their importers. Every one of them
+    # verifies seals; nothing outside this map is imported.
+    _IMPORTERS = {
+        "segments": _import_segments,
+        "audio_features": _import_audio_features,
+        "track_mbids": _import_track_mbids,
+    }
 
-def import_pushed(db_dsn: str, category: str, payload: dict) -> int:
+
+def import_pushed(db_dsn: str, category: str, payload: dict, budget: int) -> int:
     """Verify and import a payload a peer PUSHED to us.
 
     The receiving side of push-seeding deliberately reuses the pull path's
     import gate rather than growing a second one: same seal verification,
     same first-hand protection, same precedence rules. A pushed record gets
     exactly the scrutiny a pulled one does — the only difference is who
-    started the conversation.
+    started the conversation. Before that, the push is cut to what this
+    node's own answer to an offer would have asked for
+    (sync_queries.wanted_for_push): its tracklist, the gaps, the carry
+    limit's room, the phantom switch — a pusher chooses nothing else.
     """
     if category not in CARRY_CATEGORIES:
         raise ValueError(f"category not carryable: {category}")
     client = SyncClient(api_client=None, db_dsn=db_dsn)
     try:
-        return client._import_items(category, payload)
+        items = [it for it in payload.get("items") or [] if isinstance(it, dict)]
+        wanted = sync_queries.wanted_for_push(
+            client._get_conn(), category, [it.get("track_uuid") for it in items], budget)
+        kept = [it for it in items if it.get("track_uuid") in wanted]
+        if len(kept) < len(items):
+            logger.info("carry push: %d of %d %s item(s) not asked for — dropped",
+                        len(items) - len(kept), len(items), category)
+        if not kept:
+            return 0
+        return client._import_items(category, {**payload, "items": kept})
     finally:
         client._close_conn()

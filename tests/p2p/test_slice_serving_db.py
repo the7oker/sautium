@@ -33,6 +33,13 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
 DBNAME = "sautium_slice_serving_test"
 KEY = ed25519.Ed25519PrivateKey.generate()
 PUB = KEY.public_key().public_bytes_raw().hex()
+
+
+@pytest.fixture(autouse=True)
+def _author(monkeypatch):
+    """The test key is the slice author the release names."""
+    from desktop.p2p import master_node
+    monkeypatch.setattr(master_node, "SLICE_AUTHORS", (PUB,))
 VERSION = "20261101-001500"
 
 

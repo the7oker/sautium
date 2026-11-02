@@ -17,6 +17,13 @@ ed25519 = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519
 KEY = ed25519.Ed25519PrivateKey.generate()
 PUB = KEY.public_key().public_bytes_raw().hex()
 
+
+@pytest.fixture(autouse=True)
+def _author(monkeypatch):
+    """The test key is the slice author the release names."""
+    from desktop.p2p import master_node
+    monkeypatch.setattr(master_node, "SLICE_AUTHORS", (PUB,))
+
 ARTIST = "0b0c25f4-f31c-46a5-a4fb-ccbf53d663bd"
 OTHER = "8e4f0f9a-1c0b-4b1e-9b0a-0b0c25f4f31c"
 REC_A = "11111111-1111-4111-8111-111111111111"

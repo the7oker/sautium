@@ -15,9 +15,8 @@ the public sources. Neither is anything Last.fm answered — bios, tags,
 similars, track stats, genre descriptions (since 2026-09-19): its API terms
 do not allow redistribution, so that layer is node-local and every node
 fetches its own by name. Audio analysis travels as SEGMENTS with their seals
-(pull category `segments`); the track-level mean is derived locally by the
-importer and the legacy `embeddings` mean pull remains only for peers
-without the `segments` capability.
+(pull category `segments`), the only way it travels; the track-level mean is
+derived locally by the importer.
 """
 
 import base64
@@ -210,7 +209,8 @@ async def carry_push(category: str, request: Request) -> dict:
     _require_sharing()
     if carry_importer is None:
         raise HTTPException(status_code=404, detail="carry not supported")
-    if _carry_budget() <= 0:
+    budget = _carry_budget()
+    if budget <= 0:
         raise HTTPException(status_code=403, detail="not carrying")
 
     category = category.replace("-", "_")
@@ -228,7 +228,7 @@ async def carry_push(category: str, request: Request) -> dict:
         items = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(items, list) or len(items) > 10000:
             return None
-        return carry_importer.import_pushed(settings.database_url, category, payload)
+        return carry_importer.import_pushed(settings.database_url, category, payload, budget)
 
     try:
         imported = await in_peer_lane(_run)
@@ -721,47 +721,6 @@ async def pull_segments(req: PullRequest) -> dict:
         return await in_peer_lane(_run)
     except Exception as e:
         logger.error(f"Pull segments failed: {e}")
-        raise HTTPException(status_code=500, detail="internal error")
-
-
-@router.post("/pull/embeddings")
-async def pull_embeddings(req: PullRequest) -> dict:
-    """Legacy mean-vector pull — kept for peers without the `segments`
-    capability. Capable peers pull `segments` and derive the mean locally."""
-    _require_sharing()
-    if not req.uuids:
-        return {"category": "embeddings", "items": []}
-
-    def _run():
-        rows = _db_query(
-            f"""SELECT e.track_id::text AS track_uuid,
-                       em.id::text AS model_uuid, em.name AS model_name,
-                       e.vector::text AS vector, e.analysis_version,
-                       {_PROVENANCE_COLS}
-                FROM embeddings e
-                INNER JOIN embedding_models em ON em.id = e.model_id
-                LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
-                WHERE e.track_id = ANY(%s::uuid[])""",
-            [req.uuids],
-        )
-
-        items = []
-        for r in rows:
-            items.append({
-                "track_uuid": r["track_uuid"],
-                "model_uuid": r["model_uuid"],
-                "model_name": r["model_name"],
-                "vector": _parse_vector(r["vector"]),
-                "analysis_version": r["analysis_version"],
-                "provenance": _provenance_item(r),
-            })
-
-        return {"category": "embeddings", "items": items}
-
-    try:
-        return await in_peer_lane(_run)
-    except Exception as e:
-        logger.error(f"Pull embeddings failed: {e}")
         raise HTTPException(status_code=500, detail="internal error")
 
 

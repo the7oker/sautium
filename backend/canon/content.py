@@ -40,6 +40,18 @@ logger = logging.getLogger(__name__)
 
 _NO_DUR = 9999     # duration tolerance that effectively ignores duration (title-only)
 
+# A recording bound from this node's own files outranks a different binding
+# a peer's seal brought (track_mbids.imported): first-writer-wins let any
+# sealed claim hold a recording for good. The seal guard clears the peer's
+# seal as the row changes hands; this node signs its own binding later. An
+# imported row that says the same is left as it came.
+_LOCAL_BINDING_WINS = """
+    ON CONFLICT (recording_mbid) DO UPDATE SET
+        track_id = EXCLUDED.track_id, confidence = EXCLUDED.confidence, imported = FALSE
+    WHERE track_mbids.imported
+      AND (track_mbids.track_id, track_mbids.confidence)
+          IS DISTINCT FROM (EXCLUDED.track_id, EXCLUDED.confidence)"""
+
 # Cascade passes (cheap→specialised), each re-tried only on the prior residue:
 #   (label, exact_dur_tol, fuzzy_dur_tol, fuzzy_sim, min_matched, coverage_frac, cap_min_to_ntracks)
 # cap=True lets a single tight (title+duration) match verify a 1-track album
@@ -565,7 +577,7 @@ def apply_artist(artist_id, name: str, plan: dict = None) -> dict:
                             st["files"] += cur.rowcount
                         cur.execute("INSERT INTO track_mbids (recording_mbid, track_id, "
                                     "confidence) VALUES (%s,%s,'overlap_verified') "
-                                    "ON CONFLICT (recording_mbid) DO NOTHING", (rec, tid))
+                                    + _LOCAL_BINDING_WINS, (rec, tid))
                         st["track_mbids"] += cur.rowcount
                 for mbid in plan["artist_mbids"]:
                     cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
@@ -673,8 +685,7 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
         FROM owned_files mf
         JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
         WHERE ta.artist_id = %(a)s::uuid AND mf.recording_mbid IS NOT NULL
-        ON CONFLICT (recording_mbid) DO NOTHING
-    """, {"a": canon_id})
+    """ + _LOCAL_BINDING_WINS, {"a": canon_id})
     return st
 
 

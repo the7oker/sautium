@@ -20,11 +20,50 @@ import psycopg2
 import psycopg2.extras
 
 from desktop.api_client import BackendAPIClient
+from desktop.p2p import wire
 from desktop.p2p.mb_slice_queries import (MB_LOAD_LOCK_KEY, PROTOCOL_VERSION,
-                                          SLICE_TABLES, addr_uuid,
+                                          SLICE_TABLES, addr_uuid, bandcamp_page,
                                           name_key as lower_key,
                                           store_slice_blob,
                                           verify_slice_entry)
+
+_URL_COL = SLICE_TABLES["mb_url"].index("url")
+_URL_ID_COL = SLICE_TABLES["mb_url"].index("id")
+_LINK_URL_COL = SLICE_TABLES["mb_l_release_url"].index("entity1")   # both link tables: one column list
+
+
+def _rows(core: dict):
+    """{table: decoded rows} of a verified slice in its wire shape — each
+    table one of SLICE_TABLES, each row a list of its columns — or None for
+    anything else: a malformed entry is dropped, never raised on."""
+    tables = core.get("tables")
+    if not isinstance(tables, dict) or not set(tables) <= set(SLICE_TABLES):
+        return None
+    out = {}
+    for t, cols in SLICE_TABLES.items():
+        raw = tables.get(t) or []
+        if not isinstance(raw, list) or not all(isinstance(r, str) for r in raw):
+            return None
+        try:
+            rows = [wire.loads(r) for r in raw]
+        except ValueError:
+            return None
+        if not all(isinstance(r, list) and len(r) == len(cols) for r in rows):
+            return None
+        out[t] = rows
+    return out
+
+
+def _shop_pages_only(tables: dict) -> dict:
+    """A slice's url subtree cut to Bandcamp shop pages, as the dump loader
+    keeps them (mb_slice_queries.bandcamp_page): the Buy button opens what
+    these rows name, and a slice is the author's word, not a store's."""
+    urls = [r for r in tables.get("mb_url") or [] if bandcamp_page(r[_URL_COL])]
+    kept = {r[_URL_ID_COL] for r in urls}
+    out = dict(tables, mb_url=urls)
+    for t in ("mb_l_artist_url", "mb_l_release_url"):
+        out[t] = [r for r in tables.get(t) or [] if r[_LINK_URL_COL] in kept]
+    return out
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +123,6 @@ class MBSliceClient:
         an author's statement, not a transport hiccup). Returns per-batch
         stats; an 'error' dict means the whole exchange failed."""
         import hashlib as _hashlib
-        import json as _json
 
         resp = self.peer_api.mb_slice(names)
         if not resp or "error" in resp or "detail" in resp:
@@ -112,12 +150,13 @@ class MBSliceClient:
             if not isinstance(entry, dict):
                 continue                      # missing at this peer
             out = verify_slice_entry(name, entry)
-            if out is None:
+            rows = _rows(out[0]) if out is not None else None
+            if rows is None:
                 dropped += 1
-                logger.warning(f"MB slice for {name!r}: signature/identity "
+                logger.warning(f"MB slice for {name!r}: signature/identity/shape "
                                f"check failed — dropped")
                 continue
-            verified[name] = (out[0], out[1], entry)
+            verified[name] = (out[0], out[1], entry, _shop_pages_only(rows))
         if dropped and not verified:
             return {"error": "all slices failed verification"}
 
@@ -136,7 +175,7 @@ class MBSliceClient:
             cur.execute("SELECT pg_advisory_lock_shared(%s)", (MB_LOAD_LOCK_KEY,))
         try:
             with conn.cursor() as cur:
-                for name, (core, blob_gz, entry) in verified.items():
+                for name, (core, blob_gz, entry, tables) in verified.items():
                     matched = core.get("artists_matched") or {}
                     n_matched = sum(len(v) for v in matched.values())
                     stats["matched"] += n_matched
@@ -144,14 +183,13 @@ class MBSliceClient:
                         if t not in stats["truncated"]:
                             stats["truncated"].append(t)
                     # Rows travel as canonical JSON strings inside the
-                    # signed blob (deterministic sort) — decode here, and
-                    # identifiers still never come from the wire: only
-                    # SLICE_TABLES names/columns are used for SQL.
+                    # signed blob (deterministic sort), decoded and checked
+                    # above (_rows); identifiers still never come from the
+                    # wire: only SLICE_TABLES names/columns are used for SQL.
                     for t, cols in SLICE_TABLES.items():
-                        raw = (core.get("tables") or {}).get(t)
-                        if not raw:
+                        rows = tables[t]
+                        if not rows:
                             continue
-                        rows = [_json.loads(r) for r in raw]
                         stats["rows_received"] += len(rows)
                         inserted = psycopg2.extras.execute_values(
                             cur,

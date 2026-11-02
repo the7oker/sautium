@@ -24,7 +24,7 @@ import psycopg2
 import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
-from desktop.p2p import diag_protocol, lb_slice_cycle, mb_slice_queries, sync_walk, wire
+from desktop.p2p import chat_wire, diag_protocol, lb_slice_cycle, mb_slice_queries, sync_walk, wire
 from desktop.p2p.addrs import fmt_addr, is_internet_vantage
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
@@ -123,6 +123,7 @@ class P2PManager:
         self._diag_task: Optional[asyncio.Task] = None
         # Live peer-relay subscriptions: relay_pubkey -> asyncio.Task
         self._peer_relay_subs: dict[str, asyncio.Task] = {}
+        self._relay_refused_until: dict[str, float] = {}     # peer relay key -> when to ask again
         # This node among the nodes of its account: every relay keeps one
         # wake stream per instance, so a second machine signed into the same
         # account holds its own stream instead of taking this one's
@@ -130,6 +131,7 @@ class P2PManager:
         self._wake_instance = secrets.token_hex(8)
         self._peer_relay_addrs: dict[str, tuple] = {}
         self._reachability_task: Optional[asyncio.Task] = None
+        self._relay_cap_task: Optional[asyncio.Task] = None
         # unknown | reachable | cgnat | unreachable — see _reachability_loop
         self._reachability_status = "unknown"
 
@@ -488,6 +490,7 @@ class P2PManager:
             self._reachability_task = asyncio.create_task(
                 self._reachability_loop()
             )
+            self._relay_cap_task = asyncio.create_task(self._relay_cap_loop())
             self._directory_register_task = asyncio.create_task(
                 self._directory_register_loop()
             )
@@ -694,7 +697,7 @@ class P2PManager:
                      self._upnp_renewal_task, self._master_wake_task,
                      self._peer_relay_task, self._diag_task,
                      *self._peer_relay_subs.values(),
-                     self._reachability_task):
+                     self._reachability_task, self._relay_cap_task):
             if task:
                 task.cancel()
                 try:
@@ -1042,6 +1045,7 @@ class P2PManager:
             "invite_code": account["invite_code"],
         }
 
+        from desktop.node_identity import sign_message
         for ip, port in peers:
             url = f"https://{fmt_addr(ip, port)}/api/chat/handshake"
             try:
@@ -1053,7 +1057,8 @@ class P2PManager:
                     connector=aiohttp.TCPConnector(ssl=channel_ctx)
                 ) as session:
                     async with session.post(
-                        url, json=handshake_data,
+                        url, json=chat_wire.sign_handshake(
+                            sign_message, handshake_data, invite_code),
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
                         if resp.status == 200:
@@ -1257,12 +1262,12 @@ class P2PManager:
 
         # Sign request to prove key ownership (prevents metadata leakage).
         # Timestamp-bound (±60s server-side) so a captured signature cannot
-        # replay forever — mirrors the HMAC window.
+        # replay forever — mirrors the HMAC window — and made for this one
+        # friend, so no node it reaches can present it to another.
         import uuid as _uuid
         nonce = str(_uuid.uuid4())
         ts = int(time.time())
-        sig_bytes = sign_message(
-            f"history_request:{ts}:{nonce}".encode("utf-8"))
+        sig_bytes = sign_message(chat_wire.history_payload(ts, nonce, friend_pubkey))
 
         payload = {
             "public_key_hex": account["public_key_hex"],
@@ -1292,9 +1297,10 @@ class P2PManager:
                 logger.debug(f"History request to {ip}:{port} failed: {e}")
                 continue
 
-            # Decrypt each message and prepare for import
+            # Open each message's envelope and prepare for import: its uuid
+            # and time are the box's, never the listing's.
             raw_messages = data.get("messages", [])
-            if not raw_messages:
+            if not isinstance(raw_messages, list) or not raw_messages:
                 logger.debug(
                     f"No history from {ip}:{port} for "
                     f"{friend.get('username', '?')}"
@@ -1302,19 +1308,23 @@ class P2PManager:
                 return {"imported": 0, "skipped": 0, "delivered": 0}
 
             decrypted = []
-            for msg in raw_messages:
+            for msg in raw_messages[:chat_wire.HISTORY_EXPORT_MAX]:
                 try:
-                    content = self._chat_service.decrypt_message(
-                        msg["encrypted"], friend_pubkey
-                    )
-                    decrypted.append({
-                        "message_uuid": msg.get("message_uuid"),
-                        "direction": msg["direction"],
-                        "content": content,
-                        "timestamp": msg["timestamp"],
-                    })
+                    env = self._chat_service.decrypt_envelope(
+                        msg["encrypted"], friend_pubkey)
                 except Exception as e:
-                    logger.debug(f"Failed to decrypt history msg: {e}")
+                    logger.debug(f"Failed to open history msg: {e}")
+                    continue
+                if (msg.get("message_uuid") != env["uuid"]
+                        or msg.get("direction") not in ("in", "out")):
+                    logger.debug("History msg disagrees with its envelope — skipped")
+                    continue
+                decrypted.append({
+                    "message_uuid": env["uuid"],
+                    "direction": msg["direction"],
+                    "content": env["text"],
+                    "timestamp": env["ts"],
+                })
 
             if not decrypted:
                 return {"imported": 0, "skipped": 0, "delivered": 0}
@@ -1429,10 +1439,10 @@ class P2PManager:
             if join_token and proof_pending and invite in self._proof_wait_invites:
                 logger.debug(f"Handshake for {invite} waits for our identity proof")
                 continue
+            from desktop.node_identity import sign_message
             if join_token:
                 import time as _time
 
-                from desktop.node_identity import sign_message
                 ts = int(_time.time())
                 per_friend["token_id"] = join_token
                 per_friend["ts"] = ts
@@ -1443,6 +1453,10 @@ class P2PManager:
                     per_friend["birth_cert"] = own_cert
                     if own_proof:
                         per_friend["identity_proof"] = own_proof
+            else:
+                # The classic path, signed for this one responder
+                # (desktop/p2p/chat_wire.handshake_payload).
+                per_friend = chat_wire.sign_handshake(sign_message, per_friend, invite)
 
             peers = await self._find_friend_peers(friend)
 
@@ -1547,7 +1561,9 @@ class P2PManager:
                                         f"{ip}:{port}: {err}")
                                     continue
                                 resolved = await self._try_nudge(
-                                    ip, port, invite, handshake_data,
+                                    ip, port, invite,
+                                    chat_wire.sign_handshake(
+                                        sign_message, handshake_data, invite),
                                     session,
                                 )
                                 if resolved:
@@ -1960,7 +1976,8 @@ class P2PManager:
                     continue    # /health lies about the channel owner
                 if (not node_id or node_id == own
                         or node_id == master_pubkey
-                        or node_id in self._peer_relay_subs):
+                        or node_id in self._peer_relay_subs
+                        or self._relay_refused_until.get(node_id, 0) > time.time()):
                     continue
                 scored.append(
                     (0 if node_id in known else 1, ip, port, node_id))
@@ -2047,6 +2064,7 @@ class P2PManager:
                 wants_relay = (not is_master
                                or self._reachability_status
                                in ("cgnat", "unreachable"))
+                headers = {}
                 if wants_relay and time.time() >= relay_denied_until:
                     until = int(time.time()) + VOUCHER_TTL
                     v_sig = sign_message(voucher_payload(
@@ -2054,6 +2072,13 @@ class P2PManager:
                     from urllib.parse import quote
                     url += (f"&invite={quote(account['invite_code'])}"
                             f"&voucher_until={until}&voucher_sig={v_sig}")
+                    # A relay that is not our friend relays for a verified
+                    # identity only: our certificate and proof ride along.
+                    from desktop.p2p.birth_cert import load_certificate, load_proof
+                    cert = load_certificate()
+                    if cert:
+                        from desktop.p2p.peer_auth import HDR_CERT, encode_cert_bundle
+                        headers[HDR_CERT] = encode_cert_bundle(cert, load_proof())
                 # sock_read=45 → two missed 15s keepalives = dead stream
                 async with aiohttp.ClientSession(
                     connector=aiohttp.TCPConnector(
@@ -2061,13 +2086,21 @@ class P2PManager:
                     timeout=aiohttp.ClientTimeout(
                         total=None, connect=10, sock_read=45),
                 ) as session:
-                    async with session.get(url) as resp:
+                    async with session.get(url, headers=headers) as resp:
                         if (resp.status == 429 and is_master
                                 and "voucher_sig" in url):
                             relay_denied_until = time.time() + 3600
                             raise ConnectionError(
                                 "master relay full — falling back to the "
                                 "bare wake channel")
+                        if resp.status in (403, 429) and not is_master:
+                            # A peer relay that is full or will not relay
+                            # for us: let it go — the manager recruits
+                            # another — instead of holding a slot on it.
+                            self._relay_refused_until[relay_pubkey] = time.time() + 3600
+                            logger.info("Peer relay %s… refused us (HTTP %s) — released",
+                                        relay_pubkey[:8], resp.status)
+                            return
                         if resp.status != 200:
                             raise ConnectionError(
                                 f"wake subscribe: HTTP {resp.status}")
@@ -2258,6 +2291,29 @@ class P2PManager:
                     datetime.now(timezone.utc).isoformat(),
             })
         logger.info(f"Reachability: {status} ({detail})")
+
+    async def _relay_cap_loop(self) -> None:
+        """The relay's capacity on the re-announce cadence (mirror of the
+        Docker node's main._relay_cap_loop): a full relay that sees no
+        other relay grows its cap, one with room in a network that has
+        relays decays back, and the capability is announced only while a
+        stranger could still get a slot — a full relay withdraws it."""
+        from desktop.p2p.dht_service import REANNOUNCE_INTERVAL
+        while self._running:
+            await asyncio.sleep(REANNOUNCE_INTERVAL)
+            if not (self._dht_service and self._sync_server
+                    and self._reachability_status == "reachable"
+                    and self._read_setting("p2p.relay_enabled") is not False):
+                continue
+            try:
+                peers = await self._dht_service.lookup_capability("relay")
+                self._sync_server.adapt_relay_cap(len(set(peers)) > 1)
+                if self._sync_server.relay_has_room():
+                    await self._dht_service.announce_capability("relay")
+                else:
+                    self._dht_service.withdraw_capability("relay")
+            except Exception as e:
+                logger.warning(f"relay cap step failed: {e}")
 
     async def _apply_relay_role(self, status: str) -> None:
         """Relay role (Phase D): reachable + non-lite + enabled → announce
@@ -2529,10 +2585,11 @@ class P2PManager:
             timeout=aiohttp.ClientTimeout(total=10),
         ) as session:
             for idx, msg in enumerate(messages):
+                msg_uuid = msg.get("message_uuid") or self._chat_service.give_uuid(msg["id"])
+                sent_at = self._iso_utc(msg["timestamp"])
                 try:
-                    encrypted = self._chat_service.encrypt_message(
-                        msg["content"], pubkey
-                    )
+                    encrypted = self._chat_service.encrypt_envelope(
+                        msg["content"], msg_uuid, sent_at, pubkey)
                 except Exception as e:
                     logger.error(
                         f"Encrypt failed for friend {friend_id}: {e}"
@@ -2542,8 +2599,8 @@ class P2PManager:
                 payload = {
                     "from_public_key": self._chat_service.public_key_hex,
                     "encrypted": encrypted,
-                    "timestamp": self._iso_utc(msg["timestamp"]),
-                    "message_uuid": msg.get("message_uuid", ""),
+                    "timestamp": sent_at,
+                    "message_uuid": msg_uuid,
                 }
 
                 delivered = False
@@ -2597,15 +2654,17 @@ class P2PManager:
             for msg in messages:
                 if not msg.get("message_uuid"):
                     continue                       # pre-uuid rows stay on the direct path
+                sent_at = self._iso_utc(msg["timestamp"])
                 try:
-                    encrypted = self._chat_service.encrypt_message(msg["content"], MASTER_PUBKEY_HEX)
+                    encrypted = self._chat_service.encrypt_envelope(
+                        msg["content"], msg["message_uuid"], sent_at, MASTER_PUBKEY_HEX)
                 except Exception as e:
                     logger.error(f"Encrypt for mailbox failed: {e}")
                     return
                 result = await mailbox_client.deposit(
                     session, master_pubkey=MASTER_PUBKEY_HEX,
                     sender_pubkey=self._chat_service.public_key_hex, sign=sign_message,
-                    encrypted=encrypted, timestamp_iso=self._iso_utc(msg["timestamp"]),
+                    encrypted=encrypted, timestamp_iso=sent_at,
                     message_uuid=msg["message_uuid"])
                 if result is None:
                     return                         # unreachable or refused: the outbox keeps the rest
@@ -2668,15 +2727,13 @@ class P2PManager:
         delivered_any = False
         relay_ctx = pinned_ssl_context(relay_pubkey)
         for msg in messages:
+            msg_uuid = msg.get("message_uuid") or self._chat_service.give_uuid(msg["id"])
             try:
-                encrypted = self._chat_service.encrypt_message(
-                    msg["content"], friend_pubkey)
+                encrypted = self._chat_service.encrypt_envelope(
+                    msg["content"], msg_uuid, self._iso_utc(msg["timestamp"]), friend_pubkey)
             except Exception as e:
                 logger.error(f"Encrypt failed for friend {friend_id}: {e}")
                 return delivered_any
-            msg_uuid = msg.get("message_uuid", "")
-            if not msg_uuid:
-                continue  # pre-uuid row; the direct path still covers it
             ct_hash = hashlib.sha256(encrypted.encode("utf-8")).hexdigest()
             ts = int(time.time())
             payload = {

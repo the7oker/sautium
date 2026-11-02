@@ -12,6 +12,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import UUID
 
 import psycopg2.extras
 
@@ -22,9 +23,10 @@ logger = logging.getLogger(__name__)
 
 # Sync-protocol capabilities advertised on /health. Peers pick pull categories
 # by this list: "segments" = this node serves per-track segment bundles
-# (pull category `segments`, seals on the wire) and the legacy mean-vector
-# `embeddings` pull is deprecated for it. Mirrored by the FastAPI backend
-# (backend/routers/sync.py SYNC_CAPABILITIES) — keep in step.
+# (pull category `segments`, seals on the wire) — the one way audio
+# analysis travels: the unsealed mean-vector pull is gone (2026-11-03), so a
+# peer without the capability is asked for no audio at all. Mirrored by the
+# FastAPI backend (backend/routers/sync.py SYNC_CAPABILITIES) — keep in step.
 CAPABILITIES = ["segments", "carry", "holdings"]
 
 # A track bundle is K=12..24 vectors, each ~2.7KB base64 + ~1.3KB proof —
@@ -468,39 +470,6 @@ def pull_segments(conn, uuids: list[str]) -> dict:
             "batches": _batches_map(conn, roots)}
 
 
-def pull_embeddings(conn, uuids: list[str]) -> dict:
-    """Legacy mean-vector pull — kept for peers without the `segments`
-    capability. Capable peers pull `segments` and derive the mean locally."""
-    if not uuids:
-        return {"category": "embeddings", "items": []}
-
-    rows = db_query(
-        conn,
-        f"""SELECT e.track_id::text AS track_uuid,
-                   em.id::text AS model_uuid, em.name AS model_name,
-                   e.vector::text AS vector, e.analysis_version,
-                   {_PROVENANCE_COLS}
-            FROM embeddings e
-            INNER JOIN embedding_models em ON em.id = e.model_id
-            LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
-            WHERE e.track_id = ANY(%s::uuid[])""",
-        [uuids],
-    )
-
-    items = []
-    for r in rows:
-        items.append({
-            "track_uuid": r["track_uuid"],
-            "model_uuid": r["model_uuid"],
-            "model_name": r["model_name"],
-            "vector": _parse_vector(r["vector"]),
-            "analysis_version": r["analysis_version"],
-            "provenance": _provenance_item(r),
-        })
-
-    return {"category": "embeddings", "items": items}
-
-
 def pull_audio_features(conn, uuids: list[str]) -> dict:
     """Feature rows travel WITH their seals (author sig + Merkle proof) and a
     `batches` map for the Worker timestamps — imported rows stay verifiable
@@ -554,7 +523,6 @@ def pull_track_mbids(conn, track_uuids: list[str]) -> dict:
 PULL_HANDLERS = {
     "tracks": pull_tracks,
     "segments": pull_segments,
-    "embeddings": pull_embeddings,
     "audio-features": pull_audio_features,
     "audio_features": pull_audio_features,
     "track-mbids": pull_track_mbids,
@@ -705,6 +673,61 @@ def count_carried_tracks(conn) -> int:
     return int(rows[0]["n"]) if rows else 0
 
 
+def _is_uuid(value) -> bool:
+    try:
+        UUID(value)
+        return True
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def phantom_layer_on(conn) -> bool:
+    """The owner's switch over the phantom layer (discovery.phantom_layer):
+    on unless explicitly off — a missing row is the default
+    (backend/routers/settings._DEFAULTS)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM user_settings WHERE key = 'discovery.phantom_layer'")
+        row = cur.fetchone()
+    return not (row is not None and row[0] is False)
+
+
+# What a track lacks, per carry category — the test both the offer's answer
+# and a push's admission make.
+_LACKS = {
+    "segments": """NOT EXISTS (SELECT 1 FROM embeddings e
+                               JOIN embedding_segments es ON es.embedding_id = e.id
+                              WHERE e.track_id = {t})""",
+    "audio_features": "NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = {t})",
+    "track_mbids": "NOT EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = {t})",
+}
+
+
+def wanted_for_push(conn, category: str, track_uuids: list, budget: int) -> set:
+    """Of the track uuids a peer PUSHED, the ones this node takes — what its
+    own answer to an offer (wanted_tracks) would have named: a track on its
+    tracklist with a recording MBID, lacking the category, owned or — with
+    the phantom layer on — phantom; for segments, within the room the carry
+    limit leaves (an owned track's gap-fill is never carrying). No offer
+    state is kept: the push is judged by the same rules as the offer."""
+    ids = [u for u in dict.fromkeys(track_uuids) if _is_uuid(u)]
+    if not ids or budget <= 0:
+        return set()
+    room = budget - count_carried_tracks(conn) if category == "segments" else len(ids)
+    rows = db_query(conn, f"""
+        WITH cand AS (
+            SELECT p.id, EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = p.id) AS owned
+              FROM unnest(%(ids)s::uuid[]) AS p(id)
+             WHERE EXISTS (SELECT 1 FROM album_tracks at2
+                            WHERE at2.track_id = p.id AND at2.recording_mbid IS NOT NULL)
+               AND {_LACKS[category].format(t="p.id")})
+        SELECT id::text AS track_uuid FROM cand WHERE owned
+        UNION ALL
+        (SELECT id::text FROM cand WHERE NOT owned AND %(phantoms)s
+          ORDER BY id LIMIT %(room)s)""",
+        {"ids": ids, "phantoms": phantom_layer_on(conn), "room": max(room, 0)})
+    return {r["track_uuid"] for r in rows}
+
+
 def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
     """Answer an offer (v4): the offer speaks recording MBIDs, the answer
     speaks OUR track uuids — and only uuids that already exist here.
@@ -731,13 +754,16 @@ def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
         return empty
 
     mbids = recording_mbids[:CARRY_MAX_TRACKS]
+    # The phantom layer is the owner's switch: off, only owned tracks are
+    # wanted — their gap-fill is the node's own library.
     matched = db_query(
         conn,
         """SELECT DISTINCT at2.track_id::text AS track_uuid
              FROM unnest(%s::uuid[]) AS o(mbid)
              JOIN album_tracks at2 ON at2.recording_mbid = o.mbid
+            WHERE %s OR EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = at2.track_id)
             LIMIT %s""",
-        [mbids, room],
+        [mbids, phantom_layer_on(conn), room],
     )
     uuids = [r["track_uuid"] for r in matched]
     if not uuids:
@@ -842,6 +868,19 @@ def get_track_uuids_for_artist(conn, artist_uuid: str) -> list[str]:
     return [r["track_id"] for r in rows]
 
 
+# A track's audio analysis, as the gap sets count it: a row with segments,
+# or this node's own (a first-hand source). A mean without either — what
+# the unsealed mean pull once left behind — is a gap: sealed segments
+# replace it at the next pull.
+_ANALYSED = """EXISTS (SELECT 1 FROM embeddings e
+                       WHERE e.track_id = {t}.track_id
+                         AND (EXISTS (SELECT 1 FROM embedding_segments es
+                                      WHERE es.embedding_id = e.id)
+                              OR EXISTS (SELECT 1 FROM analysis_sources s
+                                         WHERE s.id = e.analysis_source_id
+                                           AND NOT s.imported)))"""
+
+
 def get_unenriched_artist_uuids(conn) -> list[str]:
     """
     Artists with at least one track that has neither an embedding nor
@@ -853,11 +892,9 @@ def get_unenriched_artist_uuids(conn) -> list[str]:
     """
     rows = db_query(
         conn,
-        """SELECT DISTINCT ta.artist_id::text AS artist_uuid
+        f"""SELECT DISTINCT ta.artist_id::text AS artist_uuid
            FROM track_artists ta
-           WHERE NOT EXISTS (
-               SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id
-           )
+           WHERE NOT {_ANALYSED.format(t="ta")}
            AND NOT EXISTS (
                SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id
            )
@@ -866,7 +903,7 @@ def get_unenriched_artist_uuids(conn) -> list[str]:
     return [r["artist_uuid"] for r in rows]
 
 
-RARE_SEARCH_SQL = """
+RARE_SEARCH_SQL = f"""
     WITH engaged AS (
         SELECT DISTINCT ta.artist_id
           FROM track_artists ta
@@ -880,8 +917,7 @@ RARE_SEARCH_SQL = """
       FROM engaged e
       JOIN track_artists ta ON ta.artist_id = e.artist_id
       LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
-     WHERE NOT EXISTS (SELECT 1 FROM embeddings em
-                        WHERE em.track_id = ta.track_id)
+     WHERE NOT {_ANALYSED.format(t="ta")}
        AND NOT EXISTS (SELECT 1 FROM audio_features af
                         WHERE af.track_id = ta.track_id)
      GROUP BY ta.artist_id
@@ -923,9 +959,9 @@ def get_incomplete_artist_uuids(conn) -> list[str]:
     """
     rows = db_query(
         conn,
-        """SELECT DISTINCT ta.artist_id::text AS artist_uuid
+        f"""SELECT DISTINCT ta.artist_id::text AS artist_uuid
            FROM track_artists ta
-           WHERE NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
+           WHERE NOT {_ANALYSED.format(t="ta")}
               OR NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)""",
     )
     return [r["artist_uuid"] for r in rows]

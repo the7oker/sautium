@@ -51,9 +51,11 @@ PROBE_CONCURRENCY = 4
 
 # (client, node id, the /health it answered)
 Source = Tuple[BackendAPIClient, str, dict]
-# (address, discovered) — a discovered one (DHT, directory, master hint) is
-# subject to the dead-address record, a manual or LAN peer never
-Candidate = Tuple[str, bool]
+# (address, discovered, the only key that may answer there or None) — a
+# discovered one (DHT, directory, master hint) is subject to the dead-address
+# record, a manual or LAN peer never; the master hint names an address, so
+# only the master's key may answer at it
+Candidate = Tuple[str, bool, Optional[str]]
 
 
 class SourceFinder:
@@ -64,7 +66,7 @@ class SourceFinder:
         capability: str,
         directory: Tuple[str, ...],
         usable: Callable[[dict], bool],
-        connect: Callable[[str], Awaitable[Optional[BackendAPIClient]]],
+        connect: Callable[..., Awaitable[Optional[BackendAPIClient]]],
         dead: DeadAddresses,
         dht,
         lan,
@@ -79,7 +81,8 @@ class SourceFinder:
             ("mbslices", "mbdump").
         usable: /health → whether the node serves this family at all.
         connect: the walk's connect_peer — the /health probe, the TLS-pinned
-            key, the own-address guard.
+            key (an expected one when the candidate names it), the
+            own-address guard.
         dead: the walk's record of dead discovered addresses — skipped here;
             `connect` feeds it with how each one answered.
         """
@@ -137,16 +140,16 @@ class SourceFinder:
         return lan, self.dht is not None
 
     async def _primary(self) -> List[Candidate]:
-        candidates = [(addr, False) for addr in self.manual_peers]
+        candidates = [(addr, False, None) for addr in self.manual_peers]
         if self.lan is not None:
             for ip, port in self.lan.peers:
                 info = self.lan.get_peer_info(ip, port) or {}
                 candidates.append(
-                    (f"{info.get('scheme', 'https')}://{fmt_addr(ip, port)}", False))
+                    (f"{info.get('scheme', 'https')}://{fmt_addr(ip, port)}", False, None))
         if self.dht is not None:
             try:
                 for ip, port in await self.dht.lookup_capability(self.capability, want_all=True):
-                    candidates.append((fmt_addr(ip, port), True))
+                    candidates.append((fmt_addr(ip, port), True, None))
             except Exception as e:
                 logger.warning(f"{self.label}: DHT capability lookup failed: {e}")
         return candidates
@@ -158,10 +161,11 @@ class SourceFinder:
         candidates: List[Candidate] = []
         for cap in self.directory:
             for host, hport, _pk in await loop.run_in_executor(None, node_hints.fetch, cap):
-                candidates.append((fmt_addr(host, hport), True))
+                candidates.append((fmt_addr(host, hport), True, None))
         hint = await loop.run_in_executor(None, master_hint.fetch)
         if hint:
-            candidates.append((fmt_addr(*hint), True))
+            from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+            candidates.append((fmt_addr(*hint), True, MASTER_PUBKEY_HEX or None))
         return candidates
 
     async def _probe(self, candidates: List[Candidate], seen: set,
@@ -169,8 +173,8 @@ class SourceFinder:
         """The usable sources among `candidates`, in their order, one per node
         (a LAN and a public address of one node are one source). A discovered
         address the record holds as dead is not dialled."""
-        addrs: List[str] = []
-        for addr, discovered in candidates:
+        addrs: List[tuple] = []
+        for addr, discovered, expected in candidates:
             if addr in seen:
                 continue
             seen.add(addr)
@@ -179,15 +183,15 @@ class SourceFinder:
                 continue
             if discovered and self._dead.backing_off(addr):
                 continue
-            addrs.append(addr)
+            addrs.append((addr, expected))
         sem = asyncio.Semaphore(PROBE_CONCURRENCY)
 
-        async def probe(addr: str) -> Optional[BackendAPIClient]:
+        async def probe(addr: str, expected: Optional[str]) -> Optional[BackendAPIClient]:
             async with sem:
-                return await self._connect(addr)
+                return await self._connect(addr, expected_pubkey=expected)
 
         found: List[Source] = []
-        for api in await asyncio.gather(*(probe(a) for a in addrs)):
+        for api in await asyncio.gather(*(probe(a, e) for a, e in addrs)):
             if api is None or not api.last_health:
                 continue
             health = api.last_health

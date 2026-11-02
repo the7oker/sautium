@@ -220,7 +220,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 - [auto] MusicBrainz and ListenBrainz data travel as signed slices, per artist name and per artist MBID — `desktop/p2p/mb_slice_queries.py`; `desktop/p2p/lb_slice_queries.py`
 - [UI] Sync & P2P settings: sharing, background enrichment, re-analysis of synced audio, relay role, diagnostics, sync interval, rare-artist keys, carry budget — `PUT /api/settings/sync`
 - [UI] Friends by invite code, invite link (token with rights, uses, expiry) or email; rename, pin, block, delete — `POST /api/p2p/friends/add`; `POST /api/p2p/tokens`; `POST /api/p2p/invite-by-email`; `PATCH /api/p2p/friends/{id}`
-- [UI] Chat is end-to-end encrypted text, delivered directly or through a relay — `desktop/p2p/chat_service.py: encrypt_message`; `POST /api/relay/forward`
+- [UI] Chat is end-to-end encrypted text, delivered directly or through a relay — `desktop/p2p/chat_service.py: encrypt_envelope`; `POST /api/relay/forward`
 - [auto] The admission gate prices strangers' requests in work; it ships in `shadow` — computed and logged, nothing charged — `desktop/p2p/pricing.py: Pricer`; `routers/settings.py: _DEFAULTS` (`p2p.gate_mode`)
 - [UI] Support diagnostics, on by default, one switch: content-free event reports, and a bundle only on a signed, single-use warrant; the launcher sends, a Docker node only records — `desktop/p2p/p2p_manager.py: _diag_report`, `_diag_handle_warrant`; `desktop/p2p/diag_protocol.py: SCOPES`
 - [L][CLI] Backup: one encrypted `.sbk` per node, keyed by the account password; MusicBrainz and ListenBrainz tables left out — `python -m backup create|inspect|restore|selftest`; `desktop/node_backup.py: BackupWriter`, `EXCLUDED_TABLE_PATTERNS`

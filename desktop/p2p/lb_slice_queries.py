@@ -33,6 +33,8 @@ import gzip
 import hashlib
 import json
 import logging
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
@@ -75,6 +77,24 @@ PROTOCOL_VERSION = 1
 
 class DumpBusy(Exception):
     """A full dump load is in progress on the serving node — retry later."""
+
+
+# A dump's version, as ListenBrainz names its statistics dumps
+# (backend/lb_dump_load._ARCHIVE_RE): YYYYMMDD-HHMMSS.
+_VERSION_RE = re.compile(r"^\d{8}-\d{6}$")
+
+
+def plausible_version(value) -> bool:
+    """A version in the dump's own format and no later than a day ahead: the
+    newest version decides what every node asks again, and one that sorts
+    after every real one would never be superseded."""
+    if not isinstance(value, str) or not _VERSION_RE.match(value):
+        return False
+    try:
+        stamp = datetime.strptime(value, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return stamp <= datetime.now(timezone.utc) + timedelta(days=1)
 
 
 def mbid_key(value) -> Optional[str]:
@@ -284,17 +304,22 @@ def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
 
 def verify_slice_entry(artist_mbid: str, entry: dict,
                        min_version: Optional[str] = None) -> Optional[Tuple[dict, bytes]]:
-    """Full per-artist verification on the receiving side: gunzip → hash →
-    author signature → the blob's own version, artist and protocol match
-    what was asked. Returns (core, blob_gz) or None. Every hop runs exactly
-    this, against the ORIGINAL author's key. Anything malformed on the wire
-    is a rejection, never an exception — the peer is untrusted."""
+    """Full per-artist verification on the receiving side: the author is one
+    the release names (master_node.SLICE_AUTHORS) → gunzip → hash → author
+    signature → the blob's own version (its format, no later than a day
+    ahead), artist and protocol match what was asked. Returns (core,
+    blob_gz) or None. Every hop runs exactly this, against the ORIGINAL
+    author's key. Anything malformed on the wire is a rejection, never an
+    exception — the peer is untrusted."""
     from desktop.node_identity import verify_signature
     from desktop.p2p import wire
+    from desktop.p2p.master_node import SLICE_AUTHORS
     try:
+        author = entry.get("author_pubkey") or ""
+        if author.lower() not in SLICE_AUTHORS:
+            return None                       # no dump holder the release names
         blob_gz = base64.b64decode(entry.get("blob_gz") or "")
         blob = wire.gunzip(blob_gz, BLOB_RAW_MAX)
-        author = entry.get("author_pubkey") or ""
         sig = entry.get("sig") or ""
         if not verify_signature(receipt_message_for(blob), bytes.fromhex(sig), author):
             return None
@@ -304,7 +329,7 @@ def verify_slice_entry(artist_mbid: str, entry: dict,
         if core.get("artist_mbid") != mbid_key(artist_mbid):
             return None
         version = core.get("dump_version")
-        if not isinstance(version, str) or not version:
+        if not plausible_version(version):
             return None
         if min_version is not None and version < min_version:
             return None
@@ -356,6 +381,18 @@ def pending_slice_mbids(conn, limit: int = 200,
         return [(r[0], r[1]) for r in cur.fetchall()]
 
 
+def _count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _row_of(row, mbid: str) -> bool:
+    """[recording mbid, listens, listeners, credited artist mbids] crediting
+    `mbid`."""
+    return (isinstance(row, list) and len(row) == 4 and mbid_key(row[0]) is not None
+            and _count(row[1]) and _count(row[2]) and isinstance(row[3], list)
+            and mbid in {mbid_key(x) for x in row[3]})
+
+
 def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict,
                  source_node: str, source_addr: Optional[str]) -> int:
     """A verified slice into the local tables, in the caller's transaction:
@@ -366,7 +403,9 @@ def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict
     from psycopg2.extras import execute_values
     mbid = mbid_key(artist_mbid)
     version = core["dump_version"]
-    recordings = core.get("recordings") or []
+    # A row counts only in its shape and for the artist it was asked for: the
+    # slice's word on one artist never sets another's numbers.
+    recordings = [r for r in core.get("recordings") or [] if _row_of(r, mbid)]
     with conn.cursor() as cur:
         if recordings:
             execute_values(cur, """
@@ -383,6 +422,8 @@ def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict
                  for r in recordings],
                 template="(%s::uuid, %s, %s, %s::uuid[], %s)", page_size=500)
         artist = core.get("artist")
+        if not (isinstance(artist, list) and len(artist) == 2 and all(map(_count, artist))):
+            artist = None
         if artist:
             cur.execute("""
                 INSERT INTO lb_artist (artist_mbid, listen_count, user_count, dump_version)

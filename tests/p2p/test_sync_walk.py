@@ -107,7 +107,7 @@ class _Walked:
     MASTER = ("198.51.100.99", 8801)
 
     def __init__(self, monkeypatch, dht_nodes, volunteers, answering, empty_handed=()):
-        self.probed, self.drained, self.hint_asked = [], [], 0
+        self.probed, self.drained, self.hint_asked, self.expected = [], [], 0, {}
         walk = _walk()
         walk.dht = SimpleNamespace(is_available=True, tail_enabled=False,
                                    set_tail_enabled=lambda mode: None)
@@ -123,8 +123,9 @@ class _Walked:
         async def lookup():
             return list(dht_nodes)
 
-        async def connect(addr, is_lan=False):
+        async def connect(addr, is_lan=False, expected_pubkey=None):
             self.probed.append(addr)
+            self.expected[addr] = expected_pubkey
             return (SimpleNamespace(base_url=f"https://{addr}", peer_pubkey=None)
                     if addr in answering else None)
 
@@ -155,6 +156,11 @@ def test_the_master_hint_is_asked_when_no_node_answered_and_only_then(monkeypatc
     assert w.hint_asked == 1
     assert "198.51.100.99:8801" in w.probed
     assert w.drained == ["198.51.100.99:8801"]
+    # The hint names an address, never a node: only the master's key may
+    # answer there, while every other address is dialled with no expectation.
+    from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+    assert w.expected["198.51.100.99:8801"] == MASTER_PUBKEY_HEX
+    assert w.expected["198.51.100.20:21000"] is None
     # It stays the last tier: not when a node answered this run, nor when one
     # answered lately with nothing for us.
     w = _Walked(monkeypatch, dht_nodes=[("198.51.100.20", 21000)], volunteers=[],

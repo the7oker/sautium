@@ -79,6 +79,43 @@ UNREACHABLE_BACKOFF_MAX = 24 * 3600
 EMPTY_PEER_TTL = 6 * 3600
 PROBE_CONCURRENCY = 8
 
+# A carry push fits every carrier's body cap — a launcher's peer server
+# takes 1 MiB (aiohttp's client_max_size) — with room for the envelope.
+PUSH_MAX_BYTES = 900 * 1024
+
+
+def push_parts(payload: dict) -> list:
+    """`payload` (pull-shaped) cut into parts of at most PUSH_MAX_BYTES of
+    items each, in order, each with the `batches` entries its items' seals
+    reference. An item larger than the bound alone is a part of its own."""
+    batches = payload.get("batches") or {}
+
+    def roots_of(item) -> set:
+        if "segments" in item:
+            return {s.get("batch_root") for s in item["segments"]} - {None}
+        return {item.get("batch_root")} - {None}
+
+    parts, items, roots, size = [], [], set(), 0
+
+    def close():
+        parts.append({**payload, "items": items,
+                      "batches": {r: batches[r] for r in roots if r in batches}})
+
+    for item in payload.get("items") or []:
+        mine = roots_of(item)
+        n = len(json.dumps(item)) + sum(len(json.dumps(batches.get(r))) for r in mine - roots)
+        if items and size + n > PUSH_MAX_BYTES:
+            close()
+            items, roots, size = [], set(), 0
+            n = len(json.dumps(item)) + sum(len(json.dumps(batches.get(r))) for r in mine)
+        items.append(item)
+        roots |= mine
+        size += n
+    if items:
+        close()
+    return parts
+
+
 # Each exchange with a peer has its own deadline, and each peer's session
 # one too (desktop/api_client.py, PEER_SESSION_S); a run ends by this, so
 # no set of peers holds the walk — or the triggers merged behind it.
@@ -676,7 +713,10 @@ class SyncWalk:
                 None, master_hint.fetch)
             last = _fresh([hint]) if hint else []
             if last:
-                reachable = await self._probe_candidates(last)
+                # The hint names an address, never a node: only the master's
+                # own key may answer there.
+                from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+                reachable = await self._probe_candidates(last, MASTER_PUBKEY_HEX)
         if remaining:
             await _drain(reachable)
         rare_mode = await self._measure_network(
@@ -731,6 +771,7 @@ class SyncWalk:
     # ---------------------------------------------------------- peer access
 
     async def connect_peer(self, peer_addr: str, is_lan: bool = False,
+                           expected_pubkey: Optional[str] = None,
                            ) -> Optional[BackendAPIClient]:
         """A working client for a peer, or None. `scheme://host:port` is
         tried as given; a bare `host:port` is HTTPS only — every peer
@@ -746,7 +787,8 @@ class SyncWalk:
         master hint), and how it answered goes into `self.dead`: a node that
         refused — a 429, a 503, a 402 it could not be paid — is alive and
         busy, never dead; no answer, a timeout, our own key or a channel
-        that is not the node /health names is dead."""
+        that is not the node /health names is dead. `expected_pubkey`: the
+        only key the channel may be (the master hint's address)."""
         loop = asyncio.get_event_loop()
         peer_identity = self._identity()
 
@@ -761,7 +803,8 @@ class SyncWalk:
             return True
 
         if "://" in peer_addr:
-            api = BackendAPIClient(peer_addr, peer=peer_identity)
+            api = BackendAPIClient(peer_addr, peer=peer_identity,
+                                   expected_pubkey=expected_pubkey)
             attempts = 2 if is_lan else 1
             for attempt in range(attempts):
                 if await _healthy(api):
@@ -771,7 +814,8 @@ class SyncWalk:
                     await asyncio.sleep(5)
             return None
 
-        api = BackendAPIClient(f"https://{peer_addr}", peer=peer_identity)
+        api = BackendAPIClient(f"https://{peer_addr}", peer=peer_identity,
+                               expected_pubkey=expected_pubkey)
         if await _healthy(api):
             self.dead.answered(peer_addr)
             return api
@@ -782,7 +826,7 @@ class SyncWalk:
         return None
 
     async def _probe_candidates(
-        self, addrs: list[str],
+        self, addrs: list[str], expected_pubkey: Optional[str] = None,
     ) -> list[tuple[str, BackendAPIClient]]:
         """Health-probe candidates concurrently — sequentially every dead
         address cost its full 5 s timeout, N of them per run — and keep the
@@ -791,7 +835,7 @@ class SyncWalk:
 
         async def probe(addr: str):
             async with sem:
-                api = await self.connect_peer(addr)
+                api = await self.connect_peer(addr, expected_pubkey=expected_pubkey)
             if api is not None:
                 self._note_sighting(api)
             return addr, api
@@ -972,10 +1016,12 @@ class SyncWalk:
             pushed = 0
 
             def push(category: str, payload: dict) -> int:
-                if not payload.get("items"):
-                    return 0
-                res = peer_api.carry_push(category.replace("_", "-"), payload)
-                return (res or {}).get("imported") or 0
+                took = 0
+                for part in push_parts(payload):
+                    imported = (peer_api.carry_push(category.replace("_", "-"), part)
+                                or {}).get("imported")
+                    took += imported if isinstance(imported, int) else 0
+                return took
 
             for category, batch in (("segments", SEGMENT_PULL_BATCH),
                                     ("audio_features", 500),

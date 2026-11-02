@@ -1150,7 +1150,7 @@ async def health_check() -> Dict[str, Any]:
     health_status["mb_dump"] = mb_dump_version()
     health_status["node_id"] = node_pubkey_hex()
     # Sync-protocol capabilities — peers pick pull categories by this list
-    # (e.g. `segments` bundles vs the legacy mean-vector pull).
+    # (`segments`: the sealed analysis bundles).
     health_status["capabilities"] = SYNC_CAPABILITIES
 
     return health_status

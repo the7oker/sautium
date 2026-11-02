@@ -3,8 +3,11 @@
 Every node auto-adds this contact at P2P start (silently; removal is
 respected forever) and reaches it via the ordinary DHT user-key lookup.
 The master is an edge-verified cache and a message relay, never a trusted
-authority (docs/design/P2P-SYNC-INTEGRITY.md) — these constants pin its
-exact identity so a DHT impersonator fails the handshake pubkey check.
+authority over what nodes hold (docs/design/P2P-SYNC-INTEGRITY.md) — these
+constants pin its exact identity so a DHT impersonator fails the handshake
+pubkey check. One exception since 2026-11-03: catalogue slices
+(SLICE_AUTHORS), where the dump's word is the signature of a dump holder the
+release names.
 
 The master account is deterministic (Argon2id over its username+password),
 so rotating that password rotates the identity and REQUIRES shipping new
@@ -24,6 +27,15 @@ MASTER_PUBKEY_HEX = ("3aa2ae91bc41863468ea4df3346811bc"
 # Fixed UUID of the public support token (minted on the master with
 # require_birth_cert=TRUE — the anti-sybil gate).
 MASTER_TOKEN_ID = "95f7c9f1-6b74-4f98-824d-faf7a1030d3b"
+
+
+# The keys whose signed catalogue slices (MusicBrainz and ListenBrainz) a
+# node takes. The canon renames, merges and mints on what a slice says, and
+# any key can sign one: a slice counts only under the signature of a dump
+# holder the release names — the master today. Another dump holder joins
+# this list in a release; blobs travel on through replicas under their
+# author's signature either way.
+SLICE_AUTHORS = (MASTER_PUBKEY_HEX,) if MASTER_PUBKEY_HEX else ()
 
 
 def master_configured() -> bool:

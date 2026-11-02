@@ -28,8 +28,8 @@ import psycopg2.pool
 
 from aiohttp import web
 
-from desktop.p2p import (addrs, admission, contact_log, lb_slice_queries, mb_slice_queries,
-                         peer_auth, sync_queries, wire, witness)
+from desktop.p2p import (addrs, admission, chat_wire, contact_log, lb_slice_queries,
+                         mb_slice_queries, peer_auth, sync_queries, wire, witness)
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,9 @@ DB_POOL_MAX = 32
 # Signed-request replay window + relay caps — mirror
 # backend/routers/peer_chat.py, keep in step.
 TS_WINDOW = 60
-TOKEN_FRIENDS_PER_HOUR = 30
+# Token friendships accepted in any hour, all tokens together — sized for an
+# announcement's newcomers, each of whom has mined its own identity proof.
+TOKEN_FRIENDS_PER_HOUR = 600
 PROBE_COOLDOWN = 60
 PROBE_TIMEOUT = 3
 PROBE_HEALTH_CAP = 256 * 1024
@@ -852,7 +854,8 @@ class SyncServer:
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
-        if self._carry_budget() <= 0:
+        budget = self._carry_budget()
+        if budget <= 0:
             return self._json_response(
                 request, {"error": "not carrying"}, status=403)
 
@@ -874,7 +877,7 @@ class SyncServer:
         from desktop.sync_client import import_pushed
         try:
             imported = await asyncio.get_event_loop().run_in_executor(
-                None, partial(import_pushed, self.db_dsn, category, body))
+                None, partial(import_pushed, self.db_dsn, category, body, budget))
         except Exception as e:
             logger.error(f"Carry push {category} failed: {e}")
             return self._json_response(
@@ -1017,6 +1020,10 @@ class SyncServer:
         except (TypeError, ValueError):
             return False
 
+    @classmethod
+    def _verify_peer_sig_bytes(cls, pubkey_hex: str, message: bytes, sig_hex: str) -> bool:
+        return cls._verify_peer_sig(pubkey_hex, message.decode("utf-8"), sig_hex)
+
     @staticmethod
     def _verify_peer_sig(pubkey_hex: str, message: str, sig_hex: str) -> bool:
         from desktop.node_identity import verify_signature
@@ -1110,15 +1117,25 @@ class SyncServer:
                                          body.get("signature", "")):
                 return self._json_response(
                     request, {"error": "invalid signature"}, status=403)
+        # The classic path too: nothing is read, written or answered for a
+        # handshake its key did not sign, for this node, just now
+        # (mirror of backend/routers/peer_chat._handshake).
+        elif not chat_wire.handshake_signed(body, own_pubkey, self._verify_peer_sig_bytes):
+            return self._json_response(
+                request, {"error": "handshake signature required"}, status=403)
+
+        def _refused():
+            # One answer for a blocked key, an unknown one and a key that is
+            # not the one a contact was made with: the status tells nothing
+            # of who this node knows.
+            return self._json_response(
+                request, {"accepted": False, "error": "not accepted"}, status=403)
 
         friends = self._chat_service.get_friends()
-        match = next(
-            (f for f in friends
-             if f["invite_code"] == peer_invite
-             or f["public_key_hex"] == peer_pubkey), None)
+        match = (next((f for f in friends if f["public_key_hex"] == peer_pubkey), None)
+                 or next((f for f in friends if f["invite_code"] == peer_invite), None))
         if match and match.get("is_blocked"):
-            return self._json_response(
-                request, {"error": "blocked"}, status=403)
+            return _refused()
         resolved = (match if match
                     and match["public_key_hex"] == peer_pubkey else None)
 
@@ -1169,10 +1186,8 @@ class SyncServer:
                     return self._json_response(
                         request, {"error": admission.detail},
                         status=admission.http_status, headers=headers)
-            tok = invite_tokens.consume_token(conn, token_id)
-            if tok is None:
-                return self._json_response(
-                    request, {"error": "token invalid"}, status=403)
+            # The hour's ceiling before the use is spent: a refusal burns
+            # nothing of the token.
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT count(*) FROM friends WHERE source = 'token'"
@@ -1180,7 +1195,11 @@ class SyncServer:
                 if cur.fetchone()[0] >= TOKEN_FRIENDS_PER_HOUR:
                     return self._json_response(
                         request, {"error": "token accept rate exceeded"},
-                        status=429)
+                        status=429, headers={"Retry-After": "300"})
+            tok = invite_tokens.consume_token(conn, token_id)
+            if tok is None:
+                return self._json_response(
+                    request, {"error": "token invalid"}, status=403)
 
             fid = self._chat_service.add_friend(
                 public_key_hex=peer_pubkey, invite_code=peer_invite,
@@ -1228,17 +1247,22 @@ class SyncServer:
                                             peer_pubkey))
 
         # -- classic path: mutual-add consent -------------------------------
-        if match is None:
+        # A friend we hold under this key: presence, and the proof that it
+        # knows our current key (it signed for it) — never its name or
+        # invite string, which are ours to keep as they were made.
+        if resolved is not None:
+            self._chat_service.update_friend_last_seen(peer_pubkey)
+            self._chat_service.set_bound_identity(resolved["id"], own_pubkey)
+            return _accept()
+        # The operator's own pending contact for this invite code, and only
+        # that: a token stub resolves through our token handshake, and a
+        # contact already made with another key gets no second row.
+        if (match is None or not match["public_key_hex"].startswith("pending:")
+                or match.get("join_token_id")):
             logger.info(
-                f"Handshake rejected from {peer_username} "
-                f"({peer_pubkey[:16]}...) — not in our friends list"
-            )
-            return self._json_response(
-                request,
-                {"accepted": False, "error": "not in friends list"},
-                status=403,
-            )
-
+                f"Handshake refused from {peer_username} "
+                f"({peer_pubkey[:16]}...) — no contact for this key")
+            return _refused()
         self._chat_service.add_friend(
             public_key_hex=peer_pubkey,
             invite_code=peer_invite,
@@ -1246,10 +1270,7 @@ class SyncServer:
         )
         # A successful handshake means the peer's launcher is up
         # and reachable right now — it's the cleanest passive
-        # presence signal we have. Without this update the
-        # friend stays "offline" in the UI until they actually
-        # send a chat message, which mismatched the "is the
-        # peer online?" question users actually want answered.
+        # presence signal we have.
         self._chat_service.update_friend_last_seen(peer_pubkey)
         logger.info(
             f"Handshake accepted from {peer_username} "
@@ -1327,8 +1348,10 @@ class SyncServer:
         key ownership (prevents metadata leakage to third parties).
 
         Request:  {public_key_hex, signature, ts, nonce, since (optional ISO)}
-          signature = Ed25519_sign("history_request:{ts}:{nonce}")
-        Response: {messages: [{message_uuid, direction, encrypted, timestamp}]}
+          signature = Ed25519_sign(chat_wire.history_payload(ts, nonce, our key))
+        Response: {messages: [{message_uuid, direction, encrypted, timestamp}]},
+          each `encrypted` an envelope (chat_wire.envelope), at most
+          chat_wire.HISTORY_EXPORT_MAX of them from `since`.
 
         The timestamp bound (±TS_WINDOW) replaced the unbound nonce scheme —
         a captured signature used to replay forever. Hard cutover on both
@@ -1366,8 +1389,10 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "stale timestamp"}, status=403
             )
-        if not self._verify_peer_sig(
-                requester_pubkey, f"history_request:{int(ts)}:{nonce}",
+        if not isinstance(nonce, str) or not self._verify_peer_sig_bytes(
+                requester_pubkey,
+                chat_wire.history_payload(int(ts), nonce,
+                                          self.account_info.get("public_key_hex", "")),
                 signature_hex):
             return self._json_response(
                 request, {"error": "invalid signature"}, status=403
@@ -1402,7 +1427,7 @@ class SyncServer:
 
         # Get messages for this friend from our DB
         messages = self._chat_service.get_history_for_export(
-            friend["id"], since=since
+            friend["id"], since=since, limit=chat_wire.HISTORY_EXPORT_MAX
         )
 
         # Encrypt each message's content with requester's public key
@@ -1411,9 +1436,8 @@ class SyncServer:
         for msg in messages:
             if msg["direction"] == "out":
                 max_out_id = max(max_out_id, msg["id"])
-            encrypted = self._chat_service.encrypt_message(
-                msg["content"], requester_pubkey
-            )
+            if not msg["message_uuid"]:
+                continue                     # a row from before uuids: nothing can bind it
             msg_ts = msg["timestamp"]
             ts_str = (
                 msg_ts.isoformat() if hasattr(msg_ts, "isoformat")
@@ -1421,13 +1445,12 @@ class SyncServer:
             )
             if "+" not in ts_str and not ts_str.endswith("Z"):
                 ts_str += "+00:00"
+            uuid_str = str(msg["message_uuid"])
             result_messages.append({
-                # NULL-safe: str(None) would ship the literal string
-                # "None" and crash the importer's uuid lookup.
-                "message_uuid": (str(msg["message_uuid"])
-                                 if msg["message_uuid"] else None),
+                "message_uuid": uuid_str,
                 "direction": msg["direction"],
-                "encrypted": encrypted,
+                "encrypted": self._chat_service.encrypt_envelope(
+                    msg["content"], uuid_str, ts_str, requester_pubkey),
                 "timestamp": ts_str,
             })
         if max_out_id:
@@ -1507,6 +1530,37 @@ class SyncServer:
     # (MIRRORS backend/routers/peer_chat.py — keep contracts in step)
     # -----------------------------------------------------------------------
 
+    def _relay_enabled(self) -> bool:
+        """The relay switch (p2p.relay_enabled, default on), read through the
+        cached settings reader the sharing switch uses."""
+        now = time.time()
+        if now - getattr(self, "_relay_checked", 0.0) >= 10.0:
+            self._relay_checked = now
+            try:
+                with self._db() as conn, conn.cursor() as cur:
+                    cur.execute("SELECT value FROM user_settings WHERE key = 'p2p.relay_enabled'")
+                    row = cur.fetchone()
+                self._relay_on = True if row is None else bool(row[0])
+            except Exception as e:
+                logger.warning("relay switch unreadable (%s) — not relaying", e)
+                self._relay_on = False
+        return self._relay_on
+
+    async def _unverified_relay_client(self, request: web.Request, pubkey: str):
+        """None for a verified identity, else the refusal to answer."""
+        bundle = peer_auth.decode_cert_bundle(request.headers.get(peer_auth.HDR_CERT) or "")
+        if bundle is None:
+            return self._json_response(
+                request, {"error": "identity certificate required"}, status=403)
+        admission = await self._identity_gate().admit(
+            pubkey, bundle["cert"], bundle["proof"], request.remote)
+        if admission.status == "verified":
+            return None
+        headers = ({"Retry-After": str(admission.retry_after)}
+                   if admission.retry_after else None)
+        return self._json_response(request, {"error": admission.detail},
+                                   status=admission.http_status, headers=headers)
+
     def ping_wake(self, pubkey: Optional[str] = None,
                   kind: str = "message") -> None:
         """Signal every stream of `pubkey` (of every key when None)."""
@@ -1571,6 +1625,17 @@ class SyncServer:
                     v_sig):
                 return self._json_response(
                     request, {"error": "invalid voucher"}, status=403)
+            if friend is None:
+                # A stranger's slot: only while this node relays at all, and
+                # for a verified identity — a certificate and its proof,
+                # checked once by the identity gate — never a bare key
+                # (mirror of backend/routers/peer_chat.wake_stream).
+                if not self._relay_enabled():
+                    return self._json_response(
+                        request, {"error": "not relaying"}, status=403)
+                refusal = await self._unverified_relay_client(request, pubkey)
+                if refusal is not None:
+                    return refusal
             if pubkey not in self._relay_clients \
                     and self.relay_client_count() >= self._relay_cap:
                 return self._json_response(
@@ -1936,6 +2001,12 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "invite code mismatch"}, status=403
             )
+        # Signed by the key it names, for this node, just now — as the
+        # classic handshake it follows (chat_wire.handshake_signed).
+        if not chat_wire.handshake_signed(
+                body, self.account_info.get("public_key_hex", ""), self._verify_peer_sig_bytes):
+            return self._json_response(
+                request, {"error": "handshake signature required"}, status=403)
 
         # Check DB first — skip Worker call if no pending invites
         loop = asyncio.get_event_loop()

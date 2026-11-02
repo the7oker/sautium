@@ -382,8 +382,14 @@ class LbSliceCycle:
     async def find_sources(self) -> tuple[list[tuple[BackendAPIClient, str, Optional[str]]],
                                           Optional[str]]:
         """Reachable slice sources as (client, node_id, version), REPLICAS
-        FIRST, and the newest dump version any of them holds — read from the
-        /health each answered when it was probed."""
+        FIRST, and the newest dump version a slice author holds — read from
+        the /health of the sources the release names as authors
+        (master_node.SLICE_AUTHORS: their channel is their key, so that
+        /health is the author's own word), in the dump's version format and
+        no later than a day ahead. Any other /health only lists its node as
+        a source: the newest version decides what every node asks again,
+        and a stranger's claim of one would freeze the asking."""
+        from desktop.p2p.master_node import SLICE_AUTHORS
         sources, _ = await self._sources.find()
         replicas: list = []
         dumps: list = []
@@ -391,9 +397,10 @@ class LbSliceCycle:
         for api, node_id, health in sources:
             dump_version = health.get("lb_dump") or None
             held_version = health.get("lb_slices_version") or None
-            for v in (dump_version, held_version):
-                if isinstance(v, str) and v and (newest is None or v > newest):
-                    newest = v
+            if str(node_id).lower() in SLICE_AUTHORS:
+                for v in (dump_version, held_version):
+                    if lb_slice_queries.plausible_version(v) and (newest is None or v > newest):
+                        newest = v
             if dump_version:
                 dumps.append((api, node_id, dump_version))
             else:

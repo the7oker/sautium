@@ -37,6 +37,13 @@ DBNAME = "sautium_lb_slice_test"
 KEY = ed25519.Ed25519PrivateKey.generate()
 PUB = KEY.public_key().public_bytes_raw().hex()
 
+
+@pytest.fixture(autouse=True)
+def _author(monkeypatch):
+    """The test key is the slice author the release names."""
+    from desktop.p2p import master_node
+    monkeypatch.setattr(master_node, "SLICE_AUTHORS", (PUB,))
+
 A_OWNED, A_ENGAGED, A_PHANTOM, A_ASKED = (uuid.UUID(int=n) for n in (1, 2, 3, 4))
 M_OWNED, M_ENGAGED, M_PHANTOM, M_ASKED = (str(uuid.UUID(int=n)) for n in (11, 12, 13, 14))
 T_OWNED, T_ENGAGED = uuid.UUID(int=21), uuid.UUID(int=22)

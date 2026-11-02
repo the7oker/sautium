@@ -37,6 +37,7 @@ import tarfile
 import time
 from typing import Callable, Dict, Optional
 
+from desktop.p2p.mb_slice_queries import BANDCAMP_PAGE
 from dump_common import (ProgressCb, ProgressReader, collect_index_ddl,
                          download_resumable, drop_indexes, noop as _noop,
                          rebuild_indexes, unlock_all, verify_sha256)
@@ -168,8 +169,8 @@ _LOAD_WEIGHT = {
 
 # daily.bandcamp.com is editorial; every other subdomain is an artist's or a
 # label's shop. Bare bandcamp.com is the site itself, never a page to buy from.
-_BANDCAMP_URL = re.compile(rb"^https?://(?!daily\.)[a-z0-9-]+\.bandcamp\.com/",
-                           re.IGNORECASE)
+# One rule for every mb_url row a node keeps, a slice's included.
+_BANDCAMP_URL = re.compile(BANDCAMP_PAGE.encode(), re.IGNORECASE)
 
 _FILTER_AFTER = {"mb_l_artist_url": "mb_url", "mb_l_release_url": "mb_url"}
 

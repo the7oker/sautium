@@ -20,6 +20,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_query, db_query_one
+from desktop.p2p.mb_slice_queries import BANDCAMP_PAGE
 from genre_queries import album_genre_chips
 from playback.manager import active_hqp_endpoint
 from sql_queries import ALBUM_FILES, best_rip_order, owned_rank, rip_quality
@@ -90,7 +91,7 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
             GROUP BY d.release
         ),
         release_pages AS (
-            SELECT u.url,
+            SELECT regexp_replace(u.url, '^http://', 'https://', 'i') AS url,
                    CASE WHEN u.url ~* '/album/' THEN 0
                         WHEN u.url ~* '/track/' THEN 1
                         ELSE 2 END AS kind,
@@ -100,14 +101,16 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
             JOIN mb_l_release_url l ON l.entity0 = r.id
             JOIN mb_url u ON u.id = l.entity1
             LEFT JOIN release_date rd ON rd.release = r.id
+            WHERE u.url ~* %(shop)s
         ),
         artist_pages AS (
-            SELECT regexp_replace(u.url, '^(https?://[^/]+).*$', '\\1') || '/music' AS url,
+            SELECT regexp_replace(u.url, '^https?://([^/]+).*$', 'https://\\1') || '/music' AS url,
                    acn.position
             FROM rg
             JOIN mb_artist_credit_name acn ON acn.artist_credit = rg.artist_credit
             JOIN mb_l_artist_url l ON l.entity0 = acn.artist
             JOIN mb_url u ON u.id = l.entity1
+            WHERE u.url ~* %(shop)s
         )
         SELECT (SELECT url FROM release_pages
                 ORDER BY kind, first_date NULLS LAST, url LIMIT 1) AS album_url,
@@ -119,7 +122,7 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
                  AND EXISTS (SELECT 1 FROM mb_url))
                 OR EXISTS (SELECT 1 FROM mb_slice_fetches f
                            WHERE f.name_key = lower(btrim(%(name)s)))) AS covered
-    """, {"rg": rg_mbid, "name": artist_name})
+    """, {"rg": rg_mbid, "name": artist_name, "shop": BANDCAMP_PAGE})
     if row["album_url"]:
         return {"state": "album", "url": row["album_url"]}
     if row["artist_url"]:

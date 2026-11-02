@@ -32,10 +32,12 @@ class _Net:
     def __init__(self, answers):
         self.answers = answers
         self.probed: list = []
+        self.expected: dict = {}
         self.dead = DeadAddresses()
 
-    async def connect(self, addr):
+    async def connect(self, addr, expected_pubkey=None):
         self.probed.append(addr)
+        self.expected[addr] = expected_pubkey
         health = self.answers.get(addr)
         if "://" not in addr:
             if health:

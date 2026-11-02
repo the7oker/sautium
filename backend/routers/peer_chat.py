@@ -34,7 +34,7 @@ from db_pool import db_query_one, get_conn, in_chat_lane
 from p2p_chat import MAX_ENCRYPTED_CHARS, get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity, verify_invite_code, witness_recorder
 from serving import EventStream
-from desktop.p2p import wire
+from desktop.p2p import chat_wire, wire
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,9 @@ chat_router = APIRouter(prefix="/api/chat", tags=["peer-chat"])
 relay_router = APIRouter(prefix="/api/relay", tags=["peer-relay"])
 
 TS_WINDOW = 60                 # seconds, mirrors auth_hmac's replay window
-TOKEN_FRIENDS_PER_HOUR = 30    # soft cap on token auto-accepts
+# Token friendships accepted in any hour, all tokens together — sized for an
+# announcement's newcomers, each of whom has mined its own identity proof.
+TOKEN_FRIENDS_PER_HOUR = 600
 PROBE_COOLDOWN = 60            # seconds per pubkey
 # The probe's call-back: its whole exchange, and what the prober's /health
 # may answer (a few hundred bytes) — mirrors desktop/p2p/sync_server.py.
@@ -126,15 +128,17 @@ def _verify_ed25519(pubkey_hex: str, message: str, sig_hex: str) -> bool:
 
 
 def _find_friend_for_handshake(invite_code: str, pubkey: str) -> Optional[dict]:
-    """Match by real pubkey, rotated-away pubkey OR invite code — the last
-    catches `pending:` stubs this node's operator pre-added manually."""
+    """Match by the current pubkey OR invite code — the last catches
+    `pending:` stubs this node's operator pre-added manually. A rotated-away
+    key matches nothing (mirror of the launcher)."""
     return db_query_one("""
         SELECT id, username, public_key_hex, invite_code, is_blocked,
-               source::text AS source
+               source::text AS source, join_token_id
           FROM friends
-         WHERE public_key_hex = %s OR previous_public_key_hex = %s
-            OR invite_code = %s
-    """, (pubkey, pubkey, invite_code))
+         WHERE public_key_hex = %s OR invite_code = %s
+         ORDER BY public_key_hex = %s DESC
+         LIMIT 1
+    """, (pubkey, invite_code, pubkey))
 
 
 # ---------------------------------------------------------------------------
@@ -280,10 +284,21 @@ def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
         signed = f"{label}:{int(ts)}:{tid}:{ident['invite_code']}"
         if not _verify_ed25519(peer_pubkey, signed, body.get("signature", "")):
             return _err("invalid signature", 403)
+    # The classic path too: nothing is read, written or answered for a
+    # handshake its key did not sign, for this node, just now (mirror of
+    # desktop/p2p/sync_server.handle_chat_handshake).
+    elif not chat_wire.handshake_signed(
+            body, ident["public_key_hex"],
+            lambda pk, message, sig: _verify_ed25519(pk, message.decode("utf-8"), sig)):
+        return _err("handshake signature required", 403)
 
+    # One answer for a blocked key, an unknown one and a key that is not
+    # the one a contact was made with: the status tells nothing of who this
+    # node knows.
+    refused = JSONResponse({"accepted": False, "error": "not accepted"}, status_code=403)
     match = _find_friend_for_handshake(peer_invite, peer_pubkey)
     if match and match["is_blocked"]:
-        return _err("blocked", 403)
+        return refused
     resolved = (match if match
                 and match["public_key_hex"] == peer_pubkey else None)
 
@@ -337,15 +352,18 @@ def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
                 return JSONResponse({"error": admission.detail},
                                     status_code=admission.http_status,
                                     headers=headers)
-        with get_conn() as conn:
-            tok = invite_tokens.consume_token(conn, token_id)
-        if tok is None:
-            return _err("token invalid", 403)
+        # The hour's ceiling before the use is spent: a refusal burns
+        # nothing of the token.
         recent = db_query_one(
             "SELECT count(*) AS c FROM friends"
             " WHERE source = 'token' AND added_at > NOW() - INTERVAL '1 hour'")
         if recent and recent["c"] >= TOKEN_FRIENDS_PER_HOUR:
-            return _err("token accept rate exceeded", 429)
+            return JSONResponse({"error": "token accept rate exceeded"},
+                                status_code=429, headers={"Retry-After": "300"})
+        with get_conn() as conn:
+            tok = invite_tokens.consume_token(conn, token_id)
+        if tok is None:
+            return _err("token invalid", 403)
 
         fid = svc.add_friend(peer_pubkey, peer_invite, peer_username,
                              source="token", source_token_id=token_id)
@@ -386,12 +404,19 @@ def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
                              grant_in.get("rights", [])))
 
     # -- classic path: mutual-add consent (mirror of sync_server) -----------
-    if match is None:
-        logger.info("Handshake rejected from %s (%s...) — not in our"
-                    " friends list", peer_username, peer_pubkey[:16])
-        return JSONResponse(
-            {"accepted": False, "error": "not in friends list"},
-            status_code=403)
+    # A friend held under this key: presence only — never its name or
+    # invite string, which stay as the contact was made.
+    if resolved is not None:
+        svc.update_friend_last_seen(peer_pubkey)
+        return _accept()
+    # The operator's own pending contact for this invite code, and only
+    # that: a token stub resolves through our token handshake, and a
+    # contact already made with another key gets no second row.
+    if (match is None or not match["public_key_hex"].startswith("pending:")
+            or match["join_token_id"]):
+        logger.info("Handshake refused from %s (%s...) — no contact for this"
+                    " key", peer_username, peer_pubkey[:16])
+        return refused
     svc.add_friend(peer_pubkey, peer_invite, peer_username)
     svc.update_friend_last_seen(peer_pubkey)
     logger.info("Handshake accepted from %s (%s...)",
@@ -500,9 +525,11 @@ def _key_rotation(body: dict) -> JSONResponse:
         return _err("invalid signature", 403)
     friend = svc.get_friend_by_public_key(notice["old_public_key"])
     if friend is None:
+        # Applied on an earlier delivery the sender never heard about — 200,
+        # like the launcher's mirror, so it stops offering this link.
+        if svc.get_friend_by_public_key(notice["new_public_key"]):
+            return JSONResponse({"status": "accepted"})
         return _err("unknown sender", 404)
-    if friend["public_key_hex"] == notice["new_public_key"]:
-        return JSONResponse({"status": "accepted"})       # already applied
     svc.apply_key_rotation(friend["id"], notice["old_public_key"],
                            notice["new_public_key"], notice["new_invite_code"])
     logger.info("Key rotation applied for %s: %s… → %s…",
@@ -534,9 +561,11 @@ def _history(body: dict) -> JSONResponse:
         return _err("missing public_key_hex", 400)
     if not _ts_ok(ts):
         return _err("stale timestamp", 403)
-    if not _verify_ed25519(requester_pubkey,
-                           f"history_request:{int(ts)}:{nonce}",
-                           signature_hex):
+    ident = resolve_identity(settings)
+    if not ident or not _verify_ed25519(
+            requester_pubkey,
+            chat_wire.history_payload(int(ts), nonce, ident["public_key_hex"]).decode("utf-8"),
+            signature_hex):
         return _err("invalid signature", 403)
 
     friend = svc.friend_for_key(requester_pubkey)
@@ -556,25 +585,26 @@ def _history(body: dict) -> JSONResponse:
         except (ValueError, TypeError):
             pass
 
-    messages = svc.get_history_for_export(friend["id"], since=since)
+    messages = svc.get_history_for_export(friend["id"], since=since,
+                                          limit=chat_wire.HISTORY_EXPORT_MAX)
     result_messages = []
     max_out_id = 0
     for msg in messages:
         if msg["direction"] == "out":
             max_out_id = max(max_out_id, msg["id"])
+        if not msg["message_uuid"]:
+            continue                         # a row from before uuids: nothing can bind it
         ts_val = msg["timestamp"]
         ts_str = (ts_val.isoformat() if hasattr(ts_val, "isoformat")
                   else str(ts_val))
         if "+" not in ts_str and not ts_str.endswith("Z"):
             ts_str += "+00:00"
+        uuid_str = str(msg["message_uuid"])
         result_messages.append({
-            # NULL-safe: str(None) would ship the literal string "None"
-            # and crash the importer's uuid lookup.
-            "message_uuid": (str(msg["message_uuid"])
-                             if msg["message_uuid"] else None),
+            "message_uuid": uuid_str,
             "direction": msg["direction"],
-            "encrypted": svc.encrypt_message(msg["content"],
-                                             requester_pubkey),
+            "encrypted": svc.encrypt_envelope(msg["content"], uuid_str, ts_str,
+                                              requester_pubkey),
             "timestamp": ts_str,
         })
     if max_out_id:
@@ -633,6 +663,26 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                 voucher_payload(pubkey, ident["public_key_hex"], v_until),
                 voucher_sig):
             return _err("invalid voucher", 403)
+        if friend is None:
+            # A stranger's slot: only while this node relays at all, and for
+            # a verified identity — a certificate and its proof, checked once
+            # by the identity gate — never a bare key (mirror of
+            # desktop/p2p/sync_server.handle_wake_stream).
+            from routers.settings import _read
+            if not _read("p2p.relay_enabled"):
+                return _err("not relaying", 403)
+            from desktop.p2p import peer_auth
+            bundle = peer_auth.decode_cert_bundle(request.headers.get(peer_auth.HDR_CERT) or "")
+            if bundle is None:
+                return _err("identity certificate required", 403)
+            admission = await _identity_gate().admit(
+                pubkey, bundle["cert"], bundle["proof"],
+                request.client.host if request.client else None)
+            if admission.status != "verified":
+                headers = ({"Retry-After": str(admission.retry_after)}
+                           if admission.retry_after else None)
+                return JSONResponse({"error": admission.detail},
+                                    status_code=admission.http_status, headers=headers)
         if pubkey not in _relay_clients and not relay_has_room():
             return _err("relay full", 429)
         voucher = {"invite_code": invite, "until": v_until,

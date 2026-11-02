@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from db_pool import get_conn
+from desktop.p2p import chat_wire
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +77,19 @@ class PeerChatService:
                 self._curve_private, friend_curve_pub)
         return self._boxes[friend_public_key_hex]
 
-    def encrypt_message(self, plaintext: str, friend_public_key_hex: str) -> str:
+    def encrypt_envelope(self, text: str, message_uuid: str, ts_iso: str,
+                         friend_public_key_hex: str) -> str:
+        """Mirror of chat_service.encrypt_envelope: the uuid and the time
+        boxed with the text (chat_wire.envelope)."""
         import base64
         box = self._get_box(friend_public_key_hex)
         return base64.b64encode(
-            box.encrypt(plaintext.encode("utf-8"))).decode("ascii")
+            box.encrypt(chat_wire.envelope(text, message_uuid, ts_iso))).decode("ascii")
+
+    def decrypt_envelope(self, encrypted_b64: str, sender_public_key_hex: str) -> dict:
+        """Mirror of chat_service.decrypt_envelope."""
+        return chat_wire.open_envelope(
+            self.decrypt_message(encrypted_b64, sender_public_key_hex).encode("utf-8"))
 
     def decrypt_message(self, encrypted_b64: str, sender_public_key_hex: str) -> str:
         import base64
@@ -111,8 +120,8 @@ class PeerChatService:
                            new_public_key_hex: str, new_invite_code: str) -> None:
         """Mirror of chat_service.store_key_rotation + apply_key_rotation in
         one step: the friend row moves to the new key, the old one stays on
-        it as previous_public_key_hex (get_friend_by_public_key answers to
-        both), and the Box cached for the old key is dropped."""
+        it as previous_public_key_hex (a record: nothing answers to it), and
+        the Box cached for the old key is dropped."""
         with get_conn() as conn, conn.cursor() as cur:
             # The friend may already be here under the new key: a node that
             # could not deliver its notice re-introduced itself by token, and
@@ -140,13 +149,15 @@ class PeerChatService:
     # -- friends ------------------------------------------------------------
 
     def get_friend_by_public_key(self, public_key_hex: str) -> Optional[dict]:
+        """By the friend's current key only (mirror of chat_service): a key
+        the friend rotated away from — leaked, perhaps — speaks for nobody."""
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""
                 SELECT id, username, public_key_hex, invite_code, display_name,
                        is_blocked, source::text AS source
                   FROM friends
-                 WHERE public_key_hex = %s OR previous_public_key_hex = %s
-            """, (public_key_hex, public_key_hex))
+                 WHERE public_key_hex = %s
+            """, (public_key_hex,))
             row = cur.fetchone()
             if not row:
                 return None
@@ -248,11 +259,12 @@ class PeerChatService:
             # NOTIFY comes from the trg_p2p_messages_notify trigger.
             return cur.fetchone()[0]
 
-    def _has_message_uuid(self, message_uuid: str) -> bool:
+    def _stored_message(self, message_uuid: str) -> Optional[tuple]:
+        """(friend_id, content) of the message stored under this uuid."""
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM p2p_messages WHERE message_uuid = %s",
+            cur.execute("SELECT friend_id, content FROM p2p_messages WHERE message_uuid = %s",
                         (message_uuid,))
-            return cur.fetchone() is not None
+            return cur.fetchone()
 
     def handle_incoming(self, sender_public_key: str, encrypted_b64: str,
                         timestamp_iso: str,
@@ -271,46 +283,50 @@ class PeerChatService:
             logger.warning("Oversized ciphertext from %s rejected",
                            friend.get("username", "?"))
             return None
-        if message_uuid and self._has_message_uuid(message_uuid):
-            return {"friend_id": friend["id"], "content": "",
-                    "timestamp": None, "duplicate": True}
         try:
-            content = self.decrypt_message(encrypted_b64, sender_public_key)
-        except CryptoError:
-            logger.error("Failed to decrypt message from %s...",
+            env = self.decrypt_envelope(encrypted_b64, sender_public_key)
+        except (CryptoError, ValueError):
+            logger.error("Failed to open a message from %s...",
                          sender_public_key[:16])
+            return None
+        content = env["text"]
+        if message_uuid and message_uuid != env["uuid"]:
+            logger.warning("Message from %s names another uuid than its box — rejected",
+                           friend.get("username", "?"))
             return None
         if len(content) > MAX_PLAINTEXT_CHARS:
             logger.warning("Oversized plaintext from %s rejected",
                            friend.get("username", "?"))
             return None
+        stored = self._stored_message(env["uuid"])
+        if stored is not None:
+            if stored[0] == friend["id"] and stored[1] == content:
+                return {"friend_id": friend["id"], "content": "",
+                        "timestamp": None, "duplicate": True}
+            logger.warning("Message %s from %s reuses a uuid — rejected",
+                           env["uuid"][:8], friend.get("username", "?"))
+            return None
 
-        ts = _sender_timestamp(timestamp_iso)
+        ts = _sender_timestamp(env["ts"])
         self.store_message(friend["id"], "in", content, ts,
-                           delivered=True, message_uuid=message_uuid)
+                           delivered=True, message_uuid=env["uuid"])
         self.update_friend_last_seen(sender_public_key)
         return {"friend_id": friend["id"], "content": content, "timestamp": ts}
 
     def get_history_for_export(self, friend_id: int,
-                               since: Optional[datetime] = None) -> list:
-        """Messages for history sync, oldest first — includes row ids so the
-        caller can mark exported outbound rows delivered (a requester that
-        proved key ownership HAS the export: export is delivery)."""
+                               since: Optional[datetime] = None, limit: int = 2000) -> list:
+        """Messages for history sync, oldest first from `since`, at most
+        `limit` (mirror of chat_service) — with row ids so the caller can
+        mark exported outbound rows delivered (a requester that proved key
+        ownership HAS the export: export is delivery)."""
         with get_conn() as conn, conn.cursor() as cur:
-            if since:
-                cur.execute("""
-                    SELECT id, message_uuid, direction, content, timestamp
-                      FROM p2p_messages
-                     WHERE friend_id = %s AND timestamp > %s
-                     ORDER BY timestamp
-                """, (friend_id, since))
-            else:
-                cur.execute("""
-                    SELECT id, message_uuid, direction, content, timestamp
-                      FROM p2p_messages
-                     WHERE friend_id = %s
-                     ORDER BY timestamp
-                """, (friend_id,))
+            cur.execute("""
+                SELECT id, message_uuid, direction, content, timestamp
+                  FROM p2p_messages
+                 WHERE friend_id = %s AND (%s::timestamptz IS NULL OR timestamp > %s)
+                 ORDER BY timestamp
+                 LIMIT %s
+            """, (friend_id, since, since, limit))
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 

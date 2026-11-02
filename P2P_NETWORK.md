@@ -434,21 +434,17 @@ is the material declaration the signature commits to — no format, sample
 rate, bit depth or provider. The importer derives the track-level mean
 itself.
 
-### Mean embedding (legacy pull, for peers without `segments`)
-```json
-{
-  "track_uuid": "...",
-  "model_uuid": "...",
-  "model_name": "laion/clap-htsat-unfused",
-  "vector": [0.123, -0.456, ...]
-}
-```
+The unsealed mean-vector pull (`embeddings`, for peers without `segments`)
+was removed 2026-11-03: its rows carried no seal, so the peer chose a
+track's vectors and nothing named who. A peer without `segments` is asked
+for no audio analysis, and a local mean without segments — what that pull
+left behind — counts as a gap that sealed segments replace.
 
 ### Exchange
 ```
 GET  /api/sync/holdings          Bloom filter of the tracks a peer holds sealed analysis for
 POST /api/sync/inventory         track uuids → what the peer holds for them
-POST /api/sync/pull/{category}   segments | embeddings (legacy) | audio-features
+POST /api/sync/pull/{category}   segments | audio-features | tracks | track-mbids
 POST /api/sync/offer, /push/{…}  carry: segments, audio_features, track_mbids
 ```
 
@@ -606,7 +602,11 @@ dedup).
 `sautium-delivery:v1:{message_uuid}:{sha256(ciphertext)}`. The relay can
 neither lie about delivery (it has no private key) nor slip in its own
 envelope (a forgery will not decrypt, so no signature appears). `delivered`
-flips only on a verified signature.
+flips only on a verified signature. Since 2026-11-03 a message's uuid and
+time travel inside its box with the text (`desktop/p2p/chat_wire.envelope`):
+an earlier ciphertext replayed under a new uuid does not open as one, and a
+uuid repeats only for the same message in the same thread — anything else
+under it is refused, and gets no receipt.
 
 **The relay stores nothing** — not a row, not a table. Its only state: an
 in-memory future while it waits for the receipt (`FORWARD_ACK_TIMEOUT = 10 s`)

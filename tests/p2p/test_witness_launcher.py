@@ -290,6 +290,9 @@ def _handshake(guest: Node, host: Node, *, token=None, grant=None, cert=True) ->
         tid = token or grant["token_id"]
         body.update(ts=ts, signature=guest.key.sign(f"{label}:{ts}:{tid}:{host.invite}".encode()).hex())
         body.update({"token_id": token} if token else {"grant": grant})
+    else:
+        from desktop.p2p import chat_wire
+        body = chat_wire.sign_handshake(guest.key.sign, body, host.invite)
     if cert:
         body["birth_cert"] = guest.cert
     return body

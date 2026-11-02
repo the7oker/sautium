@@ -99,6 +99,16 @@
       .replace(/'/g, '&#39;');
   }
 
+  // `url` when it is a Bandcamp shop's own page over https — the rule the
+  // backend keeps url rows by (desktop/p2p/mb_slice_queries.BANDCAMP_PAGE);
+  // null for anything else.
+  function bandcampShopPage(url) {
+    let u;
+    try { u = new URL(url); } catch (e) { return null; }
+    const shop = /^[a-z0-9-]+\.bandcamp\.com$/i.test(u.hostname) && !/^daily\./i.test(u.hostname);
+    return u.protocol === 'https:' && shop && !u.username && !u.password ? u.href : null;
+  }
+
   /* ---------- Now-playing track highlight ----------
      Toggles `is-playing` on detail-screen track rows whose
      data-media-file-id matches the currently playing track.
@@ -5706,9 +5716,12 @@
       // The Buy CTA — the backend resolves it from the local MusicBrainz facts
       // (`buy.state`: the album's page, the artist's page, absent, unknown).
       // A known absence disables the button; only an unknown falls back to a
-      // Bandcamp search built from the credits, which is a coin toss.
-      const buy = d.buy || { state: 'unknown', url: null };
-      const buyUrl = buy.url || ('https://bandcamp.com/search?q='
+      // Bandcamp search built from the credits, which is a coin toss. A page
+      // is opened only when it is a shop's own — https on a Bandcamp shop
+      // host, the rule the backend keeps rows by; any other is an unknown.
+      const buyPage = bandcampShopPage(d.buy && d.buy.url);
+      const buy = (d.buy && (buyPage || !d.buy.url)) ? d.buy : { state: 'unknown', url: null };
+      const buyUrl = buyPage || ('https://bandcamp.com/search?q='
         + encodeURIComponent((((d.primary_artist && d.primary_artist.name) || '')
             + ' ' + (d.title || '')).trim())
         + '&item_type=a');
