@@ -174,3 +174,28 @@ def test_a_container_from_an_older_compose_file_reaches_its_cache_as_the_node_us
         assert (root_cache / "huggingface" / "model.bin").stat().st_uid == agent.pw_uid
     finally:
         shutil.rmtree(tmp_path)
+
+
+# -- the API secret ------------------------------------------------------------------
+
+def test_the_api_secret_is_the_owners_alone(tmp_path, monkeypatch):
+    import auth_hmac
+    monkeypatch.setattr(auth_hmac.os, "geteuid", lambda: 1000)
+    path = tmp_path / "node_identity" / ".api_secret"
+    secret = auth_hmac.ensure_secret(path)
+    assert len(secret) == 43
+    assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700
+    path.chmod(0o644)                       # as an earlier release, or a restore, left it
+    path.parent.chmod(0o755)
+    assert auth_hmac.ensure_secret(path) == secret
+    assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700
+
+
+@as_root_with_the_node_user
+def test_a_root_backend_gives_the_secret_to_the_user_its_agents_run_as(tmp_path):
+    import auth_hmac
+    agent = pwd.getpwnam("agent")
+    path = tmp_path / "node_identity" / ".api_secret"
+    auth_hmac.ensure_secret(path)
+    assert (path.stat().st_uid, path.parent.stat().st_uid) == (agent.pw_uid, agent.pw_uid)
+    assert path.stat().st_mode & 0o777 == 0o600

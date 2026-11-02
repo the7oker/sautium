@@ -57,6 +57,7 @@ import ipaddress
 import logging
 import os
 import secrets
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -263,32 +264,32 @@ def ensure_secret(secret_path: Path) -> bytes:
     without escaping. The HMAC key is the printable string itself
     (utf-8 bytes), not the decoded random bytes — keeps the JS side
     simple (no base64 decode in WebCrypto importKey).
+
+    The owner's alone: 0600 in a 0700 folder, applied again at every start
+    (a restore or an earlier release may have left wider modes). Its other
+    readers, the agents' MCP servers and the launcher, run as the same user
+    — the desktop user, or the Docker node's own; a Docker backend still
+    running as root (an older Mac compose file starts uvicorn itself) gives
+    the file to the user its agents run as.
     """
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(secret_path.parent, 0o700)
     data = _read_existing(secret_path)
     if data:
-        # Re-apply readable mode every startup: Docker writes as
-        # root, native launcher needs to read it. See note below
-        # about why 0644 is acceptable here.
-        try:
-            os.chmod(secret_path, 0o644)
-        except OSError:
-            pass
-        return data.encode("ascii")
-
-    secret_path.parent.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(32)
-    secret_path.write_text(token, encoding="ascii")
-    # 0644 (not 0600): Docker container writes the file as root, the
-    # native launcher reads it as the host user. Cross-UID readability
-    # matters more here than guarding against other host users —
-    # hostile local users are explicitly out of scope (see CLAUDE.md
-    # "Security Posture", threat model).
-    try:
-        os.chmod(secret_path, 0o644)
-    except OSError:
-        pass  # Windows ACLs handled separately; not fatal here
-    logger.info(f"Generated new API secret at {secret_path}")
-    return token.encode("ascii")
+        os.chmod(secret_path, 0o600)
+    else:
+        data = secrets.token_urlsafe(32)
+        fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(data)
+        logger.info(f"Generated new API secret at {secret_path}")
+    if sys.platform == "linux" and os.geteuid() == 0:
+        import pwd
+        from claude_code_runner import AGENT_USER
+        pw = pwd.getpwnam(AGENT_USER)
+        for path in (secret_path.parent, secret_path):
+            os.chown(path, pw.pw_uid, pw.pw_gid)
+    return data.encode("ascii")
 
 
 def sign(secret: bytes, method: str, path_and_query: str, ts: str, body: bytes) -> str:
