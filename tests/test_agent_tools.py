@@ -202,7 +202,7 @@ def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(c
 def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared, monkeypatch):
     library = shared / "mcp.json"
     library.write_text(json.dumps(_probes(shared, "postgres")))
-    monkeypatch.setattr(codex_runner, "MCP_CONFIG_PATH", str(library))
+    monkeypatch.setattr(runner, "MCP_CONFIG_PATH", str(library))
     target = shared / "written.txt"
     api = codex([{"tool": "ping", "namespace": "mcp__postgres", "input": {"note": "postgres"}},
                  _patch_that_adds(target), {"text": "ok"}])
@@ -356,3 +356,38 @@ def test_a_mix_is_named_by_the_picked_provider_with_no_tool_offered(claude, db, 
     sent = api.bodies("/messages")[0]
     assert "tools" not in sent
     assert "<tracks>\nArtist" in sent["messages"][0]["content"]
+
+
+def test_a_docker_library_turn_reads_the_catalogue_and_is_refused_the_settings(
+        claude, shared, scratch_dsn, monkeypatch):
+    """The Docker node's own MCP configuration (write_docker_mcp_config),
+    the tree's SQL server and the assistant's login, end to end."""
+    import db_migrate
+    import psycopg2
+    from config import settings
+    conn = psycopg2.connect(scratch_dsn)
+    db_migrate._assistant_role(conn)
+    conn.close()
+    monkeypatch.setattr(settings, "postgres_db", scratch_dsn.rsplit("/", 1)[1])
+    path = shared / "mcp-docker.json"
+    monkeypatch.setattr(runner, "MCP_CONFIG_PATH", str(path))
+    monkeypatch.setattr(runner, "STALE_MCP_CONFIG", shared / "stale.json")
+    runner.write_docker_mcp_config()
+    # The image mounts mcp/ inside the backend's folder (/app/mcp); the suite
+    # runs a checkout, which keeps it beside backend/
+    config = json.loads(path.read_text(encoding="utf-8"))
+    for server in config["mcpServers"].values():
+        server["args"] = [str(BACKEND.parent / "mcp" / Path(server["args"][0]).name)]
+    path.write_text(json.dumps(config), encoding="utf-8")
+    api = claude([
+        {"tool": "mcp__postgres__query", "input": {"sql": "SELECT count(*) AS n FROM artists"}},
+        {"tool": "mcp__postgres__query", "input": {"sql": "SELECT value FROM user_settings"}},
+        {"text": "ok"},
+    ])
+
+    done = list(runner.call_claude_code_stream("go", "system"))[-1]
+
+    assert done.error is None
+    results = _results(api)
+    assert results.count("permission denied") == 1
+    assert "permission denied for table user_settings" in results

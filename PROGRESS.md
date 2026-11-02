@@ -524,12 +524,13 @@ implementation details live in the code, DB and git history.
   three and verified them in a single parallel mb_resolve round (+4s);
   agent SQL is capped per statement (30s: `DB_QUERY_TIMEOUT` of the in-tree
   `mcp/postgres_server.py` since 2026-11-02, the npm servers' settings
-  before it) — an OR'd-EXISTS
+  before it, and the assistant login's own `statement_timeout`) — an OR'd-EXISTS
   join across every tagged artist ran 3+ minutes, ate the whole wallclock and,
   after the SIGKILL, kept running under an orphaned MCP server; inside the
   turn the same failure is a tool error the model retries lighter;
   no `--mcp-config` → the
-  SAME mcp-docker/windows.json is translated at spawn into dotted `-c
+  SAME MCP configuration (the launcher's mcp-windows.json, the Docker
+  backend's `/app/data/mcp-docker.json`) is translated at spawn into dotted `-c
   mcp_servers.*` overrides + `--ignore-user-config` (analog of
   `--strict-mcp-config`); no `--disallowed-tools`. Until 2026-11-02 no
   sandbox either — under any sandbox `codex exec` refused every MCP
@@ -1712,6 +1713,20 @@ implementation details live in the code, DB and git history.
   transaction under the statement timeout; at most 500 rows return, as JSON.
   The npm servers sent the caller's text over the simple-query protocol,
   where a second statement after the first ran too.
+- **The assistant's own login** (since 2026-11-02). Both servers, and the
+  API providers' `execute_query`, connect as `sautium_assistant`, a role
+  that reads the catalogue (`desktop/db_init.ASSISTANT_READS`) and nothing
+  else — never settings, keys, conversations, friends or the P2P ledgers —
+  owns nothing and writes nowhere; its sessions default to read-only with a
+  30 s statement cap. Its password is derived from the owner's, so both
+  writers of an MCP file (the launcher, the Docker backend) and the
+  backend's own query tool reach the same one without a store of their
+  own. The cluster's administrator makes the login (the launcher's
+  `create_database`, Docker's bootstrap superuser at start); the grants are
+  re-stated at every backend start, because a restore
+  (`pg_restore --no-privileges`) and the LB loader's table swap drop them.
+  Before it the Docker MCP file used the node's own role — on Docker the
+  bootstrap superuser.
 - **Lazy connections** (HQPlayer / DB / backend). Connect on first use,
   auto-reconnect on failure. A cold MCP startup is fast; only the first tool
   call pays the connection cost.

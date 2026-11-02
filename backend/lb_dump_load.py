@@ -41,6 +41,7 @@ import tarfile
 import time
 from typing import Dict, List, Optional, Tuple
 
+from desktop import db_init
 from dump_common import (ProgressCb, ProgressReader, download_resumable,
                          noop as _noop, rebuild_indexes, table_stats,
                          unlock_all, verify_sha256)
@@ -358,6 +359,8 @@ def _aggregate(conn, version: str, progress_cb: ProgressCb) -> None:
         cur.execute("DROP TABLE lb_artist")
         cur.execute("ALTER TABLE lb_artist_new RENAME TO lb_artist")
         cur.execute("ALTER INDEX lb_artist_new_pkey RENAME TO lb_artist_pkey")
+        # The dropped tables took the assistant's grants with them.
+        db_init.grant_assistant_reads(cur)
         cur.execute("COMMIT")
 
 

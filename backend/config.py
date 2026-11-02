@@ -219,6 +219,16 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
+    @property
+    def assistant_database_url(self) -> str:
+        """The assistant's own login (desktop/db_init.ASSISTANT_ROLE): what
+        an agent's SQL connects as — it reads the catalogue and nothing else."""
+        from desktop.db_init import ASSISTANT_ROLE, assistant_password
+        return (
+            f"postgresql://{ASSISTANT_ROLE}:{assistant_password(self.postgres_password)}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
     def library_db_root(self) -> str:
         """The library root as media_files.file_path spells it: forward
         slashes, no trailing separator — the prefix every stored path shares

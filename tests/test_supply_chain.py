@@ -295,7 +295,7 @@ def test_the_embedded_pythons_pip_comes_from_the_pinned_wheel_not_a_script():
 def test_the_launchers_agents_start_only_servers_from_the_tree(tmp_path, monkeypatch):
     import json
     import os
-    from desktop import config_manager, python_env
+    from desktop import config_manager, db_init, python_env
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "config"))
     monkeypatch.setattr(python_env, "get_backend_python", lambda: "/the/backends/python")
@@ -309,7 +309,9 @@ def test_the_launchers_agents_start_only_servers_from_the_tree(tmp_path, monkeyp
     assert {s["command"] for s in servers.values()} == {"/the/backends/python"}
     assert servers["postgres"]["args"] == [str(tmp_path / "mcp" / "postgres_server.py")]
     assert servers["assistant"]["args"] == [str(tmp_path / "mcp" / "assistant_server.py")]
-    assert servers["postgres"]["env"]["DB_PASSWORD"] == "pw"
+    # The assistant's login, never the node's own role
+    assert (servers["postgres"]["env"]["DB_USER"], servers["postgres"]["env"]["DB_PASSWORD"]) == (
+        db_init.ASSISTANT_ROLE, db_init.assistant_password("pw"))
     if os.name == "posix":
         assert out.stat().st_mode & 0o777 == 0o600
 
@@ -319,6 +321,7 @@ def test_the_docker_node_writes_the_same_servers_from_its_own_settings(tmp_path,
     import sys
     import claude_code_runner
     from config import settings
+    from desktop import db_init
     monkeypatch.setattr(claude_code_runner, "MCP_CONFIG_PATH", str(tmp_path / "mcp-docker.json"))
     monkeypatch.setattr(claude_code_runner, "STALE_MCP_CONFIG", tmp_path / "stale" / "mcp-docker.json")
     monkeypatch.setattr(claude_code_runner.os, "geteuid", lambda: 1000)
@@ -330,7 +333,7 @@ def test_the_docker_node_writes_the_same_servers_from_its_own_settings(tmp_path,
     assert servers["postgres"]["args"] == [str(backend / "mcp" / "postgres_server.py")]
     env = servers["postgres"]["env"]
     assert (env["DB_HOST"], env["DB_NAME"], env["DB_USER"]) == (
-        settings.postgres_host, settings.postgres_db, settings.postgres_user)
+        settings.postgres_host, settings.postgres_db, db_init.ASSISTANT_ROLE)
     assert servers["assistant"]["env"]["P2P_IDENTITY_DIR"] == settings.p2p_identity_dir
 
 

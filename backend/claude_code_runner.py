@@ -197,9 +197,18 @@ def _resolve_claude_executable() -> Optional[str]:
     return None
 
 
+def library_mcp_config() -> dict:
+    """The assistant's MCP servers as both agent CLIs load them: the file the
+    launcher writes on a desktop node, the backend's own on Docker
+    (write_docker_mcp_config). Codex turns it into `-c` overrides."""
+    return json.loads(Path(MCP_CONFIG_PATH).read_text(encoding="utf-8"))
+
+
 def _tool_flags(tools: str) -> list[str]:
     """The flags that name what a call of profile `tools` may use (above)."""
     if tools == LIBRARY:
+        # The file by its path: the credentials stay off the command line,
+        # which other local accounts can read on macOS.
         flags = ["--tools", "", "--mcp-config", MCP_CONFIG_PATH,
                  "--allowedTools", ",".join(f"mcp__{name}" for name in LIBRARY_SERVERS)]
     elif tools == RESEARCH:
@@ -386,16 +395,20 @@ STALE_MCP_CONFIG = Path(__file__).resolve().parent / "mcp-docker.json"
 def write_docker_mcp_config() -> None:
     """The Docker node's MCP config, from its own settings and the servers
     the tree carries (desktop.config_manager.mcp_servers, the launcher's
-    builder too). Run at every start: the file is the node's, rewritten
-    whole, and readable by the user the agents run as — handed to it when
-    the backend still runs as root."""
+    builder too). Both servers log in as the assistant's role (desktop/
+    db_init.ASSISTANT_ROLE), which reads the catalogue and nothing else.
+    Run at every start: the file is the node's, rewritten whole, and
+    readable by the user the agents run as — handed to it when the backend
+    still runs as root."""
     from config import settings
     from desktop.config_manager import mcp_servers, write_mcp_config
+    from desktop.db_init import ASSISTANT_ROLE, assistant_password
     backend_dir = Path(__file__).resolve().parent
     servers = mcp_servers(
         sys.executable, backend_dir / "mcp", backend_dir,
         db={"host": settings.postgres_host, "port": settings.postgres_port,
-            "user": settings.postgres_user, "password": settings.postgres_password,
+            "user": ASSISTANT_ROLE,
+            "password": assistant_password(settings.postgres_password),
             "name": settings.postgres_db},
         backend_url=os.environ.get("BACKEND_URL", "http://localhost:8000"),
         identity_dir=Path(settings.p2p_identity_dir),

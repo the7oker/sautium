@@ -92,7 +92,16 @@ def _recreate(name: str, *, create: bool) -> bool:
 
 
 def pytest_sessionstart(session):
-    _recreate(SESSION_DATABASE, create=True)
+    if not _recreate(SESSION_DATABASE, create=True):
+        return
+    # The assistant's login is a cluster role a node's setup makes before
+    # any database work (desktop/db_init.ensure_assistant_role); the code
+    # that grants to it (the backend's start, the LB loader's swap) expects it.
+    from desktop import db_init
+    admin = _admin()
+    with admin.cursor() as cur:
+        db_init.ensure_assistant_role(cur, PG["password"])
+    admin.close()
 
 
 def pytest_sessionfinish(session, exitstatus):

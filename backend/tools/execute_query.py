@@ -1,7 +1,9 @@
 """Safe execute_query tool for arbitrary SELECT queries.
 
-Allows LLM to run read-only SQL against the music database.
-Whitelist approach: only SELECT/WITH allowed.
+Allows LLM to run read-only SQL against the music database. What bounds it
+is the login: the assistant role (desktop/db_init.ASSISTANT_ROLE) reads the
+catalogue and nothing else, and owns and writes nothing. The SELECT/WITH
+check, the read-only transaction and the timeout are a second layer.
 """
 
 import logging
@@ -31,9 +33,22 @@ _conn = None
 def _get_conn():
     global _conn
     if _conn is None or _conn.closed:
-        _conn = psycopg2.connect(settings.database_url)
+        _conn = psycopg2.connect(settings.assistant_database_url)
         _conn.autocommit = False  # We'll use transaction for READ ONLY
     return _conn
+
+
+def _reset(conn) -> None:
+    """End the query's transaction and clear what it left on the session —
+    advisory locks, settings, temporary tables, LISTENs: the connection
+    outlives the query, and the next one must not inherit it."""
+    conn.rollback()
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DISCARD ALL")
+    finally:
+        conn.autocommit = False
 
 
 def execute_query(sql: str) -> str:
@@ -61,32 +76,23 @@ def execute_query(sql: str) -> str:
 
     try:
         conn = _get_conn()
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute("SET LOCAL statement_timeout = '10s'")
-            cur.execute(sql)
-            rows = [dict(r) for r in cur.fetchall()]
-            conn.commit()  # end transaction
-
-        if not rows:
-            return "Query returned 0 rows."
-
-        # Format as text table
-        return _format_table(rows)
-
-    except psycopg2.Error as e:
         try:
-            _get_conn().rollback()
-        except Exception:
-            pass
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+                cur.execute("SET LOCAL statement_timeout = '10s'")
+                cur.execute(sql)
+                rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            _reset(conn)
+    except psycopg2.Error as e:
         error_msg = str(e).strip().split("\n")[0]
         return f"SQL Error: {error_msg}"
-    except Exception as e:
-        try:
-            _get_conn().rollback()
-        except Exception:
-            pass
-        return f"Error: {e}"
+
+    if not rows:
+        return "Query returned 0 rows."
+
+    # Format as text table
+    return _format_table(rows)
 
 
 def _format_table(rows: list[dict]) -> str:

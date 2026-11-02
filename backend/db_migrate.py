@@ -28,6 +28,10 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      imported-scrobble name once, the day titles came to be compared by a
      folded key (accents, typography, a store's annotation — 2026-09-24).
 
+After the schema deltas, the assistant's read-only login is re-stated
+(_assistant_role): its grants every start, its login where this node's
+own role administers the cluster.
+
 The launcher's own P2P sync server is a separate process: on a launcher
 node with old-rule data a peer import racing this rewrite is a known
 window — keep P2P off for the first start after such an upgrade.
@@ -135,6 +139,20 @@ def _drop_sub_floor_analysis(conn) -> dict:
     return counts
 
 
+def _assistant_role(conn) -> None:
+    """The assistant's login and its grants (desktop/db_init.ASSISTANT_ROLE).
+    The login is the cluster administrator's: here when this node's own
+    role is one (Docker's bootstrap superuser), else the launcher's setup
+    made it before the backend started. The grants are re-stated at every
+    start, after the migrations — a restore drops them."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT rolsuper OR rolcreaterole FROM pg_roles WHERE rolname = current_user")
+        if cur.fetchone()[0]:
+            db_init.ensure_assistant_role(cur, settings.postgres_password)
+        db_init.grant_assistant_reads(cur)
+    conn.commit()
+
+
 def apply_pending() -> dict:
     """Schema deltas, then data migrations. Returns what happened."""
     out = {"adopted_baseline": False, "sql_applied": 0, "identity_renormalized": False}
@@ -143,6 +161,7 @@ def apply_pending() -> dict:
     try:
         out["adopted_baseline"] = db_init.adopt_baseline(conn)
         out["sql_applied"] = db_init.apply_migrations(conn, logger.info)
+        _assistant_role(conn)
 
         mark = _IDENTITY_MARK.format(IDENTITY_RULE)
         if not _marked(conn, mark):

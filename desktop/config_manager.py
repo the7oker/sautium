@@ -394,12 +394,16 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
     """Generate MCP config (mcp-windows.json) for Claude Code with loopback values."""
     ports = config.get("ports", {})
     hqp = config.get("hqplayer", {})
+    from desktop.db_init import ASSISTANT_ROLE, assistant_password
     from desktop.python_env import get_backend_python
     backend_dir = output_path.parent          # the runner reads the file from backend/
+    # Both servers connect as the assistant's login, which reads the
+    # catalogue and nothing else — never as the node's own role.
     servers = mcp_servers(
         get_backend_python(), backend_dir.parent / "mcp", backend_dir,
-        db={"host": LOOPBACK, "port": ports.get("postgres", 5432), "user": "sautium",
-            "password": config.get("postgres_password", "changeme"), "name": "sautium"},
+        db={"host": LOOPBACK, "port": ports.get("postgres", 5432), "user": ASSISTANT_ROLE,
+            "password": assistant_password(config.get("postgres_password", "changeme")),
+            "name": "sautium"},
         backend_url=f"http://{LOOPBACK}:{ports.get('web', 8000)}",
         identity_dir=get_config_dir() / "node_identity",
         hqplayer_host=hqp.get("host", LOOPBACK), hqplayer_port=hqp.get("port", 4321),

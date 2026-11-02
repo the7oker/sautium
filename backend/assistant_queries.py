@@ -84,9 +84,10 @@ _OWN_LATERAL = f"""
 def active_hqp_endpoint(q):
     """The hqp_endpoints id of the HQPlayer that is the active output, else
     None — from the saved settings, so the MCP server (its own process, no
-    playback manager) ranks copies the way the backend does."""
-    rows = q("SELECT key, value FROM user_settings WHERE key IN "
-             "('output.type', 'hqplayer.host', 'hqplayer.port')")
+    playback manager) ranks copies the way the backend does. The view holds
+    these three rows and no other: the MCP server reads as the assistant's
+    login, which never sees user_settings itself."""
+    rows = q("SELECT key, value FROM assistant_settings")
     kv = {r["key"]: r["value"] for r in rows}
     if kv.get("output.type") != "hqplayer":
         return None

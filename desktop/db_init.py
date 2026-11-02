@@ -9,6 +9,8 @@ Handles:
 """
 
 import glob
+import hashlib
+import hmac
 import logging
 import os
 import platform
@@ -23,6 +25,7 @@ from typing import Optional, Callable
 
 import psycopg2
 import psycopg2.extras
+from psycopg2 import sql
 
 from desktop.config_manager import LOOPBACK
 from desktop.downloads import fetch
@@ -31,6 +34,92 @@ logger = logging.getLogger(__name__)
 
 # Migration tracking table
 MIGRATIONS_TABLE = "_schema_migrations"
+
+# The login every agent-facing SQL path uses — the assistant's MCP servers
+# and the API providers' query tool: it reads the tables below and nothing
+# else, owns nothing, and writes nowhere. The role and its login are the
+# cluster administrator's (the launcher's setup, the Docker backend's
+# bootstrap superuser: ensure_assistant_role); the grants are re-stated
+# from ASSISTANT_READS by the database owner at every start
+# (grant_assistant_reads), because a restore (pg_restore --no-privileges)
+# and the LB loader's table swap both drop them.
+ASSISTANT_ROLE = "sautium_assistant"
+
+# What the assistant may read: the catalogue, its analysis and enrichment,
+# the owner's listening, gear and HQPlayer measurements. Everything else is
+# private to it — settings and stored keys, conversations, friends and
+# messages, invites, support and diagnostics, the P2P ledgers, the Last.fm
+# import's state, provenance and seals, cover bytes, the owner's profile.
+# A new table is a decision: it goes here or stays private, and
+# tests/test_assistant_role.py fails until it is one or the other.
+ASSISTANT_READS = (
+    "album_artists", "album_descriptions", "album_genres", "album_tracks",
+    "album_variants", "albums", "artist_bio_embeddings", "artist_bios",
+    "artist_mbids", "artist_members", "artist_name_aliases", "artist_tags",
+    "artists", "assistant_settings", "audio_features", "embedding_models",
+    "embedding_segments", "embeddings", "external_metadata",
+    "gear_brands", "gear_measured_caveats", "gear_model_technologies",
+    "gear_models", "gear_pair_notes", "gear_registry_entries",
+    "gear_sentiment_terms", "gear_spec_attributes", "gear_specs",
+    "gear_technologies", "genre_desc_embeddings", "genre_descriptions",
+    "genres", "hqp_benchmark_points", "hqp_benchmark_runs", "hqp_dsp_samples",
+    "hqp_dsp_speed", "hqp_endpoints", "hqp_library_files", "lb_artist",
+    "lb_recording", "library_stats", "listening_history", "listening_sessions",
+    "local_play_stats", "lyrics_embeddings", "mb_area", "mb_artist",
+    "mb_artist_alias", "mb_artist_credit", "mb_artist_credit_name",
+    "mb_artist_tag", "mb_genre", "mb_l_artist_url", "mb_l_release_url",
+    "mb_medium", "mb_medium_format", "mb_recording", "mb_release",
+    "mb_release_country", "mb_release_group", "mb_release_group_primary_type",
+    "mb_release_group_secondary_type", "mb_release_group_secondary_type_join",
+    "mb_release_group_tag", "mb_release_label", "mb_release_unknown_country",
+    "mb_tag", "mb_track", "mb_url", "media_files", "owned_files", "seed_picks",
+    "session_tracks", "similar_artists", "tags", "text_embeddings",
+    "track_artists", "track_lyrics", "track_mbids", "tracks", "user_gear",
+)
+
+
+def assistant_password(owner_password: str) -> str:
+    """The assistant role's password, derived from the owner's database
+    password: the launcher, which writes the MCP configuration, and the
+    backend, which builds its own, reach the same one without storing it,
+    and it reveals nothing of the owner's."""
+    return hmac.new(owner_password.encode("utf-8"), b"sautium-assistant-role",
+                    hashlib.sha256).hexdigest()
+
+
+def ensure_assistant_role(cur, owner_password: str) -> None:
+    """The assistant role with its login, on a cursor of a role that may
+    administer roles. Idempotent; run at every start so a changed owner
+    password moves the derived one along. The defaults hold each session
+    read-only and short — the grants are what bounds it, these keep a
+    runaway query from eating a turn."""
+    role = sql.Identifier(ASSISTANT_ROLE)
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (ASSISTANT_ROLE,))
+    if cur.fetchone() is None:
+        cur.execute(sql.SQL("CREATE ROLE {}").format(role))
+    cur.execute(sql.SQL(
+        "ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
+        "NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 32 PASSWORD %s").format(role),
+        (assistant_password(owner_password),))
+    for setting, value in (("default_transaction_read_only", "on"),
+                           ("statement_timeout", "30s"),
+                           ("idle_in_transaction_session_timeout", "60s")):
+        cur.execute(sql.SQL("ALTER ROLE {} SET {} = %s").format(role, sql.SQL(setting)),
+                    (value,))
+
+
+def grant_assistant_reads(cur) -> None:
+    """The assistant role's grants in this database, exactly ASSISTANT_READS:
+    whatever it held before is revoked first, so a table moved to private
+    stops being readable. Run by the database owner (or a superuser)."""
+    role = sql.Identifier(ASSISTANT_ROLE)
+    cur.execute(sql.SQL("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {}").format(role))
+    # PostgreSQL 15's default; a database restored from an older cluster
+    # can still carry the old one, under which any role may create here.
+    cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+    cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
+    cur.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(
+        sql.SQL(", ").join(sql.Identifier(t) for t in ASSISTANT_READS), role))
 
 # Portable PostgreSQL (Windows), Homebrew formula (macOS) and the Docker image
 # tag (docker-compose*.yml) all track the SAME major — bump them together.
@@ -1083,6 +1172,9 @@ def create_database(
 
             # Grant privileges
             cur.execute("GRANT ALL PRIVILEGES ON DATABASE sautium TO sautium")
+
+            # The assistant's login; run_migrations gives it its grants.
+            ensure_assistant_role(cur, password)
     finally:
         conn.close()
 

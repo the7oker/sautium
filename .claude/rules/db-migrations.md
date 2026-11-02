@@ -23,6 +23,12 @@ this file carries the mechanics.
   (`002_invite_tokens.sql`, `003_gear_fk_cascade.sql` are the pattern). A
   fresh node runs 001 and then every delta, so a delta must be a no-op on
   the schema 001 just created. Never ALTER a node by hand.
+- **A new table or view is a decision for the assistant's login.** It goes
+  into `desktop/db_init.ASSISTANT_READS` (the agents' SQL may read it) or
+  into the private set of `tests/test_assistant_role.py`; that test fails
+  until it is one or the other. The grants are no migration: the backend's
+  start re-states them (`db_migrate._assistant_role`), and a loader that
+  swaps a readable table in calls `db_init.grant_assistant_reads` itself.
 - **One runner, every node.** `desktop/db_init.apply_migrations` applies
   pending files in name order and records them in `_schema_migrations`.
   The launcher calls it at service start and after an update

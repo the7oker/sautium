@@ -33,8 +33,9 @@ Differences from the Claude runner, all forced by the CLI surface
   `mcp__<name>` and puts their tools in the roster upfront — the analog
   of the Claude runner's ENABLE_TOOL_SEARCH=false.
 - No `--mcp-config` — MCP servers are injected per-run as dotted `-c`
-  overrides translated from the SAME mcp-docker.json / mcp-windows.json
-  the Claude runner uses, so both agents share one MCP source of truth.
+  overrides translated from the SAME configuration the Claude runner uses
+  (claude_code_runner.library_mcp_config), so both agents share one MCP
+  source of truth.
   `--ignore-user-config` keeps the user's own ~/.codex/config.toml (and
   any personal MCP connectors in it) out of the run — the codex analog
   of `--strict-mcp-config`. Profile files (`-p`) and a project
@@ -78,7 +79,7 @@ if sys.platform not in ("win32", "darwin"):
 
 import codex_cli
 from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
-from claude_code_runner import AGENT_USER, MCP_CONFIG_PATH, spawn_kwargs
+from claude_code_runner import AGENT_USER, library_mcp_config, spawn_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -233,16 +234,16 @@ def _write_instructions(workdir: Path) -> Path:
 
 
 def _mcp_config_overrides() -> List[str]:
-    """Translate the shared MCP JSON config (mcp-docker.json /
-    mcp-windows.json — the launcher regenerates the latter with live
-    ports and credentials) into `-c` args for codex. Dotted keys only:
-    per-key form is the robust subset of `-c` TOML parsing, and
-    json.dumps of a string/list is valid TOML for these values."""
+    """Translate the shared MCP configuration (claude_code_runner.
+    library_mcp_config — the launcher's mcp-windows.json, the backend's
+    /app/data/mcp-docker.json on Docker) into `-c` args for codex. Dotted keys only: per-key form is
+    the robust subset of `-c` TOML parsing, and json.dumps of a
+    string/list is valid TOML for these values."""
     args: List[str] = []
     try:
-        cfg = json.loads(Path(MCP_CONFIG_PATH).read_text(encoding="utf-8"))
+        cfg = library_mcp_config()
     except (OSError, json.JSONDecodeError) as e:
-        logger.error(f"MCP config unreadable at {MCP_CONFIG_PATH}: {e}")
+        logger.error(f"MCP config unreadable: {e}")
         return args
     names: List[str] = []
     for name, server in (cfg.get("mcpServers") or {}).items():
