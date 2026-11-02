@@ -324,10 +324,10 @@ def test_a_backstop_inside_the_workers_not_before_waits_for_it(worker, conn, sta
 
 class _Refusing(BaseHTTPRequestHandler):
     """A Worker that fails every stamp: `status` 503 (down) or 429 (throttling)."""
-    status, retry_after, calls = 503, None, 0
+    status, retry_after, calls = 503, None, None
 
     def do_POST(self):
-        type(self).calls += 1
+        self.calls.append(time.monotonic())
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.send_response(self.status)
         if self.retry_after is not None:
@@ -342,7 +342,7 @@ class _Refusing(BaseHTTPRequestHandler):
 
 @contextmanager
 def _refusing_worker(status, retry_after=None):
-    handler = type("Handler", (_Refusing,), {"status": status, "retry_after": retry_after, "calls": 0})
+    handler = type("Handler", (_Refusing,), {"status": status, "retry_after": retry_after, "calls": []})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -362,6 +362,13 @@ def _running(n):
         n.stop()
 
 
+def _calls_reach(handler, n: int, within: float = 15.0) -> None:
+    deadline = time.monotonic() + within
+    while len(handler.calls) < n and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert len(handler.calls) >= n
+
+
 def test_a_due_backstop_meets_a_dead_worker_once_per_retry_rung(worker, stage, monkeypatch):
     _waiting(stage)
     monkeypatch.setattr(notary, "_RETRY_S", (0.5, 1.0, 2.0, 4.0))
@@ -370,9 +377,12 @@ def test_a_due_backstop_meets_a_dead_worker_once_per_retry_rung(worker, stage, m
         n = notary._Notary()
         n._backstop = time.time() - 1
         with _running(n):
-            time.sleep(2.5)                              # attempts at 0, 0.5 and 1.5 s; the 4th at 3.5
-            assert handler.calls == 3
-            assert n._backstop is not None and n._failures == 3
+            _calls_reach(handler, 3)
+            first, second, third = handler.calls[:3]
+            assert second - first >= 0.45 and third - second >= 0.95      # a rung each, no busy loop
+            time.sleep(1.0)                                               # the next rung is 2 s away
+            assert len(handler.calls) == 3
+            assert n._backstop is not None and n._failures == 3           # the permission is kept
 
 
 def test_a_throttling_worker_is_asked_again_when_it_says(worker, stage, monkeypatch):
@@ -382,8 +392,9 @@ def test_a_throttling_worker_is_asked_again_when_it_says(worker, stage, monkeypa
         n = notary._Notary()
         n._backstop = time.time() - 1
         with _running(n):
-            time.sleep(1.5)
-            assert handler.calls == 1
+            _calls_reach(handler, 1)
+            time.sleep(1.0)
+            assert len(handler.calls) == 1
             assert n._stamp_at == pytest.approx(time.time() + 60, abs=3)
             assert n._backstop is not None
 
