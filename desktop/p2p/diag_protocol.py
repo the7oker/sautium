@@ -23,6 +23,7 @@ Ed25519 node keys — the chat construction — so only the master reads
 them. Depends on `cryptography` + PyNaCl.
 """
 
+import ipaddress
 import json
 import re
 import time
@@ -215,7 +216,10 @@ def encode_report(events: Iterable[dict]) -> bytes:
 
 def decode_report(raw: bytes) -> list:
     """Validate a decrypted report on the master; ValueError on anything
-    that is not a well-formed, size-bounded list of events."""
+    that is not a well-formed, size-bounded list of events. Each detail
+    comes back scrubbed (scrub_detail) — a node that records unscrubbed
+    text, a release behind, has it kept here without what names a person
+    or a place."""
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as e:
@@ -241,7 +245,7 @@ def decode_report(raw: bytes) -> list:
             raise ValueError("malformed event timestamp")
         if len(json.dumps(detail, default=str)) > EVENT_DETAIL_MAX_CHARS:
             raise ValueError("event detail too large")
-        out.append({"kind": e["kind"], "ts": ts, "detail": strip_local_only(detail)})
+        out.append({"kind": e["kind"], "ts": ts, "detail": scrub_detail(strip_local_only(detail))})
     return out
 
 
@@ -263,3 +267,77 @@ def scrub_secrets(text: str) -> str:
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Personal scrubbing — what leaves for support names no person, place or file
+# ---------------------------------------------------------------------------
+
+_EMAIL = re.compile(r"[\w.+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9-]+)+")
+_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w.])")
+# Colon groups an IPv6 address may be; ipaddress decides (a clock time or a
+# MAC address is none).
+_IPV6 = re.compile(r"(?<![\w:.])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])")
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# A path's folders name an account, a person, a disk; its end is known only
+# where it is quoted, so a folder may hold single spaces only where another
+# separator follows it.
+_SEG = r"[^\\/\s'\"<>|*?]+(?: [^\\/\s'\"<>|*?]+)*"
+_TAIL = r"[^\s'\"<>|]*"
+_ROOTS = ("home|Users|mnt|media|Volumes|music|Music|data|srv|net|nfs|share|app|tmp|var|opt"
+          "|usr|etc|root|run|private|Library|System")
+_FILE_URL = re.compile(r"file://[^\s'\"<>]*")
+_QUOTED_PATH = re.compile(
+    rf"""(['"])((?:[A-Za-z]:[\\/]|\\\\\w|~[\\/]|/(?:{_ROOTS})[\\/])[^'"\n]*)\1""")
+_BARE_PATH = re.compile(
+    rf"""(?<![\w.:/\\~-])(?:(?:[A-Za-z]:|\\\\[^\\/\s'"<>|]+|~|/(?:{_ROOTS})(?=[\\/\s]|$))"""
+    rf"""(?:[\\/]{_SEG}(?=[\\/]))*(?:[\\/]{_TAIL})?)""")
+_FILE_NAME = re.compile(r"[^\\/]+\.[A-Za-z0-9]{1,5}")
+
+
+def _address(match: "re.Match") -> str:
+    try:
+        ip = ipaddress.ip_address(match.group(0))
+    except ValueError:
+        return match.group(0)
+    if ip.is_unspecified or ip.is_multicast or str(ip) == "255.255.255.255":
+        return match.group(0)
+    if ip.is_loopback:
+        return "[loopback address]"
+    if ip.version == 4 and ip in _CGNAT:
+        return "[carrier-grade NAT address]"
+    if ip.is_link_local:
+        return "[link-local address]"
+    if ip.is_private:
+        return "[private address]"
+    return "[public address]"
+
+
+def _cut_path(path: str) -> str:
+    """A file keeps its name; anything else — a folder, which may be an
+    account's — is only a path."""
+    name = re.split(r"[\\/]+", path.rstrip("\\/"))[-1]
+    return "…/" + name if _FILE_NAME.fullmatch(name) else "[path]"
+
+
+def scrub_personal(text: str) -> str:
+    """scrub_secrets, then what names a person or a place: email addresses,
+    IP addresses (each to its kind), absolute paths (a file to its name)."""
+    text = scrub_secrets(text)
+    text = _FILE_URL.sub("file://[path]", text)
+    text = _QUOTED_PATH.sub(lambda m: m.group(1) + _cut_path(m.group(2)) + m.group(1), text)
+    text = _BARE_PATH.sub(lambda m: _cut_path(m.group(0)), text)
+    text = _EMAIL.sub("[email]", text)
+    text = _IPV4.sub(_address, text)
+    return _IPV6.sub(_address, text)
+
+
+def scrub_detail(value):
+    """scrub_personal over every string an event's detail holds, at any depth."""
+    if isinstance(value, str):
+        return scrub_personal(value)
+    if isinstance(value, dict):
+        return {k: scrub_detail(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [scrub_detail(v) for v in value]
+    return value

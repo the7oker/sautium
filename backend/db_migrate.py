@@ -27,6 +27,9 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      scrobble step (`scrobble_title_key_v1`) reopens every waiting
      imported-scrobble name once, the day titles came to be compared by a
      folded key (accents, typography, a store's annotation — 2026-09-24).
+     The support step (`diag_scrubbed_v1`) scrubs what was kept for support
+     before its text was: the node's events, the master's received reports
+     (no path, address or email — 2026-11-03).
 
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
@@ -139,6 +142,27 @@ def _drop_sub_floor_analysis(conn) -> dict:
     return counts
 
 
+def _scrub_support_records(conn) -> dict:
+    """What was kept for support before its text was scrubbed — every event
+    here, and on the master every report received — through the scrubber the
+    recorder and the master's ingest now apply (diag_protocol.scrub_detail),
+    so nothing stored for support names a path, an address or an email."""
+    from psycopg2.extras import Json, execute_batch
+
+    from desktop.p2p.diag_protocol import scrub_detail
+    counts = {}
+    with conn.cursor() as cur:
+        for table in ("diag_events", "support_reports"):
+            cur.execute(f"SELECT id, detail FROM {table}")
+            changed = [(Json(clean), rid) for rid, detail in cur.fetchall()
+                       if (clean := scrub_detail(detail)) != detail]
+            execute_batch(cur, f"UPDATE {table} SET detail = %s WHERE id = %s", changed,
+                          page_size=500)
+            counts[table] = len(changed)
+    conn.commit()
+    return counts
+
+
 def _assistant_role(conn) -> None:
     """The cluster administrator's part of the assistant's login
     (desktop/db_init.ASSISTANT_ROLE): the login itself, and large objects
@@ -187,6 +211,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "scrobble_title_key_v1"):
             out["scrobble_names_reopened"] = _reopen_waiting_scrobble_names(conn)
             _mark(conn, "scrobble_title_key_v1")
+
+        if not _marked(conn, "diag_scrubbed_v1"):
+            out["support_records_scrubbed"] = _scrub_support_records(conn)
+            _mark(conn, "diag_scrubbed_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker

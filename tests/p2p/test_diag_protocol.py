@@ -148,3 +148,34 @@ def test_scrub_secrets():
     assert "cd" * 32 in out                     # a node pubkey is not a secret
     assert "postgresql://sautium:[redacted]@localhost" in out
     assert 'api_key="[redacted]' in out
+
+
+def test_scrub_personal_leaves_no_email_address_or_path():
+    text = ("No such file or directory: '/home/someone/Music/A Band/01 Song.flac'\n"
+            "Permission denied: 'C:\\\\Users\\\\Some One\\\\AppData\\\\Local\\\\Sautium'\n"
+            r"cannot open C:\Users\Some One\Music\x y\track.flac now" "\n"
+            "url file:///home/someone/x.txt and ~/Music/a.flac and \\\\nas\\share\\x.flac\n"
+            "sent to someone.else+tag@example.co.uk\n"
+            "peers 192.0.2.20:8800 8.8.8.8 100.64.0.1 127.0.0.1 ::1 fe80::1 "
+            "2001:4860:4860::8888\n"
+            'File "/app/backend/main.py", line 12, in run\n'
+            "GET /api/settings/sync HTTP/1.1 at 12:34:56 bind 0.0.0.0:8800\n"
+            "dsn postgresql://sautium:s3cret@localhost:15432/sautium\n")
+    out = dp.scrub_personal(text)
+    for gone in ("someone", "Some One", "Music", "example.co.uk", "192.0.2", "8.8.8.8",
+                 "100.64", "2001:4860", "fe80", "s3cret", "nas", "AppData"):
+        assert gone not in out, gone
+    for kept in ("'…/01 Song.flac'", "…/track.flac", "file://[path]", "…/a.flac", "…/x.flac",
+                 "'[path]'", "[email]", "[private address]:8800", "[public address]",
+                 "[carrier-grade NAT address]", "[loopback address]", "[link-local address]",
+                 '"…/main.py", line 12', "GET /api/settings/sync", "12:34:56", "0.0.0.0:8800"):
+        assert kept in out, kept
+
+
+def test_a_report_is_kept_scrubbed_on_the_master():
+    events = [{"kind": "sync.failed", "ts": "2026-11-03T01:00:00+00:00",
+               "detail": {"error": "peer 192.0.2.20 refused '/home/someone/x.box'",
+                          "nested": [{"who": "someone@example.com"}], "count": 3}}]
+    [kept] = dp.decode_report(json.dumps({"v": 1, "events": events}).encode())
+    assert kept["detail"] == {"error": "peer [private address] refused '…/x.box'",
+                              "nested": [{"who": "[email]"}], "count": 3}

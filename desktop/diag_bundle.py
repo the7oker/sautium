@@ -30,7 +30,7 @@ from desktop.api_client import BackendAPIClient
 from desktop.p2p import contact_log, diag_events
 from desktop.p2p.diag_protocol import (
     BUNDLE_MAX_BYTES, CHAT_DEFAULT_DAYS, EVENTS_MAX_ROWS, LOG_TAIL_BYTES,
-    PROTOCOL_VERSION, scrub_secrets,
+    PROTOCOL_VERSION, scrub_personal, scrub_secrets,
 )
 from desktop.p2p.master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX
 
@@ -48,7 +48,7 @@ LOG_FILES = ("launcher.log", "backend.log", "backend.log.1", "pgdata/server.log"
              "bootstrap.log")
 REPORT_LOG_TAIL_BYTES = 256 * 1024     # per log in a report sent by hand
 CHAT_MAX_MESSAGES = 5000
-SYSTEM_SETTINGS_KEYS = ("p2p.reachability", "p2p.reachability_detail", "p2p.identity",
+SYSTEM_SETTINGS_KEYS = ("p2p.reachability", "p2p.identity",
                         "sync.last_at", "sync.last_items_received", "ui.language")
 
 
@@ -87,7 +87,12 @@ def system_facts(config: dict, conn=None, probe_backend: bool = True) -> dict:
     """Build, machine, tools and agent states. Backend-owned facts come over
     the signed local API and read None while the backend is not answering —
     or without asking, when the caller knows it is down: six probes at a dead
-    port cost ~2 s each on Windows, at a hung one 5 s each."""
+    port cost ~2 s each on Windows, at a hung one 5 s each.
+
+    An allow-list, field by field, because node.started sends these at every
+    start without a warrant: of the backend's health checks only their states
+    — the music folder as there or not, never its path; the reachability as
+    its kind, never the addresses behind it."""
     from desktop import updater
     from desktop.utils import (detect_claude_cli, detect_codex_cli, detect_gpu,
                                detect_node_version)
@@ -102,6 +107,8 @@ def system_facts(config: dict, conn=None, probe_backend: bool = True) -> dict:
     cfg = backend("/config") or {}
     ai = backend("/api/settings/ai") or {}
     health = backend("/health") or {}
+    checks = health.get("checks") or {}
+    database = checks.get("database")
     facts = {
         "commit": updater.current_commit(),
         "build": updater.installed_build(),
@@ -123,7 +130,12 @@ def system_facts(config: dict, conn=None, probe_backend: bool = True) -> dict:
             "claude": (backend("/api/settings/ai/claude/state") or {}).get("state"),
             "codex": (backend("/api/settings/ai/codex/state") or {}).get("state"),
         },
-        "backend": {"status": health.get("status"), "checks": health.get("checks")},
+        "backend": {
+            "status": health.get("status"),
+            "database": scrub_personal(str(database)) if database is not None else None,
+            "music_library_exists": (checks.get("music_library") or {}).get("exists"),
+            "dht": checks.get("dht"),
+        },
         "ports": config.get("ports"),
     }
     if conn is not None:
