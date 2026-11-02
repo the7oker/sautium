@@ -1,14 +1,18 @@
 """
 HMAC request signing middleware for the Sautium FastAPI backend.
 
-Each privileged request must carry two headers:
+Each privileged request must carry two headers, and every signer of this
+tree sends a third:
 
-    X-Sautium-Ts:  unix seconds (int as string)
-    X-Sautium-Sig: hex(HMAC-SHA256(secret, canonical))
+    X-Sautium-Ts:    unix seconds (int as string)
+    X-Sautium-Nonce: 32 lowercase hex digits the signer drew for this request
+    X-Sautium-Sig:   hex(HMAC-SHA256(secret, canonical))
 
 where:
 
-    canonical = METHOD + "\n" + PATH_AND_QUERY + "\n" + TS + "\n" + sha256_hex(body)
+    canonical = METHOD + "\n" + PATH_AND_QUERY + "\n" + TS + "\n" + NONCE + "\n" + sha256_hex(body)
+
+or, without a nonce, the same with the NONCE line left out.
 
 PATH_AND_QUERY is the request-target as sent — the path's own bytes,
 percent-encoding and all, and the raw query (serving.request_target) — and
@@ -50,7 +54,11 @@ Whitelisted paths (no signature required):
     /api/csp-report      (the browser's own Content-Security-Policy reports)
 
 Replay window: ±60 seconds. A request older than 60s or 60s in the
-future is rejected even with a valid signature.
+future is rejected even with a valid signature, and a signature this node
+has already accepted is refused for twice that window (`replayed`): within
+the window a request is accepted once. The nonce is what lets a signer send
+the same request twice in a second; a page loaded before signers had one
+still signs without it.
 
 The middleware reads request body once and stashes it in
 ``request._body`` so downstream handlers see the same bytes.
@@ -66,6 +74,7 @@ import re
 import secrets
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -79,6 +88,14 @@ from serving import request_target
 logger = logging.getLogger(__name__)
 
 REPLAY_WINDOW_SECONDS = 60
+NONCE_FORM = re.compile(r"[0-9a-f]{32}")
+
+# Signatures accepted in the last two windows: a request the window would
+# still take, sent again, is refused. Kept only once a signature verifies,
+# so only signers fill it — on the event loop, in arrival order.
+_SEEN_SECONDS = 2 * REPLAY_WINDOW_SECONDS
+_seen: set = set()
+_seen_order: deque = deque()            # (monotonic time it may be forgotten, signature)
 
 WHITELIST_EXACT = {
     "/health",
@@ -327,12 +344,25 @@ def ensure_secret(secret_path: Path) -> bytes:
     return data.encode("ascii")
 
 
-def sign(secret: bytes, method: str, path_and_query: str, ts: str, body: bytes) -> str:
-    """Compute the hex HMAC for a request. Used by sync_server's
-    loopback callbacks and by tests."""
+def sign(secret: bytes, method: str, path_and_query: str, ts: str, body: bytes,
+         nonce: Optional[str] = None) -> str:
+    """The hex HMAC of a request (the module doc's canonical string), with
+    the nonce line when the signer sent one."""
     body_hash = hashlib.sha256(body).hexdigest()
-    canonical = f"{method}\n{path_and_query}\n{ts}\n{body_hash}"
-    return hmac.new(secret, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    head = f"{method}\n{path_and_query}\n{ts}\n" + (f"{nonce}\n" if nonce is not None else "")
+    return hmac.new(secret, f"{head}{body_hash}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _first_use(sig: str) -> bool:
+    """Whether `sig` is new to the last two windows; it is remembered."""
+    now = time.monotonic()
+    while _seen_order and _seen_order[0][0] <= now:
+        _seen.discard(_seen_order.popleft()[1])
+    if sig in _seen:
+        return False
+    _seen.add(sig)
+    _seen_order.append((now + _SEEN_SECONDS, sig))
+    return True
 
 
 class HMACAuthMiddleware(BaseHTTPMiddleware):
@@ -375,6 +405,10 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
         except ValueError:
             return JSONResponse({"detail": "bad timestamp"}, status_code=401,
                                 headers={"X-Sautium-Auth-Error": "bad-ts"})
+        nonce = request.headers.get("x-sautium-nonce")
+        if nonce is not None and not NONCE_FORM.fullmatch(nonce):
+            return JSONResponse({"detail": "bad nonce"}, status_code=401,
+                                headers={"X-Sautium-Auth-Error": "bad-nonce"})
 
         skew = abs(time.time() - ts_int)
         if skew > REPLAY_WINDOW_SECONDS:
@@ -403,12 +437,16 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
         secret = self._get_secret()
         for key in (device_auth.current_token(secret).encode(), secret):
             if hmac.compare_digest(
-                    sig, sign(key, request.method, path_and_query, ts_raw, body)):
+                    sig, sign(key, request.method, path_and_query, ts_raw, body, nonce)):
                 break
         else:
             logger.warning("bad request signature: %s %s",
                            request.method, path)
             return JSONResponse({"detail": "bad signature"}, status_code=401,
                                 headers={"X-Sautium-Auth-Error": "bad-sig"})
+        if not _first_use(sig):
+            logger.warning("request signature used again: %s %s", request.method, path)
+            return JSONResponse({"detail": "signature already used"}, status_code=401,
+                                headers={"X-Sautium-Auth-Error": "replayed"})
 
         return await call_next(request)

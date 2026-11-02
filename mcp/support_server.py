@@ -17,6 +17,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import sys
 import time
 import urllib.parse
@@ -55,9 +56,10 @@ def _api_secret() -> bytes:
 
 def _signed(method: str, path_q: str, payload: bytes) -> dict:
     ts = str(int(time.time()))
-    canonical = f"{method}\n{path_q}\n{ts}\n{hashlib.sha256(payload).hexdigest()}"
+    nonce = secrets.token_hex(16)
+    canonical = f"{method}\n{path_q}\n{ts}\n{nonce}\n{hashlib.sha256(payload).hexdigest()}"
     sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-    return {"x-sautium-ts": ts, "x-sautium-sig": sig}
+    return {"x-sautium-ts": ts, "x-sautium-nonce": nonce, "x-sautium-sig": sig}
 
 
 def _raise_for(resp: httpx.Response) -> None:

@@ -2260,6 +2260,17 @@ user brings.
   the same scope. A percent-encoded path now verifies as the browser
   signs it: the old check compared the decoded form, which no signer
   produced.
+- **A signature is taken once (2026-11-03).** The node remembers each
+  request signature it accepted for two replay windows (120 s) and
+  refuses it a second time (`X-Sautium-Auth-Error: replayed`). Every
+  signer of the tree — the page, the launcher, both MCP servers — draws a
+  nonce for each request (`X-Sautium-Nonce`, signed after the time), so
+  the same press twice in a second is two requests. A signature without
+  one is still taken, once: a page loaded before the change reaches the
+  stale-tab reload only through its own signed status stream. The set is
+  keyed on the signature itself and filled only once one verifies. The
+  page signs a read again after `replayed` (the browser's own retry of a
+  dropped connection); it never sends a change twice.
 - **Found on the way:** `portmap._serves_web_ui` still looked for the
   inlined-secret marker of the 2026-08 page, so it recognised no port as
   the Web UI; it now reads the `sautium-webui` health type.

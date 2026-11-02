@@ -24,6 +24,7 @@ import inspect
 import json
 import logging
 import os
+import secrets
 import sys
 import time
 import urllib.parse
@@ -89,24 +90,28 @@ def _backend_get(path: str, params: dict) -> dict:
     clean = {k: v for k, v in params.items() if v not in (None, "", [], ())}
     qs = urllib.parse.urlencode(clean, doseq=True)
     path_q = f"{path}?{qs}" if qs else path
-    ts = str(int(time.time()))
-    canonical = f"GET\n{path_q}\n{ts}\n{hashlib.sha256(b'').hexdigest()}"
-    sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
     with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
-        resp = client.get(path_q, headers={"x-sautium-ts": ts, "x-sautium-sig": sig})
+        resp = client.get(path_q, headers=_signed("GET", path_q, b""))
         resp.raise_for_status()
         return resp.json()
+
+
+def _signed(method: str, path_q: str, payload: bytes) -> dict:
+    """The signature headers (the canonical string of backend/auth_hmac.py),
+    with a nonce drawn for this request."""
+    ts = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    canonical = f"{method}\n{path_q}\n{ts}\n{nonce}\n{hashlib.sha256(payload).hexdigest()}"
+    sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {"x-sautium-ts": ts, "x-sautium-nonce": nonce, "x-sautium-sig": sig}
 
 
 def _backend_post(path: str, body: dict, timeout: float = 30.0) -> dict:
     """Signed POST to the FastAPI backend (JSON body covered by the signature)."""
     payload = json.dumps(body).encode("utf-8")
-    ts = str(int(time.time()))
-    canonical = f"POST\n{path}\n{ts}\n{hashlib.sha256(payload).hexdigest()}"
-    sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
     with httpx.Client(base_url=BACKEND_URL, timeout=timeout) as client:
         resp = client.post(path, content=payload,
-                           headers={"x-sautium-ts": ts, "x-sautium-sig": sig,
+                           headers={**_signed("POST", path, payload),
                                     "content-type": "application/json"})
         if resp.status_code >= 400:
             # Surface the backend's own reason. raise_for_status() reports the

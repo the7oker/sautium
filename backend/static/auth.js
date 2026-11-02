@@ -1,8 +1,11 @@
 // Sautium request signing and the credential channel.
 //
 // Every privileged request to the backend carries:
-//   X-Sautium-Ts   unix seconds
-//   X-Sautium-Sig  hex(HMAC-SHA256(token, METHOD\nPATH_AND_QUERY\nTS\nsha256_hex(body)))
+//   X-Sautium-Ts     unix seconds
+//   X-Sautium-Nonce  16 random bytes, hex, drawn for this request
+//   X-Sautium-Sig    hex(HMAC-SHA256(token, METHOD\nPATH_AND_QUERY\nTS\nNONCE\nsha256_hex(body)))
+// The node accepts a signature once (auth_hmac.py): the nonce is what makes
+// two identical presses in one second two requests.
 //
 // The signing key is a DEVICE TOKEN this browser earned once — by the
 // account password or a pairing PIN shown on the host — and keeps in
@@ -92,17 +95,28 @@
   // server correctly rejects — which was then read as "the token is dead"
   // and logged every tab out, the freshly paired one included.
   //
-  // Returns {ts, sig, token} — the token rides with the signature, so a
-  // signature stays attributable to the token that made it even when
+  // Returns {ts, nonce, sig, token} — the token rides with the signature,
+  // so a signature stays attributable to the token that made it even when
   // storage changes in between.
   async function signRequest(method, pathAndQuery, body) {
     const token = storedToken();
     if (!token) return null;   // not paired yet — send the request unsigned
     const ts = Math.floor(Date.now() / 1000).toString();
+    const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)));
     const bodyHash = toHex(sha256(await bodyBytes(body)));
-    const canonical = `${method}\n${pathAndQuery}\n${ts}\n${bodyHash}`;
+    const canonical = `${method}\n${pathAndQuery}\n${ts}\n${nonce}\n${bodyHash}`;
     const sig = toHex(hmacSha256(enc.encode(token), enc.encode(canonical)));
-    return { ts, sig, token };
+    return { ts, nonce, sig, token };
+  }
+
+  function signedHeaders(init, signed) {
+    const headers = new Headers(init.headers || {});
+    if (signed) {
+      headers.set("X-Sautium-Ts", signed.ts);
+      headers.set("X-Sautium-Nonce", signed.nonce);
+      headers.set("X-Sautium-Sig", signed.sig);
+    }
+    return headers;
   }
 
   // -- fetch override --------------------------------------------------------
@@ -146,15 +160,9 @@
     const body = init.body != null ? init.body : "";
     const signed = await signRequest(method, pathAndQuery, body);
 
-    const headers = new Headers(init.headers || {});
-    if (signed) {
-      headers.set("X-Sautium-Ts", signed.ts);
-      headers.set("X-Sautium-Sig", signed.sig);
-    }
+    let resp = await _origFetch(input, { ...init, headers: signedHeaders(init, signed) });
 
-    let resp = await _origFetch(input, { ...init, headers });
-
-    // Two 401s say nothing about the token itself, and both are repaired by
+    // Three 401s say nothing about the token itself, and each is repaired by
     // signing again:
     //   stale-ts — the request sat in the network queue past the replay
     //     window; a frozen phone tab flushes minutes-old signatures on wake.
@@ -162,18 +170,19 @@
     //     signed in (a pairing link, another tab) while this request was in
     //     flight, so what the server rejected is a key that has already been
     //     superseded here.
+    //   replayed, for a read — the browser itself sent this very request
+    //     again (a retry after a dropped connection); a change it made is not
+    //     made twice.
     const authError = resp.status === 401 && signed
       ? resp.headers.get("X-Sautium-Auth-Error") : null;
     const superseded = authError === "bad-sig" &&
       storedToken() && storedToken() !== signed.token;
+    const reread = authError === "replayed" && (method === "GET" || method === "HEAD");
 
-    if (authError === "stale-ts" || superseded) {
+    if (authError === "stale-ts" || superseded || reread) {
       const fresh = await signRequest(method, pathAndQuery, body);
       if (fresh) {
-        const retryHeaders = new Headers(init.headers || {});
-        retryHeaders.set("X-Sautium-Ts", fresh.ts);
-        retryHeaders.set("X-Sautium-Sig", fresh.sig);
-        resp = await _origFetch(input, { ...init, headers: retryHeaders });
+        resp = await _origFetch(input, { ...init, headers: signedHeaders(init, fresh) });
       }
     } else if (authError === "bad-sig") {
       // The token the browser still holds is the one the server refused, so
