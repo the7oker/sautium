@@ -145,21 +145,11 @@ def test_no_more_than_the_budget_leaves_the_database(sql):
     """Counted where the rows are made: rows wider than the budget never
     reach the tool's process."""
     with sql._connection().cursor() as cur:
-        cur.execute("SELECT count(*), coalesce(sum(length(answer_row)), 0) FROM pg_temp.sautium_query("
+        cur.execute("SELECT count(*), coalesce(sum(length(answer_row)), 0) FROM public.sautium_query("
                     "'SELECT repeat(''x'', 2000000) AS t FROM generate_series(1, 50)', %s, %s)",
                     (sql.ROW_CAP, sql.CHAR_BUDGET))
         assert cur.fetchone() == (1, 0)                 # the note's row alone
     sql._conn.rollback()
-
-
-def test_the_function_is_made_whatever_the_roles_default_transaction(sql, monkeypatch):
-    """A role whose transactions are read-only by default still gets its
-    session's function."""
-    if sql._conn is not None:
-        sql._conn.close()
-    monkeypatch.setitem(sql.DB, "options", "-c default_transaction_read_only=on")
-    assert json.loads(sql.run_query("SELECT 1 AS one")) == [{"one": 1}]
-    sql._conn.close()
 
 
 def test_an_unreachable_database_is_said_as_the_tools_error(sql, monkeypatch):
@@ -168,12 +158,4 @@ def test_an_unreachable_database_is_said_as_the_tools_error(sql, monkeypatch):
     monkeypatch.setitem(sql.DB, "host", "127.0.0.1")
     monkeypatch.setitem(sql.DB, "port", "1")
     with pytest.raises(ValueError, match="not reachable"):
-        sql.run_query("SELECT 1")
-
-
-def test_a_session_whose_function_cannot_be_made_says_so(sql, monkeypatch):
-    if sql._conn is not None:
-        sql._conn.close()
-    monkeypatch.setattr(sql, "_QUERY_FUNCTION", "CREATE FUNCTION pg_temp.broken( RETURNS")
-    with pytest.raises(ValueError, match="session function could not be made"):
         sql.run_query("SELECT 1")

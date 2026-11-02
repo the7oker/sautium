@@ -16,6 +16,7 @@ Two flavours:
   library profile.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -26,6 +27,8 @@ import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
+
+import psycopg2
 
 if sys.platform not in ("win32", "darwin"):
     import pwd
@@ -77,6 +80,13 @@ _NO_MCP = json.dumps({"mcpServers": {}})
 # The assistant's MCP servers by name — the keys of its MCP configuration;
 # assistant_prompt.py teaches the model their tools by these names.
 LIBRARY_SERVERS = ("postgres", "assistant")
+# The CLI reads any file a prompt names after an "@" into the request,
+# wherever the prompt's text came from (measured 2026-11-02 on 2.1.241 and
+# 2.1.316, argv and stdin alike), and sends the system prompt as written. A
+# call built from data — a title's exchange, the canon's entries, a gear
+# model's name — therefore carries it in the system prompt, and its -p is
+# this line. A chat turn's -p is what the owner typed.
+_ONE_SHOT_TURN = "Answer as the system prompt asks."
 
 # assistant turns are SQL + list-building; unbounded interleaved thinking burned
 # ~75% of output tokens on a measured chat turn (4.9k-token final turn =
@@ -238,6 +248,55 @@ def agent_workdir(name: str) -> Path:
     return wd
 
 
+_turns_lock = threading.Lock()
+_live_turns = 0
+
+
+@contextlib.contextmanager
+def library_turn():
+    """One agent turn that runs the assistant's MCP servers, whose SQL logs
+    in as the assistant's role (desktop/db_init.ASSISTANT_ROLE). The role's
+    session defaults — read-only, 30 s per statement — are a session's own
+    to change, and a statement left running holds its locks after the CLI is
+    gone; so when the last live turn ends, every session of the role still
+    open is ended. The ending runs under the lock that counts the turns: no
+    turn starts its servers while it runs."""
+    global _live_turns
+    with _turns_lock:
+        _live_turns += 1
+    try:
+        yield
+    finally:
+        with _turns_lock:
+            _live_turns -= 1
+            if _live_turns == 0:
+                _end_assistant_sessions()
+
+
+def _end_assistant_sessions() -> None:
+    """End every session of the assistant's role but the query tool's own
+    connection (tools/execute_query, which the API providers' turns share
+    and which bounds its statements itself). The node's role is a member of
+    the assistant's (the launcher's setup) or a superuser (Docker). After a
+    turn that ended normally only its servers' closing sessions are left;
+    a statement still running is the case worth a warning."""
+    from db_pool import db_query
+    from desktop.db_init import ASSISTANT_ROLE
+    from tools.execute_query import connection_pid
+    try:
+        ended = db_query(
+            "SELECT state, pg_terminate_backend(pid) AS ended FROM pg_stat_activity "
+            "WHERE usename = %(role)s AND pid IS DISTINCT FROM %(keep)s",
+            {"role": ASSISTANT_ROLE, "keep": connection_pid()})
+    except psycopg2.Error as e:
+        logger.error(f"could not end the assistant's sessions after its turns: {e}")
+        return
+    running = sum(1 for row in ended if row["ended"] and row["state"] == "active")
+    if running:
+        logger.warning(f"ended {running} statement(s) of the assistant's role still "
+                       "running after its turns")
+
+
 def _agent_kwargs() -> dict:
     """Popen setup of a call: spawn_kwargs, the agent's own working directory,
     and stdin closed — with stdin open the CLI waits 3 s for piped input."""
@@ -287,12 +346,15 @@ def call_claude_code(
             "is_error": True,
         }
 
+    if tools == LIBRARY:
+        turn = ["-p", message, "--system-prompt", system_prompt]
+    else:
+        turn = ["-p", _ONE_SHOT_TURN, "--system-prompt", f"{system_prompt}\n\n{message}"]
     cmd = [
         claude_exe,
-        "-p", message,
+        *turn,
         "--output-format", "json",
         "--model", use_model,
-        "--system-prompt", system_prompt,
         *_tool_flags(tools),
     ]
     if max_turns:
@@ -307,7 +369,8 @@ def call_claude_code(
         kwargs = _agent_kwargs()
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                       encoding="utf-8", errors="replace", timeout=wallclock)
-        result = subprocess.run(cmd, **kwargs)
+        with library_turn() if tools == LIBRARY else contextlib.nullcontext():
+            result = subprocess.run(cmd, **kwargs)
 
         # A failed call still prints its result object: since CLI 2.1.x it
         # exits 1 with the cause in `result` and nothing on stderr, so the
@@ -463,6 +526,18 @@ def call_claude_code_stream(
     session_id: Optional[str] = None,
     resume: bool = False,
     model: Optional[str] = None,
+) -> Iterator[StreamEvent]:
+    """`_claude_code_stream` as one library turn (library_turn)."""
+    with library_turn():
+        yield from _claude_code_stream(message, system_prompt, session_id, resume, model)
+
+
+def _claude_code_stream(
+    message: str,
+    system_prompt: str,
+    session_id: Optional[str],
+    resume: bool,
+    model: Optional[str],
 ) -> Iterator[StreamEvent]:
     """Stream variant of `call_claude_code`. Spawns `claude
     --output-format stream-json --include-partial-messages` and turns

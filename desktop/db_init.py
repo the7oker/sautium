@@ -8,7 +8,6 @@ Handles:
 - Schema migrations (numbered SQL files)
 """
 
-import glob
 import hashlib
 import hmac
 import logging
@@ -17,7 +16,6 @@ import platform
 import shutil
 import subprocess
 import sys
-import tarfile
 import time
 import zipfile
 from pathlib import Path
@@ -36,12 +34,18 @@ logger = logging.getLogger(__name__)
 MIGRATIONS_TABLE = "_schema_migrations"
 
 # The login every agent-facing SQL path uses — the assistant's MCP servers
-# and the API providers' query tool: it reads the tables below and nothing
-# else, owns nothing, and writes nowhere. The role and its login are the
-# cluster administrator's (the launcher's setup, the Docker backend's
-# bootstrap superuser: ensure_assistant_role); the grants are re-stated
-# from ASSISTANT_READS by the database owner at every start
-# (grant_assistant_reads), because a restore (pg_restore --no-privileges)
+# and the API providers' query tool. Its privileges bound it: it reads the
+# tables below and nothing else, writes no table and creates nothing — no
+# object in the schema, no temporary one, no large object. Its session
+# defaults (read-only, 30 s statements) are only defaults, a session may
+# change them, so the backend ends whatever session of it is still open
+# when the agents' turns are over (claude_code_runner.library_turn) and
+# cancels the query tool's statement at its deadline. The role and its
+# login are the cluster administrator's (the launcher's setup, the Docker
+# backend's bootstrap superuser: ensure_assistant_role,
+# revoke_large_object_creation); the grants are re-stated from
+# ASSISTANT_READS by the migration runner (apply_migrations →
+# grant_assistant_reads), because a restore (pg_restore --no-privileges)
 # and the LB loader's table swap both drop them.
 ASSISTANT_ROLE = "sautium_assistant"
 
@@ -56,7 +60,7 @@ ASSISTANT_READS = (
     "album_artists", "album_descriptions", "album_genres", "album_tracks",
     "album_variants", "albums", "artist_bio_embeddings", "artist_bios",
     "artist_mbids", "artist_members", "artist_name_aliases", "artist_tags",
-    "artists", "assistant_settings", "audio_features", "embedding_models",
+    "artists", "assistant_settings", "audio_features", "demo_plays", "embedding_models",
     "embedding_segments", "embeddings", "external_metadata",
     "gear_brands", "gear_measured_caveats", "gear_model_technologies",
     "gear_models", "gear_pair_notes", "gear_registry_entries",
@@ -89,10 +93,11 @@ def assistant_password(owner_password: str) -> str:
 
 def ensure_assistant_role(cur, owner_password: str) -> None:
     """The assistant role with its login, on a cursor of a role that may
-    administer roles. Idempotent; run at every start so a changed owner
-    password moves the derived one along. The defaults hold each session
-    read-only and short — the grants are what bounds it, these keep a
-    runaway query from eating a turn."""
+    administer roles. Idempotent; run at every start, so a changed owner
+    password moves the derived one along — and whatever a session of the
+    role changed of itself is taken back: PostgreSQL lets a role set its own
+    password and session defaults, role-wide and per database. The defaults
+    hold a session read-only and short; the grants are what bounds it."""
     role = sql.Identifier(ASSISTANT_ROLE)
     cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (ASSISTANT_ROLE,))
     if cur.fetchone() is None:
@@ -101,6 +106,13 @@ def ensure_assistant_role(cur, owner_password: str) -> None:
         "ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
         "NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 32 PASSWORD %s").format(role),
         (assistant_password(owner_password),))
+    cur.execute("""SELECT d.datname FROM pg_db_role_setting s
+                     JOIN pg_database d ON d.oid = s.setdatabase
+                    WHERE s.setrole = %s::regrole""", (ASSISTANT_ROLE,))
+    for (database,) in cur.fetchall():
+        cur.execute(sql.SQL("ALTER ROLE {} IN DATABASE {} RESET ALL").format(
+            role, sql.Identifier(database)))
+    cur.execute(sql.SQL("ALTER ROLE {} RESET ALL").format(role))
     for setting, value in (("default_transaction_read_only", "on"),
                            ("statement_timeout", "30s"),
                            ("idle_in_transaction_session_timeout", "60s")):
@@ -111,15 +123,40 @@ def ensure_assistant_role(cur, owner_password: str) -> None:
 def grant_assistant_reads(cur) -> None:
     """The assistant role's grants in this database, exactly ASSISTANT_READS:
     whatever it held before is revoked first, so a table moved to private
-    stops being readable. Run by the database owner (or a superuser)."""
+    stops being readable. Run by the database owner (or a superuser), from
+    the migration runner. Without the role there is nothing to grant: the
+    cluster administrator's step has not run here (a launcher whose setup
+    failed) — logged, and the node runs without the assistant's SQL until a
+    start makes the role."""
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (ASSISTANT_ROLE,))
+    if cur.fetchone() is None:
+        logger.error("the assistant's login %s does not exist: its SQL fails until the "
+                     "cluster administrator's setup makes it (the launcher's start, the "
+                     "Docker backend's start)", ASSISTANT_ROLE)
+        return
     role = sql.Identifier(ASSISTANT_ROLE)
     cur.execute(sql.SQL("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {}").format(role))
     # PostgreSQL 15's default; a database restored from an older cluster
     # can still carry the old one, under which any role may create here.
     cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+    # Temporary tables and functions are PUBLIC's by default, in every
+    # database; the owner keeps its own TEMP.
+    cur.execute("SELECT current_database()")
+    cur.execute(sql.SQL("REVOKE TEMPORARY ON DATABASE {} FROM PUBLIC").format(
+        sql.Identifier(cur.fetchone()[0])))
     cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
     cur.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(
         sql.SQL(", ").join(sql.Identifier(t) for t in ASSISTANT_READS), role))
+
+
+def revoke_large_object_creation(cur) -> None:
+    """Creating a large object is PUBLIC's by default, and one outlives the
+    session that made it — the one write left to a role that holds no table.
+    Nothing of the node uses large objects. Only the cluster administrator
+    may take them from PUBLIC, database by database: the launcher's setup,
+    the Docker backend's start and a restore run this."""
+    cur.execute("REVOKE EXECUTE ON FUNCTION lo_creat(integer), lo_create(oid), "
+                "lo_from_bytea(oid, bytea) FROM PUBLIC")
 
 # Portable PostgreSQL (Windows), Homebrew formula (macOS) and the Docker image
 # tag (docker-compose*.yml) all track the SAME major — bump them together.
@@ -1148,7 +1185,7 @@ def create_database(
             )
             if not cur.fetchone():
                 cur.execute(
-                    f"CREATE ROLE sautium WITH LOGIN PASSWORD %s",
+                    "CREATE ROLE sautium WITH LOGIN PASSWORD %s",
                     (password,),
                 )
                 logger.info("Created role 'sautium'")
@@ -1175,6 +1212,11 @@ def create_database(
 
             # The assistant's login; run_migrations gives it its grants.
             ensure_assistant_role(cur, password)
+            # The owner ends the assistant's sessions after a turn
+            # (claude_code_runner.library_turn): PostgreSQL lets a role end
+            # the sessions of roles it is a member of.
+            cur.execute(sql.SQL("GRANT {} TO sautium WITH INHERIT TRUE, SET FALSE").format(
+                sql.Identifier(ASSISTANT_ROLE)))
     finally:
         conn.close()
 
@@ -1200,6 +1242,8 @@ def create_database(
                 )
                 if progress_cb:
                     progress_cb("pgvector not available (embedding search disabled)")
+
+            revoke_large_object_creation(cur)
 
             # Grant schema privileges to sautium
             cur.execute("GRANT ALL ON SCHEMA public TO sautium")
@@ -1257,8 +1301,10 @@ def apply_migrations(conn, progress_cb: Optional[Callable] = None) -> int:
     already ran earlier files. A fresh install runs 001 and then every
     delta, so a delta must be idempotent — a no-op on the schema 001 just
     created. Applied files are tracked in _schema_migrations; the same
-    runner serves the launcher (service start, post-update) and the backend
-    (backend/db_migrate.py at startup, Docker included).
+    runner serves the launcher (service start, post-update), the backend
+    (backend/db_migrate.py at startup, Docker included) and a restore.
+    After the files it states the assistant's grants (grant_assistant_reads):
+    a new table gets its decision, a restored database its lost grants.
 
     Returns the number of migrations applied.
     """
@@ -1310,6 +1356,8 @@ def apply_migrations(conn, progress_cb: Optional[Callable] = None) -> int:
         else:
             logger.info(f"Applied {applied_count} migration(s)")
 
+        grant_assistant_reads(cur)
+        conn.commit()
         return applied_count
 
 

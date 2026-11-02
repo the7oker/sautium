@@ -107,10 +107,12 @@ class BaseProvider(ABC):
         ...
 
     @abstractmethod
-    def complete(self, prompt: str, system_prompt: str, model: Optional[str] = None) -> str:
+    def complete(self, prompt: str, system_prompt: str, model: Optional[str] = None,
+                 timeout: float = 60) -> str:
         """One request, text in and text out: no tool is offered to the
-        model. The work nobody watches — titles, AI canon — runs on this
-        (providers.complete_text), never on chat()."""
+        model; `timeout` bounds the request. The work nobody watches —
+        titles, AI canon — runs on this (providers.complete_text), never on
+        chat()."""
         ...
 
     def chat_stream(

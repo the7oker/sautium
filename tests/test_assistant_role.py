@@ -1,12 +1,16 @@
 """The assistant's login (desktop/db_init.ASSISTANT_ROLE): every SQL path an
 agent drives — the MCP servers on both platforms and the API providers'
 query tool — connects as a role that reads the catalogue and nothing else,
-owns nothing and writes nowhere. The tests make the role and its grants the
-way a node does (ensure_assistant_role, then the start's grant step) on the
-module's scratch database, and connect as it."""
+writes no table and creates nothing, and whose sessions do not outlive the
+agents' turns. The tests make the role and its grants the way a node does
+(the cluster administrator's step, then the migration runner's grants) on
+the module's scratch database, and connect as it."""
 
 import json
+import logging
 import sys
+import threading
+import time
 from pathlib import Path
 
 import psycopg2
@@ -25,12 +29,12 @@ from tests.conftest import PG  # noqa: E402
 # table is a decision.
 PRIVATE = {
     "_schema_migrations", "analysis_sources", "chat_messages", "chat_sessions", "covers",
-    "demo_plays", "diag_events", "diag_warrants", "external_api_cooldown",
+    "diag_events", "diag_warrants", "external_api_cooldown",
     "friend_grant_rights", "friend_grants", "friend_rights", "friends",
     "invite_token_rights", "invite_tokens", "lastfm_import", "lb_slice_blobs",
     "lb_slice_fetches", "lb_slice_requests", "mb_slice_blobs", "mb_slice_fetches",
     "p2p_action_costs", "p2p_contact_events", "p2p_dht_state", "p2p_gate_pool",
-    "p2p_identities", "p2p_messages", "p2p_node_bans", "p2p_nodes_seen",
+    "p2p_identities", "p2p_messages", "p2p_node_bans", "p2p_nodes_seen", "p2p_witness",
     "pending_key_rotations", "pending_scrobble_artists", "pending_scrobbles", "sent_invites",
     "signing_batches", "stream_providers", "support_bundles", "support_reports",
     "support_warrants", "user_profile", "user_settings",
@@ -39,11 +43,14 @@ PRIVATE = {
 
 @pytest.fixture(scope="module")
 def owner(scratch_dsn):
-    """The scratch database as a node's start leaves it: migrated, the
-    assistant's login made, its grants stated. A connection as its owner."""
+    """The scratch database as a node's start leaves it: the cluster
+    administrator's step done (Docker's), migrated, the grants stated. A
+    connection as its owner (the suite's role is a superuser)."""
     import db_migrate
     conn = psycopg2.connect(scratch_dsn)
     db_migrate._assistant_role(conn)
+    db_init.apply_migrations(conn)
+    conn.commit()
     conn.autocommit = True
     yield conn
     conn.close()
@@ -105,6 +112,59 @@ def test_the_assistant_writes_nowhere_even_with_its_read_only_default_lifted(ass
                 cur.execute(statement)
 
 
+def test_the_assistant_creates_nothing_even_with_its_read_only_default_lifted(assistant):
+    with assistant.cursor() as cur:
+        cur.execute("SET default_transaction_read_only = off")
+        for statement in ("CREATE TEMP TABLE scratch (x int)",
+                          "CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+                          "SELECT lo_create(0)",
+                          "SELECT lo_from_bytea(0, 'x')",
+                          "CREATE SCHEMA planted"):
+            with pytest.raises(errors.InsufficientPrivilege):
+                cur.execute(statement)
+
+
+def test_the_settings_view_is_a_security_barrier(owner):
+    with owner.cursor() as cur:
+        cur.execute("SELECT reloptions FROM pg_class WHERE relname = 'assistant_settings'")
+        assert cur.fetchone()[0] == ["security_barrier=true"]
+
+
+def test_a_start_takes_back_what_a_session_changed_of_its_own_login(owner, scratch_dsn):
+    """PostgreSQL lets a role set its own password and session defaults."""
+    database = scratch_dsn.rsplit("/", 1)[1]
+    session = _as_assistant(scratch_dsn)
+    with session.cursor() as cur:
+        cur.execute("SET default_transaction_read_only = off")
+        cur.execute(f"ALTER ROLE {db_init.ASSISTANT_ROLE} SET statement_timeout = 0")
+        cur.execute(f'ALTER ROLE {db_init.ASSISTANT_ROLE} IN DATABASE "{database}" '
+                    "SET statement_timeout = 0")
+        cur.execute(f"ALTER ROLE {db_init.ASSISTANT_ROLE} PASSWORD 'changed'")
+    session.close()
+
+    with owner.cursor() as cur:
+        db_init.ensure_assistant_role(cur, PG["password"])
+        cur.execute("SELECT setdatabase, setconfig FROM pg_db_role_setting "
+                    "WHERE setrole = %s::regrole", (db_init.ASSISTANT_ROLE,))
+        assert cur.fetchall() == [(0, ["default_transaction_read_only=on",
+                                       "statement_timeout=30s",
+                                       "idle_in_transaction_session_timeout=60s"])]
+    again = _as_assistant(scratch_dsn)
+    with again.cursor() as cur:
+        cur.execute("SHOW statement_timeout")
+        assert cur.fetchone()[0] == "30s"
+    again.close()
+
+
+def test_without_the_login_the_grants_wait_and_say_why(owner, monkeypatch, caplog):
+    """A launcher whose setup failed before the backend started."""
+    monkeypatch.setattr(db_init, "ASSISTANT_ROLE", "sautium_assistant_absent")
+    caplog.set_level(logging.ERROR, logger=db_init.logger.name)
+    with owner.cursor() as cur:
+        db_init.grant_assistant_reads(cur)
+    assert "sautium_assistant_absent does not exist" in caplog.text
+
+
 def test_the_assistant_sees_the_output_settings_and_no_other(owner, assistant):
     with owner.cursor() as cur:
         cur.execute("""INSERT INTO user_settings (key, value) VALUES
@@ -115,15 +175,14 @@ def test_the_assistant_sees_the_output_settings_and_no_other(owner, assistant):
         assert [r[0] for r in cur.fetchall()] == ["output.type"]
 
 
-def test_a_restore_without_privileges_reads_again_after_the_next_start(owner, scratch_dsn):
+def test_a_restore_without_privileges_reads_again_after_the_migration_runner(owner, scratch_dsn):
     """pg_restore --no-privileges brings the tables back without a grant;
-    the backend's start states them again."""
-    import db_migrate
+    the runner a restore and every start run states them again."""
     with owner.cursor() as cur:
         cur.execute(f"REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {db_init.ASSISTANT_ROLE}")
     conn = psycopg2.connect(scratch_dsn)
     try:
-        db_migrate._assistant_role(conn)
+        db_init.apply_migrations(conn)
     finally:
         conn.close()
     reader = _as_assistant(scratch_dsn)
@@ -164,6 +223,101 @@ def test_the_query_tool_runs_as_the_assistant_and_leaves_nothing_on_its_session(
     with owner.cursor() as cur:
         cur.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 424242")
         assert cur.fetchone()[0] == 0
+    tool._conn.close()
+
+
+def test_the_sql_tool_answers_as_the_assistant_and_makes_nothing(owner, scratch_dsn):
+    """The agents' SQL tool (mcp/postgres_server.py) runs its query inside
+    the schema's function, so a login that may create nothing — not even in
+    pg_temp — gets its answers, and is refused what is private."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "postgres_server", BACKEND.parent / "mcp" / "postgres_server.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    tool.DB.update(host=PG["host"], port=str(PG["port"]), user=db_init.ASSISTANT_ROLE,
+                   password=db_init.assistant_password(PG["password"]),
+                   dbname=scratch_dsn.rsplit("/", 1)[1])
+    try:
+        assert json.loads(tool.run_query("SELECT current_user AS who")) == [
+            {"who": db_init.ASSISTANT_ROLE}]
+        assert len(json.loads(tool.run_query("SELECT count(*) AS n FROM artists"))) == 1
+        with pytest.raises(ValueError, match="permission denied for table user_settings"):
+            tool.run_query("SELECT value FROM user_settings")
+        assert json.loads(tool.run_query(
+            "SELECT count(*) AS n FROM pg_proc WHERE pronamespace = pg_my_temp_schema()")) == [
+            {"n": 0}]
+    finally:
+        if tool._conn is not None:
+            tool._conn.close()
+
+
+def test_the_query_tool_cancels_a_statement_at_its_deadline(owner, scratch_dsn, monkeypatch):
+    """The session's own statement_timeout is a setting it may change; the
+    deadline is the tool's."""
+    from config import settings
+    from tools import execute_query as tool
+    monkeypatch.setattr(settings, "postgres_db", scratch_dsn.rsplit("/", 1)[1])
+    monkeypatch.setattr(tool, "_conn", None)
+    monkeypatch.setattr(tool, "_DEADLINE_SECONDS", 1)
+
+    started = time.monotonic()
+    out = tool.execute_query("SELECT pg_sleep(6) AS slept")
+
+    assert "canceling statement due to user request" in out
+    assert time.monotonic() - started < 4
+    assert "(1 rows)" in tool.execute_query("SELECT 1 AS one")
+    tool._conn.close()
+
+
+@pytest.fixture
+def node_pool(scratch_dsn, monkeypatch):
+    """The backend's connection pool on the scratch database."""
+    import db_pool
+    import psycopg2.pool
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    yield
+    pool.closeall()
+
+
+def test_the_assistants_sessions_end_with_the_last_live_turn(
+        owner, scratch_dsn, node_pool, monkeypatch):
+    """A statement a turn's server left running ends when the turns are
+    over, not when it would; the query tool's own connection stays."""
+    import claude_code_runner as runner
+    from config import settings
+    from tools import execute_query as tool
+    monkeypatch.setattr(settings, "postgres_db", scratch_dsn.rsplit("/", 1)[1])
+    monkeypatch.setattr(tool, "_conn", None)
+    tool.execute_query("SELECT 1 AS one")
+    kept = tool.connection_pid()
+    left = _as_assistant(scratch_dsn)
+    with left.cursor() as cur:
+        cur.execute("SELECT pg_backend_pid()")
+        pid = cur.fetchone()[0]
+    ended = []
+
+    def statement():
+        try:
+            with left.cursor() as cur:
+                cur.execute("SELECT pg_sleep(20)")
+        except psycopg2.Error as e:
+            ended.append(type(e).__name__)
+    running = threading.Thread(target=statement)
+
+    with runner.library_turn():
+        running.start()
+        with runner.library_turn():
+            pass
+        with owner.cursor() as cur:
+            cur.execute("SELECT count(*) FROM pg_stat_activity WHERE pid = %s", (pid,))
+            assert cur.fetchone()[0] == 1
+    running.join(10)
+
+    assert not running.is_alive() and ended
+    assert "(1 rows)" in tool.execute_query("SELECT 1 AS one")
+    assert tool.connection_pid() == kept
     tool._conn.close()
 
 

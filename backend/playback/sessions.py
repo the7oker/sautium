@@ -383,7 +383,7 @@ def _schedule_mix_title(session_id: str) -> None:
     (the codebase's background-work idiom — chat-stream-worker, status poller).
     It runs on the provider the owner picked and on none other: with no pick
     ("no AI") or a pick that is gone the card stays 'Mix'. Text in, text out
-    (routers.chat.generate_title) — the model is offered no tool."""
+    (routers.chat.generate_title → providers.complete_text)."""
     def _worker():
         try:
             from routers.chat import generate_title, picked_provider

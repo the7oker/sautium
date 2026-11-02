@@ -2,12 +2,16 @@
 
 Allows LLM to run read-only SQL against the music database. What bounds it
 is the login: the assistant role (desktop/db_init.ASSISTANT_ROLE) reads the
-catalogue and nothing else, and owns and writes nothing. The SELECT/WITH
-check, the read-only transaction and the timeout are a second layer.
+catalogue and nothing else, and writes and creates nothing. The SELECT/WITH
+check, the read-only transaction and the timeout are a second layer — the
+session may change its own settings, so a statement past the deadline is
+cancelled from here.
 """
 
 import logging
 import re
+import threading
+from typing import Optional
 
 import psycopg2
 import psycopg2.extras
@@ -27,14 +31,29 @@ _FORBIDDEN = re.compile(
 # Only allow statements starting with SELECT or WITH
 _ALLOWED_START = re.compile(r'^\s*(SELECT|WITH)\b', re.IGNORECASE)
 
+# Past this a statement is cancelled by the client; the server-side
+# statement_timeout below is the session's to change.
+_DEADLINE_SECONDS = 15
+
+# One connection, kept (the persistent-connection rule), used by one query
+# at a time: the API providers' turns share it.
 _conn = None
+_pid: Optional[int] = None
+_lock = threading.Lock()
+
+
+def connection_pid() -> Optional[int]:
+    """The server process of the tool's connection while it has one — the
+    session claude_code_runner leaves open when it ends the assistant's."""
+    return _pid
 
 
 def _get_conn():
-    global _conn
+    global _conn, _pid
     if _conn is None or _conn.closed:
         _conn = psycopg2.connect(settings.assistant_database_url)
         _conn.autocommit = False  # We'll use transaction for READ ONLY
+        _pid = _conn.get_backend_pid()
     return _conn
 
 
@@ -75,15 +94,19 @@ def execute_query(sql: str) -> str:
         sql += " LIMIT 100"
 
     try:
-        conn = _get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SET TRANSACTION READ ONLY")
-                cur.execute("SET LOCAL statement_timeout = '10s'")
-                cur.execute(sql)
-                rows = [dict(r) for r in cur.fetchall()]
-        finally:
-            _reset(conn)
+        with _lock:
+            conn = _get_conn()
+            deadline = threading.Timer(_DEADLINE_SECONDS, conn.cancel)
+            deadline.start()
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SET TRANSACTION READ ONLY")
+                    cur.execute("SET LOCAL statement_timeout = '10s'")
+                    cur.execute(sql)
+                    rows = [dict(r) for r in cur.fetchall()]
+            finally:
+                deadline.cancel()
+                _reset(conn)
     except psycopg2.Error as e:
         error_msg = str(e).strip().split("\n")[0]
         return f"SQL Error: {error_msg}"

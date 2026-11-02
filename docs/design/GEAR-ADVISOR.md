@@ -84,10 +84,12 @@ listener), drains the whole queue on wake-up, and re-queues orphaned
 
 AI call, in preference order:
 
-1. **Claude Code CLI** (`call_claude_code(..., timeout_seconds=600,
-   mcp=False)`) — built-in WebSearch/WebFetch, subscription-billed, the same
-   runner the AI assistant chat and ai_canon use. No MCP config: research needs the
-   web, not the library.
+1. **Claude Code CLI** (`call_claude_code(..., tools=RESEARCH)`) — the
+   built-in WebSearch and WebFetch and nothing else, subscription-billed, the
+   same runner the AI assistant chat and ai_canon use. An explicit, empty MCP
+   configuration: research needs the web, not the library, and never the
+   user's own servers or connectors. The model's name rides in the system
+   prompt, never in `-p`, where the CLI would read a file it names.
 2. **Anthropic API** with the server-side `web_search` tool (pause_turn
    continuation loop, max 12 searches) when Claude Code is absent, when the
    owner made the Anthropic API the node's agent, or as the fallback for an

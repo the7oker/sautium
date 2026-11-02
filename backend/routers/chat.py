@@ -481,9 +481,9 @@ def _clean_title(raw: str) -> Optional[str]:
 
 def generate_title(provider_name: str, prompt: str) -> Optional[str]:
     """A title from `prompt` on the provider's smallest model, text in and
-    text out (providers.complete_text: the model is offered no tool). None
-    when the provider is not there or the call failed — a title is
-    best-effort, its caller keeps the placeholder."""
+    text out (providers.complete_text). None when the provider is not there
+    or the call failed — a title is best-effort, its caller keeps the
+    placeholder."""
     from providers import complete_text, get_provider
     provider = get_provider(provider_name)
     if provider is None:

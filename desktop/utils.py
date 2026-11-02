@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -245,16 +246,22 @@ def claude_auth_verified(timeout: float = 90.0) -> bool:
     # The assistant runner drops ANTHROPIC_API_KEY so the CLI bills the OAuth
     # subscription — the probe must test the same path, not a stray key.
     env.pop("ANTHROPIC_API_KEY", None)
+    # Like every Claude Code spawn, it names what it may use: no tool, no
+    # MCP server (not the user's own either), one turn — in the temp
+    # directory, stdin closed.
     kwargs = {
         "capture_output": True, "text": True,
         "encoding": "utf-8", "errors": "replace",
         "timeout": timeout, "env": env,
+        "stdin": subprocess.DEVNULL, "cwd": tempfile.gettempdir(),
     }
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
         result = subprocess.run(
-            [str(claude), "-p", "ok", "--output-format", "json"], **kwargs)
+            [str(claude), "-p", "ok", "--output-format", "json",
+             "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers": {}}',
+             "--max-turns", "1"], **kwargs)
     except Exception as e:
         logger.debug(f"Claude auth probe failed to run: {e}")
         return False
@@ -432,8 +439,6 @@ def codex_auth_verified(timeout: float = 90.0) -> bool:
 
     Slow (seconds; up to `timeout` on a stalled network) — call from a
     worker thread."""
-    import tempfile
-
     codex = get_codex_executable()
     if codex is None:
         return False

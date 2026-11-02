@@ -96,7 +96,7 @@ def pytest_sessionstart(session):
         return
     # The assistant's login is a cluster role a node's setup makes before
     # any database work (desktop/db_init.ensure_assistant_role); the code
-    # that grants to it (the backend's start, the LB loader's swap) expects it.
+    # that grants to it (the migration runner, the LB loader's swap) expects it.
     from desktop import db_init
     admin = _admin()
     with admin.cursor() as cur:

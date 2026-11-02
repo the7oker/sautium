@@ -138,11 +138,14 @@ def available_providers() -> list[dict]:
 
 def complete_text(name: str, prompt: str, system_prompt: str,
                   model: Optional[str] = None, timeout: int = 60) -> Optional[str]:
-    """One call, text in and text out, on provider `name`: the model is
-    offered no tool, whichever provider it is. The work nobody watches —
-    chat titles, mix names, AI canon — runs through here and nowhere else.
-    Returns the answer; None when the provider is not registered or a CLI
-    call failed (it logs why). An API provider's own error propagates."""
+    """One call, text in and text out, on provider `name`. Claude Code and
+    the API providers offer the model no tool; codex offers no MCP server,
+    shell or web, and keeps only the tools its harness cannot drop, inside
+    its read-only sandbox (codex_runner.call_codex_oneshot). The work
+    nobody watches — chat titles, mix names, AI canon — runs through here
+    and nowhere else. Returns the answer; None when the provider is not
+    registered or a CLI call failed (it logs why). An API provider's own
+    error propagates."""
     provider = get_provider(name)
     if provider is None:
         return None
@@ -155,4 +158,4 @@ def complete_text(name: str, prompt: str, system_prompt: str,
         from codex_runner import TITLE_MODEL, call_codex_oneshot
         return call_codex_oneshot(prompt, system_prompt, model=model or TITLE_MODEL,
                                   timeout_seconds=timeout)
-    return provider.complete(prompt, system_prompt, model)
+    return provider.complete(prompt, system_prompt, model, timeout)

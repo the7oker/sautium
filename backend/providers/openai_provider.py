@@ -133,11 +133,13 @@ class OpenAIProvider(BaseProvider):
         # CLI uses — verified present in this key's /v1/models.
         return ["gpt-5.6-terra", "gpt-5.6-luna"]
 
-    def complete(self, prompt: str, system_prompt: str, model: Optional[str] = None) -> str:
+    def complete(self, prompt: str, system_prompt: str, model: Optional[str] = None,
+                 timeout: float = 60) -> str:
         use_model = model if model in self.models() else self.models()[0]
         response = self._get_client().chat.completions.create(
             model=use_model,
             max_tokens=4096,
+            timeout=timeout,
             messages=[{"role": "system", "content": system_prompt},
                       {"role": "user", "content": prompt}],
         )

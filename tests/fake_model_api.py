@@ -170,6 +170,16 @@ def codex_tools(body: dict) -> dict[str, list[str]]:
     return offered
 
 
+def codex_instructions(body: dict) -> str:
+    """The base instructions a Responses request from codex carries: codex
+    0.149 sends model_instructions_file's text as the first developer
+    message, not in the `instructions` field."""
+    for item in body.get("input") or []:
+        if item.get("type") == "message" and item.get("role") == "developer":
+            return "".join(c.get("text", "") for c in item.get("content") or [])
+    return ""
+
+
 def codex_hosted_tools(body: dict) -> list[str]:
     """The tools codex offers inside its code-mode host, by name — the host's
     description lists each under a "### `name`" heading."""

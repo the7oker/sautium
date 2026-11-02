@@ -79,7 +79,7 @@ if sys.platform not in ("win32", "darwin"):
 
 import codex_cli
 from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
-from claude_code_runner import AGENT_USER, library_mcp_config, spawn_kwargs
+from claude_code_runner import AGENT_USER, library_mcp_config, library_turn, spawn_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +346,18 @@ def call_codex_stream(
     resume: bool = False,
     model: Optional[str] = None,
 ) -> Iterator[StreamEvent]:
+    """`_codex_stream` as one library turn (claude_code_runner.library_turn)."""
+    with library_turn():
+        yield from _codex_stream(message, player_context, thread_id, resume, model)
+
+
+def _codex_stream(
+    message: str,
+    player_context: Optional[str],
+    thread_id: Optional[str],
+    resume: bool,
+    model: Optional[str],
+) -> Iterator[StreamEvent]:
     """Spawn `codex exec --json` (or `codex exec resume <id>`) and turn
     its JSONL events into provider stream events.
 
@@ -600,10 +612,13 @@ def call_codex_oneshot(
     model: str = TITLE_MODEL,
     timeout_seconds: int = 25,
 ) -> Optional[str]:
-    """One-shot codex call, text in and text out — no MCP, `system_prompt`
-    as its instructions, `--ephemeral` so title generations don't litter
-    session storage. Returns the final agent message text, or None on
-    any failure — callers treat title generation as best-effort."""
+    """One-shot codex call, text in and text out — `system_prompt` as its
+    instructions; no MCP server, no shell, no web. The harness's own tools
+    have no off switch and stay: apply_patch (the read-only sandbox refuses
+    it), update_plan, wait, request_user_input. `--ephemeral` so title
+    generations don't litter session storage. Returns the final agent
+    message text, or None on any failure — callers treat title generation
+    as best-effort."""
     codex_exe = _resolve_codex_executable()
     if codex_exe is None:
         return None

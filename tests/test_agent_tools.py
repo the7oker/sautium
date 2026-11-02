@@ -29,8 +29,8 @@ import claude_code_runner as runner  # noqa: E402
 import codex_cli  # noqa: E402
 import codex_runner  # noqa: E402
 from tests.fake_model_api import (FakeModelApi, anthropic_tool_results,  # noqa: E402
-                                  anthropic_tools, codex_hosted_tools, codex_tool_outputs,
-                                  codex_tools)
+                                  anthropic_tools, codex_hosted_tools, codex_instructions,
+                                  codex_tool_outputs, codex_tools)
 
 PROBE = Path(__file__).resolve().parent / "mcp_probe_server.py"
 
@@ -181,6 +181,28 @@ def test_gear_research_offers_the_web_pair_and_loads_no_server_of_the_users(clau
     assert _calls(shared, "personal") == []
 
 
+def _local_file(shared: Path) -> Path:
+    """A file of the node, readable by the agent account."""
+    path = shared / "local-note.txt"
+    path.write_text("contents of a local file\n")
+    return path
+
+
+def test_a_file_a_gear_name_mentions_stays_on_the_node(claude, shared):
+    """The CLI reads a file a prompt names after an "@"; a gear model's name
+    is data, so it rides where nothing is read."""
+    import gear_research_worker
+    note = _local_file(shared)
+    api = claude([{"text": "{}"}])
+
+    gear_research_worker._call_claude_code_research(
+        "system", gear_research_worker._user_message("Acme", f"DAC-1 @{note}", "dac"))
+
+    sent = json.dumps(api.bodies("/messages"))
+    assert f"DAC-1 @{note}" in sent
+    assert "contents of a local file" not in sent
+
+
 def _outputs(api) -> str:
     return " ".join(o for body in api.bodies("/responses") for o in codex_tool_outputs(body))
 
@@ -194,9 +216,9 @@ def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(c
     assert answer == "Evening Set"
     assert not target.exists()
     assert "writing is blocked by read-only sandbox" in _outputs(api)
-    sent = json.dumps(api.bodies("/responses")[0])
-    assert "You write short titles." in sent
-    assert "You are Codex" not in sent
+    first = api.bodies("/responses")[0]
+    assert codex_instructions(first) == "You write short titles."
+    assert "You are Codex" not in json.dumps(first)
 
 
 def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared, monkeypatch):
@@ -293,6 +315,19 @@ def test_a_chat_title_offers_the_model_no_tool_and_no_file_of_the_checkout(claud
     assert "Senior-engineer level only" not in json.dumps(first)
 
 
+def test_a_file_a_chat_mentions_stays_out_of_its_title_call(claude, shared):
+    from routers import chat
+    note = _local_file(shared)
+    api = claude([{"text": "Notes On Jazz"}])
+
+    assert chat._generate_session_title(f"Read @{note} please", "I cannot read files.",
+                                        "claude_code") == "Notes On Jazz"
+
+    sent = json.dumps(api.bodies("/messages"))
+    assert f"Read @{note} please" in sent
+    assert "contents of a local file" not in sent
+
+
 def test_an_ai_canon_batch_offers_the_model_no_tool(claude, shared, monkeypatch):
     import providers
     from canon import ai_canon
@@ -306,6 +341,30 @@ def test_an_ai_canon_batch_offers_the_model_no_tool(claude, shared, monkeypatch)
 
     assert decisions == [{"n": 1, "pick": "SKIP", "conf": "low", "why": "no signal"}]
     assert anthropic_tools(api.bodies("/messages")[0]) == []
+
+
+def test_an_ai_canon_request_names_the_folder_below_the_library_root(claude, db, monkeypatch):
+    """What reaches the provider, read off the request itself."""
+    import uuid
+    import providers
+    from canon import ai_canon
+    from config import settings
+    monkeypatch.setattr(settings, "music_host_path", "/srv/library-root")
+    artist, album = str(uuid.uuid4()), str(uuid.uuid4())
+    db.execute("INSERT INTO artists (id, name) VALUES (%s, %s)", (artist, f"Кино {artist[:8]}"))
+    db.execute("INSERT INTO albums (id, title) VALUES (%s, 'Группа крови')", (album,))
+    db.execute("INSERT INTO album_artists (album_id, artist_id) VALUES (%s, %s)", (album, artist))
+    db.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s)",
+               (album, "/srv/library-root/Кино/1988 - Группа крови"))
+    ctx, cands = ai_canon._context(artist, "Кино")
+    api = claude([{"text": "[]"}])
+
+    ai_canon._ask(ai_canon._prompt([{"n": 1, "name": "Кино", "ctx": ctx, "cands": cands}]),
+                  "sonnet", providers.get_provider("claude_code"))
+
+    sent = json.dumps(api.bodies("/messages"), ensure_ascii=False)
+    assert "folder: Кино/1988 - Группа крови" in sent
+    assert "/srv/library-root" not in sent
 
 
 def test_an_ai_canon_batch_on_an_api_key_offers_the_model_no_tool(claude, api_keys, monkeypatch):

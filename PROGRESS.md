@@ -527,7 +527,10 @@ implementation details live in the code, DB and git history.
   before it, and the assistant login's own `statement_timeout`) — an OR'd-EXISTS
   join across every tagged artist ran 3+ minutes, ate the whole wallclock and,
   after the SIGKILL, kept running under an orphaned MCP server; inside the
-  turn the same failure is a tool error the model retries lighter;
+  turn the same failure is a tool error the model retries lighter. The cap
+  is a session setting the session may change, so since 2026-11-02 the
+  backend also ends every session of the login still open when the last
+  live agent turn ends (`claude_code_runner.library_turn`);
   no `--mcp-config` → the
   SAME MCP configuration (the launcher's mcp-windows.json, the Docker
   backend's `/app/data/mcp-docker.json`) is translated at spawn into dotted `-c
@@ -1707,23 +1710,35 @@ implementation details live in the code, DB and git history.
 - **The SQL tool is in the tree** (`mcp/postgres_server.py`, since
   2026-11-02): before it, the launcher ran `npx -y postgres-mcp-server` and the
   Docker node `npx -y @modelcontextprotocol/server-postgres` — npm resolved
-  each by name at every agent spawn and ran whatever it found. The query runs
-  as a cursor opened inside a session function (`FOR … IN EXECUTE`), which
-  PostgreSQL does only for ONE statement that returns rows, in a READ ONLY
-  transaction under the statement timeout; at most 500 rows return, as JSON.
+  each by name at every agent spawn and ran whatever it found. The query is
+  opened as a cursor (`OPEN … FOR EXECUTE`), which PostgreSQL does only for
+  ONE statement that returns rows, inside `sautium_query` — a function of the
+  schema (`046_sql_tool_query.sql`), not of the session, so the tool's login
+  creates nothing — in a READ ONLY transaction under the statement timeout;
+  at most 500 rows return, as JSON.
   The npm servers sent the caller's text over the simple-query protocol,
   where a second statement after the first ran too.
 - **The assistant's own login** (since 2026-11-02). Both servers, and the
   API providers' `execute_query`, connect as `sautium_assistant`, a role
   that reads the catalogue (`desktop/db_init.ASSISTANT_READS`) and nothing
   else — never settings, keys, conversations, friends or the P2P ledgers —
-  owns nothing and writes nowhere; its sessions default to read-only with a
-  30 s statement cap. Its password is derived from the owner's, so both
-  writers of an MCP file (the launcher, the Docker backend) and the
-  backend's own query tool reach the same one without a store of their
-  own. The cluster's administrator makes the login (the launcher's
-  `create_database`, Docker's bootstrap superuser at start); the grants are
-  re-stated at every backend start, because a restore
+  writes no table and creates nothing: no object in the schema, no
+  temporary one (PUBLIC's TEMP is revoked in the node's database; the SQL
+  tool's function is the schema's), no large object (their creation revoked
+  from PUBLIC by the cluster's administrator). The one settings view it reads, `assistant_settings`, is
+  a `security_barrier` view. Its sessions default to read-only with a 30 s
+  statement cap, but those are defaults a session may change — and
+  PostgreSQL lets a role set its own password and defaults — so the bounds
+  are the privileges, the backend ends the login's sessions when the agents'
+  turns are over (`claude_code_runner.library_turn`; the launcher's
+  `sautium` is a member of the role for that), `execute_query` cancels its
+  statement at a deadline of its own, and every start re-states the login.
+  Its password is derived from the owner's, so both writers of an MCP file
+  (the launcher, the Docker backend) and the backend's own query tool reach
+  the same one without a store of their own. The cluster's
+  administrator makes the login (the launcher's `create_database`, Docker's
+  bootstrap superuser at start); the migration runner re-states the grants
+  (`db_init.apply_migrations`, which a restore runs too), because a restore
   (`pg_restore --no-privileges`) and the LB loader's table swap drop them.
   Before it the Docker MCP file used the node's own role — on Docker the
   bootstrap superuser.

@@ -28,9 +28,9 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      imported-scrobble name once, the day titles came to be compared by a
      folded key (accents, typography, a store's annotation — 2026-09-24).
 
-After the schema deltas, the assistant's read-only login is re-stated
-(_assistant_role): its grants every start, its login where this node's
-own role administers the cluster.
+Before the schema deltas, where this node's own role administers the
+cluster (Docker), the assistant's read-only login is re-stated
+(_assistant_role); the runner states its grants after the deltas.
 
 The launcher's own P2P sync server is a separate process: on a launcher
 node with old-rule data a peer import racing this rewrite is a known
@@ -140,16 +140,19 @@ def _drop_sub_floor_analysis(conn) -> dict:
 
 
 def _assistant_role(conn) -> None:
-    """The assistant's login and its grants (desktop/db_init.ASSISTANT_ROLE).
-    The login is the cluster administrator's: here when this node's own
-    role is one (Docker's bootstrap superuser), else the launcher's setup
-    made it before the backend started. The grants are re-stated at every
-    start, after the migrations — a restore drops them."""
+    """The cluster administrator's part of the assistant's login
+    (desktop/db_init.ASSISTANT_ROLE): the login itself, and large objects
+    taken from PUBLIC in this database — here when this node's own role is
+    that administrator (Docker's bootstrap superuser), else the launcher's
+    setup did both before the backend started. Before the migrations, whose
+    runner states the login's grants."""
     with conn.cursor() as cur:
-        cur.execute("SELECT rolsuper OR rolcreaterole FROM pg_roles WHERE rolname = current_user")
-        if cur.fetchone()[0]:
+        cur.execute("SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user")
+        superuser, createrole = cur.fetchone()
+        if superuser or createrole:
             db_init.ensure_assistant_role(cur, settings.postgres_password)
-        db_init.grant_assistant_reads(cur)
+        if superuser:
+            db_init.revoke_large_object_creation(cur)
     conn.commit()
 
 
@@ -160,8 +163,8 @@ def apply_pending() -> dict:
     conn.autocommit = False
     try:
         out["adopted_baseline"] = db_init.adopt_baseline(conn)
-        out["sql_applied"] = db_init.apply_migrations(conn, logger.info)
         _assistant_role(conn)
+        out["sql_applied"] = db_init.apply_migrations(conn, logger.info)
 
         mark = _IDENTITY_MARK.format(IDENTITY_RULE)
         if not _marked(conn, mark):

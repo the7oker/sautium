@@ -6,7 +6,7 @@ It lives in the tree, so what runs is what the release carries, the same on
 the launcher and in Docker; the server it replaced was an npm package
 resolved by name at every agent spawn.
 
-One statement: the text is opened as a cursor inside pg_temp.sautium_query
+One statement: the text is opened as a cursor inside sautium_query
 (`OPEN … FOR EXECUTE`), which PostgreSQL does only for a single statement
 that returns rows, in a READ ONLY transaction under a statement timeout. At
 most ROW_CAP rows and CHAR_BUDGET characters of them leave the database —
@@ -20,8 +20,10 @@ advisory lock it took, which a rollback keeps, is released. What the
 connection may read or do at all is its role's business — its grants — not
 this file's: a superuser's server functions act outside any transaction (a
 replication slot made), as does any role's on the sessions of its own role
-(one ended), and a rollback undoes none of that. The role needs TEMP on the
-database for the function.
+(one ended), and a rollback undoes none of that. The function is the
+schema's (desktop/migrations/046_sql_tool_query.sql, folded into 001), so
+the tool makes nothing in the database: its login, the assistant's
+(desktop/db_init.ASSISTANT_ROLE), may create nothing, not even in pg_temp.
 
 All logging goes to stderr (stdout is the STDIO MCP transport).
 """
@@ -56,47 +58,6 @@ ROW_CAP = 500
 # default, cuts an MCP answer of its own accord.
 CHAR_BUDGET = 80_000
 
-# A session's own function: created where the role may write (pg_temp), once
-# per connection, in a transaction of its own that is writable whatever the
-# role's default. It fetches one row at a time (a FOR loop prefetches them by
-# tens), returns the rows that fit — the array's brackets and commas counted
-# — and, when more matched, one last row naming what cut them: 'rows' (the
-# cap) or 'size' (the budget). A row whose stored size is past eight times
-# what is left of the budget is cut before its JSON is made: no text renders
-# that much smaller than its storage.
-_QUERY_FUNCTION = """
-CREATE FUNCTION pg_temp.sautium_query(q text, cap integer, budget integer)
-RETURNS TABLE (answer_row text, cut text)
-LANGUAGE plpgsql AS $$
-DECLARE
-    curs refcursor;
-    r record;
-    n integer := 0;
-    used bigint := 2;
-BEGIN
-    OPEN curs FOR EXECUTE q;
-    LOOP
-        FETCH curs INTO r;
-        EXIT WHEN NOT FOUND;
-        IF n = cap THEN
-            answer_row := NULL; cut := 'rows'; RETURN NEXT; RETURN;
-        END IF;
-        IF pg_column_size(r) > 8 * (budget - used) + 1024 THEN
-            answer_row := NULL; cut := 'size'; RETURN NEXT; RETURN;
-        END IF;
-        answer_row := row_to_json(r)::text;
-        used := used + length(answer_row) + CASE WHEN n > 0 THEN 1 ELSE 0 END;
-        IF used > budget THEN
-            answer_row := NULL; cut := 'size'; RETURN NEXT; RETURN;
-        END IF;
-        n := n + 1;
-        cut := NULL;
-        RETURN NEXT;
-    END LOOP;
-END
-$$
-"""
-
 mcp = FastMCP("Sautium SQL", instructions="Read-only SQL over the music library database.")
 
 _conn = None
@@ -106,19 +67,9 @@ def _connection():
     global _conn
     if _conn is None or _conn.closed:
         try:
-            conn = psycopg2.connect(connect_timeout=10, **DB)
+            _conn = psycopg2.connect(connect_timeout=10, **DB)
         except psycopg2.OperationalError as e:
             raise ValueError(f"the database is not reachable: {str(e).strip()}") from None
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SET TRANSACTION READ WRITE")
-                cur.execute(_QUERY_FUNCTION)
-            conn.commit()
-        except psycopg2.Error as e:
-            conn.close()
-            raise ValueError("the tool's session function could not be made: "
-                             f"{(e.pgerror or str(e)).strip()}") from None
-        _conn = conn
     return _conn
 
 
@@ -144,7 +95,7 @@ def run_query(sql: str) -> str:
         with conn.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
             cur.execute("SET LOCAL statement_timeout = %s", (TIMEOUT_MS,))
-            cur.execute("SELECT answer_row, cut FROM pg_temp.sautium_query(%s, %s, %s)",
+            cur.execute("SELECT answer_row, cut FROM public.sautium_query(%s, %s, %s)",
                         (text, ROW_CAP, CHAR_BUDGET))
             rows = cur.fetchall()
     except psycopg2.Error as e:

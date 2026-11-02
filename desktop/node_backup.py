@@ -977,6 +977,15 @@ def restore_database(reader: BackupReader, target: PgTarget, *, manifest: Option
             applied = db_init.apply_migrations(app_conn)
         finally:
             app_conn.close()
+        # A new database starts from PostgreSQL's defaults; what only the
+        # cluster administrator takes from PUBLIC is taken here.
+        admin_conn = target.connect(staging, admin=True)
+        admin_conn.autocommit = True
+        try:
+            with admin_conn.cursor() as cur:
+                db_init.revoke_large_object_creation(cur)
+        finally:
+            admin_conn.close()
 
         progress("swapping")
         if exists:
