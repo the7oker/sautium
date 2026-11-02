@@ -3411,7 +3411,10 @@ where the clock stands. A landing is a reading the renderer's staying where
 it was cannot explain — one that ignores the Seek and plays on enters the
 Seek's window once it has played the distance — and a seek within both
 readings' tolerance is not judged at all; paused, the wait counts once the
-renderer plays again, never starting it. What a Seek showed is kept per renderer, by UDN
+renderer plays again, never starting it; and it ends with the play-through
+it was made in — one into the last track's end, never seen landing, used to
+reload that track's next start and teach the opposite. What a Seek showed
+is kept per renderer, by UDN
 (`output.dlna_opus_seek`): a stored fact, never a guess from its name — 710
 and a Seek that did not land as "does not seek one", a landing as "does";
 711 is the target's, not the renderer's. A renderer known to seek one starts

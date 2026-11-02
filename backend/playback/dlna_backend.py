@@ -2248,6 +2248,11 @@ class DlnaBackend(PlayerBackend):
                 if fresh_start:
                     self._pending_since = time.monotonic()
                     self._probe_last = None
+                    # A Seek still waited for is the play-through's that
+                    # ended: one into the last track's end, never seen
+                    # landing, reloaded this start at its deadline and was
+                    # remembered as one the renderer does not take
+                    self._seek_due = None
                 self._ensure_poll()
                 self._emit_now("loading" if fresh_start else "playing")
         return self._call_async(_p())

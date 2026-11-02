@@ -239,17 +239,19 @@ class PlaybackManager:
         `probed` was asked already; one believed lost is asked again too, an
         HQPlayer that is off says so at every press — else the output
         attached again from the persisted settings, at the spot the instance
-        left."""
+        left. A wait its probe says lasts through that attach, as at a press
+        (ensure_active)."""
         b = self._active
-        if b is not None and b is not probed:
-            self._probe(b)
-        if b is not None and b.healthy():
-            return b
-        from routers.settings import _read
-        if _read("output.type") is None:
-            return self.backend()   # legacy: honest ConnectionError
-        self._attach_again(b)
-        return self.backend()
+        with ExitStack() as saying:
+            if b is not None and b is not probed:
+                self._probe(b, saying)
+            if b is not None and b.healthy():
+                return b
+            from routers.settings import _read
+            if _read("output.type") is None:
+                return self.backend()   # legacy: honest ConnectionError
+            self._attach_again(b)
+            return self.backend()
 
     def renderer_reached(self, udn: str, locations: list) -> None:
         """A scan reached the renderer `udn` at `locations`
@@ -327,9 +329,11 @@ class PlaybackManager:
             self._connecting_held += 1
             first = self._connecting_held == 1
             self._connecting = label
-        if first:
-            self._push_status(dict(self._latest_status))
         try:
+            # Within the hold: a first status that fails still lets it go,
+            # never a word every later status carries
+            if first:
+                self._push_status(dict(self._latest_status))
             yield
         finally:
             with self._connecting_lock:

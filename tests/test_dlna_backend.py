@@ -329,18 +329,25 @@ class FakeRenderer:
     def reported_length(self) -> Optional[float]:
         return self.reports(self.uri, self.didl_length(self.meta))
 
+    def _ended(self) -> bool:
+        """The stream played to its end, or was sought there: on to the next
+        URI armed, else stopped. True when it ended."""
+        length = self.stream_length()
+        if self.state != "PLAYING" or length is None or self.position() < length:
+            return False
+        if self.next_uri and self.takes(self.next_meta):
+            self.uri, self.meta = self.next_uri, self.next_meta
+            self.next_uri = self.next_meta = ""
+            self._base, self._t0 = 0.0, time.monotonic()
+        else:
+            self.state, self._base, self._t0 = "STOPPED", 0.0, None
+            self.next_uri = self.next_meta = ""
+        return True
+
     async def _tick(self):
         while True:
             await asyncio.sleep(0.05)
-            length = self.stream_length()
-            if self.state == "PLAYING" and length is not None and self.position() >= length:
-                if self.next_uri and self.takes(self.next_meta):
-                    self.uri, self.meta = self.next_uri, self.next_meta
-                    self.next_uri = self.next_meta = ""
-                    self._base, self._t0 = 0.0, time.monotonic()
-                else:
-                    self.state, self._base, self._t0 = "STOPPED", 0.0, None
-                    self.next_uri = self.next_meta = ""
+            if self._ended():
                 await self._changed()
 
     def _transport_state(self) -> str:
@@ -407,6 +414,10 @@ class FakeRenderer:
                 if self.uri == uri:
                     self._base = target
                     self._t0 = time.monotonic() if self.state == "PLAYING" else None
+                    # Sought to its end, the stream ends there at once: no
+                    # reading at the target comes between
+                    if self._ended():
+                        asyncio.ensure_future(self._changed())
             if self.seek_delay:
                 self._loop.call_later(self.seek_delay, lands)
             else:
@@ -2560,3 +2571,66 @@ def test_a_seek_near_the_end_on_a_renderer_that_ignores_it_teaches_nothing(
     wait_for(lambda: r.state == "STOPPED", timeout=25, what="the track played out")
     assert (stored.get("output.dlna_opus_seek") or {}).get(r.udn.lower()) is not True
 
+
+# -- the review's third round ----------------------------------------------------
+
+
+def test_a_seek_never_seen_landing_at_the_queues_end_is_over_when_the_track_starts_again(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, stored):
+    """N-7 at the end of the queue: a judged Seek in an Opus stream to the
+    last track's very end, which the renderer takes and so stops before any
+    reading shows it there. Play starts the track over, and the Seek went
+    with the play-through it was made in. It used to wait on into the new
+    one, whose readings near 0 never landed it: at its deadline the stream
+    loaded again from the clock's second, and the renderer — one that
+    seeks — was remembered as one that does not."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 3.0)
+    r, n = _opus_on(tmp_path, monkeypatch, quality, renderers, nodes)
+    assert n.backend.seek(90)
+    wait_for(lambda: r.state == "STOPPED" and n.last.state == "stopped", what="the queue's end")
+    loads = len(r.called("SetAVTransportURI"))
+    assert n.backend.play()
+    wait_for(lambda: r.state == "PLAYING" and n.last.state == "playing" and n.last.position >= 5,
+             timeout=15, what="playing again past the Seek's deadline")
+    assert len(r.called("SetAVTransportURI")) == loads and "ss=" not in r.uri, r.uri
+    assert (stored.get("output.dlna_opus_seek") or {}).get(r.udn.lower()) is not False
+
+
+def test_a_renderer_picked_again_where_its_address_went_dark_says_it_connects_once(
+        tmp_path, proxy, renderers, manager, switch, quality, swallowing):
+    """A renderer picked again in the Output picker while its address is
+    dark — it stopped, so nothing has failed there — and it answers at
+    another: the wait on its address and the attach where it answers are
+    one "connecting". It was said, taken back ("Stopped at … — Play resumes
+    here" for a moment) and said again."""
+    here, there = _attached_at_one_of_two(tmp_path, manager, renderers)
+    manager.backend().stop()
+    wait_for(lambda: manager.latest_status.get("state") == "stopped" and here.state == "STOPPED", what="stopped")
+    here.stop_answering()
+    swallowing(here.port)
+    seen = _statuses(manager)
+    switch(type="dlna", renderer=manager.store["output.dlna_renderer"])
+    words = [data.get("connecting") for data in seen]
+    first, last = words.index("Phone"), len(words) - 1 - words[::-1].index("Phone")
+    assert all(word == "Phone" for word in words[first:last + 1]), words
+    assert words[-1] is None and manager.active._renderer["location"] == there.location
+
+
+def test_a_connecting_word_whose_first_status_fails_is_taken_back(manager):
+    """A status that fails as "connecting" is first said still lets the word
+    go: kept, every later status said the output was connecting, and both
+    transport buttons refused taps until a restart."""
+    push, calls = manager._push_status, []
+
+    def failing_first(data):
+        calls.append(data)
+        if len(calls) == 1:
+            raise RuntimeError("the status bus failed")
+        push(data)
+    manager._push_status = failing_first
+    with pytest.raises(RuntimeError, match="the status bus failed"):
+        with manager._connecting_to("Phone"):
+            pass
+    manager._push_status = push
+    push({**manager.latest_status, "state": "stopped"})
+    assert "connecting" not in manager.latest_status, manager.latest_status
