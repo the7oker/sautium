@@ -122,6 +122,21 @@ def test_the_codex_runner_starts_its_children_the_same_way(monkeypatch):
     assert (kwargs["user"], kwargs["cwd"], kwargs["stdin"]) == (1000, "/tmp", subprocess.DEVNULL)
 
 
+def test_the_openai_providers_key_never_signs_codex_in(monkeypatch):
+    """The Web UI saves the OpenAI provider's key into openai_api_key; Codex
+    mints its sign-in only from what the environment gave the node."""
+    from config import Settings
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "key-of-the-environment")
+    built = Settings()
+    built.openai_api_key = "key-the-web-ui-saved"           # routers/settings.py
+    assert built.codex_mint_key == "key-of-the-environment"
+    monkeypatch.delenv("OPENAI_API_KEY")
+    built = Settings()
+    built.openai_api_key = "key-the-web-ui-saved"
+    assert built.codex_mint_key is None
+
+
 def test_codex_signs_in_with_the_settings_key_on_its_stdin_alone(tmp_path, monkeypatch):
     """The key reaches `codex login --with-api-key` on stdin, from the
     settings: the environment of a process that starts agents holds none."""
@@ -130,7 +145,7 @@ def test_codex_signs_in_with_the_settings_key_on_its_stdin_alone(tmp_path, monke
     from config import settings
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setattr(settings, "openai_api_key", None)
+    monkeypatch.setattr(settings, "_env_openai_api_key", None)
     monkeypatch.setattr(settings, "codex_api_key", "key-from-the-settings")
     monkeypatch.setattr(codex_cli, "codex_home", lambda: tmp_path / "codex-home")
     monkeypatch.setattr(codex_runner, "_codex_home", lambda: tmp_path / "codex-home")
@@ -207,6 +222,37 @@ def test_a_filesystem_that_refuses_the_hand_over_is_counted_not_fatal(tmp_path, 
 
     monkeypatch.setattr(node_user.os, "chown", refuse)
     assert node_user.hand_over(agent, (str(tmp_path / "data"),), ()) == (0, 2)
+
+
+@as_root_with_the_node_user
+def test_a_path_the_filesystem_will_not_read_is_counted_not_fatal(tmp_path, node_user, monkeypatch):
+    """A drvfs mount's passing EIO, or a file gone during the walk, must not
+    end the container's start."""
+    import errno
+    agent = pwd.getpwnam("agent")
+    data = tmp_path / "data"
+    for name in ("unreadable", "fine"):
+        (data / name).write_text("x")
+    real = os.lstat
+
+    def lstat(path, *a, **kw):
+        if str(path).endswith("unreadable"):
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(node_user.os, "lstat", lstat)
+    assert node_user.hand_over(agent, (str(data),), ()) == (2, 1)        # data, fine; unreadable
+
+
+@as_root_with_the_node_user
+def test_only_a_folder_docker_made_as_roots_is_handed_never_one_of_the_owners(tmp_path, node_user):
+    agent = pwd.getpwnam("agent")
+    made_by_docker, the_owners = tmp_path / "codex-made", tmp_path / "codex-owned"
+    made_by_docker.mkdir()
+    the_owners.mkdir()
+    os.chown(the_owners, 4242, 4242)                 # a host user other than the image's
+    assert node_user.hand_over(agent, (), (str(made_by_docker), str(the_owners))) == (1, 0)
+    assert (made_by_docker.stat().st_uid, the_owners.stat().st_uid) == (agent.pw_uid, 4242)
 
 
 @as_root_with_the_node_user
@@ -300,6 +346,35 @@ def test_a_root_backend_gives_the_secret_to_the_user_its_agents_run_as(tmp_path)
     auth_hmac.ensure_secret(path)
     assert (path.stat().st_uid, path.parent.stat().st_uid) == (agent.pw_uid, agent.pw_uid)
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+@as_root_with_the_node_user
+def test_a_secret_another_user_owns_is_read_as_it_is(tmp_path):
+    """A secret an earlier root backend wrote on a mount that kept it root's:
+    the node's user reads it, its mode stays, the start goes on."""
+    import shutil
+    import tempfile
+    import auth_hmac
+    base = Path(tempfile.mkdtemp(prefix="sautium-test-identity-"))
+    base.chmod(0o755)
+    folder = base / "node_identity"
+    folder.mkdir()
+    folder.chmod(0o777)
+    path = folder / ".api_secret"
+    path.write_text("an-earlier-secret-of-forty-three-characters")
+    path.chmod(0o644)
+    agent = pwd.getpwnam("agent")
+
+    def as_the_node_user():
+        os.setgid(agent.pw_gid)
+        os.setuid(agent.pw_uid)
+        return auth_hmac.ensure_secret(path).decode()
+
+    try:
+        assert _in_a_child(as_the_node_user) == "an-earlier-secret-of-forty-three-characters"
+        assert (path.stat().st_uid, path.stat().st_mode & 0o777) == (0, 0o644)
+    finally:
+        shutil.rmtree(base)
 
 
 def test_an_empty_secret_file_counts_as_none(tmp_path):

@@ -177,7 +177,7 @@ def codex(tmp_path, monkeypatch):
     workdir = tmp_path / "codex-agent"
     workdir.mkdir()
     from config import settings
-    for key in ("openai_api_key", "codex_api_key"):
+    for key in ("_env_openai_api_key", "openai_api_key", "codex_api_key"):
         monkeypatch.setattr(settings, key, None)
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.setenv("FAKE_CODEX_LOGGED_IN", "1")
@@ -530,7 +530,9 @@ def test_codex_without_auth_json_is_signed_in_only_with_a_key_to_mint_from(codex
     codex.unlink()
     assert codex_cli.get_state() == "not_authed"
     from config import settings
-    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_api_key", "a key the web ui saved for the openai provider")
+    assert codex_cli.get_state(fresh=True) == "not_authed"
+    monkeypatch.setattr(settings, "_env_openai_api_key", "test-key")    # the environment's
     assert codex_cli.get_state(fresh=True) == "ready"
 
 

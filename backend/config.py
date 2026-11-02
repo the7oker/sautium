@@ -6,6 +6,7 @@ Loads settings from environment variables with sensible defaults.
 import os
 from pathlib import Path
 from typing import Optional
+from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -121,8 +122,13 @@ class Settings(BaseSettings):
     # Multi-provider LLM support
     openai_api_key: Optional[str] = None
     # Codex's own name for an OpenAI key: the runner mints the CLI's sign-in
-    # from either (codex_cli.api_key)
+    # from either (codex_mint_key)
     codex_api_key: Optional[str] = None
+    # OPENAI_API_KEY as the environment gave it, kept as the settings are
+    # built: openai_api_key is also where the Web UI puts the OpenAI
+    # provider's own key later (routers/settings.py), which is not Codex's
+    # to sign in with
+    _env_openai_api_key: Optional[str] = PrivateAttr(default=None)
     openai_compat_base_url: Optional[str] = None
     openai_compat_api_key: Optional[str] = None
     openai_compat_model: Optional[str] = None
@@ -195,6 +201,14 @@ class Settings(BaseSettings):
             self.lastfm_api_key = LASTFM_API_KEY
         if not self.lastfm_api_secret:
             self.lastfm_api_secret = LASTFM_API_SECRET
+        self._env_openai_api_key = self.openai_api_key
+
+    @property
+    def codex_mint_key(self) -> Optional[str]:
+        """The key Codex's sign-in is minted from when it has none: the
+        environment's OPENAI_API_KEY or CODEX_API_KEY as the node started —
+        never a key the Web UI saved for the OpenAI provider."""
+        return self._env_openai_api_key or self.codex_api_key
 
     @property
     def database_url(self) -> str:

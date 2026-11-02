@@ -145,8 +145,9 @@ def _resolve_codex_executable() -> Optional[str]:
 
 def _spawn_kwargs(env: dict) -> dict:
     """Popen setup shared by every codex spawn — every agent spawn's
-    (claude_code_runner.spawn_kwargs: the node's secrets out, never root, no
-    console flash on Windows), plus cwd pinned to the Sautium workdir (`exec
+    (claude_code_runner.spawn_kwargs: never root, no console flash on
+    Windows; the process has dropped the node's credentials from its
+    environment first), plus cwd pinned to the Sautium workdir (`exec
     resume` takes no `--cd`; without this the process inherits the backend's
     cwd, which on the launcher is the repo) and stdin closed (the CLI reads
     piped stdin as extra prompt context otherwise)."""
@@ -157,13 +158,15 @@ def _spawn_kwargs(env: dict) -> dict:
 
 
 def _ensure_auth(codex_exe: str) -> Optional[str]:
-    """Materialize auth.json from the settings' OpenAI key when it is
-    missing — no key reaches the CLI's environment, so it cannot bill the
-    API account past the sign-in the owner chose. Returns an error message,
-    or None when auth is in place."""
+    """Materialize auth.json, when it is missing, from the OpenAI key the
+    environment gave the node (config.Settings.codex_mint_key) — no key
+    reaches the CLI's environment, so it cannot bill the API account past
+    the sign-in the owner chose. Returns an error message, or None when auth
+    is in place."""
     if (_codex_home() / "auth.json").is_file():
         return None
-    key = codex_cli.api_key()
+    from config import settings
+    key = settings.codex_mint_key
     if not key:
         # Nothing to sign in with — and the verdict hears it from the store
         # (a cancelled `codex login` deletes auth.json behind any reader).
@@ -178,7 +181,7 @@ def _ensure_auth(codex_exe: str) -> Optional[str]:
         if proc.returncode != 0:
             logger.error(f"codex login --with-api-key failed: {(out or '').strip()[:300]}")
             return f"Codex API-key login failed: {(out or '').strip()[:200]}"
-        logger.info("Codex auth.json minted from OPENAI_API_KEY")
+        logger.info("Codex auth.json minted from the environment's OpenAI key")
         return None
     except Exception as e:
         logger.error(f"codex login --with-api-key error: {e}")

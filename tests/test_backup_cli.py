@@ -132,3 +132,18 @@ def test_head_commit_reads_git_files_without_spawning(tmp_path):
     (wt / ".git").write_text(f"gitdir: {git}\n")
     (git / "HEAD").write_text("ref: refs/heads/main\n")
     assert updater.head_commit(wt) == sha[:12]
+
+
+def test_the_password_named_leaves_the_environment_once_read(backup_mod, monkeypatch):
+    """The weekly task names its variable (`--password-env P2P_PASSWORD`), the
+    launcher passes SAUTIUM_BACKUP_PASSWORD: pg_dump and pg_restore, started
+    after, never carry the account password."""
+    import os
+    import subprocess
+    import types
+    monkeypatch.setenv("P2P_PASSWORD", "the-account-password")
+    args = types.SimpleNamespace(password_env="P2P_PASSWORD")
+    assert backup_mod._password(args, prompt="") == "the-account-password"
+    child = subprocess.run([sys.executable, "-c", "import os; print('P2P_PASSWORD' in os.environ)"],
+                           capture_output=True, text=True, check=True)
+    assert child.stdout.strip() == "False" and "P2P_PASSWORD" not in os.environ

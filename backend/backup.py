@@ -298,10 +298,13 @@ def create(password: str, *, out_dir: Optional[Path] = None,
 # ---------------------------------------------------------------------------
 
 def _password(args, *, prompt: str) -> str:
+    """The account password: from the variable named, which then leaves this
+    process's environment — pg_dump and pg_restore, started after, never
+    carry it — or asked for."""
     var = args.password_env or ("SAUTIUM_BACKUP_PASSWORD"
                                 if os.environ.get("SAUTIUM_BACKUP_PASSWORD") else None)
     if var:
-        value = os.environ.get(var)
+        value = os.environ.pop(var, None)
         if not value:
             sys.exit(f"environment variable {var} is empty")
         return value

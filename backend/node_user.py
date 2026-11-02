@@ -4,10 +4,12 @@ user.
 
 The image copies this file to a folder of root's and runs it as root with
 `python3 -I -S`: no PYTHON* variable, no site-packages, no folder anyone else
-can write on its path. It imports the standard library alone, so nothing the
-node's user could change — /app is the host's ./backend, which that user can
-write — runs as root. The command it runs after the drop (`python
-entrypoint.py`) is the backend, as the node's user.
+can write on its path. It imports the standard library alone, so at the
+container's start nothing the node's user could change — /app is the host's
+./backend, which that user can write — runs as root. The command it runs
+after the drop (`python entrypoint.py`) is the backend, as the node's user.
+A `docker exec` is root's unless it says `-u agent`, and then runs /app's
+code as root: a hand-run command says `-u agent`.
 """
 
 import os
@@ -34,39 +36,49 @@ def _say(message: str) -> None:
     print(f"[node-user] {message}", file=sys.stderr, flush=True)
 
 
-def _read_only(path: str) -> bool:
-    return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
-
-
 def hand_over(pw, trees, folders) -> tuple:
-    """Chown to the node's user what is not its own under `trees`, and
-    `folders` themselves; read-only mounts and symlinks left as they are.
-    (handed, refused): a filesystem that refuses chown is counted, not
-    fatal — what the user then cannot write fails where it is written."""
+    """Chown to the node's user what is not its own under `trees`, and each
+    of `folders` itself while it is root's; read-only mounts and symlinks
+    left as they are. (handed, refused): a path the filesystem would not
+    read or hand over — a drvfs mount's passing EIO, a file gone meanwhile —
+    is counted, not fatal; what the user then cannot write fails where it is
+    written."""
     handed = refused = 0
 
-    def take(path: str) -> None:
-        nonlocal handed, refused
-        st = os.lstat(path)
-        if stat.S_ISLNK(st.st_mode) or st.st_uid == pw.pw_uid:
-            return
+    def refuse(_error=None) -> None:
+        nonlocal refused
+        refused += 1
+
+    def writable(path: str) -> bool:
         try:
+            return not os.statvfs(path).f_flag & os.ST_RDONLY
+        except OSError:
+            refuse()
+            return False
+
+    def take(path: str, roots_only: bool = False) -> None:
+        nonlocal handed
+        try:
+            st = os.lstat(path)
+            if (stat.S_ISLNK(st.st_mode) or st.st_uid == pw.pw_uid
+                    or (roots_only and st.st_uid != 0)):
+                return
             os.chown(path, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
             handed += 1
         except OSError:
-            refused += 1
+            refuse()
 
     for tree in trees:
-        if not os.path.isdir(tree) or _read_only(tree):
+        if not os.path.isdir(tree) or not writable(tree):
             continue
-        for top, dirs, files in os.walk(tree):
-            dirs[:] = [d for d in dirs if not _read_only(os.path.join(top, d))]
+        for top, dirs, files in os.walk(tree, onerror=refuse):
+            dirs[:] = [d for d in dirs if writable(os.path.join(top, d))]
             take(top)
             for name in files:
                 take(os.path.join(top, name))
     for folder in folders:
-        if os.path.isdir(folder) and not _read_only(folder):
-            take(folder)
+        if os.path.isdir(folder) and writable(folder):
+            take(folder, roots_only=True)
     return handed, refused
 
 
