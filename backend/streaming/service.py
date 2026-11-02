@@ -141,11 +141,12 @@ def stop_enrichers() -> None:
 # enough. One loop here covers every runtime, as every runtime runs this
 # backend: a pass at start, then daily, and sooner when a download fails the
 # way an outdated build fails — never two passes within six hours while a
-# build is in place, a few minutes apart while there is none yet; a request
-# inside that gap is answered as it ends. A pass installs yt-dlp's latest
-# STABLE release, checked against the release key's signature
-# (streaming/ytdlp_release.py). A platform yt-dlp builds nothing for runs no
-# pass at all.
+# build works or a release's install has failed, a few minutes apart while
+# nothing is in place yet (a node that started offline); a request inside
+# that gap is answered as it ends, and one made during a pass is kept. A pass
+# installs yt-dlp's latest STABLE release, checked against the release key's
+# signature (streaming/ytdlp_release.py). A platform yt-dlp builds nothing
+# for runs no pass at all.
 _REFRESH_INTERVAL_S = 24 * 3600
 _REFRESH_MIN_GAP_S = 6 * 3600      # a burst of failures is still one pass
 _FIRST_BUILD_GAP_S = 5 * 60        # no build yet: a node that started offline gets one soon
@@ -176,23 +177,27 @@ async def ytdlp_refresh_loop() -> None:
     _refresh_wake = asyncio.Event()
     _refresh_loop = asyncio.get_running_loop()
     last = float("-inf")
-    while True:
-        gap = _REFRESH_MIN_GAP_S if ytdlp_release.installed_tag() else _FIRST_BUILD_GAP_S
-        early = last + gap - time.monotonic()
-        if early > 0:
-            # The rate limit, not a wait for state: the request is answered
-            # once the gap since the last pass is over
-            await asyncio.sleep(early)
-        last = time.monotonic()
-        try:
-            await asyncio.to_thread(ytdlp_release.refresh)
-        except Exception:
-            logger.exception("yt-dlp refresh pass failed; the next one runs on schedule")
-        _refresh_wake.clear()
-        try:
-            await asyncio.wait_for(_refresh_wake.wait(), timeout=_REFRESH_INTERVAL_S)
-        except asyncio.TimeoutError:
-            pass
+    held = False            # a build works, or a release's install failed
+    try:
+        while True:
+            early = last + (_REFRESH_MIN_GAP_S if held else _FIRST_BUILD_GAP_S) - time.monotonic()
+            if early > 0:
+                # The rate limit, not a wait for state: the request is
+                # answered once the gap since the last pass is over
+                await asyncio.sleep(early)
+            _refresh_wake.clear()
+            last = time.monotonic()
+            try:
+                held = (await asyncio.to_thread(ytdlp_release.refresh) is not None
+                        or ytdlp_release.failed_tag() is not None)
+            except Exception:
+                logger.exception("yt-dlp refresh pass failed; the next one runs on schedule")
+            try:
+                await asyncio.wait_for(_refresh_wake.wait(), timeout=_REFRESH_INTERVAL_S)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        _refresh_wake = _refresh_loop = None
 
 
 def ensure_proxy() -> Optional[MediaProxy]:

@@ -454,7 +454,7 @@ def pinned(monkeypatch):
     the test expects."""
     import model_cache
     monkeypatch.setitem(model_cache.HUB_REVISIONS, NAME, "0" * 40)
-    monkeypatch.setattr(model_cache, "_whole_in_cache", lambda name, revision: True)
+    monkeypatch.setattr(model_cache, "_snapshot", lambda name, revision: f"{name}@{revision}")
     return "0" * 40
 
 
@@ -1059,10 +1059,10 @@ def test_the_encoder_is_loaded_with_its_devices_kwargs(monkeypatch, pinned):
     text_embedder._load(NAME, "mps")
     text_embedder._load(NAME, "cpu")        # the pass's CPU copy
     assert seen == [
-        (NAME, "mps", {"model_kwargs": {"torch_dtype": torch.bfloat16,
-                                        "attn_implementation": "eager"},
-                       "revision": pinned, "local_files_only": True}),
-        (NAME, "cpu", {"model_kwargs": {}, "revision": pinned, "local_files_only": True})]
+        (f"{NAME}@{pinned}", "mps", {"model_kwargs": {"torch_dtype": torch.bfloat16,
+                                                      "attn_implementation": "eager"},
+                                     "local_files_only": True}),
+        (f"{NAME}@{pinned}", "cpu", {"model_kwargs": {}, "local_files_only": True})]
 
 
 @pytest.mark.parametrize("device_name, attention", [("mps", "eager"), ("cpu", None)])
@@ -1075,7 +1075,7 @@ def test_ast_is_loaded_with_its_devices_attention(monkeypatch, device_name, atte
     import transformers
     import ensemble_instruments
     import model_cache
-    monkeypatch.setattr(model_cache, "_whole_in_cache", lambda name, revision: True)
+    monkeypatch.setattr(model_cache, "_snapshot", lambda name, revision: f"{name}@{revision}")
     seen = []
 
     class Ast:
@@ -1156,7 +1156,7 @@ def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch, 
     monkeypatch.setattr(text_embedder, "_cache", {})
     text_embedder._cpu_copy(NAME)
     text_embedder._end_pass()
-    assert seen == [(NAME, "cpu", True, True)]
+    assert seen == [(f"{NAME}@{pinned}", "cpu", True, True)]
 
     # a search's factory holds the lock while it loads; a pass asks meanwhile
     passes, searched = [], []
@@ -1176,7 +1176,7 @@ def test_the_encoders_loads_wait_for_any_other_load_of_the_process(monkeypatch, 
     # neither waits for the other: the pass waited on the lock, holding nothing
     assert not loading.is_alive() and not asking.is_alive()
     assert searched[0][0] and passes == [searched[0][1]]
-    assert seen[1:] == [(NAME, "cpu", True, True)]    # one load, the lock held
+    assert seen[1:] == [(f"{NAME}@{pinned}", "cpu", True, True)]    # one load, the lock held
 
 
 @pytest.mark.parametrize("which", ["clap", "instruments"])
@@ -1187,7 +1187,7 @@ def test_clap_and_the_instrument_pair_load_under_the_same_lock(monkeypatch, fact
     again."""
     import model_cache
     monkeypatch.setitem(model_cache.HUB_REVISIONS, "clap", "0" * 40)
-    monkeypatch.setattr(model_cache, "_whole_in_cache", lambda name, revision: True)
+    monkeypatch.setattr(model_cache, "_snapshot", lambda name, revision: f"{name}@{revision}")
     held = []
 
     def loading():

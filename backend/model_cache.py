@@ -70,25 +70,37 @@ HUB_FILES = {
 }
 
 
-def _whole_in_cache(name: str, revision: str) -> bool:
+def _missing_from_cache(name: str, revision: str) -> list:
     from huggingface_hub import try_to_load_from_cache
-    return all(isinstance(try_to_load_from_cache(name, f, revision=revision), str)
-               for f in HUB_FILES[name])
+    return [f for f in HUB_FILES[name]
+            if not isinstance(try_to_load_from_cache(name, f, revision=revision), str)]
+
+
+def _snapshot(name: str, revision: str) -> str:
+    """The folder of the model's pinned snapshot, every file HUB_FILES names
+    in it: those files are fetched at that commit first when the cache lacks
+    one (a first start, a download that broke off). Raises OSError naming
+    what is still missing — offline, snapshot_download hands back whatever
+    folder it has, unchecked."""
+    from huggingface_hub import snapshot_download
+    if _missing_from_cache(name, revision):
+        logger.info("%s at %s is not in the cache whole: fetching it", name, revision[:8])
+        snapshot_download(name, revision=revision, allow_patterns=list(HUB_FILES[name]))
+        missing = _missing_from_cache(name, revision)
+        if missing:
+            raise OSError(f"{name} at {revision[:8]} is not in the cache whole and could "
+                          f"not be fetched: {', '.join(missing)}")
+    return snapshot_download(name, revision=revision, local_files_only=True)
 
 
 def from_hub(load, name: str, **kwargs):
-    """`load(name, …)` — a from_pretrained, or a constructor that takes the
-    same `revision` and `local_files_only` — at the model's pinned commit,
-    from the cache alone: when the cache lacks a file HUB_FILES names (a
-    first start, a download that broke off), those files are fetched at that
-    commit first. A model with no pinned commit or no file list is refused
-    (KeyError)."""
-    revision = HUB_REVISIONS[name]
-    if not _whole_in_cache(name, revision):
-        from huggingface_hub import snapshot_download
-        logger.info("%s at %s is not in the cache whole: fetching it", name, revision[:8])
-        snapshot_download(name, revision=revision, allow_patterns=list(HUB_FILES[name]))
-    return load(name, revision=revision, local_files_only=True, **kwargs)
+    """`load(folder, …)` — a from_pretrained, or a constructor that takes
+    `local_files_only` — on the folder of the model's pinned snapshot, whole
+    (_snapshot). A folder, not the name: sentence-transformers' processor
+    lookups drop the revision and the cache-only flag they are given, and
+    would ask the Hub for the files at `main` on every load. A model with no
+    pinned commit or no file list is refused (KeyError)."""
+    return load(_snapshot(name, HUB_REVISIONS[name]), local_files_only=True, **kwargs)
 
 
 @contextlib.contextmanager

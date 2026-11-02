@@ -81,6 +81,17 @@ def test_sums_signed_by_the_release_key_are_taken_and_nothing_else_is(pinned):
         ytdlp_release.verify_signature(sums, b"\xc2\x02\x04\x00")
 
 
+def test_a_signature_number_outside_the_keys_range_is_refused(pinned):
+    sums = b"0" * 64 + b"  yt-dlp_linux.zip\n"
+    subpackets = b"\x05\x02" + struct.pack(">I", int(time.time()))
+    hashed = b"\x04\x00\x01\x0a" + struct.pack(">H", len(subpackets)) + subpackets
+    wider = 1 << (pinned.private.key_size + 8)
+    body = hashed + b"\x00\x00" + b"\x00\x00" + _mpi(wider)
+    packet = b"\xc2" + bytes([192 + ((len(body) - 192) >> 8), (len(body) - 192) & 0xFF]) + body
+    with pytest.raises(ytdlp_release.Refused):
+        ytdlp_release.verify_signature(sums, packet)
+
+
 def test_the_signature_parser_reads_both_packet_formats_and_refuses_a_header_cut_short(pinned):
     sums = b"0" * 64 + b"  yt-dlp_linux.zip\n"
     body = pinned.sign(sums)[3:]
@@ -93,14 +104,14 @@ def test_the_signature_parser_reads_both_packet_formats_and_refuses_a_header_cut
 
 # -- a pass against a fake GitHub -------------------------------------------------------
 
-def _build(version: str, extra: dict = None) -> bytes:
+def _build(version: str, extra: dict = None, broken: bool = False) -> bytes:
     """A release archive: the executable for this platform and a folder."""
     name, exe = ytdlp_release._asset()
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as zf:
         script = zipfile.ZipInfo(exe)
         script.external_attr = (0o100755 << 16)
-        zf.writestr(script, f"#!/bin/sh\necho {version}\n")
+        zf.writestr(script, "\x00\x01 not a program" if broken else f"#!/bin/sh\necho {version}\n")
         zf.writestr("_internal/yt_dlp_ejs/core.min.js", "// solver")
         for member, data in (extra or {}).items():
             zf.writestr(member, data)
@@ -154,7 +165,7 @@ def test_an_archive_its_signed_sums_do_not_name_is_never_unpacked(github):
     ytdlp_release.refresh()
     github.publish("2026.11.02", _build("2026.11.02"), sums_digest="0" * 64)
     assert ytdlp_release.refresh() == TAG
-    assert sorted(p.name for p in ytdlp_release.root().iterdir()) == [TAG, "current"]
+    assert sorted(p.name for p in ytdlp_release.root().iterdir()) == [TAG, "current", "failed"]
 
 
 def test_sums_another_key_signed_leave_the_build_in_place(github):
@@ -162,7 +173,7 @@ def test_sums_another_key_signed_leave_the_build_in_place(github):
     ytdlp_release.refresh()
     github.publish("2026.11.02", _build("2026.11.02"), signer=SigningKey())
     assert ytdlp_release.refresh() == TAG
-    assert sorted(p.name for p in ytdlp_release.root().iterdir()) == [TAG, "current"]
+    assert sorted(p.name for p in ytdlp_release.root().iterdir()) == [TAG, "current", "failed"]
     name, _ = ytdlp_release._asset()
     assert not [p for p in github.asked if p.endswith(f"/2026.11.02/{name}")]   # never fetched
 
@@ -180,7 +191,32 @@ def test_a_build_that_does_not_name_its_own_release_never_replaces_the_one_in_pl
     ytdlp_release.refresh()
     github.publish("2026.11.02", _build("2026.10.01"))
     assert ytdlp_release.refresh() == TAG
-    assert sorted(p.name for p in ytdlp_release.root().iterdir()) == [TAG, "current"]
+    assert sorted(p.name for p in ytdlp_release.root().iterdir()) == [TAG, "current", "failed"]
+
+
+def test_a_release_that_failed_to_install_is_fetched_again_only_after_a_day_or_a_newer_one(
+        github, monkeypatch):
+    """A build that will not start where the node keeps it (a noexec mount,
+    application control) costs one download a day, not one a pass."""
+    github.publish(TAG, _build(TAG, broken=True))
+    assert ytdlp_release.refresh() is None
+    name, _ = ytdlp_release._asset()
+    fetched = lambda tag: [p for p in github.asked if p.endswith(f"/{tag}/{name}")]  # noqa: E731
+    assert len(fetched(TAG)) == 1 and ytdlp_release.failed_tag() == TAG
+    assert ytdlp_release.refresh() is None and len(fetched(TAG)) == 1
+    later = time.time() + ytdlp_release._RETRY_FAILED_S + 1
+    monkeypatch.setattr(ytdlp_release.time, "time", lambda: later)
+    assert ytdlp_release.refresh() is None and len(fetched(TAG)) == 2
+    github.publish("2026.11.02", _build("2026.11.02"))
+    assert ytdlp_release.refresh() == "2026.11.02" and ytdlp_release.failed_tag() is None
+
+
+def test_a_build_in_place_that_stopped_starting_is_installed_again(github):
+    github.publish(TAG, _build(TAG))
+    ytdlp_release.refresh()
+    ytdlp_release.executable().write_bytes(b"\x00\x01 not a program")
+    assert ytdlp_release.in_place() is None
+    assert ytdlp_release.refresh() == TAG and ytdlp_release.in_place() == TAG
 
 
 def test_an_answer_that_names_no_release_leaves_the_build_in_place(github):
@@ -270,15 +306,23 @@ def test_yt_dlp_is_not_part_of_the_backends_interpreter_or_image():
 
 # -- when a pass runs (streaming/service.py) -----------------------------------------------
 
-def _loop(monkeypatch, supported=True):
+def _loop(monkeypatch, supported=True, asked_during_the_pass=False):
     import asyncio
     from streaming import service
     passes = []
     monkeypatch.setattr(service, "_REFRESH_MIN_GAP_S", 0.3)
+    monkeypatch.setattr(service, "_FIRST_BUILD_GAP_S", 30)
     monkeypatch.setattr(service, "_REFRESH_INTERVAL_S", 30)
     monkeypatch.setattr(ytdlp_release, "supported", lambda: supported)
-    monkeypatch.setattr(ytdlp_release, "installed_tag", lambda: TAG)
-    monkeypatch.setattr(ytdlp_release, "refresh", lambda: passes.append(time.monotonic()))
+    monkeypatch.setattr(ytdlp_release, "failed_tag", lambda: None)
+
+    def refresh():
+        passes.append(time.monotonic())
+        if asked_during_the_pass and len(passes) == 1:
+            service.request_ytdlp_refresh()          # a fetch thread, while the pass runs
+        return TAG
+
+    monkeypatch.setattr(ytdlp_release, "refresh", refresh)
 
     async def run():
         task = asyncio.create_task(service.ytdlp_refresh_loop())
@@ -286,14 +330,18 @@ def _loop(monkeypatch, supported=True):
             await asyncio.sleep(0.02)
             if passes:
                 break
-        if passes:
+        if passes and not asked_during_the_pass:
             service.request_ytdlp_refresh()          # inside the gap
-            for _ in range(100):
-                await asyncio.sleep(0.02)
-                if len(passes) > 1:
-                    break
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if len(passes) > 1:
+                break
         done = task.done()
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
         return done
 
     return passes, asyncio.run(run())
@@ -304,6 +352,34 @@ def test_a_refresh_asked_for_inside_the_gap_runs_as_the_gap_ends(monkeypatch):
     assert len(passes) == 2 and passes[1] - passes[0] >= 0.25
 
 
+def test_a_refresh_asked_for_during_a_pass_is_kept(monkeypatch):
+    passes, _ = _loop(monkeypatch, asked_during_the_pass=True)
+    assert len(passes) == 2
+
+
 def test_a_platform_yt_dlp_builds_nothing_for_runs_no_pass(monkeypatch):
     passes, ended = _loop(monkeypatch, supported=False)
     assert passes == [] and ended
+
+
+def test_a_refresh_asked_for_once_the_loop_is_gone_is_no_error(monkeypatch):
+    from streaming import service
+    _loop(monkeypatch)
+    service.request_ytdlp_refresh()
+
+
+@pytest.mark.parametrize("platform_, machine, musl, asset", [
+    ("win32", "ARM64", False, ("yt-dlp_win_arm64.zip", "yt-dlp_arm64.exe")),
+    ("win32", "AMD64", False, ("yt-dlp_win.zip", "yt-dlp.exe")),
+    ("linux", "x86_64", True, ("yt-dlp_musllinux.zip", "yt-dlp_musllinux")),
+    ("linux", "aarch64", True, ("yt-dlp_musllinux_aarch64.zip", "yt-dlp_musllinux_aarch64")),
+    ("linux", "aarch64", False, ("yt-dlp_linux_aarch64.zip", "yt-dlp_linux_aarch64")),
+    ("linux", "armv7l", False, ("yt-dlp_linux_armv7l.zip", "yt-dlp_linux_armv7l")),
+])
+def test_each_platform_takes_the_build_yt_dlp_makes_for_it(monkeypatch, platform_, machine, musl,
+                                                             asset):
+    """Windows on ARM reports its own CPU to an emulated x64 Python too."""
+    monkeypatch.setattr(ytdlp_release.sys, "platform", platform_)
+    monkeypatch.setattr(ytdlp_release.platform, "machine", lambda: machine)
+    monkeypatch.setattr(ytdlp_release, "_musl", lambda: musl)
+    assert ytdlp_release._asset() == asset

@@ -95,10 +95,16 @@ def ensure_ct2_model() -> Path:
         pass
     try:
         path = Path(snapshot_download(CT2_REPO, revision=revision))
-        logger.info(f"Using prebuilt ct2 int8 model {CT2_REPO}@{revision[:8]}")
-        return path
     except (RepositoryNotFoundError, RevisionNotFoundError) as e:
         logger.warning(f"Prebuilt ct2 model is gone ({e}) — converting locally")
+    else:
+        # Offline, snapshot_download hands back whatever folder it has, unchecked
+        missing = [name for name in CT2_FILES if not (path / name).exists()]
+        if missing:
+            raise OSError(f"{CT2_REPO} at {revision[:8]} is not in the cache whole and could "
+                          f"not be fetched: {', '.join(missing)}")
+        logger.info(f"Using prebuilt ct2 int8 model {CT2_REPO}@{revision[:8]}")
+        return path
 
     import ctranslate2.converters
 
@@ -138,13 +144,13 @@ class QueryTranslator:
         model_dir = ensure_ct2_model()
         logger.info(f"Loading translation model {MODEL_ID} (ct2 int8, cpu)")
         # The prebuilt artifact bundles the tokenizer (fresh nodes never
-        # touch the 12GB source repo); a locally converted dir doesn't —
-        # those nodes have the source cached anyway.
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
-        except Exception:
+        # touch the 12GB source repo; CT2_FILES holds it whole); a locally
+        # converted dir doesn't — those nodes have the source cached anyway.
+        if model_dir == _ct2_model_dir():
             import model_cache
             self.tokenizer = model_cache.from_hub(AutoTokenizer.from_pretrained, MODEL_ID)
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
         self.translator = ctranslate2.Translator(
             str(model_dir), device="cpu", compute_type="int8",
             inter_threads=1,

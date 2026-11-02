@@ -13,9 +13,10 @@ unpacked, and the build in place stays.
 How often: a pass at the backend's start, then once a day, and sooner when a
 download fails the way an outdated build fails (service.ytdlp_refresh_loop).
 A pass asks GitHub for the latest stable release and fetches it only when it
-is not the one in place; a release older than the one in place is refused
-(an older release is validly signed too), and a build replaces the one in
-place only once it runs and names its own release.
+is not the one in place — a build is in place when it starts and names its
+own release; a release older than a working build is refused (an older
+release is validly signed too). A release whose install failed is not
+fetched again for a day, unless a newer one is out.
 """
 
 import base64
@@ -27,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -68,6 +70,12 @@ _CHILD_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "LC_ALL", "
               "APPDATA", "LOCALAPPDATA", "PROGRAMDATA")
 
 
+# A release whose install failed — refused, or a build that would not start
+# where this node keeps it (a noexec mount, application control) — waits this
+# long before its next download
+_RETRY_FAILED_S = 24 * 3600
+
+
 class Refused(Exception):
     """A release that is not what yt-dlp's release key and its sums say."""
 
@@ -76,17 +84,31 @@ def _tag_key(tag: str) -> tuple:
     return tuple(int(part) for part in tag.split("."))
 
 
+def _musl() -> bool:
+    try:
+        return not os.confstr("CS_GNU_LIBC_VERSION")
+    except (ValueError, OSError):
+        return True
+
+
 def _asset() -> tuple:
-    """(the release's archive for this platform, the executable in it)."""
+    """(the release's archive for this platform, the executable in it).
+    Windows on ARM reports its own CPU to an emulated x64 Python too."""
     machine = platform.machine().lower()
     if sys.platform == "win32" and machine in ("amd64", "x86_64"):
         return "yt-dlp_win.zip", "yt-dlp.exe"
+    if sys.platform == "win32" and machine == "arm64":
+        return "yt-dlp_win_arm64.zip", "yt-dlp_arm64.exe"
     if sys.platform == "darwin":
         return "yt-dlp_macos.zip", "yt-dlp_macos"
-    if sys.platform == "linux" and machine == "x86_64":
-        return "yt-dlp_linux.zip", "yt-dlp_linux"
-    if sys.platform == "linux" and machine in ("aarch64", "arm64"):
-        return "yt-dlp_linux_aarch64.zip", "yt-dlp_linux_aarch64"
+    if sys.platform == "linux":
+        libc = "musllinux" if _musl() else "linux"
+        if machine == "x86_64":
+            return f"yt-dlp_{libc}.zip", f"yt-dlp_{libc}"
+        if machine in ("aarch64", "arm64"):
+            return f"yt-dlp_{libc}_aarch64.zip", f"yt-dlp_{libc}_aarch64"
+        if machine == "armv7l" and libc == "linux":
+            return "yt-dlp_linux_armv7l.zip", "yt-dlp_linux_armv7l"
     raise Refused(f"yt-dlp publishes no build this node runs ({sys.platform} {machine})")
 
 
@@ -127,6 +149,24 @@ def executable() -> Optional[Path]:
 
 def child_env() -> dict:
     return {k: v for k, v in os.environ.items() if k in _CHILD_ENV}
+
+
+def failed_tag() -> Optional[str]:
+    """The release whose install failed within the last _RETRY_FAILED_S."""
+    try:
+        tag, at, _ = (root() / "failed").read_text(encoding="utf-8").split(" ", 2)
+        stale = time.time() - float(at) >= _RETRY_FAILED_S
+    except (FileNotFoundError, ValueError):
+        return None
+    return None if stale or not _TAG.fullmatch(tag) else tag
+
+
+def _record_failure(tag: str, reason: Exception) -> None:
+    folder = root()
+    folder.mkdir(parents=True, exist_ok=True)
+    part = folder / "failed.part"
+    part.write_text(f"{tag} {time.time():.0f} {reason}", encoding="utf-8")
+    os.replace(part, folder / "failed")
 
 
 # -- the signature (RFC 4880, as much of it as one v4 RSA signature needs) ----
@@ -208,6 +248,8 @@ def verify_signature(document: bytes, signature: bytes) -> None:
     at += 2 + int.from_bytes(body[at:at + 2], "big") + 2      # unhashed subpackets, hash prefix
     value, _ = _mpi(body, at)
     key = _release_key()
+    if not 0 < value < key.public_numbers().n:
+        raise Refused("a signature number outside the release key's range")
     trailer = b"\x04\xff" + len(hashed).to_bytes(4, "big")
     try:
         key.verify(value.to_bytes((key.key_size + 7) // 8, "big"), document + hashed + trailer,
@@ -257,6 +299,7 @@ def _install(client: httpx.Client, tag: str) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     archive = folder / f"{tag}.zip.part"
     digest = hashlib.sha256()
+    target = folder / tag
     try:
         with client.stream("GET", _ASSET_URL.format(tag=tag, name=name)) as r:
             r.raise_for_status()
@@ -271,15 +314,16 @@ def _install(client: httpx.Client, tag: str) -> None:
         _unpack(archive, unpacked)
         if not (unpacked / exe).is_file():
             raise Refused(f"{name} of {tag} holds no {exe}")
+        # Moved into place before it first runs: a folder whose program has
+        # just run may stay locked on Windows a while (a scan on first run)
+        shutil.rmtree(target, ignore_errors=True)
+        os.replace(unpacked, target)
     finally:
         archive.unlink(missing_ok=True)
-    said = _version(unpacked / exe)
+    said = _version(target / exe)
     if said != tag:
-        shutil.rmtree(unpacked, ignore_errors=True)
+        shutil.rmtree(target, ignore_errors=True)
         raise Refused(f"the build of {tag} says it is {said!r}")
-    target = folder / tag
-    shutil.rmtree(target, ignore_errors=True)
-    os.replace(unpacked, target)
     previous = installed_tag()
     current = folder / "current.part"
     current.write_text(tag, encoding="ascii")
@@ -302,11 +346,19 @@ def _version(exe: Path) -> Optional[str]:
     return out.stdout.strip()
 
 
+def in_place() -> Optional[str]:
+    """The tag of the build in place when it starts and names that tag."""
+    tag, exe = installed_tag(), executable()
+    return tag if exe is not None and _version(exe) == tag else None
+
+
 def refresh() -> Optional[str]:
     """One pass: the latest stable release in place, fetched and checked when
-    it is not there yet. The tag in place after the pass, None when there is
-    none. A release refused, or a network that failed, leaves the build in
-    place and says why in the log."""
+    it is not there yet, or when the build there no longer starts. The tag in
+    place after the pass, None when nothing works. A release refused, or a
+    network that failed, leaves the build in place and says why in the log;
+    an install that failed past its download is recorded (failed_tag)."""
+    good = in_place()
     try:
         with _client() as client:
             latest = client.get(_LATEST, headers={"Accept": "application/vnd.github+json"})
@@ -315,21 +367,26 @@ def refresh() -> Optional[str]:
             tag = body.get("tag_name") if isinstance(body, dict) else None
             if not isinstance(tag, str) or not _TAG.fullmatch(tag):
                 raise Refused(f"the latest release is named {tag!r}")
-            current = installed_tag()
-            if current is not None and _tag_key(tag) < _tag_key(current):
-                raise Refused(f"the latest release, {tag}, is older than {current} in place")
-            if tag != current or executable() is None:
-                _install(client, tag)
+            if good is not None and _tag_key(tag) < _tag_key(good):
+                raise Refused(f"the latest release, {tag}, is older than {good} in place")
+            if tag != good:
+                if tag == failed_tag():
+                    logger.warning("yt-dlp %s failed to install within the last day; "
+                                   "it is fetched again once a day has passed", tag)
+                else:
+                    try:
+                        _install(client, tag)
+                    except (Refused, OSError, zipfile.BadZipFile) as e:
+                        _record_failure(tag, e)
+                        raise
+                    (root() / "failed").unlink(missing_ok=True)
+                    good = tag
     except Refused as e:
         logger.error("yt-dlp release refused, the build in place stays: %s", e)
     except (httpx.HTTPError, OSError, ValueError, zipfile.BadZipFile) as e:
         logger.warning("yt-dlp refresh skipped (%s); the build in place stays", e)
-    exe = executable()
-    if exe is None:
+    if good is None:
         logger.warning("yt-dlp is not in place")
-        return None
-    said = _version(exe)
-    if said is None:
-        return None
-    logger.info("yt-dlp %s (stable, %s)", said, exe)
-    return installed_tag()
+    else:
+        logger.info("yt-dlp %s (stable, %s)", good, executable())
+    return good

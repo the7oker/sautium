@@ -34,23 +34,37 @@ def hub(tmp_path, monkeypatch):
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
     asked = []
 
+    def snapshot(name):
+        return (tmp_path / "hub" / f"models--{name.replace('/', '--')}" / "snapshots"
+                / model_cache.HUB_REVISIONS[name])
+
     def cache(name, files):
-        snapshot = (tmp_path / "hub" / f"models--{name.replace('/', '--')}" / "snapshots"
-                    / model_cache.HUB_REVISIONS[name])
         for f in files:
-            (snapshot / f).parent.mkdir(parents=True, exist_ok=True)
-            (snapshot / f).write_bytes(b"")
+            (snapshot(name) / f).parent.mkdir(parents=True, exist_ok=True)
+            (snapshot(name) / f).write_bytes(b"")
 
-    def download(name, *, revision, allow_patterns=None, **kw):
-        asked.append((name, revision, sorted(allow_patterns or [])))
-        cache(name, allow_patterns or [])
-        return str(tmp_path / "hub")
+    def download(name, *, revision, allow_patterns=None, local_files_only=False, **kw):
+        if not local_files_only:
+            asked.append((name, revision, sorted(allow_patterns or [])))
+            if online:
+                cache(name, allow_patterns or [])
+        return str(snapshot(name))            # offline too: whatever folder there is
 
+    online = True
     monkeypatch.setattr(hf, "snapshot_download", download)
-    return types.SimpleNamespace(cache=cache, asked=asked)
+    ns = types.SimpleNamespace(cache=cache, asked=asked, snapshot=snapshot)
+
+    def go_offline():
+        nonlocal online
+        online = False
+
+    ns.go_offline = go_offline
+    return ns
 
 
-def test_a_cached_commit_is_read_from_the_cache_alone(hub):
+def test_a_cached_commit_is_read_from_its_snapshot_folder_alone(hub):
+    """A folder, not the name: sentence-transformers' processor lookups drop
+    the revision and the cache-only flag, and would ask for `main`."""
     calls = []
 
     def load(name, **kwargs):
@@ -59,8 +73,7 @@ def test_a_cached_commit_is_read_from_the_cache_alone(hub):
 
     hub.cache(CLAP, model_cache.HUB_FILES[CLAP])
     assert model_cache.from_hub(load, CLAP, torch_dtype="bf16") == "model"
-    assert calls == [(CLAP, {"revision": model_cache.HUB_REVISIONS[CLAP],
-                             "local_files_only": True, "torch_dtype": "bf16"})]
+    assert calls == [(str(hub.snapshot(CLAP)), {"local_files_only": True, "torch_dtype": "bf16"})]
     assert hub.asked == []
 
 
@@ -69,10 +82,20 @@ def test_a_cache_without_one_file_of_the_commit_fetches_its_files_then_reads_the
     sentence-transformers makes up; the files come first."""
     calls = []
     hub.cache(BGE, [f for f in model_cache.HUB_FILES[BGE] if f != "modules.json"])
-    assert model_cache.from_hub(lambda name, **kw: calls.append(kw) or "model", BGE) == "model"
+    assert model_cache.from_hub(lambda name, **kw: calls.append(name) or "model", BGE) == "model"
     revision = model_cache.HUB_REVISIONS[BGE]
     assert hub.asked == [(BGE, revision, sorted(model_cache.HUB_FILES[BGE]))]
-    assert calls == [{"revision": revision, "local_files_only": True}]
+    assert calls == [str(hub.snapshot(BGE))]
+
+
+def test_a_partial_cache_that_cannot_be_fetched_is_never_loaded(hub):
+    """Offline, snapshot_download hands back the folder it has, unchecked."""
+    calls = []
+    hub.cache(BGE, [f for f in model_cache.HUB_FILES[BGE] if f != "modules.json"])
+    hub.go_offline()
+    with pytest.raises(OSError, match="modules.json"):
+        model_cache.from_hub(lambda name, **kw: calls.append(name), BGE)
+    assert calls == []
 
 
 def test_a_model_with_no_pinned_commit_is_not_loaded():
@@ -109,8 +132,8 @@ def test_clap_loads_at_its_pinned_commit(hub, monkeypatch):
     monkeypatch.setattr(clap_model, "ClapModel", type("ClapModel", (Fake,), {}))
     monkeypatch.setattr(clap_model, "_cache", {})
     clap_model.get_clap_model(CLAP, "cpu")
-    revision = model_cache.HUB_REVISIONS[CLAP]
-    assert seen == [("ClapProcessor", CLAP, revision, True), ("ClapModel", CLAP, revision, True)]
+    folder = str(hub.snapshot(CLAP))
+    assert seen == [("ClapProcessor", folder, None, True), ("ClapModel", folder, None, True)]
 
 
 # -- PaSST ---------------------------------------------------------------------
@@ -231,6 +254,20 @@ def test_a_network_that_failed_converts_nothing(madlad, monkeypatch):
 
     monkeypatch.setattr(madlad.hub, "snapshot_download", download)
     with pytest.raises(ConnectionError):
+        madlad.translation.ensure_ct2_model()
+    assert madlad.converted == []
+
+
+def test_a_partial_prebuilt_translator_that_cannot_be_fetched_is_refused(madlad, monkeypatch):
+    """Offline, snapshot_download hands back the folder it has, unchecked."""
+    snapshot = madlad.tmp / "snapshot"
+    snapshot.mkdir()
+    for name in madlad.translation.CT2_FILES:
+        if name != "model.bin":
+            (snapshot / name).write_bytes(b"")
+    monkeypatch.setattr(madlad.hub, "snapshot_download",
+                        lambda repo, *, revision, local_files_only=False, **kw: str(snapshot))
+    with pytest.raises(OSError, match="model.bin"):
         madlad.translation.ensure_ct2_model()
     assert madlad.converted == []
 
