@@ -84,6 +84,33 @@ def _end_streams() -> None:
         scope.cancel()
 
 
+class PeerSurfaceConfig(uvicorn.Config):
+    """The peer surface's server settings (main._serve_p2p): no access line
+    — a peer's address and the text of a search it sent are not this node's
+    log, and the contact log keeps what the defences need, for 30 days
+    (desktop/p2p/contact_log.py) — and no logging setup of its own.
+
+    The access logger is one per process, shared with the Web UI's server,
+    and uvicorn's protocol writes to it whenever it has a handler; its own
+    `access_log=False` works by emptying that logger, which would silence the
+    Web UI too. So this server's protocol is told by itself, and the
+    process's logging stays as its start made it (config.LOGGING_CONFIG)."""
+
+    def configure_logging(self) -> None:
+        pass
+
+    def load(self) -> None:
+        super().load()
+        protocol = self.http_protocol_class
+
+        class WithoutAccessLine(protocol):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.access_log = False
+
+        self.http_protocol_class = WithoutAccessLine
+
+
 class Server(uvicorn.Server):
     """uvicorn's server, saying the first signal that stops it and what it
     stops (`what`). A signal while it stops changes nothing: uvicorn would

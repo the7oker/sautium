@@ -257,8 +257,7 @@ async def _serve_p2p(port: int) -> None:
     import os
     import socket
 
-    import uvicorn
-    from serving import Server
+    from serving import PeerSurfaceConfig, Server
     from tls_gen import ensure_cert
     from p2p_app import app as peer_app
 
@@ -283,8 +282,8 @@ async def _serve_p2p(port: int) -> None:
         else:
             logger.info("P2P peer surface on :%d behind a trusted front — plain HTTP, "
                         "X-Forwarded-For trusted from %s", port, gateway)
-        config = uvicorn.Config(
-            peer_app, host="0.0.0.0", port=port, log_level="info",
+        config = PeerSurfaceConfig(
+            peer_app, host="0.0.0.0", port=port,
             proxy_headers=True, forwarded_allow_ips=gateway,
             timeout_graceful_shutdown=_PEER_GRACE_S,
         )
@@ -294,8 +293,8 @@ async def _serve_p2p(port: int) -> None:
             _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
             binding=tls_binding(settings),
         )
-        config = uvicorn.Config(
-            peer_app, host="0.0.0.0", port=port, log_level="info",
+        config = PeerSurfaceConfig(
+            peer_app, host="0.0.0.0", port=port,
             ssl_keyfile=str(key_path), ssl_certfile=str(cert_path),
             timeout_graceful_shutdown=_PEER_GRACE_S,
         )
