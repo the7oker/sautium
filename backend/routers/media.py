@@ -19,7 +19,7 @@ import media_urls
 from config import settings
 from db_pool import db_query_one
 from streaming import transcode
-from streaming.proxy import MIME_BY_FORMAT, UNSATISFIABLE, parse_byte_range
+from streaming.proxy import MIME_BY_FORMAT, UNSATISFIABLE, parse_byte_range, shown
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ def media_preview(token: str, request: Request,
             opus = transcode.opus_path_for_bytes(token, e.audio.data, q)
         except Exception as exc:
             logger.warning("opus transcode failed for preview %s — lossless: %s",
-                           token, exc)
+                           shown(token), exc)
             opus = None
         if opus:
             return _serve_disk(opus, transcode.MIME, request)

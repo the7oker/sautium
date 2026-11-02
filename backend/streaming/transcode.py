@@ -48,7 +48,14 @@ FLAC_TIER = "flac"
 _CACHE_DIR = Path(__file__).parent.parent / "data" / "transcode_cache"
 _BUDGET_BYTES = 1024 * 1024 * 1024       # Opus tracks, FLAC cuts and whole FLACs
 _index_lock = threading.Lock()
-_key_locks: dict[str, threading.Lock] = {}
+# One encode per key, the others for it waiting: a key's lock is one of a fixed
+# set, so a request for any number of distinct keys adds none.
+_KEY_STRIPES = 64
+_key_locks = tuple(threading.Lock() for _ in range(_KEY_STRIPES))
+# Encodes running at once, whatever the keys: a renderer asks for one track at
+# a time and the browser's prefetch for the next; a request past these waits.
+ENCODES = 2
+_encodes = threading.BoundedSemaphore(ENCODES)
 
 
 def wants_opus(quality: Optional[str]) -> bool:
@@ -56,11 +63,7 @@ def wants_opus(quality: Optional[str]) -> bool:
 
 
 def _key_lock(key: str) -> threading.Lock:
-    with _index_lock:
-        lk = _key_locks.get(key)
-        if lk is None:
-            lk = _key_locks[key] = threading.Lock()
-        return lk
+    return _key_locks[int(key[:8], 16) % _KEY_STRIPES]
 
 
 def _evict_if_needed(keep: Path) -> None:
@@ -207,7 +210,8 @@ def _produce(key: str, *, suffix: str, label: str, args_in: list,
             return str(out)
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        run_ffmpeg(args_in, out_args, out, stdin_bytes)
+        with _encodes:
+            run_ffmpeg(args_in, out_args, out, stdin_bytes)
         logger.info("%s transcode in %.1fs (%s)", label,
                     time.monotonic() - started, out.name)
     with _index_lock:

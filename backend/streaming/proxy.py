@@ -42,6 +42,26 @@ _UNSET_TIMEOUT = object()   # wait_ready sentinel: "use the proxy default"
 UNSATISFIABLE = object()    # parse_byte_range: a span that starts past the end
 _HIT_TOKENS = 256           # tokens whose requests are remembered
 _HITS_PER_TOKEN = 16
+# A token the proxy never served or has let go is remembered too — HQPlayer
+# asking for a dead one is part of its trace — but apart, few, and cut short:
+# no request for one pushes a live token's record out.
+_STRAY_TOKENS = 32
+_STRAY_HITS = 4
+_TOKEN_KEPT = 64            # characters of a token a record keeps
+_RANGE_KEPT = 128
+# Connections served at once — each a thread. HQPlayer probes and streams one
+# entry at a time, a renderer pulls one or two; past this a connection is
+# closed as it arrives. The request line and headers must arrive within
+# _REQUEST_READ_S of each other; the answer's writes wait as long as the
+# consumer does (a paused HQPlayer stops reading for as long as it likes).
+_CONNECTIONS = 64
+_REQUEST_READ_S = 10.0
+
+
+def shown(token: str) -> str:
+    """A token as a log line names it: enough to tell two apart, never one a
+    reader of the log could fetch with."""
+    return token[:6] + "…"
 
 # Content type by media_files.file_format — the one table every URL-serving
 # output reads (DLNA DIDL, the browser route, an HQPlayer elsewhere).
@@ -154,8 +174,10 @@ class MediaProxy:
         self._files: dict[str, _FileEntry] = {}          # /file/{token} registry
         # What each /file/ and /preview/ token was actually asked for — the
         # consumer's side of a hand-over, which the HQPlayer playback trace
-        # joins on the token (playback.hqp_diagnostics). Newest tokens kept.
+        # joins on the token (playback.hqp_diagnostics). Newest tokens kept;
+        # a token the proxy does not hold, in a small store of its own.
         self._hits: OrderedDict[str, deque] = OrderedDict()
+        self._stray_hits: OrderedDict[str, deque] = OrderedDict()
         self._blobs: dict[str, tuple[bytes, str]] = {}   # /art/{token} → (data, mime)
         self._blob_tokens_by_key: dict[str, str] = {}    # cover key → token
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -178,7 +200,7 @@ class MediaProxy:
     # ---- lifecycle -------------------------------------------------------
     def start(self) -> None:
         handler = _make_handler(self)
-        self._httpd = ThreadingHTTPServer((self._bind_host, self.port), handler)
+        self._httpd = _BoundedServer((self._bind_host, self.port), handler)
         threading.Thread(target=self._httpd.serve_forever, daemon=True,
                          name="media-proxy").start()
         logger.info("media proxy on %s:%d (advertised host %s)",
@@ -618,7 +640,7 @@ class MediaProxy:
             return transcode.opus_path_for_bytes(token, e.audio.data, q, ss=ss)
         except Exception as ex:
             logger.warning("opus transcode failed for preview %s — lossless: %s",
-                           token, ex)
+                           shown(token), ex)
             return None
 
     # `host` is the address the CONSUMER reaches us at (streaming.media_host
@@ -634,22 +656,31 @@ class MediaProxy:
         return f"http://{host or self._advertised_host}:{self.port}/art/{token}"
 
     def record_hit(self, token: str, client: str, method: str,
-                   range_header: Optional[str], kind: str) -> dict:
+                   range_header: Optional[str], kind: str, *, held: bool = True) -> dict:
         """Open the record of one request for `token`; the handler stamps
-        its status and adds the bytes it writes as they go out."""
+        its status and adds the bytes it writes as they go out. A token the
+        proxy does not hold (`held=False`) goes to the strays' store; the
+        token and the range are kept cut short either way."""
+        token = token[:_TOKEN_KEPT]
         hit = {"ts": time.time(), "client": client, "method": method,
-               "range": range_header, "kind": kind, "status": None, "bytes": 0}
+               "range": None if range_header is None else range_header[:_RANGE_KEPT],
+               "kind": kind, "status": None, "bytes": 0}
+        store, tokens, per = ((self._hits, _HIT_TOKENS, _HITS_PER_TOKEN) if held
+                              else (self._stray_hits, _STRAY_TOKENS, _STRAY_HITS))
         with self._lock:
-            ring = self._hits.pop(token, None) or deque(maxlen=_HITS_PER_TOKEN)
+            ring = store.pop(token, None) or deque(maxlen=per)
             ring.append(hit)
-            self._hits[token] = ring
-            while len(self._hits) > _HIT_TOKENS:
-                self._hits.popitem(last=False)
+            store[token] = ring
+            while len(store) > tokens:
+                store.popitem(last=False)
         return hit
 
     def hits(self, token: str) -> list[dict]:
+        """The requests for `token`, oldest first — held or not when asked."""
+        token = token[:_TOKEN_KEPT]
         with self._lock:
-            return [dict(h) for h in self._hits.get(token, ())]
+            both = (*self._stray_hits.get(token, ()), *self._hits.get(token, ()))
+            return [dict(h) for h in sorted(both, key=lambda h: h["ts"])]
 
     def chain_summary(self, token: str) -> Optional[dict]:
         """Where a preview token's audio comes from: the provider chain in
@@ -809,12 +840,44 @@ class MediaProxy:
             self._prefetch(tok)
 
 
+class _BoundedServer(ThreadingHTTPServer):
+    """A thread per connection, _CONNECTIONS of them at most: one past that
+    is closed as it arrives, its thread never started."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(_CONNECTIONS)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._slots.acquire(blocking=False):
+            logger.debug("media proxy: %d connections already — %s closed",
+                         _CONNECTIONS, client_address[0])
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def _make_handler(proxy: MediaProxy):
     class Handler(BaseHTTPRequestHandler):
         # HTTP/1.0 (the default): each request gets its own connection that
         # closes after the response. HQPlayer probe-then-streams and resets
         # connections; keep-alive (1.1) desynced those and playback never
         # started. Matches the plain http.server that played reliably in bring-up.
+
+        # The request line and headers: each read waits _REQUEST_READ_S at
+        # most (StreamRequestHandler sets it on the socket); the answer, once
+        # it begins (_answering), waits for the consumer as long as it takes.
+        timeout = _REQUEST_READ_S
 
         # The /file/ or /preview/ request being served, as the proxy records
         # it (record_hit): its status and the bytes that actually went out.
@@ -823,14 +886,17 @@ def _make_handler(proxy: MediaProxy):
         def log_message(self, fmt, *a):  # quiet by default; -d to trace probes
             logger.debug("proxy %s: %s", self.address_string(), fmt % a)
 
+        def _answering(self) -> None:
+            self.connection.settimeout(None)
+
         def send_response(self, code, message=None):
             if self.hit is not None:
                 self.hit["status"] = code
             super().send_response(code, message)
 
-        def _open_hit(self, token: str, kind: str) -> None:
+        def _open_hit(self, token: str, kind: str, *, held: bool) -> None:
             self.hit = proxy.record_hit(token, self.client_address[0], self.command,
-                                        self.headers.get("Range"), kind)
+                                        self.headers.get("Range"), kind, held=held)
 
         def _token(self) -> Optional[str]:
             if not self.path.startswith("/preview/"):
@@ -886,7 +952,7 @@ def _make_handler(proxy: MediaProxy):
             self._open_hit(token, "opus" if transcode.wants_opus(self._q())
                            else "cut" if fe is not None and fe.start is not None
                            else "flac" if self._q() == transcode.FLAC_TIER
-                           else "file")
+                           else "file", held=fe is not None)
             try:
                 path, mime, size = proxy.materialize_file(
                     token, self._q(), self._ss())
@@ -894,7 +960,7 @@ def _make_handler(proxy: MediaProxy):
                 self.send_error(404, "unknown token")
                 return
             except Exception as e:
-                logger.error("file token %s not servable: %s", token, e)
+                logger.error("file token %s not servable: %s", shown(token), e)
                 self.send_error(500)
                 return
             self._serve_disk_file(path, mime, size, body=body)
@@ -961,6 +1027,7 @@ def _make_handler(proxy: MediaProxy):
                 self._write(data)
 
         def do_HEAD(self):
+            self._answering()
             atok = self._art_token()
             if atok is not None:
                 self._serve_art(atok, body=False)
@@ -981,8 +1048,9 @@ def _make_handler(proxy: MediaProxy):
             tok = self._token()
             if tok is None:
                 return
-            self._open_hit(tok, "opus" if transcode.wants_opus(self._q()) else "preview")
             held = proxy._peek(tok)
+            self._open_hit(tok, "opus" if transcode.wants_opus(self._q()) else "preview",
+                           held=held is not None)
             if (held is not None and held.audio is None and held.error is None
                     and held.held is not None and not transcode.wants_opus(self._q())):
                 self.send_response(200)
@@ -1017,6 +1085,7 @@ def _make_handler(proxy: MediaProxy):
             self.end_headers()
 
         def do_GET(self):
+            self._answering()
             atok = self._art_token()
             if atok is not None:
                 self._serve_art(atok, body=True)
@@ -1028,7 +1097,8 @@ def _make_handler(proxy: MediaProxy):
             tok = self._token()
             if tok is None:
                 return
-            self._open_hit(tok, "opus" if transcode.wants_opus(self._q()) else "preview")
+            self._open_hit(tok, "opus" if transcode.wants_opus(self._q()) else "preview",
+                           held=proxy._peek(tok) is not None)
             try:
                 e = proxy._ensure_ready(tok, proxy._prepare_timeout, front=True)
             except KeyError:
@@ -1056,7 +1126,7 @@ def _make_handler(proxy: MediaProxy):
                 start, end = span
                 self._send_headers(e, end - start + 1, full=False, body=True,
                                    start=start, end=end, total=total)
-                self._write(data[start:end + 1])
+                self._write(memoryview(data)[start:end + 1])     # the span, not a copy of it
             else:
                 self._send_headers(e, total, full=True, body=True)
                 self._write(data)

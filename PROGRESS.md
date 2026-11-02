@@ -3541,6 +3541,19 @@ device on the network; none of them may hold for it more than a bound.
   names the SID; any other is refused with 412, as UPnP says. A body past
   64 KiB is refused (413). The first event lost to that bound costs
   nothing: the attach reads the renderer's state itself after subscribing.
+- **The media proxy serves 64 connections at once,** a thread each; one
+  past that is closed as it arrives. A request line and its headers wait
+  10 s per read at most; the answer, once it begins, waits for its reader
+  as long as it takes — a paused HQPlayer stops reading for as long as it
+  likes, and its stream must survive that. A span of a buffer goes out as
+  a view of it, never a copy. Requests for a token the proxy does not
+  hold are remembered apart (32 tokens, 4 requests each), so none of them
+  pushes a live token's record — what the HQPlayer trace reads — out; a
+  record keeps 64 characters of a token and 128 of a range. Two encodes
+  run at once, whatever the keys (`transcode.ENCODES`), and a key's lock
+  is one of 64: a request for any number of distinct keys adds none. A log
+  line names a token by its first six characters (`proxy.shown`): a token
+  is a bearer credential for its file.
 
 ## Known Gotchas
 
