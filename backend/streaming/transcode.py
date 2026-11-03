@@ -24,7 +24,6 @@ And whole files in FLAC (`flac_path_for_file`), for a DLNA renderer whose
 sink list lacks their own format. FLAC is ~10× Opus size, hence the budget.
 """
 
-import contextlib
 import hashlib
 import logging
 import os
@@ -49,17 +48,19 @@ FLAC_TIER = "flac"
 _CACHE_DIR = Path(__file__).parent.parent / "data" / "transcode_cache"
 _BUDGET_BYTES = 1024 * 1024 * 1024       # Opus tracks, FLAC cuts and whole FLACs
 _index_lock = threading.Lock()
-# One encode per key, the others for it waiting: a key's lock is one of a fixed
-# set, so a request for any number of distinct keys adds none.
+# Two families of encode, each with its own locks and its own cap, so neither
+# waits behind the other: Opus from an offset a request names (`ss`), and the
+# lossless copies and cuts of a file — a CUE track's cut is what HQPlayer
+# waits for before it may play. One encode per key, the others for it
+# waiting: a key's lock is one of a fixed set, so a request for any number of
+# distinct keys adds none; ENCODES of a family run at once, whatever the keys
+# — a renderer asks for one track at a time and the browser's prefetch for the
+# next — and a request past them waits.
 _KEY_STRIPES = 64
-_key_locks = tuple(threading.Lock() for _ in range(_KEY_STRIPES))
-# Encodes running at once whose offset a request names (Opus from `ss`),
-# whatever their keys: a renderer asks for one track at a time and the
-# browser's prefetch for the next; a request past these waits. A lossless
-# copy or cut is the file's own, never a request's offset, and runs beside
-# them — a CUE track's cut is what HQPlayer waits for before it may play.
 ENCODES = 2
-_encodes = threading.BoundedSemaphore(ENCODES)
+_FAMILIES = ("offset", "file")
+_key_locks = {family: tuple(threading.Lock() for _ in range(_KEY_STRIPES)) for family in _FAMILIES}
+_encodes = {family: threading.BoundedSemaphore(ENCODES) for family in _FAMILIES}
 # A hung ffmpeg — a source on a stalled network share — is let go
 FFMPEG_TIMEOUT_S = 30 * 60
 
@@ -68,8 +69,8 @@ def wants_opus(quality: Optional[str]) -> bool:
     return quality in OPUS_BITRATES
 
 
-def _key_lock(key: str) -> threading.Lock:
-    return _key_locks[int(key[:8], 16) % _KEY_STRIPES]
+def _key_lock(key: str, family: str) -> threading.Lock:
+    return _key_locks[family][int(key[:8], 16) % _KEY_STRIPES]
 
 
 def _evict_if_needed(keep: Path) -> None:
@@ -149,7 +150,7 @@ def opus_path_for_file(source_path: str, quality: str, ss: float = 0.0) -> Optio
     key = hashlib.sha1(f"{source_path}|{mtime}|{bitrate}|{int(ss)}".encode()).hexdigest()
     return _produce(key, suffix=".ogg", label=f"opus {bitrate}k",
                     args_in=_seek_args(ss, ["-i", source_path]),
-                    out_args=_opus_args(bitrate), stdin_bytes=None, offset_of_a_request=True)
+                    out_args=_opus_args(bitrate), stdin_bytes=None, family="offset")
 
 
 def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str,
@@ -163,8 +164,7 @@ def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str,
     key = hashlib.sha1(f"{token}|{bitrate}|{int(ss)}".encode()).hexdigest()
     return _produce(key, suffix=".ogg", label=f"opus {bitrate}k",
                     args_in=_seek_args(ss, ["-i", "pipe:0"]),
-                    out_args=_opus_args(bitrate), stdin_bytes=source_bytes,
-                    offset_of_a_request=True)
+                    out_args=_opus_args(bitrate), stdin_bytes=source_bytes, family="offset")
 
 
 def flac_path_for_file(source_path: str) -> str:
@@ -209,18 +209,18 @@ def flac_slice_path_for_file(source_path: str, start: float,
 
 def _produce(key: str, *, suffix: str, label: str, args_in: list,
              out_args: list, stdin_bytes: Optional[bytes],
-             offset_of_a_request: bool = False) -> str:
+             family: str = "file") -> str:
     out = _CACHE_DIR / f"{key}{suffix}"
     if out.exists():
         os.utime(out, None)                     # bump access time for LRU
         return str(out)
-    with _key_lock(key):                        # one encode per key; others wait
+    with _key_lock(key, family):                # one encode per key; others wait
         if out.exists():
             os.utime(out, None)
             return str(out)
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        with _encodes if offset_of_a_request else contextlib.nullcontext():
+        with _encodes[family]:
             run_ffmpeg(args_in, out_args, out, stdin_bytes)
         logger.info("%s transcode in %.1fs (%s)", label,
                     time.monotonic() - started, out.name)

@@ -40,7 +40,7 @@ from typing import Optional, Tuple
 import httpx
 import imagehash
 from mutagen import File as MutagenFile
-from PIL import EpsImagePlugin, Image, UnidentifiedImageError
+from PIL import EpsImagePlugin, Image
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -193,17 +193,18 @@ def open_cover(data: bytes) -> Optional[Image.Image]:
     """`data` decoded as a cover (COVER_FORMATS), or None. Its size is read
     from the header and judged before a pixel is decoded: past Pillow's own
     bound (MAX_IMAGE_PIXELS, ~89 MP — a booklet scanned for print is ~50)
-    it is refused, never decoded. A file Pillow cannot read is no cover —
-    some damage it says as SyntaxError or EOFError."""
+    it is refused, never decoded. Whatever Pillow raises on a picture it
+    cannot read — and a damaged one makes it raise near anything — the
+    picture is no cover: this is the boundary where outside bytes become a
+    cover or none."""
     try:
         img = Image.open(BytesIO(data), formats=COVER_FORMATS)
         if img.width * img.height > Image.MAX_IMAGE_PIXELS:
             logger.debug("cover of %dx%d refused undecoded", img.width, img.height)
             return None
         img.load()
-    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError,
-            SyntaxError, EOFError) as e:
-        logger.debug(f"PIL decode failed: {e}")
+    except Exception as e:
+        logger.debug("cover refused undecodable: %s: %s", type(e).__name__, e)
         return None
     return img
 

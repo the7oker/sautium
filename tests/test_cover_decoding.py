@@ -76,3 +76,23 @@ def test_a_damaged_cover_is_no_cover_and_no_jpeg():
     assert covers.open_cover(damaged) is None
     assert covers._encode_and_hash(damaged) is None
     assert DlnaBackend._to_jpeg(damaged, "damaged") is None
+
+
+def _tiff_with_a_strip_offset_of_another_type() -> bytes:
+    """A 4×4 TIFF whose strip offset is stored as a floating type: Pillow
+    raises a TypeError from load()."""
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), (10, 20, 30)).save(buf, "TIFF")
+    data = bytearray(buf.getvalue())
+    ifd = struct.unpack_from("<I", data, 4)[0]
+    for i in range(struct.unpack_from("<H", data, ifd)[0]):
+        at = ifd + 2 + 12 * i
+        if struct.unpack_from("<H", data, at)[0] == 273:          # StripOffsets
+            struct.pack_into("<H", data, at + 2, 11)              # stored as FLOAT
+    return bytes(data)
+
+
+def test_any_cover_pillow_cannot_read_is_no_cover():
+    damaged = _tiff_with_a_strip_offset_of_another_type()
+    assert covers.open_cover(damaged) is None
+    assert DlnaBackend._to_jpeg(damaged, "damaged") is None

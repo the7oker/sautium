@@ -3591,29 +3591,36 @@ device on the network; none of them may hold for it more than a bound.
   closed as it arrives. A request line and its headers wait 10 s per read
   and 15 s in all at most; the answer, once it begins, waits for its reader
   as long as it takes — a paused HQPlayer stops reading for as long as it
-  likes, and its stream must survive that — and TCP keepalive finds a
-  reader that is gone for good (about two minutes). A connection that ends
-  under its request is said at debug, not as a traceback on stderr. A span of a buffer goes out as
+  likes, and its stream must survive that — so a reader gone for good keeps
+  its place until the system's TCP gives up on it (minutes). A connection
+  that ends under its request is said at debug, not as a traceback on
+  stderr. A span of a buffer goes out as
   a view of it, never a copy. Requests for a token the proxy does not
   hold are remembered apart (32 tokens, 4 requests each), so none of them
   pushes a live token's record — what the HQPlayer trace reads — out; a
-  record keeps 64 characters of a token and 128 of a range. Two encodes
-  whose offset a request names (Opus from `ss`) run at once, whatever the
-  keys (`transcode.ENCODES`); a lossless copy or cut is the file's own and
-  runs beside them — a CUE track's cut is what HQPlayer waits for before it
-  may play. A key's lock is one of 64: a request for any number of distinct
-  keys adds none. ffmpeg is let go after 30 minutes (a source on a stalled
-  share). A log
+  record keeps 64 characters of a token and 128 of a range. Encodes come in
+  two families, each with its own locks and its own cap of two at once
+  (`transcode.ENCODES`), whatever the keys: Opus from an offset a request
+  names (`ss`), and the lossless copies and cuts of a file — so a CUE track's
+  cut, what HQPlayer waits for before it may play, never waits behind an
+  Opus encode. A key's lock is one of 64 of its family's: a request for any
+  number of distinct keys adds none. ffmpeg is let go after 30 minutes (a
+  source on a stalled share). A log
   line names a token by its first six characters (`proxy.shown`): a token
   is a bearer credential for its file.
 - **The Output scan takes a device's word within bounds.** A multicast
   answer's LOCATION is taken only as plain HTTP, and described at the
   address the answer came from — as the unicast sweep already made it
-  (`_rehost`). A scan, and an address added by hand, reads a device's
-  description alone (`_fetch_description`, `_described_devices` with
-  defusedxml): what it needs of a device is there, and the service
-  documents are the attach's — the library's device builder fetched every
-  one of them. The description is read to its end, as many pieces as it
+  (`_rehost`); a LOCATION that is no URL is that answer's failure alone,
+  in the sweep as in the multicast search. A scan, and an address added by
+  hand, reads a device's description alone (`_fetch_description`,
+  `_described_devices` with defusedxml): what it needs of a device is
+  there, and the service documents are the attach's — the library's device
+  builder fetched every one of them. It reads the root device and those it
+  embeds directly, in the UPnP device namespace, as the attach's library
+  does — a renderer it would not find there is not listed — the document
+  in its own encoding, and a device's name, model and maker without control
+  characters, 200 characters at most. The description is read to its end, as many pieces as it
   comes in, with no redirect followed and nothing compressed taken, 256 KiB
   at most (a declared length past that refused before a byte); four
   addresses per host and 64 in all are described, those of hosts a renderer
@@ -3660,9 +3667,9 @@ device on the network; none of them may hold for it more than a bound.
   decoded: past Pillow's ~89 MP bound — no longer raised to 200 MP for
   booklets, which are ~50 — a picture is refused undecoded, never a
   multi-gigabyte decode that ends in a crash and repeats on the next
-  view. A file Pillow cannot read — some damage it says as SyntaxError —
-  is no cover, and leaves the DLNA track it was for without art, not
-  without a load.
+  view. A file Pillow cannot read — whatever it raises: damage makes it
+  raise near anything — is no cover, and leaves the DLNA track it was for
+  without art, not without a load.
 
 ## Known Gotchas
 

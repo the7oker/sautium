@@ -62,9 +62,11 @@ def _closed_within(s: socket.socket, seconds: float) -> bool:
 def test_a_request_that_does_not_arrive_is_let_go_and_an_answer_waits_for_its_reader(
         started, tmp_path, monkeypatch):
     monkeypatch.setattr(proxy_mod, "_REQUEST_READ_S", 0.3)
+    monkeypatch.setattr(proxy_mod, "_REQUEST_HEAD_S", 0.5)
     proxy, port = started()
     assert _closed_within(_idle(port), 2.0)
-    # once the request is in, the answer waits as long as its reader does
+    # once the request is in, the answer waits as long as its reader does —
+    # past the head's deadline too
     track = tmp_path / "t.flac"
     track.write_bytes(b"y" * (4 << 20))
     tok = proxy.register_file(str(track), "audio/flac")
@@ -144,23 +146,34 @@ def test_encodes_run_so_many_at_once_with_a_fixed_set_of_locks(tmp_path, monkeyp
         with guard:
             running[0] -= 1
     monkeypatch.setattr(transcode, "run_ffmpeg", encode)
-    locks = len(transcode._key_locks)
-    keys = [hashlib.sha1(f"track {i}".encode()).hexdigest() for i in range(208)]    # as _produce's callers make them
-    threads = [threading.Thread(target=transcode._produce, args=(keys[i],),
-                                kwargs=dict(suffix=".ogg", label="t", args_in=[], out_args=[],
-                                            stdin_bytes=None, offset_of_a_request=True))
-               for i in range(8)]
+    # one buffer at eight offsets a request names, as a token holder may ask
+    threads = [threading.Thread(target=transcode.opus_path_for_bytes, args=("tok", b"pcm", "opus_96", ss))
+               for ss in range(8)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(10)
     assert peak[0] == transcode.ENCODES
-    for key in keys[8:]:
-        transcode._key_lock(key)
-    assert len(transcode._key_locks) == locks
+    # and eight whole files asked for lossless, as the same holder may
+    peak[0] = 0
+    files = []
+    for i in range(8):
+        files.append(tmp_path / f"t{i}.dsf")
+        files[-1].write_bytes(b"dsd")
+    threads = [threading.Thread(target=transcode.flac_path_for_file, args=(str(f),)) for f in files]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert peak[0] == transcode.ENCODES
+    for i in range(200):
+        for family in transcode._key_locks:
+            transcode._key_lock(hashlib.sha1(f"track {i}".encode()).hexdigest(), family)
+    assert {len(stripes) for stripes in transcode._key_locks.values()} == {transcode._KEY_STRIPES}
 
 
 def test_a_lossless_cut_runs_beside_the_encodes_a_request_offset_names(tmp_path, monkeypatch):
+    import os
     monkeypatch.setattr(transcode, "_CACHE_DIR", tmp_path)
     release = threading.Event()
 
@@ -169,26 +182,36 @@ def test_a_lossless_cut_runs_beside_the_encodes_a_request_offset_names(tmp_path,
             release.wait(10)
         out_path.write_bytes(b"x")
     monkeypatch.setattr(transcode, "run_ffmpeg", encode)
-    held = [threading.Thread(target=transcode._produce, args=(hashlib.sha1(f"o{i}".encode()).hexdigest(),),
-                             kwargs=dict(suffix=".ogg", label="t", args_in=[], out_args=[],
-                                         stdin_bytes=None, offset_of_a_request=True))
-            for i in range(transcode.ENCODES)]
-    for t in held:
-        t.start()
-    time.sleep(0.1)
-    began = time.monotonic()
-    transcode._produce(hashlib.sha1(b"cut").hexdigest(), suffix=".flac", label="cut",
-                       args_in=[], out_args=[], stdin_bytes=None)
-    assert time.monotonic() - began < 1.0
-    release.set()
-    for t in held:
-        t.join(10)
+    image = tmp_path / "image.flac"
+    image.write_bytes(b"flac")
+    held = [threading.Thread(target=transcode.opus_path_for_bytes, args=("tok", b"pcm", "opus_96", ss))
+            for ss in range(transcode.ENCODES)]
+    # a cut whose key falls in the same stripe as a held encode's: locks of
+    # one family never hold the other's
+    stripe = int(hashlib.sha1(b"tok|96|0").hexdigest()[:8], 16) % transcode._KEY_STRIPES
+    mtime = int(os.path.getmtime(image))
+    start = next(float(n) for n in range(100000)
+                 if int(hashlib.sha1(f"{image}|{mtime}|slice|{float(n):.6f}|{float(n) + 10:.6f}"
+                                     .encode()).hexdigest()[:8], 16) % transcode._KEY_STRIPES == stripe)
+    cut = threading.Thread(target=transcode.flac_slice_path_for_file, args=(str(image), start, start + 10, {}))
+    try:
+        for t in held:
+            t.start()
+        time.sleep(0.1)
+        cut.start()
+        cut.join(1.0)
+        assert not cut.is_alive()              # the CUE track's cut did not wait for the two encodes
+    finally:
+        release.set()
+        for t in (*held, cut):
+            t.join(10)
 
 
 def test_an_ffmpeg_that_does_not_finish_is_let_go(tmp_path, monkeypatch):
     import subprocess
 
     def run(cmd, **kw):
+        (tmp_path / "out.flac.part").write_bytes(b"half")       # what ffmpeg wrote before it hung
         raise subprocess.TimeoutExpired(cmd, kw["timeout"])
     monkeypatch.setattr(transcode.subprocess, "run", run)
     with pytest.raises(RuntimeError, match="did not finish"):
@@ -234,16 +257,17 @@ def test_one_address_holds_at_most_its_share_of_the_connections(started, monkeyp
     time.sleep(0.2)
     assert _closed_within(_idle(port), 1.0)
     other = socket.socket()
-    other.bind(("127.0.0.2", 0))
+    try:
+        other.bind(("127.0.0.2", 0))
+    except OSError:
+        pytest.skip("this host has no second loopback address")
     other.connect(("127.0.0.1", port))
     assert not _closed_within(other, 0.5)
     for s in (*held, other):
         s.close()
+    time.sleep(0.3)
+    # the share is given back as the connections end
+    again = _idle(port)
+    assert not _closed_within(again, 0.5)
+    again.close()
 
-
-def test_a_consumers_connection_is_kept_alive():
-    with socket.socket() as s:
-        proxy_mod._keep_alive(s)
-        assert s.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
-        if hasattr(socket, "TCP_KEEPIDLE"):
-            assert s.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE) == proxy_mod._KEEPALIVE_IDLE_S

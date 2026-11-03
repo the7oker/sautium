@@ -286,30 +286,66 @@ _BUNDLE_UNPACKED_BYTES = 512 * 1024 * 1024
 # The tar stream itself, its headers with it: the entries' bytes, a header and
 # padding each, and room for long names
 _BUNDLE_STREAM_BYTES = _BUNDLE_UNPACKED_BYTES + 4 * 1024 * 1024
+# A long name's or an extended header's data, which tar reads whole as it walks
+# the archive and counts as no entry: a bundle's names are short
+_HEADER_DATA_BYTES = 64 * 1024
+
+
+def _unpack(plain: bytes, dest: Path) -> None:
+    """The bundle into `dest` (_unpacked_tar, _safe_extract); one that is no
+    tar archive is refused as such."""
+    with _unpacked_tar(plain) as stream:
+        try:
+            with tarfile.open(fileobj=stream, mode="r:") as tar:
+                _safe_extract(tar, dest)
+        except tarfile.TarError as e:
+            raise HTTPException(status_code=422, detail=f"bundle is no tar archive: {e}") from e
 
 
 def _unpacked_tar(plain: bytes):
     """The bundle's tar stream, out of its gzip into a temporary file within
-    _BUNDLE_STREAM_BYTES — before tar reads a header: tar takes a long name's
-    or an extended header's data whole as it walks the archive, and that
-    counts as no entry."""
+    _BUNDLE_STREAM_BYTES, every long-name and extended header's data within
+    _HEADER_DATA_BYTES — all before tar reads a header. A bundle that is no
+    gzip stream is refused as such; a disk that cannot take one is the
+    master's own failure, raised as itself."""
     out = tempfile.TemporaryFile()
     try:
         total = 0
         with gzip.GzipFile(fileobj=io.BytesIO(plain)) as packed:
-            while chunk := packed.read(1024 * 1024):
+            while True:
+                try:
+                    chunk = packed.read(1024 * 1024)
+                except (OSError, EOFError, zlib.error) as e:
+                    raise HTTPException(status_code=422, detail=f"bundle is no gzip stream: {e}") from e
+                if not chunk:
+                    break
                 total += len(chunk)
                 if total > _BUNDLE_STREAM_BYTES:
                     raise HTTPException(status_code=422, detail="bundle unpacks past what a bundle holds")
                 out.write(chunk)
-    except (OSError, EOFError, zlib.error) as e:
-        out.close()
-        raise HTTPException(status_code=422, detail=f"bundle is no gzip stream: {e}")
-    except HTTPException:
+        _bounded_headers(out)
+    except BaseException:
         out.close()
         raise
     out.seek(0)
     return out
+
+
+def _bounded_headers(stream) -> None:
+    """Walk the tar stream's 512-byte headers: a long-name or extended
+    header whose data passes _HEADER_DATA_BYTES is refused. A header of
+    another shape ends the walk — tar says what it is."""
+    stream.seek(0)
+    while (block := stream.read(512)) and len(block) == 512 and block.strip(b"\0"):
+        field = block[124:136]
+        try:
+            size = (int.from_bytes(field[1:], "big") if field[0] & 0x80
+                    else int(field.split(b"\0", 1)[0].strip() or b"0", 8))
+        except ValueError:
+            return
+        if block[156:157] in (b"x", b"g", b"L", b"K") and size > _HEADER_DATA_BYTES:
+            raise HTTPException(status_code=422, detail="bundle header past what a bundle's names take")
+        stream.seek((size + 511) // 512 * 512, 1)
 
 
 def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
@@ -355,8 +391,7 @@ def open_bundle(bundle_id: str) -> Dict[str, Any]:
         if dest.exists():
             shutil.rmtree(dest)
         dest.mkdir(parents=True)
-        with _unpacked_tar(plain) as stream, tarfile.open(fileobj=stream, mode="r:") as tar:
-            _safe_extract(tar, dest)
+        _unpack(plain, dest)
         db_execute("UPDATE support_bundles SET opened_at = now(), extract_path = %s WHERE id = %s",
                    (str(dest), bundle_id))
     manifest_path = dest / "manifest.json"

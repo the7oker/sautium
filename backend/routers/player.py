@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -467,13 +468,21 @@ def _rehost(location: str, ip: str) -> str:
     VPN — a phone on mobile data, joined to the same tailnet — and it answers
     on the tunnel while naming its carrier-side address, which resolves to
     nothing here. The port and path are the device's to choose; the host is
-    ours to know, because we just spoke to it."""
+    ours to know, because we just spoke to it. None for a LOCATION that is
+    no URL — a port that is no number, a bracket left open, no host: that
+    answer's failure alone."""
     from urllib.parse import urlparse, urlunparse
-    parts = urlparse(location)
-    if not parts.hostname or parts.hostname == ip:
+    try:
+        parts = urlparse(location)
+        hostname, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not hostname:
+        return None
+    if hostname == ip:
         return location
     host = f"[{ip}]" if ":" in ip else ip
-    netloc = f"{host}:{parts.port}" if parts.port else host
+    netloc = f"{host}:{port}" if port else host
     return urlunparse(parts._replace(netloc=netloc))
 
 
@@ -505,10 +514,11 @@ def _msearch_location(ip: str, timeout: float = 3.0) -> Optional[str]:
                     loc = line.split(":", 1)[1].strip()
                 elif low.startswith("st:"):
                     st = line.split(":", 1)[1].strip()
-            if loc and "MediaRenderer" in st:
-                return _rehost(loc, ip)
-            if loc and fallback is None:
-                fallback = _rehost(loc, ip)
+            described = _rehost(loc, ip) if loc else None
+            if described and "MediaRenderer" in st:
+                return described
+            if described and fallback is None:
+                fallback = described
     finally:
         s.close()
     return fallback
@@ -528,11 +538,12 @@ class DescriptionRefused(Exception):
     """A description the scan does not take: its shape, its size, its URL."""
 
 
-async def _fetch_description(location: str) -> str:
+async def _fetch_description(location: str) -> bytes:
     """The device description at `location`, read to its end: one plain-HTTP
     GET, no redirect followed, nothing compressed taken, _DESCRIBE_BYTES at
     most — a declared length over that refused before a byte of it is
-    read — within _DESCRIBE_TIMEOUT_S."""
+    read — within _DESCRIBE_TIMEOUT_S. Bytes: the XML parser reads the
+    document's own encoding."""
     from urllib.parse import urlparse
 
     from aiohttp import ClientSession, ClientTimeout
@@ -554,35 +565,39 @@ async def _fetch_description(location: str) -> str:
                 body += chunk
                 if len(body) > _DESCRIBE_BYTES:
                     raise DescriptionRefused("a description past its size")
-            try:
-                return body.decode(r.charset or "utf-8", "replace")
-            except LookupError:                       # a charset no codec names
-                return body.decode("utf-8", "replace")
+            return bytes(body)
 
 
-def _described_devices(text: str) -> list:
-    """Every device a description names, the root's first then the embedded
-    ones, each as its own child elements' text by local name (deviceType,
-    friendlyName, UDN…) — namespaced or not, as devices write it."""
+_UPNP_DEVICE = "{urn:schemas-upnp-org:device-1-0}"
+_TEXT_CONTROL = re.compile("[\x00-\x1f\x7f]")
+
+
+def _described_devices(document: bytes) -> list:
+    """The root device of a description and the devices it embeds directly,
+    each as its own child elements' text (deviceType, friendlyName, UDN…) —
+    read as the attach's library reads a description: in the UPnP device
+    namespace, and no deeper, so the scan lists no renderer the attach
+    would not find there."""
     from defusedxml.ElementTree import fromstring
+    top = fromstring(document).find(f"{_UPNP_DEVICE}device")
+    if top is None:
+        return []
+    embedded = top.findall(f"{_UPNP_DEVICE}deviceList/{_UPNP_DEVICE}device")
+    return [{child.tag.replace(_UPNP_DEVICE, ""): (child.text or "").strip() for child in device}
+            for device in (top, *embedded)]
 
-    def local(tag) -> str:
-        return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
-    return [{local(child.tag): (child.text or "").strip() for child in el}
-            for el in fromstring(text).iter() if local(el.tag) == "device"]
+
+def _described_text(value: str) -> str:
+    """A device's word about itself as it is stored and shown: no control
+    character, 200 characters at most."""
+    return _TEXT_CONTROL.sub("", value)[:200]
 
 
 def _multicast_location(location: str, source: Optional[str]) -> Optional[str]:
     """A multicast answer's LOCATION as the scan describes it: plain HTTP,
     on the address the answer came from (_rehost), as the unicast sweep
     does — or none."""
-    from urllib.parse import urlparse
-    parts = urlparse(location)
-    try:
-        parts.port                                    # a port that is no number is no URL
-    except ValueError:
-        return None
-    if parts.scheme != "http" or not parts.hostname or not source:
+    if not source or not location.lower().startswith("http://"):
         return None
     return _rehost(location, source.split("%", 1)[0].strip("[]"))
 
@@ -643,7 +658,8 @@ async def _dlna_describe(location: str) -> dict:
         root = devices[0]
         raise HTTPException(
             status_code=422,
-            detail=f"'{root.get('friendlyName', '')}' is {root.get('deviceType') or 'not a renderer'}"
+            detail=f"'{_described_text(root.get('friendlyName', ''))}' is "
+                   f"{_described_text(root.get('deviceType', '')) or 'not a renderer'}"
                    " — no MediaRenderer at this address (a media-server "
                    "description of the same device is a common decoy)")
     if not renderer.get("UDN"):
@@ -651,9 +667,9 @@ async def _dlna_describe(location: str) -> dict:
     return {
         "udn": renderer["UDN"],
         "location": location,
-        "name": renderer.get("friendlyName", ""),
-        "model": renderer.get("modelName", ""),
-        "manufacturer": renderer.get("manufacturer", ""),
+        "name": _described_text(renderer.get("friendlyName", "")),
+        "model": _described_text(renderer.get("modelName", "")),
+        "manufacturer": _described_text(renderer.get("manufacturer", "")),
     }
 
 
@@ -787,8 +803,9 @@ async def _unicast_sweep(found: dict, found_hqp: dict) -> None:
                             loc = line.split(":", 1)[1].strip()
                         elif low.startswith("usn:"):
                             usn = line.split(":", 1)[1].strip()
-                    if loc and loc.lower().startswith("http://"):
-                        hits.append((usn or loc, _rehost(loc, ip)))
+                    described = _rehost(loc, ip) if loc.lower().startswith("http://") else None
+                    if described:
+                        hits.append((usn or loc, described))
         except OSError:
             pass
         finally:
@@ -799,9 +816,15 @@ async def _unicast_sweep(found: dict, found_hqp: dict) -> None:
     targets = ([str(h) for net in _lan_subnets() for h in net.hosts()]
                + await asyncio.to_thread(_tailnet_peers))
     with ThreadPoolExecutor(max_workers=64) as pool:
+        # every probe ends before the pool is left: one that fails is its
+        # address's failure, never the sweep's
         results = await asyncio.gather(
-            *(loop.run_in_executor(pool, _probe, ip) for ip in targets))
-    for ip, (hits, hqp) in zip(targets, results):
+            *(loop.run_in_executor(pool, _probe, ip) for ip in targets), return_exceptions=True)
+    for ip, result in zip(targets, results):
+        if isinstance(result, Exception):
+            logger.debug("unicast probe of %s failed: %s", ip, result)
+            continue
+        hits, hqp = result
         for usn, loc in hits:
             found[(usn, loc)] = loc
         if hqp is not None:

@@ -45,6 +45,17 @@ def _description(services: int = 0, padding: int = 0) -> str:
             f'<!--{"p" * padding}--></root>')
 
 
+def _nested(depth: int, *, namespace: bool = True, name: str = "Shelf") -> str:
+    """A media server whose renderer sits `depth` levels below it."""
+    renderer = ('<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>'
+                f'<friendlyName>{name}</friendlyName><UDN>uuid:shelf-1</UDN></device>')
+    for _ in range(depth):
+        renderer = ('<device><deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>'
+                    f'<friendlyName>Box</friendlyName><UDN>uuid:box</UDN><deviceList>{renderer}</deviceList></device>')
+    xmlns = ' xmlns="urn:schemas-upnp-org:device-1-0"' if namespace else ""
+    return f'<?xml version="1.0"?><root{xmlns}>{renderer}</root>'
+
+
 @pytest.fixture
 def device():
     """An HTTP server on loopback that describes a renderer in each of the
@@ -88,6 +99,13 @@ def device():
                                             length=player._DESCRIBE_BYTES + 1),
         "/pieces.xml": lambda r: streamed(r, _description().encode(),
                                           length=len(_description().encode()), pause=0.2),
+        "/embedded.xml": lambda r: text(_nested(1)),
+        "/deep.xml": lambda r: text(_nested(2)),
+        "/bare.xml": lambda r: text(_nested(0, namespace=False)),
+        "/noisy.xml": lambda r: text(_nested(0, name="Shelf\t\n" + "x" * 300)),
+        "/latin1.xml": lambda r: asyncio.sleep(0, web.Response(
+            body=('<?xml version="1.0" encoding="ISO-8859-1"?>' + _nested(0, name="Caf\xe9")
+                  .split("?>", 1)[1]).encode("latin-1"), content_type="text/xml")),
         "/many.xml": lambda r: text(_description(services=24)),
         "/slow.xml": slow,
     }
@@ -266,3 +284,38 @@ def test_an_hqplayer_without_a_library_is_known_by_no_hash(monkeypatch):
     monkeypatch.setattr(hqp_library, "db_query", lambda *a, **k: asked.append(a) or [{"id": 1}])
     assert hqp_library.resolve_endpoint("192.0.2.7", 4321)[:2] == (None, None)
     assert asked == []
+
+
+def test_a_renderer_is_listed_where_the_attach_finds_one(device):
+    base, _hits = device
+    assert _describe(f"{base}/embedded.xml")["udn"] == "uuid:shelf-1"          # a server's own renderer
+    with pytest.raises(player.HTTPException):
+        _describe(f"{base}/deep.xml")                                         # deeper than the attach looks
+    with pytest.raises(player.DescriptionRefused, match="no device"):
+        _describe(f"{base}/bare.xml")                                         # outside the UPnP namespace
+
+
+def test_a_devices_words_are_plain_and_in_its_own_encoding(device):
+    base, _hits = device
+    noisy = _describe(f"{base}/noisy.xml")["name"]
+    assert noisy == "Shelf" + "x" * 195
+    assert _describe(f"{base}/latin1.xml")["name"] == "Caf\xe9"
+
+
+def test_a_location_that_is_no_url_is_its_answers_failure_alone(device, quiet_scan, monkeypatch):
+    for location in ("http://192.0.2.5:port/d.xml", "http://[::1/d.xml", "http:///d.xml"):
+        assert player._rehost(location, "192.0.2.9") is None, location
+        assert player._multicast_location(location, "192.0.2.9") is None, location
+    base, _hits = device
+    port = base.rsplit(":", 1)[1]
+
+    async def answers(callback, **_kw):
+        await callback({"location": "http://[::1/d.xml", "usn": "uuid:x", "_host": "127.0.0.1"})
+        await callback({"location": f"http://127.0.0.1:{port}/plain.xml", "usn": "uuid:a", "_host": "127.0.0.1"})
+
+    async def no_sweep(found, found_hqp):
+        return None
+    monkeypatch.setattr(quiet_scan, "async_search", answers)
+    monkeypatch.setattr(player, "_unicast_sweep", no_sweep)
+    result = asyncio.run(player._scan_run())
+    assert [r["location"] for r in result["renderers"]] == [f"http://127.0.0.1:{port}/plain.xml"]

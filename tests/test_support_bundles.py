@@ -20,10 +20,10 @@ for p in (ROOT / "backend", ROOT):
 from routers import support  # noqa: E402
 
 
-def _bundle(entries) -> bytes:
+def _bundle(entries, form=tarfile.PAX_FORMAT) -> bytes:
     """A tar.gz of (name, bytes, mode) entries."""
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    with tarfile.open(fileobj=buf, mode="w:gz", format=form) as tar:
         for name, data, mode in entries:
             info = tarfile.TarInfo(name)
             info.size, info.mode = len(data), mode
@@ -32,9 +32,8 @@ def _bundle(entries) -> bytes:
 
 
 def _extract(blob: bytes, dest: Path) -> None:
-    """As the desk opens a bundle: out of its gzip within bounds, then tar."""
-    with support._unpacked_tar(blob) as stream, tarfile.open(fileobj=stream, mode="r:") as tar:
-        support._safe_extract(tar, dest)
+    """As the desk opens a bundle (support._unpack)."""
+    support._unpack(blob, dest)
 
 
 def test_a_bundle_unpacks_as_its_files(tmp_path):
@@ -75,4 +74,19 @@ def test_a_bundle_whose_tar_stream_passes_its_cap_is_refused_before_a_byte_is_wr
 def test_what_is_no_gzip_stream_is_refused(tmp_path):
     with pytest.raises(HTTPException) as refused:
         _extract(b"not a bundle", tmp_path)
+    assert refused.value.status_code == 422
+
+
+def test_a_long_name_past_what_a_bundles_names_take_is_refused_before_a_byte_is_written(tmp_path, monkeypatch):
+    monkeypatch.setattr(support, "_HEADER_DATA_BYTES", 64)
+    with pytest.raises(HTTPException) as refused:
+        _extract(_bundle([("logs/" + "n" * 200 + ".log", b"x", 0o644)], form=tarfile.GNU_FORMAT), tmp_path)
+    assert refused.value.status_code == 422
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_what_is_no_tar_archive_is_refused(tmp_path):
+    import gzip
+    with pytest.raises(HTTPException) as refused:
+        _extract(gzip.compress(b"not a tar archive"), tmp_path)
     assert refused.value.status_code == 422

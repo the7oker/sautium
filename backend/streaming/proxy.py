@@ -58,24 +58,12 @@ _RANGE_KEPT = 128
 # together). The request line and headers must arrive within _REQUEST_HEAD_S
 # in all and _REQUEST_READ_S of each other; the answer's writes wait as long
 # as the consumer does (a paused HQPlayer stops reading for as long as it
-# likes), and a consumer gone for good is found by TCP keepalive.
+# likes), so a consumer gone for good keeps its place until the system's TCP
+# gives up on it (minutes), as a paused one keeps its own by design.
 _CONNECTIONS = 64
 _PER_ADDRESS = 32
 _REQUEST_READ_S = 10.0
 _REQUEST_HEAD_S = 15.0
-_KEEPALIVE_IDLE_S, _KEEPALIVE_INTERVAL_S, _KEEPALIVE_PROBES = 60, 10, 6
-
-
-def _keep_alive(sock: socket.socket) -> None:
-    """TCP keepalive on a consumer's connection: a peer that is gone — not
-    one that only stopped reading — is found in about two minutes."""
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    if hasattr(socket, "TCP_KEEPIDLE"):                       # Linux, Windows
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, _KEEPALIVE_IDLE_S)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, _KEEPALIVE_INTERVAL_S)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, _KEEPALIVE_PROBES)
-    elif hasattr(socket, "TCP_KEEPALIVE"):                    # macOS: the idle time
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, _KEEPALIVE_IDLE_S)
 
 
 def shown(token: str) -> str:
@@ -863,8 +851,7 @@ class MediaProxy:
 class _BoundedServer(ThreadingHTTPServer):
     """A thread per connection, _CONNECTIONS of them at most and
     _PER_ADDRESS from one address: one past either is closed as it arrives,
-    its thread never started. Every connection taken is kept alive
-    (_keep_alive)."""
+    its thread never started."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -884,7 +871,6 @@ class _BoundedServer(ThreadingHTTPServer):
             self.shutdown_request(request)
             return
         try:
-            _keep_alive(request)
             super().process_request(request, client_address)
         except BaseException:
             self._release(address)
