@@ -36,6 +36,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from db_pool import get_conn, in_chat_lane, in_peer_lane
+from serving import is_shared
 from routers.sync import (
     SYNC_CAPABILITIES, carry_queries, lb_dump_version, lb_inventory, lb_router,
     mb_dump_version, mb_router, node_pubkey_hex, router, sharing_enabled,
@@ -410,10 +411,10 @@ BODY_CAP_DEFAULT = 64 * 1024
 BODY_IDLE_S = 10
 BODY_DEADLINE_S = 30
 BODY_RATE = 32 * 1024
-# Bodies read at once, by kind: (in all, from any one address). The chat
-# lane's, the bulk lane's and the large ones each have their own, so a flood
-# of one never holds another's, and one address holds a few of a kind at
-# most. A slot is taken at the body's first read and kept until the answer:
+# Bodies read at once, by kind: (in all, from any one address — but a shared
+# one, serving.SHARED_ADDRESSES). The chat lane's, the bulk lane's and the
+# large ones each have their own, so a flood of one never holds another's,
+# and one address holds a few of a kind at most. A slot is taken at the body's first read and kept until the answer:
 # a request refused before its body — a stranger's support bundle — holds
 # none, and a lane's backlog holds its own kind's slots only.
 BODY_SLOTS = {"chat": (128, 8), "bulk": (128, 8), "large": (4, 1)}
@@ -447,14 +448,18 @@ class _Slots:
 
     async def take(self, addr: str) -> bool:
         held = self._by.get(addr, 0)
-        if held >= self._per_address:
+        if held >= self._per_address and not is_shared(addr):
             return False
         self._by[addr] = held + 1             # counted while it waits, too
         try:
-            await asyncio.wait_for(self._free.acquire(), BODY_SLOT_WAIT_S)
-        except asyncio.TimeoutError:
+            async with asyncio.timeout(BODY_SLOT_WAIT_S):
+                await self._free.acquire()
+        except TimeoutError:
             self._leave(addr)
             return False
+        except BaseException:
+            self._leave(addr)                 # cancelled with its request
+            raise
         return True
 
     def give(self, addr: str) -> None:

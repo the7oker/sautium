@@ -198,11 +198,13 @@ def test_a_history_request_made_for_one_node_fails_at_another(monkeypatch):
         assert http.post("/api/chat/history", json=request(OTHER_NODE)).status_code == 403
 
 
-async def _wake(server, query, headers=None):
+async def _wake(server, query, headers=None, answer=None):
     app = web.Application()
     app.router.add_get("/api/relay/wake-stream", server.handle_wake_stream)
     async with AioClient(TestServer(app)) as client:
         r = await client.get("/api/relay/wake-stream", params=query, headers=headers or {})
+        if answer is not None:
+            answer.update(r.headers)
         return r.status
 
 
@@ -329,7 +331,9 @@ def test_a_pull_reads_page_by_page_and_the_next_goes_on_from_there(monkeypatch):
     third = asyncio.run(manager._sync_chat_history(friend, [("198.51.100.5", 1)]))
     assert asked == [None, "c1", "c2", "c3"]
     assert (first["imported"], second["imported"], third["imported"]) == (3, 1, 0)
-    assert manager._history_after[7] == "c3"                # an empty page keeps the cursor
+    assert manager._history_after[(7, "198.51.100.5:1")] == "c3"   # an empty page keeps it
+    asyncio.run(manager._sync_chat_history(friend, [("198.51.100.6", 1)]))
+    assert asked[4] is None                    # another node of the account: its own cursor
 
 
 def test_a_stored_message_is_pushed_at_once_and_again_if_another_arrives(monkeypatch):
@@ -415,5 +419,61 @@ def test_with_the_relay_off_a_friends_voucher_announces_nothing(monkeypatch):
              "sig": FRIEND.key.sign(f"wake_subscribe:{ts}:{HOST.pub}:{FRIEND.pub}".encode()).hex(),
              "invite": FRIEND.invite, "voucher_until": str(until),
              "voucher_sig": FRIEND.key.sign(voucher_payload(FRIEND.pub, HOST.pub, until).encode()).hex()}
-    assert asyncio.run(_wake(server, query)) == 200                # its chat stream
+    answer = {}
+    assert asyncio.run(_wake(server, query, answer=answer)) == 200   # its chat stream, said so
+    assert answer.get("X-Sautium-Relay") == "off"
     assert announced == [] and FRIEND.pub not in server._relay_clients
+
+
+def test_switching_the_relay_off_ends_the_slots_held():
+    from desktop.p2p.wake_registry import WakeRegistry
+    from routers import peer_chat
+
+    async def scene(close, registry, clients):
+        friend = registry.register(FRIEND.pub, "", "198.51.100.7")
+        relayed = registry.register(STRANGER.pub, "", "198.51.100.8")
+        clients[STRANGER.pub] = {"invite_code": STRANGER.invite}
+        close()
+        return friend.closed, relayed.closed
+
+    server = SyncServer("postgresql://unused")
+    assert asyncio.run(scene(server.close_relay_clients, server._wake, server._relay_clients)) \
+        == (False, True)
+    registry = WakeRegistry()
+    peer_chat._wake, saved = registry, peer_chat._wake
+    try:
+        assert asyncio.run(scene(peer_chat.close_relay_clients, registry, peer_chat._relay_clients)) \
+            == (False, True)
+    finally:
+        peer_chat._wake = saved
+        peer_chat._relay_clients.pop(STRANGER.pub, None)
+
+
+def test_the_pass_leaves_a_friend_a_push_is_under_way_for(monkeypatch):
+    from desktop.p2p import p2p_manager
+    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
+    manager._running, manager._pushing = True, {7}
+    manager._history_synced_friends = set()
+    pending = [{"friend_id": 7, "public_key_hex": FRIEND.pub, "invite_code": FRIEND.invite}]
+    manager._chat_service = SimpleNamespace(get_pending_messages=lambda: list(pending))
+    pushed = []
+
+    async def peers(info, refresh=False):
+        return []
+
+    async def push(*a):
+        pushed.append(a[0])
+
+    manager._find_friend_peers, manager._push_pending_messages = peers, push
+
+    async def scene():
+        manager._chat_notify = asyncio.Event()
+        manager._chat_notify.set()
+        task = asyncio.ensure_future(manager._sync_chat_histories())
+        await asyncio.sleep(0.05)
+        manager._running = False
+        manager._chat_notify.set()
+        await asyncio.wait_for(task, 2)
+
+    asyncio.run(scene())
+    assert pushed == []

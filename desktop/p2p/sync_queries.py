@@ -704,20 +704,20 @@ _LACKS = {
 }
 
 
-# Pushes to one carrier are judged one at a time: the room the carry limit
-# leaves is read and spent by the same push.
-CARRY_LOCK_KEY = 0x63617279  # "cary"
-
-
 def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
     """Of the items a peer PUSHED, the ones this node takes — what its own
     answer to an offer (wanted_tracks) would have named: a track on its
     tracklist with a recording MBID — for a binding, that very recording —,
-    lacking the category, owned or, with the phantom layer on, phantom
-    within the room the carry limit leaves (an owned track's gap-fill is
-    never carrying). One item per track (per track and recording for a
-    binding). No offer state is kept: the push is judged by the same rules
-    as the offer."""
+    lacking the category, owned or, with the phantom layer on, phantom: one
+    carried here already (its features or binding following its segments
+    adds nothing to carry), or one more within the room the carry limit
+    leaves (an owned track's gap-fill is never carrying). One item per track
+    (per track and recording for a binding). No offer state is kept: the
+    push is judged by the same rules as the offer. The room is read per
+    push, and pushes in flight at once may each spend it: the limit is
+    exceeded by at most what they carry together, a part each (900 KiB) —
+    a soft ceiling, where serialising them would hold every thread that
+    serves peers behind one import."""
     binding = category == "track_mbids"
     keyed: dict = {}
     for it in items:
@@ -730,15 +730,19 @@ def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
     rows = db_query(conn, f"""
         WITH cand AS (
             SELECT p.id, p.rec,
-                   EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = p.id) AS owned
+                   EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = p.id) AS owned,
+                   EXISTS (SELECT 1 FROM embeddings e
+                             JOIN analysis_sources s ON s.id = e.analysis_source_id
+                            WHERE e.track_id = p.id AND s.imported) AS carried
               FROM unnest(%(ids)s::uuid[], %(recs)s::uuid[]) AS p(id, rec)
              WHERE EXISTS (SELECT 1 FROM album_tracks at2
                             WHERE at2.track_id = p.id AND at2.recording_mbid IS NOT NULL
                               AND (p.rec IS NULL OR at2.recording_mbid = p.rec))
                AND {_LACKS[category].format(t="p.id")})
-        SELECT id::text AS track_uuid, rec::text AS rec FROM cand WHERE owned
+        SELECT id::text AS track_uuid, rec::text AS rec FROM cand
+         WHERE owned OR (carried AND %(phantoms)s)
         UNION ALL
-        (SELECT id::text, rec::text FROM cand WHERE NOT owned AND %(phantoms)s
+        (SELECT id::text, rec::text FROM cand WHERE NOT owned AND NOT carried AND %(phantoms)s
           ORDER BY id LIMIT %(room)s)""",
         {"ids": [k[0] for k in keyed], "recs": [k[1] for k in keyed],
          "phantoms": phantom_layer_on(conn), "room": max(room, 0)})

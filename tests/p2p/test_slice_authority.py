@@ -134,3 +134,15 @@ def test_the_buy_button_opens_a_shop_page_only():
     script = (f"{body}\nconsole.log(JSON.stringify({json.dumps(cases)}.map(bandcampShopPage)));")
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout
     assert json.loads(out) == ["https://artist.bandcamp.com/album/x"] + [None] * 6
+
+
+def test_a_build_for_a_shared_requester_counts_against_the_minute_alone():
+    budget = mb.BuildBudget(4, 4)                # one a minute for any one requester
+    for _ in range(4):
+        assert budget.admit(None)
+        budget.done(None, counted=True)
+    assert not budget.admit(None) and not budget.admit("198.51.100.1")   # the minute is spent
+    budget = mb.BuildBudget(4, 4)
+    assert budget.admit("198.51.100.1")
+    budget.done("198.51.100.1", counted=True)
+    assert not budget.admit("198.51.100.1") and budget.admit(None)

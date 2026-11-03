@@ -841,25 +841,35 @@ class ChatService:
         # One message per uuid in a thread: the same message again is a
         # duplicate (and answered so); anything else under its uuid — or a
         # uuid another thread holds — is refused.
-        stored = self._stored_message(env["uuid"])
-        if stored is not None:
-            if stored[0] == friend["id"] and stored[1] == content:
-                logger.debug(f"Duplicate message {env['uuid'][:8]}, skipping")
-                return {"friend_id": friend["id"], "content": "", "timestamp": None,
-                        "duplicate": True}
-            logger.warning(f"Message {env['uuid'][:8]} from {friend.get('username', '?')} "
-                           f"reuses a uuid — rejected")
-            return None
-
         ts = _sender_timestamp(env["ts"])
-        self.store_message(
-            friend["id"], "in", content, ts,
-            delivered=True, message_uuid=env["uuid"],
-        )
-        self.update_friend_last_seen(sender_public_key)
+        stored = self._stored_message(env["uuid"])
+        if stored is None:
+            if self._store_incoming(friend["id"], content, ts, env["uuid"]):
+                self.update_friend_last_seen(sender_public_key)
+                return {"friend_id": friend["id"], "content": content, "timestamp": ts}
+            stored = self._stored_message(env["uuid"])      # another copy of it landed first
+        if stored[0] == friend["id"] and stored[1] == content:
+            logger.debug(f"Duplicate message {env['uuid'][:8]}, skipping")
+            return {"friend_id": friend["id"], "content": "", "timestamp": None,
+                    "duplicate": True}
+        logger.warning(f"Message {env['uuid'][:8]} from {friend.get('username', '?')} "
+                       f"reuses a uuid — rejected")
+        return None
 
-        return {
-            "friend_id": friend["id"],
-            "content": content,
-            "timestamp": ts,
-        }
+    def _store_incoming(self, friend_id: int, content: str, ts: datetime,
+                        message_uuid: str) -> bool:
+        """An incoming message stored, False when its uuid already is — two
+        copies of one message side by side (mirrors backend/p2p_chat)."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO p2p_messages
+                        (friend_id, direction, content, timestamp, delivered, message_uuid)
+                    VALUES (%s, 'in', %s, %s, TRUE, %s)
+                    ON CONFLICT (message_uuid) WHERE message_uuid IS NOT NULL DO NOTHING
+                    RETURNING id
+                """, (friend_id, content, ts, message_uuid))
+                return cur.fetchone() is not None
+        finally:
+            self._return_db(conn)

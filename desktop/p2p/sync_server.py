@@ -31,6 +31,10 @@ from desktop.p2p import (addrs, admission, chat_wire, contact_log, lb_slice_quer
                          mb_slice_queries, peer_auth, sync_queries, wire, witness)
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
+# On a wake stream's answer: "off" — a voucher came, and this node does not
+# relay (mirror of backend/routers/peer_chat).
+RELAY_HEADER = "X-Sautium-Relay"
+
 logger = logging.getLogger(__name__)
 
 
@@ -1427,12 +1431,12 @@ class SyncServer:
         def _page():
             # The pool's own connection: the chat service's one belongs to
             # the loop's thread.
+            after = chat_wire.history_cursor(body.get("after"))
             with self._db() as conn:
-                rows = chat_wire.export_rows(conn, friend["id"],
-                                             chat_wire.history_cursor(body.get("after")))
+                rows = chat_wire.export_rows(conn, friend["id"], after)
                 page, out_ids, after, more = chat_wire.export_page(
                     rows, lambda text, message_uuid, ts_iso: self._chat_service.encrypt_envelope(
-                        text, message_uuid, ts_iso, requester_pubkey))
+                        text, message_uuid, ts_iso, requester_pubkey), after)
                 if out_ids:
                     chat_wire.mark_exported(conn, friend["id"], out_ids)
             return len(page), wire.render({"messages": page, "next": after, "more": more},
@@ -1506,6 +1510,12 @@ class SyncServer:
     # Relay protocol: wake stream + reachability probe
     # (MIRRORS backend/routers/peer_chat.py — keep contracts in step)
     # -----------------------------------------------------------------------
+
+    def close_relay_clients(self) -> None:
+        """End every stream a voucher holds a slot on — the relay switch went
+        off (mirror of backend/routers/peer_chat.close_relay_clients)."""
+        for pubkey in list(self._relay_clients):
+            self._wake.close(pubkey)
 
     def _relay_enabled(self) -> bool:
         """The relay switch (p2p.relay_enabled, default on), read through the
@@ -1641,11 +1651,13 @@ class SyncServer:
                 except Exception as e:
                     logger.warning("client announce failed: %s", e)
 
-        resp = web.StreamResponse(headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        })
+        headers = {"Content-Type": "text/event-stream", "Cache-Control": "no-cache",
+                   "X-Accel-Buffering": "no"}
+        if invite and v_sig and voucher is None:
+            # A friend's voucher the switch does not honour: its chat stream,
+            # said so — a client that came for a peer relay lets this one go.
+            headers[RELAY_HEADER] = "off"
+        resp = web.StreamResponse(headers=headers)
         await resp.prepare(request)
         try:
             await resp.write(b": connected\n\n")

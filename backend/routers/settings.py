@@ -2316,6 +2316,12 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
         _write("enrichment.reanalyze_imported", bool(req.reanalyze_imported))
     if req.relay_enabled is not None:
         _write("p2p.relay_enabled", bool(req.relay_enabled))
+        if not req.relay_enabled:
+            # The slots already held end now — on this surface here, on a
+            # launcher's peer server from its LISTEN (p2p_manager).
+            from routers.peer_chat import close_relay_clients
+            close_relay_clients()
+            db_execute("NOTIFY sautium_relay_off")
     if req.diagnostics_enabled is not None:
         _write("support.diagnostics_enabled", bool(req.diagnostics_enabled))
     if req.background_enrichment is not None:

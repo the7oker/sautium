@@ -327,6 +327,22 @@ def test_each_peer_session_ends_by_its_deadline_and_by_the_runs(monkeypatch):
     assert seen[1] <= time.monotonic() + sync_walk.PEER_SESSION_S
 
 
+def test_a_refusal_that_says_when_to_come_back_is_a_wait_not_a_failure(peer):
+    def busy(h):
+        _send(h, b'{"error": "busy"}', status=503, headers=[("Retry-After", "5")])
+
+    peer.answers["/api/mb/slice"] = busy
+    assert _client(peer)._post_json("/api/mb/slice", {"names": ["Sade"]})["retry_after"] == 5
+
+
+def test_lone_surrogates_are_neither_logged_nor_served():
+    from desktop.p2p import contact_log
+    assert contact_log._target("Sa\ud800de", 64) == "sade"
+    assert not mb_slice_queries.servable_name("Sa\ud800de")
+    body, _ = wire.render({"missing": ["Sa\ud800de"]}, False)
+    assert json.loads(body) == {"missing": ["Sa\ud800de"]}       # echoed as its own escape
+
+
 def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
     """Its session ended, not failed: no request is started past it, the
     names stay pending, and the source is not dropped as one that failed."""
@@ -360,4 +376,10 @@ def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
     monkeypatch.setattr(cycle_mod, "MBSliceClient", _Client)
     asyncio.run(cycle.run())
     assert asked == [] and dropped == []
+    assert published[-1]["unserved"] == 2
+    # A batch under way when the session ends fails by the session's end.
+    monkeypatch.setattr(cycle_mod, "PEER_SESSION_S", 0.2)
+    _Client.run = lambda self, batch: (asked.append(batch), time.sleep(0.3), {"error": "no response"})[2]
+    asyncio.run(cycle.run())
+    assert asked == [["A", "B"]] and dropped == []
     assert published[-1]["unserved"] == 2

@@ -41,7 +41,7 @@ executor (`SyncWalk._db`).
 import asyncio
 import json
 import logging
-import select
+import selectors
 import time
 from datetime import datetime, timezone
 from functools import partial
@@ -257,16 +257,23 @@ def rare_search_uuids(dsn: str) -> list[str]:
         conn.close()
 
 
-def tracks_for_artists(dsn: str, artist_uuids: list[str]) -> list[str]:
+def tracks_for_artists(dsn: str, artist_uuids: list[str], engaged_only: bool = False) -> list[str]:
+    """The artists' tracks — with `engaged_only`, the ones an owned file or
+    a completed listen engages (split_engaged's rule, per track)."""
     if not artist_uuids:
         return []
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT track_id::text FROM track_artists "
-                "WHERE artist_id = ANY(%s::uuid[])",
-                [artist_uuids],
+                """SELECT DISTINCT ta.track_id::text FROM track_artists ta
+                    WHERE ta.artist_id = ANY(%s::uuid[])
+                      AND (NOT %s
+                           OR EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = ta.track_id)
+                           OR EXISTS (SELECT 1 FROM listening_history lh
+                                       WHERE lh.track_id = ta.track_id
+                                         AND lh.completed AND NOT lh.skipped))""",
+                [artist_uuids, engaged_only],
             )
             return [r[0] for r in cur.fetchall()]
     finally:
@@ -275,18 +282,29 @@ def tracks_for_artists(dsn: str, artist_uuids: list[str]) -> list[str]:
 
 def core_and_bulk(dsn: str, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
     """(core tracks, bulk tracks): the engaged artists' tracks are the
-    core, the rest the phantom bulk (sync_queries.split_engaged) — none
-    while the owner keeps the phantom layer off, as the carry offer does.
-    Both are priced against a peer's holdings filter the same way; the
-    split keeps the logs honest about what a run is made of."""
+    core, the rest the phantom bulk (sync_queries.split_engaged). While the
+    owner keeps the phantom layer off, as the carry offer does, the core is
+    the engaged tracks alone and there is no bulk. Both are priced against a
+    peer's holdings filter the same way; the split keeps the logs honest
+    about what a run is made of."""
     conn = _connect(dsn)
     try:
         engaged, rest = sync_queries.split_engaged(conn, artist_uuids)
-        if not sync_queries.phantom_layer_on(conn):
-            rest = []
+        phantoms = sync_queries.phantom_layer_on(conn)
     finally:
         conn.close()
-    return tracks_for_artists(dsn, engaged), tracks_for_artists(dsn, rest)
+    return (tracks_for_artists(dsn, engaged, engaged_only=not phantoms),
+            tracks_for_artists(dsn, rest) if phantoms else [])
+
+
+def readable(conn, timeout: float) -> bool:
+    """`conn` (a socket, a psycopg2 connection) has something to read within
+    `timeout` — through selectors' default, epoll or kqueue (select() only
+    on Windows): select.select refuses a descriptor past 1023, and a peer
+    surface holds thousands of connections."""
+    with selectors.DefaultSelector() as sel:
+        sel.register(conn, selectors.EVENT_READ)
+        return bool(sel.select(timeout))
 
 
 async def listen_notifications(db_dsn: str,
@@ -295,8 +313,8 @@ async def listen_notifications(db_dsn: str,
                                on_listening: Optional[Callable[[], None]] = None) -> None:
     """LISTEN on every channel in `handlers` and call a channel's handler
     once per poll in which it fired, however many notifies arrived.
-    Select-on-socket with a 5 s timeout so cancellation stays responsive; a
-    dropped connection is reopened after 5 s. Handlers run on the event
+    Waits on the socket with a 5 s timeout so cancellation stays responsive;
+    a dropped connection is reopened after 5 s. Handlers run on the event
     loop — schedule anything long as a task. `on_listening` runs each time
     the LISTENs are in place, the first time and after every reconnect: a
     state whose change is announced by a notify is read again then, so a
@@ -313,17 +331,17 @@ async def listen_notifications(db_dsn: str,
             if on_listening:
                 on_listening()
             while running():
-                ready = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: select.select([conn], [], [], 5))
-                if ready[0]:
-                    conn.poll()
-                    fired = set()
-                    while conn.notifies:
-                        fired.add(conn.notifies.pop(0).channel)
-                    for channel in fired:
-                        handler = handlers.get(channel)
-                        if handler:
-                            handler()
+                if not await asyncio.get_event_loop().run_in_executor(
+                        None, readable, conn, 5):
+                    continue
+                conn.poll()
+                fired = set()
+                while conn.notifies:
+                    fired.add(conn.notifies.pop(0).channel)
+                for channel in fired:
+                    handler = handlers.get(channel)
+                    if handler:
+                        handler()
         except Exception as e:
             logger.debug(f"LISTEN {sorted(handlers)} error: {e}")
             await asyncio.sleep(5)

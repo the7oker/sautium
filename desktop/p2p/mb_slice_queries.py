@@ -251,11 +251,12 @@ def receipt_message_for(blob: bytes) -> bytes:
 
 
 def servable_name(name: str) -> bool:
-    """A name a slice is served for (NAME_MAX_CHARS, no control character,
-    not a special-purpose artist)."""
+    """A name a slice is served for (NAME_MAX_CHARS, no control character
+    nor lone surrogate — no text an answer can carry —, not a
+    special-purpose artist)."""
     n = name.strip()
     return (0 < len(n) <= NAME_MAX_CHARS
-            and not any(unicodedata.category(c) == "Cc" for c in n)
+            and not any(unicodedata.category(c) in ("Cc", "Cs") for c in n)
             and not _SPECIAL_PURPOSE.match(n.lower()))
 
 
@@ -283,25 +284,31 @@ class BuildBudget:
         self._per_minute = per_minute
         self._per_requester = max(1, per_minute // 4)
 
-    def admit(self, requester: str) -> bool:
+    def admit(self, requester: Optional[str]) -> bool:
+        """`requester` None: one that stands for many (a shared address),
+        bounded by the minute's total alone."""
         now = time.monotonic()
         with self._lock:
             while self._times and now - self._times[0][0] >= 60:
                 _, who = self._times.popleft()
+                if who is None:
+                    continue
                 if self._by[who] == 1:
                     del self._by[who]
                 else:
                     self._by[who] -= 1
             if (len(self._times) >= self._per_minute
-                    or self._by.get(requester, 0) >= self._per_requester):
+                    or (requester is not None
+                        and self._by.get(requester, 0) >= self._per_requester)):
                 return False
         return self._slots.acquire(blocking=False)
 
-    def done(self, requester: str, counted: bool) -> None:
+    def done(self, requester: Optional[str], counted: bool) -> None:
         if counted:
             with self._lock:
                 self._times.append((time.monotonic(), requester))
-                self._by[requester] = self._by.get(requester, 0) + 1
+                if requester is not None:
+                    self._by[requester] = self._by.get(requester, 0) + 1
         self._slots.release()
 
 
@@ -875,7 +882,7 @@ def _respelled(blob_gz: bytes, name: str, artist_ids: list) -> bytes:
 
 
 def _build(conn, name: str, version: str, sign_fn, author_pubkey: str,
-           requester: str, replace: bool) -> Optional[dict]:
+           requester: Optional[str], replace: bool) -> Optional[dict]:
     """A dump node's signed slice of `name`, kept when it replaces this
     name's older blob or is among the first spellings of its match set —
     None past the build budget, or for a subtree larger than any requester
@@ -911,7 +918,7 @@ def count_slice_blobs(conn) -> int:
 
 
 def serve_slices(conn, names: list, sign_fn=None,
-                 author_pubkey: str = "", requester: str = "") -> dict:
+                 author_pubkey: str = "", requester: Optional[str] = "") -> dict:
     """The shared v3 server body for both surfaces.
 
     Per name: cached blob wins (dump node's cache and replica's inventory

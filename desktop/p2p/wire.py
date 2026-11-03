@@ -46,7 +46,10 @@ def render(answer: dict, gzip_ok: bool) -> tuple[bytes, Optional[str]]:
     peer surfaces make a bulk answer with the work that produced it, off the
     loop: tens of MB of JSON and its gzip, on the loop, held every other
     request meanwhile."""
-    body = json.dumps(answer, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # A lone surrogate — a JSON escape a peer sent, echoed — has no UTF-8:
+    # it goes back out as that same escape.
+    body = json.dumps(answer, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8", "backslashreplace")
     if gzip_ok and len(body) > ANSWER_GZIP_MIN:
         return gzip.compress(body, compresslevel=ANSWER_GZIP_LEVEL, mtime=0), "gzip"
     return body, None

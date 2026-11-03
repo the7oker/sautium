@@ -472,12 +472,13 @@ class BackendAPIClient:
                 body_resp = self._error_body(e)
             except Exception:
                 body_resp = {"detail": f"HTTP {e.code}"}
-            if e.code == 429:
+            if e.code == 429 or (e.code == 503 and e.headers.get("Retry-After")):
                 # The peer says when the oldest stamp leaves its window —
-                # the earliest a retry can succeed. A peer on older code
-                # sends neither the header nor the body field; the caller
-                # then falls back to the window length. Whole seconds, an
-                # hour at most: the callers sleep on it.
+                # the earliest a retry can succeed —, or that it is busy for
+                # so long (a 503 with Retry-After: its body slots). A peer on
+                # older code sends neither the header nor the body field;
+                # the caller then falls back to the window length. Whole
+                # seconds, an hour at most: the callers sleep on it.
                 wait = body_resp.get("retry_after")
                 if not isinstance(wait, int) or isinstance(wait, bool):
                     try:

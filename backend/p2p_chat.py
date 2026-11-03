@@ -298,20 +298,34 @@ class PeerChatService:
             logger.warning("Oversized plaintext from %s rejected",
                            friend.get("username", "?"))
             return None
-        stored = self._stored_message(env["uuid"])
-        if stored is not None:
-            if stored[0] == friend["id"] and stored[1] == content:
-                return {"friend_id": friend["id"], "content": "",
-                        "timestamp": None, "duplicate": True}
-            logger.warning("Message %s from %s reuses a uuid — rejected",
-                           env["uuid"][:8], friend.get("username", "?"))
-            return None
-
         ts = _sender_timestamp(env["ts"])
-        self.store_message(friend["id"], "in", content, ts,
-                           delivered=True, message_uuid=env["uuid"])
-        self.update_friend_last_seen(sender_public_key)
-        return {"friend_id": friend["id"], "content": content, "timestamp": ts}
+        stored = self._stored_message(env["uuid"])
+        if stored is None:
+            if self._store_incoming(friend["id"], content, ts, env["uuid"]):
+                self.update_friend_last_seen(sender_public_key)
+                return {"friend_id": friend["id"], "content": content, "timestamp": ts}
+            stored = self._stored_message(env["uuid"])      # another copy of it landed first
+        if stored[0] == friend["id"] and stored[1] == content:
+            return {"friend_id": friend["id"], "content": "",
+                    "timestamp": None, "duplicate": True}
+        logger.warning("Message %s from %s reuses a uuid — rejected",
+                       env["uuid"][:8], friend.get("username", "?"))
+        return None
+
+    def _store_incoming(self, friend_id: int, content: str, ts: datetime,
+                        message_uuid: str) -> bool:
+        """An incoming message stored, False when its uuid already is: two
+        copies of one message (a direct push and a relay's, or a push and
+        its retry) arrive side by side on two threads."""
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO p2p_messages
+                    (friend_id, direction, content, timestamp, delivered, message_uuid)
+                VALUES (%s, 'in', %s, %s, TRUE, %s)
+                ON CONFLICT (message_uuid) WHERE message_uuid IS NOT NULL DO NOTHING
+                RETURNING id
+            """, (friend_id, content, ts, message_uuid))
+            return cur.fetchone() is not None
 
 
 _service: Optional[PeerChatService] = None

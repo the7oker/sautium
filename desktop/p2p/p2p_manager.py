@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import secrets
-import select
 import threading
 import time
 from datetime import datetime, timezone
@@ -35,7 +34,7 @@ from desktop.p2p.lb_slice_cycle import LbSliceCycle
 from desktop.p2p.mb_slice_cycle import MbSliceCycle
 from desktop.p2p.sync_walk import SyncWalk
 from desktop.p2p.sync_server import (
-    FORWARD_ACK_TIMEOUT, VOUCHER_TTL, SyncServer, voucher_payload,
+    FORWARD_ACK_TIMEOUT, RELAY_HEADER, VOUCHER_TTL, SyncServer, voucher_payload,
 )
 
 # A relay holds our forward open until the recipient signs a receipt; give
@@ -118,10 +117,12 @@ class P2PManager:
         self._friend_peer_cache: dict[int, list[tuple]] = {}
         # Friends whose history has been pulled this session (skip re-pull)
         self._history_synced_friends: set[int] = set()
-        # Friend id -> the history cursor the last pull ended on: a pull goes
-        # on from it (a wake pulls once per reply), so a thread is read whole
-        # once a session and then only what is new.
-        self._history_after: dict[int, str] = {}
+        # (friend id, the answering node's address) -> the history cursor the
+        # last pull from it ended on: a pull goes on from it (a wake pulls
+        # once per reply), so a thread is read whole once a session and then
+        # only what is new — per node: two of one account answer from their
+        # own rows.
+        self._history_after: dict[tuple, str] = {}
         # Friends a stored message is being pushed to at once (_deliver_now),
         # and those a further message arrived for meanwhile.
         self._pushing: set[int] = set()
@@ -1276,9 +1277,10 @@ class P2PManager:
             url = f"https://{fmt_addr(ip, port)}/api/chat/history"
             stats = {"imported": 0, "skipped": 0, "delivered": 0}
             pages = 0
+            cursor = (friend["id"], fmt_addr(ip, port))
             while pages < chat_wire.HISTORY_PAGES_PER_PULL:
                 data = await self._history_page(url, friend_pubkey, account,
-                                                self._history_after.get(friend["id"]))
+                                                self._history_after.get(cursor))
                 if data is None:
                     break
                 if pages == 0:
@@ -1288,7 +1290,7 @@ class P2PManager:
                     stats[k] += v
                 after = data.get("next")
                 if isinstance(after, str) and after:
-                    self._history_after[friend["id"]] = after
+                    self._history_after[cursor] = after
                 if data.get("more") is not True:
                     break
             if not pages:
@@ -2119,10 +2121,13 @@ class P2PManager:
                             raise ConnectionError(
                                 "master relay full — falling back to the "
                                 "bare wake channel")
-                        if resp.status in (403, 429) and not is_master:
+                        if not is_master and (resp.status in (403, 429)
+                                              or resp.headers.get(RELAY_HEADER) == "off"):
                             # A peer relay that is full or will not relay
-                            # for us: let it go — the manager recruits
-                            # another — instead of holding a slot on it.
+                            # for us — a friend's that is not relaying
+                            # answers with its chat stream, said so: let it
+                            # go — the manager recruits another — instead of
+                            # holding a slot on it.
                             self._relay_refused_until[relay_pubkey] = time.time() + 3600
                             logger.info("Peer relay %s… refused us (HTTP %s) — released",
                                         relay_pubkey[:8], resp.status)
@@ -2939,30 +2944,37 @@ class P2PManager:
                     cur.execute("LISTEN sautium_chat")
                     cur.execute("LISTEN sautium_diag")
                     cur.execute("LISTEN sautium_identity_rotated")
+                    cur.execute("LISTEN sautium_relay_off")
 
                 while self._running:
-                    # Block up to 5 s waiting for data on the socket
-                    ready = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: select.select([conn], [], [], 5),
-                    )
-                    if ready[0]:
+                    # Notices a query on this connection collected wait in
+                    # conn.notifies with nothing more to read on the socket.
+                    if not conn.notifies:
+                        if not await asyncio.get_event_loop().run_in_executor(
+                                None, sync_walk.readable, conn, 5):
+                            continue
                         conn.poll()
-                        notes = []
-                        while conn.notifies:
-                            notes.append(conn.notifies.pop(0))
-                        channels = {note.channel for note in notes}
-                        if "sautium_chat" in channels and self._chat_notify:
-                            self._chat_notify.set()
-                        replies = replied_friends(notes)
-                        if replies:
-                            await self._ping_wake_for(conn, replies)
-                            self._deliver_now(replies)
-                        if "sautium_diag" in channels:
-                            self._diag_queue.put_nowait(("report",))
-                        if ("sautium_identity_rotated" in channels
-                                and self._on_identity_rotated_cb):
-                            self._on_identity_rotated_cb()
+                    notes = []
+                    while conn.notifies:
+                        notes.append(conn.notifies.pop(0))
+                    channels = {note.channel for note in notes}
+                    if "sautium_chat" in channels and self._chat_notify:
+                        self._chat_notify.set()
+                    replies = replied_friends(notes)
+                    if replies:
+                        await self._ping_wake_for(conn, replies)
+                        self._deliver_now(replies)
+                    if "sautium_diag" in channels:
+                        self._diag_queue.put_nowait(("report",))
+                    if "sautium_relay_off" in channels and self._sync_server:
+                        # The owner switched relaying off: the slots held end
+                        # now, and the capability goes with them.
+                        self._sync_server.close_relay_clients()
+                        if self._dht_service:
+                            self._dht_service.withdraw_capability("relay")
+                    if ("sautium_identity_rotated" in channels
+                            and self._on_identity_rotated_cb):
+                        self._on_identity_rotated_cb()
             except Exception as e:
                 logger.debug(f"DB LISTEN error: {e}")
                 await asyncio.sleep(5)
@@ -3055,11 +3067,13 @@ class P2PManager:
             if not pending:
                 continue
 
-            # Collect unique friends with undelivered messages
+            # Collect unique friends with undelivered messages — not one a
+            # push is already under way for (_deliver_now): two at once
+            # deliver one message twice.
             seen_friends: set[int] = set()
             for msg in pending:
                 fid = msg["friend_id"]
-                if fid in seen_friends:
+                if fid in seen_friends or fid in self._pushing:
                     continue
                 seen_friends.add(fid)
 

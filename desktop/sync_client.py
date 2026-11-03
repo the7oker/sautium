@@ -94,26 +94,32 @@ def _on_the_grid(segments, duration) -> bool:
 
 def batch_roots(item: dict) -> set:
     """The Merkle roots an item's seals name — a bundle's per segment."""
-    if "segments" in item:
-        return {s.get("batch_root") for s in item["segments"] if isinstance(s, dict)} - {None}
-    return {item.get("batch_root")} - {None}
+    segments = item.get("segments")
+    named = ([s.get("batch_root") for s in segments if isinstance(s, dict)]
+             if isinstance(segments, list) else [item.get("batch_root")])
+    return {r for r in named if isinstance(r, str)}
+
+
+def _track_of(row) -> Optional[str]:
+    track = row if isinstance(row, str) else row[0] if isinstance(row, list) and row else None
+    return track if isinstance(track, str) else None
 
 
 def _asked(rows, asked: set) -> list:
     """The inventory rows that name a track asked about: a plain uuid, or a
     row whose first field is one. A peer's word about any other track is no
     answer to the question."""
-    return [r for r in rows if (r if isinstance(r, str)
-                                else r[0] if isinstance(r, list) and r else None) in asked]
+    return [r for r in rows if _track_of(r) in asked]
 
 
 def answer_to(result: dict, asked: set) -> dict:
     """The part of a pull answer about the tracks asked, with the Worker
     timestamps those items' seals name and no others."""
     items = [it for it in result.get("items") or []
-             if isinstance(it, dict) and it.get("track_uuid") in asked]
+             if isinstance(it, dict) and _track_of(it.get("track_uuid")) in asked]
     roots = set().union(*(batch_roots(it) for it in items))
-    batches = result.get("batches") or {}
+    batches = result.get("batches")
+    batches = batches if isinstance(batches, dict) else {}
     return {**result, "items": items,
             "batches": {r: batches[r] for r in roots if r in batches}}
 
@@ -1072,14 +1078,8 @@ def import_pushed(db_dsn: str, category: str, payload: dict, budget: int) -> int
         raise ValueError(f"category not carryable: {category}")
     client = SyncClient(api_client=None, db_dsn=db_dsn)
     try:
-        conn = client._get_conn()
-        with conn.cursor() as cur:
-            # Session-held, so concurrent pushes cannot each spend the same
-            # room; the connection's close releases it whatever happens.
-            cur.execute("SELECT pg_advisory_lock(%s)", (sync_queries.CARRY_LOCK_KEY,))
-        conn.commit()
         items = [it for it in payload.get("items") or [] if isinstance(it, dict)]
-        kept = sync_queries.wanted_for_push(conn, category, items, budget)
+        kept = sync_queries.wanted_for_push(client._get_conn(), category, items, budget)
         if len(kept) < len(items):
             logger.info("carry push: %d of %d %s item(s) not asked for — dropped",
                         len(items) - len(kept), len(items), category)

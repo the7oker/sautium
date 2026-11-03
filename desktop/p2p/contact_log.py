@@ -160,8 +160,10 @@ def extract_request_shape(path: str, body: bytes):
 
 def _target(value, width: int) -> str:
     """One name or id as the log keeps it: trimmed, lowercased, cut to
-    `width`, without the NULs the database refuses in text."""
-    return str(value).replace("\x00", "").strip().lower()[:width]
+    `width`, without what the database refuses in text — a NUL, a lone
+    surrogate a JSON escape can make."""
+    text = str(value).replace("\x00", "").encode("utf-8", "ignore").decode("utf-8")
+    return text.strip().lower()[:width]
 
 
 # bytes_in/bytes_out are INTEGER columns; a declared length past it would

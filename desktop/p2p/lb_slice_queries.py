@@ -246,7 +246,8 @@ def max_blob_version(conn) -> Optional[str]:
 
 
 def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
-                 sign_fn=None, author_pubkey: str = "", requester: str = "") -> dict:
+                 sign_fn=None, author_pubkey: str = "",
+                 requester: Optional[str] = "") -> dict:
     """The shared v1 server body for both surfaces.
 
     Per MBID: a cached blob answers when it is at least ``min_version`` AND

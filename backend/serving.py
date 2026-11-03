@@ -247,16 +247,19 @@ class Server(uvicorn.Server):
 
 class _Census:
     """The connections a surface holds, in all and from each address — on
-    the loop, so no lock."""
+    the loop, so no lock. A `shared` address (the Docker gateway, which an
+    address-hiding NAT gives every peer) has no share of its own: the total
+    is its bound."""
 
-    def __init__(self, total: int, per_address: Optional[int]):
-        self.total, self.per_address = total, per_address
+    def __init__(self, total: int, per_address: Optional[int], shared: frozenset = frozenset()):
+        self.total, self.per_address, self.shared = total, per_address, shared
         self.open = 0
         self.by: dict[str, int] = {}
 
     def admit(self, addr: str) -> bool:
         if self.open >= self.total or (
-                self.per_address is not None and self.by.get(addr, 0) >= self.per_address):
+                self.per_address is not None and addr not in self.shared
+                and self.by.get(addr, 0) >= self.per_address):
             return False
         self.open += 1
         self.by[addr] = self.by.get(addr, 0) + 1
@@ -275,24 +278,65 @@ def _host(transport) -> str:
     return str(peer[0]) if peer else ""
 
 
+# The peer addresses that stand for many peers: the Docker gateway, which an
+# address-hiding NAT (Docker Desktop's published port) gives every one of
+# them. Per-address shares do not apply to one — the surface's totals do.
+# Set by the peer server as it starts (main._serve_p2p).
+SHARED_ADDRESSES: frozenset = frozenset()
+
+
+def is_shared(addr) -> bool:
+    return addr in SHARED_ADDRESSES
+
+
+# The least a peer must take of what is owed it, in bytes a second, measured
+# over each stall_s: a link slower than this holds its answer, buffered here,
+# for as long as the answer takes.
+DRAIN_FLOOR = 8 * 1024
+
+
+class _Transport:
+    """The HTTP protocol's view of its transport: its writes and its close
+    start the connection's drain watch (peer_protocol)."""
+
+    def __init__(self, owner, transport):
+        self._owner, self._t = owner, transport
+
+    def write(self, data) -> None:
+        self._t.write(data)
+        self._owner._wrote(len(data))
+
+    def writelines(self, lines) -> None:
+        for data in lines:
+            self.write(data)
+
+    def close(self) -> None:
+        self._t.close()
+        self._owner._wrote(0)
+
+    def __getattr__(self, name):
+        return getattr(self._t, name)
+
+
 def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
                   max_connections: int, per_address: Optional[int],
-                  tls: Optional[ssl.SSLContext] = None):
+                  shared: frozenset = frozenset(), tls: Optional[ssl.SSLContext] = None):
     """uvicorn's HTTP protocol class `base`, bounded for a surface strangers
     reach — what uvicorn takes as `http=`. uvicorn bounds none of this:
 
     - a request head not whole within `head_s` of the connection's opening
       (or of its first byte after the previous response), or over
-      `head_max` bytes, closes the connection — httptools has no head size
-      of its own;
-    - a peer that reads nothing of an answer for `stall_s` — the write
-      buffer stays over its high-water mark — has its connection aborted,
-      and the answer held for it is freed. Under TLS the TLS layer takes an
-      answer whole at once, so the bound is the connection's close: the
-      keep-alive, then at most `stall_s` to deliver what is left;
+      `head_max` bytes — a head sent while the previous request is answered
+      too —, ends the connection; httptools has no head size of its own;
+    - a peer that takes less than DRAIN_FLOOR a second of what is owed it,
+      over any `stall_s`, has its connection aborted and the answer held for
+      it freed; one reading slowly but steadily gets the whole of it — a
+      close waits for it, under TLS too (no shutdown timeout of its own
+      cuts it) —, and a close whose answer is out ends within `stall_s`;
     - at most `max_connections` at once and `per_address` from any one
       address (None behind a trusted front, where every connection is the
-      front's); one past either is closed before a byte is read;
+      front's; none for a `shared` one); one past either is closed before a
+      byte is read;
     - with `tls`, the handshake is made here (loop.start_tls) within
       `head_s`: uvicorn gives asyncio no handshake timeout, whose own is
       60 s, and a connection in its handshake was one no limit counted;
@@ -306,7 +350,7 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
 
     A request in progress, a long event stream included, is never cut by
     the head clock."""
-    census = _Census(max_connections, per_address)
+    census = _Census(max_connections, per_address, shared)
 
     class Bounded(base):
         _addr: Optional[str] = None       # its census entry, once admitted
@@ -314,6 +358,7 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
         # request bytes that rode the handshake's last flight, or its loss.
         _early: Optional[list] = None
         _lost = False
+        _raw = None                       # the TCP transport under TLS
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -326,9 +371,13 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
             self.logger.debug("Unsupported upgrade request.")
 
         def connection_made(self, transport):
-            self._head_timer = self._stall_timer = None
-            self._head_bytes = 0
-            super().connection_made(transport)
+            self._head_timer = self._watch_timer = None
+            self._head_bytes = self._written = self._owed = 0
+            self._out = self._gone = False
+            self._app = transport
+            if self._raw is None:
+                self._raw = transport
+            super().connection_made(_Transport(self, transport))
             if self._addr is None:
                 addr = _host(transport)
                 if not census.admit(addr):
@@ -354,49 +403,73 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
 
         def _head_expired(self) -> None:
             self._head_timer = None
-            if self._between_requests() and not self.transport.is_closing():
+            if self._between_requests() and not self._app.is_closing():
                 logger.info("connection closed: no request head within %s s", head_s)
-                self.transport.close()
+                self._app.abort()
 
         def data_received(self, data: bytes) -> None:
             if self.transport is None:
                 self._early = (self._early or []) + [data]
                 return
+            cycle = self.cycle
             if self._between_requests():
                 self._arm_head()
                 self._head_bytes += len(data)
+            elif not cycle.more_body:
+                # Past a request's body, before its answer: the next head.
+                self._head_bytes += len(data)
             super().data_received(data)
-            if not self._between_requests():
+            if self.cycle is not cycle:
                 self._disarm_head()
                 self._head_bytes = 0
-            elif self._head_bytes > head_max and not self.transport.is_closing():
+            if self._head_bytes > head_max and not self._app.is_closing():
                 logger.info("connection closed: request head over %d bytes", head_max)
-                self.transport.close()
+                self._app.abort()
 
-        def pause_writing(self) -> None:
-            super().pause_writing()
-            if self._stall_timer is None:
-                self._stall_timer = self.loop.call_later(stall_s, self._stalled)
+        # -- what is owed the peer -------------------------------------------
 
-        def resume_writing(self) -> None:
-            super().resume_writing()
-            if self._stall_timer is not None:
-                self._stall_timer.cancel()
-                self._stall_timer = None
+        def _unsent(self) -> int:
+            n = self._app.get_write_buffer_size()
+            return n + (self._raw.get_write_buffer_size() if self._raw is not self._app else 0)
 
-        def _stalled(self) -> None:
-            self._stall_timer = None
-            logger.info("connection aborted: its peer read nothing for %s s", stall_s)
-            self.transport.abort()
+        def _wrote(self, n: int) -> None:
+            self._written += n
+            if self._gone:
+                return
+            if self._watch_timer is None and (self._unsent() or self._app.is_closing()):
+                self._owed, self._written, self._out = self._unsent(), 0, False
+                self._watch_timer = self.loop.call_later(stall_s, self._watch)
+
+        def _watch(self) -> None:
+            """Every stall_s while something is owed or a close is under way:
+            under the floor, aborted; all out and still closing — the peer
+            does not answer TLS's close — aborted one stall_s on."""
+            self._watch_timer = None
+            left = self._unsent()
+            owed = self._owed + self._written
+            if left and owed - left < min(DRAIN_FLOOR * stall_s, owed):
+                logger.info("connection aborted: its peer took under %d bytes a second for %s s",
+                            DRAIN_FLOOR, stall_s)
+                self._app.abort()
+                return
+            if not left and self._app.is_closing():
+                if self._out:
+                    self._app.abort()
+                    return
+                self._out = True
+            if left or self._app.is_closing():
+                self._owed, self._written = left, 0
+                self._watch_timer = self.loop.call_later(stall_s, self._watch)
 
         def connection_lost(self, exc) -> None:
             if self.transport is None:
                 self._lost = True
                 return
+            self._gone = True
             self._disarm_head()
-            if self._stall_timer is not None:
-                self._stall_timer.cancel()
-                self._stall_timer = None
+            if self._watch_timer is not None:
+                self._watch_timer.cancel()
+                self._watch_timer = None
             if self._addr is not None:
                 census.leave(self._addr)
                 self._addr = None
@@ -407,10 +480,15 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
         return Bounded
 
     def factory(**kwargs) -> asyncio.Protocol:
-        return _TLSAcceptor(lambda: Bounded(**kwargs), tls, head_s, stall_s, census)
+        return _TLSAcceptor(lambda: Bounded(**kwargs), tls, head_s, census)
 
     factory.census = census
     return factory
+
+
+# The shutdown timeout start_tls takes, never the bound that holds: the
+# drain watch ends a close long before.
+_TLS_SHUTDOWN_BACKSTOP_S = 3600
 
 
 def _feed(protocol, data: bytes) -> None:
@@ -431,9 +509,9 @@ class _TLSAcceptor(asyncio.Protocol):
     closed when it is not within `handshake_s`."""
 
     def __init__(self, make_protocol, ctx: ssl.SSLContext, handshake_s: float,
-                 flush_s: float, census: _Census):
-        self._make, self._ctx, self._handshake_s, self._flush_s, self._census = (
-            make_protocol, ctx, handshake_s, flush_s, census)
+                 census: _Census):
+        self._make, self._ctx, self._handshake_s, self._census = (
+            make_protocol, ctx, handshake_s, census)
         self._task = None
         self._early: list = []
 
@@ -450,16 +528,21 @@ class _TLSAcceptor(asyncio.Protocol):
         protocol = self._make()
         if self._early:
             # uvloop reads a connection before the pause above can hold it:
-            # what reached this protocol — the ClientHello — goes to the TLS
-            # protocol start_tls puts in its place, after that one's
-            # connection_made, which start_tls schedules as it begins. A
-            # client sends nothing more before the server's answer to it.
+            # what reached this protocol — the first bytes of the ClientHello
+            # — goes to the TLS protocol start_tls puts in its place, ahead
+            # of anything read later. Scheduled before start_tls schedules
+            # that protocol's start, it reaches it first, which only buffers
+            # bytes until its handshake begins.
             early = b"".join(self._early)
-            loop.call_soon(loop.call_soon, lambda: _feed(transport.get_protocol(), early))
+            loop.call_soon(lambda: _feed(transport.get_protocol(), early))
         try:
+            # No shutdown timeout of TLS's own: it would cut an answer a slow
+            # peer is still reading — the protocol's drain watch bounds a
+            # close instead (peer_protocol).
             tls = await loop.start_tls(
                 transport, protocol, self._ctx, server_side=True,
-                ssl_handshake_timeout=self._handshake_s, ssl_shutdown_timeout=self._flush_s)
+                ssl_handshake_timeout=self._handshake_s,
+                ssl_shutdown_timeout=_TLS_SHUTDOWN_BACKSTOP_S)
         except (OSError, RuntimeError) as e:
             # A peer that speaks no TLS, never finishes, or left: nothing
             # was served, so nothing is lost but the connection.
@@ -471,6 +554,7 @@ class _TLSAcceptor(asyncio.Protocol):
             self._census.leave(addr)
             return
         protocol._addr = addr                 # its census entry is the protocol's now
+        protocol._raw = transport
         protocol.connection_made(tls)
 
     def data_received(self, data: bytes) -> None:

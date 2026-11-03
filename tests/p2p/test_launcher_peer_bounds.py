@@ -188,3 +188,56 @@ def test_a_stored_reply_wakes_that_friends_stream():
     finally:
         p2p_manager.psycopg2.connect = original
     assert pinged == ["ab" * 32]
+
+
+def test_notices_a_query_collected_are_handled_before_the_next_wait(monkeypatch):
+    """A query on the LISTEN connection (the wake ping's) leaves the notices
+    it read in conn.notifies, with nothing left on the socket to wake a wait."""
+    from desktop.p2p import sync_walk
+    handled, waits = [], []
+    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
+    manager._running = True
+    manager._chat_notify = None
+    manager._sync_server = None
+    manager._on_identity_rotated_cb = None
+    manager.db_dsn = "postgresql://unused"
+
+    class _Queue:
+        def put_nowait(self, item):
+            handled.append(item)
+
+    manager._diag_queue = _Queue()
+
+    class _Conn:
+        notifies = [SimpleNamespace(channel="sautium_diag", payload="")]
+
+        def set_isolation_level(self, level):
+            pass
+
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql):
+            pass
+
+        def poll(self):
+            pass
+
+        def close(self):
+            pass
+
+    def readable(conn, timeout):
+        waits.append(len(conn.notifies))
+        manager._running = False
+        return False
+
+    monkeypatch.setattr(p2p_manager.psycopg2, "connect", lambda dsn: _Conn())
+    monkeypatch.setattr(sync_walk, "readable", readable)
+    asyncio.run(manager._listen_for_db_notifications())
+    assert handled == [("report",)] and waits == [0]       # handled first, then the wait

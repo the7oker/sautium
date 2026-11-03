@@ -608,8 +608,10 @@ an earlier ciphertext replayed under a new uuid does not open as one, and a
 uuid repeats only for the same message in the same thread — anything else
 under it is refused, and gets no receipt. A history export is read in pages
 (`chat_wire.export_page`: at most 2 000 messages or 4 MiB of ciphertext, each
-page after the cursor the one before ended on), and an exporter marks
-delivered exactly the outgoing messages a page carried.
+page after the cursor the one before ended on — the requester keeps one per
+answering node —, the exporter's undelivered outgoing messages whatever the
+cursor), and an exporter marks delivered exactly the outgoing messages a page
+carried.
 
 **The relay stores nothing** — not a row, not a table. Its only state: an
 in-memory future while it waits for the receipt (`FORWARD_ACK_TIMEOUT = 10 s`)
@@ -782,7 +784,10 @@ registry is in-memory: a relay restart simply has clients re-issue. Since
 2026-11-03 a voucher is not all a stranger needs: its slot is taken only
 while the relay switch (`p2p.relay_enabled`) is on and for an identity the
 gate has verified (its certificate and proof ride the subscription), and with
-the switch off a friend's stream is its chat stream, announced for nobody.
+the switch off a friend's stream is its chat stream, announced for nobody and
+said so (`X-Sautium-Relay: off`: a client that came for a peer relay lets it
+go); switching off ends the slots held (on a launcher through
+`NOTIFY sautium_relay_off`).
 
 **Announce-on-behalf.** The BT DHT does not verify infohash ownership — that is
 the feature: the relay announces `Sautium-user:{invite}` for every registered
@@ -1100,10 +1105,14 @@ under it —, a support bundle's 32 MiB on the master; the front holds the same
 ceiling and a 10 s request head), a body that keeps arriving at a floor rate,
 read in a slot of its kind (chat, bulk, large) of which one address holds a
 few; on the peer server (`serving.peer_protocol`) the TLS handshake and the
-request head within 10 s and a head of at most 64 KiB, a peer that reads
-nothing of an answer let go after 30 s, a connection ceiling of half the
+request head within 10 s and a head of at most 64 KiB (one sent while the
+last answer runs included), a peer that takes under 8 KiB a second of what is
+owed it over 30 s let go — a slower but steady one gets the whole answer, a
+close waiting for it under TLS too —, a connection ceiling of half the
 process's descriptors with 256 per address and three quarters of it for wake
-streams; the peer surface's SQL, parsing and answers made on two lanes of
+streams (the Docker gateway, which an address-hiding NAT gives every peer, has
+no per-address share — the totals bound it); a support bundle's warrant is
+checked before its body; the peer surface's SQL, parsing and answers made on two lanes of
 their own (`db_pool.in_peer_lane` for data, `in_chat_lane` for chat, relay,
 diagnostics and `/health`'s counts) beside the Web UI's loop and pool; the
 global `mb/search` and slice windows, the dump node's build budget and a

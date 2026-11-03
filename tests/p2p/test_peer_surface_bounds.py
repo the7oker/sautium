@@ -38,12 +38,12 @@ from routers import peer_chat, peer_diag, sync  # noqa: E402
 _addr = iter(f"198.51.100.{i}" for i in range(10, 250))
 
 
-async def _call(method, path, *, headers=(), chunks=(), delay=0.0, addr=None):
+async def _call(method, path, *, headers=(), chunks=(), delay=0.0, addr=None, query=""):
     """One request through the whole peer app: (status, body, bytes it read).
     Past its chunks the body stalls."""
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
              "method": method, "scheme": "https", "path": path, "raw_path": path.encode(),
-             "query_string": b"", "root_path": "", "server": ("peer", 8801),
+             "query_string": query.encode(), "root_path": "", "server": ("peer", 8801),
              "client": (addr or next(_addr), 40000),
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers]}
     pending, read, out = list(chunks), {"n": 0}, {"status": None, "body": b""}
@@ -196,6 +196,36 @@ def test_a_body_is_read_in_a_slot_of_its_kind_and_one_address_holds_a_few(slots,
     assert other[0] != 503 and other[2] == 2           # another address's is not
 
 
+def test_a_shared_address_has_the_totals_and_no_share_of_its_own(monkeypatch):
+    gateway = "172.17.0.1"                      # every peer, behind an address-hiding NAT
+    census = serving._Census(4, 1, frozenset({gateway}))
+    assert all(census.admit(gateway) for _ in range(4)) and not census.admit(gateway)
+    census = serving._Census(4, 1, frozenset({gateway}))
+    assert census.admit("198.51.100.1") and not census.admit("198.51.100.1")
+    monkeypatch.setattr(serving, "SHARED_ADDRESSES", frozenset({gateway}))
+
+    async def slots():
+        bodies = p2p_app._Slots(3, 1)
+        return [await bodies.take(gateway) for _ in range(3)] + [await bodies.take("198.51.100.1")]
+
+    assert asyncio.run(slots()) == [True, True, True, False]     # the total, then nothing left
+
+
+def test_a_wait_for_a_slot_cancelled_with_its_request_gives_its_place_back():
+    async def scene():
+        slots = p2p_app._Slots(1, 2)
+        assert await slots.take("203.0.113.9")
+        waiting = asyncio.ensure_future(slots.take("203.0.113.9"))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        slots.give("203.0.113.9")
+        return slots._by
+
+    assert asyncio.run(scene()) == {}
+
+
 def test_a_peers_sql_and_its_answer_run_on_the_peer_lane_never_on_the_loop(monkeypatch):
     threads = []
 
@@ -345,16 +375,52 @@ BIG = 8 * 1024 * 1024
 async def _app(scope, receive, send):
     if scope["type"] != "http":
         return
+    if scope["path"] == "/hold":                        # an answer that takes its time
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"start", "more_body": True})
+        await asyncio.sleep(30)
+        await send({"type": "http.response.body", "body": b""})
+        return
     body = b"x" * BIG if scope["path"] == "/big" else b"ok"
     await send({"type": "http.response.start", "status": 200,
                 "headers": [(b"content-length", str(len(body)).encode())]})
     await send({"type": "http.response.body", "body": body})
 
 
+def _read_slowly(sock, seconds_per_chunk=0.01, chunk=32 * 1024) -> bytes:
+    """The whole answer, read steadily at well over the floor (a few MiB a
+    second) and well under what loopback sends: past what the kernel buffers
+    hold, the answer waits in the transport's for many a stall_s."""
+    sock.settimeout(10)
+    got = bytearray()
+    while True:
+        data = sock.recv(chunk)
+        if not data:
+            return bytes(got)
+        got += data
+        time.sleep(seconds_per_chunk)
+
+
+def _closed_by(sock, seconds) -> bool:
+    """The peer closed the connection within `seconds` in all."""
+    deadline = time.monotonic() + seconds
+    try:
+        while (left := deadline - time.monotonic()) > 0:
+            sock.settimeout(left)
+            if not sock.recv(65536):
+                return True
+    except ConnectionResetError:
+        return True
+    except socket.timeout:
+        pass
+    return False
+
+
 def _serve(http):
     import uvicorn
     config = uvicorn.Config(_app, host="127.0.0.1", port=0, log_level="warning",
-                            http=http, lifespan="off", timeout_keep_alive=1)
+                            http=http, lifespan="off", timeout_keep_alive=1,
+                            timeout_graceful_shutdown=1)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -436,6 +502,27 @@ def test_a_peer_that_reads_nothing_of_its_answer_is_let_go(head_server):
         assert _until(5, lambda: census.open == 0)       # aborted, its answer freed
     finally:
         deaf.close()
+
+
+def test_a_peer_reading_slowly_but_steadily_gets_its_whole_answer(head_server):
+    port, _ = head_server
+    with socket.socket() as slow:
+        slow.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024)
+        slow.connect(("127.0.0.1", port))
+        slow.sendall(b"GET /big HTTP/1.1\r\nHost: peer\r\nConnection: close\r\n\r\n")
+        answer = _read_slowly(slow)                    # some seconds, many a stall_s
+    assert len(answer.split(b"\r\n\r\n", 1)[1]) == BIG
+
+
+def test_a_head_sent_while_the_last_answer_runs_is_bounded_too(head_server):
+    port, census = head_server
+    with socket.create_connection(("127.0.0.1", port)) as piped:
+        piped.sendall(b"GET /hold HTTP/1.1\r\nHost: peer\r\n\r\n")
+        piped.settimeout(3)
+        assert piped.recv(1024).startswith(b"HTTP/1.1 200")
+        piped.sendall(b"GET / HTTP/1.1\r\nHost: peer\r\nX-Pad: " + b"a" * (2 * BOUNDS["head_max"]))
+        assert _closed_by(piped, 3)                    # the answer it rode on runs 30 s
+    assert _until(2, lambda: census.open == 0)
 
 
 def test_one_address_holds_a_few_connections(head_server):
@@ -533,3 +620,58 @@ def test_a_tls_peer_that_reads_nothing_of_its_answer_is_let_go(tls_server):
         assert _until(5, lambda: census.open == 0)       # aborted, its answer freed
     finally:
         deaf.close()
+
+
+def test_a_tls_peer_reading_slowly_but_steadily_gets_its_whole_answer(tls_server):
+    """No shutdown timeout of TLS's own cuts an answer still being read."""
+    port, _ = tls_server
+    raw = socket.socket()
+    raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024)
+    raw.connect(("127.0.0.1", port))
+    with _client_ctx().wrap_socket(raw) as slow:
+        slow.sendall(b"GET /big HTTP/1.1\r\nHost: peer\r\nConnection: close\r\n\r\n")
+        answer = _read_slowly(slow)
+    assert len(answer.split(b"\r\n\r\n", 1)[-1]) == BIG
+
+
+def test_a_wait_on_a_descriptor_past_1023_holds():
+    """The LISTEN loops wait through selectors (sync_walk.readable): with the
+    descriptor limit raised, a database connection opened late is past
+    select()'s 1024."""
+    import os
+    import resource
+    from desktop.p2p import sync_walk
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 1100:
+        pytest.skip("the hard descriptor limit is under 1100")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 2048), hard))
+    a, b = socket.socketpair()
+    high = os.dup2(a.fileno(), 1500)
+    late = socket.socket(fileno=high)
+    try:
+        assert sync_walk.readable(late, 0.05) is False
+        b.sendall(b"!")
+        assert sync_walk.readable(late, 1) is True
+    finally:
+        late.close()
+        a.close()
+        b.close()
+
+
+def test_a_bundle_for_a_warrant_not_its_signers_is_refused_before_its_body(monkeypatch):
+    from master_node import MASTER_PUBKEY_HEX
+    monkeypatch.setattr(peer_diag, "resolve_identity",
+                        lambda s: {"public_key_hex": MASTER_PUBKEY_HEX})
+    monkeypatch.setattr(peer_diag, "_signer_is_friend", lambda pk: True)
+    warrants = {"11111111-1111-1111-1111-111111111111": None,
+                "22222222-2222-2222-2222-222222222222":
+                    {"node_pubkey": "aa" * 32, "expires_at": None, "fulfilled_at": None}}
+    monkeypatch.setattr(peer_diag, "db_query_one", lambda sql, params: warrants[params[0]])
+    body = b"x" * (200 * 1024)
+    for warrant, status in (("11111111-1111-1111-1111-111111111111", 404),
+                            ("22222222-2222-2222-2222-222222222222", 403)):
+        got, _, read = asyncio.run(_call(
+            "POST", f"/api/diag/bundle",
+            headers=[("content-length", str(len(body))), ("X-Sautium-Peer-Pubkey", "ef" * 32)],
+            chunks=[body], query=f"warrant={warrant}"))
+        assert (got, read) == (status, 0)

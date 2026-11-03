@@ -5,9 +5,11 @@ skipped without a cluster: an earlier ciphertext under a new uuid is
 refused; the same message again is a duplicate, anything else under its
 uuid is refused; a history import touches its own thread only; a history
 page marks delivered only the messages it carries, and the next page starts
-after the last one's row, even within one second; a friend's retired key
-speaks for nobody on the Docker surface; the token hour's ceiling is checked
-before a use is spent."""
+after the last one's row, even within one second; a page carries this node's
+undelivered rows behind the cursor too, and its cursor never steps back; one
+message arriving twice at once is stored once; a friend's retired key speaks
+for nobody on the Docker surface; the token hour's ceiling is checked before
+a use is spent."""
 
 import base64
 import sys
@@ -114,6 +116,68 @@ def test_a_history_page_marks_delivered_only_what_it_carries(conn, scratch_dsn, 
         if not more:
             break
     assert seen == ["m0", "m1", "m2", "m3"]                 # two in one second, both read
+
+
+def test_a_page_carries_this_nodes_undelivered_rows_behind_the_cursor(conn, scratch_dsn):
+    from datetime import timedelta
+    me = _service(scratch_dsn, ME)
+    fid = me.add_friend(public_key_hex=FRIEND[1], invite_code=FRIEND[2], username="friend")
+    t0 = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO p2p_messages (friend_id, direction, content, timestamp,
+                                                 delivered, message_uuid)
+                       VALUES (%s, 'out', 'older, never delivered', %s, FALSE, %s),
+                              (%s, 'in', 'older, theirs', %s, TRUE, %s),
+                              (%s, 'out', 'newer', %s, FALSE, %s)
+                       RETURNING id""",
+                    (fid, t0, str(uuid.uuid4()), fid, t0, str(uuid.uuid4()),
+                     fid, t0 + timedelta(hours=1), str(uuid.uuid4())))
+        ids = [r[0] for r in cur.fetchall()]
+    ahead = (t0 + timedelta(minutes=30), 10 ** 9)      # a cursor another node of the account gave
+    rows = chat_wire.export_rows(conn, fid, ahead)
+    page, out_ids, after, more = chat_wire.export_page(rows, lambda t, u, ts: t, ahead)
+    assert [m["encrypted"] for m in page] == ["older, never delivered", "newer"]
+    assert out_ids == [ids[0], ids[2]] and not more
+    assert chat_wire.history_cursor(after) == (t0 + timedelta(hours=1), ids[2])
+    assert chat_wire.history_cursor(chat_wire.export_page([], lambda t, u, ts: t, ahead)[2]) == ahead
+
+
+def test_a_page_reads_no_text_past_its_bytes(conn, scratch_dsn, monkeypatch):
+    from datetime import timedelta
+    me = _service(scratch_dsn, ME)
+    fid = me.add_friend(public_key_hex=FRIEND[1], invite_code=FRIEND[2], username="friend")
+    t0 = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    with conn.cursor() as cur:
+        for n in range(4):
+            cur.execute("""INSERT INTO p2p_messages (friend_id, direction, content, timestamp,
+                                                     delivered, message_uuid)
+                           VALUES (%s, 'in', %s, %s, TRUE, %s)""",
+                        (fid, "x" * 20, t0 + timedelta(seconds=n), str(uuid.uuid4())))
+    monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_BYTES", 30)
+    rows = chat_wire.export_rows(conn, fid, None)
+    assert [r["content"] is not None for r in rows] == [True, True, False, False]
+    page, _, after, more = chat_wire.export_page(rows, lambda t, u, ts: t)
+    assert len(page) == 2 and more
+
+
+def test_one_message_arriving_twice_at_once_is_stored_once(conn, scratch_dsn, docker_db):
+    from p2p_chat import PeerChatService
+    svc = PeerChatService(ME[0].private_bytes_raw(), ME[1], ())
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO friends (public_key_hex, invite_code, username) VALUES (%s, %s, 'friend')",
+                    (FRIEND[1], FRIEND[2]))
+    friend = _service(scratch_dsn, FRIEND)
+    u, sent = str(uuid.uuid4()), datetime.now(timezone.utc).isoformat()
+    box = friend.encrypt_envelope("hello", u, sent, ME[1])
+    assert svc.handle_incoming(FRIEND[1], box, sent, message_uuid=u)["content"] == "hello"
+    real = svc._stored_message
+    calls = []
+    svc._stored_message = lambda m: (calls.append(m), None if len(calls) == 1 else real(m))[1]
+    again = svc.handle_incoming(FRIEND[1], box, sent, message_uuid=u)   # its twin landed first
+    assert again["duplicate"] and len(calls) == 2
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM p2p_messages WHERE message_uuid = %s", (u,))
+        assert cur.fetchone()[0] == 1
 
 
 @pytest.fixture

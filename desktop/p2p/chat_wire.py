@@ -108,17 +108,32 @@ def history_cursor(value) -> Optional[tuple]:
 def export_rows(conn, friend_id: int, after: Optional[tuple]) -> list[dict]:
     """A page's rows of a thread, oldest first after the cursor `after`
     (history_cursor), one past a page's count — with row ids, so the
-    exporter can mark the outgoing rows a page carries delivered."""
+    exporter can mark the outgoing rows a page carries delivered. Its own
+    undelivered outgoing rows come whatever the cursor: one taken from
+    another node of this account, or before this node's clock stepped back,
+    stands past rows the requester never had."""
     ts, row_id = after or (None, None)
     with conn.cursor() as cur:
+        # A row's text comes only while the texts before it are under the
+        # page's bytes (its ciphertext is larger still, so export_page stops
+        # first); the rest come as ids, to say the thread goes on.
         cur.execute("""
-            SELECT id, message_uuid, direction, content, timestamp
-              FROM p2p_messages
-             WHERE friend_id = %s
-               AND (%s::timestamptz IS NULL OR (timestamp, id) > (%s::timestamptz, %s))
+            SELECT id, message_uuid, direction, timestamp,
+                   CASE WHEN before < %(bytes)s THEN content END AS content
+              FROM (SELECT id, message_uuid, direction, content, timestamp,
+                           sum(octet_length(content)) OVER (ORDER BY timestamp, id)
+                               - octet_length(content) AS before
+                      FROM (SELECT id, message_uuid, direction, content, timestamp
+                              FROM p2p_messages
+                             WHERE friend_id = %(f)s
+                               AND (%(ts)s::timestamptz IS NULL
+                                    OR (timestamp, id) > (%(ts)s::timestamptz, %(id)s)
+                                    OR (direction = 'out' AND delivered = FALSE))
+                             ORDER BY timestamp, id
+                             LIMIT %(n)s) thread) page
              ORDER BY timestamp, id
-             LIMIT %s
-        """, (friend_id, ts, ts, row_id, HISTORY_EXPORT_MAX + 1))
+        """, {"f": friend_id, "ts": ts, "id": row_id, "n": HISTORY_EXPORT_MAX + 1,
+              "bytes": HISTORY_EXPORT_BYTES})
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -136,14 +151,15 @@ def mark_exported(conn, friend_id: int, ids: list) -> int:
         return cur.rowcount
 
 
-def export_page(rows: list, seal) -> tuple[list, list, Optional[str], bool]:
-    """One page of a thread from `rows` — oldest first, read one past
-    HISTORY_EXPORT_MAX, each {id, message_uuid, direction, content,
-    timestamp} — boxed by `seal(text, uuid, ts_iso)`: (the page, the ids of
-    the outgoing rows it carries — what the exporter marks delivered, and
-    nothing else —, the cursor of its last row or None for an empty page,
-    whether the thread goes on past it)."""
-    page, out_ids, size, cursor = [], [], 0, None
+def export_page(rows: list, seal, after: Optional[tuple] = None
+                ) -> tuple[list, list, Optional[str], bool]:
+    """One page of a thread from `rows` (export_rows) after the cursor
+    `after`, each row boxed by `seal(text, uuid, ts_iso)`: (the page, the
+    ids of the outgoing rows it carries — what the exporter marks delivered,
+    and nothing else —, the cursor the next page starts after — never
+    behind `after`; None while there is none —, whether the thread goes on
+    past the page)."""
+    page, out_ids, size, last = [], [], 0, after
     for n, row in enumerate(rows[:HISTORY_EXPORT_MAX], 1):
         ts_iso = row["timestamp"].isoformat()
         message_uuid = str(row["message_uuid"])
@@ -153,10 +169,14 @@ def export_page(rows: list, seal) -> tuple[list, list, Optional[str], bool]:
         size += len(encrypted)
         if row["direction"] == "out":
             out_ids.append(row["id"])
-        cursor = f"{ts_iso}|{row['id']}"
+        if last is None or (row["timestamp"], row["id"]) > last:
+            last = (row["timestamp"], row["id"])
         if size >= HISTORY_EXPORT_BYTES:
-            return page, out_ids, cursor, n < len(rows)
-    return page, out_ids, cursor, len(rows) > HISTORY_EXPORT_MAX
+            break
+    else:
+        n = min(len(rows), HISTORY_EXPORT_MAX)
+    cursor = f"{last[0].isoformat()}|{last[1]}" if last is not None else None
+    return page, out_ids, cursor, n < len(rows)
 
 
 def envelope(text: str, message_uuid: str, ts_iso: str) -> bytes:

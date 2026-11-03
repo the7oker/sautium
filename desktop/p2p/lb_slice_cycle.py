@@ -477,6 +477,10 @@ class LbSliceCycle:
                             leftovers[lane].extend(batch)
                             continue
                         result = await self._exchange(api, node, source_addr, batch, min_version)
+                    if "error" in result and time.monotonic() >= api.session_deadline:
+                        # The session ended under this batch, not the source.
+                        leftovers[lane].extend(batch)
+                        continue
                     if "error" in result:
                         leftovers[lane].extend(batch)
                         if result.get("retry_after") is not None:

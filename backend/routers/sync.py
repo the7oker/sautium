@@ -98,6 +98,15 @@ def _require_sharing() -> None:
 # ../desktop/p2p. Loaded by file path (not sys.path) so desktop modules can
 # never shadow backend ones. Absent → the endpoint 404s (launcher-mode
 # backends serve slices through the launcher's own sync server instead).
+def _requester(request: Request) -> Optional[str]:
+    """Whose share of a dump node's build budget a request spends: its
+    address — None for a shared one (serving.SHARED_ADDRESSES), which only
+    the budget's total bounds."""
+    from serving import is_shared
+    addr = request.client.host if request.client else ""
+    return None if is_shared(addr) else addr
+
+
 async def _answer(request: Request, run) -> Response:
     """`run()`'s answer, made on the peer lane with the work that produced
     it (wire.render): a bulk answer is tens of MB, and its JSON and gzip on
@@ -384,7 +393,7 @@ async def lb_slice(req: LBSliceRequest, request: Request) -> Response:
         with get_conn() as conn:
             return lb_slice_queries.serve_slices(
                 conn, req.artist_mbids, req.min_version, sign_fn, author,
-                request.client.host if request.client else "")
+                _requester(request))
 
     try:
         return await _answer(request, _run)
@@ -442,7 +451,7 @@ async def mb_slice(req: MBSliceRequest, request: Request) -> Response:
         with get_conn() as conn:
             return mb_slice_queries.serve_slices(
                 conn, req.names, sign_fn, author,
-                request.client.host if request.client else "")
+                _requester(request))
 
     try:
         return await _answer(request, _run)

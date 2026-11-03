@@ -351,6 +351,10 @@ class MbSliceCycle:
                         leftovers.extend(remaining[i:])
                         break
                     stats = await loop.run_in_executor(None, client.run, batch)
+                if "error" in stats and time.monotonic() >= api.session_deadline:
+                    # The session ended under this batch, not the source.
+                    leftovers.extend(remaining[i:])
+                    break
                 if "error" in stats:
                     leftovers.extend(batch)
                     if "retry_after" in stats:

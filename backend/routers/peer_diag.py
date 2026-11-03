@@ -15,7 +15,6 @@ cap what they read BEFORE reading it — nothing above this router does.
 Writes go to support_* tables only.
 """
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -176,16 +175,21 @@ async def diag_bundle(request: Request, warrant: str = ""):
     refusal = await _admitted(request)
     if refusal is not None:
         return refusal
+    # The warrant before the body too, for the signer it names: a bundle
+    # is up to 32 MiB, and the id travels only on that node's wake stream.
+    refusal = await in_chat_lane(_warrant_refusal, warrant_id,
+                                 (request.headers.get(peer_auth.HDR_PUBKEY) or "").lower())
+    if refusal is not None:
+        return refusal
     body = await _read_capped(request, diag_protocol.BUNDLE_MAX_BYTES)
     if body is None:
         return _err("bundle too large", 413)
     return await in_chat_lane(_store_bundle, request, body, warrant_id)
 
 
-def _store_bundle(request: Request, body: bytes, warrant_id: str):
-    pubkey, failure = _verify(request, body)
-    if failure:
-        return failure
+def _warrant_refusal(warrant_id: str, pubkey: str) -> Optional[JSONResponse]:
+    """The refusal a bundle for `warrant_id` from `pubkey` is owed, or None:
+    a warrant this node issued to that key, open, within its grace."""
     row = db_query_one("""
         SELECT node_pubkey, expires_at, fulfilled_at
           FROM support_warrants WHERE id = %s
@@ -199,6 +203,16 @@ def _store_bundle(request: Request, body: bytes, warrant_id: str):
     grace = timedelta(seconds=diag_protocol.BUNDLE_ACCEPT_GRACE_S)
     if datetime.now(timezone.utc) > row["expires_at"] + grace:
         return _err("warrant expired", 410)
+    return None
+
+
+def _store_bundle(request: Request, body: bytes, warrant_id: str):
+    pubkey, failure = _verify(request, body)
+    if failure:
+        return failure
+    refusal = _warrant_refusal(warrant_id, pubkey)
+    if refusal is not None:
+        return refusal
 
     bundle_id = str(uuid.uuid4())
     digest = hashlib.sha256(body).hexdigest()

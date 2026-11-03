@@ -145,6 +145,19 @@ def _find_friend_for_handshake(invite_code: str, pubkey: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 _wake = WakeRegistry()
+# On a wake stream's answer: "off" — a voucher came, and this node does not
+# relay (mirror of desktop/p2p/sync_server).
+RELAY_HEADER = "X-Sautium-Relay"
+
+
+def close_relay_clients() -> None:
+    """End every stream a voucher holds a slot on — the relay switch went
+    off. Each client subscribes again and meets the switch: a friend gets
+    its chat stream back, a stranger a refusal."""
+    with _relay_lock:
+        keys = list(_relay_clients)
+    for pubkey in keys:
+        _wake.close(pubkey)
 
 
 def limit_wake_streams(n: int) -> None:
@@ -603,11 +616,12 @@ def _history(body: dict, gzip_ok: bool) -> Response:
                                               "can_message"):
             return _err("not permitted", 403)
 
+    after = chat_wire.history_cursor(body.get("after"))
     with get_conn() as conn:
-        rows = chat_wire.export_rows(conn, friend["id"], chat_wire.history_cursor(body.get("after")))
+        rows = chat_wire.export_rows(conn, friend["id"], after)
         result_messages, out_ids, after, more = chat_wire.export_page(
             rows, lambda text, message_uuid, ts_iso: svc.encrypt_envelope(
-                text, message_uuid, ts_iso, requester_pubkey))
+                text, message_uuid, ts_iso, requester_pubkey), after)
         if out_ids:
             # This node has no push loop: a page is how its messages arrive.
             chat_wire.mark_exported(conn, friend["id"], out_ids)
@@ -698,6 +712,9 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                        "signature": voucher_sig}
     elif not friend:
         return _err("voucher required", 403)
+    # A friend's voucher the switch does not honour: its chat stream, said
+    # so — a client that came for a peer relay lets this one go.
+    unhonoured = bool(invite and voucher_sig) and voucher is None
 
     ip = request.client.host if request.client else "unknown"
     sub = _wake.register(pubkey, instance, ip)
@@ -761,7 +778,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     except Exception as e:
                         logger.warning("client withdraw failed: %s", e)
 
-    return EventStream(gen())
+    return EventStream(gen(), headers={RELAY_HEADER: "off"} if unhonoured else None)
 
 
 @relay_router.get("/voucher")

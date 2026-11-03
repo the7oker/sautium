@@ -182,7 +182,7 @@ async def _relay_cap_loop() -> None:
     but safe `more than one announcer` (we are one of them while we
     announce; miscounts only delay a cap step by one cycle)."""
     from dht_service import REANNOUNCE_INTERVAL
-    from routers.peer_chat import adapt_relay_cap, relay_has_room
+    from routers.peer_chat import adapt_relay_cap, close_relay_clients, relay_has_room
     from routers.settings import _read
     while True:
         await asyncio.sleep(REANNOUNCE_INTERVAL)
@@ -191,6 +191,7 @@ async def _relay_cap_loop() -> None:
         try:
             if not _read("p2p.relay_enabled"):
                 _dht_service.withdraw_capability("relay")
+                close_relay_clients()
                 continue
             peers = await _dht_service.lookup_capability("relay")
             others = len({(ip, port) for ip, port in peers}) > 1
@@ -294,6 +295,7 @@ async def _serve_p2p(port: int) -> None:
     import ssl
 
     from uvicorn.protocols.http.auto import AutoHTTPProtocol
+    import serving
     from serving import PeerSurfaceConfig, Server, peer_protocol
     from tls_gen import ensure_cert
     from p2p_app import app as peer_app
@@ -318,8 +320,8 @@ async def _serve_p2p(port: int) -> None:
     peer_chat.limit_wake_streams(connections * 3 // 4)
     bounds = dict(head_s=_PEER_HEAD_S, head_max=_PEER_HEAD_MAX, stall_s=_PEER_STALL_S,
                   max_connections=connections)
+    gateway = _default_gateway()
     if settings.p2p_trusted_front:
-        gateway = _default_gateway()
         if gateway is None:
             logger.warning("P2P peer surface on :%d behind a trusted front, but no default "
                            "gateway in /proc/net/route — X-Forwarded-For will be ignored", port)
@@ -342,11 +344,14 @@ async def _serve_p2p(port: int) -> None:
         # serves plain TCP here and never sees the certificate.
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(str(cert_path), str(key_path))
+        # Peers that arrive from the gateway — all of them behind Docker
+        # Desktop's published port — have no per-address share.
+        serving.SHARED_ADDRESSES = frozenset({gateway}) if gateway else frozenset()
         config = PeerSurfaceConfig(
             peer_app, host="0.0.0.0", port=port,
             timeout_graceful_shutdown=_PEER_GRACE_S, timeout_keep_alive=_PEER_KEEPALIVE_S,
-            http=peer_protocol(AutoHTTPProtocol, per_address=_PEER_PER_ADDRESS, tls=tls,
-                               **bounds),
+            http=peer_protocol(AutoHTTPProtocol, per_address=_PEER_PER_ADDRESS,
+                               shared=serving.SHARED_ADDRESSES, tls=tls, **bounds),
         )
     try:
         await Server(config, what="the peer surface").serve()

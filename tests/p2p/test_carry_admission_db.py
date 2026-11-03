@@ -99,6 +99,18 @@ def test_the_carry_limit_is_the_room_left_and_an_owned_gap_is_not_carrying(conn)
     assert _wanted(conn, budget=3, category="track_mbids") == {OWNED}
 
 
+def test_a_carried_tracks_features_and_binding_follow_its_segments_whatever_the_room(conn):
+    with conn.cursor() as cur:                       # PHANTOM's segments came with this carry
+        cur.execute("INSERT INTO analysis_sources (track_id, chromaprint, imported) "
+                    "VALUES (%s, 'AQAA', true) RETURNING id", (PHANTOM,))
+        cur.execute("INSERT INTO embeddings (track_id, model_id, vector, analysis_source_id) "
+                    "VALUES (%s, %s, %s::vector, %s)",
+                    (PHANTOM, MODEL, "[" + ",".join(["0.01"] * 512) + "]", cur.fetchone()[0]))
+    budget = 1                                        # the room is spent: 1 carried of 1
+    assert _wanted(conn, budget=budget, category="audio_features") == {OWNED, PHANTOM}
+    assert _wanted(conn, budget=budget, category="track_mbids") == {OWNED, PHANTOM}
+
+
 def test_a_pushed_binding_names_the_recording_on_this_nodes_tracklist(conn):
     items = [{"track_uuid": OWNED, "recording_mbid": str(uuid.uuid4())},
              {"track_uuid": PHANTOM, "recording_mbid": _recording(conn, PHANTOM)}]

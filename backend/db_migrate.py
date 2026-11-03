@@ -30,6 +30,9 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      The support step (`diag_scrubbed_v1`) scrubs what was kept for support
      before its text was: the node's events, the master's received reports
      (no path, address or email — 2026-11-03).
+     The slice step (`slice_authors_v1`) drops what slices of a key the
+     release does not name left behind, the day a slice came to count only
+     under its author (master_node.SLICE_AUTHORS, 2026-11-03).
 
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
@@ -45,6 +48,7 @@ takes from autovacuum (below); the lifespan runs it in the background.
 
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 from psycopg2 import errors, sql
@@ -169,6 +173,40 @@ def _scrub_support_records(conn) -> dict:
     return counts
 
 
+def _drop_unauthored_slices(conn) -> dict:
+    """The ledger rows that closed a name or an artist on the word of a key
+    the release does not name — asked again, of an author —; the blobs such
+    a key signed, which every requester now refuses (this node's own stay:
+    a dump node's cache); and the LB ledger and data rows under a version no
+    dump has yet, a day ahead or more (lb_slice_queries.plausible_version)
+    — the LB import moves rows forward only, so one such row kept the real
+    numbers out for good. Rows a slice put in the MB tables carry no author,
+    and stay."""
+    from master_node import SLICE_AUTHORS
+    from p2p_identity import resolve_identity
+    authors = [a.lower() for a in SLICE_AUTHORS]
+    own = ((resolve_identity(settings) or {}).get("public_key_hex") or "").lower()
+    keep = authors + ([own] if own else [])
+    horizon = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y%m%d-%H%M%S")
+    counts = {}
+    with conn.cursor() as cur:
+        for table in ("mb_slice_fetches", "lb_slice_fetches"):
+            cur.execute(sql.SQL("DELETE FROM {} WHERE source_pubkey IS NOT NULL"
+                                "   AND lower(source_pubkey) <> ALL(%s::text[])")
+                        .format(sql.Identifier(table)), (authors,))
+            counts[table] = cur.rowcount
+        for table in ("mb_slice_blobs", "lb_slice_blobs"):
+            cur.execute(sql.SQL("DELETE FROM {} WHERE lower(btrim(author_pubkey)) <> ALL(%s::text[])")
+                        .format(sql.Identifier(table)), (keep,))
+            counts[table] = cur.rowcount
+        for table in ("lb_slice_fetches", "lb_slice_blobs", "lb_recording", "lb_artist"):
+            cur.execute(sql.SQL("DELETE FROM {} WHERE dump_version > %s")
+                        .format(sql.Identifier(table)), (horizon,))
+            counts[table] = counts.get(table, 0) + cur.rowcount
+    conn.commit()
+    return counts
+
+
 def _assistant_role(conn) -> None:
     """The cluster administrator's part of the assistant's login
     (desktop/db_init.ASSISTANT_ROLE): the login itself, and large objects
@@ -221,6 +259,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "diag_scrubbed_v1"):
             out["support_records_scrubbed"] = _scrub_support_records(conn)
             _mark(conn, "diag_scrubbed_v1")
+
+        if not _marked(conn, "slice_authors_v1"):
+            out["unauthored_slices_dropped"] = _drop_unauthored_slices(conn)
+            _mark(conn, "slice_authors_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker

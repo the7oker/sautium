@@ -20,8 +20,9 @@ import psycopg2
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
+for _p in (REPO, REPO / "backend"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from desktop.p2p import lb_slice_queries as lb  # noqa: E402
 from desktop.p2p import mb_slice_queries as q  # noqa: E402
@@ -230,3 +231,39 @@ def test_lb_builds_share_the_loaders_lock_among_themselves(conn, dsn):
             lb.get_slice_one(conn, str(uuid.UUID(int=7)), VERSION)
     finally:
         other.close()
+
+
+def test_what_slices_of_an_unnamed_key_left_is_dropped(conn, monkeypatch):
+    import db_migrate
+    import master_node as backend_master
+    import p2p_identity
+    own, stranger = "cd" * 32, "ef" * 32
+    monkeypatch.setattr(backend_master, "SLICE_AUTHORS", (PUB,))
+    monkeypatch.setattr(p2p_identity, "resolve_identity", lambda s: {"public_key_hex": own})
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO mb_slice_fetches (name_key, source_pubkey) VALUES
+                       ('by author', %s), ('by stranger', %s), ('before keys', NULL)""",
+                    (PUB.upper(), stranger))
+        cur.execute("""INSERT INTO lb_slice_fetches (artist_mbid, dump_version, source_pubkey) VALUES
+                       (%s, %s, %s), (%s, %s, %s), (%s, '29991231-000000', %s)""",
+                    (str(uuid.UUID(int=31)), VERSION, PUB, str(uuid.UUID(int=32)), VERSION, stranger,
+                     str(uuid.UUID(int=33)), PUB))
+        for key, signer in (("a", PUB), ("o", own), ("s", stranger)):
+            cur.execute("""INSERT INTO mb_slice_blobs (name_key, dump_version, author_pubkey, sig, blob_gz)
+                           VALUES (%s, %s, %s, %s, '\\x00')""", (key, VERSION, signer, "00" * 64))
+        cur.execute("""INSERT INTO lb_recording (recording_mbid, listen_count, user_count, artist_mbids,
+                                                 dump_version)
+                       VALUES (%s, 1, 1, ARRAY[%s::uuid], '29991231-000000')""",
+                    (str(uuid.UUID(int=34)), str(uuid.UUID(int=7))))
+    db_migrate._drop_unauthored_slices(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT name_key FROM mb_slice_fetches ORDER BY name_key")
+        assert [r[0] for r in cur.fetchall()] == ["before keys", "by author"]
+        cur.execute("SELECT artist_mbid::text FROM lb_slice_fetches")
+        assert [r[0] for r in cur.fetchall()] == [str(uuid.UUID(int=31))]
+        cur.execute("SELECT name_key FROM mb_slice_blobs ORDER BY name_key")
+        assert [r[0] for r in cur.fetchall()] == ["a", "o"]        # the author's and this node's own
+        cur.execute("SELECT count(*) FROM lb_recording WHERE dump_version > '2999'")
+        assert cur.fetchone()[0] == 0
+        cur.execute("DELETE FROM mb_slice_fetches")
+        cur.execute("DELETE FROM lb_slice_fetches")
