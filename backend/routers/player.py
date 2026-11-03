@@ -947,7 +947,8 @@ async def _scan_run():
                     # comes on first contact, at the address the owner gave
                     ep = await asyncio.to_thread(hqp_library.register, *configured)
             except Exception as e:
-                logger.warning("HQPlayer %r at %s could not be registered: %s", facts["name"], host, e)
+                logger.warning("an HQPlayer the scan found could not be registered: %s", e)
+                logger.debug("its address: %s", host)
                 ep = None
             if ep is not None:
                 entry["endpoint_id"] = ep["id"]
@@ -986,7 +987,9 @@ async def _scan_run():
         if mine and any(info["location"] in mine for info in infos):
             elsewhere = [info["location"] for info in infos if info["location"] not in mine]
             if elsewhere:
-                logger.info("%s answers where it is known; not taken at %s", key, ", ".join(elsewhere))
+                logger.info("a renderer the node holds answers where it is known; "
+                            "%d other address(es) claiming it not taken", len(elsewhere))
+                logger.debug("%s not taken at %s", key, ", ".join(elsewhere))
             infos = [info for info in infos if info["location"] in mine]
         reached[key] = [info["location"] for info in infos]
         # A scan finds the device where it is TODAY; whatever we knew about
