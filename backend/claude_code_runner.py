@@ -307,10 +307,12 @@ def _end_assistant_sessions() -> None:
 @functools.lru_cache(maxsize=4)
 def _has_snapshot_switch(claude_exe: str, mtime_ns: int) -> bool:
     """Whether the CLI at `claude_exe` lists the switch; keyed by its mtime,
-    so a CLI updated in place is asked again."""
+    so a CLI updated in place is asked again. One whose --help fails lists
+    nothing: the call itself then says what is wrong with it, through the
+    refusals the call's own answer maps."""
     kwargs = _agent_kwargs()
     kwargs.update(capture_output=True, text=True, encoding="utf-8",
-                  errors="replace", timeout=30, check=True)
+                  errors="replace", timeout=30)
     return _SNAPSHOT_SWITCH in subprocess.run([claude_exe, "--help"], **kwargs).stdout
 
 
