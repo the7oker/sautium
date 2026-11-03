@@ -2332,9 +2332,13 @@ class P2PManager:
         from desktop.p2p.dht_service import REANNOUNCE_INTERVAL
         while self._running:
             await asyncio.sleep(REANNOUNCE_INTERVAL)
+            if self._sync_server and self._read_setting("p2p.relay_enabled") is False:
+                # Off: no slot outlives the switch — one admitted while the
+                # off notice was on its way included (as the Docker loop does).
+                self._sync_server.close_relay_clients()
+                continue
             if not (self._dht_service and self._sync_server
-                    and self._reachability_status == "reachable"
-                    and self._read_setting("p2p.relay_enabled") is not False):
+                    and self._reachability_status == "reachable"):
                 continue
             try:
                 peers = await self._dht_service.lookup_capability("relay")

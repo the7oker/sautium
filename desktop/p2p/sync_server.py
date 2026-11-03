@@ -1513,7 +1513,10 @@ class SyncServer:
 
     def close_relay_clients(self) -> None:
         """End every stream a voucher holds a slot on — the relay switch went
-        off (mirror of backend/routers/peer_chat.close_relay_clients)."""
+        off (mirror of backend/routers/peer_chat.close_relay_clients). The
+        switch's cached reading is off from now: a client that subscribes
+        again inside the cache's 10 s finds it so."""
+        self._relay_on, self._relay_checked = False, time.time()
         for pubkey in list(self._relay_clients):
             self._wake.close(pubkey)
 

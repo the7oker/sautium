@@ -241,3 +241,46 @@ def test_notices_a_query_collected_are_handled_before_the_next_wait(monkeypatch)
     monkeypatch.setattr(sync_walk, "readable", readable)
     asyncio.run(manager._listen_for_db_notifications())
     assert handled == [("report",)] and waits == [0]       # handled first, then the wait
+
+
+def test_the_relay_off_notice_ends_the_slots_and_the_capability(monkeypatch):
+    from desktop.p2p import sync_walk
+    closed, withdrawn = [], []
+    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
+    manager._running, manager._chat_notify, manager._on_identity_rotated_cb = True, None, None
+    manager.db_dsn = "postgresql://unused"
+    manager._sync_server = SimpleNamespace(close_relay_clients=lambda: closed.append(True))
+    manager._dht_service = SimpleNamespace(withdraw_capability=withdrawn.append)
+
+    class _Conn:
+        notifies = [SimpleNamespace(channel="sautium_relay_off", payload="")]
+
+        def set_isolation_level(self, level):
+            pass
+
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql):
+            pass
+
+        def poll(self):
+            pass
+
+        def close(self):
+            pass
+
+    def readable(conn, timeout):
+        manager._running = False
+        return False
+
+    monkeypatch.setattr(p2p_manager.psycopg2, "connect", lambda dsn: _Conn())
+    monkeypatch.setattr(sync_walk, "readable", readable)
+    asyncio.run(manager._listen_for_db_notifications())
+    assert closed == [True] and withdrawn == ["relay"]

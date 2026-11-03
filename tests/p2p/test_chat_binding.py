@@ -477,3 +477,27 @@ def test_the_pass_leaves_a_friend_a_push_is_under_way_for(monkeypatch):
 
     asyncio.run(scene())
     assert pushed == []
+
+
+def test_switching_the_relay_off_is_heard_at_once_on_both_surfaces(monkeypatch):
+    """The settings write ends Docker's slots in process and tells a
+    launcher; the launcher's switch reads off from the close on, inside its
+    cache's 10 s too."""
+    from routers import peer_chat, settings as settings_router
+    written, notified, closed = [], [], []
+    monkeypatch.setattr(settings_router, "_write", lambda k, v: written.append((k, v)))
+    monkeypatch.setattr(settings_router, "db_execute", lambda sql, *a: notified.append(sql))
+    monkeypatch.setattr(settings_router, "_sync_state", lambda: {})
+    monkeypatch.setattr(peer_chat, "close_relay_clients", lambda: closed.append(True))
+    settings_router.put_sync_prefs(settings_router.SyncPrefs(relay_enabled=False))
+    assert written == [("p2p.relay_enabled", False)] and closed == [True]
+    assert notified == ["NOTIFY sautium_relay_off"]
+    server = SyncServer("postgresql://unused")
+    server._relay_on, server._relay_checked = True, time.time()        # read on, just now
+    server.close_relay_clients()
+    assert server._relay_enabled() is False
+
+
+def test_a_cursor_without_its_offset_is_no_cursor():
+    assert chat_wire.history_cursor("2026-11-03T00:00:00|5") is None
+    assert chat_wire.history_cursor("2026-11-03T00:00:00+00:00|5")[1] == 5

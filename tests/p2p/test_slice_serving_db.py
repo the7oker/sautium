@@ -255,6 +255,20 @@ def test_what_slices_of_an_unnamed_key_left_is_dropped(conn, monkeypatch):
                                                  dump_version)
                        VALUES (%s, 1, 1, ARRAY[%s::uuid], '29991231-000000')""",
                     (str(uuid.UUID(int=34)), str(uuid.UUID(int=7))))
+        # What the stranger's slice for artist 32 gave, under a plausible version:
+        # its own recording goes, one credited to artist 31 as well stays.
+        cur.execute("""INSERT INTO lb_artist (artist_mbid, listen_count, user_count, dump_version)
+                       VALUES (%s, 9, 9, %s), (%s, 1, 1, %s)""",
+                    (str(uuid.UUID(int=32)), VERSION, str(uuid.UUID(int=31)), VERSION))
+        cur.execute("""INSERT INTO lb_recording (recording_mbid, listen_count, user_count, artist_mbids,
+                                                 dump_version)
+                       VALUES (%s, 9, 9, ARRAY[%s::uuid], %s), (%s, 9, 9, ARRAY[%s::uuid, %s::uuid], %s)""",
+                    (str(uuid.UUID(int=35)), str(uuid.UUID(int=32)), VERSION,
+                     str(uuid.UUID(int=36)), str(uuid.UUID(int=32)), str(uuid.UUID(int=31)), VERSION))
+        cur.execute("""INSERT INTO lb_slice_blobs (artist_mbid, dump_version, author_pubkey, sig, blob_gz)
+                       VALUES (%s, %s, %s, %s, '\\x00'), (%s, '29991231-000000', %s, %s, '\\x00')""",
+                    (str(uuid.UUID(int=37)), VERSION, stranger, "00" * 64,
+                     str(uuid.UUID(int=38)), PUB, "00" * 64))
     db_migrate._drop_unauthored_slices(conn)
     with conn.cursor() as cur:
         cur.execute("SELECT name_key FROM mb_slice_fetches ORDER BY name_key")
@@ -265,5 +279,14 @@ def test_what_slices_of_an_unnamed_key_left_is_dropped(conn, monkeypatch):
         assert [r[0] for r in cur.fetchall()] == ["a", "o"]        # the author's and this node's own
         cur.execute("SELECT count(*) FROM lb_recording WHERE dump_version > '2999'")
         assert cur.fetchone()[0] == 0
+        cur.execute("SELECT artist_mbid::text FROM lb_artist")
+        assert [r[0] for r in cur.fetchall()] == [str(uuid.UUID(int=31))]
+        cur.execute("SELECT recording_mbid::text FROM lb_recording WHERE recording_mbid IN (%s, %s)",
+                    (str(uuid.UUID(int=35)), str(uuid.UUID(int=36))))
+        assert [r[0] for r in cur.fetchall()] == [str(uuid.UUID(int=36))]
+        cur.execute("SELECT count(*) FROM lb_slice_blobs")
+        assert cur.fetchone()[0] == 0                     # a stranger's, and one a day ahead
         cur.execute("DELETE FROM mb_slice_fetches")
         cur.execute("DELETE FROM lb_slice_fetches")
+        cur.execute("DELETE FROM lb_artist")
+        cur.execute("DELETE FROM lb_recording WHERE recording_mbid = %s", (str(uuid.UUID(int=36)),))

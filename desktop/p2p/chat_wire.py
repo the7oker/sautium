@@ -100,9 +100,10 @@ def history_cursor(value) -> Optional[tuple]:
         return None
     ts, _, row_id = value.partition("|")
     try:
-        return datetime.fromisoformat(ts), int(row_id)
+        at, row = datetime.fromisoformat(ts), int(row_id)
     except ValueError:
         return None
+    return (at, row) if at.tzinfo is not None else None      # the cursors given carry their offset
 
 
 def export_rows(conn, friend_id: int, after: Optional[tuple]) -> list[dict]:
@@ -117,20 +118,29 @@ def export_rows(conn, friend_id: int, after: Optional[tuple]) -> list[dict]:
         # A row's text comes only while the texts before it are under the
         # page's bytes (its ciphertext is larger still, so export_page stops
         # first); the rest come as ids, to say the thread goes on.
+        # Two index paths, each cut to a page — the thread after the cursor
+        # (idx_p2p_messages_thread) and the pending outgoing rows
+        # (idx_p2p_messages_pending) —, so a page costs a page whatever the
+        # planner would make of an OR across them.
         cur.execute("""
             SELECT id, message_uuid, direction, timestamp,
                    CASE WHEN before < %(bytes)s THEN content END AS content
               FROM (SELECT id, message_uuid, direction, content, timestamp,
                            sum(octet_length(content)) OVER (ORDER BY timestamp, id)
                                - octet_length(content) AS before
-                      FROM (SELECT id, message_uuid, direction, content, timestamp
-                              FROM p2p_messages
-                             WHERE friend_id = %(f)s
-                               AND (%(ts)s::timestamptz IS NULL
-                                    OR (timestamp, id) > (%(ts)s::timestamptz, %(id)s)
-                                    OR (direction = 'out' AND delivered = FALSE))
-                             ORDER BY timestamp, id
-                             LIMIT %(n)s) thread) page
+                      FROM (SELECT * FROM (
+                                (SELECT id, message_uuid, direction, content, timestamp
+                                   FROM p2p_messages
+                                  WHERE friend_id = %(f)s
+                                    AND (%(ts)s::timestamptz IS NULL
+                                         OR (timestamp, id) > (%(ts)s::timestamptz, %(id)s))
+                                  ORDER BY timestamp, id LIMIT %(n)s)
+                                UNION
+                                (SELECT id, message_uuid, direction, content, timestamp
+                                   FROM p2p_messages
+                                  WHERE friend_id = %(f)s AND direction = 'out' AND delivered = FALSE
+                                  ORDER BY timestamp, id LIMIT %(n)s)) both_paths
+                             ORDER BY timestamp, id LIMIT %(n)s) thread) page
              ORDER BY timestamp, id
         """, {"f": friend_id, "ts": ts, "id": row_id, "n": HISTORY_EXPORT_MAX + 1,
               "bytes": HISTORY_EXPORT_BYTES})

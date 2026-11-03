@@ -525,6 +525,57 @@ def test_a_head_sent_while_the_last_answer_runs_is_bounded_too(head_server):
     assert _until(2, lambda: census.open == 0)
 
 
+def test_a_websocket_upgrade_is_an_ordinary_request_and_gives_its_place_back(head_server):
+    """No WebSocket on the peer protocol: an upgrade would take the transport
+    from it, and its census entry with it."""
+    import base64
+    port, census = head_server
+    nonce = base64.b64encode(bytes(16))                 # the 16-byte nonce an upgrade names
+    upgrade = (b"GET / HTTP/1.1\r\nHost: peer\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+               b"Sec-WebSocket-Key: " + nonce + b"\r\nSec-WebSocket-Version: 13\r\n\r\n")
+    for _ in range(3):
+        with socket.create_connection(("127.0.0.1", port)) as asking:
+            asking.sendall(upgrade)
+            asking.settimeout(3)
+            assert asking.recv(1024).startswith(b"HTTP/1.1 200")      # answered as the request it is
+    assert _until(3, lambda: census.open == 0)
+
+
+def test_a_steady_reader_near_the_floor_is_kept(head_server):
+    """The kernel's send buffer is kept small (TCP_NOTSENT_LOWAT): grown to
+    megabytes, it moved the transport's buffer in steps a steady 256 KiB/s
+    reader took longer than a window to empty."""
+    port, census = head_server
+    with socket.socket() as reader:
+        reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024)
+        reader.connect(("127.0.0.1", port))
+        reader.sendall(b"GET /big HTTP/1.1\r\nHost: peer\r\nConnection: close\r\n\r\n")
+        reader.settimeout(5)
+        got, until = 0, time.monotonic() + 4 * BOUNDS["stall_s"] / 0.5   # many windows
+        while time.monotonic() < until:
+            data = reader.recv(8 * 1024)
+            assert data, "cut while reading steadily"
+            got += len(data)
+            time.sleep(8 * 1024 / (256 * 1024))
+        assert census.open == 1 and got > 512 * 1024
+
+
+def test_what_the_connections_owe_is_counted_and_bounds_a_bulk_answer(head_server, monkeypatch):
+    port, census = head_server
+    deaf = socket.socket()
+    deaf.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    deaf.connect(("127.0.0.1", port))
+    deaf.sendall(b"GET /big HTTP/1.1\r\nHost: peer\r\n\r\n")
+    try:
+        assert _until(2, lambda: serving.owed_bytes() > 1024 * 1024)
+        assert _until(5, lambda: serving.owed_bytes() == 0)        # let go, its answer freed
+    finally:
+        deaf.close()
+    monkeypatch.setattr(serving, "owed_bytes", lambda: sync.OWED_MAX + 1)
+    answer = asyncio.run(sync._answer(_request(), lambda: {"never": "made"}))
+    assert answer.status_code == 503 and answer.headers["retry-after"] == "30"
+
+
 def test_one_address_holds_a_few_connections(head_server):
     port, census = head_server
     held = [socket.create_connection(("127.0.0.1", port)) for _ in range(BOUNDS["per_address"])]

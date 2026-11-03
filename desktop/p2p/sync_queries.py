@@ -771,20 +771,30 @@ def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
     if not recording_mbids or budget <= 0:
         return empty
     room = budget - count_carried_tracks(conn)
-    if room <= 0:
-        return empty
 
     mbids = recording_mbids[:CARRY_MAX_TRACKS]
     # The phantom layer is the owner's switch: off, only owned tracks are
-    # wanted — their gap-fill is the node's own library.
+    # wanted — their gap-fill is the node's own library. As a push is judged
+    # (wanted_for_push): a phantom carried here already is wanted whatever
+    # the room — what it lacks adds nothing to carry —, and the room is for
+    # phantoms not carried yet.
     matched = db_query(
         conn,
-        """SELECT DISTINCT at2.track_id::text AS track_uuid
-             FROM unnest(%s::uuid[]) AS o(mbid)
-             JOIN album_tracks at2 ON at2.recording_mbid = o.mbid
-            WHERE %s OR EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = at2.track_id)
-            LIMIT %s""",
-        [mbids, phantom_layer_on(conn), room],
+        """WITH m AS (SELECT DISTINCT at2.track_id
+                        FROM unnest(%(m)s::uuid[]) AS o(mbid)
+                        JOIN album_tracks at2 ON at2.recording_mbid = o.mbid),
+                c AS (SELECT m.track_id,
+                             EXISTS (SELECT 1 FROM owned_files f
+                                      WHERE f.track_id = m.track_id) AS owned,
+                             EXISTS (SELECT 1 FROM embeddings e
+                                       JOIN analysis_sources s ON s.id = e.analysis_source_id
+                                      WHERE e.track_id = m.track_id AND s.imported) AS carried
+                        FROM m)
+           SELECT track_id::text AS track_uuid FROM c WHERE owned OR (carried AND %(p)s)
+           UNION ALL
+           (SELECT track_id::text FROM c WHERE NOT owned AND NOT carried AND %(p)s
+             ORDER BY track_id LIMIT %(room)s)""",
+        {"m": mbids, "p": phantom_layer_on(conn), "room": max(room, 0)},
     )
     uuids = [r["track_uuid"] for r in matched]
     if not uuids:

@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import ssl
 import sys
 import threading
@@ -289,6 +290,32 @@ def is_shared(addr) -> bool:
     return addr in SHARED_ADDRESSES
 
 
+# What the kernel keeps unsent on a peer connection before it asks for more
+# (TCP_NOTSENT_LOWAT, Linux's option 25): its send buffer would otherwise
+# grow to megabytes and wake the writer a third of it at a time — the drain
+# watch would see a steady slow reader take nothing for a window and cut it.
+_NOTSENT_LOWAT = 64 * 1024
+_TCP_NOTSENT_LOWAT = 25
+
+
+def _small_send_buffer(transport) -> None:
+    if sys.platform == "linux":
+        transport.get_extra_info("socket").setsockopt(
+            socket.IPPROTO_TCP, _TCP_NOTSENT_LOWAT, _NOTSENT_LOWAT)
+
+
+# The peer connections that owe their peer something now — what owed_bytes
+# sums (on the loop, so no lock).
+_OWING: set = set()
+
+
+def owed_bytes() -> int:
+    """What this node's peer connections hold for their peers, written and
+    not yet taken: a bulk answer is not made past a ceiling of it
+    (routers/sync._answer)."""
+    return sum(c._unsent() for c in _OWING)
+
+
 # The least a peer must take of what is owed it, in bytes a second, measured
 # over each stall_s: a link slower than this holds its answer, buffered here,
 # for as long as the answer takes.
@@ -333,6 +360,7 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
       it freed; one reading slowly but steadily gets the whole of it — a
       close waits for it, under TLS too (no shutdown timeout of its own
       cuts it) —, and a close whose answer is out ends within `stall_s`;
+      what all of them owe together is owed_bytes();
     - at most `max_connections` at once and `per_address` from any one
       address (None behind a trusted front, where every connection is the
       front's; none for a `shared` one); one past either is closed before a
@@ -343,10 +371,11 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
     - no access line — a peer's address and the text of a search it sent
       are not this node's log; the contact log keeps what the defences
       need, for 30 days (desktop/p2p/contact_log.py) — and no WebSocket:
-      the surface has no WebSocket route, and uvicorn's WebSocket protocol
+      the surface has no WebSocket route, uvicorn's WebSocket protocol
       logs each handshake with the asker's address and the path it asked
-      for, query and all. An upgrade is answered as the plain request it
-      also is.
+      for, query and all, and an upgrade would hand the transport to it,
+      away from the census. An upgrade is answered as the plain request it
+      also is: a connection is this protocol's to its end.
 
     A request in progress, a long event stream included, is never cut by
     the head clock."""
@@ -363,6 +392,8 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.access_log = False
+            # An upgraded connection's connection_lost is another protocol's:
+            # this one's census entry would stay taken for good
             self.ws_protocol_class = None
 
         def _unsupported_upgrade_warning(self) -> None:
@@ -384,6 +415,7 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
                     transport.abort()
                     return
                 self._addr = addr
+                _small_send_buffer(transport)
             self._arm_head()
             early, self._early = self._early, None
             for data in early or ():
@@ -439,6 +471,7 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
             if self._watch_timer is None and (self._unsent() or self._app.is_closing()):
                 self._owed, self._written, self._out = self._unsent(), 0, False
                 self._watch_timer = self.loop.call_later(stall_s, self._watch)
+                _OWING.add(self)
 
         def _watch(self) -> None:
             """Every stall_s while something is owed or a close is under way:
@@ -450,22 +483,27 @@ def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
             if left and owed - left < min(DRAIN_FLOOR * stall_s, owed):
                 logger.info("connection aborted: its peer took under %d bytes a second for %s s",
                             DRAIN_FLOOR, stall_s)
+                _OWING.discard(self)
                 self._app.abort()
                 return
             if not left and self._app.is_closing():
                 if self._out:
+                    _OWING.discard(self)
                     self._app.abort()
                     return
                 self._out = True
             if left or self._app.is_closing():
                 self._owed, self._written = left, 0
                 self._watch_timer = self.loop.call_later(stall_s, self._watch)
+            else:
+                _OWING.discard(self)
 
         def connection_lost(self, exc) -> None:
             if self.transport is None:
                 self._lost = True
                 return
             self._gone = True
+            _OWING.discard(self)
             self._disarm_head()
             if self._watch_timer is not None:
                 self._watch_timer.cancel()
@@ -520,6 +558,7 @@ class _TLSAcceptor(asyncio.Protocol):
         if not self._census.admit(addr):
             transport.abort()
             return
+        _small_send_buffer(transport)
         transport.pause_reading()            # the first bytes are the handshake's
         self._task = asyncio.get_running_loop().create_task(self._handshake(transport, addr))
 

@@ -111,6 +111,31 @@ def test_a_carried_tracks_features_and_binding_follow_its_segments_whatever_the_
     assert _wanted(conn, budget=budget, category="track_mbids") == {OWNED, PHANTOM}
 
 
+def test_an_offer_wants_a_carried_tracks_gaps_whatever_the_room(conn):
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO analysis_sources (track_id, chromaprint, imported) "
+                    "VALUES (%s, 'AQAA', true) RETURNING id", (PHANTOM,))
+        cur.execute("INSERT INTO embeddings (track_id, model_id, vector, analysis_source_id) "
+                    "VALUES (%s, %s, %s::vector, %s)",
+                    (PHANTOM, MODEL, "[" + ",".join(["0.01"] * 512) + "]", cur.fetchone()[0]))
+    mbids = [_recording(conn, t) for t in (OWNED, PHANTOM)]
+    wanted = sync_queries.wanted_tracks(conn, mbids, 1)            # the room is spent
+    assert set(wanted["audio_features"]) == {OWNED, PHANTOM}
+
+
+def test_with_the_phantom_layer_off_the_walk_asks_engaged_tracks_alone(conn, scratch_dsn):
+    artist = str(uuid.UUID(int=701))
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'B') ON CONFLICT DO NOTHING", (artist,))
+        for tid in (OWNED, PHANTOM, ANALYSED):
+            cur.execute("INSERT INTO track_artists (track_id, artist_id, role) VALUES (%s, %s, 'primary')",
+                        (tid, artist))
+        cur.execute("""INSERT INTO listening_history (track_id, started_at, completed, skipped)
+                       VALUES (%s, now(), true, false)""", (PHANTOM,))
+    assert set(sync_walk.tracks_for_artists(scratch_dsn, [artist])) == {OWNED, PHANTOM, ANALYSED}
+    assert set(sync_walk.tracks_for_artists(scratch_dsn, [artist], engaged_only=True)) == {OWNED, PHANTOM}
+
+
 def test_a_pushed_binding_names_the_recording_on_this_nodes_tracklist(conn):
     items = [{"track_uuid": OWNED, "recording_mbid": str(uuid.uuid4())},
              {"track_uuid": PHANTOM, "recording_mbid": _recording(conn, PHANTOM)}]

@@ -175,13 +175,13 @@ def _scrub_support_records(conn) -> dict:
 
 def _drop_unauthored_slices(conn) -> dict:
     """The ledger rows that closed a name or an artist on the word of a key
-    the release does not name — asked again, of an author —; the blobs such
-    a key signed, which every requester now refuses (this node's own stay:
-    a dump node's cache); and the LB ledger and data rows under a version no
-    dump has yet, a day ahead or more (lb_slice_queries.plausible_version)
-    — the LB import moves rows forward only, so one such row kept the real
-    numbers out for good. Rows a slice put in the MB tables carry no author,
-    and stay."""
+    the release does not name — asked again, of an author — with the LB
+    numbers such a key gave; the blobs such a key signed, which every
+    requester now refuses (this node's own stay: a dump node's cache); and
+    the LB ledger and data rows under a version no dump has yet, a day ahead
+    or more (lb_slice_queries.plausible_version) — the LB import moves rows
+    forward only, so one such row kept the real numbers out for good. Rows a
+    slice put in the MB tables carry no author, and stay."""
     from master_node import SLICE_AUTHORS
     from p2p_identity import resolve_identity
     authors = [a.lower() for a in SLICE_AUTHORS]
@@ -190,6 +190,19 @@ def _drop_unauthored_slices(conn) -> dict:
     horizon = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y%m%d-%H%M%S")
     counts = {}
     with conn.cursor() as cur:
+        # A non-author's LB numbers first, while its ledger rows still name
+        # the artists: the import moves rows forward only, so a stranger's
+        # row under a newer version would keep the author's out when the
+        # artist is asked again. A recording credited to anyone else too
+        # stays — its other artist's slice is not asked again.
+        cur.execute("SELECT artist_mbid FROM lb_slice_fetches WHERE source_pubkey IS NOT NULL"
+                    "   AND lower(source_pubkey) <> ALL(%s::text[])", (authors,))
+        strangers = [r[0] for r in cur.fetchall()]
+        cur.execute("DELETE FROM lb_artist WHERE artist_mbid = ANY(%s::uuid[])", (strangers,))
+        counts["lb_artist"] = cur.rowcount
+        cur.execute("DELETE FROM lb_recording WHERE cardinality(artist_mbids) > 0"
+                    "   AND artist_mbids <@ %s::uuid[]", (strangers,))
+        counts["lb_recording"] = cur.rowcount
         for table in ("mb_slice_fetches", "lb_slice_fetches"):
             cur.execute(sql.SQL("DELETE FROM {} WHERE source_pubkey IS NOT NULL"
                                 "   AND lower(source_pubkey) <> ALL(%s::text[])")

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import record_sig
@@ -107,10 +107,21 @@ def _requester(request: Request) -> Optional[str]:
     return None if is_shared(addr) else addr
 
 
+# What the peer connections may hold for their peers together before a bulk
+# answer waits (serving.owed_bytes): each reader above the floor keeps its
+# whole answer buffered for as long as it reads, and the sum had no bound.
+OWED_MAX = 256 * 1024 * 1024
+
+
 async def _answer(request: Request, run) -> Response:
     """`run()`'s answer, made on the peer lane with the work that produced
     it (wire.render): a bulk answer is tens of MB, and its JSON and gzip on
-    the loop held every other request meanwhile, the Web UI's too."""
+    the loop held every other request meanwhile, the Web UI's too. Not made
+    while the peer connections owe their peers OWED_MAX: a 503 that says
+    when to come back (requesters wait on it)."""
+    from serving import owed_bytes
+    if owed_bytes() > OWED_MAX:
+        return JSONResponse({"detail": "busy"}, status_code=503, headers={"Retry-After": "30"})
     gzip_ok = "gzip" in request.headers.get("accept-encoding", "")
     body, encoding = await in_peer_lane(lambda: wire.render(run(), gzip_ok))
     return Response(body, media_type="application/json",
