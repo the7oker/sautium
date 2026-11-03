@@ -404,8 +404,14 @@ LOGGING_CONFIG = {
             "propagate": False,
         },
         # httpx names every request's whole URL at INFO: an address being
-        # verified, a search, a lookup's artist and title.
+        # verified, a search, a lookup's artist and title. So do the clients
+        # under other lookups: lyricsgenius the title and artist it searches
+        # (INFO, WARNING), urllib3 a retried request's URL (WARNING), pylast
+        # each method it calls — a scrobble's moment — (INFO).
         "httpx": {"level": "WARNING"},
         "httpcore": {"level": "WARNING"},
+        "lyricsgenius": {"level": "ERROR"},
+        "urllib3": {"level": "ERROR"},
+        "pylast": {"level": "WARNING"},
     },
 }

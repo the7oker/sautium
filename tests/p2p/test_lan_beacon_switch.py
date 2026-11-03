@@ -250,11 +250,17 @@ def test_the_probe_keeps_what_a_sibling_says_of_its_switch(monkeypatch, said, na
     assert lan._local_node_ports() == ([port] if named else [])
 
 
-def test_a_sibling_that_stops_answering_is_named_no_more(monkeypatch):
+@pytest.mark.parametrize("answer", [None, {"type": "something-else", "sharing": True}],
+                         ids=["no answer", "not a node's answer"])
+def test_a_sibling_that_stops_answering_as_a_node_is_named_no_more(monkeypatch, answer):
     monkeypatch.setattr(lan_discovery, "BEACON_INTERVAL", 0.01)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), type("Handler", (_Health,), {"said": {}}))
+    handler = type("Foreign", (_Health,), {"do_GET": _answer_with(answer or {})})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     port = server.server_address[1]
-    server.server_close()                       # nothing answers there
+    if answer is None:
+        server.server_close()                   # nothing answers there
+    else:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
     lan = LANDiscovery(sync_port=24001, node_id=NODE, localhost_probe_ports=[port])
     _sibling(lan, port, sharing=True)
     lan._running = True
@@ -265,8 +271,42 @@ def test_a_sibling_that_stops_answering_is_named_no_more(monkeypatch):
         lan._running = False
         await asyncio.wait_for(task, 30)
 
-    asyncio.run(one_round())
+    try:
+        asyncio.run(one_round())
+    finally:
+        if answer is not None:
+            server.shutdown()
+            server.server_close()
     assert lan._local_node_ports() == []
+
+
+def _answer_with(body: dict):
+    def do_GET(self):
+        raw = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(raw)
+    return do_GET
+
+
+def test_a_read_of_the_switch_begun_before_it_moved_is_not_kept(monkeypatch):
+    from routers import settings as settings_router
+    from routers import sync
+    reads = []
+
+    def read(key):
+        reads.append(key)
+        if len(reads) == 1:
+            sync.sharing_changed()              # the owner's write lands meanwhile
+            return True                         # what the switch said before it
+        return False
+
+    monkeypatch.setattr(settings_router, "_read", read)
+    monkeypatch.setattr(sync, "_sharing_cache", (0.0, True))
+    assert sync.sharing_enabled() is True       # the read in flight answers its own question
+    assert sync.sharing_enabled() is False      # and is not kept: the next one reads again
+    assert len(reads) == 2
 
 
 def test_a_docker_node_says_in_its_health_whether_its_owner_shares(scratch_dsn, monkeypatch,

@@ -57,6 +57,8 @@ SEGMENTS_MAX_UUIDS = 500
 # a settings query.
 _SHARING_TTL = 10.0
 _sharing_cache: tuple[float, bool] = (0.0, True)
+# Moved on by every change of the switch: a read begun before one is not kept
+_sharing_generation = 0
 
 
 def sharing_enabled() -> bool:
@@ -66,20 +68,23 @@ def sharing_enabled() -> bool:
     ts, val = _sharing_cache
     if now - ts < _SHARING_TTL:
         return val
+    generation = _sharing_generation
     try:
         from routers.settings import _read
         val = bool(_read("sync.p2p_enabled"))
     except Exception as e:                       # settings unreadable: fail closed
         logger.warning(f"sharing flag unreadable ({e}) — refusing to serve")
         val = False
-    _sharing_cache = (now, val)
+    if generation == _sharing_generation:
+        _sharing_cache = (now, val)
     return val
 
 
 def sharing_changed() -> None:
     """The owner moved the switch (routers/settings.put_sync_prefs): serving,
     and what /health says of it, follow at once — not at the cache's expiry."""
-    global _sharing_cache
+    global _sharing_cache, _sharing_generation
+    _sharing_generation += 1
     _sharing_cache = (0.0, True)
 
 

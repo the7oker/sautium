@@ -412,12 +412,12 @@ class LANDiscovery:
                                 )
                                 if self._on_new_peer:
                                     self._on_new_peer("127.0.0.1", port)
-                        break
+                            break
                     except Exception:
                         continue
                 else:
-                    # No answer: what the sibling said before no longer holds,
-                    # and a beacon names it only on its word
+                    # No node's answer: what the sibling said before no longer
+                    # holds, and a beacon names it only on its word
                     known = self._peers.get(("127.0.0.1", port))
                     if known is not None:
                         known["sharing"] = False

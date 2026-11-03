@@ -114,6 +114,11 @@ class PeerSurfaceConfig(uvicorn.Config):
                 super().__init__(*args, **kwargs)
                 self.access_log = False
 
+            def _unsupported_upgrade_warning(self) -> None:
+                # Anyone may ask this surface for an upgrade; answered as a
+                # plain request, it warns of nothing here
+                self.logger.debug("Unsupported upgrade request.")
+
         self.http_protocol_class = WithoutAccessLine
 
 

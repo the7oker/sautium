@@ -77,7 +77,8 @@ async def main():
 
 body = asyncio.run(main())
 print(json.dumps({"body": body.decode(), "kept": kept, "access_lines": lines,
-                  "upgrade_said": [l for l in said if "private" in l or '"WebSocket ' in l]}))
+                  "upgrade_said": [l for l in said if "private" in l or "WebSocket" in l
+                                   or "upgrade" in l]}))
 """
 
 

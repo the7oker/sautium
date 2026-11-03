@@ -35,10 +35,15 @@ logging.getLogger("uvicorn.access").info(
 logging.getLogger("httpx").info(
     'HTTP Request: GET https://example.org/check-email?email=someone%%40example.com "HTTP/1.1 200 OK"')
 logging.getLogger("httpx").warning("httpx warns: kept")
+logging.getLogger("lyricsgenius.genius").info('Searching for "A Private Title" by A Private Artist...')
+logging.getLogger("lyricsgenius.genius").warning("No results found for: 'A Private Title'")
+logging.getLogger("urllib3.connectionpool").warning(
+    "Retrying (%%r) after connection broken by '%%r': %%s", 2, "reset", "/search?q=A+Private+Title")
+logging.getLogger("pylast").info("track.scrobble")
 """
 
 
-def test_the_access_line_keeps_no_query_and_httpx_names_no_url_at_info():
+def test_the_access_line_keeps_no_query_and_no_client_names_a_lookup():
     proc = subprocess.run([sys.executable, "-c", DRIVER % {"backend": str(BACKEND)}],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
@@ -46,6 +51,7 @@ def test_the_access_line_keeps_no_query_and_httpx_names_no_url_at_info():
     assert '"GET /api/discovery/search HTTP/1.1" 200' in out
     assert "private" not in out and "abc123" not in out
     assert "someone" not in out and "httpx warns: kept" in out
+    assert "Private" not in out and "track.scrobble" not in out
 
 
 def test_a_listen_logs_no_title_at_info(monkeypatch, caplog):
@@ -110,12 +116,30 @@ def _names_content(node: ast.AST, fmt: ast.AST = None, built: frozenset = frozen
                for sub in ast.walk(node))
 
 
+def _carries_content(value: ast.AST) -> bool:
+    """Whether an expression is content itself, or text built from it — not
+    the result of a call that was handed some."""
+    if isinstance(value, ast.JoinedStr):
+        return _names_content(value)
+    if isinstance(value, ast.BinOp):
+        return _carries_content(value.left) or _carries_content(value.right)
+    if isinstance(value, ast.BoolOp):
+        return any(_carries_content(v) for v in value.values)
+    if isinstance(value, ast.Call):
+        name = getattr(value.func, "attr", getattr(value.func, "id", None))
+        return name in _BARE_NAME_CALLS or name == "format" and _names_content(value)
+    return isinstance(value, (ast.Attribute, ast.Name, ast.Subscript)) and _names_content(value)
+
+
 def _built_from_content(fn: ast.AST) -> frozenset:
-    """The variables a function assigns an f-string naming content."""
-    return frozenset(t.id for node in ast.walk(fn) if isinstance(node, ast.Assign)
-                     and any(isinstance(s, ast.JoinedStr) and _names_content(s)
-                             for s in ast.walk(node.value))
-                     for t in node.targets if isinstance(t, ast.Name))
+    """The variables a function assigns content: an f-string, a
+    concatenation or a `.format` naming it, a title itself, a file's base
+    name."""
+    return frozenset(t.id for node in ast.walk(fn)
+                     if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None
+                     and _carries_content(node.value)
+                     for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                     if isinstance(t, ast.Name))
 
 
 def _content_logged(path: Path) -> list:

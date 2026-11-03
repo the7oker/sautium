@@ -508,7 +508,8 @@ def _fetch_lyrics_batch(
                         found = True
                     time.sleep(0.1)
                 except Exception as e:
-                    logger.warning(f"LRCLIB failed for {row.artist} - {row.title}: {e}")
+                    logger.warning("LRCLIB failed: %s", type(e).__name__)
+                    logger.debug(f"LRCLIB failed for {row.artist} - {row.title}: {e}")
                     failed = True
 
             if not found and genius_ok:
@@ -523,7 +524,8 @@ def _fetch_lyrics_batch(
                         found = True
                     time.sleep(1.0)
                 except Exception as e:
-                    logger.warning(f"Genius failed for {row.artist} - {row.title}: {e}")
+                    logger.warning("Genius failed: %s", type(e).__name__)
+                    logger.debug(f"Genius failed for {row.artist} - {row.title}: {e}")
                     failed = True
 
             if found:

@@ -240,6 +240,21 @@ def test_a_report_is_kept_scrubbed_on_the_master():
     ("cue '/music/A/B/Some Album.cue', cover /music/A/B/Some Album.jpg",
      "cue '…/[name].cue', cover …/[name].jpg"),
     ('File "/app/backend/main.py", line 12', 'File "…/main.py", line 12'),
+    # An apostrophe in a name — Python then quotes the path with `"` —, a
+    # colon in a folder's name, the extended-length prefix
+    ("local file not found: /music/Some Artist/Some Album/05 Someone's Song.flac",
+     "local file not found: …/[name].flac"),
+    ('No such file or directory: "/music/Some Artist/Some Album/05 Someone\'s Song.flac"',
+     'No such file or directory: "…/[name].flac"'),
+    ("/music/Some N' Band/Some Album/01 Some Title.flac", "…/[name].flac"),
+    ("kept before: …/05 Someone's Song.flac", "kept before: …/[name].flac"),
+    ("add of file:///E:/Music/Some Artist/Some Album/05 Someone's Song.flac — no",
+     "add of file://[path] — no"),
+    ('File "C:\\Users\\Some O\'Name\\AppData\\Local\\x\\main.py", line 12', 'File "…/main.py", line 12'),
+    ("/music/Some Artist/Some Album (Deluxe: Remastered)/05 Some Song Title.flac failed",
+     "…/[name].flac failed"),
+    (r"open \\?\E:\Music\Some Artist\Some Album\05 Some Title.flac now", "open …/[name].flac now"),
+    ("it's '/home/x/y.box' and 'z'", "it's '…/y.box' and 'z'"),
 ])
 def test_scrub_personal_cases(text, scrubbed):
     assert dp.scrub_personal(text) == scrubbed
@@ -285,6 +300,8 @@ def test_a_server_name_with_no_end_is_scrubbed_in_linear_time(text):
     "file://" + "a " * (1 << 15), "file:///E:/" + "a:" * (1 << 15),
     "\\\\?\\C:\\Users\\" + "a" * (1 << 16), "/mnt/c/Users/" + "a " * (1 << 15),
     "x.local:" * (1 << 13), "a." * (1 << 15) + "local",
+    "'/music/a" + ".flac" * (1 << 13) + "!'", "/music/a/" + "b.flac." * (1 << 13),
+    '"/music/' + "a'" * (1 << 15), "/music/" + "a:" * (1 << 15),
 ])
 def test_a_long_run_of_any_shape_is_scrubbed_in_linear_time(text):
     import time
