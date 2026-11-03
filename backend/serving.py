@@ -296,12 +296,24 @@ def is_shared(addr) -> bool:
 # watch would see a steady slow reader take nothing for a window and cut it.
 _NOTSENT_LOWAT = 64 * 1024
 _TCP_NOTSENT_LOWAT = 25
+_lowat_refused = False
 
 
 def _small_send_buffer(transport) -> None:
-    if sys.platform == "linux":
+    """The option on a connection just accepted. A kernel that refuses it
+    (it has had it since 3.13) costs the connection nothing — said once:
+    the drain watch then measures what the kernel's buffer takes, in its
+    steps."""
+    global _lowat_refused
+    if sys.platform != "linux" or _lowat_refused:
+        return
+    try:
         transport.get_extra_info("socket").setsockopt(
             socket.IPPROTO_TCP, _TCP_NOTSENT_LOWAT, _NOTSENT_LOWAT)
+    except OSError as e:
+        _lowat_refused = True
+        logger.warning("the kernel refuses TCP_NOTSENT_LOWAT (%s): a steady slow peer "
+                       "may be let go as stalled", e)
 
 
 # The peer connections that owe their peer something now — what owed_bytes

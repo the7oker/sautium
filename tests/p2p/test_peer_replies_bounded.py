@@ -335,6 +335,17 @@ def test_a_refusal_that_says_when_to_come_back_is_a_wait_not_a_failure(peer):
     assert _client(peer)._post_json("/api/mb/slice", {"names": ["Sade"]})["retry_after"] == 5
 
 
+def test_a_holdings_refusal_that_says_when_names_its_wait_as_a_posts_does(peer):
+    def busy(h):
+        _send(h, b'{"detail": "busy"}', status=503, headers=[("Retry-After", "30")])
+
+    peer.answers["/api/sync/holdings"] = busy
+    client = _client(peer)
+    assert client.sync_holdings()["retry_after"] == 30
+    peer.answers["/api/sync/holdings"] = lambda h: _send(h, b'{"detail": "down"}', status=500)
+    assert client.sync_holdings() is None and client.last_retry_after is None
+
+
 def test_lone_surrogates_are_neither_logged_nor_served():
     from desktop.p2p import contact_log
     assert contact_log._target("Sa\ud800de", 64) == "sade"

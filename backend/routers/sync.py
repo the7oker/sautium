@@ -107,9 +107,11 @@ def _requester(request: Request) -> Optional[str]:
     return None if is_shared(addr) else addr
 
 
-# What the peer connections may hold for their peers together before a bulk
-# answer waits (serving.owed_bytes): each reader above the floor keeps its
-# whole answer buffered for as long as it reads, and the sum had no bound.
+# What the peer connections may hold for their peers together before a new
+# bulk answer waits (serving.owed_bytes): each reader above the floor keeps
+# its whole answer buffered for as long as it reads, and the sum had no
+# bound. A ceiling on starting, not a cap: answers already being made count
+# once written, so ones begun together can pass it.
 OWED_MAX = 256 * 1024 * 1024
 
 

@@ -290,6 +290,27 @@ class SyncClient:
         self._progress(f"Sync complete. Imported {total} items across {len(stats)} categories.")
         return stats
 
+    def _ask(self, ask: Callable[[], Optional[dict]], key: str, what: str) -> Optional[dict]:
+        """`ask()`'s answer when it holds `key`, asked at most twice: again
+        after the wait a busy or rate-limited peer names (its Retry-After,
+        120 s at most — retrying sooner lands inside the same window), else
+        after 2 s. A refusal under load is a wait, and a failure is mostly
+        transient — a TLS handshake interrupted, an HMAC timestamp drifting
+        in a CPU stall, a keep-alive race —: neither ends the run's step."""
+        for attempt in (1, 2):
+            answer = ask()
+            if answer and key in answer:
+                return answer
+            if attempt == 1:
+                wait = 2
+                if answer and answer.get("retry_after"):
+                    wait = min(int(answer["retry_after"]), 120)
+                    logger.info(f"{what}: the peer is busy, re-asking in {wait}s")
+                else:
+                    logger.warning(f"{what} failed (attempt 1), retrying in {wait}s")
+                time.sleep(wait)
+        return None
+
     def _fetch_inventory(self, track_uuids: list[str]) -> Optional[dict]:
         """Inventory in ≤INVENTORY_CHUNK slices, merged: chunks are disjoint
         track sets, so list values concatenate."""
@@ -298,8 +319,9 @@ class SyncClient:
         merged: dict = {k: [] for k in EMPTY_INVENTORY}
         for i, tracks in enumerate(requests, 1):
             t0 = time.monotonic()
-            part = self.api.sync_inventory(tracks)
-            if not part or "tracks" not in part:
+            part = self._ask(lambda: self.api.sync_inventory(tracks), "tracks",
+                             f"Inventory {i}/{len(requests)}")
+            if part is None:
                 return None
             asked = set(tracks)
             for k, v in part.items():
@@ -342,8 +364,10 @@ class SyncClient:
                         f"  {len(tracks)} track gaps weigh less than the "
                         f"peer's filter — asking directly")
                     return self._fetch_inventory(tracks)
-            payload = self.api.sync_holdings(cached["version"] if cached else None)
-            if not payload or "version" not in payload:
+            payload = self._ask(
+                lambda: self.api.sync_holdings(cached["version"] if cached else None),
+                "version", "Holdings")
+            if payload is None:
                 self._progress("  holdings request failed")
                 return None
             if payload.get("unchanged") and cached:
@@ -462,18 +486,10 @@ class SyncClient:
     def _pull_and_import_category(
         self, cat_key: str, pull_endpoint: str, uuids: list[str]
     ) -> int:
-        """Pull and import a single category in batches.
-
-        Each batch is retried once after a 2s backoff. Empirically pull
-        failures on localhost are transient — TLS handshake interrupts,
-        gzip-middleware boundary cases on large audio_features payloads
-        (the instruments+moods JSONB columns blow up the wire size),
-        HMAC timestamp drift during a CPU stall, or uvicorn keepalive
-        races. A single retry catches the bulk of them; persistent
-        failure logs a warning and the broader incomplete-artist sync
-        flow will pick up the gap on the next pass.
-        """
-        import time
+        """Pull and import a single category in batches, each asked as
+        `_ask` asks; a batch that fails twice logs a warning, and the
+        broader incomplete-artist sync flow picks up the gap on the next
+        pass."""
         total_imported = 0
         batch_size = (SEGMENT_PULL_BATCH if cat_key == "segments"
                       else self.batch_size)
@@ -488,27 +504,9 @@ class SyncClient:
                 f"({len(batch_uuids)} items)..."
             )
 
-            result = None
-            for attempt in (1, 2):
-                result = self.api.sync_pull(pull_endpoint, batch_uuids)
-                if result and "items" in result:
-                    break
-                if attempt == 1:
-                    # A 429 names when the peer's window frees (Retry-After);
-                    # retrying after 2 s landed inside the same window and
-                    # failed again, and the batch was skipped for a cycle.
-                    wait = 2
-                    if result and result.get("retry_after"):
-                        wait = min(int(result["retry_after"]), 120)
-                        logger.info(
-                            f"Pull {cat_key} batch {batch_idx}: peer rate-limited, "
-                            f"re-asking in {wait}s")
-                    else:
-                        logger.warning(
-                            f"Pull {cat_key} batch {batch_idx} failed "
-                            f"(attempt 1), retrying in {wait}s")
-                    time.sleep(wait)
-            if not result or "items" not in result:
+            result = self._ask(lambda: self.api.sync_pull(pull_endpoint, batch_uuids),
+                               "items", f"Pull {cat_key} batch {batch_idx}")
+            if result is None:
                 logger.warning(
                     f"Pull {cat_key} batch {batch_idx} failed after retry, "
                     f"skipping {len(batch_uuids)} uuids"

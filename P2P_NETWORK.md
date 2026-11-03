@@ -1108,8 +1108,10 @@ few; on the peer server (`serving.peer_protocol`) the TLS handshake and the
 request head within 10 s and a head of at most 64 KiB (one sent while the
 last answer runs included), a peer that takes under 8 KiB a second of what is
 owed it over 30 s let go — a slower but steady one gets the whole answer, a
-close waiting for it under TLS too —, what all peers are owed together at most
-256 MiB before a bulk answer waits (a 503 that says when), no WebSocket upgrade, a connection ceiling of half the
+close waiting for it under TLS too —, a new bulk answer held back while all
+peers are owed over 256 MiB together (a 503 that says when, which requesters
+wait out; answers under way are not cut, so ones begun together can pass it),
+no access line and no WebSocket upgrade, a connection ceiling of half the
 process's descriptors with 256 per address and three quarters of it for wake
 streams (the Docker gateway, which an address-hiding NAT gives every peer, has
 no per-address share — the totals bound it); a support bundle's warrant is

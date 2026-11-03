@@ -284,3 +284,28 @@ def test_the_relay_off_notice_ends_the_slots_and_the_capability(monkeypatch):
     monkeypatch.setattr(sync_walk, "readable", readable)
     asyncio.run(manager._listen_for_db_notifications())
     assert closed == [True] and withdrawn == ["relay"]
+
+
+def test_the_relay_cap_step_ends_the_slots_while_the_switch_is_off(monkeypatch):
+    """The cap loop is the off notice's backstop: while relaying is off its
+    every step ends the slots held, and no capability is looked up for it."""
+    from desktop.p2p import dht_service
+    closed, looked = [], []
+    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
+    manager._running, manager._reachability_status = True, "reachable"
+    manager._sync_server = SimpleNamespace(close_relay_clients=lambda: closed.append(True))
+
+    async def lookup(capability):
+        looked.append(capability)
+        manager._running = False
+        return []
+
+    def setting(key):
+        manager._running = False
+        return False if key == "p2p.relay_enabled" else None
+
+    manager._dht_service = SimpleNamespace(lookup_capability=lookup)
+    manager._read_setting = setting
+    monkeypatch.setattr(dht_service, "REANNOUNCE_INTERVAL", 0)
+    asyncio.run(asyncio.wait_for(manager._relay_cap_loop(), 5))
+    assert closed == [True] and looked == []

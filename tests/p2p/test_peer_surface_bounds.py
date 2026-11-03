@@ -612,6 +612,40 @@ def _client_ctx():
     return ctx
 
 
+@pytest.mark.parametrize("tls", [False, True], ids=["plain", "tls"])
+@pytest.mark.parametrize("base", _protocols(), ids=lambda c: c.__name__)
+def test_a_kernel_that_refuses_the_send_buffer_option_costs_a_connection_nothing(
+        base, tls, tmp_path, monkeypatch):
+    """The send-buffer option is tuning: where the kernel refuses it, every
+    connection is served all the same and gives its census place back."""
+    import ssl
+    import tls_gen
+    monkeypatch.setattr(serving, "_TCP_NOTSENT_LOWAT", 1023)      # an option no kernel has
+    monkeypatch.setattr(serving, "_lowat_refused", False)
+    ctx = None
+    if tls:
+        cert, key = tls_gen.ensure_cert(tmp_path)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert), str(key))
+    protocol = serving.peer_protocol(base, tls=ctx, **BOUNDS)
+    server, thread = _serve(protocol)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        for _ in range(BOUNDS["per_address"] + 2):
+            sock = socket.create_connection(("127.0.0.1", port))
+            if tls:
+                sock = _client_ctx().wrap_socket(sock)
+            with sock:
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: peer\r\nConnection: close\r\n\r\n")
+                sock.settimeout(3)
+                assert sock.recv(1024).startswith(b"HTTP/1.1 200")
+        assert _until(3, lambda: protocol.census.open == 0)
+        assert serving._lowat_refused is (sys.platform == "linux")
+    finally:
+        server.should_exit = True
+        thread.join(10)
+
+
 def test_a_tls_handshake_is_inside_the_head_deadline(tls_server):
     port, census = tls_server
     started = time.monotonic()
@@ -722,7 +756,7 @@ def test_a_bundle_for_a_warrant_not_its_signers_is_refused_before_its_body(monke
     for warrant, status in (("11111111-1111-1111-1111-111111111111", 404),
                             ("22222222-2222-2222-2222-222222222222", 403)):
         got, _, read = asyncio.run(_call(
-            "POST", f"/api/diag/bundle",
+            "POST", "/api/diag/bundle",
             headers=[("content-length", str(len(body))), ("X-Sautium-Peer-Pubkey", "ef" * 32)],
             chunks=[body], query=f"warrant={warrant}"))
         assert (got, read) == (status, 0)

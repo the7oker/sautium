@@ -1,10 +1,12 @@
 """SyncClient's inventory routing (desktop/sync_client.py): core and bulk
 gaps alike go through the peer's holdings filter when the ask outweighs the
 filter — only the hits reach the exact inventory — and directly when the
-peer publishes no filter."""
+peer publishes no filter; a refusal that names a wait is waited out within
+the run."""
 
 import uuid
 
+from desktop import sync_client
 from desktop.p2p.bloom import BloomFilter
 from desktop.sync_client import EMPTY_INVENTORY, SyncClient
 
@@ -66,7 +68,8 @@ def test_small_ask_goes_directly_and_no_filter_means_direct():
     assert plain.asked == [core_t]
 
 
-def test_nothing_held_is_an_empty_inventory_not_a_failure():
+def test_nothing_held_is_an_empty_inventory_not_a_failure(monkeypatch):
+    monkeypatch.setattr(sync_client.time, "sleep", lambda s: None)
     api = _Api([])                      # an empty filter never hits
     inv = _client(api)._holdings_inventory(api.get_health(), _uuids(3000))
     assert inv == dict(EMPTY_INVENTORY) and api.asked == []
@@ -76,6 +79,43 @@ def test_nothing_held_is_an_empty_inventory_not_a_failure():
             return None
     down = _Down(_uuids(5))
     assert _client(down)._holdings_inventory(down.get_health(), _uuids(3000)) is None
+
+
+def test_a_busy_peer_is_asked_again_after_the_wait_it_names(monkeypatch):
+    """A refusal that names a wait — a 429's window, a busy 503 — at the
+    run's first bulk step is waited out and asked again within the run,
+    for the holdings filter and the exact inventory alike."""
+    waits = []
+    monkeypatch.setattr(sync_client.time, "sleep", waits.append)
+    busy = {"detail": "busy", "retry_after": 30}
+
+    class _Busy(_Api):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.refusals = {"holdings": 1, "inventory": 1}
+
+        def sync_holdings(self, have=None):
+            if self.refusals["holdings"]:
+                self.refusals["holdings"] -= 1
+                return dict(busy)
+            return super().sync_holdings(have)
+
+        def sync_inventory(self, track_uuids):
+            if self.refusals["inventory"]:
+                self.refusals["inventory"] -= 1
+                return dict(busy)
+            return super().sync_inventory(track_uuids)
+
+    held = _uuids(3000)
+    api = _Busy(held[:2])
+    inv = _client(api)._holdings_inventory(api.get_health(), held)
+    assert inv is not None and set(held[:2]) <= set(inv["tracks"])
+    assert waits == [30, 30]
+
+    waits.clear()
+    direct = _Busy([], capabilities=("segments",))
+    assert _client(direct)._fetch_inventory(_uuids(3))["tracks"]
+    assert waits == [30]
 
 
 def test_merged_inventory_never_aliases_the_shared_empty_constant():

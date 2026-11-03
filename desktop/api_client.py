@@ -287,6 +287,25 @@ def _read_breaker(resp) -> socket.socket:
         borrowed.detach()
 
 
+def _come_back_in(e: urllib.error.HTTPError, body: dict) -> Optional[int]:
+    """When a refusal says a retry can succeed: a 429's window frees, a busy
+    peer has room again (a 503 with Retry-After). A peer on older code sends
+    neither the header nor the body field — None, and the caller falls back
+    to the window length. Whole seconds, an hour at most: callers sleep on
+    it."""
+    wait = body.get("retry_after")
+    if not isinstance(wait, int) or isinstance(wait, bool):
+        try:
+            wait = int(e.headers.get("Retry-After") or 0)
+        except (TypeError, ValueError):
+            wait = 0
+    return min(max(wait, 1), 3600) if wait > 0 else None
+
+
+def _says_when(e: urllib.error.HTTPError) -> bool:
+    return e.code == 429 or (e.code == 503 and bool(e.headers.get("Retry-After")))
+
+
 class BackendAPIClient:
     """Client for the local backend API (plain HTTP on loopback, HMAC-signed)
     or a peer node (HTTPS pinned to the node key)."""
@@ -310,6 +329,7 @@ class BackendAPIClient:
         self._introduced = False
         self.last_health: Optional[dict] = None          # the last /health that passed its checks
         self.last_http_error: Optional[int] = None       # the status the last GET was refused with
+        self.last_retry_after: Optional[int] = None      # the wait that refusal named, if it did
         self.last_peer_identity: Optional[str] = None   # last X-Sautium-Peer-Identity seen
         self.last_peer_lane: Optional[str] = None
         self.last_gate_result: Optional[str] = None
@@ -424,18 +444,24 @@ class BackendAPIClient:
             for k, v in self._auth_headers("GET", path, b"").items():
                 req.add_header(k, v)
             resp = self._open(req, timeout, exchange)
-            self.last_http_error = None
+            self.last_http_error = self.last_retry_after = None
             self._note_peer_response(resp.headers)
             return _read_json_body(resp, limit, exchange)
         except urllib.error.HTTPError as e:
-            self.last_http_error = e.code
+            self.last_http_error, self.last_retry_after = e.code, None
             self._note_peer_response(e.headers)
             if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay(endpoint_family(path)):
                 return self._get_json(path, timeout, _paid=True)     # priced: pay once and retry
+            if _says_when(e):
+                try:
+                    body = self._error_body(e)
+                except Exception:
+                    body = {}
+                self.last_retry_after = _come_back_in(e, body)
             logger.debug(f"API request failed: {url} — {e}")
             return None
         except Exception as e:
-            self.last_http_error = None
+            self.last_http_error = self.last_retry_after = None
             logger.debug(f"API request failed: {url} — {e}")
             return None
         finally:
@@ -472,20 +498,8 @@ class BackendAPIClient:
                 body_resp = self._error_body(e)
             except Exception:
                 body_resp = {"detail": f"HTTP {e.code}"}
-            if e.code == 429 or (e.code == 503 and e.headers.get("Retry-After")):
-                # The peer says when the oldest stamp leaves its window —
-                # the earliest a retry can succeed —, or that it is busy for
-                # so long (a 503 with Retry-After: its body slots). A peer on
-                # older code sends neither the header nor the body field;
-                # the caller then falls back to the window length. Whole
-                # seconds, an hour at most: the callers sleep on it.
-                wait = body_resp.get("retry_after")
-                if not isinstance(wait, int) or isinstance(wait, bool):
-                    try:
-                        wait = int(e.headers.get("Retry-After") or 0)
-                    except (TypeError, ValueError):
-                        wait = 0
-                body_resp["retry_after"] = min(max(wait, 1), 3600) if wait > 0 else None
+            if _says_when(e):
+                body_resp["retry_after"] = _come_back_in(e, body_resp)
             logger.warning(f"API POST {url} returned {e.code}: {str(body_resp)[:300]}")
             return body_resp
         except Exception as e:
@@ -596,11 +610,16 @@ class BackendAPIClient:
 
     def sync_holdings(self, have: Optional[str] = None) -> Optional[dict]:
         """The peer's holdings filters (GET /api/sync/holdings); `have` =
-        the version already cached, answered with a stub when unchanged."""
+        the version already cached, answered with a stub when unchanged. A
+        refusal that names a wait comes back as a POST's does, with its
+        `retry_after`."""
         path = "/api/sync/holdings"
         if have:
             path += "?have=" + urllib.parse.quote(have, safe="")
-        return self._get_json(path, timeout=300)
+        answer = self._get_json(path, timeout=300)
+        if answer is None and self.last_retry_after:
+            return {"detail": f"HTTP {self.last_http_error}", "retry_after": self.last_retry_after}
+        return answer
 
     def sync_pull(self, category: str, uuids: list[str]) -> Optional[dict]:
         """Pull enrichment data for a category and list of UUIDs."""
