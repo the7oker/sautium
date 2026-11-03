@@ -101,9 +101,11 @@ def _signed(method: str, path_q: str, payload: bytes) -> dict:
     with a nonce drawn for this request."""
     ts = str(int(time.time()))
     nonce = secrets.token_hex(16)
-    canonical = f"{method}\n{path_q}\n{ts}\n{nonce}\n{hashlib.sha256(payload).hexdigest()}"
+    digest = hashlib.sha256(payload).hexdigest()
+    canonical = f"{method}\n{path_q}\n{ts}\n{nonce}\n{digest}"
     sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-    return {"x-sautium-ts": ts, "x-sautium-nonce": nonce, "x-sautium-sig": sig}
+    return {"x-sautium-ts": ts, "x-sautium-nonce": nonce, "x-sautium-body-sha256": digest,
+            "x-sautium-sig": sig}
 
 
 def _backend_post(path: str, body: dict, timeout: float = 30.0) -> dict:

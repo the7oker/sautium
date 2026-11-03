@@ -12,22 +12,27 @@ five of the ten seconds the launcher gives a stop (2026-10-25).
 
 And what a request names (request_target): every check that admits a
 request reads the scope uvicorn routes on, never a URL Starlette builds
-again from the Host header. And what a request may weigh (BodyLimit): its
-body is read whole, within bounds, before anything else of the app runs.
+again from the Host header. And what a request may weigh (BodyBudget): a
+body read whole, within bounds, by a gate that must read it before it can
+judge it (auth_hmac's door).
 
 Light at import: the entrypoint imports it before the database is up.
 """
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
 import signal
 import sys
 import threading
 import weakref
+from typing import Optional
 
 import anyio
 import uvicorn
+from starlette.datastructures import Headers
 from starlette.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -51,73 +56,84 @@ def request_target(scope) -> str:
     return target + "?" + query.decode("latin-1") if query else target
 
 
-class BodyLimit:
-    """Pure ASGI, outermost: an HTTP request's body is read whole before the
-    app sees the request — at most `cap` bytes, within `deadline` seconds,
-    and the bodies being read or held at once share `budget` bytes. A
-    declared length over the cap is refused before a byte is read (413); a
-    body that grows past it is refused there (413), one still arriving at
-    the deadline is refused (408), one the budget cannot hold is refused
-    (503), and a client that leaves mid-body is answered 400 for the
-    record; the app never runs for any of them. Uvicorn reads a body only
-    as the app asks for it, and Starlette joins what it is given with no
-    ceiling: this is the ceiling, ahead of the signature check that has to
-    read the body."""
+class BodyBudget:
+    """An HTTP request's body read whole before the app runs — at most `cap`
+    bytes, within `deadline` seconds — while the bodies read through this
+    budget and still held share `budget` bytes. Uvicorn reads a body only as
+    the app asks for it, and Starlette joins what it is given with no
+    ceiling: this is the ceiling, for a gate that must read a body before it
+    can judge it (auth_hmac.HMACAuthMiddleware)."""
 
-    def __init__(self, app, *, cap: int, budget: int, deadline: float) -> None:
-        self.app = app
+    def __init__(self, *, cap: int, budget: int, deadline: float) -> None:
         self.cap, self.budget, self.deadline = cap, budget, deadline
-        self.held = 0            # bytes of the bodies read or held now; event-loop only
+        self.held = 0            # bytes read or held through this budget now; event-loop only
 
-    async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http":
-            return await self.app(scope, receive, send)
-        declared = next((v for k, v in scope["headers"] if k == b"content-length"), b"")
-        if declared.isdigit() and int(declared) > self.cap:
-            return await _refuse(send, 413, "request body too large")
-        chunks, size, reserved = [], 0, 0
+    @contextlib.asynccontextmanager
+    async def reading(self, scope, receive, send):
+        """`async with budget.reading(scope, receive, send) as body:` — the
+        whole body, counted in the budget until the block ends; None once a
+        refusal has been answered: a declared length over the cap before a
+        byte is read (413), a body that grows past it (413), one still
+        arriving at the deadline (408), one the budget cannot hold (503), a
+        client that leaves mid-body (400, which nobody reads)."""
+        taken = [0]
         try:
-            try:
-                async with asyncio.timeout(self.deadline):
-                    while True:
-                        message = await receive()
-                        if message["type"] == "http.disconnect":
-                            return await _refuse(send, 400, "request body not received")
-                        chunk = message.get("body", b"")
-                        size += len(chunk)
-                        if size > self.cap:
-                            return await _refuse(send, 413, "request body too large")
-                        if self.held + len(chunk) > self.budget:
-                            return await _refuse(send, 503, "busy: too many bodies in flight")
+            yield await self._read(scope, receive, send, taken)
+        finally:
+            self.held -= taken[0]
+
+    async def _read(self, scope, receive, send, taken: list) -> Optional[bytes]:
+        length = Headers(scope=scope).get("content-length", "")
+        if length.isdigit() and int(length) > self.cap:
+            await refuse(send, 413, "request body too large")
+            return None
+        chunks, refusal = [], None
+        try:
+            async with asyncio.timeout(self.deadline):
+                while refusal is None:
+                    message = await receive()
+                    if message["type"] == "http.disconnect":
+                        refusal = (400, "request body not received")
+                        break
+                    chunk = message.get("body", b"")
+                    if taken[0] + len(chunk) > self.cap:
+                        refusal = (413, "request body too large")
+                    elif self.held + len(chunk) > self.budget:
+                        refusal = (503, "busy: too many bodies in flight")
+                    else:
                         self.held += len(chunk)
-                        reserved += len(chunk)
+                        taken[0] += len(chunk)
                         chunks.append(chunk)
                         if not message.get("more_body", False):
-                            break
-            except TimeoutError:
-                return await _refuse(send, 408, "request body not received in time")
-            body = b"".join(chunks)
-            chunks = None
-            handed = False
-
-            async def replay():
-                nonlocal handed
-                if handed:
-                    return await receive()
-                handed = True
-                return {"type": "http.request", "body": body, "more_body": False}
-
-            await self.app(scope, replay, send)
-        finally:
-            self.held -= reserved
+                            return b"".join(chunks)
+        except TimeoutError:
+            refusal = (408, "request body not received in time")
+        await refuse(send, *refusal)
+        return None
 
 
-async def _refuse(send, status: int, detail: str) -> None:
-    payload = ('{"detail": "%s"}' % detail).encode()
+def replaying(body: bytes, receive):
+    """A `receive` that hands the app `body` whole, then the client's own
+    messages (a disconnect among them)."""
+    handed = False
+
+    async def replay():
+        nonlocal handed
+        if handed:
+            return await receive()
+        handed = True
+        return {"type": "http.request", "body": body, "more_body": False}
+    return replay
+
+
+async def refuse(send, status: int, detail: str, headers: tuple = ()) -> None:
+    """A JSON refusal that closes the connection: the request's body may
+    still be on its way, unread."""
+    payload = json.dumps({"detail": detail}).encode()
     await send({"type": "http.response.start", "status": status,
                 "headers": [(b"content-type", b"application/json"),
                             (b"content-length", str(len(payload)).encode()),
-                            (b"connection", b"close")]})
+                            (b"connection", b"close"), *headers]})
     await send({"type": "http.response.body", "body": payload})
 
 

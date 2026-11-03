@@ -29,7 +29,7 @@ import p2p_identity  # noqa: E402
 @pytest.fixture(autouse=True)
 def _no_identity(monkeypatch):
     monkeypatch.setattr(p2p_identity, "load_signing_key", lambda settings: None)
-    monkeypatch.setattr(device_auth, "_derive_in_flight", 0)
+    monkeypatch.setattr(device_auth, "_derive_in_flight", 0, raising=False)
     device_auth._channels.clear()
 
 
@@ -49,7 +49,8 @@ def test_a_password_login_on_an_anonymous_account_derives_nothing(monkeypatch):
     assert derived == []
 
 
-def test_the_derivations_in_flight_are_bounded_and_the_rest_are_turned_away():
+def test_the_derivations_in_flight_are_bounded_and_the_last_place_is_a_signed_callers(monkeypatch):
+    monkeypatch.setattr(device_auth, "_derive_semaphore", asyncio.Semaphore(2))
     gate = threading.Event()
 
     def derive():
@@ -57,24 +58,48 @@ def test_the_derivations_in_flight_are_bounded_and_the_rest_are_turned_away():
         return "derived"
 
     async def scenario():
-        running = [asyncio.ensure_future(device_auth.derive_guarded(derive))
-                   for _ in range(device_auth.DERIVE_QUEUE)]
+        unsigned = [asyncio.ensure_future(device_auth.derive_guarded(derive))
+                    for _ in range(device_auth.DERIVE_QUEUE - 1)]
         await asyncio.sleep(0.05)
         with pytest.raises(device_auth.Busy):
-            await device_auth.derive_guarded(derive)
+            await device_auth.derive_guarded(derive)                  # the login door is full
+        signed = asyncio.ensure_future(device_auth.derive_guarded(derive, signed=True))
+        await asyncio.sleep(0.05)
+        with pytest.raises(device_auth.Busy):
+            await device_auth.derive_guarded(derive, signed=True)
         # a caller that goes leaves its derivation counted until its thread ends
-        running[0].cancel()
+        unsigned[0].cancel()
         await asyncio.sleep(0.05)
         assert device_auth._derive_in_flight == device_auth.DERIVE_QUEUE
-        with pytest.raises(device_auth.Busy):
-            await device_auth.derive_guarded(derive)
         gate.set()
-        results = await asyncio.gather(*running[1:])
+        results = await asyncio.gather(*unsigned[1:], signed)
         while device_auth._derive_in_flight:
             await asyncio.sleep(0.01)
         return results
     assert asyncio.run(scenario()) == ["derived"] * (device_auth.DERIVE_QUEUE - 1)
     assert device_auth._derive_in_flight == 0
+
+
+def test_a_derivation_whose_caller_went_has_its_failure_said(caplog, monkeypatch):
+    monkeypatch.setattr(device_auth, "_derive_semaphore", asyncio.Semaphore(2))
+    gate = threading.Event()
+
+    def derive():
+        gate.wait(10)
+        raise ValueError("the derivation failed here")
+
+    async def scenario():
+        caller = asyncio.ensure_future(device_auth.derive_guarded(derive))
+        await asyncio.sleep(0.05)
+        caller.cancel()
+        await asyncio.sleep(0.01)
+        gate.set()
+        while device_auth._derive_in_flight:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.01)
+    with caplog.at_level("WARNING", logger="device_auth"):
+        asyncio.run(scenario())
+    assert "the derivation failed here" in caplog.text
 
 
 def _seal(handshake: dict, payload: dict) -> dict:
@@ -165,33 +190,75 @@ def test_the_page_seals_a_box_again_once_to_a_fresh_handshake_and_says_busy():
     assert out["result"] == "The node is busy — try again in a moment."
     assert out["asked"] == ["/api/auth/handshake", "/api/auth/login"] * 2
     out = _gate([[400, "channel"], [400, "channel"]])
-    assert out["result"] is False and out["asked"].count("/api/auth/login") == 2
+    assert out["asked"].count("/api/auth/login") == 2
     out = _gate([[401, None]])
     assert out["result"] is False and out["asked"].count("/api/auth/login") == 1
 
 
-@pytest.fixture
-def rotations(doors, monkeypatch):
-    """The change-identity door with the rotation itself recorded, not run."""
-    from routers import auth
-    done = []
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_only_a_refused_password_is_said_to_be_wrong():
+    for replies in ([[400, "channel"], [400, "channel"]], [[422, None]], [[500, None]]):
+        assert _gate(replies)["result"] == "The sign-in did not finish — try again.", replies
 
-    async def rotate(username, password):
+
+@pytest.fixture
+def rotations(doors, tmp_path, monkeypatch):
+    """The change-identity door over a node with an identity file, the
+    rotation itself and what follows it recorded, not run; the current
+    password is "the right one" until a rotation sets another."""
+    from routers import auth
+    done, state = [], {"password": "the right one"}
+    (tmp_path / "node_info.json").write_text("{}")
+    monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
+    monkeypatch.setattr(device_auth, "account_configured", lambda: True)
+    monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
+
+    async def rotate(_d, username, password):
+        await asyncio.sleep(0.01)
         done.append((username, password))
-        return {"username": username, "invite_code": "x", "public_key_hex": "cd" * 32,
-                "anonymous": not password}
-    monkeypatch.setattr(device_auth, "rotate_identity", rotate)
+        state["password"] = password
+        return {"info": {"username": username, "invite_code": "x", "public_key_hex": "cd" * 32,
+                         "anonymous": not password}}
+    monkeypatch.setattr(device_auth, "_rotate_locked", rotate)
+    monkeypatch.setattr(device_auth, "_after_rotation", lambda: None)
     monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
+    asked = []
 
-    async def verify(password):
-        return password == "the right one"
+    async def verify(password, *, signed=False):
+        asked.append(signed)
+        await asyncio.sleep(0.01)
+        return password == state["password"]
     monkeypatch.setattr(device_auth, "verify_password", verify)
 
     def change(**payload):
         return doors.post("/api/auth/change-identity",
                           json=_seal(doors.get("/api/auth/handshake").json(), payload))
+    change.asked = asked
     return change, done
+
+
+def test_two_rotations_each_need_the_password_of_the_identity_they_change(rotations, monkeypatch):
+    _change, done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+
+    async def both():
+        return await asyncio.gather(
+            device_auth.rotate_identity("second", "the second one", "the right one"),
+            device_auth.rotate_identity("third", "the third one", "the right one"),
+            return_exceptions=True)
+    first, second = asyncio.run(both())
+    assert first["username"] == "second" and isinstance(second, device_auth.WrongPassword)
+    assert done == [("second", "the second one")]
+
+
+def test_a_docker_account_says_it_has_a_password(tmp_path, monkeypatch):
+    pytest.importorskip("cryptography")
+    monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
+    info = device_auth._write_identity(tmp_path, "anonymous-1a2b", "a chosen password")
+    assert info["anonymous"] is False
+    assert json.loads((tmp_path / "node_info.json").read_text())["anonymous"] is False
+    assert device_auth.account_anonymous() is False
 
 
 def test_a_named_account_changes_only_with_its_current_password(rotations, monkeypatch):
@@ -214,15 +281,26 @@ def test_a_busy_node_says_so_at_the_change(rotations, monkeypatch):
     change, done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
 
-    async def busy(_password):
+    async def busy(_password, *, signed=False):
         raise device_auth.Busy()
     monkeypatch.setattr(device_auth, "verify_password", busy)
     assert change(username="second", current_password="the right one").status_code == 503
     assert done == []
 
 
-def test_an_identity_from_the_environment_is_changed_there(tmp_path, monkeypatch):
-    monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
-    monkeypatch.setattr(device_auth, "account_configured", lambda: True)
-    with pytest.raises(RuntimeError, match="environment"):
-        asyncio.run(device_auth.rotate_identity("second", "new password"))
+def test_the_change_asks_its_derivation_as_a_signed_caller(rotations, monkeypatch):
+    change, _done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    assert change(username="second", password="new password",
+                  current_password="the right one").status_code == 200
+    assert change.asked == [True]
+
+
+def test_an_identity_from_the_environment_is_changed_there_before_any_password_is_derived(
+        rotations, tmp_path, monkeypatch):
+    change, done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    (tmp_path / "node_info.json").unlink()
+    r = change(username="second", password="new password", current_password="a guess")
+    assert r.status_code == 409 and "environment" in r.json()["detail"]
+    assert change.asked == [] and done == []

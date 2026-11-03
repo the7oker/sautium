@@ -1,11 +1,13 @@
 // Sautium request signing and the credential channel.
 //
 // Every privileged request to the backend carries:
-//   X-Sautium-Ts     unix seconds
-//   X-Sautium-Nonce  16 random bytes, hex, drawn for this request
-//   X-Sautium-Sig    hex(HMAC-SHA256(token, METHOD\nPATH_AND_QUERY\nTS\nNONCE\nsha256_hex(body)))
+//   X-Sautium-Ts           unix seconds
+//   X-Sautium-Nonce        16 random bytes, hex, drawn for this request
+//   X-Sautium-Body-Sha256  sha256_hex(body), the digest the signature covers
+//   X-Sautium-Sig          hex(HMAC-SHA256(token, METHOD\nPATH_AND_QUERY\nTS\nNONCE\nsha256_hex(body)))
 // The node accepts a signature once (auth_hmac.py): the nonce is what makes
-// two identical presses in one second two requests.
+// two identical presses in one second two requests. The declared digest lets
+// it judge the signature before it reads a byte of the body.
 //
 // The signing key is a DEVICE TOKEN this browser earned once — by the
 // account password or a pairing PIN shown on the host — and keeps in
@@ -95,9 +97,9 @@
   // server correctly rejects — which was then read as "the token is dead"
   // and logged every tab out, the freshly paired one included.
   //
-  // Returns {ts, nonce, sig, token} — the token rides with the signature,
-  // so a signature stays attributable to the token that made it even when
-  // storage changes in between.
+  // Returns {ts, nonce, bodyHash, sig, token} — the token rides with the
+  // signature, so a signature stays attributable to the token that made it
+  // even when storage changes in between.
   async function signRequest(method, pathAndQuery, body) {
     const token = storedToken();
     if (!token) return null;   // not paired yet — send the request unsigned
@@ -106,7 +108,7 @@
     const bodyHash = toHex(sha256(await bodyBytes(body)));
     const canonical = `${method}\n${pathAndQuery}\n${ts}\n${nonce}\n${bodyHash}`;
     const sig = toHex(hmacSha256(enc.encode(token), enc.encode(canonical)));
-    return { ts, nonce, sig, token };
+    return { ts, nonce, bodyHash, sig, token };
   }
 
   function signedHeaders(init, signed) {
@@ -114,6 +116,7 @@
     if (signed) {
       headers.set("X-Sautium-Ts", signed.ts);
       headers.set("X-Sautium-Nonce", signed.nonce);
+      headers.set("X-Sautium-Body-Sha256", signed.bodyHash);
       headers.set("X-Sautium-Sig", signed.sig);
     }
     return headers;
@@ -266,6 +269,10 @@
   }
 
   const BUSY = "The node is busy — try again in a moment.";
+  // Only a 401 says the password or the code was wrong; anything else is the
+  // exchange that did not finish, said as such.
+  const UNFINISHED = "The sign-in did not finish — try again.";
+  const failure = (r) => r.status === 401 ? false : r.status === 503 ? BUSY : UNFINISHED;
 
   async function errorDetail(r, fallback) {
     try {
@@ -294,7 +301,7 @@
     acceptNode: (pubkey) => pinNode(pubkey),
     async login(password) {
       const r = await boxedPost("/api/auth/login", { password });
-      if (!r.ok) return r.status === 503 ? BUSY : false;
+      if (!r.ok) return failure(r);
       setToken(r.data.token);
       pinNode(r.nodePubkey);
       return true;
@@ -312,7 +319,7 @@
     },
     async pair(code) {
       const r = await boxedPost("/api/auth/pair", { code });
-      if (!r.ok) return false;
+      if (!r.ok) return failure(r);
       setToken(r.data.token);
       pinNode(r.nodePubkey);
       return true;
@@ -476,9 +483,9 @@
     // A pairing code from the URL, once the user has accepted the new node.
     async function redeem() {
       submit.disabled = true;
-      let ok = false;
+      let res = false;
       try {
-        ok = await retry();
+        res = await retry();
       } catch (e) {
         if (!(e instanceof NodeChanged)) throw e;
         askNodeChanged(e, redeem);
@@ -486,8 +493,8 @@
       } finally {
         submit.disabled = false;
       }
-      if (ok) { location.reload(); return; }
-      msg.textContent = "That code is wrong or has expired — get a new one on the host.";
+      if (res === true) { location.reload(); return; }
+      msg.textContent = typeof res === "string" ? res : "That code is wrong or has expired — get a new one on the host.";
     }
 
     async function attempt() {
@@ -509,9 +516,10 @@
           ok = res === true;
           why = typeof res === "string" ? res : "Wrong password.";
         } else {
-          ok = await window.Sautium.auth.pair(
+          const res = await window.Sautium.auth.pair(
             overlay.querySelector("#auth-pin").value.trim());
-          why = "That code is wrong or has expired — get a new one on the host.";
+          ok = res === true;
+          why = typeof res === "string" ? res : "That code is wrong or has expired — get a new one on the host.";
         }
       } catch (e) {
         submit.disabled = false;
@@ -577,13 +585,13 @@
       if (code) {
         let ok = false;
         try {
-          ok = await window.Sautium.auth.pair(code);
+          ok = (await window.Sautium.auth.pair(code)) === true;
         } catch (e) {
           if (!(e instanceof NodeChanged)) throw e;
           // The code stays in the URL until the gate redeems it.
           showLoginGate({ changed: e, retry: async () => {
             const done = await window.Sautium.auth.pair(code);
-            if (done) stripFragmentCode();
+            if (done === true) stripFragmentCode();
             return done;
           } });
           return;

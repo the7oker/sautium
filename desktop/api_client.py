@@ -9,8 +9,8 @@ Two signing modes, chosen at construction:
 - LOCAL backend (default): HMAC-SHA256 over
   ``METHOD\\nPATH_AND_QUERY\\nTS\\nNONCE\\nsha256_hex(body)`` with the secret
   shared with the backend (the identity folder's ``.api_secret``); headers
-  ``X-Sautium-Ts``, ``X-Sautium-Nonce``, ``X-Sautium-Sig``; see
-  backend/auth_hmac.py.
+  ``X-Sautium-Ts``, ``X-Sautium-Nonce``, ``X-Sautium-Body-Sha256``,
+  ``X-Sautium-Sig``; see backend/auth_hmac.py.
 - PEER (``peer=PeerIdentity(...)``): Ed25519 by this node's key over the
   wire-format-v1 message (desktop/p2p/peer_auth.py) — headers
   ``X-Sautium-Peer-Pubkey/-Ts/-Sig`` — bound to the peer's pubkey, which is
@@ -84,8 +84,8 @@ def _load_secret() -> Optional[bytes]:
 
 
 def _sign_headers(method: str, path_and_query: str, body: bytes) -> dict:
-    """Build X-Sautium-Ts/X-Sautium-Sig headers for the request, or
-    {} if the secret isn't available yet."""
+    """The signature headers for the request (backend/auth_hmac.py), or {}
+    if the secret isn't available yet."""
     secret = _load_secret()
     if not secret:
         return {}
@@ -94,7 +94,8 @@ def _sign_headers(method: str, path_and_query: str, body: bytes) -> dict:
     body_hash = hashlib.sha256(body or b"").hexdigest()
     canonical = f"{method}\n{path_and_query}\n{ts}\n{nonce}\n{body_hash}"
     sig = hmac.new(secret, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-    return {"X-Sautium-Ts": ts, "X-Sautium-Nonce": nonce, "X-Sautium-Sig": sig}
+    return {"X-Sautium-Ts": ts, "X-Sautium-Nonce": nonce,
+            "X-Sautium-Body-Sha256": body_hash, "X-Sautium-Sig": sig}
 
 
 def _read_json_body(resp) -> dict:

@@ -44,8 +44,9 @@ BRUTE FORCE. The two doors need different locks:
     parallel attempts would need 250 GB). The danger runs the other way: that
     same cost turns an unbounded login endpoint into a memory DoS, so
     derivations run under a semaphore, and past DERIVE_QUEUE of them in
-    flight a request is turned away (Busy) instead of waiting — a derivation
-    runs to its end even when its caller has gone. An anonymous account has
+    flight a request is turned away (Busy) instead of waiting — the last
+    place kept for a signed caller — and a derivation runs to its end even
+    when its caller has gone. An anonymous account has
     no password anyone knows: its door is the PIN, and a password login there
     is refused before any derivation.
 """
@@ -247,7 +248,11 @@ async def create_account(username: str, password: str) -> dict:
         return await asyncio.to_thread(_write_identity, d, username, password)
 
 
-async def rotate_identity(username: str, password: str) -> dict:
+class WrongPassword(Exception):
+    """The current password given is not this account's."""
+
+
+async def rotate_identity(username: str, password: str, current_password: str = "") -> dict:
     """A new name and/or password for the node's identity — in a
     deterministic KDF that is a new key (desktop/node_identity.rotate_identity
     keeps the old one in the archive). An empty password is minted, as the
@@ -255,31 +260,46 @@ async def rotate_identity(username: str, password: str) -> dict:
     door. Same lock as create_account — two rotations racing would archive
     the same key twice.
 
+    An account with a password changes only with it: `current_password` is
+    checked under the lock, after the refusals that cost nothing and before
+    anything else is derived — a rotation that raced another would
+    otherwise change the identity the other just made, on the password of
+    the one before (WrongPassword; Busy past the derivation bound). An
+    anonymous account has no password anyone has seen.
+
     Everything in this process that cached the old key is told; the P2P
     layer learns through NOTIFY (the launcher restarts its manager on it —
     a Docker node restarts the backend, its peer surface is bound to the
-    key at start).
-
-    The old key first signs every witness record still waiting for its
-    signature (notary.drain_witness): a sighting stays signed by the key
-    that saw it, never by one issued after it."""
+    key at start)."""
     d = _identity_dir()
     if d is None:
         raise RuntimeError("no identity directory configured")
-    import notary
-    from desktop.node_identity import rotate_identity as _rotate
-
     async with _create_lock:
         if not account_configured():
             raise RuntimeError("no account to change")
         if not (d / "node_info.json").exists():
             raise RuntimeError("This identity comes from the node's environment "
                                "(P2P_USERNAME, P2P_PASSWORD): change it there")
-        anonymous = not password
-        await asyncio.to_thread(notary.drain_witness)
-        result = await asyncio.to_thread(
-            _rotate, d, username, password or secrets.token_urlsafe(32), anonymous)
+        if not account_anonymous() and not await verify_password(current_password, signed=True):
+            raise WrongPassword()
+        result = await _rotate_locked(d, username, password)
+    _after_rotation()
+    return result["info"]
 
+
+async def _rotate_locked(d, username: str, password: str) -> dict:
+    """The rotation itself, under _create_lock. The old key first signs every
+    witness record still waiting for its signature (notary.drain_witness): a
+    sighting stays signed by the key that saw it, never by one issued after
+    it."""
+    import notary
+    from desktop.node_identity import rotate_identity as _rotate
+    await asyncio.to_thread(notary.drain_witness)
+    return await asyncio.to_thread(
+        _rotate, d, username, password or secrets.token_urlsafe(32), not password)
+
+
+def _after_rotation() -> None:
     import p2p_chat
     import p2p_identity
     from db_pool import db_execute
@@ -293,7 +313,6 @@ async def rotate_identity(username: str, password: str) -> dict:
     # already; the epoch bump makes that an explicit, logged event.
     bump_epoch()
     db_execute("NOTIFY sautium_identity_rotated")
-    return result["info"]
 
 
 def _write_identity(d, username: str, password: str) -> dict:
@@ -307,6 +326,9 @@ def _write_identity(d, username: str, password: str) -> dict:
     from p2p_identity import derive_identity, derive_private_key
 
     info = derive_identity(username, password)          # validates the name
+    # Said, not left to account_anonymous's reading of the name's shape: the
+    # owner chose this password, whatever the nickname looks like
+    info["anonymous"] = False
     key: Ed25519PrivateKey = derive_private_key(username, password)
 
     d.mkdir(parents=True, exist_ok=True)
@@ -351,7 +373,7 @@ def _expected_pubkey() -> Optional[str]:
         format=serialization.PublicFormat.Raw).hex()
 
 
-async def verify_password(password: str) -> bool:
+async def verify_password(password: str, *, signed: bool = False) -> bool:
     """Check the account password by DERIVING the identity and comparing
     public keys.
 
@@ -361,14 +383,15 @@ async def verify_password(password: str) -> bool:
     (username+password -> Argon2id -> Ed25519), so the derivation itself is
     the check; there is no password hash to store, leak or rotate. An
     anonymous account is refused before any derivation. Raises Busy
-    (derive_guarded)."""
+    (derive_guarded; `signed` for a caller a request signature vouches
+    for)."""
     expected = _expected_pubkey()
     username = account_username()
     if not expected or not username or not password or account_anonymous():
         return False
     from p2p_identity import derive_identity
     try:
-        got = await derive_guarded(derive_identity, username, password)
+        got = await derive_guarded(derive_identity, username, password, signed=signed)
     except Busy:
         raise
     except Exception as e:
@@ -377,15 +400,17 @@ async def verify_password(password: str) -> bool:
     return hmac.compare_digest(got.get("public_key_hex", ""), expected)
 
 
-async def derive_guarded(fn, *args):
-    """Run one Argon2id derivation off the loop, under the memory semaphore
-    (module doc, BRUTE FORCE) — every request-path derivation goes through
-    here: login, and the backup key that shares the password. Raises Busy
-    when DERIVE_QUEUE are in flight already. A caller that goes leaves its
-    derivation counted, and holding its semaphore slot, until its thread
-    ends: a thread cannot be stopped, so it is what the bound counts."""
+async def derive_guarded(fn, *args, signed: bool = False):
+    """Run one Argon2id derivation of a request off the loop, under the
+    memory semaphore (the module doc's two doors): the login door's and
+    change-identity's. Raises Busy when DERIVE_QUEUE are in flight already —
+    one fewer for a caller no request signature vouches for, so a crowd at
+    the login door never turns the owner's own change away. A caller that
+    goes leaves its derivation counted, and holding its semaphore slot,
+    until its thread ends — a thread cannot be stopped, so it is what the
+    bound counts — and a failure of it is logged, not lost."""
     global _derive_in_flight
-    if _derive_in_flight >= DERIVE_QUEUE:
+    if _derive_in_flight >= DERIVE_QUEUE - (0 if signed else 1):
         raise Busy()
     _derive_in_flight += 1
 
@@ -397,8 +422,16 @@ async def derive_guarded(fn, *args):
         finally:
             _derive_in_flight -= 1
     task = asyncio.ensure_future(run())
-    task.add_done_callback(lambda t: t.cancelled() or t.exception())
-    return await asyncio.shield(task)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_abandoned_derivation)
+        raise
+
+
+def _abandoned_derivation(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("a derivation whose caller went failed: %s", task.exception())
 
 
 # ---------------------------------------------------------------------------

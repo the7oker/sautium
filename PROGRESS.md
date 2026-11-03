@@ -2272,8 +2272,10 @@ user brings.
   signs it: the old check compared the decoded form, which no signer
   produced.
 - **A signature is taken once (2026-11-03).** The node remembers each
-  request signature it accepted for two replay windows (120 s) and
-  refuses it a second time (`X-Sautium-Auth-Error: replayed`). Every
+  request signature it accepted while the window could still take it — until
+  the wall clock is past the request's own time plus the window, and two
+  windows on the monotonic clock at least, so a step of either reopens none —
+  and refuses it a second time (`X-Sautium-Auth-Error: replayed`). Every
   signer of the tree — the page, the launcher, both MCP servers — draws a
   nonce for each request (`X-Sautium-Nonce`, signed after the time), so
   the same press twice in a second is two requests. A signature without
@@ -2282,26 +2284,42 @@ user brings.
   keyed on the signature itself and filled only once one verifies. The
   page signs a read again after `replayed` (the browser's own retry of a
   dropped connection); it never sends a change twice.
-- **What a request may cost before it is judged (2026-11-03).** A body is
-  read whole before anything of the app runs (`serving.BodyLimit`, the
-  outermost middleware): 12 MiB at most — the largest the Web UI sends is a
-  10 MiB avatar — within 120 s, the bodies in flight sharing 48 MiB; past
-  them 413, 408 or 503, and the signature check never meets such a body.
+- **What a request may cost before it is judged (2026-11-03).** The port's
+  door (`auth_hmac.HMACAuthMiddleware`, pure ASGI, the outermost) decides
+  everything the headers decide before a byte of a body is read — the Host,
+  the whitelist, the headers' shape and age, and the signature itself, over
+  the body's digest every signer declares (`X-Sautium-Body-Sha256`, the
+  digest the canonical string carries anyway) or the empty body's. Then the
+  body is read whole (`serving.BodyBudget`): a signer's from a budget only a
+  key holder reaches — 12 MiB, the largest the Web UI sends being a 10 MiB
+  avatar, within 120 s, 48 MiB in flight — and every other body, a
+  whitelisted route's or that of a page from before declared digests, from
+  a small one (64 KiB, 20 s, 1 MiB in flight): bodies nobody signed, held
+  open as long as their senders like, cannot fill the budget the owner's
+  changes are read from. A body that is not its declared one is a bad
+  signature. The first cut read every body, up to 12 MiB, before it judged
+  anything — a single shared budget anyone could hold.
   The Argon2id derivations are bounded in flight (`device_auth.DERIVE_QUEUE`,
-  four, two running): past that the login is told 503, and the page says
-  the node is busy, not that the password is wrong. A derivation whose
-  caller went stays counted until its thread ends — a thread cannot be
-  stopped. A password login on an anonymous account is refused before any
-  derivation: its door is the PIN. A box the node could not open answers
-  400 marked `channel` (the handshake table keeps 64 and lets the oldest
-  go), and the page seals it once more to a fresh handshake. The Host guard
-  reads the interfaces at most once a second, whatever the literals.
+  four, two running, the last place a signed caller's): past that the login
+  is told 503, and the page says the node is busy; only a 401 is said as a
+  wrong password or code, anything else as a sign-in that did not finish. A
+  derivation whose caller went stays counted until its thread ends — a
+  thread cannot be stopped — and a failure of it is logged. A password login
+  on an anonymous account is refused before any derivation: its door is the
+  PIN. A box the node could not open answers 400 marked `channel` (the
+  handshake table keeps 64 and lets the oldest go), and the page seals it
+  once more to a fresh handshake. The Host guard reads the interfaces at
+  most once a second, whatever the literals.
 - **Who the node is changes only with its password (2026-11-03).** A
   device token signs a browser in; it does not rotate the identity. On an
   account with a password, change-identity takes the current one in the
-  same box and checks it before anything else is derived — the token is
-  one value every paired browser shares, never expires, and travels in a
-  page's storage, while the password is the identity's own key. An
+  same box and checks it under the rotation's lock, before anything else
+  is derived — two rotations racing each need the password of the identity
+  they change — the token is one value every paired browser shares, never
+  expires, and travels in a page's storage, while the password is the
+  identity's own key. An identity the environment configures is refused
+  before any derivation. An account made on a Docker node says it has a
+  password (`anonymous: false`), whatever its nickname looks like. An
   anonymous account has no password anyone has seen: what its rotation
   asks for instead is undecided (2026-11-03) and unchanged meanwhile.
 - **portmap maps the peer surface and nothing else (2026-11-03).** Its

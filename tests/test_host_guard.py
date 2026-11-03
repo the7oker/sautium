@@ -38,7 +38,7 @@ def interfaces(monkeypatch):
     monkeypatch.setattr(auth_hmac.time, "monotonic", lambda: state.now)
     monkeypatch.setattr(auth_hmac, "_allowed_hosts", None)
     monkeypatch.setattr(auth_hmac, "_host_misses", {})
-    monkeypatch.setattr(auth_hmac, "_last_scan", float("-inf"))
+    monkeypatch.setattr(auth_hmac, "_last_scan", float("-inf"), raising=False)
     monkeypatch.delenv("SAUTIUM_HOST_IPS", raising=False)
     monkeypatch.delenv("SAUTIUM_ALLOWED_HOSTS", raising=False)
     return state

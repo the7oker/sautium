@@ -504,7 +504,7 @@ def test_a_rotation_signs_the_waiting_rows_with_the_old_key(conn, tmp_path, monk
     old = json.loads((tmp_path / "node_info.json").read_text())["public_key_hex"]
     subjects = [_sighting("handshake") for _ in range(2)]
     assert all(_row(conn, s, "handshake")["signature"] is None for s in subjects)
-    asyncio.run(device_auth.rotate_identity("second", "battery-staple"))
+    asyncio.run(device_auth.rotate_identity("second", "battery-staple", "correct-horse"))
     new = json.loads((tmp_path / "node_info.json").read_text())["public_key_hex"]
     assert new != old
     for s in subjects:

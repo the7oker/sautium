@@ -156,8 +156,9 @@ async def login(boxed: BoxedRequest) -> dict:
 
 @router.post("/pair")
 async def pair(boxed: BoxedRequest) -> dict:
-    """Exchange a host-displayed PIN for a device token. The PIN is one-shot;
-    a wrong code costs one of MAX_PIN_ATTEMPTS."""
+    """Exchange a host-displayed PIN for a device token. A code pairs until it
+    expires (device_auth.redeem_pin); a wrong one costs one of
+    MAX_PIN_ATTEMPTS."""
     req, reply = _open(boxed, PairRequest)
     if not await device_auth.redeem_pin(req.code):
         raise HTTPException(status_code=401, detail="invalid or expired code")
@@ -167,15 +168,17 @@ async def pair(boxed: BoxedRequest) -> dict:
 @router.post("/change-identity")
 async def change_identity(boxed: BoxedRequest) -> dict:
     """A new name and/or password. The name and the password are both KDF
-    inputs, so either change IS a new key: friends are told by a notice the
-    old key signed (P2P layer), a verified email has to be verified again
-    from the new key (which is what makes the notary record succession),
-    other devices sign in with the new pair, and every paired browser is out
-    — this one gets a fresh token in the reply, like logout-all.
+    inputs, so either change IS a new key: on a launcher friends are told by
+    a notice the old key signed (its P2P manager; a Docker node sends none),
+    a verified email has to be verified again from the new key (which is
+    what makes the notary record succession), other devices sign in with the
+    new pair, and every paired browser is out — this one gets a fresh token
+    in the reply, like logout-all.
 
     Signature-protected (not whitelisted): only a paired browser or the
     host can rotate, and an account with a password has it typed again —
-    checked before anything else is derived. Boxed all the same — the
+    checked with the rotation, under its lock, before anything else is
+    derived (device_auth.rotate_identity). Boxed all the same — the
     passwords go in and the new token comes out."""
     req, reply = _open(boxed, ChangeIdentityRequest)
     username = req.username.strip()
@@ -183,15 +186,12 @@ async def change_identity(boxed: BoxedRequest) -> dict:
         raise HTTPException(status_code=422, detail="Nickname required")
     if req.password and len(req.password) < 8:
         raise HTTPException(status_code=422, detail="Password: 8+ characters")
-    if not device_auth.account_anonymous():
-        try:
-            confirmed = await device_auth.verify_password(req.current_password)
-        except device_auth.Busy:
-            raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
-        if not confirmed:
-            raise HTTPException(status_code=403, detail="The current password is not this account's")
     try:
-        info = await device_auth.rotate_identity(username, req.password)
+        info = await device_auth.rotate_identity(username, req.password, req.current_password)
+    except device_auth.Busy:
+        raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
+    except device_auth.WrongPassword:
+        raise HTTPException(status_code=403, detail="The current password is not this account's")
     except ValueError as e:                       # username shape / same pair
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:

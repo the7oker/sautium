@@ -2,17 +2,27 @@
 HMAC request signing middleware for the Sautium FastAPI backend.
 
 Each privileged request must carry two headers, and every signer of this
-tree sends a third:
+tree sends two more:
 
-    X-Sautium-Ts:    unix seconds (int as string)
-    X-Sautium-Nonce: 32 lowercase hex digits the signer drew for this request
-    X-Sautium-Sig:   hex(HMAC-SHA256(secret, canonical))
+    X-Sautium-Ts:          unix seconds (int as string)
+    X-Sautium-Nonce:       32 lowercase hex digits the signer drew for this request
+    X-Sautium-Body-Sha256: sha256_hex(body), the digest the canonical string carries
+    X-Sautium-Sig:         hex(HMAC-SHA256(secret, canonical))
 
 where:
 
     canonical = METHOD + "\n" + PATH_AND_QUERY + "\n" + TS + "\n" + NONCE + "\n" + sha256_hex(body)
 
 or, without a nonce, the same with the NONCE line left out.
+
+The middleware is the app's outermost, pure ASGI, and decides everything the
+headers decide before a byte of a body is read: the Host, the whitelist, the
+headers' shape and age, and — over the declared digest, or the empty body's
+when the request has none — the signature itself. A body is then read whole
+(serving.BodyBudget): a signer's from a large budget only a key holder can
+reach, every other body — a whitelisted route's, a signer's that declares no
+digest (a page loaded before signers declared one) — from a small one; a body
+that differs from its declared digest is refused as a bad signature.
 
 PATH_AND_QUERY is the request-target as sent — the path's own bytes,
 percent-encoding and all, and the raw query (serving.request_target) — and
@@ -56,13 +66,10 @@ Whitelisted paths (no signature required):
 
 Replay window: ±60 seconds. A request older than 60s or 60s in the
 future is rejected even with a valid signature, and a signature this node
-has already accepted is refused for twice that window (`replayed`): within
-the window a request is accepted once. The nonce is what lets a signer send
-the same request twice in a second; a page loaded before signers had one
-still signs without it.
-
-The middleware reads request body once and stashes it in
-``request._body`` so downstream handlers see the same bytes.
+has already accepted is refused while the window could still take it, and
+for two windows at least (`replayed`): within the window a request is
+accepted once. The nonce is what lets a signer send the same request twice
+in a second; a page loaded before signers had one still signs without it.
 """
 
 import errno
@@ -79,24 +86,36 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import Headers
 
 import device_auth
-from serving import request_target
+from serving import BodyBudget, refuse, replaying, request_target
 
 logger = logging.getLogger(__name__)
 
 REPLAY_WINDOW_SECONDS = 60
 NONCE_FORM = re.compile(r"[0-9a-f]{32}")
+DIGEST_FORM = re.compile(r"[0-9a-f]{64}")
+_EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
-# Signatures accepted in the last two windows: a request the window would
-# still take, sent again, is refused. Kept only once a signature verifies,
-# so only signers fill it — on the event loop, in arrival order.
+# The bodies a request may carry (serving.BodyBudget): a signer's, its
+# signature verified over the digest it declares, from the large budget — the
+# largest body the Web UI sends is an avatar (routers/profile.py, 10 MiB), and
+# the deadline leaves one that size two minutes on a slow uplink; every other
+# body from the small one — a credential exchange is a few kilobytes, a policy
+# report 16 KiB, a request of a page from before declared digests a JSON
+# document.
+SIGNED_BODIES = {"cap": 12 * 1024 * 1024, "budget": 48 * 1024 * 1024, "deadline": 120.0}
+OPEN_BODIES = {"cap": 64 * 1024, "budget": 1024 * 1024, "deadline": 20.0}
+
+# Signatures accepted while a request the window would still take could come
+# again — until the wall clock is past their own time plus the window, and two
+# windows on the monotonic one at least, so a step of either clock reopens
+# none. Kept only once a signature verifies, so only signers fill it — on the
+# event loop, in arrival order.
 _SEEN_SECONDS = 2 * REPLAY_WINDOW_SECONDS
 _seen: set = set()
-_seen_order: deque = deque()            # (monotonic time it may be forgotten, signature)
+_seen_order: deque = deque()   # (monotonic and wall time it may be forgotten, signature)
 
 WHITELIST_EXACT = {
     "/health",
@@ -350,109 +369,142 @@ def ensure_secret(secret_path: Path) -> bytes:
     return data.encode("ascii")
 
 
+def _mac(secret: bytes, method: str, path_and_query: str, ts: str, nonce: Optional[str],
+         body_digest: str) -> str:
+    head = f"{method}\n{path_and_query}\n{ts}\n" + (f"{nonce}\n" if nonce is not None else "")
+    return hmac.new(secret, f"{head}{body_digest}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def sign(secret: bytes, method: str, path_and_query: str, ts: str, body: bytes,
          nonce: Optional[str] = None) -> str:
     """The hex HMAC of a request (the module doc's canonical string), with
     the nonce line when the signer sent one."""
-    body_hash = hashlib.sha256(body).hexdigest()
-    head = f"{method}\n{path_and_query}\n{ts}\n" + (f"{nonce}\n" if nonce is not None else "")
-    return hmac.new(secret, f"{head}{body_hash}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return _mac(secret, method, path_and_query, ts, nonce, hashlib.sha256(body).hexdigest())
 
 
-def _first_use(sig: str) -> bool:
-    """Whether `sig` is new to the last two windows; it is remembered."""
-    now = time.monotonic()
-    while _seen_order and _seen_order[0][0] <= now:
-        _seen.discard(_seen_order.popleft()[1])
+def _first_use(sig: str, ts: int) -> bool:
+    """Whether `sig` is new to what is remembered (_SEEN_SECONDS); it is
+    remembered now."""
+    now, wall = time.monotonic(), time.time()
+    while _seen_order and _seen_order[0][0] <= now and _seen_order[0][1] < wall:
+        _seen.discard(_seen_order.popleft()[2])
     if sig in _seen:
         return False
     _seen.add(sig)
-    _seen_order.append((now + _SEEN_SECONDS, sig))
+    _seen_order.append((now + _SEEN_SECONDS, ts + REPLAY_WINDOW_SECONDS, sig))
     return True
 
 
-class HMACAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, secret_path: Path):
-        super().__init__(app)
+def _carries_body(headers: Headers) -> bool:
+    return headers.get("content-length", "0") != "0" or "transfer-encoding" in headers
+
+
+def _auth_error(kind: str) -> tuple:
+    # The error kind rides a response header so the client can tell a
+    # replay-window rejection (re-sign and retry — the token is fine) from a
+    # revoked token (re-authenticate). A frozen phone tab flushes queued
+    # requests with timestamps minutes old on wake; treating that 401 as
+    # revocation logged the user out on every screen-on.
+    return ((b"x-sautium-auth-error", kind.encode()),)
+
+
+class HMACAuthMiddleware:
+    """Pure ASGI, the app's outermost: the Web UI port's door (the module
+    doc). `signed_bodies` and `open_bodies` size its two body budgets."""
+
+    def __init__(self, app, secret_path: Path, *, signed_bodies: Optional[dict] = None,
+                 open_bodies: Optional[dict] = None):
+        self.app = app
         self._secret_path = secret_path
         self._secret: Optional[bytes] = None
+        self._signed_bodies = BodyBudget(**(signed_bodies or SIGNED_BODIES))
+        self._open_bodies = BodyBudget(**(open_bodies or OPEN_BODIES))
 
     def _get_secret(self) -> bytes:
         if self._secret is None:
             self._secret = ensure_secret(self._secret_path)
         return self._secret
 
-    async def dispatch(self, request: Request, call_next):
-        path = request.scope["path"]
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = Headers(scope=scope)
+        method, path = scope["method"], scope["path"]
 
-        if not host_allowed(request.headers.get("host", "")):
+        if not host_allowed(headers.get("host", "")):
             # Refuse before anything else, whitelist included — the whitelist
             # is precisely what a rebinding attack has to work with.
-            return JSONResponse({"detail": "unrecognised Host"}, status_code=421)
+            return await refuse(send, 421, "unrecognised Host")
 
         if _is_whitelisted(path):
-            return await call_next(request)
+            return await self._admit(scope, receive, send, self._open_bodies)
 
-        # The error kind rides a response header so the client can tell a
-        # replay-window rejection (re-sign and retry — the token is fine)
-        # from a revoked token (re-authenticate). A frozen phone tab flushes
-        # queued requests with timestamps minutes old on wake; treating that
-        # 401 as revocation logged the user out on every screen-on.
-        ts_raw = request.headers.get("x-sautium-ts")
-        sig = request.headers.get("x-sautium-sig")
+        ts_raw, sig = headers.get("x-sautium-ts"), headers.get("x-sautium-sig")
         if not ts_raw or not sig:
-            return JSONResponse(
-                {"detail": "missing signature headers"}, status_code=401,
-                headers={"X-Sautium-Auth-Error": "missing"},
-            )
-
+            return await refuse(send, 401, "missing signature headers", _auth_error("missing"))
         try:
             ts_int = int(ts_raw)
         except ValueError:
-            return JSONResponse({"detail": "bad timestamp"}, status_code=401,
-                                headers={"X-Sautium-Auth-Error": "bad-ts"})
-        nonce = request.headers.get("x-sautium-nonce")
+            return await refuse(send, 401, "bad timestamp", _auth_error("bad-ts"))
+        nonce = headers.get("x-sautium-nonce")
         if nonce is not None and not NONCE_FORM.fullmatch(nonce):
-            return JSONResponse({"detail": "bad nonce"}, status_code=401,
-                                headers={"X-Sautium-Auth-Error": "bad-nonce"})
+            return await refuse(send, 401, "bad nonce", _auth_error("bad-nonce"))
+        digest = headers.get("x-sautium-body-sha256")
+        if digest is not None and not DIGEST_FORM.fullmatch(digest):
+            return await refuse(send, 401, "bad body digest", _auth_error("bad-digest"))
 
         skew = abs(time.time() - ts_int)
         if skew > REPLAY_WINDOW_SECONDS:
-            logger.warning("stale request timestamp (%ds skew): %s %s",
-                           int(skew), request.method, path)
-            return JSONResponse({"detail": "stale timestamp"}, status_code=401,
-                                headers={"X-Sautium-Auth-Error": "stale-ts"})
+            logger.warning("stale request timestamp (%ds skew): %s %s", int(skew), method, path)
+            return await refuse(send, 401, "stale timestamp", _auth_error("stale-ts"))
 
-        body = await request.body()
-        # Restore body for downstream handlers — Starlette consumes the
-        # underlying stream when we await request.body() here.
-        # Setting _body on the Request object makes subsequent body()
-        # calls hit the cached value.
-        request._body = body  # noqa: SLF001 — documented Starlette workaround
+        target = request_target(scope)
+        if digest is None and not _carries_body(headers):
+            digest = _EMPTY_DIGEST
+        if digest is None:
+            # A signer that declares no digest — a page loaded before signers
+            # declared one: its body comes from the small budget and is judged
+            # once read
+            return await self._admit(scope, receive, send, self._open_bodies, judge=lambda body: self._judge(
+                method, path, target, ts_raw, ts_int, nonce, hashlib.sha256(body).hexdigest(), sig))
+        refusal = self._judge(method, path, target, ts_raw, ts_int, nonce, digest, sig)
+        if refusal is not None:
+            return await refuse(send, 401, *refusal)
+        return await self._admit(scope, receive, send, self._signed_bodies, digest=digest)
 
-        path_and_query = request_target(request.scope)
+    def _judge(self, method, path, target, ts_raw, ts_int, nonce, digest, sig) -> Optional[tuple]:
+        """None for a signature that verifies and is new, else the refusal.
 
-        # Two keys are accepted, for two kinds of caller:
-        #   * the DEVICE TOKEN — what a browser gets after logging in. The
-        #     page no longer carries any key, so this is the only thing a
-        #     remote client can sign with, and one epoch bump revokes it.
-        #   * the SERVER SECRET — for callers that already live on the host
-        #     and read the file directly (launcher, MCP server). Nothing is
-        #     gained by rejecting them: whoever can read the file has the
-        #     host anyway.
+        Two keys are accepted, for two kinds of caller:
+          * the DEVICE TOKEN — what a browser gets after logging in. The page
+            carries no key, so this is the only thing a remote client can
+            sign with, and one epoch bump revokes it.
+          * the SERVER SECRET — for callers that already live on the host and
+            read the file directly (launcher, MCP server). Nothing is gained
+            by rejecting them: whoever can read the file has the host
+            anyway."""
         secret = self._get_secret()
-        for key in (device_auth.current_token(secret).encode(), secret):
-            if hmac.compare_digest(
-                    sig, sign(key, request.method, path_and_query, ts_raw, body, nonce)):
-                break
-        else:
-            logger.warning("bad request signature: %s %s",
-                           request.method, path)
-            return JSONResponse({"detail": "bad signature"}, status_code=401,
-                                headers={"X-Sautium-Auth-Error": "bad-sig"})
-        if not _first_use(sig):
-            logger.warning("request signature used again: %s %s", request.method, path)
-            return JSONResponse({"detail": "signature already used"}, status_code=401,
-                                headers={"X-Sautium-Auth-Error": "replayed"})
+        if not any(hmac.compare_digest(sig, _mac(key, method, target, ts_raw, nonce, digest))
+                   for key in (device_auth.current_token(secret).encode(), secret)):
+            logger.warning("bad request signature: %s %s", method, path)
+            return "bad signature", _auth_error("bad-sig")
+        if not _first_use(sig, ts_int):
+            logger.warning("request signature used again: %s %s", method, path)
+            return "signature already used", _auth_error("replayed")
+        return None
 
-        return await call_next(request)
+    async def _admit(self, scope, receive, send, budget: BodyBudget, *,
+                     digest: Optional[str] = None, judge=None) -> None:
+        """The request's body read whole from `budget`, held to its signed
+        `digest` or put to `judge`, then the app with it."""
+        async with budget.reading(scope, receive, send) as body:
+            if body is None:
+                return
+            if digest is not None and not hmac.compare_digest(hashlib.sha256(body).hexdigest(), digest):
+                logger.warning("request body differs from its signed digest: %s %s",
+                               scope["method"], scope["path"])
+                return await refuse(send, 401, "bad signature", _auth_error("bad-sig"))
+            refusal = judge(body) if judge is not None else None
+            if refusal is not None:
+                return await refuse(send, 401, *refusal)
+            await self.app(scope, replaying(body, receive), send)

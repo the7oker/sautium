@@ -5,6 +5,7 @@ peer surface's limiter and its diagnostics signature. A signature is taken
 once within the window, and every signer of the tree signs with a nonce."""
 
 import asyncio
+import collections
 import hashlib
 import hmac
 import json
@@ -41,8 +42,8 @@ def client(tmp_path, monkeypatch):
     with a fixed device token and this test client's Host as the node's."""
     monkeypatch.setattr(device_auth, "current_token", lambda secret: TOKEN)
     monkeypatch.setattr(auth_hmac, "_allowed_hosts", {"testserver"})
-    monkeypatch.setattr(auth_hmac, "_seen", set())
-    monkeypatch.setattr(auth_hmac, "_seen_order", auth_hmac.deque())
+    monkeypatch.setattr(auth_hmac, "_seen", set(), raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen_order", collections.deque(), raising=False)
 
     async def echo(request):
         return JSONResponse({"path": request.scope["path"],
@@ -56,17 +57,21 @@ def client(tmp_path, monkeypatch):
 
 
 def signed(method: str, target: str, body: bytes = b"", *, nonce: str | None = "draw",
-           key: bytes = TOKEN.encode(), ts: str | None = None) -> dict:
+           key: bytes = TOKEN.encode(), ts: str | None = None, digest: bool = True) -> dict:
     """The headers a signer sends, the canonical string written out here as
-    the wire defines it; `nonce=None` signs as a page from before the nonce."""
+    the wire defines it; `nonce=None, digest=False` signs as a page from
+    before the nonce and the declared digest."""
     ts = ts or str(int(time.time()))
     if nonce == "draw":
         nonce = secrets.token_hex(16)
-    lines = [method, target, ts] + ([nonce] if nonce is not None else []) + [hashlib.sha256(body).hexdigest()]
+    body_digest = hashlib.sha256(body).hexdigest()
+    lines = [method, target, ts] + ([nonce] if nonce is not None else []) + [body_digest]
     headers = {"X-Sautium-Ts": ts,
                "X-Sautium-Sig": hmac.new(key, "\n".join(lines).encode(), hashlib.sha256).hexdigest()}
     if nonce is not None:
         headers["X-Sautium-Nonce"] = nonce
+    if digest:
+        headers["X-Sautium-Body-Sha256"] = body_digest
     return headers
 
 
@@ -164,20 +169,30 @@ def test_the_same_request_twice_in_a_second_is_two_requests_with_two_nonces(clie
 
 
 def test_a_signature_without_a_nonce_is_taken_once_too(client):
-    """A page loaded before its signer drew nonces keeps working until it
-    reloads, and its signatures are taken once like any."""
-    headers = signed("GET", "/api/secret", nonce=None)
+    """A page loaded before its signer drew nonces and declared digests keeps
+    working until it reloads, and its signatures are taken once like any."""
+    headers = signed("GET", "/api/secret", nonce=None, digest=False)
     assert client.get("/api/secret", headers=headers).status_code == 200
     assert client.get("/api/secret", headers=headers).headers["x-sautium-auth-error"] == "replayed"
+    headers = signed("POST", "/api/secret", b"{}", nonce=None, digest=False)
+    assert client.post("/api/secret", content=b"{}", headers=headers).status_code == 200
 
 
 def test_the_nonce_is_covered_by_the_signature(client):
+    assert client.get("/api/secret", headers=signed("GET", "/api/secret")).status_code == 200
     headers = signed("GET", "/api/secret")
     headers["X-Sautium-Nonce"] = secrets.token_hex(16)
     r = client.get("/api/secret", headers=headers)
     assert r.status_code == 401 and r.headers["x-sautium-auth-error"] == "bad-sig"
     stripped = {k: v for k, v in signed("GET", "/api/secret").items() if k != "X-Sautium-Nonce"}
     assert client.get("/api/secret", headers=stripped).headers["x-sautium-auth-error"] == "bad-sig"
+
+
+def test_a_declared_digest_is_64_lowercase_hex_digits(client):
+    for bad in ("", "ab", "A" * 64, "0" * 63):
+        headers = {**signed("POST", "/api/secret", b"{}"), "X-Sautium-Body-Sha256": bad}
+        r = client.post("/api/secret", content=b"{}", headers=headers)
+        assert r.status_code == 401 and r.headers["x-sautium-auth-error"] == "bad-digest", bad
 
 
 def test_a_nonce_is_32_lowercase_hex_digits(client):
@@ -192,20 +207,41 @@ def test_a_refused_signature_is_not_remembered(client):
     assert not auth_hmac._seen
 
 
+def _clocks(monkeypatch):
+    """The monotonic and the wall clock, both the signer's and the node's,
+    moved by hand."""
+    clock = {"mono": 1000.0, "wall": float(int(time.time()))}
+    monkeypatch.setattr(auth_hmac.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(auth_hmac.time, "time", lambda: clock["wall"])
+    return clock
+
+
 def test_what_is_remembered_is_forgotten_after_two_windows(client, monkeypatch):
-    clock = [1000.0]
-    monkeypatch.setattr(auth_hmac.time, "monotonic", lambda: clock[0])
+    clock = _clocks(monkeypatch)
     for _ in range(3):
         assert client.get("/api/secret", headers=signed("GET", "/api/secret")).status_code == 200
     assert len(auth_hmac._seen) == 3
-    clock[0] += 2 * auth_hmac.REPLAY_WINDOW_SECONDS
+    clock["mono"] += 2 * auth_hmac.REPLAY_WINDOW_SECONDS
+    clock["wall"] += 2 * auth_hmac.REPLAY_WINDOW_SECONDS
     assert client.get("/api/secret", headers=signed("GET", "/api/secret")).status_code == 200
     assert len(auth_hmac._seen) == 1
+
+
+def test_a_step_back_of_the_wall_clock_reopens_no_signature(client, monkeypatch):
+    clock = _clocks(monkeypatch)
+    headers = signed("GET", "/api/secret")
+    assert client.get("/api/secret", headers=headers).status_code == 200
+    # the wall clock set back 100 s, then 130 s go by: two windows are over on
+    # the monotonic clock, and the request's own time is inside the window again
+    clock["mono"] += 130
+    clock["wall"] += 30
+    assert client.get("/api/secret", headers=headers).headers["x-sautium-auth-error"] == "replayed"
 
 
 def _verify(headers: dict, key: bytes, method: str, target: str, body: bytes) -> None:
     h = {k.lower(): v for k, v in headers.items()}
     assert auth_hmac.NONCE_FORM.fullmatch(h["x-sautium-nonce"])
+    assert h["x-sautium-body-sha256"] == hashlib.sha256(body).hexdigest()
     assert h["x-sautium-sig"] == auth_hmac.sign(key, method, target, h["x-sautium-ts"], body,
                                                 h["x-sautium-nonce"])
 
@@ -228,12 +264,17 @@ def test_the_host_signers_sign_with_a_nonce(monkeypatch):
 
 _PAGE_DRIVER = r"""
 const fs = require('node:fs'), vm = require('node:vm');
-const [shaPath, authPath, origin] = process.argv.slice(-3);
+const [shaPath, authPath, origin, mode] = process.argv.slice(-4);
 const sent = [];
 const store = new Map([['sautium.device_token', 'page token']]);
+// mode "replayed": the node answers each first send of a request "replayed"
+const answer = () => mode === 'replayed' && sent.length % 2
+  ? { status: 401, headers: new Headers({ 'X-Sautium-Auth-Error': 'replayed' }) }
+  : { status: 200, headers: new Headers() };
 const ctx = {
-  window: { fetch: async (input, init) => { sent.push({ url: String(input), headers: [...new Headers(init.headers)] });
-                                            return { status: 200, headers: new Headers() }; },
+  window: { fetch: async (input, init) => { sent.push({ url: String(input), method: init.method || 'GET',
+                                                        headers: [...new Headers(init.headers)] });
+                                            return answer(); },
             addEventListener() {}, dispatchEvent() {} },
   localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k) },
   location: { origin, hash: '', pathname: '/', search: '' },
@@ -247,22 +288,40 @@ vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(shaPath, 'utf8'), ctx);
 vm.runInContext(fs.readFileSync(authPath, 'utf8'), ctx);
 (async () => {
-  await ctx.window.fetch('/api/item/café?q=a b', { method: 'POST', body: '{"x":1}' });
-  await ctx.window.fetch('/api/item/café?q=a b', { method: 'POST', body: '{"x":1}' });
+  if (mode === 'replayed') {
+    await ctx.window.fetch('/api/status');
+    await ctx.window.fetch('/api/player/next', { method: 'POST', body: '{}' });
+  } else {
+    await ctx.window.fetch('/api/item/café?q=a b', { method: 'POST', body: '{"x":1}' });
+    await ctx.window.fetch('/api/item/café?q=a b', { method: 'POST', body: '{"x":1}' });
+  }
   process.stdout.write(JSON.stringify(sent));
 })();
 """
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-def test_the_page_signs_the_target_as_it_sends_it_with_a_nonce_each_time():
+def _page_sends(mode: str) -> list:
     static = ROOT / "backend" / "static"
     proc = subprocess.run(["node", "-e", _PAGE_DRIVER, "--", str(static / "sha256.js"),
-                           str(static / "auth.js"), "http://node.test:8800"],
+                           str(static / "auth.js"), "http://node.test:8800", mode],
                           capture_output=True, check=True, timeout=30)
-    sent = json.loads(proc.stdout)
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_page_signs_the_target_as_it_sends_it_with_a_nonce_each_time():
+    sent = _page_sends("plain")
     assert len(sent) == 2
     for request in sent:
         _verify(dict(request["headers"]), b"page token", "POST", "/api/item/caf%C3%A9?q=a%20b", b'{"x":1}')
     nonces = {dict(r["headers"])["x-sautium-nonce"] for r in sent}
     assert len(nonces) == 2
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_page_signs_a_read_the_node_called_replayed_again_and_never_sends_a_change_twice():
+    sent = _page_sends("replayed")
+    assert [r["method"] for r in sent] == ["GET", "GET", "POST"]
+    first, again = (dict(r["headers"]) for r in sent[:2])
+    assert first["x-sautium-nonce"] != again["x-sautium-nonce"]
+    _verify(again, b"page token", "GET", "/api/status", b"")

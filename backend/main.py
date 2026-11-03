@@ -34,7 +34,6 @@ import csp
 import device_auth
 import lastfm_auth
 from dht_service import DHTService, HAS_LIBTORRENT
-from serving import BodyLimit
 
 _API_SECRET_PATH = _secret_path()
 _INDEX_HTML_PATH = _Path(__file__).parent / "static" / "index.html"
@@ -1000,10 +999,6 @@ app = FastAPI(
     docs_url=None, redoc_url=None,
 )
 
-# HMAC signature check on every privileged request; the unsigned paths are
-# listed in backend/auth_hmac.py.
-app.add_middleware(HMACAuthMiddleware, secret_path=_API_SECRET_PATH)
-
 # Every HTML page the node serves says what it may load (csp.py).
 app.add_middleware(csp.PolicyMiddleware)
 
@@ -1911,11 +1906,10 @@ async def no_cache_static(request, call_next):
     return response
 
 
-# Added last, so it runs first: no body is read past these bounds by anything
-# of the app — the signature check reads the whole body before it can judge
-# it. The largest body the Web UI sends is an avatar (routers/profile.py,
-# 10 MiB); the deadline leaves one that size two minutes on a slow uplink.
-app.add_middleware(BodyLimit, cap=12 * 1024 * 1024, budget=48 * 1024 * 1024, deadline=120.0)
+# The port's door — the Host, the whitelist, the request signature, and the
+# bounds a body is read within (backend/auth_hmac.py). Added last, so it runs
+# first: nothing of the app reads a body it has not judged.
+app.add_middleware(HMACAuthMiddleware, secret_path=_API_SECRET_PATH)
 
 
 if __name__ == "__main__":
