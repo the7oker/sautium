@@ -138,6 +138,9 @@ def test_primary_candidates_that_serve_nothing_fall_back_to_the_directory(hints)
     assert hints["asked"] == ["mbslices", "mbdump", "master"]
     assert net.probed[:3] == ["http://192.0.2.10:22000", "https://192.0.2.11:22001",
                               "203.0.113.5:21001"]
+    from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+    assert net.expected["198.51.100.1:8801"] == MASTER_PUBKEY_HEX   # dialled for its key only
+    assert net.expected["198.51.100.20:8801"] is None
 
 
 def test_one_node_behind_two_addresses_is_one_source(hints):

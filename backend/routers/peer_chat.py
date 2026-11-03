@@ -241,8 +241,9 @@ def _witness_handshake(body: dict, peer_pubkey: str) -> None:
     """An accepted token or grant handshake is a sighting of the guest when
     it carried its certificate (desktop/p2p/witness.py) — the guest's
     signature was checked, the use was burned. Never the classic mutual-add
-    path: it is unsigned, and anyone could post anyone's public certificate
-    there. Mirrors sync_server._witness_handshake."""
+    path: signed since 2026-11-03, it carries no certificate, and a sighting
+    there is not one of the channels witness.py counts. Mirrors
+    sync_server._witness_handshake."""
     cert = body.get("birth_cert")
     if isinstance(cert, dict):
         witness_recorder(settings).note(cert, "handshake", peer_pubkey)
@@ -665,30 +666,36 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                 voucher_payload(pubkey, ident["public_key_hex"], v_until),
                 voucher_sig):
             return _err("invalid voucher", 403)
-        if friend is None:
-            # A stranger's slot: only while this node relays at all, and for
-            # a verified identity — a certificate and its proof, checked once
-            # by the identity gate — never a bare key (mirror of
-            # desktop/p2p/sync_server.handle_wake_stream).
-            from routers.settings import _read
-            if not _read("p2p.relay_enabled"):
-                return _err("not relaying", 403)
-            from desktop.p2p import peer_auth
-            bundle = peer_auth.decode_cert_bundle(request.headers.get(peer_auth.HDR_CERT) or "")
-            if bundle is None:
-                return _err("identity certificate required", 403)
-            admission = await _identity_gate().admit(
-                pubkey, bundle["cert"], bundle["proof"],
-                request.client.host if request.client else None)
-            if admission.status != "verified":
-                headers = ({"Retry-After": str(admission.retry_after)}
-                           if admission.retry_after else None)
-                return JSONResponse({"error": admission.detail},
-                                    status_code=admission.http_status, headers=headers)
-        if pubkey not in _relay_clients and not relay_has_room():
-            return _err("relay full", 429)
-        voucher = {"invite_code": invite, "until": v_until,
-                   "signature": voucher_sig}
+        # A voucher is a slot of this node's relaying: only while the switch
+        # is on. Off, a friend's stream is its chat stream, with nothing
+        # announced for it; a stranger has none.
+        from routers.settings import _read
+        relaying = await in_chat_lane(_read, "p2p.relay_enabled")
+        if friend is None and not relaying:
+            return _err("not relaying", 403)
+        if relaying:
+            if pubkey not in _relay_clients and not relay_has_room():
+                return _err("relay full", 429)
+            if friend is None:
+                # A stranger's slot is for a verified identity — a
+                # certificate and its proof, checked once by the identity
+                # gate — never a bare key (mirror of desktop/p2p/sync_server
+                # .handle_wake_stream). Room first: a full relay spends no
+                # proof check.
+                from desktop.p2p import peer_auth
+                bundle = peer_auth.decode_cert_bundle(request.headers.get(peer_auth.HDR_CERT) or "")
+                if bundle is None:
+                    return _err("identity certificate required", 403)
+                admission = await _identity_gate().admit(
+                    pubkey, bundle["cert"], bundle["proof"],
+                    request.client.host if request.client else None)
+                if admission.status != "verified":
+                    headers = ({"Retry-After": str(admission.retry_after)}
+                               if admission.retry_after else None)
+                    return JSONResponse({"error": admission.detail},
+                                        status_code=admission.http_status, headers=headers)
+            voucher = {"invite_code": invite, "until": v_until,
+                       "signature": voucher_sig}
     elif not friend:
         return _err("voucher required", 403)
 

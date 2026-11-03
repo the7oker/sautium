@@ -1055,9 +1055,9 @@ class SyncServer:
         """An accepted token or grant handshake is a sighting of the guest
         when it carried its certificate (desktop/p2p/witness.py) — the
         guest's signature was checked, the use was burned. Never the classic
-        mutual-add path: it is unsigned, and anyone could post anyone's
-        public certificate there. MIRRORS
-        backend/routers/peer_chat._witness_handshake."""
+        mutual-add path: signed since 2026-11-03, it carries no certificate,
+        and a sighting there is not one of the channels witness.py counts.
+        MIRRORS backend/routers/peer_chat._witness_handshake."""
         cert = body.get("birth_cert")
         if isinstance(cert, dict):
             await asyncio.get_event_loop().run_in_executor(
@@ -1602,23 +1602,29 @@ class SyncServer:
                     v_sig):
                 return self._json_response(
                     request, {"error": "invalid voucher"}, status=403)
-            if friend is None:
-                # A stranger's slot: only while this node relays at all, and
-                # for a verified identity — a certificate and its proof,
-                # checked once by the identity gate — never a bare key
-                # (mirror of backend/routers/peer_chat.wake_stream).
-                if not self._relay_enabled():
-                    return self._json_response(
-                        request, {"error": "not relaying"}, status=403)
-                refusal = await self._unverified_relay_client(request, pubkey)
-                if refusal is not None:
-                    return refusal
-            if pubkey not in self._relay_clients \
-                    and self.relay_client_count() >= self._relay_cap:
+            # A voucher is a slot of this node's relaying: only while the
+            # switch is on. Off, a friend's stream is its chat stream, with
+            # nothing announced for it; a stranger has none.
+            relaying = self._relay_enabled()
+            if friend is None and not relaying:
                 return self._json_response(
-                    request, {"error": "relay full"}, status=429)
-            voucher = {"invite_code": invite, "until": v_until,
-                       "signature": v_sig}
+                    request, {"error": "not relaying"}, status=403)
+            if relaying:
+                if pubkey not in self._relay_clients \
+                        and self.relay_client_count() >= self._relay_cap:
+                    return self._json_response(
+                        request, {"error": "relay full"}, status=429)
+                if friend is None:
+                    # A stranger's slot is for a verified identity — a
+                    # certificate and its proof, checked once by the
+                    # identity gate — never a bare key (mirror of
+                    # backend/routers/peer_chat.wake_stream). Room first: a
+                    # full relay spends no proof check.
+                    refusal = await self._unverified_relay_client(request, pubkey)
+                    if refusal is not None:
+                        return refusal
+                voucher = {"invite_code": invite, "until": v_until,
+                           "signature": v_sig}
         elif not friend:
             return self._json_response(
                 request, {"error": "voucher required"}, status=403)

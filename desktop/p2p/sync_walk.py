@@ -54,7 +54,7 @@ import psycopg2.extensions
 from desktop.api_client import PEER_SESSION_S, BackendAPIClient
 from desktop.p2p import master_hint, network_size, node_hints, sync_queries
 from desktop.p2p.addrs import canon_host, fmt_addr
-from desktop.sync_client import SEGMENT_PULL_BATCH, SyncClient
+from desktop.sync_client import SEGMENT_PULL_BATCH, SyncClient, batch_roots
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +89,6 @@ def push_parts(payload: dict) -> list:
     items each, in order, each with the `batches` entries its items' seals
     reference. An item larger than the bound alone is a part of its own."""
     batches = payload.get("batches") or {}
-
-    def roots_of(item) -> set:
-        if "segments" in item:
-            return {s.get("batch_root") for s in item["segments"]} - {None}
-        return {item.get("batch_root")} - {None}
-
     parts, items, roots, size = [], [], set(), 0
 
     def close():
@@ -102,7 +96,7 @@ def push_parts(payload: dict) -> list:
                       "batches": {r: batches[r] for r in roots if r in batches}})
 
     for item in payload.get("items") or []:
-        mine = roots_of(item)
+        mine = batch_roots(item)
         n = len(json.dumps(item)) + sum(len(json.dumps(batches.get(r))) for r in mine - roots)
         if items and size + n > PUSH_MAX_BYTES:
             close()
@@ -281,12 +275,15 @@ def tracks_for_artists(dsn: str, artist_uuids: list[str]) -> list[str]:
 
 def core_and_bulk(dsn: str, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
     """(core tracks, bulk tracks): the engaged artists' tracks are the
-    core, the rest the phantom bulk (sync_queries.split_engaged). Both are
-    priced against a peer's holdings filter the same way; the split keeps
-    the logs honest about what a run is made of."""
+    core, the rest the phantom bulk (sync_queries.split_engaged) — none
+    while the owner keeps the phantom layer off, as the carry offer does.
+    Both are priced against a peer's holdings filter the same way; the
+    split keeps the logs honest about what a run is made of."""
     conn = _connect(dsn)
     try:
         engaged, rest = sync_queries.split_engaged(conn, artist_uuids)
+        if not sync_queries.phantom_layer_on(conn):
+            rest = []
     finally:
         conn.close()
     return tracks_for_artists(dsn, engaged), tracks_for_artists(dsn, rest)
@@ -1014,12 +1011,22 @@ class SyncWalk:
                 return 0
 
             pushed = 0
+            limited = {"waited": False, "stop": False}
 
             def push(category: str, payload: dict) -> int:
                 took = 0
                 for part in push_parts(payload):
-                    imported = (peer_api.carry_push(category.replace("_", "-"), part)
-                                or {}).get("imported")
+                    answer = peer_api.carry_push(category.replace("_", "-"), part) or {}
+                    if answer.get("retry_after") and not limited["waited"]:
+                        # The carrier's window is full: wait it out once, as
+                        # it says, and send the part again.
+                        limited["waited"] = True
+                        time.sleep(min(int(answer["retry_after"]), 120))
+                        answer = peer_api.carry_push(category.replace("_", "-"), part) or {}
+                    if answer.get("retry_after"):
+                        limited["stop"] = True          # every further part would be refused
+                        break
+                    imported = answer.get("imported")
                     took += imported if isinstance(imported, int) else 0
                 return took
 
@@ -1029,6 +1036,8 @@ class SyncWalk:
                 uuids = wanted.get(category) or []
                 handler = sync_queries.PULL_HANDLERS[category]
                 for i in range(0, len(uuids), batch):
+                    if limited["stop"]:
+                        break
                     took = push(category, handler(conn, uuids[i:i + batch]))
                     pushed += took
                     if took:

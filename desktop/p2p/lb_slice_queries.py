@@ -317,8 +317,8 @@ def verify_slice_entry(artist_mbid: str, entry: dict,
     from desktop.p2p import wire
     from desktop.p2p.master_node import SLICE_AUTHORS
     try:
-        author = entry.get("author_pubkey") or ""
-        if author.lower() not in SLICE_AUTHORS:
+        author = entry.get("author_pubkey")
+        if not isinstance(author, str) or author.lower() not in SLICE_AUTHORS:
             return None                       # no dump holder the release names
         blob_gz = base64.b64decode(entry.get("blob_gz") or "")
         blob = wire.gunzip(blob_gz, BLOB_RAW_MAX)

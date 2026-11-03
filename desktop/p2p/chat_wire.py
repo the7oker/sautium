@@ -142,20 +142,18 @@ def export_page(rows: list, seal) -> tuple[list, list, Optional[str], bool]:
     timestamp} — boxed by `seal(text, uuid, ts_iso)`: (the page, the ids of
     the outgoing rows it carries — what the exporter marks delivered, and
     nothing else —, the cursor of its last row or None for an empty page,
-    whether the thread goes on past it). A row from before message uuids is
-    passed over: nothing binds it."""
+    whether the thread goes on past it)."""
     page, out_ids, size, cursor = [], [], 0, None
     for n, row in enumerate(rows[:HISTORY_EXPORT_MAX], 1):
-        if row["message_uuid"]:
-            ts_iso = row["timestamp"].isoformat()
-            message_uuid = str(row["message_uuid"])
-            encrypted = seal(row["content"], message_uuid, ts_iso)
-            page.append({"message_uuid": message_uuid, "direction": row["direction"],
-                         "encrypted": encrypted, "timestamp": ts_iso})
-            size += len(encrypted)
-            if row["direction"] == "out":
-                out_ids.append(row["id"])
-        cursor = f"{row['timestamp'].isoformat()}|{row['id']}"
+        ts_iso = row["timestamp"].isoformat()
+        message_uuid = str(row["message_uuid"])
+        encrypted = seal(row["content"], message_uuid, ts_iso)
+        page.append({"message_uuid": message_uuid, "direction": row["direction"],
+                     "encrypted": encrypted, "timestamp": ts_iso})
+        size += len(encrypted)
+        if row["direction"] == "out":
+            out_ids.append(row["id"])
+        cursor = f"{ts_iso}|{row['id']}"
         if size >= HISTORY_EXPORT_BYTES:
             return page, out_ids, cursor, n < len(rows)
     return page, out_ids, cursor, len(rows) > HISTORY_EXPORT_MAX

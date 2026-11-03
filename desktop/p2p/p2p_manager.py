@@ -1349,20 +1349,25 @@ class P2PManager:
 
     def _import_history_page(self, friend: dict, friend_pubkey: str, data: dict) -> dict:
         """Open each message's envelope of one page and import them: a
-        message's uuid and time are the box's, never the listing's."""
+        message's uuid and time are the box's, never the listing's, and its
+        size is a message's, as on the direct path."""
+        from desktop.p2p.chat_service import MAX_ENCRYPTED_CHARS, MAX_PLAINTEXT_CHARS
         raw_messages = data.get("messages", [])
         if not isinstance(raw_messages, list) or not raw_messages:
             return {}
         decrypted = []
         for msg in raw_messages[:chat_wire.HISTORY_EXPORT_MAX]:
             try:
+                if len(msg["encrypted"]) > MAX_ENCRYPTED_CHARS:
+                    raise ValueError("ciphertext over a message's size")
                 env = self._chat_service.decrypt_envelope(msg["encrypted"], friend_pubkey)
             except Exception as e:
                 logger.debug(f"Failed to open history msg: {e}")
                 continue
             if (msg.get("message_uuid") != env["uuid"]
-                    or msg.get("direction") not in ("in", "out")):
-                logger.debug("History msg disagrees with its envelope — skipped")
+                    or msg.get("direction") not in ("in", "out")
+                    or len(env["text"]) > MAX_PLAINTEXT_CHARS):
+                logger.debug("History msg disagrees with its envelope or its size — skipped")
                 continue
             decrypted.append({
                 "message_uuid": env["uuid"],
@@ -2606,7 +2611,7 @@ class P2PManager:
             timeout=aiohttp.ClientTimeout(total=10),
         ) as session:
             for idx, msg in enumerate(messages):
-                msg_uuid = msg.get("message_uuid") or self._chat_service.give_uuid(msg["id"])
+                msg_uuid = msg["message_uuid"]
                 sent_at = self._iso_utc(msg["timestamp"])
                 try:
                     encrypted = self._chat_service.encrypt_envelope(
@@ -2748,7 +2753,7 @@ class P2PManager:
         delivered_any = False
         relay_ctx = pinned_ssl_context(relay_pubkey)
         for msg in messages:
-            msg_uuid = msg.get("message_uuid") or self._chat_service.give_uuid(msg["id"])
+            msg_uuid = msg["message_uuid"]
             try:
                 encrypted = self._chat_service.encrypt_envelope(
                     msg["content"], msg_uuid, self._iso_utc(msg["timestamp"]), friend_pubkey)

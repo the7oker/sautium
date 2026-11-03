@@ -57,6 +57,24 @@ def test_a_slice_signed_by_any_other_key_is_refused_before_it_is_inflated(monkey
     assert inflated == []
 
 
+@pytest.mark.parametrize("author", [None, 7, ["ab"], {"k": 1}])
+def test_an_author_that_is_no_key_is_a_refusal_not_an_error(author):
+    assert mb.verify_slice_entry("Sade", {**_mb_entry(AUTHOR), "author_pubkey": author}) is None
+    assert lb.verify_slice_entry(ARTIST, {**_lb_entry(AUTHOR), "author_pubkey": author}) is None
+
+
+def test_an_lb_row_counts_only_in_its_shape_and_for_its_artist():
+    other, rec = str(uuid.UUID(int=78)), str(uuid.UUID(int=900))
+    assert lb._row_of([rec, 10, 3, [ARTIST]], ARTIST)
+    assert lb._row_of([rec, 10, 3, [other, ARTIST.upper()]], ARTIST)
+    assert not lb._row_of([rec, 10, 3, [other]], ARTIST)            # another artist's numbers
+    assert not lb._row_of([rec, -1, 3, [ARTIST]], ARTIST)
+    assert not lb._row_of([rec, 10, True, [ARTIST]], ARTIST)
+    assert not lb._row_of(["not a uuid", 10, 3, [ARTIST]], ARTIST)
+    assert not lb._row_of([rec, 10, 3, ARTIST], ARTIST)
+    assert not lb._row_of([rec, 10, 3], ARTIST)
+
+
 @pytest.mark.parametrize("version", ["20991231-235959", "v9", "2026-11-01", "20261301-000000"])
 def test_an_lb_version_out_of_its_format_or_ahead_of_today_is_refused(version):
     assert lb.verify_slice_entry(ARTIST, _lb_entry(AUTHOR, version)) is None

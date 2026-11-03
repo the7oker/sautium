@@ -548,20 +548,6 @@ class ChatService:
         finally:
             self._return_db(conn)
 
-    def give_uuid(self, message_id: int) -> str:
-        """The uuid of an outgoing row from before uuids, given now: a
-        message travels in an envelope that carries one."""
-        conn = self._get_db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""UPDATE p2p_messages
-                                  SET message_uuid = COALESCE(message_uuid, %s::uuid)
-                                WHERE id = %s RETURNING message_uuid::text""",
-                            (str(uuid.uuid4()), message_id))
-                return cur.fetchone()[0]
-        finally:
-            self._return_db(conn)
-
     def _stored_message(self, message_uuid: str) -> Optional[tuple]:
         """(friend_id, content) of the message stored under this uuid."""
         conn = self._get_db()

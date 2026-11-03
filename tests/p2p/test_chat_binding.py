@@ -283,19 +283,19 @@ def test_a_history_page_is_bounded_and_says_where_the_next_one_starts(monkeypatc
     import uuid
     from datetime import datetime, timedelta, timezone
     t0 = datetime(2026, 11, 3, tzinfo=timezone.utc)
-    rows = [{"id": i, "message_uuid": None if i == 2 else uuid.UUID(int=i),
+    rows = [{"id": i, "message_uuid": uuid.UUID(int=i),
              "direction": "out" if i % 2 else "in", "content": "x" * 10,
              "timestamp": t0 + timedelta(seconds=i)} for i in range(1, 5)]
     seal = lambda text, message_uuid, ts_iso: text
     monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_MAX", 3)          # read one past it: 4 rows
     page, out_ids, after, more = chat_wire.export_page(rows, seal)
-    assert [m["message_uuid"] for m in page] == [str(uuid.UUID(int=1)), str(uuid.UUID(int=3))]
-    assert out_ids == [1, 3] and more                                # row 2: passed over, no id
+    assert [m["message_uuid"] for m in page] == [str(uuid.UUID(int=i)) for i in (1, 2, 3)]
+    assert out_ids == [1, 3] and more                                # the outgoing ones it carries
     assert chat_wire.history_cursor(after) == (t0 + timedelta(seconds=3), 3)
     monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_MAX", 10)
     monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_BYTES", 15)       # the second message reaches it
     page, out_ids, after, more = chat_wire.export_page(rows, seal)
-    assert len(page) == 2 and more and chat_wire.history_cursor(after)[1] == 3
+    assert len(page) == 2 and more and chat_wire.history_cursor(after)[1] == 2
     assert chat_wire.export_page(rows[:1], seal)[2:] == (f"{(t0 + timedelta(seconds=1)).isoformat()}|1", False)
     assert chat_wire.export_page([], seal) == ([], [], None, False)
     assert chat_wire.history_cursor("not a cursor") is None
@@ -359,3 +359,61 @@ def test_a_stored_message_is_pushed_at_once_and_again_if_another_arrives(monkeyp
 
     asyncio.run(scene())
     assert pushed == [7, 7] and not manager._pushing
+
+
+def test_the_docker_relay_slot_needs_the_switch_room_and_a_verified_identity(monkeypatch):
+    from fastapi.testclient import TestClient
+    from desktop.p2p import peer_auth
+    from desktop.p2p.sync_server import voucher_payload
+    from routers import peer_chat, settings as settings_router
+    app = _docker_app(monkeypatch, _Svc(), None)
+    app.include_router(peer_chat.relay_router)
+    ts, until = int(time.time()), int(time.time()) + 3600
+    query = {"pubkey": STRANGER.pub, "ts": str(ts), "instance": "a" * 16,
+             "sig": STRANGER.key.sign(f"wake_subscribe:{ts}:{HOST.pub}:{STRANGER.pub}".encode()).hex(),
+             "invite": STRANGER.invite, "voucher_until": str(until),
+             "voucher_sig": STRANGER.key.sign(voucher_payload(STRANGER.pub, HOST.pub, until).encode()).hex()}
+    switch, room, gated = {"on": False}, {"free": True}, []
+    monkeypatch.setattr(settings_router, "_read",
+                        lambda key: switch["on"] if key == "p2p.relay_enabled" else None)
+    monkeypatch.setattr(peer_chat, "relay_has_room", lambda: room["free"])
+
+    class _Gate:
+        async def admit(self, pk, cert, proof, addr):
+            gated.append(pk)
+            return SimpleNamespace(status="unverified", detail="identity proof required",
+                                   http_status=403, retry_after=None)
+
+    monkeypatch.setattr(peer_chat, "_identity_gate", lambda: _Gate())
+    cert = {peer_auth.HDR_CERT: peer_auth.encode_cert_bundle({"pubkey": STRANGER.pub}, None)}
+    with TestClient(app) as http:
+        get = lambda headers=None: http.get("/api/relay/wake-stream", params=query,
+                                            headers=headers or {})
+        assert get(cert).json()["error"] == "not relaying"
+        switch["on"] = True
+        room["free"] = False
+        assert get(cert).status_code == 429 and gated == []       # full: no proof is checked
+        room["free"] = True
+        assert get().json()["error"] == "identity certificate required"
+        r = get(cert)
+        assert r.status_code == 403 and r.json()["error"] == "identity proof required"
+    assert gated == [STRANGER.pub]
+
+
+def test_with_the_relay_off_a_friends_voucher_announces_nothing(monkeypatch):
+    from desktop.p2p.sync_server import voucher_payload
+    server = SyncServer("postgresql://unused",
+                        account_info={"public_key_hex": HOST.pub, "username": HOST.name,
+                                      "invite_code": HOST.invite})
+    announced = []
+    server._chat_service = SimpleNamespace(
+        friend_for_key=lambda pk: _friend(FRIEND), update_friend_last_seen=lambda pk: None)
+    server.set_client_announce_cbs(announced.append, lambda code: None)
+    monkeypatch.setattr(server, "_relay_enabled", lambda: False)
+    ts, until = int(time.time()), int(time.time()) + 3600
+    query = {"pubkey": FRIEND.pub, "ts": str(ts), "instance": "b" * 16,
+             "sig": FRIEND.key.sign(f"wake_subscribe:{ts}:{HOST.pub}:{FRIEND.pub}".encode()).hex(),
+             "invite": FRIEND.invite, "voucher_until": str(until),
+             "voucher_sig": FRIEND.key.sign(voucher_payload(FRIEND.pub, HOST.pub, until).encode()).hex()}
+    assert asyncio.run(_wake(server, query)) == 200                # its chat stream
+    assert announced == [] and FRIEND.pub not in server._relay_clients

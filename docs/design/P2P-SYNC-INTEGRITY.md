@@ -824,8 +824,9 @@ certificate, channel), the first sighting of each.
 - **Channels.** `introduced` — the subject signed a request to this node
   and introduced itself (`X-Sautium-Peer-Cert`), recorded after the
   admission gate's verdict; `handshake` — an ACCEPTED token or grant
-  handshake carried the guest's certificate (never the unsigned classic
-  path); `probe` — this node dialed the subject and its `/health`, on a
+  handshake carried the guest's certificate (never the classic path, which
+  carries none — and was unsigned before 2026-11-03); `probe` — this node
+  dialed the subject and its `/health`, on a
   channel TLS-bound to its key, carried `birth_cert`. A fourth value,
   `carried` (a certificate riding with records its key authored, `via` the
   deliverer), is reserved for slice 2. The DHT and the relay are no

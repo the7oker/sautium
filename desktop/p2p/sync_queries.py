@@ -674,9 +674,11 @@ def count_carried_tracks(conn) -> int:
 
 
 def _is_uuid(value) -> bool:
+    """A uuid as the database writes it, lower-case and hyphenated — not
+    urn:, braces or bare hex, which UUID() takes and ::uuid does not, nor
+    another spelling of one that would miss it in a lookup."""
     try:
-        UUID(value)
-        return True
+        return str(UUID(value)) == value
     except (TypeError, ValueError, AttributeError):
         return False
 
@@ -702,30 +704,45 @@ _LACKS = {
 }
 
 
-def wanted_for_push(conn, category: str, track_uuids: list, budget: int) -> set:
-    """Of the track uuids a peer PUSHED, the ones this node takes — what its
-    own answer to an offer (wanted_tracks) would have named: a track on its
-    tracklist with a recording MBID, lacking the category, owned or — with
-    the phantom layer on — phantom; for segments, within the room the carry
-    limit leaves (an owned track's gap-fill is never carrying). No offer
-    state is kept: the push is judged by the same rules as the offer."""
-    ids = [u for u in dict.fromkeys(track_uuids) if _is_uuid(u)]
-    if not ids or budget <= 0:
-        return set()
-    room = budget - count_carried_tracks(conn) if category == "segments" else len(ids)
+# Pushes to one carrier are judged one at a time: the room the carry limit
+# leaves is read and spent by the same push.
+CARRY_LOCK_KEY = 0x63617279  # "cary"
+
+
+def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
+    """Of the items a peer PUSHED, the ones this node takes — what its own
+    answer to an offer (wanted_tracks) would have named: a track on its
+    tracklist with a recording MBID — for a binding, that very recording —,
+    lacking the category, owned or, with the phantom layer on, phantom
+    within the room the carry limit leaves (an owned track's gap-fill is
+    never carrying). One item per track (per track and recording for a
+    binding). No offer state is kept: the push is judged by the same rules
+    as the offer."""
+    binding = category == "track_mbids"
+    keyed: dict = {}
+    for it in items:
+        key = (it.get("track_uuid"), it.get("recording_mbid") if binding else None)
+        if _is_uuid(key[0]) and (not binding or _is_uuid(key[1])):
+            keyed.setdefault(key, it)
+    if not keyed or budget <= 0:
+        return []
+    room = budget - count_carried_tracks(conn)
     rows = db_query(conn, f"""
         WITH cand AS (
-            SELECT p.id, EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = p.id) AS owned
-              FROM unnest(%(ids)s::uuid[]) AS p(id)
+            SELECT p.id, p.rec,
+                   EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = p.id) AS owned
+              FROM unnest(%(ids)s::uuid[], %(recs)s::uuid[]) AS p(id, rec)
              WHERE EXISTS (SELECT 1 FROM album_tracks at2
-                            WHERE at2.track_id = p.id AND at2.recording_mbid IS NOT NULL)
+                            WHERE at2.track_id = p.id AND at2.recording_mbid IS NOT NULL
+                              AND (p.rec IS NULL OR at2.recording_mbid = p.rec))
                AND {_LACKS[category].format(t="p.id")})
-        SELECT id::text AS track_uuid FROM cand WHERE owned
+        SELECT id::text AS track_uuid, rec::text AS rec FROM cand WHERE owned
         UNION ALL
-        (SELECT id::text FROM cand WHERE NOT owned AND %(phantoms)s
+        (SELECT id::text, rec::text FROM cand WHERE NOT owned AND %(phantoms)s
           ORDER BY id LIMIT %(room)s)""",
-        {"ids": ids, "phantoms": phantom_layer_on(conn), "room": max(room, 0)})
-    return {r["track_uuid"] for r in rows}
+        {"ids": [k[0] for k in keyed], "recs": [k[1] for k in keyed],
+         "phantoms": phantom_layer_on(conn), "room": max(room, 0)})
+    return [keyed[(r["track_uuid"], r["rec"])] for r in rows]
 
 
 def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:

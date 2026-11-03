@@ -1,7 +1,8 @@
 """Audio analysis travels sealed or not at all (desktop/sync_client.py,
 desktop/p2p/sync_queries.py, backend/routers/sync.py), on a real
 PostgreSQL built from the migrations — skipped without a cluster: a peer
-without the `segments` capability is asked for no audio; an import takes
+without the `segments` capability is asked for no embeddings, its sealed
+audio features still; an import takes
 only the categories it knows, whatever a payload names itself; a local mean
 without segments is a gap, in the plan and in the walk's gap sets; neither
 peer surface serves an unsealed mean."""
@@ -23,6 +24,7 @@ from desktop import sync_client  # noqa: E402
 from desktop.p2p import sync_queries  # noqa: E402
 
 TRACK = str(uuid.UUID(int=101))
+OTHER = str(uuid.UUID(int=102))          # a track here the peer was never asked about
 ARTIST = str(uuid.UUID(int=201))
 MODEL = str(uuid.UUID(int=301))
 
@@ -34,7 +36,8 @@ def conn(scratch_dsn):
     with c.cursor() as cur:
         cur.execute("TRUNCATE tracks, artists, embedding_models CASCADE")
         cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'Imported Only')", (ARTIST,))
-        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'mean only')", (TRACK,))
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'mean only'), (%s, 'not asked')",
+                    (TRACK, OTHER))
         cur.execute("INSERT INTO track_artists (track_id, artist_id, role) VALUES (%s, %s, 'primary')",
                     (TRACK, ARTIST))
         cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)", (MODEL,))
@@ -59,25 +62,28 @@ class _Peer:
     base_url = "https://peer:1"
     peer_pubkey = "ab" * 32
 
-    def __init__(self, capabilities, segments=12):
+    def __init__(self, capabilities, segments=12, features=False):
         self.capabilities, self.segments, self.pulls = list(capabilities), segments, []
+        self.features = features
 
     def get_health(self):
         return {"capabilities": self.capabilities}
 
     def sync_inventory(self, track_uuids):
-        return {"tracks": list(track_uuids), "embeddings": [[TRACK, 2, self.segments]],
-                "audio_features": []}
+        return {"tracks": list(track_uuids) + [OTHER],
+                "embeddings": [[TRACK, 2, self.segments], [OTHER, 2, 12]],
+                "audio_features": [[TRACK, 2]] if self.features else []}
 
     def sync_pull(self, category, uuids):
         self.pulls.append(category)
+        self.asked = getattr(self, "asked", []) + list(uuids)
         return {"category": category, "items": [], "batches": {}}
 
 
-def test_a_peer_without_segments_is_asked_for_no_audio(conn, scratch_dsn):
-    peer = _Peer(capabilities=[])
+def test_a_peer_without_segments_is_asked_for_no_embeddings(conn, scratch_dsn):
+    peer = _Peer(capabilities=[], features=True)
     sync_client.SyncClient(peer, scratch_dsn).run_sync([TRACK])
-    assert peer.pulls == []
+    assert peer.pulls == ["audio-features"]                 # sealed rows of their own
 
 
 def test_a_mean_without_segments_is_a_gap_in_the_plan_and_the_gap_sets(conn, scratch_dsn):
@@ -85,6 +91,7 @@ def test_a_mean_without_segments_is_a_gap_in_the_plan_and_the_gap_sets(conn, scr
     peer = _Peer(capabilities=["segments"])
     sync_client.SyncClient(peer, scratch_dsn).run_sync([TRACK])
     assert peer.pulls == ["segments"]
+    assert peer.asked == [TRACK]                              # the inventory's word on OTHER: no answer
     assert sync_queries.get_unenriched_artist_uuids(conn) == [ARTIST]
     assert sync_queries.get_incomplete_artist_uuids(conn) == [ARTIST]
     unsealed = _Peer(capabilities=["segments"], segments=0)       # nothing sealed to give

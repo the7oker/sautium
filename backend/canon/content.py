@@ -679,14 +679,24 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
         db.close()
     # track_mbids re-derived from the stamped files: track UUIDs may have just
     # moved in the rename/merge, the files' track_id followed by CASCADE.
+    bind_owned_recordings(canon_id)
+    return st
+
+
+def bind_owned_recordings(artist_id: str) -> None:
+    """track_mbids from the recordings stamped on an artist's owned files —
+    one track per recording, as the table holds it: two tracks that carry
+    one recording ("Song", "Song (Remastered)") would have the update reach
+    its row twice in one statement, which PostgreSQL refuses."""
     db_execute("""
         INSERT INTO track_mbids (recording_mbid, track_id, confidence)
-        SELECT DISTINCT mf.recording_mbid, mf.track_id, 'overlap_verified'::mb_match_confidence
+        SELECT DISTINCT ON (mf.recording_mbid)
+               mf.recording_mbid, mf.track_id, 'overlap_verified'::mb_match_confidence
         FROM owned_files mf
         JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
         WHERE ta.artist_id = %(a)s::uuid AND mf.recording_mbid IS NOT NULL
-    """ + _LOCAL_BINDING_WINS, {"a": canon_id})
-    return st
+        ORDER BY mf.recording_mbid, mf.track_id
+    """ + _LOCAL_BINDING_WINS, {"a": artist_id})
 
 
 def merge_collisions(dry_run: bool = True) -> list:

@@ -41,11 +41,11 @@ from desktop.p2p.sync_queries import CARRY_CATEGORIES, EMPTY_INVENTORY
 
 logger = logging.getLogger(__name__)
 
-# Categories and their pull endpoint names. Audio analysis is pulled as
+# Categories and their pull endpoint names. Audio embeddings are pulled as
 # sealed `segments` only, from a peer that advertises the capability; a peer
 # without it is asked for none (the unsealed mean-vector pull is gone,
 # 2026-11-03: its rows took no seal, so a peer chose the vectors a track
-# got and nothing named who).
+# got and nothing named who) — its sealed audio features still.
 CATEGORIES = [
     # (category_key_in_inventory, pull_endpoint, uuid_column_hint)
     ("segments", "segments", "track"),
@@ -75,19 +75,47 @@ MAX_GRID_WINDOWS = 24 * 3600 // GRID_WINDOW_S
 def _on_the_grid(segments, duration) -> bool:
     """A bundle's segments fit the canonical grid of the duration its seals
     declare: indices unique, each inside it, no more of them than it has
-    windows."""
+    windows. One window over: the declared duration is the file's tag,
+    rounded, and the grid is cut from the decoded audio, which can run past
+    a ten-second boundary."""
     if not isinstance(segments, list) or not segments:
         return False
     if duration is None:
         windows = MAX_GRID_WINDOWS
     elif isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
-        windows = min(max(1, duration // GRID_WINDOW_S), MAX_GRID_WINDOWS)
+        windows = min(max(1, duration // GRID_WINDOW_S) + 1, MAX_GRID_WINDOWS)
     else:
         return False
     idx = [s.get("i") if isinstance(s, dict) else None for s in segments]
     return (len(idx) <= windows and len(set(idx)) == len(idx)
             and all(isinstance(i, int) and not isinstance(i, bool) and 0 <= i < windows
                     for i in idx))
+
+
+def batch_roots(item: dict) -> set:
+    """The Merkle roots an item's seals name — a bundle's per segment."""
+    if "segments" in item:
+        return {s.get("batch_root") for s in item["segments"] if isinstance(s, dict)} - {None}
+    return {item.get("batch_root")} - {None}
+
+
+def _asked(rows, asked: set) -> list:
+    """The inventory rows that name a track asked about: a plain uuid, or a
+    row whose first field is one. A peer's word about any other track is no
+    answer to the question."""
+    return [r for r in rows if (r if isinstance(r, str)
+                                else r[0] if isinstance(r, list) and r else None) in asked]
+
+
+def answer_to(result: dict, asked: set) -> dict:
+    """The part of a pull answer about the tracks asked, with the Worker
+    timestamps those items' seals name and no others."""
+    items = [it for it in result.get("items") or []
+             if isinstance(it, dict) and it.get("track_uuid") in asked]
+    roots = set().union(*(batch_roots(it) for it in items))
+    batches = result.get("batches") or {}
+    return {**result, "items": items,
+            "batches": {r: batches[r] for r in roots if r in batches}}
 
 
 # A fetched holdings filter is used as-is for this long before the peer's
@@ -218,7 +246,7 @@ class SyncClient:
         use_segments = "segments" in self.peer_capabilities
         if not use_segments:
             self._progress(
-                "  peer has no `segments` capability — no audio analysis from it")
+                "  peer has no `segments` capability — no embeddings from it")
 
         # Step 3: Inventory — what the peer holds of our gaps, core and bulk
         # alike: the exact inventory when our ask weighs less than the
@@ -267,9 +295,10 @@ class SyncClient:
             part = self.api.sync_inventory(tracks)
             if not part or "tracks" not in part:
                 return None
+            asked = set(tracks)
             for k, v in part.items():
                 if isinstance(v, list):
-                    merged.setdefault(k, []).extend(v)
+                    merged.setdefault(k, []).extend(_asked(v, asked))
             self._progress(
                 f"  inventory {i}/{len(requests)}: {len(tracks)} tracks "
                 f"in {time.monotonic() - t0:.1f}s")
@@ -480,8 +509,8 @@ class SyncClient:
                 )
                 continue
 
-            items = result["items"]
-            if not items:
+            result = answer_to(result, set(batch_uuids))
+            if not result["items"]:
                 continue
 
             imported = self._import_items(cat_key, result)
@@ -1043,15 +1072,20 @@ def import_pushed(db_dsn: str, category: str, payload: dict, budget: int) -> int
         raise ValueError(f"category not carryable: {category}")
     client = SyncClient(api_client=None, db_dsn=db_dsn)
     try:
+        conn = client._get_conn()
+        with conn.cursor() as cur:
+            # Session-held, so concurrent pushes cannot each spend the same
+            # room; the connection's close releases it whatever happens.
+            cur.execute("SELECT pg_advisory_lock(%s)", (sync_queries.CARRY_LOCK_KEY,))
+        conn.commit()
         items = [it for it in payload.get("items") or [] if isinstance(it, dict)]
-        wanted = sync_queries.wanted_for_push(
-            client._get_conn(), category, [it.get("track_uuid") for it in items], budget)
-        kept = [it for it in items if it.get("track_uuid") in wanted]
+        kept = sync_queries.wanted_for_push(conn, category, items, budget)
         if len(kept) < len(items):
             logger.info("carry push: %d of %d %s item(s) not asked for — dropped",
                         len(items) - len(kept), len(items), category)
         if not kept:
             return 0
-        return client._import_items(category, {**payload, "items": kept})
+        return client._import_items(category, answer_to(
+            {**payload, "items": kept}, {it["track_uuid"] for it in kept}))
     finally:
         client._close_conn()

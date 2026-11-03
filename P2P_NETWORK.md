@@ -778,7 +778,11 @@ someone else's invite has nothing to answer with. The relay_pubkey inside the
 payload means a voucher issued to one relay cannot be presented by another;
 `verify_invite_code` binds the invite to the client's key; `until` (24 h,
 re-issued on every reconnect) bounds the authority's lifetime. The voucher
-registry is in-memory: a relay restart simply has clients re-issue.
+registry is in-memory: a relay restart simply has clients re-issue. Since
+2026-11-03 a voucher is not all a stranger needs: its slot is taken only
+while the relay switch (`p2p.relay_enabled`) is on and for an identity the
+gate has verified (its certificate and proof ride the subscription), and with
+the switch off a friend's stream is its chat stream, announced for nobody.
 
 **Announce-on-behalf.** The BT DHT does not verify infohash ownership — that is
 the feature: the relay announces `Sautium-user:{invite}` for every registered
@@ -999,7 +1003,9 @@ replaces Last.fm track stats" has the loader; this is the protocol.
   `lb_slices` (the inventory) and `lb_slices_version` (the newest held).
 - **Versioned.** `dump_version` is inside the signed bytes and in every
   ledger row (`lb_slice_fetches`, `lb_slice_blobs`) and data row. A request's
-  `min_version` is the newest version any reachable source advertised; a
+  `min_version` is the newest version a reachable source the release names as
+  a slice author advertised (since 2026-11-03 — a stranger's word moved it
+  before); a
   cache older than it is `missing`, not an answer; a dump node never serves
   a cache older than its own dump and rebuilds it; imports move rows
   forward only; the requester re-asks every ledger row older than the
