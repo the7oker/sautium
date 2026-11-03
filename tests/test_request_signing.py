@@ -82,6 +82,10 @@ def test_the_whitelist_is_judged_on_the_routed_path(client, monkeypatch):
     assert client.get("/api/auth/status").status_code == 200
 
 
+def test_a_prefix_no_route_serves_is_no_whitelist_entry(client):
+    assert client.get("/sync/inventory").status_code == 401
+
+
 def test_a_signature_covers_the_target_as_sent(client):
     target = "/api/item/caf%C3%A9?q=a%20b&x=%2F"
     r = client.get(target, headers=signed("GET", target))

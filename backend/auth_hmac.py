@@ -42,11 +42,12 @@ Whitelisted paths (no signature required):
     /static/*            (CSS, JS, fonts)
     /api/covers/*        (album cover art — loaded via <img src>,
                           which cannot attach custom headers)
-    /api/sync/*          (P2P sync from remote launchers — has its
-                          own Ed25519 auth in sync_server.py)
+    /api/sync/*          (the peer routes, mounted here as well — without
+                          the peer surface's middleware, every caller is
+                          anonymous to them)
     /api/mb/*            (MusicBrainz slices for peers, like /api/sync/*)
-    /sync/*              (legacy P2P sync)
-    /api/p2p/chat/wake   (loopback-only "ping" from sync_server)
+    /api/p2p/chat/wake   (the launcher's sync server wakes the chat
+                          streams; the route asks no caller who it is)
     /api/auth/status, /handshake, /login, /pair, /create-account
                          (the credential checks themselves — see below)
     /api/player/media/*  (<audio> bytes, behind their own signed query)
@@ -244,7 +245,6 @@ WHITELIST_PREFIX = (
     "/api/covers/",
     "/api/sync/",
     "/api/mb/",
-    "/sync/",
     # <audio> elements can't set HMAC headers — these routes verify their
     # own short-lived query-param signatures instead (media_urls.verify).
     "/api/player/media/",

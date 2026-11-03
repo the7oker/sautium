@@ -36,7 +36,7 @@ per-exchange server key that the node's identity key signs. See "Credential
 channel" below.
 
 BRUTE FORCE. The two doors need different locks:
-  * PIN — small enough to guess, so it expires in minutes, dies after
+  * PIN — 40 bits, short-lived: it expires in minutes, dies after
     MAX_PIN_ATTEMPTS, and every check passes through a lock. Sleeping
     between attempts would be useless: a thousand parallel requests sleep
     concurrently. Serialising them is what makes attempts countable.
@@ -65,7 +65,9 @@ logger = logging.getLogger(__name__)
 _EPOCH_KEY = "auth.token_epoch"
 
 # Unambiguous alphabet (no O/0, I/1) — the PIN is read off a screen and typed
-# on a phone. Length is insurance, not the defence: MAX_PIN_ATTEMPTS is.
+# on a phone. Its length is the defence, 40 bits: a code dies after
+# MAX_PIN_ATTEMPTS, but the launcher shows the next one at once, so the cap
+# bounds one code, not the guesses over time.
 _PIN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PIN_GROUPS = 2
 PIN_GROUP_LEN = 4
