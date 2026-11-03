@@ -2304,9 +2304,14 @@ user brings.
   page's storage, while the password is the identity's own key. An
   anonymous account has no password anyone has seen: what its rotation
   asks for instead is undecided (2026-11-03) and unchanged meanwhile.
-- **Found on the way:** `portmap._serves_web_ui` still looked for the
-  inlined-secret marker of the 2026-08 page, so it recognised no port as
-  the Web UI; it now reads the `sautium-webui` health type.
+- **portmap maps the peer surface and nothing else (2026-11-03).** Its
+  guard asked whether a port served the Web UI — by the inlined-secret
+  marker of the 2026-08 page, later by the `sautium-webui` health type with
+  `json` never imported — so a running Web UI ended the command with a
+  traceback, while the media proxy, the DLNA event port and a port with
+  nothing behind it yet were mapped. Now a TCP port is mapped only when it
+  answers /health over TLS saying `sautium-peer` (start the node, then
+  map), and a UDP mapping is never the LAN beacon's port.
 
 ### Streaming is a demo channel (2026-09-17)
 

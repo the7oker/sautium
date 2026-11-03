@@ -14,20 +14,24 @@ Mappings are attempted as permanent first; routers that reject a zero lease
 get LEASE_DURATION and the command says so, because such a mapping silently
 expires and has to be refreshed (`--keep` does that in the foreground).
 
-SAFETY: this refuses to map a port that answers with the Sautium Web UI.
-That page carries the API secret inline (window.__SAUTIUM_SECRET), so
-exposing it to the internet hands over the whole API — see the Security
-Posture section in CLAUDE.md. The P2P sync surface is the one that may
-face the internet; the Web UI never is.
+SAFETY: only the peer surface may face the internet (the Security Posture
+section in CLAUDE.md). A TCP port is mapped only when it answers /health
+over TLS saying `sautium-peer`; the Web UI, the media proxy and the DLNA
+event listener are plain HTTP and LAN-only, so they never pass, and nor
+does a port with nothing behind it yet — start the node, then map. A UDP
+mapping is never the LAN beacon's port.
 """
 
 import argparse
+import http.client
+import json
 import socket
 import ssl
 import sys
 import time
 import urllib.request
 
+from desktop.p2p.lan_discovery import LAN_DISCOVERY_PORT
 from desktop.p2p.upnp_service import (
     HAS_UPNP, LEASE_DURATION, add_mapping, discover_igd, list_mappings,
 )
@@ -51,18 +55,20 @@ def _igd_or_exit():
     return u
 
 
-def _serves_web_ui(port: int) -> bool:
-    """True if the local port answers as the Web UI (plain HTTP; its /health
-    says `sautium-webui`, and only the peer surface may say `sautium-peer`)."""
+def _answers_as_peer_surface(port: int) -> bool:
+    """Whether the local port answers /health over TLS saying `sautium-peer`
+    — the peer surface, and nothing else is (the Web UI says `sautium-webui`,
+    over plain HTTP). A probe that fails is a no."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE      # telling surfaces apart, not trusting one
     try:
-        body = urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/health", timeout=3).read(65536)
-    except Exception:
+        with urllib.request.urlopen(f"https://127.0.0.1:{port}/health",
+                                    context=ctx, timeout=3) as resp:
+            health = json.loads(resp.read(65536))
+    except (OSError, ValueError, http.client.HTTPException):
         return False
-    try:
-        return json.loads(body).get("type") == "sautium-webui"
-    except ValueError:
-        return False
+    return isinstance(health, dict) and health.get("type") == "sautium-peer"
 
 
 def _port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
@@ -101,11 +107,16 @@ def cmd_map(args) -> None:
     external = args.external or port
     proto = "UDP" if args.udp else "TCP"
 
-    if proto == "TCP" and _serves_web_ui(port):
+    if proto == "TCP" and not _answers_as_peer_surface(port):
         sys.exit(
-            f"Refusing to map {port}: it serves the Sautium Web UI, whose "
-            f"page contains the API secret. Exposing it would hand over the "
-            f"whole API. Map the P2P sync port instead.")
+            f"Refusing to map {port}: it does not answer as the peer surface "
+            f"(HTTPS /health saying sautium-peer). Only the peer surface may "
+            f"face the internet - never the Web UI, the media proxy or the "
+            f"DLNA event port. Start the node, then map its peer port (8801 "
+            f"on Docker).")
+    if proto == "UDP" and port == LAN_DISCOVERY_PORT:
+        sys.exit(f"Refusing to map {port}/UDP: it is the LAN beacon's port, "
+                 f"which stays on the LAN.")
 
     if getattr(args, "pcp", False):
         from desktop.p2p import pcp as pcp_mod
@@ -125,10 +136,6 @@ def cmd_map(args) -> None:
         return
 
     u = _igd_or_exit()
-    if proto == "TCP" and not _port_is_listening(port):
-        print(f"warning: nothing is listening on 127.0.0.1:{port} - mapping "
-              f"it anyway, but peers will get a closed port until it is up")
-
     lease = args.lease
     permanent = lease == 0
     if not add_mapping(u, external, port, proto, lease, args.name):

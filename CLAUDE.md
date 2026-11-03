@@ -461,7 +461,8 @@ below bind with or without it.
    expose to the public internet** — the launcher's sync server
    (random port 20000–29999, UPnP-mapped) and the Docker peer app
    (`backend/p2p_app.py`, port 8801, `python -m desktop.portmap map 8801`
-   or a manual forward; portmap refuses any port serving the secret).
+   or a manual forward; portmap maps only a port answering as the peer
+   surface).
    Self-signed TLS **pinned to the node key** (the cert carries the
    node's Ed25519 signature over its own TLS key — `peer_auth`
    binding extension; peer clients verify it on every handshake, so
