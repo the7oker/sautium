@@ -6,6 +6,7 @@ but exposed as HTTP endpoints for the Web UI.
 """
 
 import asyncio
+import codecs
 import json
 import logging
 import os
@@ -543,14 +544,18 @@ async def _fetch_description(location: str) -> str:
     GET, no redirect followed, nothing compressed taken, _DESCRIBE_BYTES at
     most — a declared length over that refused before a byte of it is
     read — within _DESCRIBE_TIMEOUT_S. Decoded as the attach's library
-    decodes it (aiohttp's text()): in the charset the answer names when
-    Python knows it, else as UTF-8, strictly — the XML declaration's own
-    word is not read — so the scan lists what the attach can read."""
-    import codecs
+    decodes it (aiohttp's text()): in the charset the answer names, read
+    from its Content-Type as aiohttp reads it, when Python knows it, else as
+    UTF-8, strictly — the XML declaration's own word is not read — so the
+    scan lists what the attach can read. A charset outside
+    _DESCRIPTION_CODECS is refused: the device picks the codec, and some of
+    Python's are no text encoding or decode in quadratic time (punycode),
+    on the event loop where no deadline can stop them."""
     import contextlib
     from urllib.parse import urlparse
 
     from aiohttp import ClientSession, ClientTimeout
+    from aiohttp.helpers import parse_mimetype
 
     if urlparse(location).scheme != "http":
         raise DescriptionRefused("a description is a plain-HTTP GET")
@@ -570,13 +575,27 @@ async def _fetch_description(location: str) -> str:
                 if len(body) > _DESCRIBE_BYTES:
                     raise DescriptionRefused("a description past its size")
             encoding = "utf-8"
-            if r.charset:
+            charset = parse_mimetype(r.headers.get("Content-Type", "").lower()).parameters.get("charset")
+            if charset:
                 with contextlib.suppress(LookupError, ValueError):   # unknown: UTF-8, as aiohttp
-                    encoding = codecs.lookup(r.charset).name
+                    encoding = codecs.lookup(charset).name
+            if encoding not in _DESCRIPTION_CODECS:
+                raise DescriptionRefused("a description in an encoding the scan does not read")
             try:
                 return body.decode(encoding)
-            except UnicodeDecodeError:
+            except UnicodeError:
                 raise DescriptionRefused("a description its encoding does not read") from None
+
+
+# The text encodings a device description is read in: Unicode, the ISO and
+# Windows single-byte sets, and the CJK multi-byte ones — each decodes in
+# linear time.
+_DESCRIPTION_CODECS = frozenset(codecs.lookup(name).name for name in (
+    "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be",
+    "ascii", *(f"iso8859-{n}" for n in (*range(1, 12), 13, 14, 15, 16)),
+    *(f"cp125{n}" for n in range(9)), "koi8-r", "koi8-u", "mac-roman",
+    "shift_jis", "cp932", "euc_jp", "iso2022_jp", "gb2312", "gbk", "gb18030",
+    "big5", "big5hkscs", "cp950", "euc_kr", "cp949"))
 
 
 _UPNP_DEVICE = "{urn:schemas-upnp-org:device-1-0}"
@@ -951,8 +970,9 @@ async def _scan_run():
             # not answering, not registered. The same verdict the selected
             # row gets from its live check, so a box reads the same whether
             # it is the output or not.
-            logger.info("an HQPlayer the scan found answers discovery but not control: %s", err)
-            logger.debug("its name and address: %r at %s", facts["name"], host)
+            logger.info("an HQPlayer the scan found answers discovery but not control (%s)",
+                        type(err).__name__)
+            logger.debug("its name and address: %r at %s: %s", facts["name"], host, err)
             entry["control"] = False
         else:
             ep, how, _facts = resolved
@@ -1037,8 +1057,9 @@ async def _scan_run():
             try:
                 await asyncio.to_thread(manager.renderer_reached, chosen, reached[chosen])
             except Exception as e:
-                logger.warning("the output did not move to where the scan reached its renderer: %s", e)
-                logger.debug("%s reached at %s", fresh[chosen].get("name"), reached[chosen][0])
+                logger.warning("the output did not move to where the scan reached its renderer (%s)",
+                               type(e).__name__)
+                logger.debug("%s reached at %s: %s", fresh[chosen].get("name"), reached[chosen][0], e)
     renderers = list(fresh.values())
     return {"renderers": renderers, "hqplayers": _hqplayer_entries()}
 

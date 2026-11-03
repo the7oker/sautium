@@ -133,6 +133,13 @@ def test_a_body_within_bounds_reaches_the_app_whole_and_then_the_clients_own_mes
     assert budget.held == 0
 
 
+def test_a_body_dropped_unread_is_read_no_further_than_the_cap():
+    """A chunked body under a short declared length, as h11 passes it on."""
+    receive = _feed(*[b"x" * 60] * 10)
+    asyncio.run(BodyBudget(cap=100, budget=1000, deadline=5).dropping(_scope(length=1), receive))
+    assert len(receive.asked) == 2
+
+
 def test_a_client_that_leaves_mid_body_is_answered_400_and_the_app_never_runs():
     app, budget = App(), BodyBudget(cap=100, budget=1000, deadline=5)
     sent = _run(_gate(budget, app), _scope(), _feed(b"ab", then_disconnect=True))

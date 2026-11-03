@@ -157,6 +157,18 @@ def test_a_size_that_is_no_size_is_refused_before_tar_reads_one(tmp_path, monkey
     _refused_before_tar_reads_it(gzip.compress(bytes(_resealed(raw, 0))), tmp_path, monkeypatch)
 
 
+def test_more_headers_than_a_bundle_has_entries_are_refused_before_tar_reads_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(support, "_BUNDLE_ENTRIES", 3)
+    _refused_before_tar_reads_it(_bundle([(f"logs/{i}.log", b"", 0o644) for i in range(4)]),
+                                 tmp_path, monkeypatch)
+
+
+def test_entries_whose_names_collide_are_refused(tmp_path):
+    with pytest.raises(HTTPException) as refused:
+        _extract(_bundle([("logs", b"x", 0o644), ("logs/backend.log", b"y", 0o644)]), tmp_path)
+    assert refused.value.status_code == 422
+
+
 def test_what_is_no_tar_archive_is_refused(tmp_path):
     import gzip
     with pytest.raises(HTTPException) as refused:

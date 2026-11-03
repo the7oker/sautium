@@ -87,17 +87,23 @@ class BodyBudget:
 
     async def dropping(self, scope, receive) -> None:
         """A body declared within the cap read and dropped, chunk by chunk,
-        until the deadline, and counted nowhere — it holds nothing: for an
-        answer decided without it. A connection closed over an unread body
-        can reset under the answer; Windows drops what it had received."""
+        until the deadline or the cap, and counted nowhere — it holds
+        nothing: for an answer decided without it. A connection closed over
+        an unread body can reset under the answer; Windows drops what it had
+        received. The cap is counted here too: a server that reads a chunked
+        body past its declared length (h11) would otherwise stream it to the
+        deadline."""
         length = Headers(scope=scope).get("content-length", "")
         if not (length.isdigit() and 0 < int(length) <= self.cap):
             return
+        read = 0
         with contextlib.suppress(TimeoutError):           # the answer goes as it stands
             async with asyncio.timeout(self.deadline):
                 while True:
                     message = await receive()
-                    if message["type"] == "http.disconnect" or not message.get("more_body", False):
+                    read += len(message.get("body", b""))
+                    if (message["type"] == "http.disconnect" or not message.get("more_body", False)
+                            or read > self.cap):
                         return
 
     async def _read(self, scope, receive, send, taken: list) -> tuple:

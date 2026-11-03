@@ -3628,7 +3628,9 @@ device on the network; none of them may hold for it more than a bound.
   builder fetched every one of them. It reads the description as the
   attach's library does, so a renderer the attach would not find there is
   not listed: decoded in the charset the answer names when Python knows it,
-  else as UTF-8 (the XML declaration is not read); the root device and one
+  else as UTF-8 (the XML declaration is not read) — and only in a text
+  encoding: the device picks the codec, and punycode decodes in quadratic
+  time on the event loop, so any other is refused; the root device and one
   device of each type it embeds directly, the last, in the UPnP device
   namespace; each word from the first element of its name. A device's
   name, model and maker are kept without control or line-separating

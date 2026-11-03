@@ -129,6 +129,10 @@ def device():
         "/sjis.xml": raw(_declared("Shift_JIS", "\u68da").encode("shift_jis"), "text/xml; charset=Shift_JIS"),
         "/sjis-unlabelled.xml": raw(_declared("Shift_JIS", "Shelf").encode(), "text/xml"),
         "/unknown-charset.xml": raw(_declared("UTF-8").encode(), "text/xml; charset=x-none"),
+        "/quoted-charset.xml": raw(_declared("UTF-8").encode("latin-1"), "text/xml; charset='latin1'"),
+        "/param-charset.xml": raw(_declared("UTF-8").encode("latin-1"), 'text/xml; foo="a;charset=latin1"'),
+        "/punycode.xml": raw(b"-" + b"9" * 4096, "text/xml; charset=punycode"),
+        "/zlib.xml": raw(_declared("UTF-8").encode(), "text/xml; charset=zlib"),
         "/zones.xml": lambda r: text(_zones()),
         "/doubled.xml": lambda r: text(_nested(0).replace(
             "<UDN>uuid:shelf-1</UDN>", "<UDN>uuid:shelf-1</UDN><UDN>uuid:shelf-2</UDN>")),
@@ -332,6 +336,15 @@ def test_a_devices_words_are_plain_and_its_udn_whole_or_refused(device):
             _describe(f"{base}/{shape}.xml")
 
 
+def test_a_description_in_a_codec_that_is_no_text_encoding_is_refused_undecoded(device):
+    """The device names the codec: punycode decodes in quadratic time on the
+    event loop, zlib is no text encoding at all."""
+    base, _hits = device
+    for shape in ("punycode", "zlib"):
+        with pytest.raises(player.DescriptionRefused, match="encoding the scan does not read"):
+            _describe(f"{base}/{shape}.xml")
+
+
 def _listed(url):
     """The UDN of the renderer the scan lists at `url`, or None."""
     from xml.etree.ElementTree import ParseError
@@ -363,7 +376,8 @@ def _attached(url):
 @pytest.mark.parametrize("shape, udn", [
     ("utf8", "uuid:shelf-1"), ("latin1", None), ("labelled", "uuid:shelf-1"),
     ("undeclared", "uuid:shelf-1"), ("sjis", "uuid:shelf-1"), ("sjis-unlabelled", "uuid:shelf-1"),
-    ("unknown-charset", "uuid:shelf-1"), ("embedded", "uuid:shelf-1"), ("deep", None), ("bare", None),
+    ("unknown-charset", "uuid:shelf-1"), ("quoted-charset", "uuid:shelf-1"), ("param-charset", "uuid:shelf-1"),
+    ("embedded", "uuid:shelf-1"), ("deep", None), ("bare", None),
     ("zones", "uuid:zone-b"), ("doubled", "uuid:shelf-1"),
 ])
 def test_the_scan_reads_a_description_as_the_attach_does(device, shape, udn):

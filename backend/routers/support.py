@@ -337,11 +337,16 @@ def _bounded_headers(stream) -> None:
     """Walk the tar stream's headers as tar will, to its end — the first
     empty block, or a stream too short for a header: one that reads (its
     checksum holds, its numbers are tar's own), of a kind in _BUNDLE_TYPES,
-    a folder carrying no data and a file's data within the stream. Any
-    other header is refused, before tar reads one."""
+    a folder carrying no data and a file's data within the stream, and
+    _BUNDLE_ENTRIES of them at most. Any other header is refused, before tar
+    reads one."""
     end = stream.seek(0, io.SEEK_END)
     stream.seek(0)
+    headers = 0
     while len(block := stream.read(tarfile.BLOCKSIZE)) == tarfile.BLOCKSIZE and block.strip(b"\0"):
+        headers += 1
+        if headers > _BUNDLE_ENTRIES:
+            raise HTTPException(status_code=422, detail="bundle holds more entries than a bundle has")
         try:
             readable = tarfile.nti(block[148:156]) in tarfile.calc_chksums(block)
             size = tarfile.nti(block[124:136])
@@ -377,7 +382,10 @@ def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
         if total > _BUNDLE_UNPACKED_BYTES:
             raise HTTPException(status_code=422, detail="bundle unpacks past what a bundle holds")
         members.append(member)
-    tar.extractall(dest, members=members, filter="data")
+    try:
+        tar.extractall(dest, members=members, filter="data")
+    except OSError as e:   # entries whose names collide: a file and a folder of one name
+        raise HTTPException(status_code=422, detail="bundle entries do not unpack") from e
 
 
 @router.post("/bundles/{bundle_id}/open")
