@@ -148,7 +148,8 @@ def test_encodes_run_so_many_at_once_with_a_fixed_set_of_locks(tmp_path, monkeyp
     keys = [hashlib.sha1(f"track {i}".encode()).hexdigest() for i in range(208)]    # as _produce's callers make them
     threads = [threading.Thread(target=transcode._produce, args=(keys[i],),
                                 kwargs=dict(suffix=".ogg", label="t", args_in=[], out_args=[],
-                                            stdin_bytes=None)) for i in range(8)]
+                                            stdin_bytes=None, offset_of_a_request=True))
+               for i in range(8)]
     for t in threads:
         t.start()
     for t in threads:
@@ -157,6 +158,42 @@ def test_encodes_run_so_many_at_once_with_a_fixed_set_of_locks(tmp_path, monkeyp
     for key in keys[8:]:
         transcode._key_lock(key)
     assert len(transcode._key_locks) == locks
+
+
+def test_a_lossless_cut_runs_beside_the_encodes_a_request_offset_names(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "_CACHE_DIR", tmp_path)
+    release = threading.Event()
+
+    def encode(args_in, out_args, out_path, stdin_bytes):
+        if out_path.suffix == ".ogg":
+            release.wait(10)
+        out_path.write_bytes(b"x")
+    monkeypatch.setattr(transcode, "run_ffmpeg", encode)
+    held = [threading.Thread(target=transcode._produce, args=(hashlib.sha1(f"o{i}".encode()).hexdigest(),),
+                             kwargs=dict(suffix=".ogg", label="t", args_in=[], out_args=[],
+                                         stdin_bytes=None, offset_of_a_request=True))
+            for i in range(transcode.ENCODES)]
+    for t in held:
+        t.start()
+    time.sleep(0.1)
+    began = time.monotonic()
+    transcode._produce(hashlib.sha1(b"cut").hexdigest(), suffix=".flac", label="cut",
+                       args_in=[], out_args=[], stdin_bytes=None)
+    assert time.monotonic() - began < 1.0
+    release.set()
+    for t in held:
+        t.join(10)
+
+
+def test_an_ffmpeg_that_does_not_finish_is_let_go(tmp_path, monkeypatch):
+    import subprocess
+
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    monkeypatch.setattr(transcode.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="did not finish"):
+        transcode.run_ffmpeg(["-i", "in.flac"], ["-f", "flac"], tmp_path / "out.flac", None)
+    assert not (tmp_path / "out.flac.part").exists()
 
 
 def test_a_token_is_named_in_the_log_by_its_prefix(started, caplog):
@@ -168,3 +205,45 @@ def test_a_token_is_named_in_the_log_by_its_prefix(started, caplog):
     assert e.value.code == 500
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert proxy_mod.shown(tok) in logged and tok not in logged
+
+
+def test_a_request_head_that_keeps_coming_slowly_is_let_go_at_its_deadline(started, monkeypatch):
+    monkeypatch.setattr(proxy_mod, "_REQUEST_READ_S", 0.5)
+    monkeypatch.setattr(proxy_mod, "_REQUEST_HEAD_S", 0.6)
+    _proxy, port = started()
+    s = _idle(port)
+    began, closed_at = time.monotonic(), None
+    for byte in b"GET /file/xxxxxxxxxxxxxx":          # a byte every 0.15 s, within each read's wait
+        try:
+            s.sendall(bytes([byte]))
+        except OSError:
+            closed_at = time.monotonic()
+            break
+        if _closed_within(s, 0.15):
+            closed_at = time.monotonic()
+            break
+    assert closed_at is not None and closed_at - began < 2.0
+
+
+def test_one_address_holds_at_most_its_share_of_the_connections(started, monkeypatch):
+    monkeypatch.setattr(proxy_mod, "_CONNECTIONS", 4)
+    monkeypatch.setattr(proxy_mod, "_PER_ADDRESS", 2)
+    monkeypatch.setattr(proxy_mod, "_REQUEST_READ_S", 5.0)
+    _proxy, port = started()
+    held = [_idle(port) for _ in range(2)]
+    time.sleep(0.2)
+    assert _closed_within(_idle(port), 1.0)
+    other = socket.socket()
+    other.bind(("127.0.0.2", 0))
+    other.connect(("127.0.0.1", port))
+    assert not _closed_within(other, 0.5)
+    for s in (*held, other):
+        s.close()
+
+
+def test_a_consumers_connection_is_kept_alive():
+    with socket.socket() as s:
+        proxy_mod._keep_alive(s)
+        assert s.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            assert s.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE) == proxy_mod._KEEPALIVE_IDLE_S

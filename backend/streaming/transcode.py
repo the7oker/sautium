@@ -24,6 +24,7 @@ And whole files in FLAC (`flac_path_for_file`), for a DLNA renderer whose
 sink list lacks their own format. FLAC is ~10× Opus size, hence the budget.
 """
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -52,10 +53,15 @@ _index_lock = threading.Lock()
 # set, so a request for any number of distinct keys adds none.
 _KEY_STRIPES = 64
 _key_locks = tuple(threading.Lock() for _ in range(_KEY_STRIPES))
-# Encodes running at once, whatever the keys: a renderer asks for one track at
-# a time and the browser's prefetch for the next; a request past these waits.
+# Encodes running at once whose offset a request names (Opus from `ss`),
+# whatever their keys: a renderer asks for one track at a time and the
+# browser's prefetch for the next; a request past these waits. A lossless
+# copy or cut is the file's own, never a request's offset, and runs beside
+# them — a CUE track's cut is what HQPlayer waits for before it may play.
 ENCODES = 2
 _encodes = threading.BoundedSemaphore(ENCODES)
+# A hung ffmpeg — a source on a stalled network share — is let go
+FFMPEG_TIMEOUT_S = 30 * 60
 
 
 def wants_opus(quality: Optional[str]) -> bool:
@@ -110,12 +116,14 @@ def run_ffmpeg(args_in: list, out_args: list, out_path: Path,
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            *args_in, "-vn", *out_args, str(tmp)]
     try:
-        subprocess.run(cmd, input=stdin_bytes, check=True,
+        subprocess.run(cmd, input=stdin_bytes, check=True, timeout=FFMPEG_TIMEOUT_S,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         os.replace(tmp, out_path)               # atomic — no half file is ever served
     except subprocess.CalledProcessError as e:
         err = (e.stderr or b"").decode(errors="replace")[-300:]
         raise RuntimeError(f"ffmpeg failed: {err}") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"ffmpeg did not finish within {FFMPEG_TIMEOUT_S} s") from e
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -141,7 +149,7 @@ def opus_path_for_file(source_path: str, quality: str, ss: float = 0.0) -> Optio
     key = hashlib.sha1(f"{source_path}|{mtime}|{bitrate}|{int(ss)}".encode()).hexdigest()
     return _produce(key, suffix=".ogg", label=f"opus {bitrate}k",
                     args_in=_seek_args(ss, ["-i", source_path]),
-                    out_args=_opus_args(bitrate), stdin_bytes=None)
+                    out_args=_opus_args(bitrate), stdin_bytes=None, offset_of_a_request=True)
 
 
 def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str,
@@ -155,7 +163,8 @@ def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str,
     key = hashlib.sha1(f"{token}|{bitrate}|{int(ss)}".encode()).hexdigest()
     return _produce(key, suffix=".ogg", label=f"opus {bitrate}k",
                     args_in=_seek_args(ss, ["-i", "pipe:0"]),
-                    out_args=_opus_args(bitrate), stdin_bytes=source_bytes)
+                    out_args=_opus_args(bitrate), stdin_bytes=source_bytes,
+                    offset_of_a_request=True)
 
 
 def flac_path_for_file(source_path: str) -> str:
@@ -199,7 +208,8 @@ def flac_slice_path_for_file(source_path: str, start: float,
 
 
 def _produce(key: str, *, suffix: str, label: str, args_in: list,
-             out_args: list, stdin_bytes: Optional[bytes]) -> str:
+             out_args: list, stdin_bytes: Optional[bytes],
+             offset_of_a_request: bool = False) -> str:
     out = _CACHE_DIR / f"{key}{suffix}"
     if out.exists():
         os.utime(out, None)                     # bump access time for LRU
@@ -210,7 +220,7 @@ def _produce(key: str, *, suffix: str, label: str, args_in: list,
             return str(out)
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        with _encodes:
+        with _encodes if offset_of_a_request else contextlib.nullcontext():
             run_ffmpeg(args_in, out_args, out, stdin_bytes)
         logger.info("%s transcode in %.1fs (%s)", label,
                     time.monotonic() - started, out.name)

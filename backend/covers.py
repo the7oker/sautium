@@ -193,14 +193,16 @@ def open_cover(data: bytes) -> Optional[Image.Image]:
     """`data` decoded as a cover (COVER_FORMATS), or None. Its size is read
     from the header and judged before a pixel is decoded: past Pillow's own
     bound (MAX_IMAGE_PIXELS, ~89 MP — a booklet scanned for print is ~50)
-    it is refused, never decoded."""
+    it is refused, never decoded. A file Pillow cannot read is no cover —
+    some damage it says as SyntaxError or EOFError."""
     try:
         img = Image.open(BytesIO(data), formats=COVER_FORMATS)
         if img.width * img.height > Image.MAX_IMAGE_PIXELS:
             logger.debug("cover of %dx%d refused undecoded", img.width, img.height)
             return None
         img.load()
-    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError) as e:
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError,
+            SyntaxError, EOFError) as e:
         logger.debug(f"PIL decode failed: {e}")
         return None
     return img

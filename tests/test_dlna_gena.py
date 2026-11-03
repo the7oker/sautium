@@ -76,10 +76,11 @@ class _Service:
         self.changes.append(changes)
 
 
-def _subscribe_meeting(notify, strangers: int):
+def _subscribe_meeting(notify, strangers: int, wait: float = 0.0):
     """A SUBSCRIBE whose renderer sends its first event before it answers —
-    and `strangers` events of other SIDs beside it — then answers with its
-    SID: (the SID, what the subscription was told, the statuses, what is kept)."""
+    and `strangers` events of other SIDs beside it — then, `wait` seconds
+    later, answers with its SID: (the SID, what the subscription was told,
+    the statuses, what is kept)."""
     from async_upnp_client.const import HttpResponse
 
     async def scenario():
@@ -92,6 +93,7 @@ def _subscribe_meeting(notify, strangers: int):
                 statuses = [await _post(notify, early_sid)]
                 statuses += [await _post(notify, f"uuid:stranger-{i}") for i in range(strangers)]
                 Renderer.statuses = statuses
+                await asyncio.sleep(wait)
                 return HttpResponse(200, {"sid": early_sid, "timeout": "Second-1800"}, "")
         handler._requester = Renderer()
         service = _Service()
@@ -122,3 +124,19 @@ def test_a_notify_body_is_bounded(notify):
         finally:
             await server.async_stop_server()
     assert asyncio.run(scenario()) == 413
+
+
+def test_an_early_event_older_than_its_window_is_not_played(notify, monkeypatch):
+    monkeypatch.setattr(dlna_backend, "_EARLY_EVENT_SECONDS", 0.2)
+    sid, changes, statuses, _kept_now = _subscribe_meeting(notify, strangers=0, wait=0.4)
+    assert sid == "uuid:the-renderer-1" and statuses == [200] and changes == []
+
+
+def test_an_event_without_a_sid_is_refused_and_kept_nowhere(notify):
+    async def scenario():
+        server = await dlna_backend._ensure_notify(dlna_backend.AiohttpRequester(), None)
+        try:
+            return await _post(notify, ""), _kept(server.event_handler)
+        finally:
+            await server.async_stop_server()
+    assert asyncio.run(scenario()) == (412, 0)

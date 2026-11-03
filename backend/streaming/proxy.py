@@ -25,6 +25,8 @@ import hashlib
 import hmac
 import logging
 import secrets
+import socket
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -49,13 +51,31 @@ _STRAY_TOKENS = 32
 _STRAY_HITS = 4
 _TOKEN_KEPT = 64            # characters of a token a record keeps
 _RANGE_KEPT = 128
-# Connections served at once — each a thread. HQPlayer probes and streams one
-# entry at a time, a renderer pulls one or two; past this a connection is
-# closed as it arrives. The request line and headers must arrive within
-# _REQUEST_READ_S of each other; the answer's writes wait as long as the
-# consumer does (a paused HQPlayer stops reading for as long as it likes).
+# Connections served at once — each a thread — and from one address: HQPlayer
+# probes and streams one entry at a time, a renderer pulls one or two; past
+# either, a connection is closed as it arrives (where every consumer shows one
+# address, as behind Docker Desktop's bridge, the share is what they have
+# together). The request line and headers must arrive within _REQUEST_HEAD_S
+# in all and _REQUEST_READ_S of each other; the answer's writes wait as long
+# as the consumer does (a paused HQPlayer stops reading for as long as it
+# likes), and a consumer gone for good is found by TCP keepalive.
 _CONNECTIONS = 64
+_PER_ADDRESS = 32
 _REQUEST_READ_S = 10.0
+_REQUEST_HEAD_S = 15.0
+_KEEPALIVE_IDLE_S, _KEEPALIVE_INTERVAL_S, _KEEPALIVE_PROBES = 60, 10, 6
+
+
+def _keep_alive(sock: socket.socket) -> None:
+    """TCP keepalive on a consumer's connection: a peer that is gone — not
+    one that only stopped reading — is found in about two minutes."""
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    if hasattr(socket, "TCP_KEEPIDLE"):                       # Linux, Windows
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, _KEEPALIVE_IDLE_S)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, _KEEPALIVE_INTERVAL_S)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, _KEEPALIVE_PROBES)
+    elif hasattr(socket, "TCP_KEEPALIVE"):                    # macOS: the idle time
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, _KEEPALIVE_IDLE_S)
 
 
 def shown(token: str) -> str:
@@ -841,30 +861,59 @@ class MediaProxy:
 
 
 class _BoundedServer(ThreadingHTTPServer):
-    """A thread per connection, _CONNECTIONS of them at most: one past that
-    is closed as it arrives, its thread never started."""
+    """A thread per connection, _CONNECTIONS of them at most and
+    _PER_ADDRESS from one address: one past either is closed as it arrives,
+    its thread never started. Every connection taken is kept alive
+    (_keep_alive)."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._slots = threading.BoundedSemaphore(_CONNECTIONS)
+        self._lock = threading.Lock()
+        self._by_address: dict[str, int] = {}
 
     def process_request(self, request, client_address) -> None:
-        if not self._slots.acquire(blocking=False):
-            logger.debug("media proxy: %d connections already — %s closed",
-                         _CONNECTIONS, client_address[0])
+        address = client_address[0]
+        with self._lock:
+            taken = (self._by_address.get(address, 0) < _PER_ADDRESS
+                     and self._slots.acquire(blocking=False))
+            if taken:
+                self._by_address[address] = self._by_address.get(address, 0) + 1
+        if not taken:
+            logger.debug("media proxy: no connection left for %s — closed", address)
             self.shutdown_request(request)
             return
         try:
+            _keep_alive(request)
             super().process_request(request, client_address)
         except BaseException:
-            self._slots.release()
+            self._release(address)
             raise
 
     def process_request_thread(self, request, client_address) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._slots.release()
+            self._release(client_address[0])
+
+    def handle_error(self, request, client_address) -> None:
+        """A connection that ended under its request — the consumer gone, or
+        its head past the deadline — is said at debug; anything else is an
+        error, with its traceback in the log (not on stderr)."""
+        error = sys.exc_info()[1]
+        if isinstance(error, ConnectionError):
+            logger.debug("media proxy: %s's connection ended: %s", client_address[0], error)
+        else:
+            logger.error("media proxy: a request from %s failed", client_address[0], exc_info=True)
+
+    def _release(self, address: str) -> None:
+        with self._lock:
+            left = self._by_address[address] - 1
+            if left:
+                self._by_address[address] = left
+            else:
+                del self._by_address[address]
+        self._slots.release()
 
 
 def _make_handler(proxy: MediaProxy):
@@ -875,8 +924,10 @@ def _make_handler(proxy: MediaProxy):
         # started. Matches the plain http.server that played reliably in bring-up.
 
         # The request line and headers: each read waits _REQUEST_READ_S at
-        # most (StreamRequestHandler sets it on the socket); the answer, once
-        # it begins (_answering), waits for the consumer as long as it takes.
+        # most (StreamRequestHandler sets it on the socket), and the whole of
+        # them _REQUEST_HEAD_S (setup's timer) — a head that keeps coming
+        # slowly holds no place for good; the answer, once it begins
+        # (_answering), waits for the consumer as long as it takes.
         timeout = _REQUEST_READ_S
 
         # The /file/ or /preview/ request being served, as the proxy records
@@ -886,7 +937,25 @@ def _make_handler(proxy: MediaProxy):
         def log_message(self, fmt, *a):  # quiet by default; -d to trace probes
             logger.debug("proxy %s: %s", self.address_string(), fmt % a)
 
+        def setup(self) -> None:
+            super().setup()
+            self._head_timer = threading.Timer(_REQUEST_HEAD_S, self._head_late)
+            self._head_timer.daemon = True
+            self._head_timer.start()
+
+        def _head_late(self) -> None:
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError as e:                      # it ended on its own meanwhile
+                logger.debug("proxy %s: the head's deadline met an ended connection: %s",
+                             self.address_string(), e)
+
+        def finish(self) -> None:
+            self._head_timer.cancel()
+            super().finish()
+
         def _answering(self) -> None:
+            self._head_timer.cancel()
             self.connection.settimeout(None)
 
         def send_response(self, code, message=None):

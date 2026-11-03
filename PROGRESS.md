@@ -3572,20 +3572,29 @@ device on the network; none of them may hold for it more than a bound.
   good. `dlna_backend._EventHandler` keeps one only while a SUBSCRIBE or a
   renewal of the node's is in flight or answered less than 30 s ago — 16 at
   most, each for 30 s — and plays it to its subscription when the answer
-  names the SID; any other is refused with 412, as UPnP says. A body past
-  64 KiB is refused (413). The first event lost to that bound costs
-  nothing: the attach reads the renderer's state itself after subscribing.
-- **The media proxy serves 64 connections at once,** a thread each; one
-  past that is closed as it arrives. A request line and its headers wait
-  10 s per read at most; the answer, once it begins, waits for its reader
+  names the SID — not when it waited past its 30 s; any other, and one
+  without a SID, is refused with 412, as UPnP says. A body past 64 KiB is
+  refused (413). The first event lost to that bound costs nothing: the
+  attach reads the renderer's state itself after subscribing.
+- **The media proxy serves 64 connections at once,** a thread each, 32 of
+  them from one address (behind Docker Desktop's bridge every consumer
+  shows one, and 32 is what they have together); one past either is
+  closed as it arrives. A request line and its headers wait 10 s per read
+  and 15 s in all at most; the answer, once it begins, waits for its reader
   as long as it takes — a paused HQPlayer stops reading for as long as it
-  likes, and its stream must survive that. A span of a buffer goes out as
+  likes, and its stream must survive that — and TCP keepalive finds a
+  reader that is gone for good (about two minutes). A connection that ends
+  under its request is said at debug, not as a traceback on stderr. A span of a buffer goes out as
   a view of it, never a copy. Requests for a token the proxy does not
   hold are remembered apart (32 tokens, 4 requests each), so none of them
   pushes a live token's record — what the HQPlayer trace reads — out; a
   record keeps 64 characters of a token and 128 of a range. Two encodes
-  run at once, whatever the keys (`transcode.ENCODES`), and a key's lock
-  is one of 64: a request for any number of distinct keys adds none. A log
+  whose offset a request names (Opus from `ss`) run at once, whatever the
+  keys (`transcode.ENCODES`); a lossless copy or cut is the file's own and
+  runs beside them — a CUE track's cut is what HQPlayer waits for before it
+  may play. A key's lock is one of 64: a request for any number of distinct
+  keys adds none. ffmpeg is let go after 30 minutes (a source on a stalled
+  share). A log
   line names a token by its first six characters (`proxy.shown`): a token
   is a bearer credential for its file.
 - **The Output scan takes a device's word within bounds.** A multicast
@@ -3642,7 +3651,9 @@ device on the network; none of them may hold for it more than a bound.
   decoded: past Pillow's ~89 MP bound — no longer raised to 200 MP for
   booklets, which are ~50 — a picture is refused undecoded, never a
   multi-gigabyte decode that ends in a crash and repeats on the next
-  view.
+  view. A file Pillow cannot read — some damage it says as SyntaxError —
+  is no cover, and leaves the DLNA track it was for without art, not
+  without a load.
 
 ## Known Gotchas
 

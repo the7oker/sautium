@@ -1126,8 +1126,9 @@ construction) to the master and POSTed to `/api/diag/bundle?warrant=<id>`
 on the master's peer surface with a wire-format-v1 signature, 32 MiB cap,
 stored as received in `support_bundles`. `support_open_bundle` decrypts and
 unpacks it under `data/support/<pubkey16>/<bundle>/` (a bind mount) —
-plaintext leaves the database only on that call. It unpacks regular files
-and folders only, 256 entries and 512 MiB at most, judged from the headers
+plaintext leaves the database only on that call. It takes the tar stream
+out of its gzip within a hard cap first, then unpacks regular files and
+folders only, 256 entries and 512 MiB at most, judged from the headers
 before a byte is written, through the standard library's `data` filter
 (since 2026-11-03).
 

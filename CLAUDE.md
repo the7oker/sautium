@@ -437,12 +437,15 @@ below bind with or without it.
    DLNA output — owned-file bytes at `/file/{token}` plus cover art at
    `/art/{token}`; all gated by unguessable tokens (an owned file's is an
    HMAC of its path under the node secret — stable across restarts so a
-   remote HQPlayer's mirrored playlist survives one — and is served only
-   while a queue has registered the file, never the library at large) and
+   remote HQPlayer's mirrored playlist survives one — and serves the file
+   from the first time a queue registers it until the node restarts, never
+   the library at large) and
    exist because HQPlayer — on this machine, or an HQPlayer Embedded box on
    the LAN, which is handed streams — and DLNA renderers can neither sign
    HMAC nor trust TLS. 8831 is the DLNA
-   GENA event listener (renderer → backend callbacks). The launcher
+   GENA event listener (renderer → backend callbacks), which has no token:
+   it takes events only for subscriptions the node made, so many and so
+   large (`dlna_backend._EventHandler`). The launcher
    node uses its own pair — 8832 (media) / 8833 (GENA), `ports.media`/
    `ports.gena` in config.json → `MEDIA_PROXY_PORT`/`DLNA_GENA_PORT` —
    because the Docker node's forward holds 8830-8831 even while the

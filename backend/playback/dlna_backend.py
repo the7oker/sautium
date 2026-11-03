@@ -241,8 +241,11 @@ if HAS_UPNP:
         async def handle_notify(self, http_request):
             headers = http_request.headers
             sid = headers.get("SID")
-            if (headers.get("NT") != "upnp:event" or headers.get("NTS") != "upnp:propchange"
-                    or not sid or self.service_for_sid(sid) is not None):
+            if headers.get("NT") != "upnp:event" or headers.get("NTS") != "upnp:propchange":
+                return await super().handle_notify(http_request)
+            if not sid:
+                return HTTPStatus.PRECONDITION_FAILED
+            if self.service_for_sid(sid) is not None:
                 return await super().handle_notify(http_request)
             now = time.monotonic()
             for stale in [k for k, (at, _) in self._early.items() if now - at > _EARLY_EVENT_SECONDS]:
@@ -257,7 +260,7 @@ if HAS_UPNP:
 
         async def _played_early(self, answer):
             early = self._early.pop(answer[0], None)
-            if early is not None:
+            if early is not None and time.monotonic() - early[0] <= _EARLY_EVENT_SECONDS:
                 await super().handle_notify(early[1])
             return answer
 

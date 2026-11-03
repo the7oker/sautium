@@ -11,12 +11,15 @@ files are readable from the host. Plaintext leaves the database only on
 that explicit call.
 """
 
+import gzip
 import io
 import json
 import logging
 import os
 import shutil
 import tarfile
+import tempfile
+import zlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -280,6 +283,33 @@ def support_bundles(node: str = "") -> List[Dict[str, Any]]:
 # few hundred MiB at the very most.
 _BUNDLE_ENTRIES = 256
 _BUNDLE_UNPACKED_BYTES = 512 * 1024 * 1024
+# The tar stream itself, its headers with it: the entries' bytes, a header and
+# padding each, and room for long names
+_BUNDLE_STREAM_BYTES = _BUNDLE_UNPACKED_BYTES + 4 * 1024 * 1024
+
+
+def _unpacked_tar(plain: bytes):
+    """The bundle's tar stream, out of its gzip into a temporary file within
+    _BUNDLE_STREAM_BYTES — before tar reads a header: tar takes a long name's
+    or an extended header's data whole as it walks the archive, and that
+    counts as no entry."""
+    out = tempfile.TemporaryFile()
+    try:
+        total = 0
+        with gzip.GzipFile(fileobj=io.BytesIO(plain)) as packed:
+            while chunk := packed.read(1024 * 1024):
+                total += len(chunk)
+                if total > _BUNDLE_STREAM_BYTES:
+                    raise HTTPException(status_code=422, detail="bundle unpacks past what a bundle holds")
+                out.write(chunk)
+    except (OSError, EOFError, zlib.error) as e:
+        out.close()
+        raise HTTPException(status_code=422, detail=f"bundle is no gzip stream: {e}")
+    except HTTPException:
+        out.close()
+        raise
+    out.seek(0)
+    return out
 
 
 def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
@@ -325,7 +355,7 @@ def open_bundle(bundle_id: str) -> Dict[str, Any]:
         if dest.exists():
             shutil.rmtree(dest)
         dest.mkdir(parents=True)
-        with tarfile.open(fileobj=io.BytesIO(plain), mode="r:gz") as tar:
+        with _unpacked_tar(plain) as stream, tarfile.open(fileobj=stream, mode="r:") as tar:
             _safe_extract(tar, dest)
         db_execute("UPDATE support_bundles SET opened_at = now(), extract_path = %s WHERE id = %s",
                    (str(dest), bundle_id))

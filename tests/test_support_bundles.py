@@ -1,6 +1,7 @@
 """How the support desk unpacks a bundle a node sent (routers/support.py
-_safe_extract): so many entries and so many bytes, judged from the headers
-before a byte is written, and no mode bit beyond plain permissions."""
+_unpacked_tar, _safe_extract): a tar stream of so many bytes, so many entries
+and so many bytes in them, judged before a byte is written, and no mode bit
+beyond plain permissions."""
 
 import io
 import stat
@@ -31,7 +32,8 @@ def _bundle(entries) -> bytes:
 
 
 def _extract(blob: bytes, dest: Path) -> None:
-    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+    """As the desk opens a bundle: out of its gzip within bounds, then tar."""
+    with support._unpacked_tar(blob) as stream, tarfile.open(fileobj=stream, mode="r:") as tar:
         support._safe_extract(tar, dest)
 
 
@@ -60,3 +62,17 @@ def test_a_bundle_that_unpacks_past_its_cap_is_refused_before_a_byte_is_written(
         _extract(_bundle([("a.log", b"x" * 8, 0o644), ("b.log", b"x" * 8, 0o644)]), tmp_path)
     assert refused.value.status_code == 422
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_bundle_whose_tar_stream_passes_its_cap_is_refused_before_a_byte_is_written(tmp_path, monkeypatch):
+    monkeypatch.setattr(support, "_BUNDLE_STREAM_BYTES", 8 * 1024)
+    with pytest.raises(HTTPException) as refused:
+        _extract(_bundle([("logs/backend.log", b"line\n" * 4096, 0o644)]), tmp_path)
+    assert refused.value.status_code == 422
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_what_is_no_gzip_stream_is_refused(tmp_path):
+    with pytest.raises(HTTPException) as refused:
+        _extract(b"not a bundle", tmp_path)
+    assert refused.value.status_code == 422

@@ -58,3 +58,21 @@ def test_a_picture_past_the_bound_is_refused_from_its_header(monkeypatch):
     webp, w, h, orig_w, orig_h, fmt, _phash = covers._encode_and_hash(_small_png())
     assert (w, h, orig_w, orig_h, fmt) == (4, 4, 4, 4, "png") and webp[:4] == b"RIFF"
     assert DlnaBackend._to_jpeg(_small_png(), "png")[:2] == b"\xff\xd8"
+
+
+def _png_with_a_damaged_second_chunk() -> bytes:
+    """An 8×8 picture whose data runs over two chunks, the second's type
+    damaged: Pillow says so as a SyntaxError, from load()."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    packed = zlib.compress(b"".join(b"\x00" + b"\x80\x10\x10" * 8 for _ in range(8)))
+    half = len(packed) // 2
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", packed[:half]) + chunk(b"ID\x00T", packed[half:]) + chunk(b"IEND", b""))
+
+
+def test_a_damaged_cover_is_no_cover_and_no_jpeg():
+    damaged = _png_with_a_damaged_second_chunk()
+    assert covers.open_cover(damaged) is None
+    assert covers._encode_and_hash(damaged) is None
+    assert DlnaBackend._to_jpeg(damaged, "damaged") is None
