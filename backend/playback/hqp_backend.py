@@ -3965,9 +3965,11 @@ class HqpBackend(PlayerBackend):
         if item is not None:
             who = {"track_id": item.track_id, "media_file_id": item.media_file_id,
                    "title": item.title, "artist": item.artist, "album": item.album,
-                   "kind": item.opener()["kind"]}
+                   "kind": item.opener()["kind"], "format": item.opener().get("format"),
+                   "length": item.duration_seconds}
         elif handover:
-            who = {k: handover.get(k) for k in ("track_id", "media_file_id", "title", "artist")}
+            who = {k: handover.get(k)
+                   for k in ("track_id", "media_file_id", "title", "artist", "format", "length")}
         else:
             who = None
         if who is not None and mode == "preview" and proxy is not None and token:

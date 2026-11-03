@@ -12,7 +12,9 @@ node keys, TLS keys, .api_secret, the agents' auth files). Log tails go
 through diag_protocol.scrub_personal: no credential, email, address or
 absolute path. The `playback` scope — the HQPlayer
 output's playback traces and HQPlayer's own log, which are content — comes
-from the backend with every path already cut to its last two components.
+from the backend with each track named by its ids, format and length and
+every path cut to its last two components; a library file's name leaves as
+its extension (scrub_detail), even in a scope the person sends.
 """
 
 import io

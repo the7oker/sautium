@@ -121,7 +121,8 @@ def mode_of(uri: str) -> str:
 def note_handover(uri: str, key: tuple, item, mode: str) -> None:
     entry = {"uri": uri, "ts": time.time(), "mode": mode, "track_id": item.track_id,
              "media_file_id": item.media_file_id, "title": item.title,
-             "artist": item.artist, "ok": None, "result": None, "message": ""}
+             "artist": item.artist, "format": item.opener().get("format"),
+             "length": item.duration_seconds, "ok": None, "result": None, "message": ""}
     with _lock:
         _ledger.pop(uri, None)
         _ledger[uri] = entry
@@ -1478,13 +1479,29 @@ def _read_web(url: str, cap: int = 2 * 1024 * 1024) -> list:
     return [line for line in lines if line and not _noise(line)][-LOG_LINES:]
 
 
+# What names a track in a trace — kept on the node, as its file's name is
+# (diag_protocol.scrub_personal cuts that to its extension as it leaves).
+_TRACK_NAMES = ("title", "artist", "album")
+
+
+def _by_id(attempt: dict) -> dict:
+    """A trace as it leaves: its track named by its ids, format and length."""
+    facts = attempt.get("facts") or {}
+    for key in ("item", "handover"):
+        if facts.get(key):
+            facts[key] = {k: v for k, v in facts[key].items() if k not in _TRACK_NAMES}
+    return attempt
+
+
 def bundle_view(source: dict, info: dict) -> dict:
-    """Everything the `playback` warrant scope carries: every trace, the
-    client's failed commands and a fresh tail of HQPlayer's log, every path
-    cut to its last two components."""
+    """Everything the `playback` warrant scope carries: every trace — its
+    track named by its ids, format and length, never by its title, artist or
+    album, even when the person sends it —, the client's failed commands and
+    a fresh tail of HQPlayer's log, every path cut to its last two
+    components."""
     from hqplayer_client import HQPlayerClient
     return _redacted({
-        "attempts": [public(a, redact=False) for a in attempts()],
+        "attempts": [_by_id(public(a, redact=False)) for a in attempts()],
         "failing": failing_run(),
         "client_errors": HQPlayerClient.last_errors(),
         "log": read_log(source, info),

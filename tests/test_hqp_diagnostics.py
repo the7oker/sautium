@@ -672,6 +672,28 @@ def test_a_redacted_trace_names_no_full_path(fresh):
     assert "…/Album/03. Track.flac" in cut
 
 
+def test_a_trace_leaves_naming_its_track_by_its_ids_format_and_length(fresh):
+    """The `playback` scope a person sends names a trace's track as the node
+    knows it — its ids, format and length — never by its title, artist or
+    album, nor by its file's name; the node's own view keeps them."""
+    from desktop.p2p.diag_protocol import scrub_detail
+    named = {"title": "Some Song Title", "artist": "Some Artist", "album": "Some Album"}
+    facts = _trace("no_fetch_stream")
+    _close("no_fetch_stream",
+           item={**facts["item"], **named, "format": "flac", "length": 241.0},
+           handover={**facts["handover"], "title": named["title"], "artist": named["artist"],
+                     "format": "flac", "length": 241.0},
+           expected_uri="file:///music/Some Artist/Some Album/05 Some Song Title.flac")
+    view = diag.bundle_view(diag.log_source("127.0.0.1", {}), {})
+    assert "Some" not in json.dumps(scrub_detail(view), ensure_ascii=False)
+    [sent] = view["attempts"]
+    assert sent["facts"]["item"] == {"track_id": "t-3", "media_file_id": 33, "kind": "file",
+                                     "format": "flac", "length": 241.0}
+    assert {"format": "flac", "length": 241.0, "track_id": "t-3"}.items() <= sent["facts"]["handover"].items()
+    assert not {"title", "artist"} & sent["facts"]["handover"].keys()
+    assert diag.public(diag.attempts()[0], redact=False)["facts"]["item"]["title"] == "Some Song Title"
+
+
 # -- HQPlayer's own log ---------------------------------------------------------------------
 
 def _log_lines():
