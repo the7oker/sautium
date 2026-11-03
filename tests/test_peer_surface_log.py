@@ -99,7 +99,8 @@ def serve(tls):
     return asyncio.run(main())
 
 out = {"plain": serve(False), "tls": serve(True)}
-print(json.dumps({**out, "kept": kept, "access_lines": lines,
+print(json.dumps({**out, "kept": kept, "offered": PeerSurfaceConfig(app).ws,
+                  "access_lines": lines,
                   "upgrade_said": [l for l in said if "private" in l or "WebSocket" in l
                                    or "upgrade" in l]}))
 """
@@ -112,7 +113,7 @@ def test_the_peer_surface_logs_no_access_line_and_leaves_the_web_uis_log_alone()
     import json
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     served = {"body": "ok", "upgrade": "HTTP/1.1 200 OK"}
-    assert out == {"plain": served, "tls": served, "kept": True,
+    assert out == {"plain": served, "tls": served, "kept": True, "offered": "none",
                    "access_lines": [], "upgrade_said": []}
 
 

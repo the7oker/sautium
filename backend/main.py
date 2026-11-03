@@ -1902,9 +1902,9 @@ app.include_router(media_router)
 from routers.eq import router as eq_router
 app.include_router(eq_router)
 
-from routers.sync import router as sync_router, mb_router as mb_sync_router
-app.include_router(sync_router)
-app.include_router(mb_sync_router)
+# The peer routes (routers/sync) face the peer surface alone (p2p_app, its
+# own port): served here they had none of its bounds, and nothing asks for
+# them on this port.
 
 from routers.auth import router as auth_router
 app.include_router(auth_router)

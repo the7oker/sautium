@@ -208,13 +208,20 @@ def _end_streams() -> None:
 class PeerSurfaceConfig(uvicorn.Config):
     """The peer surface's server settings (main._serve_p2p), served by the
     peer protocol (`http=peer_protocol(...)`, which writes no access line
-    and takes no WebSocket): no logging setup of its own.
+    and takes no WebSocket): no WebSocket offered, and no logging setup of
+    its own.
 
     The access logger is one per process, shared with the Web UI's server,
     and uvicorn's protocol writes to it whenever it has a handler; its own
     `access_log=False` works by emptying that logger, which would silence the
     Web UI too. So the peer protocol is told by itself, and the process's
-    logging stays as its start made it (config.LOGGING_CONFIG)."""
+    logging stays as its start made it (config.LOGGING_CONFIG). The server
+    offers no WebSocket either (uvicorn's releases before the upgrade-warning
+    hook the protocol quiets warn of an upgrade whenever one is offered); the
+    protocol's own refusal is its census's, whatever serves it."""
+
+    def __init__(self, app, **kwargs) -> None:
+        super().__init__(app, ws="none", **kwargs)
 
     def configure_logging(self) -> None:
         pass

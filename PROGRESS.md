@@ -2270,7 +2270,12 @@ user brings.
   routed. The peer surface's limiter and its diagnostics signature read
   the same scope. A percent-encoded path now verifies as the browser
   signs it: the old check compared the decoded form, which no signer
-  produced.
+  produced. The peer surface refuses a path with a control character
+  before any window: the router's match lets a trailing newline through
+  (`$` in Python's re), and a window comparing the routed path whole
+  counted such a spelling as another path. The peer routes are no longer
+  mounted on the Web UI port, where they had none of the peer surface's
+  bounds and nothing asked for them.
 - **A signature is taken once (2026-11-03).** The node remembers each
   request signature it accepted while the window could still take it — until
   the wall clock is past the request's own time plus the window, and two

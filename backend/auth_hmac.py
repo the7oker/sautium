@@ -52,10 +52,6 @@ Whitelisted paths (no signature required):
     /static/*            (CSS, JS, fonts)
     /api/covers/*        (album cover art — loaded via <img src>,
                           which cannot attach custom headers)
-    /api/sync/*          (the peer routes, mounted here as well — without
-                          the peer surface's middleware, every caller is
-                          anonymous to them)
-    /api/mb/*            (MusicBrainz slices for peers, like /api/sync/*)
     /api/p2p/chat/wake   (the launcher's sync server wakes the chat
                           streams; the route asks no caller who it is)
     /api/auth/status, /handshake, /login, /pair, /create-account
@@ -274,8 +270,6 @@ def _own_ipv4_literal(host: str, allowed: set) -> bool:
 WHITELIST_PREFIX = (
     "/static/",
     "/api/covers/",
-    "/api/sync/",
-    "/api/mb/",
     # <audio> elements can't set HMAC headers — these routes verify their
     # own short-lived query-param signatures instead (media_urls.verify).
     "/api/player/media/",

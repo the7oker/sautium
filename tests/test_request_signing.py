@@ -92,6 +92,23 @@ def test_a_prefix_no_route_serves_is_no_whitelist_entry(client):
     assert client.get("/sync/inventory").status_code == 401
 
 
+def test_the_web_ui_port_serves_no_peer_route(client):
+    """The peer routes face the peer surface alone (p2p_app, its own port):
+    on the Web UI port they had none of its bounds — an unsigned caller is
+    refused there like any other, and the app mounts none of them."""
+    import ast
+    for path in ("/api/sync/inventory", "/api/mb/slice", "/api/lb/slice"):
+        assert client.post(path).status_code == 401
+    tree = ast.parse((ROOT / "backend" / "main.py").read_text(encoding="utf-8"))
+    peer_routers = {alias.asname or alias.name for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom) and node.module == "routers.sync"
+                    for alias in node.names}
+    mounted = {arg.id for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and getattr(node.func, "attr", None) == "include_router"
+               for arg in node.args if isinstance(arg, ast.Name)}
+    assert not peer_routers & mounted
+
+
 def test_a_signature_covers_the_target_as_sent(client):
     target = "/api/item/caf%C3%A9?q=a%20b&x=%2F"
     r = client.get(target, headers=signed("GET", target))
@@ -131,6 +148,41 @@ def test_the_peer_limiter_counts_by_the_routed_path(monkeypatch):
 
     asyncio.run(p2p_app.rate_limit(request, downstream))
     assert p2p_app._hits.get("192.0.2.7") and not p2p_app._health_hits.get("192.0.2.7")
+
+
+def _peer_request(path: str, method: str = "POST") -> Request:
+    return Request({"type": "http", "method": method, "path": path,
+                    "raw_path": path.encode("latin-1"), "query_string": b"",
+                    "headers": [], "client": ("192.0.2.7", 40000)})
+
+
+async def _served(_request):
+    return JSONResponse({})
+
+
+def test_the_node_wide_slice_window_counts_by_the_routed_path(monkeypatch):
+    import p2p_app
+    _url_says(monkeypatch, "http://node/health")
+    now = time.time()
+    monkeypatch.setattr(p2p_app, "_hits", {})
+    monkeypatch.setattr(p2p_app, "_slice_global", {
+        p: [now] * p2p_app.SLICE_RATE_GLOBAL for p in p2p_app.SLICE_PATHS})
+    for path in p2p_app.SLICE_PATHS:
+        answer = asyncio.run(p2p_app.rate_limit(_peer_request(path), _served))
+        assert answer.status_code == 429
+
+
+def test_a_path_with_a_control_character_is_refused_before_any_window(monkeypatch):
+    """The router lets a trailing newline through; no window would count such
+    a spelling of a route as that route, so none reaches the router."""
+    import p2p_app
+    monkeypatch.setattr(p2p_app, "_hits", {})
+    monkeypatch.setattr(p2p_app, "_search_hits", {})
+    monkeypatch.setattr(p2p_app, "_search_global", [])
+    for path in ("/api/mb/search\n", "/api/mb/slice\n", "/health\r", "/api/sync/pull/tracks\x00"):
+        answer = asyncio.run(p2p_app.rate_limit(_peer_request(path, "GET"), _served))
+        assert answer.status_code == 400
+    assert not p2p_app._hits and not p2p_app._search_hits and not p2p_app._search_global
 
 
 def test_the_diagnostics_signature_covers_the_target_as_sent(monkeypatch):

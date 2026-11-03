@@ -36,12 +36,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from db_pool import get_conn, in_chat_lane, in_peer_lane
-from serving import is_shared
+from serving import is_shared, request_target
 from routers.sync import (
     SYNC_CAPABILITIES, carry_queries, lb_dump_version, lb_inventory, lb_router,
     mb_dump_version, mb_router, node_pubkey_hex, router, sharing_enabled,
 )
-from serving import request_target
 
 logger = logging.getLogger(__name__)
 
@@ -606,12 +605,21 @@ def _rate_limited(stamps: list, now: float) -> JSONResponse:
                         headers={"Retry-After": str(max(1, wait))})
 
 
+# No path of this surface holds a control character, and the router's match
+# lets a trailing newline through (`$` in Python's re): such a spelling of a
+# route reached its handler while every window here, comparing the routed
+# path whole, counted it as another path.
+_UNROUTABLE = re.compile(r"[\x00-\x1f\x7f]")
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     ip = request.client.host if request.client else "unknown"
     now = time.time()
     # The routed path, never request.url's (serving.request_target)
     path = request.scope["path"]
+    if _UNROUTABLE.search(path):
+        return JSONResponse({"detail": "bad request target"}, status_code=400)
     if path == "/api/mb/search":
         if not _search_allowed(ip, now):
             return _rate_limited(_search_hits.get(ip, []), now)
@@ -625,8 +633,8 @@ async def rate_limit(request: Request, call_next):
     if len(recent) >= RATE_LIMIT_PER_MINUTE:
         bucket[ip] = recent
         return _rate_limited(recent, now)
-    if request.url.path in _slice_global and not _slice_allowed(request.url.path, now):
-        return _rate_limited(_slice_global[request.url.path], now)
+    if path in _slice_global and not _slice_allowed(path, now):
+        return _rate_limited(_slice_global[path], now)
     recent.append(now)
     bucket[ip] = recent
     if len(bucket) > 10_000:                   # bound the tables under a flood
