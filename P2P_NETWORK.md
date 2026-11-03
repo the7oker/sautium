@@ -1127,10 +1127,13 @@ on the master's peer surface with a wire-format-v1 signature, 32 MiB cap,
 stored as received in `support_bundles`. `support_open_bundle` decrypts and
 unpacks it under `data/support/<pubkey16>/<bundle>/` (a bind mount) —
 plaintext leaves the database only on that call. It takes the tar stream
-out of its gzip within a hard cap first, its long-name and extended headers
-within 64 KiB, then unpacks regular files and folders only, 256 entries and
-512 MiB at most, judged from the headers before a byte is written, through
-the standard library's `data` filter (since 2026-11-03).
+out of its gzip within a hard cap first and walks its headers as tar reads
+them before tar reads one: a bundle holds regular files (and folders), so a
+header of any other kind — an extended, long-name or sparse one among
+them — a header that does not read, or an entry running past the stream's
+end is refused. Then it unpacks regular files and folders only, 256 entries
+and 512 MiB at most, judged from the headers before a byte is written,
+through the standard library's `data` filter (since 2026-11-03).
 
 **Why a captured warrant is worthless.** The bundle's destination is not
 in the warrant — it is the pinned master, reached over the node's own

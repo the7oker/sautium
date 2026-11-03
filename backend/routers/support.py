@@ -284,11 +284,13 @@ def support_bundles(node: str = "") -> List[Dict[str, Any]]:
 _BUNDLE_ENTRIES = 256
 _BUNDLE_UNPACKED_BYTES = 512 * 1024 * 1024
 # The tar stream itself, its headers with it: the entries' bytes, a header and
-# padding each, and room for long names
+# padding each
 _BUNDLE_STREAM_BYTES = _BUNDLE_UNPACKED_BYTES + 4 * 1024 * 1024
-# A long name's or an extended header's data, which tar reads whole as it walks
-# the archive and counts as no entry: a bundle's names are short
-_HEADER_DATA_BYTES = 64 * 1024
+# The headers a bundle's tar holds: diag_bundle.collect writes regular files
+# with short names, and a folder is taken too. Every other kind — an extended,
+# long-name or sparse header among them — carries data tar reads whole as it
+# walks the archive, or moves through the stream by rules of its own
+_BUNDLE_TYPES = (tarfile.REGTYPE, tarfile.DIRTYPE)
 
 
 def _unpack(plain: bytes, dest: Path) -> None:
@@ -304,10 +306,10 @@ def _unpack(plain: bytes, dest: Path) -> None:
 
 def _unpacked_tar(plain: bytes):
     """The bundle's tar stream, out of its gzip into a temporary file within
-    _BUNDLE_STREAM_BYTES, every long-name and extended header's data within
-    _HEADER_DATA_BYTES — all before tar reads a header. A bundle that is no
-    gzip stream is refused as such; a disk that cannot take one is the
-    master's own failure, raised as itself."""
+    _BUNDLE_STREAM_BYTES, its headers walked (_bounded_headers) — all before
+    tar reads a header. A bundle that is no gzip stream is refused as such;
+    a disk that cannot take one is the master's own failure, raised as
+    itself."""
     out = tempfile.TemporaryFile()
     try:
         total = 0
@@ -332,20 +334,28 @@ def _unpacked_tar(plain: bytes):
 
 
 def _bounded_headers(stream) -> None:
-    """Walk the tar stream's 512-byte headers: a long-name or extended
-    header whose data passes _HEADER_DATA_BYTES is refused. A header of
-    another shape ends the walk — tar says what it is."""
+    """Walk the tar stream's headers as tar will, to its end — the first
+    empty block, or a stream too short for a header: one that reads (its
+    checksum holds, its numbers are tar's own), of a kind in _BUNDLE_TYPES,
+    a folder carrying no data and a file's data within the stream. Any
+    other header is refused, before tar reads one."""
+    end = stream.seek(0, io.SEEK_END)
     stream.seek(0)
-    while (block := stream.read(512)) and len(block) == 512 and block.strip(b"\0"):
-        field = block[124:136]
+    while len(block := stream.read(tarfile.BLOCKSIZE)) == tarfile.BLOCKSIZE and block.strip(b"\0"):
         try:
-            size = (int.from_bytes(field[1:], "big") if field[0] & 0x80
-                    else int(field.split(b"\0", 1)[0].strip() or b"0", 8))
-        except ValueError:
-            return
-        if block[156:157] in (b"x", b"g", b"L", b"K") and size > _HEADER_DATA_BYTES:
-            raise HTTPException(status_code=422, detail="bundle header past what a bundle's names take")
-        stream.seek((size + 511) // 512 * 512, 1)
+            readable = tarfile.nti(block[148:156]) in tarfile.calc_chksums(block)
+            size = tarfile.nti(block[124:136])
+        except tarfile.HeaderError:
+            readable = False
+        if not readable:
+            raise HTTPException(status_code=422, detail="bundle holds a header that does not read")
+        kind = block[156:157]
+        if kind not in _BUNDLE_TYPES or size < 0 or (kind == tarfile.DIRTYPE and size):
+            raise HTTPException(status_code=422, detail="bundle holds an entry of a kind a bundle does not")
+        data = (size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE * tarfile.BLOCKSIZE
+        if stream.tell() + data > end:
+            raise HTTPException(status_code=422, detail="bundle entry runs past the archive's end")
+        stream.seek(data, io.SEEK_CUR)
 
 
 def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
