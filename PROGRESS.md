@@ -3603,12 +3603,12 @@ device on the network; none of them may hold for it more than a bound.
   hold are remembered apart (32 tokens, 4 requests each), so none of them
   pushes a live token's record — what the HQPlayer trace reads — out; a
   record keeps 64 characters of a token and 128 of a range. Encodes come in
-  two families, each with its own locks and its own cap of two at once
+  three families, each with its own locks and its own cap of two at once
   (`transcode.ENCODES`), whatever the keys: Opus from an offset a request
-  names (`ss`), and the lossless copies and cuts of a file — so a CUE track's
-  cut, what HQPlayer waits for before it may play, never waits behind an
-  Opus encode. A key's lock is one of 64 of its family's: a request for any
-  number of distinct keys adds none. ffmpeg is let go after 30 minutes (a
+  names (`ss`), a whole file's lossless copy a request names (`q=flac`), and
+  a CUE track's cut — so the cut, what HQPlayer waits for before it may
+  play, never waits behind an encode a request named. A key's lock is one of
+  64 of its family's: a request for any number of distinct keys adds none. ffmpeg is let go after 30 minutes (a
   source on a stalled share). A log
   line names a token by its first six characters (`proxy.shown`): a token
   is a bearer credential for its file.

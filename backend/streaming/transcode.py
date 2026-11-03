@@ -48,17 +48,18 @@ FLAC_TIER = "flac"
 _CACHE_DIR = Path(__file__).parent.parent / "data" / "transcode_cache"
 _BUDGET_BYTES = 1024 * 1024 * 1024       # Opus tracks, FLAC cuts and whole FLACs
 _index_lock = threading.Lock()
-# Two families of encode, each with its own locks and its own cap, so neither
-# waits behind the other: Opus from an offset a request names (`ss`), and the
-# lossless copies and cuts of a file — a CUE track's cut is what HQPlayer
-# waits for before it may play. One encode per key, the others for it
-# waiting: a key's lock is one of a fixed set, so a request for any number of
-# distinct keys adds none; ENCODES of a family run at once, whatever the keys
-# — a renderer asks for one track at a time and the browser's prefetch for the
+# Three families of encode, each with its own locks and its own cap, so none
+# waits behind another: Opus from an offset a request names (`ss`); a whole
+# file's lossless copy, which a request names (`q=flac`); and a CUE track's
+# cut — the track itself wherever it plays, and what HQPlayer waits for
+# before it may play it. One encode per key, the others for it waiting: a
+# key's lock is one of a fixed set, so a request for any number of distinct
+# keys adds none; ENCODES of a family run at once, whatever the keys — a
+# renderer asks for one track at a time and the browser's prefetch for the
 # next — and a request past them waits.
 _KEY_STRIPES = 64
 ENCODES = 2
-_FAMILIES = ("offset", "file")
+_FAMILIES = ("offset", "file", "cut")
 _key_locks = {family: tuple(threading.Lock() for _ in range(_KEY_STRIPES)) for family in _FAMILIES}
 _encodes = {family: threading.BoundedSemaphore(ENCODES) for family in _FAMILIES}
 # A hung ffmpeg — a source on a stalled network share — is let go
@@ -182,7 +183,7 @@ def flac_path_for_file(source_path: str) -> str:
         out_args += ["-ar", "88200", "-sample_fmt", "s32"]
     out_args += ["-c:a", "flac", "-f", "flac"]
     return _produce(key, suffix=".flac", label="flac", args_in=["-i", source_path],
-                    out_args=out_args, stdin_bytes=None)
+                    out_args=out_args, stdin_bytes=None, family="file")
 
 
 def flac_slice_path_for_file(source_path: str, start: float,
@@ -204,12 +205,11 @@ def flac_slice_path_for_file(source_path: str, start: float,
     out_args += ["-c:a", "flac", "-f", "flac"]
     return _produce(key, suffix=".flac", label="flac slice",
                     args_in=["-ss", f"{start:.6f}", "-i", source_path],
-                    out_args=out_args, stdin_bytes=None)
+                    out_args=out_args, stdin_bytes=None, family="cut")
 
 
 def _produce(key: str, *, suffix: str, label: str, args_in: list,
-             out_args: list, stdin_bytes: Optional[bytes],
-             family: str = "file") -> str:
+             out_args: list, stdin_bytes: Optional[bytes], family: str) -> str:
     out = _CACHE_DIR / f"{key}{suffix}"
     if out.exists():
         os.utime(out, None)                     # bump access time for LRU

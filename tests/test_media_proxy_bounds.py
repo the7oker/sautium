@@ -207,6 +207,43 @@ def test_a_lossless_cut_runs_beside_the_encodes_a_request_offset_names(tmp_path,
             t.join(10)
 
 
+def test_a_cue_cut_runs_beside_the_lossless_copies_a_request_names(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setattr(transcode, "_CACHE_DIR", tmp_path / "cache")
+    release = threading.Event()
+
+    def encode(args_in, out_args, out_path, stdin_bytes):
+        if "-ss" not in args_in:               # a whole file's copy, not a cut
+            release.wait(10)
+        out_path.write_bytes(b"x")
+    monkeypatch.setattr(transcode, "run_ffmpeg", encode)
+    files = [tmp_path / f"t{i}.dsf" for i in range(transcode.ENCODES)]
+    for f in files:
+        f.write_bytes(b"dsd")
+    held = [threading.Thread(target=transcode.flac_path_for_file, args=(str(f),)) for f in files]
+    # a cut whose key falls in the same stripe as a held copy's
+    copy_key = f"{files[0]}|{int(os.path.getmtime(files[0]))}|{transcode.FLAC_TIER}"
+    stripe = int(hashlib.sha1(copy_key.encode()).hexdigest()[:8], 16) % transcode._KEY_STRIPES
+    image = tmp_path / "image.flac"
+    image.write_bytes(b"flac")
+    mtime = int(os.path.getmtime(image))
+    start = next(float(n) for n in range(100000)
+                 if int(hashlib.sha1(f"{image}|{mtime}|slice|{float(n):.6f}|{float(n) + 10:.6f}"
+                                     .encode()).hexdigest()[:8], 16) % transcode._KEY_STRIPES == stripe)
+    cut = threading.Thread(target=transcode.flac_slice_path_for_file, args=(str(image), start, start + 10, {}))
+    try:
+        for t in held:
+            t.start()
+        time.sleep(0.1)
+        cut.start()
+        cut.join(1.0)
+        assert not cut.is_alive()              # the CUE track's cut did not wait for the two copies
+    finally:
+        release.set()
+        for t in (*held, cut):
+            t.join(10)
+
+
 def test_an_ffmpeg_that_does_not_finish_is_let_go(tmp_path, monkeypatch):
     import subprocess
 
@@ -256,18 +293,22 @@ def test_one_address_holds_at_most_its_share_of_the_connections(started, monkeyp
     held = [_idle(port) for _ in range(2)]
     time.sleep(0.2)
     assert _closed_within(_idle(port), 1.0)
+    for s in held:
+        s.close()
+    time.sleep(0.3)
+    # the share is given back as the connections end
+    held = [_idle(port) for _ in range(2)]
+    time.sleep(0.2)
+    assert not any(_closed_within(s, 0.3) for s in held)
     other = socket.socket()
     try:
         other.bind(("127.0.0.2", 0))
     except OSError:
+        for s in held:
+            s.close()
         pytest.skip("this host has no second loopback address")
     other.connect(("127.0.0.1", port))
     assert not _closed_within(other, 0.5)
     for s in (*held, other):
         s.close()
-    time.sleep(0.3)
-    # the share is given back as the connections end
-    again = _idle(port)
-    assert not _closed_within(again, 0.5)
-    again.close()
 
