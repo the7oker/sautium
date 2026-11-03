@@ -3620,20 +3620,24 @@ device on the network; none of them may hold for it more than a bound.
   hand, reads a device's description alone (`_fetch_description`,
   `_described_devices` with defusedxml): what it needs of a device is
   there, and the service documents are the attach's — the library's device
-  builder fetched every one of them. It reads the root device and those it
-  embeds directly, in the UPnP device namespace, as the attach's library
-  does — a renderer it would not find there is not listed — the document
-  in its own encoding, and a device's name, model and maker without control
-  characters, 200 characters at most. The description is read to its end, as many pieces as it
-  comes in, with no redirect followed and nothing compressed taken, 256 KiB
-  at most (a declared length past that refused before a byte); four
-  addresses per host and 64 in all are described, those of hosts a renderer
-  is remembered at — the chosen output's among them — first, all at once in
+  builder fetched every one of them. It reads the description as the
+  attach's library does, so a renderer the attach would not find there is
+  not listed: decoded in the charset the answer names when Python knows it,
+  else as UTF-8 (the XML declaration is not read); the root device and one
+  device of each type it embeds directly, the last, in the UPnP device
+  namespace; each word from the first element of its name. A device's
+  name, model and maker are kept without control or line-separating
+  characters, 200 characters at most; a UDN carrying one, or past 128
+  characters, is refused (a UDN is an identity, kept whole or not at all).
+  The description is read to its end, as many pieces as it comes in, with
+  no redirect followed and nothing compressed taken, 256 KiB at most (a
+  declared length past that refused before a byte); four addresses per host
+  and 64 in all are described, those of hosts a renderer is remembered at — the chosen output's among them — first, all at once in
   a loop of a worker thread's own — never parsed on the server's loop —
   within 20 s. Whatever one HQPlayer answers is that box's failure alone:
   before, one answer the resolve could not take ended the whole scan and
   kept the old list. A box's name and product are stored without control
-  characters and cut at 200; a library hash is a token of plain ASCII, or
+  or line-separating characters and cut at 200; a library hash is a token of plain ASCII, or
   empty for a box without a library — which nothing is then known by; the
   answers to GetInfo and LibraryGetHash are taken up to 64 KiB, any other
   up to 16 MiB (`hqplayer_client.ANSWER_LIMIT`; the whole library's

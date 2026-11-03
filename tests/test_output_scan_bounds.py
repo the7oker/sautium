@@ -56,6 +56,22 @@ def _nested(depth: int, *, namespace: bool = True, name: str = "Shelf") -> str:
     return f'<?xml version="1.0"?><root{xmlns}>{renderer}</root>'
 
 
+def _declared(encoding, name: str = "Caf\xe9") -> str:
+    """A renderer's description under an XML declaration of `encoding` (None:
+    no declaration)."""
+    body = _nested(0, name=name).split("?>", 1)[1]
+    return (f'<?xml version="1.0" encoding="{encoding}"?>' if encoding else "") + body
+
+
+def _zones() -> str:
+    """A media server embedding two renderers of one type."""
+    zone = ('<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>'
+            '<friendlyName>Zone {0}</friendlyName><UDN>uuid:zone-{0}</UDN></device>')
+    return ('<?xml version="1.0"?><root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+            '<deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType><friendlyName>Box</friendlyName>'
+            f'<UDN>uuid:box</UDN><deviceList>{zone.format("a")}{zone.format("b")}</deviceList></device></root>')
+
+
 @pytest.fixture
 def device():
     """An HTTP server on loopback that describes a renderer in each of the
@@ -70,6 +86,9 @@ def device():
 
     async def text(body, **kw):
         return web.Response(text=body, content_type="text/xml", **kw)
+
+    def raw(body: bytes, content_type: str):
+        return lambda r: asyncio.sleep(0, web.Response(body=body, headers={"Content-Type": content_type}))
 
     async def slow(_request):
         await asyncio.sleep(3)
@@ -102,10 +121,19 @@ def device():
         "/embedded.xml": lambda r: text(_nested(1)),
         "/deep.xml": lambda r: text(_nested(2)),
         "/bare.xml": lambda r: text(_nested(0, namespace=False)),
-        "/noisy.xml": lambda r: text(_nested(0, name="Shelf\t\n" + "x" * 300)),
-        "/latin1.xml": lambda r: asyncio.sleep(0, web.Response(
-            body=('<?xml version="1.0" encoding="ISO-8859-1"?>' + _nested(0, name="Caf\xe9")
-                  .split("?>", 1)[1]).encode("latin-1"), content_type="text/xml")),
+        "/noisy.xml": lambda r: text(_nested(0, name="Shel\u2028f\x85\t\n" + "x" * 300)),
+        "/utf8.xml": raw(_declared("UTF-8").encode(), "text/xml"),
+        "/latin1.xml": raw(_declared("ISO-8859-1").encode("latin-1"), "text/xml"),
+        "/labelled.xml": raw(_declared("UTF-8").encode("latin-1"), "text/xml; charset=ISO-8859-1"),
+        "/undeclared.xml": raw(_declared(None).encode("latin-1"), "text/xml; charset=ISO-8859-1"),
+        "/sjis.xml": raw(_declared("Shift_JIS", "\u68da").encode("shift_jis"), "text/xml; charset=Shift_JIS"),
+        "/sjis-unlabelled.xml": raw(_declared("Shift_JIS", "Shelf").encode(), "text/xml"),
+        "/unknown-charset.xml": raw(_declared("UTF-8").encode(), "text/xml; charset=x-none"),
+        "/zones.xml": lambda r: text(_zones()),
+        "/doubled.xml": lambda r: text(_nested(0).replace(
+            "<UDN>uuid:shelf-1</UDN>", "<UDN>uuid:shelf-1</UDN><UDN>uuid:shelf-2</UDN>")),
+        "/udn-tab.xml": lambda r: text(_nested(0).replace("uuid:shelf-1", "uuid:shelf\t1")),
+        "/udn-long.xml": lambda r: text(_nested(0).replace("uuid:shelf-1", "uuid:" + "1" * 124)),
         "/many.xml": lambda r: text(_description(services=24)),
         "/slow.xml": slow,
     }
@@ -231,7 +259,8 @@ def test_what_one_hqplayer_answers_is_its_failure_alone(quiet_scan, monkeypatch)
 
 
 def test_an_hqplayers_facts_are_plain_and_its_hash_a_token(monkeypatch):
-    answers = {"<GetInfo/>": b'<GetInfo name="Stu\x00dio\x07" product="Signalyst HQPlayer Desktop 6"/>',
+    answers = {"<GetInfo/>": b'<GetInfo name="Stu\x00d\tio\x07\xc2\x85\xe2\x80\xa8" '
+                             b'product="Signalyst HQPlayer Desktop 6"/>',
                "<LibraryGetHash/>": '<LibraryGetHash value="été"/>'.encode()}
     limits = {}
 
@@ -295,11 +324,53 @@ def test_a_renderer_is_listed_where_the_attach_finds_one(device):
         _describe(f"{base}/bare.xml")                                         # outside the UPnP namespace
 
 
-def test_a_devices_words_are_plain_and_in_its_own_encoding(device):
+def test_a_devices_words_are_plain_and_its_udn_whole_or_refused(device):
     base, _hits = device
-    noisy = _describe(f"{base}/noisy.xml")["name"]
-    assert noisy == "Shelf" + "x" * 195
-    assert _describe(f"{base}/latin1.xml")["name"] == "Caf\xe9"
+    assert _describe(f"{base}/noisy.xml")["name"] == "Shelf" + "x" * 195
+    for shape in ("udn-tab", "udn-long"):
+        with pytest.raises(player.DescriptionRefused, match="UDN"):
+            _describe(f"{base}/{shape}.xml")
+
+
+def _listed(url):
+    """The UDN of the renderer the scan lists at `url`, or None."""
+    from xml.etree.ElementTree import ParseError
+    try:
+        return player.udn_key(_describe(url)["udn"])
+    except (player.DescriptionRefused, player.HTTPException, ParseError):
+        return None
+
+
+def _attached(url):
+    """What the attach's library makes of the description at `url`: the UDN
+    of the renderer among the device and those it embeds directly — where
+    the attach looks for the one the scan listed — or None."""
+    from async_upnp_client.aiohttp import AiohttpRequester
+    from async_upnp_client.client_factory import UpnpFactory
+    from async_upnp_client.exceptions import UpnpError
+
+    async def run():
+        try:
+            device = await UpnpFactory(AiohttpRequester(timeout=5), non_strict=True).async_create_device(url)
+        except UpnpError:
+            return None
+        found = [d for d in (device, *device.embedded_devices.values())
+                 if ":MediaRenderer:" in d.device_type.strip()]
+        return player.udn_key(found[0].udn) if found else None
+    return asyncio.run(run())
+
+
+@pytest.mark.parametrize("shape, udn", [
+    ("utf8", "uuid:shelf-1"), ("latin1", None), ("labelled", "uuid:shelf-1"),
+    ("undeclared", "uuid:shelf-1"), ("sjis", "uuid:shelf-1"), ("sjis-unlabelled", "uuid:shelf-1"),
+    ("unknown-charset", "uuid:shelf-1"), ("embedded", "uuid:shelf-1"), ("deep", None), ("bare", None),
+    ("zones", "uuid:zone-b"), ("doubled", "uuid:shelf-1"),
+])
+def test_the_scan_reads_a_description_as_the_attach_does(device, shape, udn):
+    """Its charset as the answer names it, the declaration not read; one
+    embedded device of a type, the last; each word from its first element."""
+    base, _hits = device
+    assert (_listed(f"{base}/{shape}.xml"), _attached(f"{base}/{shape}.xml")) == (udn, udn)
 
 
 def test_a_location_that_is_no_url_is_its_answers_failure_alone(device, quiet_scan, monkeypatch):
@@ -319,3 +390,18 @@ def test_a_location_that_is_no_url_is_its_answers_failure_alone(device, quiet_sc
     monkeypatch.setattr(player, "_unicast_sweep", no_sweep)
     result = asyncio.run(player._scan_run())
     assert [r["location"] for r in result["renderers"]] == [f"http://127.0.0.1:{port}/plain.xml"]
+
+
+def test_a_probe_that_fails_is_its_addresss_failure_alone(monkeypatch):
+    import ipaddress
+
+    def probe(ip):
+        if ip == "192.0.2.1":
+            raise ValueError("an answer of no shape")
+        return [("uuid:b", f"http://{ip}:80/d.xml")], {"name": "box", "product": "Signalyst HQPlayer Embedded 6"}
+    monkeypatch.setattr(player, "_lan_subnets", lambda: [ipaddress.ip_network("192.0.2.0/30")])
+    monkeypatch.setattr(player, "_tailnet_peers", lambda: [])
+    monkeypatch.setattr(player, "_sweep_probe", probe)
+    found, found_hqp = {}, {}
+    asyncio.run(player._unicast_sweep(found, found_hqp))
+    assert list(found.values()) == ["http://192.0.2.2:80/d.xml"] and list(found_hqp) == ["192.0.2.2"]

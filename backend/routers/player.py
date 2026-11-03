@@ -460,7 +460,7 @@ class AddDeviceRequest(BaseModel):
     address: str   # an IP or host name (an HQPlayer's control port is 4321, a renderer's SSDP 1900) — or a full device-description URL
 
 
-def _rehost(location: str, ip: str) -> str:
+def _rehost(location: str, ip: str) -> Optional[str]:
     """Point a description URL at the address that actually answered.
 
     SSDP devices advertise a LOCATION built from their own interface address,
@@ -538,12 +538,16 @@ class DescriptionRefused(Exception):
     """A description the scan does not take: its shape, its size, its URL."""
 
 
-async def _fetch_description(location: str) -> bytes:
+async def _fetch_description(location: str) -> str:
     """The device description at `location`, read to its end: one plain-HTTP
     GET, no redirect followed, nothing compressed taken, _DESCRIBE_BYTES at
     most — a declared length over that refused before a byte of it is
-    read — within _DESCRIBE_TIMEOUT_S. Bytes: the XML parser reads the
-    document's own encoding."""
+    read — within _DESCRIBE_TIMEOUT_S. Decoded as the attach's library
+    decodes it (aiohttp's text()): in the charset the answer names when
+    Python knows it, else as UTF-8, strictly — the XML declaration's own
+    word is not read — so the scan lists what the attach can read."""
+    import codecs
+    import contextlib
     from urllib.parse import urlparse
 
     from aiohttp import ClientSession, ClientTimeout
@@ -565,31 +569,44 @@ async def _fetch_description(location: str) -> bytes:
                 body += chunk
                 if len(body) > _DESCRIBE_BYTES:
                     raise DescriptionRefused("a description past its size")
-            return bytes(body)
+            encoding = "utf-8"
+            if r.charset:
+                with contextlib.suppress(LookupError, ValueError):   # unknown: UTF-8, as aiohttp
+                    encoding = codecs.lookup(r.charset).name
+            try:
+                return body.decode(encoding)
+            except UnicodeDecodeError:
+                raise DescriptionRefused("a description its encoding does not read") from None
 
 
 _UPNP_DEVICE = "{urn:schemas-upnp-org:device-1-0}"
-_TEXT_CONTROL = re.compile("[\x00-\x1f\x7f]")
+_DESCRIBED = ("deviceType", "friendlyName", "manufacturer", "modelName", "UDN")
+_TEXT_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# A UDN is a renderer's identity — stored, sent in each row, compared — so it
+# is taken whole or not at all ("uuid:" and a UUID, 41 characters, in practice)
+_UDN_FORM = re.compile("[^\x00-\x1f\x7f-\x9f\u2028\u2029]{1,128}")
 
 
-def _described_devices(document: bytes) -> list:
+def _described_devices(document: str) -> list:
     """The root device of a description and the devices it embeds directly,
-    each as its own child elements' text (deviceType, friendlyName, UDN…) —
-    read as the attach's library reads a description: in the UPnP device
-    namespace, and no deeper, so the scan lists no renderer the attach
-    would not find there."""
+    read as the attach's library reads them (async_upnp_client's UpnpFactory
+    and UpnpDevice): in the UPnP device namespace and no deeper, one embedded
+    device of a type — the last — and each word from the first element of
+    its name. Read so, the scan lists no renderer the attach would not find
+    there."""
     from defusedxml.ElementTree import fromstring
     top = fromstring(document).find(f"{_UPNP_DEVICE}device")
     if top is None:
         return []
-    embedded = top.findall(f"{_UPNP_DEVICE}deviceList/{_UPNP_DEVICE}device")
-    return [{child.tag.replace(_UPNP_DEVICE, ""): (child.text or "").strip() for child in device}
-            for device in (top, *embedded)]
+    embedded = {device.findtext(f"{_UPNP_DEVICE}deviceType", ""): device
+                for device in top.findall(f"{_UPNP_DEVICE}deviceList/{_UPNP_DEVICE}device")}
+    return [{word: device.findtext(f"{_UPNP_DEVICE}{word}", "").strip() for word in _DESCRIBED}
+            for device in (top, *embedded.values())]
 
 
 def _described_text(value: str) -> str:
-    """A device's word about itself as it is stored and shown: no control
-    character, 200 characters at most."""
+    """A device's word about itself as it is stored and shown: no control or
+    line-separating character, 200 characters at most."""
     return _TEXT_CONTROL.sub("", value)[:200]
 
 
@@ -653,23 +670,23 @@ async def _dlna_describe(location: str) -> dict:
     devices = _described_devices(await _fetch_description(location))
     if not devices:
         raise DescriptionRefused("no device in the description")
-    renderer = next((d for d in devices if ":MediaRenderer:" in d.get("deviceType", "")), None)
+    renderer = next((d for d in devices if ":MediaRenderer:" in d["deviceType"]), None)
     if renderer is None:
         root = devices[0]
         raise HTTPException(
             status_code=422,
-            detail=f"'{_described_text(root.get('friendlyName', ''))}' is "
-                   f"{_described_text(root.get('deviceType', '')) or 'not a renderer'}"
+            detail=f"'{_described_text(root['friendlyName'])}' is "
+                   f"{_described_text(root['deviceType']) or 'not a renderer'}"
                    " — no MediaRenderer at this address (a media-server "
                    "description of the same device is a common decoy)")
-    if not renderer.get("UDN"):
-        raise DescriptionRefused("a renderer without a UDN")
+    if not _UDN_FORM.fullmatch(renderer["UDN"]):
+        raise DescriptionRefused("a renderer without a UDN of its form")
     return {
         "udn": renderer["UDN"],
         "location": location,
-        "name": _described_text(renderer.get("friendlyName", "")),
-        "model": _described_text(renderer.get("modelName", "")),
-        "manufacturer": _described_text(renderer.get("manufacturer", "")),
+        "name": _described_text(renderer["friendlyName"]),
+        "model": _described_text(renderer["modelName"]),
+        "manufacturer": _described_text(renderer["manufacturer"]),
     }
 
 
@@ -750,6 +767,62 @@ def _lan_subnets() -> list:
     return nets
 
 
+def _sweep_probe(ip: str) -> tuple:
+    """One address of the unicast sweep (_unicast_sweep): an M-SEARCH and an
+    HQPlayer `<discover/>` sent to it and its answers read for 1.5 s — the
+    renderers it names, as (usn, location) pairs, and the HQPlayer it is, if
+    any."""
+    import select as sel
+    import socket as sock
+
+    import hqp_library
+    msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+           'MAN: "ssdp:discover"\r\nMX: 1\r\n'
+           'ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n').encode()
+    s = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
+    d = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
+    hits, hqp = [], None
+    try:
+        s.sendto(msg, (ip, 1900))
+        d.sendto(b"<discover/>\n", (ip, 4321))
+        started = time.time()
+        deadline = started + 1.5
+        asked_again = False
+        while time.time() < deadline:
+            ready, _, _ = sel.select([s, d], [], [], max(0.0, min(deadline, started + 0.6) - time.time()) or 0.05)
+            if hqp is None and not asked_again and time.time() >= started + 0.6:
+                # one datagram can go missing (seen live: the Pi answered one
+                # sweep and not the next); a second ask halfway costs nothing
+                d.sendto(b"<discover/>\n", (ip, 4321))
+                asked_again = True
+            for r in ready:
+                try:
+                    data, addr = r.recvfrom(4096)
+                except OSError:
+                    continue
+                if addr[0] != ip:
+                    continue
+                if r is d:
+                    hqp = hqp_library.parse_discover(data) or hqp
+                    continue
+                loc = usn = ""
+                for line in data.decode(errors="replace").splitlines():
+                    low = line.lower()
+                    if low.startswith("location:"):
+                        loc = line.split(":", 1)[1].strip()
+                    elif low.startswith("usn:"):
+                        usn = line.split(":", 1)[1].strip()
+                described = _rehost(loc, ip) if loc.lower().startswith("http://") else None
+                if described:
+                    hits.append((usn or loc, described))
+    except OSError:
+        pass
+    finally:
+        s.close()
+        d.close()
+    return hits, hqp
+
+
 async def _unicast_sweep(found: dict, found_hqp: dict) -> None:
     """M-SEARCH every address of the LAN, one at a time rather than by
     multicast — and ask each for an HQPlayer in the same breath (the
@@ -761,65 +834,14 @@ async def _unicast_sweep(found: dict, found_hqp: dict) -> None:
     the bridge like any other UDP, which the router answering this sweep from
     inside the container proves. 254 addresses, two datagrams each, is a
     rounding error next to a user waiting for a device list."""
-    import hqp_library
     loop = asyncio.get_running_loop()
-
-    def _probe(ip: str) -> tuple:
-        import select as sel
-        import socket as sock
-        msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
-               'MAN: "ssdp:discover"\r\nMX: 1\r\n'
-               'ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n').encode()
-        s = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
-        d = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
-        hits, hqp = [], None
-        try:
-            s.sendto(msg, (ip, 1900))
-            d.sendto(b"<discover/>\n", (ip, 4321))
-            started = time.time()
-            deadline = started + 1.5
-            asked_again = False
-            while time.time() < deadline:
-                ready, _, _ = sel.select([s, d], [], [], max(0.0, min(deadline, started + 0.6) - time.time()) or 0.05)
-                if hqp is None and not asked_again and time.time() >= started + 0.6:
-                    # one datagram can go missing (seen live: the Pi answered one
-                    # sweep and not the next); a second ask halfway costs nothing
-                    d.sendto(b"<discover/>\n", (ip, 4321))
-                    asked_again = True
-                for r in ready:
-                    try:
-                        data, addr = r.recvfrom(4096)
-                    except OSError:
-                        continue
-                    if addr[0] != ip:
-                        continue
-                    if r is d:
-                        hqp = hqp_library.parse_discover(data) or hqp
-                        continue
-                    loc = usn = ""
-                    for line in data.decode(errors="replace").splitlines():
-                        low = line.lower()
-                        if low.startswith("location:"):
-                            loc = line.split(":", 1)[1].strip()
-                        elif low.startswith("usn:"):
-                            usn = line.split(":", 1)[1].strip()
-                    described = _rehost(loc, ip) if loc.lower().startswith("http://") else None
-                    if described:
-                        hits.append((usn or loc, described))
-        except OSError:
-            pass
-        finally:
-            s.close()
-            d.close()
-        return hits, hqp
-
     targets = ([str(h) for net in _lan_subnets() for h in net.hosts()]
                + await asyncio.to_thread(_tailnet_peers))
     with ThreadPoolExecutor(max_workers=64) as pool:
         # every probe ends before the pool is left: one that fails is its
         # address's failure, never the sweep's
         results = await asyncio.gather(
-            *(loop.run_in_executor(pool, _probe, ip) for ip in targets), return_exceptions=True)
+            *(loop.run_in_executor(pool, _sweep_probe, ip) for ip in targets), return_exceptions=True)
     for ip, result in zip(targets, results):
         if isinstance(result, Exception):
             logger.debug("unicast probe of %s failed: %s", ip, result)
@@ -929,8 +951,8 @@ async def _scan_run():
             # not answering, not registered. The same verdict the selected
             # row gets from its live check, so a box reads the same whether
             # it is the output or not.
-            logger.info("HQPlayer %r at %s answers discovery but not control: %s",
-                        facts["name"], host, err)
+            logger.info("an HQPlayer the scan found answers discovery but not control: %s", err)
+            logger.debug("its name and address: %r at %s", facts["name"], host)
             entry["control"] = False
         else:
             ep, how, _facts = resolved
@@ -1015,8 +1037,8 @@ async def _scan_run():
             try:
                 await asyncio.to_thread(manager.renderer_reached, chosen, reached[chosen])
             except Exception as e:
-                logger.warning("the output did not move to %s, where the scan reached %s (%s)",
-                               reached[chosen][0], fresh[chosen].get("name"), e)
+                logger.warning("the output did not move to where the scan reached its renderer: %s", e)
+                logger.debug("%s reached at %s", fresh[chosen].get("name"), reached[chosen][0])
     renderers = list(fresh.values())
     return {"renderers": renderers, "hqplayers": _hqplayer_entries()}
 

@@ -63,8 +63,10 @@ _HASH_TIMEOUT = 10.0
 _LIBRARY_TIMEOUT = 300.0
 _LIBRARY_LIMIT = 1024 * 1024 * 1024
 # What a box says about itself is shown and stored: a name, never a control
-# character, so long at most. A library hash is a token of plain ASCII.
+# or line-separating character, so long at most. A library hash is a token
+# of plain ASCII.
 _FACT_MAX = 200
+_FACT_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 _HASH_FORM = re.compile(rb'value="([0-9A-Za-z+/=_.:-]{0,256})"')   # empty: no library
 # GetInfo's and LibraryGetHash's answers are a line of attributes: what any
 # box that answers discovery may send for them
@@ -88,7 +90,7 @@ def _command(host: str, port: int, xml: str, timeout: float,
 
 
 def _fact(value: str) -> str:
-    return _XML_CONTROL.sub("", value)[:_FACT_MAX]
+    return _FACT_CONTROL.sub("", value)[:_FACT_MAX]
 
 
 def get_info(host: str, port: int) -> Dict[str, str]:
