@@ -2274,8 +2274,11 @@ user brings.
 - **A signature is taken once (2026-11-03).** The node remembers each
   request signature it accepted while the window could still take it — until
   the wall clock is past the request's own time plus the window, and two
-  windows on the monotonic clock at least, so a step of either reopens none —
-  and refuses it a second time (`X-Sautium-Auth-Error: replayed`). Every
+  windows on the monotonic clock at least: a step of either clock while it
+  is remembered reopens nothing, a step back of the wall clock past its
+  forgetting reopens it, as a restart does — and refuses it a second time
+  (`X-Sautium-Auth-Error: replayed`). A signature is taken when its headers
+  verify and given back when its body never arrives: the request did not run. Every
   signer of the tree — the page, the launcher, both MCP servers — draws a
   nonce for each request (`X-Sautium-Nonce`, signed after the time), so
   the same press twice in a second is two requests. A signature without
@@ -2296,9 +2299,15 @@ user brings.
   whitelisted route's or that of a page from before declared digests, from
   a small one (64 KiB, 20 s, 1 MiB in flight): bodies nobody signed, held
   open as long as their senders like, cannot fill the budget the owner's
-  changes are read from. A body that is not its declared one is a bad
-  signature. The first cut read every body, up to 12 MiB, before it judged
-  anything — a single shared budget anyone could hold.
+  changes are read from (the small one and the sign-in doors it carries can
+  be held; so could the doors' derivations before). A body that is not its
+  declared one is a bad signature. A refusal the headers decided reads a
+  body that fits the small cap first, so the connection does not close over
+  unread bytes — a reset can take the answer with it, and a woken tab must
+  read `stale-ts` to sign again. A signature or a time of another shape
+  than every signer writes is refused as such. The first cut read every
+  body, up to 12 MiB, before it judged anything — a single shared budget
+  anyone could hold.
   The Argon2id derivations are bounded in flight (`device_auth.DERIVE_QUEUE`,
   four, two running, the last place a signed caller's): past that the login
   is told 503, and the page says the node is busy; only a 401 is said as a

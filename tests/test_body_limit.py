@@ -172,7 +172,8 @@ def door(tmp_path, monkeypatch):
     as the node's and a fixed device token."""
     monkeypatch.setattr(device_auth, "current_token", lambda secret: TOKEN)
     monkeypatch.setattr(auth_hmac, "_allowed_hosts", {"localhost"})
-    monkeypatch.setattr(auth_hmac, "_seen", set(), raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen", {}, raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen_wall", [], raising=False)
     monkeypatch.setattr(auth_hmac, "_seen_order", collections.deque(), raising=False)
     app = App()
     return app, auth_hmac.HMACAuthMiddleware(
@@ -217,10 +218,37 @@ def test_a_body_that_is_not_the_declared_one_is_refused(door):
 
 def test_an_unknown_host_is_refused_before_a_byte_is_read(door):
     app, gate = door
-    receive = _feed(b"x" * 50)
-    scope = _scope(length=50, headers=_signed_headers(b"x" * 50))
+    receive = _feed(b"x" * 500)
+    scope = _scope(length=500, headers=_signed_headers(b"x" * 500))
     scope["headers"][0] = (b"host", b"elsewhere.example")
     assert _status(_run(gate, scope, receive)) == 421 and not receive.asked and not app.calls
+
+
+def test_a_refusal_the_headers_decide_reads_a_small_body_first(door):
+    """A body that fits the small budget is read and dropped before the
+    refusal, so the connection closes over nothing unread; a larger one is
+    refused unread."""
+    app, gate = door
+    stale = [(k, str(int(time.time()) - 3600).encode() if k == b"x-sautium-ts" else v)
+             for k, v in _signed_headers(b"x" * 50)]
+    receive = _feed(b"x" * 50)
+    sent = _run(gate, _scope(length=50, headers=stale), receive)
+    assert _status(sent) == 401 and _auth_error(sent) == "stale-ts" and receive.asked and not app.calls
+    receive = _feed(b"x" * 500)
+    sent = _run(gate, _scope(length=500), receive)
+    assert _status(sent) == 401 and _auth_error(sent) == "missing" and not receive.asked
+
+
+def test_a_signature_whose_body_never_arrived_may_come_once_more(door):
+    """The request did not run: its one taking is still to come."""
+    app, gate = door
+    body = b"x" * 500
+    headers = _signed_headers(body)
+    assert _status(_run(gate, _scope(length=500, headers=headers), _feed(body[:200], then_disconnect=True))) == 400
+    assert _status(_run(gate, _scope(length=500, headers=headers), _feed(body))) == 200
+    sent = _run(gate, _scope(length=500, headers=headers), _feed(body))
+    assert _status(sent) == 401 and _auth_error(sent) == "replayed"
+    assert len(app.calls) == 1
 
 
 def test_a_whitelisted_route_and_a_signer_without_a_digest_read_from_the_small_budget(door):

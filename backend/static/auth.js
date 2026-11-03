@@ -357,7 +357,8 @@
   // `changed` + `retry`: the boot found a pairing code in the URL but the
   // node answering is not the one this browser knows. The gate opens on the
   // question, and "Continue" pins the new node and redeems the code.
-  function showLoginGate({ changed, retry } = {}) {
+  // `notice`: why the code in the URL did not sign this browser in.
+  function showLoginGate({ changed, retry, notice } = {}) {
     if (document.getElementById("auth-gate")) return;
 
     const overlay = document.createElement("dialog");
@@ -475,6 +476,7 @@
       mode = st.onboarding ? "create" : (st.password_login ? "password" : "pin");
       username = st.username || "";
       buildForm();
+      if (notice) msg.textContent = notice;
       if (changed) askNodeChanged(changed, redeem);
     }).catch(() => {
       msg.textContent = "Cannot reach the server.";
@@ -582,10 +584,11 @@
       // case it exists for: the page went on signing with the dead token, ate
       // a 401, and raised the password dialog the button is there to avoid.
       const code = fragmentCode();
+      let notice = null;
       if (code) {
-        let ok = false;
+        let res = false;
         try {
-          ok = (await window.Sautium.auth.pair(code)) === true;
+          res = await window.Sautium.auth.pair(code);
         } catch (e) {
           if (!(e instanceof NodeChanged)) throw e;
           // The code stays in the URL until the gate redeems it.
@@ -596,11 +599,15 @@
           } });
           return;
         }
-        stripFragmentCode();
-        if (ok) return;
+        // A code the node took or refused is spent; one the node did not get
+        // to (busy, an exchange that did not finish) stays in the URL for the
+        // next load, and the gate says why
+        if (typeof res !== "string") stripFragmentCode();
+        if (res === true) return;
+        notice = typeof res === "string" ? res : null;
       }
       if (storedToken()) return;
-      showLoginGate();
+      showLoginGate({ notice });
     } finally {
       // Every exit, gate included — a latch nobody releases hangs the app.
       _authSettled();

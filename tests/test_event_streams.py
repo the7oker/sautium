@@ -5,8 +5,8 @@ The Web UI's streams never end by themselves. uvicorn waited out its whole
 graceful window on them before the lifespan's shutdown, then cancelled them
 — a traceback for each open tab in backend.log, and five of the ten seconds
 the launcher gives a stop (2026-10-25). Here a real serving.Server serves an
-app shaped as the backend's — a BaseHTTPMiddleware in front, as the HMAC
-check is — and its streams wait as the backend's do, on an event with a
+app shaped as the backend's — a BaseHTTPMiddleware in front, as its
+no_cache_static is — and its streams wait as the backend's do, on an event with a
 keepalive timeout. The grace is long, so a stop that waited on a stream
 would show; the stop must not.
 """

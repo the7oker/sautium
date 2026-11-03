@@ -42,7 +42,8 @@ def client(tmp_path, monkeypatch):
     with a fixed device token and this test client's Host as the node's."""
     monkeypatch.setattr(device_auth, "current_token", lambda secret: TOKEN)
     monkeypatch.setattr(auth_hmac, "_allowed_hosts", {"testserver"})
-    monkeypatch.setattr(auth_hmac, "_seen", set(), raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen", {}, raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen_wall", [], raising=False)
     monkeypatch.setattr(auth_hmac, "_seen_order", collections.deque(), raising=False)
 
     async def echo(request):
@@ -227,7 +228,7 @@ def test_what_is_remembered_is_forgotten_after_two_windows(client, monkeypatch):
     assert len(auth_hmac._seen) == 1
 
 
-def test_a_step_back_of_the_wall_clock_reopens_no_signature(client, monkeypatch):
+def test_a_step_back_of_the_wall_clock_reopens_no_signature_still_kept(client, monkeypatch):
     clock = _clocks(monkeypatch)
     headers = signed("GET", "/api/secret")
     assert client.get("/api/secret", headers=headers).status_code == 200
@@ -236,6 +237,29 @@ def test_a_step_back_of_the_wall_clock_reopens_no_signature(client, monkeypatch)
     clock["mono"] += 130
     clock["wall"] += 30
     assert client.get("/api/secret", headers=headers).headers["x-sautium-auth-error"] == "replayed"
+
+
+def test_a_signature_the_wall_clock_keeps_holds_back_no_other(client, monkeypatch):
+    clock = _clocks(monkeypatch)
+    first = signed("GET", "/api/secret")
+    assert client.get("/api/secret", headers=first).status_code == 200
+    clock["wall"] -= 1000                                       # the wall clock set back
+    second = signed("GET", "/api/secret")
+    assert client.get("/api/secret", headers=second).status_code == 200
+    clock["mono"] += 130
+    clock["wall"] += 130
+    assert client.get("/api/secret", headers=signed("GET", "/api/secret")).status_code == 200
+    # the first is kept until the wall clock is past it again; the second, which
+    # it no longer is, is let go however long the first stays
+    assert first["X-Sautium-Sig"] in auth_hmac._seen and second["X-Sautium-Sig"] not in auth_hmac._seen
+
+
+def test_a_signature_or_a_time_of_another_shape_is_refused_as_such(client):
+    headers = {**signed("GET", "/api/secret"), "X-Sautium-Sig": "\u00e9" * 64}
+    r = client.get("/api/secret", headers={k: v.encode("latin-1") for k, v in headers.items()})
+    assert r.status_code == 401 and r.headers["x-sautium-auth-error"] == "bad-sig"
+    r = client.get("/api/secret", headers={**signed("GET", "/api/secret"), "X-Sautium-Ts": "1" * 400})
+    assert r.status_code == 401 and r.headers["x-sautium-auth-error"] == "bad-ts"
 
 
 def _verify(headers: dict, key: bytes, method: str, target: str, body: bytes) -> None:

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -203,30 +204,41 @@ def test_only_a_refused_password_is_said_to_be_wrong():
 
 @pytest.fixture
 def rotations(doors, tmp_path, monkeypatch):
-    """The change-identity door over a node with an identity file, the
-    rotation itself and what follows it recorded, not run; the current
-    password is "the right one" until a rotation sets another."""
+    """The change-identity door over a node with an identity file; the
+    rotation's own work — the key's, the witness drain's, what the node is
+    told after — recorded or stubbed, not run; the current password is "the
+    right one" until a rotation sets another."""
+    import db_pool
+    import notary
+    import p2p_chat
+    import p2p_identity
+    from desktop import node_identity
     from routers import auth
+    from routers import p2p as p2p_router
     done, state = [], {"password": "the right one"}
     (tmp_path / "node_info.json").write_text("{}")
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
     monkeypatch.setattr(device_auth, "account_configured", lambda: True)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
 
-    async def rotate(_d, username, password):
-        await asyncio.sleep(0.01)
+    def rotate(_d, username, password, anonymous):
+        time.sleep(0.05)
         done.append((username, password))
         state["password"] = password
         return {"info": {"username": username, "invite_code": "x", "public_key_hex": "cd" * 32,
-                         "anonymous": not password}}
-    monkeypatch.setattr(device_auth, "_rotate_locked", rotate)
-    monkeypatch.setattr(device_auth, "_after_rotation", lambda: None)
+                         "anonymous": anonymous}, "rotation": {}}
+    monkeypatch.setattr(node_identity, "rotate_identity", rotate)
+    monkeypatch.setattr(notary, "drain_witness", lambda: None)
+    for module, name in ((p2p_identity, "forget_cached"), (p2p_router, "forget_identity"),
+                         (p2p_chat, "forget_service"), (device_auth, "bump_epoch")):
+        monkeypatch.setattr(module, name, lambda: None)
+    monkeypatch.setattr(db_pool, "db_execute", lambda *a, **k: None)
     monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
     asked = []
 
-    async def verify(password, *, signed=False):
-        asked.append(signed)
+    async def verify(password, **kw):
+        asked.append(kw.get("signed", False))
         await asyncio.sleep(0.01)
         return password == state["password"]
     monkeypatch.setattr(device_auth, "verify_password", verify)
@@ -238,18 +250,24 @@ def rotations(doors, tmp_path, monkeypatch):
     return change, done
 
 
-def test_two_rotations_each_need_the_password_of_the_identity_they_change(rotations, monkeypatch):
+def test_two_changes_at_once_each_need_the_password_of_the_identity_they_change(rotations, doors,
+                                                                                 monkeypatch):
+    import httpx
     _change, done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
 
     async def both():
-        return await asyncio.gather(
-            device_auth.rotate_identity("second", "the second one", "the right one"),
-            device_auth.rotate_identity("third", "the third one", "the right one"),
-            return_exceptions=True)
-    first, second = asyncio.run(both())
-    assert first["username"] == "second" and isinstance(second, device_auth.WrongPassword)
-    assert done == [("second", "the second one")]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=doors.app),
+                                     base_url="http://node") as client:
+            async def change(username, password):
+                handshake = (await client.get("/api/auth/handshake")).json()
+                return (await client.post("/api/auth/change-identity", json=_seal(handshake, {
+                    "username": username, "password": password,
+                    "current_password": "the right one"}))).status_code
+            return await asyncio.gather(change("second", "the second one"),
+                                        change("third", "the third one"))
+    assert sorted(asyncio.run(both())) == [200, 403]
+    assert len(done) == 1
 
 
 def test_a_docker_account_says_it_has_a_password(tmp_path, monkeypatch):

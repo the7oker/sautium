@@ -74,8 +74,10 @@ in a second; a page loaded before signers had one still signs without it.
 
 import errno
 import hashlib
+import heapq
 import hmac
 import ipaddress
+import itertools
 import logging
 import os
 import re
@@ -94,8 +96,11 @@ from serving import BodyBudget, refuse, replaying, request_target
 logger = logging.getLogger(__name__)
 
 REPLAY_WINDOW_SECONDS = 60
+# What each signature header may be, as every signer of the tree writes it
+TS_FORM = re.compile(r"[0-9]{1,12}")
 NONCE_FORM = re.compile(r"[0-9a-f]{32}")
 DIGEST_FORM = re.compile(r"[0-9a-f]{64}")
+SIG_FORM = re.compile(r"[0-9a-f]{64}")
 _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
 # The bodies a request may carry (serving.BodyBudget): a signer's, its
@@ -104,18 +109,24 @@ _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 # the deadline leaves one that size two minutes on a slow uplink; every other
 # body from the small one — a credential exchange is a few kilobytes, a policy
 # report 16 KiB, a request of a page from before declared digests a JSON
-# document.
+# document (such a tab's avatar upload is refused until it reloads). The small
+# budget is any sender's: it can be held, and with it the sign-in doors — which
+# their derivation bound already lets a crowd hold — never the owner's changes.
 SIGNED_BODIES = {"cap": 12 * 1024 * 1024, "budget": 48 * 1024 * 1024, "deadline": 120.0}
 OPEN_BODIES = {"cap": 64 * 1024, "budget": 1024 * 1024, "deadline": 20.0}
 
-# Signatures accepted while a request the window would still take could come
-# again — until the wall clock is past their own time plus the window, and two
-# windows on the monotonic one at least, so a step of either clock reopens
-# none. Kept only once a signature verifies, so only signers fill it — on the
-# event loop, in arrival order.
+# Signatures taken — each once it verifies, from its headers, and given back
+# when its body never arrives (the request did not run: its one taking is
+# still to come) — and kept while a request the window would still take could
+# come again: until the wall clock is past their own time plus the window, and
+# two windows on the monotonic clock at least. A step of either clock while
+# one is kept reopens nothing; a step back of the wall clock past its
+# forgetting reopens it, as a restart does. On the event loop.
 _SEEN_SECONDS = 2 * REPLAY_WINDOW_SECONDS
-_seen: set = set()
-_seen_order: deque = deque()   # (monotonic and wall time it may be forgotten, signature)
+_seen: dict = {}                 # signature -> its entry (monotonic, wall, signature, serial)
+_seen_order: deque = deque()     # entries, by the monotonic time they may be forgotten
+_seen_wall: list = []            # heap: entries the monotonic clock let go, by their wall time
+_serials = itertools.count()
 
 WHITELIST_EXACT = {
     "/health",
@@ -382,21 +393,37 @@ def sign(secret: bytes, method: str, path_and_query: str, ts: str, body: bytes,
     return _mac(secret, method, path_and_query, ts, nonce, hashlib.sha256(body).hexdigest())
 
 
-def _first_use(sig: str, ts: int) -> bool:
-    """Whether `sig` is new to what is remembered (_SEEN_SECONDS); it is
-    remembered now."""
+def _take(sig: str, ts: int) -> Optional[tuple]:
+    """`sig`'s entry, taken now — None when it is taken already."""
     now, wall = time.monotonic(), time.time()
-    while _seen_order and _seen_order[0][0] <= now and _seen_order[0][1] < wall:
-        _seen.discard(_seen_order.popleft()[2])
+    while _seen_order and _seen_order[0][0] <= now:
+        entry = _seen_order.popleft()
+        if _seen.get(entry[2]) is entry:
+            heapq.heappush(_seen_wall, (entry[1], entry[3], entry))
+    while _seen_wall and _seen_wall[0][0] < wall:
+        entry = heapq.heappop(_seen_wall)[2]
+        if _seen.get(entry[2]) is entry:
+            del _seen[entry[2]]
     if sig in _seen:
-        return False
-    _seen.add(sig)
-    _seen_order.append((now + _SEEN_SECONDS, ts + REPLAY_WINDOW_SECONDS, sig))
-    return True
+        return None
+    entry = (now + _SEEN_SECONDS, ts + REPLAY_WINDOW_SECONDS, sig, next(_serials))
+    _seen[sig] = entry
+    _seen_order.append(entry)
+    return entry
+
+
+def _give_back(entry: tuple) -> None:
+    """The request `entry` was taken for did not run: its signature may come once more."""
+    if _seen.get(entry[2]) is entry:
+        del _seen[entry[2]]
 
 
 def _carries_body(headers: Headers) -> bool:
     return headers.get("content-length", "0") != "0" or "transfer-encoding" in headers
+
+
+async def _nowhere(_message) -> None:
+    pass
 
 
 def _auth_error(kind: str) -> tuple:
@@ -434,29 +461,30 @@ class HMACAuthMiddleware:
         if not host_allowed(headers.get("host", "")):
             # Refuse before anything else, whitelist included — the whitelist
             # is precisely what a rebinding attack has to work with.
-            return await refuse(send, 421, "unrecognised Host")
+            return await self._refused(scope, receive, send, 421, "unrecognised Host")
 
         if _is_whitelisted(path):
             return await self._admit(scope, receive, send, self._open_bodies)
 
         ts_raw, sig = headers.get("x-sautium-ts"), headers.get("x-sautium-sig")
         if not ts_raw or not sig:
-            return await refuse(send, 401, "missing signature headers", _auth_error("missing"))
-        try:
-            ts_int = int(ts_raw)
-        except ValueError:
-            return await refuse(send, 401, "bad timestamp", _auth_error("bad-ts"))
+            return await self._refused(scope, receive, send, 401, "missing signature headers", "missing")
+        if not TS_FORM.fullmatch(ts_raw):
+            return await self._refused(scope, receive, send, 401, "bad timestamp", "bad-ts")
+        if not SIG_FORM.fullmatch(sig):
+            return await self._refused(scope, receive, send, 401, "bad signature", "bad-sig")
+        ts_int = int(ts_raw)
         nonce = headers.get("x-sautium-nonce")
         if nonce is not None and not NONCE_FORM.fullmatch(nonce):
-            return await refuse(send, 401, "bad nonce", _auth_error("bad-nonce"))
+            return await self._refused(scope, receive, send, 401, "bad nonce", "bad-nonce")
         digest = headers.get("x-sautium-body-sha256")
         if digest is not None and not DIGEST_FORM.fullmatch(digest):
-            return await refuse(send, 401, "bad body digest", _auth_error("bad-digest"))
+            return await self._refused(scope, receive, send, 401, "bad body digest", "bad-digest")
 
         skew = abs(time.time() - ts_int)
         if skew > REPLAY_WINDOW_SECONDS:
             logger.warning("stale request timestamp (%ds skew): %s %s", int(skew), method, path)
-            return await refuse(send, 401, "stale timestamp", _auth_error("stale-ts"))
+            return await self._refused(scope, receive, send, 401, "stale timestamp", "stale-ts")
 
         target = request_target(scope)
         if digest is None and not _carries_body(headers):
@@ -466,14 +494,27 @@ class HMACAuthMiddleware:
             # declared one: its body comes from the small budget and is judged
             # once read
             return await self._admit(scope, receive, send, self._open_bodies, judge=lambda body: self._judge(
-                method, path, target, ts_raw, ts_int, nonce, hashlib.sha256(body).hexdigest(), sig))
-        refusal = self._judge(method, path, target, ts_raw, ts_int, nonce, digest, sig)
+                method, path, target, ts_raw, ts_int, nonce, hashlib.sha256(body).hexdigest(), sig)[0])
+        refusal, taken = self._judge(method, path, target, ts_raw, ts_int, nonce, digest, sig)
         if refusal is not None:
-            return await refuse(send, 401, *refusal)
-        return await self._admit(scope, receive, send, self._signed_bodies, digest=digest)
+            return await self._refused(scope, receive, send, 401, *refusal)
+        return await self._admit(scope, receive, send, self._signed_bodies, digest=digest, taken=taken)
 
-    def _judge(self, method, path, target, ts_raw, ts_int, nonce, digest, sig) -> Optional[tuple]:
-        """None for a signature that verifies and is new, else the refusal.
+    async def _refused(self, scope, receive, send, status: int, detail: str,
+                       kind: Optional[str] = None) -> None:
+        """A refusal the headers decided. A body on its way that fits the small
+        cap is read and dropped first: a connection closed over an unread body
+        can reset under the answer — Windows drops what it had received — and
+        a page must read a refusal's kind (stale-ts) to sign again."""
+        length = Headers(scope=scope).get("content-length", "")
+        if length.isdigit() and 0 < int(length) <= self._open_bodies.cap:
+            async with self._open_bodies.reading(scope, receive, _nowhere):
+                pass
+        await refuse(send, status, detail, _auth_error(kind) if kind else ())
+
+    def _judge(self, method, path, target, ts_raw, ts_int, nonce, digest, sig) -> tuple:
+        """(None, the signature's entry) for a signature that verifies and is
+        new — taken now (_take) — else (the refusal's detail and kind, None).
 
         Two keys are accepted, for two kinds of caller:
           * the DEVICE TOKEN — what a browser gets after logging in. The page
@@ -487,18 +528,22 @@ class HMACAuthMiddleware:
         if not any(hmac.compare_digest(sig, _mac(key, method, target, ts_raw, nonce, digest))
                    for key in (device_auth.current_token(secret).encode(), secret)):
             logger.warning("bad request signature: %s %s", method, path)
-            return "bad signature", _auth_error("bad-sig")
-        if not _first_use(sig, ts_int):
+            return ("bad signature", "bad-sig"), None
+        taken = _take(sig, ts_int)
+        if taken is None:
             logger.warning("request signature used again: %s %s", method, path)
-            return "signature already used", _auth_error("replayed")
-        return None
+            return ("signature already used", "replayed"), None
+        return None, taken
 
     async def _admit(self, scope, receive, send, budget: BodyBudget, *,
-                     digest: Optional[str] = None, judge=None) -> None:
+                     digest: Optional[str] = None, taken: Optional[tuple] = None, judge=None) -> None:
         """The request's body read whole from `budget`, held to its signed
-        `digest` or put to `judge`, then the app with it."""
+        `digest` or put to `judge`, then the app with it. A body that never
+        arrives gives its signature back (`taken`)."""
         async with budget.reading(scope, receive, send) as body:
             if body is None:
+                if taken is not None:
+                    _give_back(taken)
                 return
             if digest is not None and not hmac.compare_digest(hashlib.sha256(body).hexdigest(), digest):
                 logger.warning("request body differs from its signed digest: %s %s",
@@ -506,5 +551,5 @@ class HMACAuthMiddleware:
                 return await refuse(send, 401, "bad signature", _auth_error("bad-sig"))
             refusal = judge(body) if judge is not None else None
             if refusal is not None:
-                return await refuse(send, 401, *refusal)
+                return await refuse(send, 401, refusal[0], _auth_error(refusal[1]))
             await self.app(scope, replaying(body, receive), send)

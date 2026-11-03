@@ -401,9 +401,10 @@ async def verify_password(password: str, *, signed: bool = False) -> bool:
 
 
 async def derive_guarded(fn, *args, signed: bool = False):
-    """Run one Argon2id derivation of a request off the loop, under the
-    memory semaphore (the module doc's two doors): the login door's and
-    change-identity's. Raises Busy when DERIVE_QUEUE are in flight already —
+    """Run one Argon2id derivation of a password check off the loop, under
+    the memory semaphore (the module doc's two doors): the login door's,
+    change-identity's and the backup CLI's (in its own process). Raises Busy
+    when DERIVE_QUEUE are in flight already —
     one fewer for a caller no request signature vouches for, so a crowd at
     the login door never turns the owner's own change away. A caller that
     goes leaves its derivation counted, and holding its semaphore slot,
