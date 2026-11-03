@@ -31,7 +31,8 @@ def test_config_allowlist_drops_every_credential():
     assert out["p2p"] == {"listen_port": 20123, "docker_ports": [8801], "chat_enabled": True}
     assert out["openai_compat"] == {"base_url": "http://x", "model": "m", "name": "n"}
     assert out["lastfm"] == {"authorized": True}
-    assert out["ports"]["web"] == 18000 and out["hqplayer"]["host"] == "h"
+    assert out["ports"]["web"] == 18000 and out["hqplayer"] == {
+        "enabled": True, "host": "another machine", "port": 4321}
 
 
 def test_settings_allowlist_never_names_a_credential_key():

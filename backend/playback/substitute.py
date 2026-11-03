@@ -212,10 +212,9 @@ class Substitutes:
         if index is None:
             return
         if play["kind"] == "proxy":
-            logger.info("queue slot %d streams %s — %s", index, item.artist, item.title)
+            logger.debug("queue slot %d streams %s — %s", index, item.artist, item.title)
         else:
-            logger.info("queue slot %d unplayable here: %s (%s — %s)", index,
-                        play["reason"], item.artist, item.title)
+            logger.info("queue slot %d unplayable here: %s", index, play["reason"])
         # Either way: a play the output parked on the slot goes on — the
         # stream, or past the slot
         self._notify(index)

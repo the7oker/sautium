@@ -370,12 +370,17 @@ def _read(key: str) -> Any:
 
 
 def _write(key: str, value: Any) -> None:
+    """A setting's value; `updated_at` moves only when the value does — it is
+    when the owner last changed it (the support switch's rule reads it,
+    desktop/p2p/diag_events.SWITCH_ALLOWS), and a tab re-sending a value
+    changes nothing."""
     db_execute(
         """
         INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)
         ON CONFLICT (key) DO UPDATE
             SET value = EXCLUDED.value,
                 updated_at = CURRENT_TIMESTAMP
+            WHERE user_settings.value IS DISTINCT FROM EXCLUDED.value
         """,
         (key, json.dumps(value)),
     )

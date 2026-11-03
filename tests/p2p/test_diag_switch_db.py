@@ -127,3 +127,29 @@ def test_a_withdrawn_bundle_is_deleted_and_closed_with_no_request_made(
         cur.execute("SELECT error, uploaded_at FROM diag_warrants WHERE id = %s", (wid,))
         assert cur.fetchone() == (diag_events.WITHDRAWN, None)
     assert wid not in diag_events.resumable_warrants(conn)
+
+
+def test_a_value_sent_again_withdraws_nothing(conn, scratch_dsn, monkeypatch):
+    """The Web UI's own write (routers/settings._write): a tab re-sending the
+    switch as it is leaves its last change where it was."""
+    import sys
+    from pathlib import Path
+    backend = str(Path(__file__).resolve().parents[2] / "backend")
+    if backend not in sys.path:
+        sys.path.insert(0, backend)
+    import psycopg2.pool
+
+    import db_pool
+    from routers import settings as settings_router
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    try:
+        settings_router._write("support.diagnostics_enabled", True)
+        wid = _warrant(conn)
+        diag_events.mark_collected(conn, wid, 100, datetime.now(timezone.utc))
+        settings_router._write("support.diagnostics_enabled", True)
+        assert diag_events.may_upload(conn, wid)
+        settings_router._write("support.diagnostics_enabled", False)
+        assert not diag_events.may_upload(conn, wid)
+    finally:
+        pool.closeall()

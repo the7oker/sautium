@@ -140,7 +140,8 @@ def _allowed_host_set() -> set:
                 for s in os.getenv("SAUTIUM_ALLOWED_HOSTS", "").split(",")
                 if s.strip()}
     _allowed_hosts = allowed
-    logger.info("Host guard accepts: %s", sorted(allowed))
+    # This machine's own names (a tailnet's, mDNS's) are its owner's: DEBUG.
+    logger.debug("Host guard accepts: %s", sorted(allowed))
     return allowed
 
 
@@ -189,7 +190,7 @@ def _own_ipv4_literal(host: str, allowed: set) -> bool:
     new = set(detect_own_ipv4s()) - allowed
     if new:
         allowed |= new
-        logger.info("Host guard accepts: %s (interfaces up since startup)", sorted(new))
+        logger.debug("Host guard accepts: %s (interfaces up since startup)", sorted(new))
     if host in allowed:
         return True
     if len(_host_misses) >= _MISS_CAP:

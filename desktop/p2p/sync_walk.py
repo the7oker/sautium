@@ -252,12 +252,16 @@ def core_and_bulk(dsn: str, artist_uuids: list[str]) -> tuple[list[str], list[st
 
 async def listen_notifications(db_dsn: str,
                                handlers: dict[str, Callable[[], None]],
-                               running: Callable[[], bool]) -> None:
+                               running: Callable[[], bool],
+                               on_listening: Optional[Callable[[], None]] = None) -> None:
     """LISTEN on every channel in `handlers` and call a channel's handler
     once per poll in which it fired, however many notifies arrived.
     Select-on-socket with a 5 s timeout so cancellation stays responsive; a
     dropped connection is reopened after 5 s. Handlers run on the event
-    loop — schedule anything long as a task."""
+    loop — schedule anything long as a task. `on_listening` runs each time
+    the LISTENs are in place, the first time and after every reconnect: a
+    state whose change is announced by a notify is read again then, so a
+    change no one was listening for is not lost."""
     while running():
         conn = None
         try:
@@ -267,6 +271,8 @@ async def listen_notifications(db_dsn: str,
             with conn.cursor() as cur:
                 for channel in handlers:
                     cur.execute(f"LISTEN {channel}")
+            if on_listening:
+                on_listening()
             while running():
                 ready = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: select.select([conn], [], [], 5))

@@ -111,12 +111,13 @@ def _scrobble_async(method: str, **kwargs) -> bool:
     The one gate of the Scrobbling switch: every report passes here, so the
     live now-playing obeys it as the scrobble does. False when the switch held
     the report back — the caller keeps the listen unscrobbled, and a switch
-    turned on before the listen's threshold still scrobbles it."""
-    if not _scrobbling_enabled():
-        return False
+    turned on before the listen's threshold still scrobbles it. A node with no
+    Last.fm session has nothing to send and reads no switch."""
     net = _get_scrobbler()
     if net is None:
         return True
+    if not _scrobbling_enabled():
+        return False
     if cooling_down('lastfm'):
         return True  # Last.fm is rate-limiting us — skip the scrobble, keep polling
 

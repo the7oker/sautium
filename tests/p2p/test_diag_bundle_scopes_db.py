@@ -17,7 +17,7 @@ psycopg2 = pytest.importorskip("psycopg2")
 
 from desktop import diag_bundle  # noqa: E402
 
-PERSONAL = ("someone", "8.8.8.8", "192.0.2", "example.com")
+PERSONAL = ("someone", "Someone", "8.8.8.8", "192.0.2", "example.com", "pixel.lan")
 
 
 class _NodeApi:
@@ -49,9 +49,15 @@ def test_the_structural_scopes_name_no_path_address_or_person(scratch_dsn, tmp_p
     with conn.cursor() as cur:
         cur.execute("DELETE FROM diag_events")
         for key, value in (("p2p.reachability_detail", "wan 8.8.8.8:24001 via 192.0.2.1"),
-                           ("hqplayer.host", "192.0.2.9"),
+                           ("hqplayer.host", "Someones-Desktop"),
                            ("library.watch_folder", "/home/someone/Music"),
-                           ("support.contact", "someone@example.com")):
+                           ("support.contact", "someone@example.com"),
+                           ("output.dlna_renderer", {"udn": "uuid:5f9ec1b3-ed3a-4f0d-8d84-1",
+                                                     "location": "http://pixel.lan:8200/d.xml",
+                                                     "name": "Someone's Phone"}),
+                           ("output.dlna_pinned", [{"udn": "uuid:5f9ec1b3-ed3a-4f0d-8d84-1",
+                                                    "name": "Someone's Phone"}]),
+                           ("output.local_device", "WASAPI::Someone's Headphones")):
             cur.execute("INSERT INTO user_settings (key, value) VALUES (%s, %s) "
                         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                         (key, json.dumps(value)))
@@ -76,4 +82,9 @@ def test_the_structural_scopes_name_no_path_address_or_person(scratch_dsn, tmp_p
     for name, text in members.items():
         for personal in PERSONAL:
             assert personal not in text, (name, personal)
-    assert '"authorized": true' in members["settings.json"]
+    settings = json.loads(members["settings.json"])
+    assert settings["config"]["lastfm"] == {"authorized": True}
+    assert settings["user_settings"]["hqplayer.host"]["value"] == "another machine"
+    assert settings["user_settings"]["output.local_device"]["value"] == "WASAPI"
+    assert settings["user_settings"]["output.dlna_renderer"]["value"] == {
+        "udn": "uuid:5f9ec1b3-ed3a-4f0d-8d84-1", "location": "http://[host]:8200/d.xml"}

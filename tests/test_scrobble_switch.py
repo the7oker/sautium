@@ -21,7 +21,7 @@ if str(BACKEND) not in sys.path:
 
 psycopg2 = pytest.importorskip("psycopg2")
 
-from conftest import PG, SESSION_DATABASE  # noqa: E402
+from conftest import PG  # noqa: E402
 from playback import tracker  # noqa: E402
 from playback.queue import QueueItem  # noqa: E402
 
@@ -40,9 +40,15 @@ class _LastFm:
         return call
 
 
-def _pool(**connect):
+def _pool(minconn=1, **connect):
     import psycopg2.pool
-    return psycopg2.pool.ThreadedConnectionPool(1, 2, **connect)
+    return psycopg2.pool.ThreadedConnectionPool(minconn, 2, **connect)
+
+
+def _heard_nothing(lastfm) -> bool:
+    """The reports go out on a thread of their own: give one half a second
+    to say anything at all."""
+    return not lastfm.called.wait(0.5) and lastfm.calls == []
 
 
 @pytest.fixture
@@ -51,18 +57,12 @@ def node(scratch_dsn, monkeypatch):
     pool = _pool(dsn=scratch_dsn)
     monkeypatch.setattr(db_pool, "_pool", pool)
     lastfm = _LastFm()
-    built: list[int] = []
-
-    def scrobbler():
-        built.append(1)
-        return lastfm
-
-    monkeypatch.setattr(tracker, "_get_scrobbler", scrobbler)
+    monkeypatch.setattr(tracker, "_get_scrobbler", lambda: lastfm)
     monkeypatch.setattr(tracker, "_play_session", None)
     monkeypatch.setattr(tracker, "_carried", False)
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
-    yield conn, lastfm, built
+    yield conn, lastfm
     conn.close()
     pool.closeall()
 
@@ -88,31 +88,31 @@ def _listen(track_id: str, positions) -> None:
 
 
 def test_with_scrobbling_off_last_fm_hears_nothing_not_even_now_playing(node):
-    conn, lastfm, built = node
+    conn, lastfm = node
     _switch(conn, False)
     _listen(str(uuid.uuid4()), (0.0, 1.0, 150.0, 199.0))
     tracker.track_play_event("stopped", 0.0, 0.0, None)
-    assert built == [] and lastfm.calls == []
+    assert _heard_nothing(lastfm)
 
 
 def test_a_switch_that_cannot_be_read_sends_nothing_and_says_so(node, monkeypatch, caplog):
-    _, lastfm, built = node
+    _, lastfm = node
     import db_pool
-    # The run's session database is empty: the switch's table is not there.
-    pool = _pool(dbname=SESSION_DATABASE, **PG)
+    # A database that is not there: every read of the switch fails.
+    pool = _pool(minconn=0, dbname="sautium_test_no_such_database", **PG)
     monkeypatch.setattr(db_pool, "_pool", pool)
     try:
         with caplog.at_level("ERROR", logger=tracker.logger.name):
             _listen(str(uuid.uuid4()), (0.0, 150.0))
     finally:
         pool.closeall()
-    assert built == [] and lastfm.calls == []
+    assert _heard_nothing(lastfm)
     assert any("Scrobbling" in r.getMessage() for r in caplog.records
                if r.name == tracker.logger.name and r.levelname == "ERROR")
 
 
 def test_a_listen_the_switch_held_back_scrobbles_once_it_is_on_before_the_threshold(node):
-    conn, lastfm, built = node
+    conn, lastfm = node
     _switch(conn, False)
     track = str(uuid.uuid4())
     _listen(track, (0.0, 20.0))           # its start: now-playing held back

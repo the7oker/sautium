@@ -299,9 +299,9 @@ class StreamProvider(ABC):
             return None
         r = r if isinstance(r, ResolvedSource) else ResolvedSource(source_id=r)
         if not fits_length(query, r.duration):
-            logger.info("%s: %s — %s is %.0fs against catalog %s — not the recording",
-                        self.manifest.id, query.artist, query.title, r.duration,
-                        "/".join(f"{w:.0f}s" for w in attested_lengths(query)))
+            logger.debug("%s: %s — %s is %.0fs against catalog %s — not the recording",
+                         self.manifest.id, query.artist, query.title, r.duration,
+                         "/".join(f"{w:.0f}s" for w in attested_lengths(query)))
             return None
         return r
 

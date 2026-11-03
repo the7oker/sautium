@@ -273,26 +273,39 @@ def scrub_secrets(text: str) -> str:
 # Personal scrubbing — what leaves for support names no person, place or file
 # ---------------------------------------------------------------------------
 
-_EMAIL = re.compile(r"[\w.+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9-]+)+")
-_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w.])")
+# An address's start is where its run of address characters starts — a
+# start inside a long token (a hex blob in a database log) would make the
+# search quadratic; a top-level domain is letters, so a package's version
+# (`name@18.3.1`) is no address.
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@(?:[^\W_](?:[\w-]*[^\W_])?\.)+[^\W\d_]{2,}"
+                    r"(?![\w-]|\.[\w-])")
+# A sentence's full stop may follow an address; a fifth number may not (a
+# version string).
+_IPV4 = re.compile(r"(?<!\w)(?<!\d\.)\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d)")
 # Colon groups an IPv6 address may be; ipaddress decides (a clock time or a
 # MAC address is none).
 _IPV6 = re.compile(r"(?<![\w:.])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])")
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# The names a home network, a tailnet or mDNS give a machine name its owner
+# ("…-macbook.local", "….ts.net"); a public service's name is no one's.
+_HOST = re.compile(r"(?<![\w.-])[\w-]+(?:\.[\w-]+)*\.(?:local|lan|home|home\.arpa|localdomain"
+                   r"|internal|fritz\.box|ts\.net)(?![\w-])", re.IGNORECASE)
+_SAFE_HOSTS = {"host.docker.internal"}
 # A path's folders name an account, a person, a disk; its end is known only
 # where it is quoted, so a folder may hold single spaces only where another
 # separator follows it.
 _SEG = r"[^\\/\s'\"<>|*?]+(?: [^\\/\s'\"<>|*?]+)*"
 _TAIL = r"[^\s'\"<>|]*"
-_ROOTS = ("home|Users|mnt|media|Volumes|music|Music|data|srv|net|nfs|share|app|tmp|var|opt"
-          "|usr|etc|root|run|private|Library|System")
-_FILE_URL = re.compile(r"file://[^\s'\"<>]*")
-_QUOTED_PATH = re.compile(
-    rf"""(['"])((?:[A-Za-z]:[\\/]|\\\\\w|~[\\/]|/(?:{_ROOTS})[\\/])[^'"\n]*)\1""")
+_ROOTS = (r"home|Users|mnt|media|Volumes|volume\d+|homes|music|Music|data|srv|net|nfs|share"
+          r"|storage|app|tmp|var|opt|usr|etc|root|run|private|Library|System")
+_SHARE_URL = re.compile(r"\b(file|smb|nfs|afp|sftp)://[^\s'\"<>]*", re.IGNORECASE)
+_PATH_START = rf"""(?:[A-Za-z]:(?=[\\/])|\\\\[^\\/\s'"<>|]+|~[\w.-]*(?=[\\/])|/(?:{_ROOTS})(?=[\\/\s]|$))"""
+_QUOTED_PATH = re.compile(rf"""(['"])({_PATH_START}[^'"\n]*)\1""")
 _BARE_PATH = re.compile(
-    rf"""(?<![\w.:/\\~-])(?:(?:[A-Za-z]:|\\\\[^\\/\s'"<>|]+|~|/(?:{_ROOTS})(?=[\\/\s]|$))"""
-    rf"""(?:[\\/]{_SEG}(?=[\\/]))*(?:[\\/]{_TAIL})?)""")
+    rf"""(?<![\w./\\~-]){_PATH_START}(?:[\\/]{_SEG}(?=[\\/]))*(?:[\\/]{_TAIL})?""")
+_WHOLE_PATH = re.compile(rf"{_PATH_START}[^\n]*")
 _FILE_NAME = re.compile(r"[^\\/]+\.[A-Za-z0-9]{1,5}")
+_ACCOUNT_DIRS = {"users", "home", "homes"}
 
 
 def _address(match: "re.Match") -> str:
@@ -313,31 +326,45 @@ def _address(match: "re.Match") -> str:
     return "[public address]"
 
 
+def _host(match: "re.Match") -> str:
+    return match.group(0) if match.group(0).lower() in _SAFE_HOSTS else "[host]"
+
+
 def _cut_path(path: str) -> str:
     """A file keeps its name; anything else — a folder, which may be an
-    account's — is only a path."""
-    name = re.split(r"[\\/]+", path.rstrip("\\/"))[-1]
+    account's, and an account's folder whatever its name looks like — is
+    only a path."""
+    parts = [p for p in re.split(r"[\\/]+", path.rstrip("\\/")) if p]
+    name = parts[-1] if parts else ""
+    if len(parts) >= 2 and parts[-2].lower() in _ACCOUNT_DIRS:
+        return "[path]"
     return "…/" + name if _FILE_NAME.fullmatch(name) else "[path]"
 
 
 def scrub_personal(text: str) -> str:
     """scrub_secrets, then what names a person or a place: email addresses,
-    IP addresses (each to its kind), absolute paths (a file to its name)."""
+    IP addresses (each to its kind), a home network's host names, absolute
+    paths (a file to its name)."""
     text = scrub_secrets(text)
-    text = _FILE_URL.sub("file://[path]", text)
+    text = _SHARE_URL.sub(lambda m: m.group(1) + "://[path]", text)
     text = _QUOTED_PATH.sub(lambda m: m.group(1) + _cut_path(m.group(2)) + m.group(1), text)
     text = _BARE_PATH.sub(lambda m: _cut_path(m.group(0)), text)
     text = _EMAIL.sub("[email]", text)
+    text = _HOST.sub(_host, text)
     text = _IPV4.sub(_address, text)
     return _IPV6.sub(_address, text)
 
 
 def scrub_detail(value):
-    """scrub_personal over every string an event's detail holds, at any depth."""
+    """scrub_personal over every string an event's detail holds, at any depth,
+    keys included; a value that is a path from its start is one path, its
+    spaces and all."""
     if isinstance(value, str):
+        if _WHOLE_PATH.fullmatch(value):
+            return _cut_path(value)
         return scrub_personal(value)
     if isinstance(value, dict):
-        return {k: scrub_detail(v) for k, v in value.items()}
+        return {scrub_detail(k): scrub_detail(v) for k, v in value.items()}
     if isinstance(value, list):
         return [scrub_detail(v) for v in value]
     return value

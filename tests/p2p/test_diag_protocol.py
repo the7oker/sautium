@@ -179,3 +179,43 @@ def test_a_report_is_kept_scrubbed_on_the_master():
     [kept] = dp.decode_report(json.dumps({"v": 1, "events": events}).encode())
     assert kept["detail"] == {"error": "peer [private address] refused '…/x.box'",
                               "nested": [{"who": "[email]"}], "count": 3}
+
+
+@pytest.mark.parametrize("text, scrubbed", [
+    ("connect to 8.8.8.8.", "connect to [public address]."),
+    ("peer 192.0.2.10.", "peer [private address]."),
+    ("1.2.3.4.5 is a version", "1.2.3.4.5 is a version"),
+    ("react@18.3.1 builds", "react@18.3.1 builds"),
+    ("write to юзер@пошта.укр now", "write to [email] now"),
+    (r"C:\Users\john.smith", "[path]"),
+    ("/home/john.doe and /Users/jane.doe/", "[path] and [path]"),
+    ("~someone/Music/x.flac", "…/x.flac"),
+    ("share smb://nas.local/home/someone/Music", "share smb://[path]"),
+    ("music_dir:/music/A/b.flac", "music_dir:…/b.flac"),
+    ("/volume1/homes/someone/Music/a.flac", "…/a.flac"),
+    ("guard: ['box.tail1a2b.ts.net', 'Someones-MacBook.local', 'host.docker.internal']",
+     "guard: ['[host]', '[host]', 'host.docker.internal']"),
+    ("GET http://pixel.lan:8200/desc.xml", "GET http://[host]:8200/desc.xml"),
+    ("https://api.github.com/repos", "https://api.github.com/repos"),
+    ("Phase B: failed {a: 1} ~3 s", "Phase B: failed {a: 1} ~3 s"),
+])
+def test_scrub_personal_cases(text, scrubbed):
+    assert dp.scrub_personal(text) == scrubbed
+
+
+def test_scrub_detail_takes_keys_and_a_whole_path_value():
+    assert dp.scrub_detail({"/home/someone/x.flac": r"C:\Users\Some One",
+                            "folder": "D:\\Music of Some One", "n": 3}) == {
+        "…/x.flac": "[path]", "folder": "[path]", "n": 3}
+
+
+def test_a_long_token_is_scrubbed_in_linear_time():
+    """A database log's hex blob: 64 K characters take milliseconds to
+    scrub; a search that tried every position in it took seconds here,
+    and about an hour for a 2 MiB log tail."""
+    import time
+    blob = "STATEMENT: '\\x" + "ab" * (1 << 15) + "'::bytea someone@example.com"
+    started = time.monotonic()
+    out = dp.scrub_personal(blob)
+    assert time.monotonic() - started < 1.0
+    assert out.endswith("[email]")

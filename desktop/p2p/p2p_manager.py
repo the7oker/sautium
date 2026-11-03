@@ -3026,12 +3026,16 @@ class P2PManager:
                 self._lb_sources_changed()),
             # The owner moved P2P sharing (routers/settings.put_sync_prefs).
             "sautium_sharing": lambda: asyncio.create_task(self._sharing_changed()),
-        }, lambda: self._running)
+        }, lambda: self._running,
+            # A move while no LISTEN was up (before it, or while it reconnects)
+            # would be lost: the switch is read again whenever it is up.
+            on_listening=lambda: asyncio.create_task(self._sharing_changed()))
 
     async def _sharing_changed(self) -> None:
-        """P2P sharing as it is now — at start, and whenever the owner moves
-        it: the LAN beacon, which names this node on every network it joins,
-        goes out only while it is on."""
+        """P2P sharing as it is now — at start, whenever the owner moves it,
+        and whenever the notifications are listened for again: the LAN
+        beacon names this node on every network it joins only while it is
+        on (LANDiscovery.set_beaconing)."""
         loop = asyncio.get_event_loop()
         on = await loop.run_in_executor(None, self._sync_server.sharing_changed)
         self._lan_discovery.set_beaconing(on)

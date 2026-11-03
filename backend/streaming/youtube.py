@@ -297,9 +297,9 @@ class YouTubeProvider(StreamProvider):
             matched = [c for c in self._title_attested(query, cands, gates)
                        if norm_key(c["channel"]) in trusted]
             if matched:
-                logger.info("youtube: no channel carries %s — %r admitted on the "
-                            "album's rip channel %r", query.artist, query.title,
-                            matched[0]["channel"])
+                logger.debug("youtube: no channel carries %s — %r admitted on the "
+                             "album's rip channel %r", query.artist, query.title,
+                             matched[0]["channel"])
         if not matched:
             raise _GateWipeout(
                 f"youtube: no artist match for {search!r} "
@@ -323,8 +323,8 @@ class YouTubeProvider(StreamProvider):
                 f"{'/'.join(f'{w:.0f}s' for w in lens)}, "
                 f"nearest {nearest['duration']:.0f}s)")
         best = max(fit, key=lambda c: self._score(c, query))
-        logger.info("youtube resolve %r -> %s (%ss, %s)",
-                    search, best["id"], best["duration"], best["channel"])
+        logger.debug("youtube resolve %r -> %s (%ss, %s)",
+                     search, best["id"], best["duration"], best["channel"])
         return ResolvedSource(
             source_id=best["id"], duration=best["duration"],
             artwork_url=f"https://i.ytimg.com/vi/{best['id']}/hqdefault.jpg")

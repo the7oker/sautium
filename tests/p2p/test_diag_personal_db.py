@@ -2,7 +2,8 @@
 a real PostgreSQL built from the migrations: an event's detail is stored
 scrubbed whatever its writer put in it (diag_events.record); the rows kept
 before that — the node's events, the master's received reports — are scrubbed
-once at startup (db_migrate's `diag_scrubbed_v1`); and the facts a node sends
+once at startup, and a bundle staged before is withdrawn (db_migrate's
+`diag_scrubbed_v1`); and the facts a node sends
 at every start (diag_bundle.system_facts, node.started) carry the backend's
 health as states, never the music folder's path or the reachability's
 addresses. Skipped without a cluster."""
@@ -63,7 +64,14 @@ def test_what_was_kept_before_is_scrubbed_once_at_startup(conn):
                     (json.dumps({"error": "boom"}),))
         cur.execute("INSERT INTO support_reports (node_pubkey, kind, ts, detail) "
                     "VALUES (%s, 'sync.failed', now(), %s)", ("ab" * 32, json.dumps(RAW)))
-    assert _scrub_support_records(conn) == {"diag_events": 1, "support_reports": 1}
+        cur.execute("DELETE FROM diag_warrants")
+        # a bundle collected before, staged, never uploaded
+        cur.execute("INSERT INTO diag_warrants (id, issuer, issued_at, expires_at, scopes, "
+                    "collected_at) VALUES (gen_random_uuid(), %s, now(), now() + interval '1 day', "
+                    "'{logs}', now())", ("ab" * 32,))
+    assert _scrub_support_records(conn) == {"diag_events": 1, "support_reports": 1,
+                                            "staged_bundles_withdrawn": 1}
+    assert diag_events.resumable_warrants(conn) == []
     assert _details(conn, "diag_events") == [CLEAN, {"error": "boom"}]
     assert _details(conn, "support_reports") == [CLEAN]
 

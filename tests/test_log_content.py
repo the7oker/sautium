@@ -82,6 +82,36 @@ def _message_text_logged(path: Path) -> list:
     return found
 
 
+# What a node plays, searches for, and who its owner is: names an INFO line
+# of these modules must not carry (their DEBUG lines may).
+_CONTENT_ATTRS = {"title", "artist", "username"}
+_CONTENT_NAMES = {"search", "username"}
+_PLAY_MODULES = ["playback/tracker.py", "playback/substitute.py", "playback/hqp_backend.py",
+                 "streaming/youtube.py", "streaming/base.py", "streaming/deezer_catalog.py",
+                 "lastfm_auth.py", "auth_hmac.py"]
+
+
+def _content_at_info(path: Path) -> list:
+    found = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("info", "warning")
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "logger"):
+            continue
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Attribute) and sub.attr in _CONTENT_ATTRS) or (
+                    isinstance(sub, ast.Name) and sub.id in _CONTENT_NAMES):
+                found.append(f"{path.name}:{node.lineno}")
+        first = node.args[0] if node.args else None
+        if isinstance(first, ast.Constant) and str(first.value).startswith("Host guard accepts"):
+            found.append(f"{path.name}:{node.lineno}")
+    return found
+
+
+def test_no_info_line_names_what_is_played_searched_or_who_listens():
+    assert [hit for name in _PLAY_MODULES for hit in _content_at_info(BACKEND / name)] == []
+
+
 def test_no_agent_runner_logs_the_text_of_a_message():
     runners = [BACKEND / "claude_code_runner.py", BACKEND / "codex_runner.py"]
     assert [hit for path in runners for hit in _message_text_logged(path)] == []

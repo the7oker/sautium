@@ -159,6 +159,12 @@ def _scrub_support_records(conn) -> dict:
             execute_batch(cur, f"UPDATE {table} SET detail = %s WHERE id = %s", changed,
                           page_size=500)
             counts[table] = len(changed)
+        # A bundle collected before, staged and not yet uploaded, was not
+        # scrubbed and is boxed: it never leaves (resumable_warrants skips it).
+        cur.execute("""
+            UPDATE diag_warrants SET error = 'withdrawn: collected before support bundles were scrubbed'
+             WHERE collected_at IS NOT NULL AND uploaded_at IS NULL AND error IS NULL""")
+        counts["staged_bundles_withdrawn"] = cur.rowcount
     conn.commit()
     return counts
 

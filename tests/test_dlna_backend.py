@@ -1314,9 +1314,9 @@ def heard(monkeypatch):
     monkeypatch.setattr(tracker, "_carried", False)
     monkeypatch.setattr(tracker, "_db_execute", lambda sql, p=None: listened.append(
         (p["tid"], round(p["pct"]))) if "INSERT INTO listening_history" in sql else None)
+    # The report goes: the Scrobbling switch, read inside _scrobble_async, is on.
     monkeypatch.setattr(tracker, "_scrobble_async",
-                        lambda method, **kw: lastfm.append((method, kw.get("title"))))
-    monkeypatch.setattr(tracker, "_scrobbling_enabled", lambda: True)
+                        lambda method, **kw: lastfm.append((method, kw.get("title"))) or True)
     return listened, lastfm
 
 

@@ -230,7 +230,7 @@ class _DspChange:
         if background("playback not resumed after a DSP change",
                       lambda: backend.resume_after_rebuild(item, entry, position),
                       needed=needed, until=lambda: needed() is not None):
-            logger.info("resumed playback after a DSP change (%s at %d s)", entry.title, position)
+            logger.info("resumed playback after a DSP change (at %d s)", position)
 
 
 def _uri_in_playlist(hqp: HQPlayerClient, uri: str) -> bool:
@@ -1707,8 +1707,7 @@ class HqpBackend(PlayerBackend):
             self._parked = _Parked(item, int(second), start, token, under_another=self._taken())
         proxy = streaming_service.get_proxy()
         proxy.ensure_buffered([token])
-        logger.info("HQPlayer: slot %s waits for its stream (%s — %s)",
-                    self._queue.index_of(item), item.artist, item.title)
+        logger.info("HQPlayer: slot %s waits for its stream", self._queue.index_of(item))
         self.poke()
         if not proxy.bytes_away(token):
             self._land(token)       # in, or failed, before the park stood: it goes now

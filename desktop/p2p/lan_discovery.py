@@ -2,17 +2,23 @@
 LAN peer discovery for Sautium via UDP broadcast.
 
 Complements DHT (which works over the internet but fails for peers
-behind the same NAT/router).  Each node periodically broadcasts a
-small beacon on the LAN; other nodes collect beacons and expose
-discovered peers for sync.
+behind the same NAT/router). A launcher broadcasts a small beacon on the
+LAN while its owner shares (P2P sharing on); other nodes collect beacons and
+expose discovered peers for sync.
 
 Protocol (JSON over UDP broadcast, port 19002):
   {
-    "sautium": 1,           # protocol version
-    "node_id": "...",        # Ed25519 public key hex (or empty)
-    "sync_port": 19000,      # HTTP sync server port
-    "artists": 42            # enriched artist count (hint)
+    "sautium": 1,            # protocol version
+    "beacon_id": "...",      # random per process: a host hears its own
+    "node_id": "...",        # Ed25519 public key hex      } while P2P
+    "sync_port": 19000,      # HTTP sync server port        } sharing is
+    "artists": 42,           # enriched artist count (hint) } on
+    "invite_code": "...",    #                              }
+    "nodes": [8801]          # sibling nodes on this host (a Docker backend)
   }
+With sharing off a launcher names no node of its own: it beacons only its
+siblings — they keep their own switches, and this host's address is the
+only way the LAN reaches them — and nothing at all without any.
 
 Security: beacons are unsigned discovery hints only.  The actual
 sync uses HTTPS with certificate pinning.
@@ -21,6 +27,7 @@ sync uses HTTPS with certificate pinning.
 import asyncio
 import json
 import logging
+import secrets
 import socket
 import time
 from typing import Callable, Dict, Optional, Tuple
@@ -63,20 +70,20 @@ class LANDiscovery:
         self._peers: Dict[Tuple[str, int], dict] = {}
         self._running = False
         self._sock: Optional[socket.socket] = None
-        # Set while the owner shares (set_beaconing); the broadcast loop waits
-        # on it, so a node with P2P sharing off says nothing on the networks
-        # it joins, and one turned back on beacons at once.
-        self._beaconing = asyncio.Event()
+        # Whether the owner shares (set_beaconing) — off until told — and
+        # the wake that sends a changed beacon at once.
+        self._sharing = False
+        self._wake = asyncio.Event()
+        self._beacon_id = secrets.token_hex(8)
 
     def set_beaconing(self, on: bool) -> None:
-        """Beacons go out only while P2P sharing is on: each one names the
-        node — its key, username and invite code — to every device on the
-        network. The node keeps hearing others' beacons either way. Called
-        on the event loop."""
-        if on:
-            self._beaconing.set()
-        else:
-            self._beaconing.clear()
+        """While P2P sharing is on, the beacon names this node — its key,
+        username, invite code, port and library size — to every device on
+        the network; while it is off, only the sibling nodes on this host
+        (_make_beacon). The node hears others' beacons either way. Called on
+        the event loop."""
+        self._sharing = on
+        self._wake.set()
 
     @property
     def peers(self) -> list[Tuple[str, int]]:
@@ -106,8 +113,9 @@ class LANDiscovery:
         return sorted({port for (ip, port), info in self._peers.items()
                        if info.get("localhost")})
 
-    def _parse_beacon(self, data: bytes, sender_ip: str) -> Optional[Tuple[str, int, dict]]:
-        """Parse beacon, return (ip, sync_port, info) or None."""
+    def _parse_beacon(self, data: bytes, sender_ip: str) -> Optional[Tuple[str, Optional[int], dict]]:
+        """Parse beacon, return (ip, sync_port, info) or None; sync_port is
+        None for a host that names only its siblings (sharing off there)."""
         try:
             msg = json.loads(data.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -116,16 +124,19 @@ class LANDiscovery:
         if msg.get("sautium") != PROTOCOL_VERSION:
             return None
 
-        sync_port = msg.get("sync_port")
-        if not isinstance(sync_port, int):
+        # Ignore our own beacons — a siblings-only one names no node
+        if msg.get("beacon_id") == self._beacon_id:
             return None
-
-        # Ignore our own beacons
         if msg.get("node_id") and msg["node_id"] == self.node_id:
             return None
 
         nodes = [p for p in (msg.get("nodes") or [])
                  if isinstance(p, int) and 0 < p < 65536]
+        sync_port = msg.get("sync_port")
+        if not isinstance(sync_port, int):
+            if not nodes:
+                return None
+            sync_port = None
         return (sender_ip, sync_port, {
             "node_id": msg.get("node_id", ""),
             "artists": msg.get("artists", 0),
@@ -186,31 +197,36 @@ class LANDiscovery:
         logger.info("LAN discovery stopped")
 
     async def _broadcast_loop(self, loop: asyncio.AbstractEventLoop):
-        """Periodically broadcast beacon on all network interfaces, while
-        beaconing is on."""
+        """Broadcast the beacon on all network interfaces every
+        BEACON_INTERVAL, and at once when the sharing switch moves; a beacon
+        with nothing to say (sharing off, no sibling) is not sent."""
         while self._running:
-            await self._beaconing.wait()
+            beacon = self._make_beacon(enriched_artists=0)
+            if beacon is not None:
+                try:
+                    # Send to both global and subnet broadcast addresses.
+                    # 255.255.255.255 may not cross interfaces on multi-NIC
+                    # machines (Windows with VMware/VPN adapters).
+                    targets = {"255.255.255.255"}
+                    for bcast in self._get_broadcast_addresses():
+                        targets.add(bcast)
+                    for addr in targets:
+                        try:
+                            await loop.run_in_executor(
+                                None,
+                                lambda a=addr: self._sock.sendto(
+                                    beacon, (a, self.discovery_port)
+                                ),
+                            )
+                        except OSError:
+                            pass
+                except OSError as e:
+                    logger.debug(f"LAN broadcast failed: {e}")
+            self._wake.clear()
             try:
-                beacon = self._make_beacon(enriched_artists=0)
-                # Send to both global and subnet broadcast addresses.
-                # 255.255.255.255 may not cross interfaces on multi-NIC
-                # machines (Windows with VMware/VPN adapters).
-                targets = {"255.255.255.255"}
-                for bcast in self._get_broadcast_addresses():
-                    targets.add(bcast)
-                for addr in targets:
-                    try:
-                        await loop.run_in_executor(
-                            None,
-                            lambda a=addr: self._sock.sendto(
-                                beacon, (a, self.discovery_port)
-                            ),
-                        )
-                    except OSError:
-                        pass
-            except OSError as e:
-                logger.debug(f"LAN broadcast failed: {e}")
-            await asyncio.sleep(BEACON_INTERVAL)
+                await asyncio.wait_for(self._wake.wait(), BEACON_INTERVAL)
+            except asyncio.TimeoutError:
+                pass
 
     @staticmethod
     def _get_broadcast_addresses() -> list[str]:
@@ -261,9 +277,10 @@ class LANDiscovery:
                 if parsed:
                     ip, port, info = parsed
                     key = (ip, port)
-                    is_new = key not in self._peers
+                    is_new = port is not None and key not in self._peers
                     info["last_seen"] = time.time()
-                    self._peers[key] = info
+                    if port is not None:
+                        self._peers[key] = info
                     if is_new:
                         logger.info(
                             f"LAN peer discovered: {ip}:{port} "
@@ -417,18 +434,24 @@ class LANDiscovery:
                 return (ip, port)
         return None
 
-    def _make_beacon(self, enriched_artists: int = 0) -> bytes:
-        """Build beacon payload. `nodes` is optional — older peers ignore it,
-        so it needs no protocol bump."""
-        count = getattr(self, "_enriched_count", enriched_artists)
-        payload = {
-            "sautium": PROTOCOL_VERSION,
-            "node_id": self.node_id,
-            "sync_port": self.sync_port,
-            "artists": count,
-            "invite_code": self.invite_code,
-        }
+    def _make_beacon(self, enriched_artists: int = 0) -> Optional[bytes]:
+        """The beacon as it stands, or None when there is nothing to say.
+        While P2P sharing is on it names this node and the siblings on its
+        host; while it is off, only the siblings — a container cannot
+        broadcast for itself, and it keeps its own switch — and with none,
+        nothing. `nodes` and `beacon_id` are optional — older peers ignore
+        them, so they need no protocol bump."""
         local_nodes = self._local_node_ports()
+        if not self._sharing and not local_nodes:
+            return None
+        payload = {"sautium": PROTOCOL_VERSION, "beacon_id": self._beacon_id}
+        if self._sharing:
+            payload.update(
+                node_id=self.node_id,
+                sync_port=self.sync_port,
+                artists=getattr(self, "_enriched_count", enriched_artists),
+                invite_code=self.invite_code,
+            )
         if local_nodes:
             payload["nodes"] = local_nodes
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")

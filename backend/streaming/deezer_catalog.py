@@ -132,7 +132,7 @@ class DeezerCatalog:
             hit = self._by_isrc(query.isrc)
             if hit:
                 tid, dur, art = hit
-                logger.info("deezer resolve %r via ISRC -> %s", query.title, tid)
+                logger.debug("deezer resolve %r via ISRC -> %s", query.title, tid)
                 return ResolvedSource(source_id=tid, duration=dur, artwork_url=art)
         known = self._album_cached(query.album_id) if query.album_id else None
         if known and query.track_id in known:
@@ -448,8 +448,8 @@ class DeezerCatalog:
                 f"top hit {top['artist']!r} - {top['title']!r}, {top['duration']}s"
                 f"{self._refused_note(refused)})")
         best = max(fit, key=lambda c: self._score(c, query))
-        logger.info("deezer resolve %r -> %s (%ss, %s)",
-                    query.title, best["id"], best["duration"], best["artist"])
+        logger.debug("deezer resolve %r -> %s (%ss, %s)",
+                     query.title, best["id"], best["duration"], best["artist"])
         return ResolvedSource(source_id=str(best["id"]), duration=best["duration"],
                               artwork_url=best.get("artwork"))
 

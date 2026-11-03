@@ -210,9 +210,8 @@ def observe_agent_state(conn, agent: str, state: str, source: str = "settings") 
     _commit(conn)
     if previous is None:
         return False
-    record(conn, "agent.state_changed",
-           {"agent": agent, "from": previous, "to": state, "source": source})
-    return True
+    return record(conn, "agent.state_changed",
+                  {"agent": agent, "from": previous, "to": state, "source": source}) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +374,8 @@ def _selftest(dsn: str) -> None:
     created = []
     try:
         created.append(record(conn, "sync.failed", {"trigger": "selftest", "error": "boom"}))
+        assert created[0] is not None, ("diagnostics are off on this node: nothing is recorded "
+                                        "for support, so there is nothing to test")
         assert select.select([listener], [], [], 5)[0], "no NOTIFY within 5 s"
         listener.poll()
         assert any(n.channel == "sautium_diag" for n in listener.notifies), "wrong channel"

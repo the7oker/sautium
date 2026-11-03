@@ -857,8 +857,8 @@ def listens(monkeypatch):
     """The play tracker's writes and Last.fm calls, recorded instead of made."""
     writes, lastfm = [], []
     monkeypatch.setattr(tracker, "_db_execute", lambda sql, params=None: writes.append((sql, params)))
-    monkeypatch.setattr(tracker, "_scrobble_async", lambda method, **kw: lastfm.append(method))
-    monkeypatch.setattr(tracker, "_scrobbling_enabled", lambda: True)
+    # The report goes: the Scrobbling switch, read inside _scrobble_async, is on.
+    monkeypatch.setattr(tracker, "_scrobble_async", lambda method, **kw: lastfm.append(method) or True)
     monkeypatch.setattr(tracker, "_play_session", None)
     return writes, lastfm
 

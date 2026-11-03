@@ -276,7 +276,7 @@ def callback(nonce: str, token: str) -> str:
         raise FlowError(f"Sautium could not finish the connection: {e}. "
                         "Return to Sautium and start again.") from e
     _end(flow, None)
-    logger.info("Last.fm authorized as %s", username)
+    logger.info("Last.fm authorized")
     # The connection is the import's first trigger: the owner's history is
     # what makes a new node's Home theirs (backend/lastfm_history.py).
     import lastfm_history

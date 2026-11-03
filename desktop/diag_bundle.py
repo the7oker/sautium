@@ -151,6 +151,36 @@ def system_facts(config: dict, conn=None, probe_backend: bool = True) -> dict:
 # settings — allowlists, never the credential rows
 # ---------------------------------------------------------------------------
 
+_THIS_MACHINE = {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
+
+
+def _host_kind(host):
+    """Where an HQPlayer is, never its name — a machine's name is often its
+    owner's: this machine, or another one (an address, the scrubber's kind)."""
+    if not host:
+        return host
+    if str(host).lower() in _THIS_MACHINE:
+        return "this machine"
+    scrubbed = scrub_personal(str(host))
+    return scrubbed if scrubbed != str(host) else "another machine"
+
+
+def _without_names(key: str, value):
+    """The outputs a node chose, by kind: a renderer's or a sound device's own
+    name is often its owner's ("…'s iPhone", "…'s AirPods")."""
+    if key in ("output.dlna_renderer", "output.dlna_pinned"):
+        if isinstance(value, dict):
+            return {k: v for k, v in value.items() if k != "name"}
+        if isinstance(value, list):
+            return [{k: v for k, v in r.items() if k != "name"} if isinstance(r, dict) else r
+                    for r in value]
+    if key == "output.local_device" and isinstance(value, str):
+        return value.split("::", 1)[0]
+    if key == "hqplayer.host":
+        return _host_kind(value)
+    return value
+
+
 def settings_allowlisted(conn) -> dict:
     with conn.cursor() as cur:
         cur.execute("""
@@ -158,13 +188,16 @@ def settings_allowlisted(conn) -> dict:
              WHERE key = ANY(%s) OR key LIKE ANY(%s)
              ORDER BY key
         """, (list(SETTINGS_KEYS), [p + "%" for p in SETTINGS_KEY_PREFIXES]))
-        return {k: {"value": v, "updated_at": _iso(u)} for k, v, u in cur.fetchall()}
+        return {k: {"value": _without_names(k, v), "updated_at": _iso(u)}
+                for k, v, u in cur.fetchall()}
 
 
 def config_allowlisted(config: dict) -> dict:
     """config.json's facts, names left out: a node's name is often its
-    owner's, a Last.fm username always is."""
+    owner's, a Last.fm username always is, an HQPlayer's host is a machine's."""
     out = {k: config.get(k) for k in CONFIG_KEYS if k in config}
+    if isinstance(out.get("hqplayer"), dict):
+        out["hqplayer"] = {**out["hqplayer"], "host": _host_kind(out["hqplayer"].get("host"))}
     p2p = config.get("p2p") or {}
     out["p2p"] = {k: p2p.get(k) for k in CONFIG_P2P_KEYS if k in p2p}
     compat = config.get("openai_compat") or {}
@@ -359,7 +392,7 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
                     "/api/player/diagnostics/hqplayer/bundle", timeout=30)
                 if data is None:
                     raise RuntimeError("the backend did not return its playback traces")
-                add("playback/hqplayer.json", scrub_personal(_json(data)))
+                add("playback/hqplayer.json", _json(scrub_detail(data)))
             scope("playback", _playback)
             add("manifest.json", _json(manifest))
     finally:
