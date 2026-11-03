@@ -274,15 +274,34 @@ def support_bundles(node: str = "") -> List[Dict[str, Any]]:
     return [_out(r) for r in rows]
 
 
+# What one bundle may unpack to. The node caps the boxed archive
+# (diag_protocol.BUNDLE_MAX_BYTES) and gzip inside it can hold far more; a
+# bundle's own entries are a dozen (desktop/diag_bundle.collect), its text a
+# few hundred MiB at the very most.
+_BUNDLE_ENTRIES = 256
+_BUNDLE_UNPACKED_BYTES = 512 * 1024 * 1024
+
+
 def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
     """Regular files and directories under `dest` only — the archive is a
-    friend's, still untrusted input."""
+    friend's, still untrusted input — _BUNDLE_ENTRIES of them and
+    _BUNDLE_UNPACKED_BYTES in all at most, judged from their headers before
+    a byte is written; then unpacked through the standard library's `data`
+    filter: no mode bit beyond plain permissions, no owner from the
+    archive."""
     root = dest.resolve()
-    for member in tar.getmembers():
+    members, total = [], 0
+    for member in tar:
+        if len(members) == _BUNDLE_ENTRIES:
+            raise HTTPException(status_code=422, detail="bundle holds more entries than a bundle has")
         target = (dest / member.name).resolve()
         if not (member.isfile() or member.isdir()) or root not in target.parents and target != root:
             raise HTTPException(status_code=422, detail=f"bundle entry refused: {member.name}")
-    tar.extractall(dest, members=[m for m in tar.getmembers() if m.isfile() or m.isdir()])
+        total += member.size
+        if total > _BUNDLE_UNPACKED_BYTES:
+            raise HTTPException(status_code=422, detail="bundle unpacks past what a bundle holds")
+        members.append(member)
+    tar.extractall(dest, members=members, filter="data")
 
 
 @router.post("/bundles/{bundle_id}/open")
