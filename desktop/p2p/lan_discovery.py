@@ -415,6 +415,12 @@ class LANDiscovery:
                         break
                     except Exception:
                         continue
+                else:
+                    # No answer: what the sibling said before no longer holds,
+                    # and a beacon names it only on its word
+                    known = self._peers.get(("127.0.0.1", port))
+                    if known is not None:
+                        known["sharing"] = False
             await asyncio.sleep(BEACON_INTERVAL)
 
     def update_enriched_count(self, count: int):

@@ -25,7 +25,7 @@ from desktop.p2p import diag_events  # noqa: E402
 
 RAW = {"error": "open '/home/someone/Music/A Band/01 Song.flac' via 192.0.2.20 for someone@example.com",
        "step": "start_all"}
-CLEAN = {"error": "open '…/01 Song.flac' via [private address] for [email]", "step": "start_all"}
+CLEAN = {"error": "open '…/[name].flac' via [private address] for [email]", "step": "start_all"}
 
 
 @pytest.fixture
@@ -53,6 +53,14 @@ def test_an_event_is_kept_scrubbed_whatever_its_writer_put_in_it(conn):
     [kept] = _details(conn, "diag_events")
     assert kept["error"] == CLEAN["error"]
     assert "someone" not in json.dumps(kept) and "…/y.box" in kept["exc"]
+
+
+def test_an_event_spooled_while_the_database_is_away_is_kept_scrubbed(tmp_path):
+    error = FileNotFoundError(2, "No such file or directory", "/home/someone/x/y.box")
+    diag_events.spool(tmp_path, "service.start_failed", {**RAW, "exc": error})
+    kept = (diag_events.diag_dir(tmp_path) / diag_events.SPOOL_FILENAME).read_text(encoding="utf-8")
+    assert "someone" not in kept and "192.0.2" not in kept
+    assert json.loads(kept)["detail"]["error"] == CLEAN["error"]
 
 
 def test_what_was_kept_before_is_scrubbed_once_at_startup(conn):

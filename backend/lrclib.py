@@ -147,7 +147,12 @@ class LrclibService:
             if data is None:
                 data = self.search_lyrics(track_name, artist_name)
         except Exception as e:
-            logger.warning(f"LRCLIB transient failure for {artist_name} - {track_name}: {e}")
+            # The track looked up, and the request URL an HTTP error names it
+            # in, are the listener's: the WARNING says only what failed
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            logger.warning("LRCLIB transient failure: %s",
+                           f"HTTP {status}" if status else type(e).__name__)
+            logger.debug(f"LRCLIB transient failure for {artist_name} - {track_name}: {e}")
             self._store_external_metadata(db, track_id_str, "error", None)
             return {"status": "error", "error": str(e)}
 

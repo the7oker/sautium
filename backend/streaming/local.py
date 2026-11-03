@@ -76,6 +76,6 @@ class LocalTranscodeProvider(StreamProvider):
                 os.unlink(out)
             except OSError:
                 pass
-        logger.info("local transcode ok: %s (%d KiB FLAC, lossless=%s)",
-                    os.path.basename(container_path), len(data) // 1024, lossless)
+        logger.debug("local transcode ok: %s (%d KiB FLAC, lossless=%s)",
+                     os.path.basename(container_path), len(data) // 1024, lossless)
         return FetchedAudio(data=data, mime="audio/flac", lossless=lossless)

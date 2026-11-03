@@ -181,7 +181,7 @@ class GeniusService:
                 returned_artist=song.artist,
             )
             if rejection:
-                logger.warning(
+                logger.debug(
                     f"Genius lyrics rejected for {artist} - {title}: {rejection}"
                 )
                 return None
@@ -201,9 +201,13 @@ class GeniusService:
             # lyricsgenius uses `requests`; a 429 surfaces as HTTPError with a
             # .response. Arm the persistent cooldown so the lyrics loop skips
             # Genius until it clears instead of hammering a throttling API.
-            if getattr(getattr(e, "response", None), "status_code", None) == 429:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 429:
                 api_cooldown.arm('genius', "HTTP 429")
-            logger.error(f"Genius search failed for {artist} - {title}: {e}")
+            # The track looked up, and the request URL an HTTP error names it
+            # in, are the listener's: the ERROR line says only what failed
+            logger.error("Genius search failed: %s", f"HTTP {status}" if status else type(e).__name__)
+            logger.debug(f"Genius search failed for {artist} - {title}: {e}")
             return None
 
     def fetch_and_store(
@@ -227,7 +231,8 @@ class GeniusService:
         try:
             data = self.search_song(title=track_name, artist=artist_name)
         except Exception as e:
-            logger.error(f"Genius error for {artist_name} - {track_name}: {e}")
+            logger.error("Genius error: %s", type(e).__name__)
+            logger.debug(f"Genius error for {artist_name} - {track_name}: {e}")
             self._store_external_metadata(db, track_id_str, "error", None)
             return {"status": "error"}
 

@@ -165,7 +165,7 @@ def test_scrub_personal_leaves_no_email_address_or_path():
     for gone in ("someone", "Some One", "Music", "example.co.uk", "192.0.2", "8.8.8.8",
                  "100.64", "2001:4860", "fe80", "s3cret", "nas", "AppData"):
         assert gone not in out, gone
-    for kept in ("'…/01 Song.flac'", "…/track.flac", "file://[path]", "…/a.flac", "…/x.flac",
+    for kept in ("'…/[name].flac'", "…/[name].flac", "file://[path]",
                  "'[path]'", "[email]", "[private address]:8800", "[public address]",
                  "[carrier-grade NAT address]", "[loopback address]", "[link-local address]",
                  '"…/main.py", line 12', "GET /api/settings/sync", "12:34:56", "0.0.0.0:8800"):
@@ -189,10 +189,10 @@ def test_a_report_is_kept_scrubbed_on_the_master():
     ("write to юзер@пошта.укр now", "write to [email] now"),
     (r"C:\Users\john.smith", "[path]"),
     ("/home/john.doe and /Users/jane.doe/", "[path] and [path]"),
-    ("~someone/Music/x.flac", "…/x.flac"),
+    ("~someone/Music/x.flac", "…/[name].flac"),
     ("share smb://nas.local/home/someone/Music", "share smb://[path]"),
-    ("music_dir:/music/A/b.flac", "music_dir:…/b.flac"),
-    ("/volume1/homes/someone/Music/a.flac", "…/a.flac"),
+    ("music_dir:/music/A/b.flac", "music_dir:…/[name].flac"),
+    ("/volume1/homes/someone/Music/a.flac", "…/[name].flac"),
     ("guard: ['box.tail1a2b.ts.net', 'Someones-MacBook.local', 'host.docker.internal']",
      "guard: ['[host]', '[host]', 'host.docker.internal']"),
     ("GET http://pixel.lan:8200/desc.xml", "GET http://[host]:8200/desc.xml"),
@@ -206,7 +206,7 @@ def test_a_report_is_kept_scrubbed_on_the_master():
     (r"unquoted C:\Users\John Smith", "unquoted [path]"),
     ("/music is not mounted", "[path] is not mounted"),
     ("copy /home/someone/Music/x.flac and http://example.org/a/b",
-     "copy …/x.flac and http://example.org/a/b"),
+     "copy …/[name].flac and http://example.org/a/b"),
     ("ssh someone@192.0.2.5 failed", "ssh [email] failed"),
     ("connect to box.home.arpa failed", "connect to [host] failed"),
     # A module's name is no machine's
@@ -214,6 +214,32 @@ def test_a_report_is_kept_scrubbed_on_the_master():
      "2026-11-03 [routers.home] INFO: built; [streaming.local] too"),
     ("'_thread._local' object; threading.local; Path.home(); werkzeug.local.LocalProxy",
      "'_thread._local' object; threading.local; Path.home(); werkzeug.local.LocalProxy"),
+    # A machine's name under a home suffix, whatever its case
+    ("Sync from nas.local:20001 failed; connect to openwrt.lan, box.internal, nas.home.lan",
+     "Sync from [host]:20001 failed; connect to [host], [host], [host]"),
+    ("host.docker.internal:8800", "host.docker.internal:8800"),
+    # An account's folder however the path to it is written
+    (r"unquoted \\?\C:\Users\John Smith\Music now", "unquoted [path] now"),
+    ("cannot list /mnt/c/Users/John Smith", "cannot list [path]"),
+    (r"C:\\Users\\John Smith\\Music failed", "[path] failed"),
+    # A library file's name is a title: only its extension is left, unquoted
+    # spaces and all, and in what a log line cut to `…/<folder>/<file>`
+    ("No such file or directory: '/music/Some Artist/Some Album/05 Some Song Title.flac'",
+     "No such file or directory: '…/[name].flac'"),
+    ("local file not found: /music/Some Artist/Some Album/06 Another Title.m4a",
+     "local file not found: …/[name].m4a"),
+    ("/music/Some Artist/Some Album/05 Some Song Title.flac: Invalid data found",
+     "…/[name].flac: Invalid data found"),
+    ("answered the add of file://…/Some Album/05 Some Song Title.flac 3 s after",
+     "answered the add of file://[path] 3 s after"),
+    ("playlist_add failed: file:///E:/Music/Some Artist/Some Album/05 Some Song Title.flac — no",
+     "playlist_add failed: file://[path] — no"),
+    (r"probe failed for E:\Music\Some Artist\Some Album\05 Some Song Title.flac: gone",
+     "probe failed for …/[name].flac: gone"),
+    ("kept before: …/05 Some Song Title.flac", "kept before: …/[name].flac"),
+    ("cue '/music/A/B/Some Album.cue', cover /music/A/B/Some Album.jpg",
+     "cue '…/[name].cue', cover …/[name].jpg"),
+    ('File "/app/backend/main.py", line 12', 'File "…/main.py", line 12'),
 ])
 def test_scrub_personal_cases(text, scrubbed):
     assert dp.scrub_personal(text) == scrubbed
@@ -222,7 +248,7 @@ def test_scrub_personal_cases(text, scrubbed):
 def test_scrub_detail_takes_keys_and_a_whole_path_value():
     assert dp.scrub_detail({"/home/someone/x.flac": r"C:\Users\Some One",
                             "folder": "D:\\Music of Some One", "n": 3}) == {
-        "…/x.flac": "[path]", "folder": "[path]", "n": 3}
+        "…/[name].flac": "[path]", "folder": "[path]", "n": 3}
 
 
 def test_a_value_that_starts_with_a_path_is_scrubbed_whole():
@@ -230,12 +256,12 @@ def test_a_value_that_starts_with_a_path_is_scrubbed_whole():
     assert dp.scrub_detail({"error": said, "path": said, "file": "/music/A/a.flac from 192.0.2.5"}) == {
         "error": "[path] token=[redacted] for [email]",
         "path": "…/config.json: token=[redacted] for [email]",
-        "file": "…/a.flac from [private address]"}
+        "file": "…/[name].flac from [private address]"}
 
 
 def test_two_keys_that_scrub_alike_keep_both_values():
     assert dp.scrub_detail({"/home/a/x.flac": 1, "/home/b/x.flac": 2, "/home/c/x.flac": 3}) == {
-        "…/x.flac": 1, "…/x.flac (2)": 2, "…/x.flac (3)": 3}
+        "…/[name].flac": 1, "…/[name].flac (2)": 2, "…/[name].flac (3)": 3}
 
 
 @pytest.mark.parametrize("text", ["'\\\\" + "a" * (1 << 16), "'\\\\" + "a" * (1 << 16) + '"',
@@ -245,6 +271,22 @@ def test_a_server_name_with_no_end_is_scrubbed_in_linear_time(text):
     it — 64 K characters — takes milliseconds, as a value and under a key
     that names a path; a search that tried every way to split it took
     seconds."""
+    import time
+    started = time.monotonic()
+    dp.scrub_personal(text)
+    dp.scrub_detail({"path": text})
+    assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.parametrize("text", [
+    "/music/" + "a " * (1 << 15),                  # an unquoted path, no extension ahead
+    "/music/a/" + "b " * (1 << 15) + ".fla",
+    "…/" * (1 << 15), "…/" + "a " * (1 << 15),     # cut paths, none ending in a file
+    "file://" + "a " * (1 << 15), "file:///E:/" + "a:" * (1 << 15),
+    "\\\\?\\C:\\Users\\" + "a" * (1 << 16), "/mnt/c/Users/" + "a " * (1 << 15),
+    "x.local:" * (1 << 13), "a." * (1 << 15) + "local",
+])
+def test_a_long_run_of_any_shape_is_scrubbed_in_linear_time(text):
     import time
     started = time.monotonic()
     dp.scrub_personal(text)

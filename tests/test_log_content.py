@@ -85,26 +85,49 @@ def _message_text_logged(path: Path) -> list:
 # What a node plays, searches for, and who its owner is: names these modules
 # must not put in a line logged at INFO or above (their DEBUG lines may) — nor
 # in the text of an exception they raise, which a caller logs or a playback
-# trace keeps, nor in what they hand to a call that logs it.
+# trace keeps, nor in what they hand to a call that logs it, nor through a
+# variable the function built from them. A path may appear in such a line —
+# what ships is scrubbed, and a library file's name is cut to its extension
+# (diag_protocol.scrub_personal) — but a bare file name may not: nothing
+# marks it as one.
 _CONTENT_ATTRS = {"title", "artist", "album", "username"}
-_CONTENT_NAMES = {"search", "username"}
+_CONTENT_NAMES = {"search", "username", "artist", "title", "album", "artist_name", "track_name",
+                  "album_name"}
+_BARE_NAME_CALLS = {"basename"}
 _LOGGED_LEVELS = {"info", "warning", "error", "exception", "critical"}
 _LOGGING_CALLS = {"background", "lose_mirror"}      # each logs its first argument
 _PLAY_MODULES = sorted([*BACKEND.glob("playback/**/*.py"), *BACKEND.glob("streaming/**/*.py"),
                         BACKEND / "routers" / "player.py", BACKEND / "lastfm_auth.py",
-                        BACKEND / "auth_hmac.py"])
+                        BACKEND / "auth_hmac.py", BACKEND / "genius.py", BACKEND / "lrclib.py"])
 
 
-def _names_content(node: ast.AST, fmt: ast.AST = None) -> bool:
+def _names_content(node: ast.AST, fmt: ast.AST = None, built: frozenset = frozenset()) -> bool:
     return any(isinstance(sub, ast.Attribute) and sub.attr in _CONTENT_ATTRS
-               or isinstance(sub, ast.Name) and sub.id in _CONTENT_NAMES
+               or isinstance(sub, ast.Name) and (sub.id in _CONTENT_NAMES or sub.id in built)
                or isinstance(sub, ast.Constant) and sub is not fmt and sub.value in _CONTENT_ATTRS
+               or isinstance(sub, ast.Call) and getattr(sub.func, "attr", getattr(
+                   sub.func, "id", None)) in _BARE_NAME_CALLS
                for sub in ast.walk(node))
 
 
+def _built_from_content(fn: ast.AST) -> frozenset:
+    """The variables a function assigns an f-string naming content."""
+    return frozenset(t.id for node in ast.walk(fn) if isinstance(node, ast.Assign)
+                     and any(isinstance(s, ast.JoinedStr) and _names_content(s)
+                             for s in ast.walk(node.value))
+                     for t in node.targets if isinstance(t, ast.Name))
+
+
 def _content_logged(path: Path) -> list:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    built = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names = _built_from_content(fn)
+            for node in ast.walk(fn):
+                built[id(node)] = built.get(id(node), frozenset()) | names
     found = []
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for node in ast.walk(tree):
         where = f"{path.relative_to(BACKEND)}:{getattr(node, 'lineno', 0)}"
         if isinstance(node, ast.Raise) and node.exc is not None:
             if any(isinstance(s, ast.JoinedStr) and _names_content(s) for s in ast.walk(node.exc)):
@@ -117,8 +140,9 @@ def _content_logged(path: Path) -> list:
         if (name in _LOGGED_LEVELS and isinstance(func, ast.Attribute)
                 and isinstance(func.value, ast.Name) and func.value.id == "logger"):
             fmt = node.args[0] if node.args else None
-            if _names_content(node, fmt) or (isinstance(fmt, ast.Constant) and str(
-                    fmt.value).startswith("Host guard accepts")):
+            if _names_content(node, fmt, built.get(id(node), frozenset())) or (
+                    isinstance(fmt, ast.Constant)
+                    and str(fmt.value).startswith("Host guard accepts")):
                 found.append(where)
         elif name in _LOGGING_CALLS and node.args and _names_content(node.args[0]):
             found.append(where)
@@ -127,6 +151,41 @@ def _content_logged(path: Path) -> list:
 
 def test_no_logged_line_names_what_is_played_searched_or_who_listens():
     assert [hit for path in _PLAY_MODULES for hit in _content_logged(path)] == []
+
+
+def test_a_played_files_path_leaves_the_node_without_its_name(tmp_path, monkeypatch, caplog):
+    """What the local outputs log and raise about a library file — its
+    transcode, a file gone since the scan, the URI HQPlayer is handed — names
+    neither the file nor its folders once scrubbed for support, and a bare
+    file name is not logged at INFO at all."""
+    import subprocess as sp
+
+    from desktop.p2p.diag_protocol import scrub_personal
+    from hqplayer_client import file_path_to_uri, redact_uri
+    from streaming import local
+    from streaming.base import ProviderError
+
+    folder = tmp_path / "Some Artist" / "Some Album"
+    folder.mkdir(parents=True)
+    played = folder / "05 Some Song Title.m4a"
+    played.write_bytes(b"\0" * 64)
+
+    def ffmpeg(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"fLaC" + b"\0" * 64)
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(local.subprocess, "run", ffmpeg)
+    provider = local.LocalTranscodeProvider()
+    with caplog.at_level(logging.INFO):
+        provider._download(str(played))
+        with pytest.raises(ProviderError) as gone:
+            provider._download(str(folder / "06 Another Title.m4a"))
+    said = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    said += [str(gone.value), f"[Errno 2] No such file or directory: '{played}'",
+             f"HQPlayer answered the add of {redact_uri(file_path_to_uri(str(played)))}: taken"]
+    for line in said:
+        shipped = scrub_personal(line)
+        assert "Some" not in shipped and "Title" not in shipped, shipped
 
 
 def test_no_agent_runner_logs_the_text_of_a_message():
@@ -159,7 +218,7 @@ def test_a_saved_report_names_no_address_or_path(tmp_path, monkeypatch):
     text = diag_bundle.save_report(data_dir=tmp_path, config={}, state="Failed",
                                    detail="").read_text(encoding="utf-8")
     assert "someone" not in text and "192.0.2" not in text
-    assert "[private address]:24001" in text and "'…/x.flac'" in text and "[email]" in text
+    assert "[private address]:24001" in text and "'…/[name].flac'" in text and "[email]" in text
 
 
 @pytest.mark.parametrize("name", ["docker-compose.yml", "docker-compose.mac.yml",

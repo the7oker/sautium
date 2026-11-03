@@ -2295,8 +2295,11 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
     if req.p2p_enabled is not None:
         _write("sync.p2p_enabled", bool(req.p2p_enabled))
         # The launcher's LAN beacon and its serving follow the switch now
-        # (desktop/p2p/p2p_manager._sharing_changed), not at a cache's expiry.
+        # (desktop/p2p/p2p_manager._sharing_changed), not at a cache's expiry,
+        # and so does this process's peer surface.
         db_execute("NOTIFY sautium_sharing")
+        from routers import sync as sync_router
+        sync_router.sharing_changed()
     if req.auto_interval_min is not None:
         # None gets coerced to null serverside via _write — explicit
         # 0 here means "every 0 min" (disabled in the UI). We store

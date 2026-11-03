@@ -288,27 +288,42 @@ _IPV4 = re.compile(r"(?<!\w)(?<!\d\.)\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d)")
 _IPV6 = re.compile(r"(?<![\w:.])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])")
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 # The names a tailnet, mDNS or a home router give a machine name its owner;
-# a public service's name is no one's. A name under a home suffix is a
-# machine's where a URL names it, or where it looks like one (a hyphen, a
-# digit, a capital: "Someones-MacBook.local") — a lowercase dotted word there
-# is a module's (`streaming.local`, `routers.home`); so is a single label in a
-# URL's host (`http://pixel:8200`). A name ends where its characters do.
-_HOME_SUFFIX = r"(?i:home\.arpa|local|lan|home|internal|localdomain)"
+# a public service's name is no one's. Under `.local` and `.home` a name is a
+# machine's where a URL names it, where a port follows it, or where it looks
+# like one (a hyphen, a digit, a capital: "Someones-MacBook.local") — a
+# lowercase dotted word there is a module's (`streaming.local`,
+# `routers.home`); so is a single label in a URL's host (`http://pixel:8200`).
+# A name ends where its characters do.
+_HOME_SUFFIX = r"(?i:ts\.net|home\.arpa|localdomain|fritz\.box|lan|internal)"
+_MODULE_SUFFIX = r"(?i:local|home)"
 _NAME_END = r"(?![\w(-]|\.\w)"
 _HOST = re.compile(
-    rf"(?<![\w.-])(?:[\w-]+\.)+(?i:ts\.net|home\.arpa|localdomain|fritz\.box){_NAME_END}"
-    rf"|(?<=://)(?:[\w-]+\.)+{_HOME_SUFFIX}{_NAME_END}"
+    rf"(?<![\w.-])(?:[\w-]+\.)+{_HOME_SUFFIX}{_NAME_END}"
+    rf"|(?<=://)(?:[\w-]+\.)+{_MODULE_SUFFIX}{_NAME_END}"
     rf"|(?<=://)[\w-]+(?=[:/\s'\"]|$)"
-    rf"|(?<![\w.-])(?=[\w.-]*[-A-Z0-9])(?:[\w-]+\.)+{_HOME_SUFFIX}{_NAME_END}")
+    rf"|(?<![\w.-])(?:[\w-]+\.)+{_MODULE_SUFFIX}(?=:\d)"
+    rf"|(?<![\w.-])(?=[\w.-]*[-A-Z0-9])(?:[\w-]+\.)+{_MODULE_SUFFIX}{_NAME_END}")
 _SAFE_HOSTS = {"host.docker.internal", "localhost"}
 # A path's folders name an account, a person, a disk; its end is known only
 # where it is quoted, so a folder may hold single spaces only where another
 # separator follows it — and no colon, which a URL later on the line has.
 _SEG = r"[^\\/\s'\"<>|*?:]+(?: [^\\/\s'\"<>|*?:]+)*"
 _TAIL = r"[^\s'\"<>|]*"
+# The extensions of a library's files, its cue sheets, playlists and covers:
+# such a file's name is a track's or an album's title. It is cut to its
+# extension, and it ends an unquoted path, spaces and all.
+_MEDIA_EXT = (r"(?i:flac|mp3|m4a|m4b|mp4|aac|alac|ape|wv|wave?|aiff?|aifc|dsf|dff|ogg|oga|opus"
+              r"|wma|mka|tak|tta|mpc|ac3|dts|cue|m3u8?|pls|jpe?g|png|webp|gif|bmp|tiff?)")
+_MEDIA_TAIL = rf"""[^\\/\n'"<>|]*?\.{_MEDIA_EXT}(?![\w])"""
+_MEDIA_NAME = re.compile(rf".+?\.({_MEDIA_EXT})(?:\.[A-Za-z0-9]{{1,5}})*")
 _ROOTS = (r"home|Users|mnt|media|Volumes|volume\d+|homes|music|Music|data|srv|net|nfs|share"
           r"|storage|app|tmp|var|opt|usr|etc|root|run|private|Library|System")
-_SHARE_URL = re.compile(r"\b(file|smb|nfs|afp|sftp)://[^\s'\"<>]*", re.IGNORECASE)
+# A share URL is a path. A library file's may hold spaces up to its extension
+# (a URI the node hands HQPlayer is not percent-encoded); a colon ends that
+# reading — another URL's scheme — but a drive's does not.
+_SHARE_URL = re.compile(
+    rf"""\b(file|smb|nfs|afp|sftp)://(?:(?:[^\n'"<>:]|(?<=/[A-Za-z]):)*?\.{_MEDIA_EXT}(?![\w])"""
+    rf"""|[^\s'"<>]*)""", re.IGNORECASE)
 # A path starts at a drive (before a separator); at a server — `\\NAS`, or
 # `\\\\NAS` as Python's error text doubles it, or `//NAS/share` — whose
 # name ends where its characters do (one way to read it, not one per
@@ -316,13 +331,21 @@ _SHARE_URL = re.compile(r"\b(file|smb|nfs|afp|sftp)://[^\s'\"<>]*", re.IGNORECAS
 _PATH_START = (rf"""(?:[A-Za-z]:(?=[\\/])|\\\\(?:\\\\)?[^\\/\s'"<>|]+(?![^\\/\s'"<>|])"""
                rf"""|(?<!:)//[^/\s'"<>|]+(?=/)|~[\w.-]*(?=[\\/])|/(?:{_ROOTS})(?=[\\/\s]|$))""")
 # A Windows account's folder may hold spaces (`C:\Users\Some One`): after
-# the users root, all up to the next separator, quote or line end is its
-# name. A POSIX account's name holds none.
-_ACCOUNT = r"""[A-Za-z]:[\\/](?i:users)[\\/][^\\/\n'"<>|]*(?![^\\/\n'"<>|])"""
+# the users root — `\\?\` before the drive, separators doubled as Python's
+# error text prints them, WSL's `/mnt/c` — all up to the next separator,
+# quote or line end is its name. A POSIX account's name holds none.
+_SEP = r"(?:\\\\|[\\/])"
+_ACCOUNT_NAME = r"""[^\\/\n'"<>|]*(?![^\\/\n'"<>|])"""
+_ACCOUNT = (rf"""(?:(?:\\\\){{1,2}}\?{_SEP})?[A-Za-z]:{_SEP}(?i:users){_SEP}{_ACCOUNT_NAME}"""
+            rf"""|/mnt/[a-z]/(?i:users)/{_ACCOUNT_NAME}""")
 _QUOTED_PATH = re.compile(rf"""(['"])({_PATH_START}[^'"\n]*)\1""")
 _BARE_PATH = re.compile(
-    rf"""(?<![\w./\\~-])(?:{_ACCOUNT}|{_PATH_START})(?:[\\/]{_SEG}(?=[\\/]))*(?:[\\/]{_TAIL})?""")
+    rf"""(?<![\w./\\~-])(?:{_ACCOUNT}|{_PATH_START})(?:[\\/]{_SEG}(?=[\\/]))*"""
+    rf"""(?:[\\/](?:{_MEDIA_TAIL}|{_TAIL}))?""")
 _WHOLE_PATH = re.compile(rf"(?:{_ACCOUNT}|{_PATH_START})[^\n]*")
+# What a path was cut to before — this scrubber's `…/<file>`, the log's
+# `…/<folder>/<file>` (hqplayer_client.redact_path) — still names a title.
+_ELIDED = re.compile(rf"""…[\\/][^\n'"<>…]*?\.({_MEDIA_EXT})(?![\w])""")
 # The keys a structured detail keeps a path under: its value is a path from
 # start to end, spaces and all.
 _PATHISH_KEY = re.compile(r"(?i)(?:^|[_.-])(?:path|dir|directory|folder|file|root)s?$")
@@ -353,21 +376,25 @@ def _host(match: "re.Match") -> str:
 
 
 def _cut_path(path: str) -> str:
-    """A file keeps its name; anything else — a folder, which may be an
-    account's, and an account's folder whatever its name looks like — is
-    only a path."""
+    """A file keeps its name, unless a library's file — a title — keeps only
+    its extension; anything else — a folder, which may be an account's, and
+    an account's folder whatever its name looks like — is only a path."""
     parts = [p for p in re.split(r"[\\/]+", path.rstrip("\\/")) if p]
     name = parts[-1] if parts else ""
     if len(parts) >= 2 and parts[-2].lower() in _ACCOUNT_DIRS:
         return "[path]"
+    media = _MEDIA_NAME.fullmatch(name)
+    if media:
+        return f"…/[name].{media.group(1)}"
     return "…/" + name if _FILE_NAME.fullmatch(name) else "[path]"
 
 
 def scrub_personal(text: str) -> str:
-    """scrub_secrets, then what names a person or a place: email addresses,
-    IP addresses (each to its kind), a home network's host names, absolute
-    paths (a file to its name)."""
+    """scrub_secrets, then what names a person, a place or a title: email
+    addresses, IP addresses (each to its kind), a home network's host names,
+    absolute paths (a file to its name, a library's file to its extension)."""
     text = scrub_secrets(text)
+    text = _ELIDED.sub(lambda m: f"…/[name].{m.group(1)}", text)
     text = _SHARE_URL.sub(lambda m: m.group(1) + "://[path]", text)
     text = _QUOTED_PATH.sub(lambda m: m.group(1) + _cut_path(m.group(2)) + m.group(1), text)
     text = _BARE_PATH.sub(lambda m: _cut_path(m.group(0)), text)

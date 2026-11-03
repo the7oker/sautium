@@ -94,12 +94,18 @@ class PeerSurfaceConfig(uvicorn.Config):
     and uvicorn's protocol writes to it whenever it has a handler; its own
     `access_log=False` works by emptying that logger, which would silence the
     Web UI too. So this server's protocol is told by itself, and the
-    process's logging stays as its start made it (config.LOGGING_CONFIG)."""
+    process's logging stays as its start made it (config.LOGGING_CONFIG).
+
+    No WebSocket either: the surface has no WebSocket route, and uvicorn's
+    WebSocket protocol logs each handshake with the asker's address and the
+    path it asked for, query and all — an upgrade is answered as the plain
+    request it also is."""
 
     def configure_logging(self) -> None:
         pass
 
     def load(self) -> None:
+        self.ws = "none"
         super().load()
         protocol = self.http_protocol_class
 

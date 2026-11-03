@@ -3571,7 +3571,8 @@ class HqpBackend(PlayerBackend):
         if target is None:
             said = (f"{start.target.title or 'the track'}, played meanwhile, is not in the queue "
                     "— not played")
-            logger.info("%s", said)
+            logger.info("a start held through a queue change: its track, played meanwhile, is "
+                        "not in the queue — not played")
             return said
         if (owed is None or owed[0] is not self._attempt) and self._starts_already(target, start.position):
             # A start sent before the mutation, under way: the word is that

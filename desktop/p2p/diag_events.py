@@ -225,8 +225,10 @@ def diag_dir(data_dir: Path) -> Path:
 
 
 def spool(data_dir: Path, kind: str, detail: Optional[dict] = None) -> None:
-    line = json.dumps({"ts": _iso_now(), "kind": kind, "detail": detail or {}},
-                      ensure_ascii=False, default=str)
+    """Scrubbed as record() scrubs, before it is written: a node whose
+    database stays down keeps the spool on disk."""
+    clean = scrub_detail(json.loads(json.dumps(detail or {}, default=str)))
+    line = json.dumps({"ts": _iso_now(), "kind": kind, "detail": clean}, ensure_ascii=False)
     with open(diag_dir(data_dir) / SPOOL_FILENAME, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 

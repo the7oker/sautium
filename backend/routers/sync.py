@@ -76,6 +76,13 @@ def sharing_enabled() -> bool:
     return val
 
 
+def sharing_changed() -> None:
+    """The owner moved the switch (routers/settings.put_sync_prefs): serving,
+    and what /health says of it, follow at once — not at the cache's expiry."""
+    global _sharing_cache
+    _sharing_cache = (0.0, True)
+
+
 def _require_sharing() -> None:
     if not sharing_enabled():
         raise HTTPException(status_code=403, detail="sharing disabled")

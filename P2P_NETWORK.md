@@ -1112,7 +1112,8 @@ address, email, host name or owner's name (`diag_protocol.scrub_detail`;
 the config allow-list drops the node's name and the Last.fm username), and
 log tails go through `diag_protocol.scrub_personal` — credentials, emails,
 addresses (each to its kind), a home network's host names, absolute paths
-(a file to its name). The tar.gz
+(a file to its name; a library's file — audio, cue sheet, playlist, cover —
+to its extension, its name being a title). The tar.gz
 is boxed (NaCl Box, Curve25519 from the node keys — the chat
 construction) to the master and POSTed to `/api/diag/bundle?warrant=<id>`
 on the master's peer surface with a wire-format-v1 signature, 32 MiB cap,
@@ -1143,7 +1144,8 @@ that raised; since 2026-09-24 / 2026-09-20). The master accepts any
 well-formed `family.name`, so
 a node one release ahead is never refused a whole report over a new kind.
 Before a database exists (wizard, a PostgreSQL that did not start) events
-wait in `<data_dir>/diag/spool.jsonl` and are drained at the next start.
+wait in `<data_dir>/diag/spool.jsonl`, scrubbed as they are written, and are
+drained at the next start.
 The insert trigger NOTIFYs `sautium_diag`; the launcher's worker boxes
 the unreported rows — content-free: `LOCAL_ONLY_FIELDS` (log tails) never
 leave the node — and POSTs `/api/diag/report` (256 KiB, 30/h per node,

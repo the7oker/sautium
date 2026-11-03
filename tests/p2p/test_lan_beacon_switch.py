@@ -250,6 +250,25 @@ def test_the_probe_keeps_what_a_sibling_says_of_its_switch(monkeypatch, said, na
     assert lan._local_node_ports() == ([port] if named else [])
 
 
+def test_a_sibling_that_stops_answering_is_named_no_more(monkeypatch):
+    monkeypatch.setattr(lan_discovery, "BEACON_INTERVAL", 0.01)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), type("Handler", (_Health,), {"said": {}}))
+    port = server.server_address[1]
+    server.server_close()                       # nothing answers there
+    lan = LANDiscovery(sync_port=24001, node_id=NODE, localhost_probe_ports=[port])
+    _sibling(lan, port, sharing=True)
+    lan._running = True
+
+    async def one_round():
+        task = asyncio.create_task(lan._localhost_probe_loop())
+        await asyncio.sleep(0.5)
+        lan._running = False
+        await asyncio.wait_for(task, 30)
+
+    asyncio.run(one_round())
+    assert lan._local_node_ports() == []
+
+
 def test_a_docker_node_says_in_its_health_whether_its_owner_shares(scratch_dsn, monkeypatch,
                                                                     tmp_path):
     pytest.importorskip("psycopg2")
@@ -268,9 +287,10 @@ def test_a_docker_node_says_in_its_health_whether_its_owner_shares(scratch_dsn, 
     monkeypatch.setattr(p2p_identity, "_served", (None, None))
     try:
         http = TestClient(p2p_app.app)
-        for on in (False, True):
-            settings_router._write("sync.p2p_enabled", on)
-            monkeypatch.setattr(sync, "_sharing_cache", (0.0, not on))     # past the cache
+        for on in (False, True, False):
+            # As the owner moves it: the peer surface says so at once, its
+            # cache of the switch dropped by the same write
+            settings_router.put_sync_prefs(settings_router.SyncPrefs(p2p_enabled=on))
             assert http.get("/health").json()["sharing"] is on
     finally:
         pool.closeall()

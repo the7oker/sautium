@@ -442,12 +442,13 @@ class DeezerCatalog:
             raise ProviderError("deezer: no results")
         if not fit:
             top = listed[0]
-            logger.debug("deezer: top hit for %s - %s is %r - %r",
-                         query.artist, query.title, top["artist"], top["title"])
+            logger.debug("deezer: top hit for %s - %s is %r - %r%s",
+                         query.artist, query.title, top["artist"], top["title"],
+                         self._refused_note(refused))
             raise ProviderError(
                 f"deezer: nothing attested (catalog "
                 f"{'/'.join(f'{w:.0f}s' for w in attested_lengths(query)) or '?'}; "
-                f"top hit {top['duration']}s{self._refused_note(refused)})")
+                f"top hit {top['duration']}s)")
         best = max(fit, key=lambda c: self._score(c, query))
         logger.debug("deezer resolve %r -> %s (%ss, %s)",
                      query.title, best["id"], best["duration"], best["artist"])
