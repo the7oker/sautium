@@ -46,7 +46,7 @@ class App:
 def _gate(budget, app):
     """The smallest gate over a budget: the body read whole, then the app."""
     async def gate(scope, receive, send):
-        async with budget.reading(scope, receive, send) as body:
+        async with budget.reading(scope, receive, send) as (body, _):
             if body is not None:
                 await app(scope, replaying(body, receive), send)
     return gate
@@ -172,7 +172,7 @@ def door(tmp_path, monkeypatch):
     as the node's and a fixed device token."""
     monkeypatch.setattr(device_auth, "current_token", lambda secret: TOKEN)
     monkeypatch.setattr(auth_hmac, "_allowed_hosts", {"localhost"})
-    monkeypatch.setattr(auth_hmac, "_seen", {}, raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen", type(auth_hmac._seen)(), raising=False)
     monkeypatch.setattr(auth_hmac, "_seen_wall", [], raising=False)
     monkeypatch.setattr(auth_hmac, "_seen_order", collections.deque(), raising=False)
     app = App()
@@ -191,7 +191,7 @@ def _signed_headers(body: bytes, *, digest=True, key: bytes = TOKEN.encode(), pa
     return head
 
 
-def test_a_request_without_a_signature_is_refused_before_a_byte_of_its_body_is_read(door):
+def test_a_request_without_a_signature_is_refused_and_a_body_over_the_small_cap_never_read(door):
     app, gate = door
     receive = _feed(b"x" * 500)
     sent = _run(gate, _scope(length=500), receive)
@@ -216,7 +216,7 @@ def test_a_body_that_is_not_the_declared_one_is_refused(door):
     assert _status(sent) == 401 and _auth_error(sent) == "bad-sig" and not app.calls
 
 
-def test_an_unknown_host_is_refused_before_a_byte_is_read(door):
+def test_an_unknown_host_is_refused_and_a_body_over_the_small_cap_never_read(door):
     app, gate = door
     receive = _feed(b"x" * 500)
     scope = _scope(length=500, headers=_signed_headers(b"x" * 500))
@@ -249,6 +249,32 @@ def test_a_signature_whose_body_never_arrived_may_come_once_more(door):
     sent = _run(gate, _scope(length=500, headers=headers), _feed(body))
     assert _status(sent) == 401 and _auth_error(sent) == "replayed"
     assert len(app.calls) == 1
+
+
+def test_a_signature_whose_body_was_answered_with_a_refusal_stays_spent(door):
+    """Only a client that left gets its signature back; one answered — its
+    body over the cap, declared or grown — signs its next try afresh."""
+    app, gate = door
+    body = b"x" * 500
+    declared, grown = _signed_headers(body), _signed_headers(body)
+    assert _status(_run(gate, _scope(length=1001, headers=declared), _feed(body))) == 413
+    chunked = _scope(headers=[*grown, (b"transfer-encoding", b"chunked")])
+    assert _status(_run(gate, chunked, _feed(body, body, body))) == 413
+    for headers in (declared, grown):
+        sent = _run(gate, _scope(length=500, headers=headers), _feed(body))
+        assert _status(sent) == 401 and _auth_error(sent) == "replayed"
+    assert not app.calls
+
+
+def test_a_signature_taken_and_given_back_again_and_again_holds_one_place(door):
+    app, gate = door
+    body = b"x" * 500
+    headers = _signed_headers(body)
+    for _ in range(100):
+        assert _status(_run(gate, _scope(length=500, headers=headers),
+                            _feed(body[:200], then_disconnect=True))) == 400
+    assert len(auth_hmac._seen_order) <= 2 * len(auth_hmac._seen) + 65
+    assert _status(_run(gate, _scope(length=500, headers=headers), _feed(body))) == 200
 
 
 def test_a_whitelisted_route_and_a_signer_without_a_digest_read_from_the_small_budget(door):
@@ -299,6 +325,56 @@ def test_the_large_budget_is_a_key_holders_alone(door):
         await asyncio.gather(*stalled, return_exceptions=True)
         return _status(boxes[3]), _status(boxes[4])
     assert asyncio.run(scenario()) == (503, 200)
+
+
+def _box():
+    box = []
+
+    async def send(message):
+        box.append(message)
+    send.box = box
+    return send
+
+
+def test_a_refusal_reads_a_small_body_first_while_the_small_budget_is_held(door):
+    """The body a refusal drops is counted in no budget, so senders holding
+    the small one leave a refusal its read."""
+    app, gate = door
+
+    async def scenario():
+        stalled = [asyncio.ensure_future(gate(_scope(length=100, path="/api/auth/login"),
+                                              _stall(b"x" * 50), _box())) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        send, receive = _box(), _feed(b"x" * 30, b"x" * 30)
+        await gate(_scope(length=60), receive, send)
+        held = gate._open_bodies.held
+        for s in stalled:
+            s.cancel()
+        await asyncio.gather(*stalled, return_exceptions=True)
+        return send.box, len(receive.asked), held
+    sent, asked, held = asyncio.run(scenario())
+    assert _status(sent) == 401 and _auth_error(sent) == "missing"
+    assert asked == 2 and held == 150
+
+
+def test_a_signature_refused_while_the_large_budget_is_full_stays_spent(door):
+    app, gate = door
+
+    async def scenario():
+        app.release = asyncio.Event()
+        first, sends = b"x" * 1000, [_box(), _box(), _box()]
+        running = asyncio.ensure_future(gate(_scope(length=1000, headers=_signed_headers(first)),
+                                             _feed(first), sends[0]))
+        while not app.calls:
+            await asyncio.sleep(0.01)
+        body = b"y" * 600
+        headers = _signed_headers(body)
+        await gate(_scope(length=600, headers=headers), _feed(body), sends[1])
+        app.release.set()
+        await running
+        await gate(_scope(length=600, headers=headers), _feed(body), sends[2])
+        return [_status(s.box) for s in sends], _auth_error(sends[2].box)
+    assert asyncio.run(scenario()) == ([200, 503, 401], "replayed")
 
 
 def test_what_is_not_http_passes_through(tmp_path):

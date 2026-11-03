@@ -28,7 +28,6 @@ import signal
 import sys
 import threading
 import weakref
-from typing import Optional
 
 import anyio
 import uvicorn
@@ -70,23 +69,39 @@ class BodyBudget:
 
     @contextlib.asynccontextmanager
     async def reading(self, scope, receive, send):
-        """`async with budget.reading(scope, receive, send) as body:` — the
-        whole body, counted in the budget until the block ends; None once a
-        refusal has been answered: a declared length over the cap before a
-        byte is read (413), a body that grows past it (413), one still
-        arriving at the deadline (408), one the budget cannot hold (503), a
-        client that leaves mid-body (400, which nobody reads)."""
+        """`async with budget.reading(scope, receive, send) as (body, refused):`
+        — the whole body, counted in the budget until the block ends, and
+        None; or None and the status of the refusal answered: a declared
+        length over the cap before a byte is read (413), a body that grows
+        past it (413), one still arriving at the deadline (408), one the
+        budget cannot hold (503), a client that leaves mid-body (400, which
+        nobody reads)."""
         taken = [0]
         try:
             yield await self._read(scope, receive, send, taken)
         finally:
             self.held -= taken[0]
 
-    async def _read(self, scope, receive, send, taken: list) -> Optional[bytes]:
+    async def dropping(self, scope, receive) -> None:
+        """A body declared within the cap read and dropped, chunk by chunk,
+        until the deadline, and counted nowhere — it holds nothing: for an
+        answer decided without it. A connection closed over an unread body
+        can reset under the answer; Windows drops what it had received."""
+        length = Headers(scope=scope).get("content-length", "")
+        if not (length.isdigit() and 0 < int(length) <= self.cap):
+            return
+        with contextlib.suppress(TimeoutError):           # the answer goes as it stands
+            async with asyncio.timeout(self.deadline):
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.disconnect" or not message.get("more_body", False):
+                        return
+
+    async def _read(self, scope, receive, send, taken: list) -> tuple:
         length = Headers(scope=scope).get("content-length", "")
         if length.isdigit() and int(length) > self.cap:
             await refuse(send, 413, "request body too large")
-            return None
+            return None, 413
         chunks, refusal = [], None
         try:
             async with asyncio.timeout(self.deadline):
@@ -105,11 +120,11 @@ class BodyBudget:
                         taken[0] += len(chunk)
                         chunks.append(chunk)
                         if not message.get("more_body", False):
-                            return b"".join(chunks)
+                            return b"".join(chunks), None
         except TimeoutError:
             refusal = (408, "request body not received in time")
         await refuse(send, *refusal)
-        return None
+        return None, refusal[0]
 
 
 def replaying(body: bytes, receive):

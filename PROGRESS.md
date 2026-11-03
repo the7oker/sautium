@@ -2278,15 +2278,18 @@ user brings.
   is remembered reopens nothing, a step back of the wall clock past its
   forgetting reopens it, as a restart does — and refuses it a second time
   (`X-Sautium-Auth-Error: replayed`). A signature is taken when its headers
-  verify and given back when its body never arrives: the request did not run. Every
-  signer of the tree — the page, the launcher, both MCP servers — draws a
-  nonce for each request (`X-Sautium-Nonce`, signed after the time), so
-  the same press twice in a second is two requests. A signature without
-  one is still taken, once: a page loaded before the change reaches the
-  stale-tab reload only through its own signed status stream. The set is
-  keyed on the signature itself and filled only once one verifies. The
-  page signs a read again after `replayed` (the browser's own retry of a
-  dropped connection); it never sends a change twice.
+  verify and given back when its client leaves before its body arrived: the
+  request did not run, and a browser sends it again after a cut connection.
+  One answered 413, 408 or 503 stays spent: that client signs its next try
+  afresh. Every signer of the tree — the page, the launcher, both MCP
+  servers — draws a nonce for each request (`X-Sautium-Nonce`, signed
+  after the time), so the same press twice in a second is two requests. A
+  signature without one is still taken, once: a page loaded before the
+  change reaches the stale-tab reload only through its own signed status
+  stream. The set is keyed on the signature itself and filled only once
+  one verifies. The page signs a read again after `replayed` (the
+  browser's own retry of a dropped connection); it never sends a change
+  twice.
 - **What a request may cost before it is judged (2026-11-03).** The port's
   door (`auth_hmac.HMACAuthMiddleware`, pure ASGI, the outermost) decides
   everything the headers decide before a byte of a body is read — the Host,
@@ -2302,9 +2305,10 @@ user brings.
   changes are read from (the small one and the sign-in doors it carries can
   be held; so could the doors' derivations before). A body that is not its
   declared one is a bad signature. A refusal the headers decided reads a
-  body that fits the small cap first, so the connection does not close over
-  unread bytes — a reset can take the answer with it, and a woken tab must
-  read `stale-ts` to sign again. A signature or a time of another shape
+  body that fits the small cap first, dropping it as it comes and counting
+  it in no budget, so the connection does not close over unread bytes —
+  a reset can take the answer with it, and a woken tab must read
+  `stale-ts` to sign again. A signature or a time of another shape
   than every signer writes is refused as such. The first cut read every
   body, up to 12 MiB, before it judged anything — a single shared budget
   anyone could hold.

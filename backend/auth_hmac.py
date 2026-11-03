@@ -116,12 +116,13 @@ SIGNED_BODIES = {"cap": 12 * 1024 * 1024, "budget": 48 * 1024 * 1024, "deadline"
 OPEN_BODIES = {"cap": 64 * 1024, "budget": 1024 * 1024, "deadline": 20.0}
 
 # Signatures taken — each once it verifies, from its headers, and given back
-# when its body never arrives (the request did not run: its one taking is
-# still to come) — and kept while a request the window would still take could
-# come again: until the wall clock is past their own time plus the window, and
-# two windows on the monotonic clock at least. A step of either clock while
-# one is kept reopens nothing; a step back of the wall clock past its
-# forgetting reopens it, as a restart does. On the event loop.
+# when its client leaves before its body arrived (the request did not run, and
+# a browser sends it again after a cut connection) — and kept while a request
+# the window would still take could come again: until the wall clock is past
+# their own time plus the window, and two windows on the monotonic clock at
+# least. A step of either clock while one is kept reopens nothing; a step back
+# of the wall clock past its forgetting reopens it, as a restart does. On the
+# event loop.
 _SEEN_SECONDS = 2 * REPLAY_WINDOW_SECONDS
 _seen: dict = {}                 # signature -> its entry (monotonic, wall, signature, serial)
 _seen_order: deque = deque()     # entries, by the monotonic time they may be forgotten
@@ -413,17 +414,20 @@ def _take(sig: str, ts: int) -> Optional[tuple]:
 
 
 def _give_back(entry: tuple) -> None:
-    """The request `entry` was taken for did not run: its signature may come once more."""
+    """The request `entry` was taken for did not run: its signature may come
+    once more. Its place in the order stays until its time, so the order is
+    compacted once it is more than twice what is kept: one signature taken
+    and given back again and again holds one place."""
     if _seen.get(entry[2]) is entry:
         del _seen[entry[2]]
+    if len(_seen_order) > 2 * len(_seen) + 64:
+        kept = [e for e in _seen_order if _seen.get(e[2]) is e]
+        _seen_order.clear()
+        _seen_order.extend(kept)
 
 
 def _carries_body(headers: Headers) -> bool:
     return headers.get("content-length", "0") != "0" or "transfer-encoding" in headers
-
-
-async def _nowhere(_message) -> None:
-    pass
 
 
 def _auth_error(kind: str) -> tuple:
@@ -503,13 +507,9 @@ class HMACAuthMiddleware:
     async def _refused(self, scope, receive, send, status: int, detail: str,
                        kind: Optional[str] = None) -> None:
         """A refusal the headers decided. A body on its way that fits the small
-        cap is read and dropped first: a connection closed over an unread body
-        can reset under the answer — Windows drops what it had received — and
+        cap is read and dropped first, held by no budget (BodyBudget.dropping):
         a page must read a refusal's kind (stale-ts) to sign again."""
-        length = Headers(scope=scope).get("content-length", "")
-        if length.isdigit() and 0 < int(length) <= self._open_bodies.cap:
-            async with self._open_bodies.reading(scope, receive, _nowhere):
-                pass
+        await self._open_bodies.dropping(scope, receive)
         await refuse(send, status, detail, _auth_error(kind) if kind else ())
 
     def _judge(self, method, path, target, ts_raw, ts_int, nonce, digest, sig) -> tuple:
@@ -538,11 +538,14 @@ class HMACAuthMiddleware:
     async def _admit(self, scope, receive, send, budget: BodyBudget, *,
                      digest: Optional[str] = None, taken: Optional[tuple] = None, judge=None) -> None:
         """The request's body read whole from `budget`, held to its signed
-        `digest` or put to `judge`, then the app with it. A body that never
-        arrives gives its signature back (`taken`)."""
-        async with budget.reading(scope, receive, send) as body:
+        `digest` or put to `judge`, then the app with it. A client that leaves
+        before its body arrived gives its signature back (`taken`): the request
+        did not run, and a browser sends it again after a cut connection. One
+        answered 413, 408 or 503 signs its next try afresh — its signature
+        stays spent."""
+        async with budget.reading(scope, receive, send) as (body, refused):
             if body is None:
-                if taken is not None:
+                if taken is not None and refused == 400:
                     _give_back(taken)
                 return
             if digest is not None and not hmac.compare_digest(hashlib.sha256(body).hexdigest(), digest):

@@ -42,7 +42,7 @@ def client(tmp_path, monkeypatch):
     with a fixed device token and this test client's Host as the node's."""
     monkeypatch.setattr(device_auth, "current_token", lambda secret: TOKEN)
     monkeypatch.setattr(auth_hmac, "_allowed_hosts", {"testserver"})
-    monkeypatch.setattr(auth_hmac, "_seen", {}, raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen", type(auth_hmac._seen)(), raising=False)
     monkeypatch.setattr(auth_hmac, "_seen_wall", [], raising=False)
     monkeypatch.setattr(auth_hmac, "_seen_order", collections.deque(), raising=False)
 
