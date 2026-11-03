@@ -344,8 +344,12 @@ _ACCOUNT = (rf"""(?:(?:\\\\){{1,2}}\?{_SEP})?[A-Za-z]:{_SEP}(?i:users){_SEP}{_AC
 # Quoted by either mark, a path runs to its closing one: Python quotes a
 # string holding an apostrophe with `"`.
 _QUOTED_PATH = re.compile(rf"""(')({_PATH_START}[^'\n]*)'|(")({_PATH_START}[^"\n]*)["]""")
+# A part that holds a library file's name before a space or a mark is the
+# file, never a folder: what follows it is the message (`…: Input/output
+# error`), however many `/` the message holds.
 _BARE_PATH = re.compile(
-    rf"""(?<![\w./\\~-])(?:{_ACCOUNT}|{_PATH_START})(?:[\\/]{_SEG}(?=[\\/]))*"""
+    rf"""(?<![\w./\\~-])(?:{_ACCOUNT}|{_PATH_START})"""
+    rf"""(?:[\\/](?![^\\/\n"<>|]*?\.{_MEDIA_EXT}[^\w\\/]){_SEG}(?=[\\/]))*"""
     rf"""(?:[\\/](?:{_MEDIA_TAIL}|{_TAIL}))?""")
 _WHOLE_PATH = re.compile(rf"(?:{_ACCOUNT}|{_PATH_START})[^\n]*")
 # What a path was cut to before — this scrubber's `…/<file>`, the log's

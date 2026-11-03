@@ -1100,7 +1100,10 @@ upload and a finished one is a no-op — **single-use and retry-safe with
 one row**. `desktop/diag_bundle.py` collects the scopes — `system`,
 `settings`, `p2p`, `jobs`, `events`, `logs`, `chat`, and since 2026-10-02
 `playback` (the HQPlayer output's playback traces and HQPlayer's own log,
-from the backend's memory with every path cut to its last two components;
+from the backend's memory with every path cut to its last two components —
+since 2026-11-03 a folder to `[path]`, each trace's track named by its ids,
+format and length, never its title, artist or album, and a library file's
+name cut to its extension as it leaves;
 asked for by name — a node refuses a warrant naming a scope it does not
 know, so the master's default stays the seven every deployed node has,
 `diag_protocol.DEFAULT_SCOPES`) — each a fixed

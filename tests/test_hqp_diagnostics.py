@@ -654,6 +654,10 @@ def test_shares_and_any_absolute_path_are_cut_too():
     assert "someone" not in diag.redact_text(win)
     untouched = "& 2026/10/02 12:00:00 Play (-1/0)"
     assert diag.redact_text(untouched) == untouched
+    # A folder names an artist and an album: only a file keeps its last parts
+    assert diag.redact_text(r"& 2026/10/02 12:00:00 Library: scanning E:\Music\Some Artist\Some Album") \
+        .endswith("Library: scanning [path]")
+    assert diag.redact_text("& 2026/10/02 12:00:00 scanning /music/SomeArtist/SomeAlbum").endswith("scanning [path]")
 
 
 def test_a_redacted_trace_names_no_full_path(fresh):

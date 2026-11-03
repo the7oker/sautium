@@ -1779,7 +1779,11 @@ Traces and logs are content (paths, track identities): whole through the
 local API, and in a support warrant only under the `playback` scope, asked
 for by name, with every path cut to its last two components (drive, UNC and
 any absolute POSIX path alike) and every media-proxy token to its first six
-characters — a token is the capability that serves the file.
+characters — a token is the capability that serves the file. Since
+2026-11-03 a folder leaves as `[path]`, a trace names its track by its ids,
+format and length — never its title, artist or album, even in a warrant the
+person answers —, and the support scrubber cuts a library file's name to its
+extension (`desktop/p2p/diag_protocol.scrub_personal`).
 
 ### DSP load — what this HQPlayer keeps up with (2026-10-02)
 

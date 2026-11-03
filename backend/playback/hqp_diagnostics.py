@@ -1257,7 +1257,12 @@ def redact_text(text: str) -> str:
 
     def cut(m) -> str:
         s = m.group(0)
-        return "file://" + redact_path(s[7:]) if s.startswith("file://") else redact_path(s)
+        scheme, path = ("file://", s[7:]) if s.startswith("file://") else ("", s)
+        # A folder's last two parts are an artist and an album: only a file
+        # keeps them, and a folder (no dot in its last part) is only a path
+        if "." not in re.split(r"[\\/]+", path.rstrip("\\/"))[-1]:
+            return scheme + "[path]"
+        return scheme + redact_path(path)
     return _TEXT_PATH.sub(cut, text)
 
 

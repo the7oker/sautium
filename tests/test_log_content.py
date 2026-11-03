@@ -125,10 +125,14 @@ def _carries_content(value: ast.AST) -> bool:
         return _carries_content(value.left) or _carries_content(value.right)
     if isinstance(value, ast.BoolOp):
         return any(_carries_content(v) for v in value.values)
+    if isinstance(value, ast.IfExp):
+        return _carries_content(value.body) or _carries_content(value.orelse)
     if isinstance(value, ast.Call):
         name = getattr(value.func, "attr", getattr(value.func, "id", None))
-        return name in _BARE_NAME_CALLS or name == "format" and _names_content(value)
-    return isinstance(value, (ast.Attribute, ast.Name, ast.Subscript)) and _names_content(value)
+        return name in _BARE_NAME_CALLS or name in ("format", "join") and _names_content(value)
+    return isinstance(value, (ast.Attribute, ast.Name, ast.Subscript, ast.Dict, ast.List, ast.Tuple,
+                              ast.Set, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+                      ) and _names_content(value)
 
 
 def _built_from_content(fn: ast.AST) -> frozenset:

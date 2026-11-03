@@ -255,6 +255,13 @@ def test_a_report_is_kept_scrubbed_on_the_master():
      "…/[name].flac failed"),
     (r"open \\?\E:\Music\Some Artist\Some Album\05 Some Title.flac now", "open …/[name].flac now"),
     ("it's '/home/x/y.box' and 'z'", "it's '…/y.box' and 'z'"),
+    # What follows a library file's name is the message, `/` and all
+    ("/music/Some Artist/Some Album/05 Some Title.flac: Input/output error",
+     "…/[name].flac: Input/output error"),
+    ("/music/Some Artist/Some Album/05 Some Title.flac can't open a/b", "…/[name].flac can't open a/b"),
+    ("copy /music/Some Artist/Some Album/05 Some Title.flac to 192.0.2.7:/backup/x failed",
+     "copy …/[name].flac to [private address]:/backup/x failed"),
+    ("/music/Some Artist/Some.Album.2020.FLAC/05 Some Title.flac", "…/[name].flac"),
 ])
 def test_scrub_personal_cases(text, scrubbed):
     assert dp.scrub_personal(text) == scrubbed
@@ -302,6 +309,7 @@ def test_a_server_name_with_no_end_is_scrubbed_in_linear_time(text):
     "x.local:" * (1 << 13), "a." * (1 << 15) + "local",
     "'/music/a" + ".flac" * (1 << 13) + "!'", "/music/a/" + "b.flac." * (1 << 13),
     '"/music/' + "a'" * (1 << 15), "/music/" + "a:" * (1 << 15),
+    "/music/" + "a.flac: x/" * (1 << 13), "/music/" + "x/" * (1 << 15) + "y.flac: z",
 ])
 def test_a_long_run_of_any_shape_is_scrubbed_in_linear_time(text):
     import time
