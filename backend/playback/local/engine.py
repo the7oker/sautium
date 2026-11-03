@@ -317,7 +317,7 @@ class Engine:
             probed = _probe(src) if src else None
             if probed is not None:
                 break
-            logger.error("track unplayable, skipping: %s — %s", item.artist, item.title)
+            logger.error("track unplayable, skipping slot %d", index)
             self._track_failures += 1
             seek_to = 0.0
             if self._track_failures >= _MAX_CONSECUTIVE_TRACK_FAILURES:
@@ -549,7 +549,7 @@ class Engine:
             probed = _probe(src) if src else None
             if probed is not None:
                 break
-            logger.error("track unplayable, skipping: %s — %s", item.artist, item.title)
+            logger.error("track unplayable, skipping slot %d", index)
             self._track_failures += 1
             if self._track_failures >= _MAX_CONSECUTIVE_TRACK_FAILURES:
                 self._ring.closed = True

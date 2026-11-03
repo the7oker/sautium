@@ -636,6 +636,7 @@ class SyncServer:
             "status": "ok",
             "node_id": self.node_id,
             "type": "sautium-peer",
+            "sharing": self._sharing_enabled(),
             "birth_cert": (cert if cert is not None
                            and cert["pubkey"].lower() == self.node_id.lower() else None),
             "mb_dump": self.mb_dump_version,

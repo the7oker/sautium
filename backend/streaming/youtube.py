@@ -275,7 +275,8 @@ class YouTubeProvider(StreamProvider):
             seen = {c["id"] for c in cands}
             cands = cands + [c for c in alt if c["id"] not in seen]
         if not cands:
-            raise ProviderError(f"youtube: no results for {search!r}")
+            logger.debug("youtube: no results for %r", search)
+            raise ProviderError("youtube: no results")
         if not matched and trusted and not query.performers:
             # No channel names the artist, but this track's ALBUM has vouched
             # for one (_album_consensus): a channel holding the tracklist under
@@ -301,9 +302,9 @@ class YouTubeProvider(StreamProvider):
                              "album's rip channel %r", query.artist, query.title,
                              matched[0]["channel"])
         if not matched:
-            raise _GateWipeout(
-                f"youtube: no artist match for {search!r} "
-                f"(top hit channel {cands[0]['channel']!r})")
+            logger.debug("youtube: no artist match for %r (top hit channel %r)",
+                         search, cands[0]["channel"])
+            raise _GateWipeout("youtube: no artist match")
 
         # Length gates the pool before anything is ranked: a listing whose
         # length is not the catalog's is a different recording (an edit, a live
@@ -318,8 +319,9 @@ class YouTubeProvider(StreamProvider):
             # `duration` alone is blank whenever the display edition left it out.
             lens = attested_lengths(query)
             nearest = min(matched, key=lambda c: min(abs(c["duration"] - w) for w in lens))
+            logger.debug("youtube: no length match for %r", search)
             raise ProviderError(
-                f"youtube: no length match for {search!r} (catalog "
+                f"youtube: no length match (catalog "
                 f"{'/'.join(f'{w:.0f}s' for w in lens)}, "
                 f"nearest {nearest['duration']:.0f}s)")
         best = max(fit, key=lambda c: self._score(c, query))
@@ -346,11 +348,11 @@ class YouTubeProvider(StreamProvider):
         try:
             out = self._run(args, timeout=self._timeout, capture_output=True, text=True).stdout
         except subprocess.TimeoutExpired as e:
-            raise ProviderUnavailable(f"youtube search timeout: {search!r}") from e
+            raise ProviderUnavailable("youtube search timeout") from e
         except subprocess.CalledProcessError as e:
             # An empty search exits 0 with no lines; a non-zero exit is the
             # search itself failing, which says nothing about the track.
-            raise ProviderUnavailable(f"youtube search failed for {search!r}") from e
+            raise ProviderUnavailable(f"youtube search failed (exit {e.returncode})") from e
 
         cands = []
         for line in out.splitlines():

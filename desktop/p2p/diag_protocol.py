@@ -276,9 +276,10 @@ def scrub_secrets(text: str) -> str:
 # An address's start is where its run of address characters starts — a
 # start inside a long token (a hex blob in a database log) would make the
 # search quadratic; a top-level domain is letters, so a package's version
-# (`name@18.3.1`) is no address.
-_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@(?:[^\W_](?:[\w-]*[^\W_])?\.)+[^\W\d_]{2,}"
-                    r"(?![\w-]|\.[\w-])")
+# (`name@18.3.1`) is no address, while a name at a numeric host
+# (`someone@192.0.2.5`) is one.
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@(?:(?:[^\W_](?:[\w-]*[^\W_])?\.)+[^\W\d_]{2,}"
+                    r"(?![\w-]|\.[\w-])|\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d))")
 # A sentence's full stop may follow an address; a fifth number may not (a
 # version string).
 _IPV4 = re.compile(r"(?<!\w)(?<!\d\.)\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d)")
@@ -286,24 +287,45 @@ _IPV4 = re.compile(r"(?<!\w)(?<!\d\.)\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d)")
 # MAC address is none).
 _IPV6 = re.compile(r"(?<![\w:.])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])")
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
-# The names a home network, a tailnet or mDNS give a machine name its owner
-# ("…-macbook.local", "….ts.net"); a public service's name is no one's.
-_HOST = re.compile(r"(?<![\w.-])[\w-]+(?:\.[\w-]+)*\.(?:local|lan|home|home\.arpa|localdomain"
-                   r"|internal|fritz\.box|ts\.net)(?![\w-])", re.IGNORECASE)
-_SAFE_HOSTS = {"host.docker.internal"}
+# The names a tailnet, mDNS or a home router give a machine name its owner;
+# a public service's name is no one's. A name under a home suffix is a
+# machine's where a URL names it, or where it looks like one (a hyphen, a
+# digit, a capital: "Someones-MacBook.local") — a lowercase dotted word there
+# is a module's (`streaming.local`, `routers.home`); so is a single label in a
+# URL's host (`http://pixel:8200`). A name ends where its characters do.
+_HOME_SUFFIX = r"(?i:home\.arpa|local|lan|home|internal|localdomain)"
+_NAME_END = r"(?![\w(-]|\.\w)"
+_HOST = re.compile(
+    rf"(?<![\w.-])(?:[\w-]+\.)+(?i:ts\.net|home\.arpa|localdomain|fritz\.box){_NAME_END}"
+    rf"|(?<=://)(?:[\w-]+\.)+{_HOME_SUFFIX}{_NAME_END}"
+    rf"|(?<=://)[\w-]+(?=[:/\s'\"]|$)"
+    rf"|(?<![\w.-])(?=[\w.-]*[-A-Z0-9])(?:[\w-]+\.)+{_HOME_SUFFIX}{_NAME_END}")
+_SAFE_HOSTS = {"host.docker.internal", "localhost"}
 # A path's folders name an account, a person, a disk; its end is known only
 # where it is quoted, so a folder may hold single spaces only where another
-# separator follows it.
-_SEG = r"[^\\/\s'\"<>|*?]+(?: [^\\/\s'\"<>|*?]+)*"
+# separator follows it — and no colon, which a URL later on the line has.
+_SEG = r"[^\\/\s'\"<>|*?:]+(?: [^\\/\s'\"<>|*?:]+)*"
 _TAIL = r"[^\s'\"<>|]*"
 _ROOTS = (r"home|Users|mnt|media|Volumes|volume\d+|homes|music|Music|data|srv|net|nfs|share"
           r"|storage|app|tmp|var|opt|usr|etc|root|run|private|Library|System")
 _SHARE_URL = re.compile(r"\b(file|smb|nfs|afp|sftp)://[^\s'\"<>]*", re.IGNORECASE)
-_PATH_START = rf"""(?:[A-Za-z]:(?=[\\/])|\\\\[^\\/\s'"<>|]+|~[\w.-]*(?=[\\/])|/(?:{_ROOTS})(?=[\\/\s]|$))"""
+# A path starts at a drive (before a separator); at a server — `\\NAS`, or
+# `\\\\NAS` as Python's error text doubles it, or `//NAS/share` — whose
+# name ends where its characters do (one way to read it, not one per
+# character); at `~` or `~user` before a separator; at a root folder.
+_PATH_START = (rf"""(?:[A-Za-z]:(?=[\\/])|\\\\(?:\\\\)?[^\\/\s'"<>|]+(?![^\\/\s'"<>|])"""
+               rf"""|(?<!:)//[^/\s'"<>|]+(?=/)|~[\w.-]*(?=[\\/])|/(?:{_ROOTS})(?=[\\/\s]|$))""")
+# A Windows account's folder may hold spaces (`C:\Users\Some One`): after
+# the users root, all up to the next separator, quote or line end is its
+# name. A POSIX account's name holds none.
+_ACCOUNT = r"""[A-Za-z]:[\\/](?i:users)[\\/][^\\/\n'"<>|]*(?![^\\/\n'"<>|])"""
 _QUOTED_PATH = re.compile(rf"""(['"])({_PATH_START}[^'"\n]*)\1""")
 _BARE_PATH = re.compile(
-    rf"""(?<![\w./\\~-]){_PATH_START}(?:[\\/]{_SEG}(?=[\\/]))*(?:[\\/]{_TAIL})?""")
-_WHOLE_PATH = re.compile(rf"{_PATH_START}[^\n]*")
+    rf"""(?<![\w./\\~-])(?:{_ACCOUNT}|{_PATH_START})(?:[\\/]{_SEG}(?=[\\/]))*(?:[\\/]{_TAIL})?""")
+_WHOLE_PATH = re.compile(rf"(?:{_ACCOUNT}|{_PATH_START})[^\n]*")
+# The keys a structured detail keeps a path under: its value is a path from
+# start to end, spaces and all.
+_PATHISH_KEY = re.compile(r"(?i)(?:^|[_.-])(?:path|dir|directory|folder|file|root)s?$")
 _FILE_NAME = re.compile(r"[^\\/]+\.[A-Za-z0-9]{1,5}")
 _ACCOUNT_DIRS = {"users", "home", "homes"}
 
@@ -355,16 +377,26 @@ def scrub_personal(text: str) -> str:
     return _IPV6.sub(_address, text)
 
 
-def scrub_detail(value):
+def scrub_detail(value, key: str = ""):
     """scrub_personal over every string an event's detail holds, at any depth,
-    keys included; a value that is a path from its start is one path, its
-    spaces and all."""
+    keys included. A value under a key that names a path (`music_path`,
+    `current_file`, `folder`…) is one path from its start to its end, spaces
+    and all; every value then goes through scrub_personal whole. Two keys
+    that scrub alike (two folders' `x.flac`) keep both values."""
     if isinstance(value, str):
-        if _WHOLE_PATH.fullmatch(value):
-            return _cut_path(value)
+        if _PATHISH_KEY.search(key) and _WHOLE_PATH.fullmatch(value):
+            value = _cut_path(value)
         return scrub_personal(value)
     if isinstance(value, dict):
-        return {scrub_detail(k): scrub_detail(v) for k, v in value.items()}
+        out = {}
+        for k, v in value.items():
+            name = base = scrub_personal(k) if isinstance(k, str) else k
+            n = 1
+            while name in out:
+                n += 1
+                name = f"{base} ({n})"
+            out[name] = scrub_detail(v, k if isinstance(k, str) else "")
+        return out
     if isinstance(value, list):
-        return [scrub_detail(v) for v in value]
+        return [scrub_detail(v, key) for v in value]
     return value

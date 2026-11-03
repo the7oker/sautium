@@ -366,6 +366,7 @@ class P2PManager:
         """Main async routine: start services, announce, wait."""
         self._stop_event = asyncio.Event()
         self._chat_notify = asyncio.Event()
+        self._sharing_lock = asyncio.Lock()
         self._walk.bind()
         # Support diagnostics: one sequential worker fed by the master's
         # wake stream (warrants), its reconnects (resume) and LISTEN
@@ -3035,10 +3036,13 @@ class P2PManager:
         """P2P sharing as it is now — at start, whenever the owner moves it,
         and whenever the notifications are listened for again: the LAN
         beacon names this node on every network it joins only while it is
-        on (LANDiscovery.set_beaconing)."""
-        loop = asyncio.get_event_loop()
-        on = await loop.run_in_executor(None, self._sync_server.sharing_changed)
-        self._lan_discovery.set_beaconing(on)
+        on (LANDiscovery.set_beaconing). One read at a time, each applied
+        before the next starts: an earlier read finishing later would put
+        back what the switch said before."""
+        async with self._sharing_lock:
+            on = await asyncio.get_running_loop().run_in_executor(
+                None, self._sync_server.sharing_changed)
+            self._lan_discovery.set_beaconing(on)
 
     async def _after_walk(self):
         """What the walk just carried in may name artists canon waits on

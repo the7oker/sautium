@@ -271,10 +271,7 @@ class BrowserBackend(PlayerBackend):
         elif event == "paused":
             self._state = "paused"
         elif event == "error":
-            item = self._queue.item_at(self._index)
-            logger.warning("browser renderer error on %s — %s",
-                           item.artist if item else "?",
-                           item.title if item else "?")
+            logger.warning("browser renderer error on slot %d", self._index)
             self._state = "stopped"
         elif event == "ended":
             return self._advance()
@@ -426,12 +423,10 @@ class BrowserBackend(PlayerBackend):
                     self._pending_play_index = index if play else None
                     self._holds_spot = held == (self._index, self._position)
                     self._state = "loading" if play else "stopped"
-                    logger.info("browser output: slot %d waits for its stream (%s — %s)",
-                                index, item.artist, item.title)
+                    logger.info("browser output: slot %d waits for its stream", index)
                     self._emit_now()
                     return True
-                logger.warning("browser output: skipping unreachable item %s — %s",
-                               item.artist, item.title)
+                logger.warning("browser output: skipping unreachable slot %d", index)
                 index += 1
                 continue
             break
@@ -455,8 +450,7 @@ class BrowserBackend(PlayerBackend):
             return True
         self._epoch += 1
         self._holds_spot = False
-        logger.info("renderer directive: load slot %d play=%s (%s — %s)",
-                    index, play, item.artist, item.title)
+        logger.info("renderer directive: load slot %d play=%s", index, play)
         self._push(self._load_directive(index, item, play=play, position=position))
         if play:
             self._state = "playing"

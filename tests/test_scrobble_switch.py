@@ -111,6 +111,22 @@ def test_a_switch_that_cannot_be_read_sends_nothing_and_says_so(node, monkeypatc
                if r.name == tracker.logger.name and r.levelname == "ERROR")
 
 
+def test_a_node_with_no_last_fm_session_reads_no_switch(node, monkeypatch, caplog):
+    """Nothing to send, nothing to ask: with no session the switch is not
+    read — one that cannot be read says nothing."""
+    import db_pool
+    monkeypatch.setattr(tracker, "_get_scrobbler", lambda: None)
+    pool = _pool(minconn=0, dbname="sautium_test_no_such_database", **PG)
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    try:
+        with caplog.at_level("ERROR", logger=tracker.logger.name):
+            assert tracker._scrobble_async("update_now_playing", artist="An Artist", title="A Title")
+    finally:
+        pool.closeall()
+    assert not [r for r in caplog.records
+                if r.name == tracker.logger.name and r.levelname == "ERROR"]
+
+
 def test_a_listen_the_switch_held_back_scrobbles_once_it_is_on_before_the_threshold(node):
     conn, lastfm = node
     _switch(conn, False)

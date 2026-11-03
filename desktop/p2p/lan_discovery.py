@@ -9,7 +9,7 @@ expose discovered peers for sync.
 Protocol (JSON over UDP broadcast, port 19002):
   {
     "sautium": 1,            # protocol version
-    "beacon_id": "...",      # random per process: a host hears its own
+    "beacon_id": "...",      # random per beacon: a host knows its own
     "node_id": "...",        # Ed25519 public key hex      } while P2P
     "sync_port": 19000,      # HTTP sync server port        } sharing is
     "artists": 42,           # enriched artist count (hint) } on
@@ -17,8 +17,9 @@ Protocol (JSON over UDP broadcast, port 19002):
     "nodes": [8801]          # sibling nodes on this host (a Docker backend)
   }
 With sharing off a launcher names no node of its own: it beacons only its
-siblings — they keep their own switches, and this host's address is the
-only way the LAN reaches them — and nothing at all without any.
+siblings that share (each keeps its own switch and says it in /health;
+this host's address is the only way the LAN reaches them) — and nothing at
+all without one.
 
 Security: beacons are unsigned discovery hints only.  The actual
 sync uses HTTPS with certificate pinning.
@@ -30,6 +31,7 @@ import logging
 import secrets
 import socket
 import time
+from collections import deque
 from typing import Callable, Dict, Optional, Tuple
 
 from desktop.p2p.addrs import fmt_addr
@@ -74,14 +76,17 @@ class LANDiscovery:
         # the wake that sends a changed beacon at once.
         self._sharing = False
         self._wake = asyncio.Event()
-        self._beacon_id = secrets.token_hex(8)
+        # The ids of the beacons sent lately: one comes back to its own host
+        # within moments, and a fresh id per beacon links none of them to
+        # the next.
+        self._sent_ids: deque = deque(maxlen=16)
 
     def set_beaconing(self, on: bool) -> None:
         """While P2P sharing is on, the beacon names this node — its key,
         username, invite code, port and library size — to every device on
         the network; while it is off, only the sibling nodes on this host
-        (_make_beacon). The node hears others' beacons either way. Called on
-        the event loop."""
+        that share (_make_beacon). The node hears others' beacons either way.
+        Called on the event loop."""
         self._sharing = on
         self._wake.set()
 
@@ -106,12 +111,14 @@ class LANDiscovery:
 
     def _local_node_ports(self) -> list[int]:
         """Ports of sibling nodes found on THIS host by the localhost probe
-        (a Docker backend). They are announced so LAN peers can reach them
-        at OUR address: a container cannot broadcast for itself, and its DHT
-        announcement carries the router's external address — which nothing on
-        the LAN can connect back to (the backend port is never forwarded)."""
+        (a Docker backend) whose owner shares — each says so in its /health,
+        and one that does not say it is not announced. They are announced so
+        LAN peers can reach them at OUR address: a container cannot broadcast
+        for itself, and its DHT announcement carries the router's external
+        address — which nothing on the LAN can connect back to (the backend
+        port is never forwarded)."""
         return sorted({port for (ip, port), info in self._peers.items()
-                       if info.get("localhost")})
+                       if info.get("localhost") and info.get("sharing")})
 
     def _parse_beacon(self, data: bytes, sender_ip: str) -> Optional[Tuple[str, Optional[int], dict]]:
         """Parse beacon, return (ip, sync_port, info) or None; sync_port is
@@ -125,7 +132,7 @@ class LANDiscovery:
             return None
 
         # Ignore our own beacons — a siblings-only one names no node
-        if msg.get("beacon_id") == self._beacon_id:
+        if msg.get("beacon_id") in self._sent_ids:
             return None
         if msg.get("node_id") and msg["node_id"] == self.node_id:
             return None
@@ -201,6 +208,9 @@ class LANDiscovery:
         BEACON_INTERVAL, and at once when the sharing switch moves; a beacon
         with nothing to say (sharing off, no sibling) is not sent."""
         while self._running:
+            # Cleared before the beacon is made: a switch moved while it goes
+            # out wakes the next one at once
+            self._wake.clear()
             beacon = self._make_beacon(enriched_artists=0)
             if beacon is not None:
                 try:
@@ -222,7 +232,6 @@ class LANDiscovery:
                             pass
                 except OSError as e:
                     logger.debug(f"LAN broadcast failed: {e}")
-            self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), BEACON_INTERVAL)
             except asyncio.TimeoutError:
@@ -394,6 +403,7 @@ class LANDiscovery:
                                 "last_seen": time.time(),
                                 "localhost": True,
                                 "scheme": scheme,
+                                "sharing": data.get("sharing") is True,
                             }
                             if is_new:
                                 logger.info(
@@ -437,14 +447,16 @@ class LANDiscovery:
     def _make_beacon(self, enriched_artists: int = 0) -> Optional[bytes]:
         """The beacon as it stands, or None when there is nothing to say.
         While P2P sharing is on it names this node and the siblings on its
-        host; while it is off, only the siblings — a container cannot
-        broadcast for itself, and it keeps its own switch — and with none,
-        nothing. `nodes` and `beacon_id` are optional — older peers ignore
-        them, so they need no protocol bump."""
+        host that share; while it is off, only those siblings — a container
+        cannot broadcast for itself, and it keeps its own switch — and with
+        none, nothing. `nodes` and `beacon_id` are optional — older peers
+        ignore them, so they need no protocol bump."""
         local_nodes = self._local_node_ports()
         if not self._sharing and not local_nodes:
             return None
-        payload = {"sautium": PROTOCOL_VERSION, "beacon_id": self._beacon_id}
+        beacon_id = secrets.token_hex(8)
+        self._sent_ids.append(beacon_id)
+        payload = {"sautium": PROTOCOL_VERSION, "beacon_id": beacon_id}
         if self._sharing:
             payload.update(
                 node_id=self.node_id,

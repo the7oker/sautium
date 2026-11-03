@@ -743,8 +743,8 @@ class MediaProxy:
                 if not self.link_admissible(prov, e.query):
                     last_err = last_err or ProviderError(
                         f"{prov.manifest.id}: demo listen spent")
-                    logger.info("preview link refused [%d] %s — %s via %s: demo listen spent",
-                                e.index, e.query.artist, e.query.title, prov.manifest.id)
+                    logger.info("preview link refused [%d] via %s: demo listen spent",
+                                e.index, prov.manifest.id)
                     continue
                 started = time.monotonic()
                 try:
@@ -754,9 +754,8 @@ class MediaProxy:
                     break
                 except ProviderError as ex:
                     last_err = ex
-                    logger.warning("preview fetch failed [%d] %s — %s via %s: %s",
-                                   e.index, e.query.artist, e.query.title,
-                                   prov.manifest.id, ex)
+                    logger.warning("preview fetch failed [%d] via %s: %s",
+                                   e.index, prov.manifest.id, ex)
             if e.audio is None and last_err is not None:
                 e.error = str(last_err)
         except Exception as ex:  # provider bug — surface, don't hang the GET
@@ -795,7 +794,7 @@ class MediaProxy:
         if not e._claimed:
             self._prefetch(token, front=front)  # enqueue (keeps fetching strictly sequential)
         if not e.ready.wait(timeout):
-            raise TimeoutError(f"preview not ready: {e.query.title}")
+            raise TimeoutError(f"preview [{e.index}] not ready")
         return e
 
     def _advance(self, index: int) -> None:

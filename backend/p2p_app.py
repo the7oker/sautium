@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse
 from db_pool import get_conn
 from routers.sync import (
     SYNC_CAPABILITIES, carry_queries, lb_dump_version, lb_inventory, lb_router,
-    mb_dump_version, mb_router, node_pubkey_hex, router,
+    mb_dump_version, mb_router, node_pubkey_hex, router, sharing_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -438,7 +438,9 @@ async def health() -> dict:
     """Peer-facing identity. Same contract as the launcher's sync server —
     node_id + mb_dump + capabilities are what a peer picks sources by, and
     `birth_cert` (the certificate, never the proof) is what a peer that
-    dials this node records it by (desktop/p2p/witness.py)."""
+    dials this node records it by (desktop/p2p/witness.py). `sharing` is the
+    owner's P2P sharing switch: a launcher on the same host names this node
+    in its LAN beacon only while it is on (desktop/p2p/lan_discovery.py)."""
     from config import settings
     from p2p_identity import served_certificate
     mb_slices = 0
@@ -457,6 +459,7 @@ async def health() -> dict:
         "status": "ok",
         "type": "sautium-peer",
         "node_id": node_id,
+        "sharing": sharing_enabled(),
         "birth_cert": cert if cert is not None and node_id and cert["pubkey"] == node_id else None,
         "mb_dump": mb_dump_version(),
         "mb_slices": mb_slices,

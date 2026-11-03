@@ -1794,21 +1794,20 @@ def _filler_append(item, gen: int, *, position: str = "end",
                 return None
             active = manager.active
             if e.failed and active is not None:
-                active.lose_mirror(f"filler: {e}; {item.artist} — {item.title} and what "
-                                   "follows go into the queue alone")
+                active.lose_mirror(f"filler: {e}; the item and what follows go into the "
+                                   "queue alone")
             continue                # the queue, or the output it has now, takes it at once
         except Dropped as e:
             if hqp_link.stopping() is not None:
                 return None
-            logger.info("filler: %s — %s not added (%s); again once the output change is over",
-                        item.artist, item.title, e)
+            logger.info("filler: an item not added (%s); again once the output change is over", e)
             if not manager.wait_for_output_change(seen, hqp_link.BUILD_LIMIT_S):
                 break
             continue
         if added is None:
             return None
         return bool(added)          # 0: the output refused the file (one notice says so)
-    logger.warning("filler: dropped %s — %s, the output did not settle", item.artist, item.title)
+    logger.warning("filler: an item dropped, the output did not settle")
     return False
 
 
@@ -2115,8 +2114,7 @@ def _parallel_resolve(provider, queries: list, wanted: list) -> list:
         except Exception as e:
             # A provider bug is not "the track is nowhere": surface it, and keep
             # it out of the chain cache like any other non-answer.
-            logger.warning("%s resolve crashed for %s — %s: %s",
-                           provider.manifest.id, q.artist, q.title, e)
+            logger.warning("%s resolve crashed: %s", provider.manifest.id, e)
             return ProviderUnavailable(str(e))
 
     with ThreadPoolExecutor(max_workers=min(provider.resolve_workers, len(wanted)),

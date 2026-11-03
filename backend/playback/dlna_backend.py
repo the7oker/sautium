@@ -1883,8 +1883,7 @@ class DlnaBackend(PlayerBackend):
                 self._seek_due = None
                 self._position, self._length = start_at, item.duration_seconds or 0.0
                 self._error = None
-                logger.info("DLNA: slot %d waits for its stream (%s — %s)",
-                            index, item.artist, item.title)
+                logger.info("DLNA: slot %d waits for its stream", index)
                 # Said before the disarm's round trip: a Stop or a Pause made
                 # meanwhile says its own state last
                 self._emit_now("loading")
@@ -1896,8 +1895,7 @@ class DlnaBackend(PlayerBackend):
                     logger.debug("SetNext disarm unsupported/failed: %s", e)
                 return True
             if url is None:
-                logger.warning("DLNA: skipping unreachable item %s — %s",
-                               item.artist, item.title)
+                logger.warning("DLNA: skipping unreachable slot %d", index)
                 index, ss, url_override, start_at = index + 1, 0.0, None, 0.0
                 continue
             if start_at > 0 and "q=opus" in url and self._opus_seeks() is not True:
@@ -2028,8 +2026,8 @@ class DlnaBackend(PlayerBackend):
         try:
             return await asyncio.to_thread(materialize)
         except (KeyError, TimeoutError, RuntimeError, OSError) as ex:
-            logger.warning("DLNA: stream for %s — %s unavailable: %s",
-                           item.artist, item.title, ex)
+            logger.warning("DLNA: stream for slot %s unavailable: %s",
+                           self._queue.index_of(item), ex)
             return None
 
     def _arm_preload(self) -> None:

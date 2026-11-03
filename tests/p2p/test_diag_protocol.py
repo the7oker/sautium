@@ -198,6 +198,22 @@ def test_a_report_is_kept_scrubbed_on_the_master():
     ("GET http://pixel.lan:8200/desc.xml", "GET http://[host]:8200/desc.xml"),
     ("https://api.github.com/repos", "https://api.github.com/repos"),
     ("Phase B: failed {a: 1} ~3 s", "Phase B: failed {a: 1} ~3 s"),
+    # Python's error text doubles a Windows path's backslashes
+    (r"[WinError 53] The network path was not found: '\\\\SOMEONES-NAS\\Music'",
+     "[WinError 53] The network path was not found: '[path]'"),
+    (r"'\\\\?\\C:\\Users\\Some One\\Music'", "'[path]'"),
+    ("mount //SERVER/share/Music failed", "mount [path] failed"),
+    (r"unquoted C:\Users\John Smith", "unquoted [path]"),
+    ("/music is not mounted", "[path] is not mounted"),
+    ("copy /home/someone/Music/x.flac and http://example.org/a/b",
+     "copy …/x.flac and http://example.org/a/b"),
+    ("ssh someone@192.0.2.5 failed", "ssh [email] failed"),
+    ("connect to box.home.arpa failed", "connect to [host] failed"),
+    # A module's name is no machine's
+    ("2026-11-03 [routers.home] INFO: built; [streaming.local] too",
+     "2026-11-03 [routers.home] INFO: built; [streaming.local] too"),
+    ("'_thread._local' object; threading.local; Path.home(); werkzeug.local.LocalProxy",
+     "'_thread._local' object; threading.local; Path.home(); werkzeug.local.LocalProxy"),
 ])
 def test_scrub_personal_cases(text, scrubbed):
     assert dp.scrub_personal(text) == scrubbed
@@ -207,6 +223,33 @@ def test_scrub_detail_takes_keys_and_a_whole_path_value():
     assert dp.scrub_detail({"/home/someone/x.flac": r"C:\Users\Some One",
                             "folder": "D:\\Music of Some One", "n": 3}) == {
         "…/x.flac": "[path]", "folder": "[path]", "n": 3}
+
+
+def test_a_value_that_starts_with_a_path_is_scrubbed_whole():
+    said = "/app/data/config.json: token=abcd1234efgh for someone@example.com"
+    assert dp.scrub_detail({"error": said, "path": said, "file": "/music/A/a.flac from 192.0.2.5"}) == {
+        "error": "[path] token=[redacted] for [email]",
+        "path": "…/config.json: token=[redacted] for [email]",
+        "file": "…/a.flac from [private address]"}
+
+
+def test_two_keys_that_scrub_alike_keep_both_values():
+    assert dp.scrub_detail({"/home/a/x.flac": 1, "/home/b/x.flac": 2, "/home/c/x.flac": 3}) == {
+        "…/x.flac": 1, "…/x.flac (2)": 2, "…/x.flac (3)": 3}
+
+
+@pytest.mark.parametrize("text", ["'\\\\" + "a" * (1 << 16), "'\\\\" + "a" * (1 << 16) + '"',
+                                  "'\\\\" + "a" * (1 << 16) + "\n'", "\\\\" + "a" * (1 << 16) + "\n"])
+def test_a_server_name_with_no_end_is_scrubbed_in_linear_time(text):
+    """A run after two backslashes with no separator, quote or space to end
+    it — 64 K characters — takes milliseconds, as a value and under a key
+    that names a path; a search that tried every way to split it took
+    seconds."""
+    import time
+    started = time.monotonic()
+    dp.scrub_personal(text)
+    dp.scrub_detail({"path": text})
+    assert time.monotonic() - started < 1.0
 
 
 def test_a_long_token_is_scrubbed_in_linear_time():

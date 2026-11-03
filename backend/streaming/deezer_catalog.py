@@ -172,7 +172,7 @@ class DeezerCatalog:
             except ProviderUnavailable as e:
                 return e
             except ProviderError as e:
-                logger.info("%s", e)
+                logger.debug("deezer resolve %s - %s: %s", q.artist, q.title, e)
                 return None
 
         with ThreadPoolExecutor(max_workers=min(self.RESOLVE_WORKERS, len(wanted)),
@@ -242,12 +242,12 @@ class DeezerCatalog:
                 continue
             pairs, _, refused = self._corroborate(group, album)
             if 2 * len(pairs) >= n:
-                logger.info("deezer album %r -> %s by barcode %s (%d/%d tracks line up)",
-                            lead.album, album["id"], code, len(pairs), n)
+                logger.debug("deezer album %r -> %s by barcode %s (%d/%d tracks line up)",
+                             lead.album, album["id"], code, len(pairs), n)
                 return self._mapping(pairs, album)
-            logger.info("deezer: barcode %s names album %s (%r) but %d/%d tracks line "
-                        "up — not the tracklist%s", code, album["id"], album.get("title"),
-                        len(pairs), n, self._refused_note(refused))
+            logger.debug("deezer: barcode %s names album %s (%r) but %d/%d tracks line "
+                         "up — not the tracklist%s", code, album["id"], album.get("title"),
+                         len(pairs), n, self._refused_note(refused))
         best = None
         for stub in self._search_albums(lead, n)[:self.ALBUM_FETCH_N]:
             album = self._album_by_id(stub["id"])
@@ -257,11 +257,11 @@ class DeezerCatalog:
             m = len(pairs)
             ok = ((m >= min(self.ALBUM_CONSENSUS, n) and 2 * m >= n) if attested
                   else (m >= self.ALBUM_STRONG and 4 * m >= 3 * n))
-            logger.info("deezer album %r ~ %s (%r by %s): %d/%d tracks line up, %s%s%s",
-                        lead.album, album["id"], album.get("title"),
-                        (album.get("artist") or {}).get("name"), m, n,
-                        "attested" if attested else "unattested",
-                        "" if ok else " — not it", self._refused_note(refused))
+            logger.debug("deezer album %r ~ %s (%r by %s): %d/%d tracks line up, %s%s%s",
+                         lead.album, album["id"], album.get("title"),
+                         (album.get("artist") or {}).get("name"), m, n,
+                         "attested" if attested else "unattested",
+                         "" if ok else " — not it", self._refused_note(refused))
             if ok and (best is None or m > len(best[0])):
                 best = (pairs, album)
                 if m == n:
@@ -439,14 +439,15 @@ class DeezerCatalog:
                 if fit:
                     break
         if not listed:
-            raise ProviderError(f"deezer: no results for {query.artist} - {query.title}")
+            raise ProviderError("deezer: no results")
         if not fit:
             top = listed[0]
+            logger.debug("deezer: top hit for %s - %s is %r - %r",
+                         query.artist, query.title, top["artist"], top["title"])
             raise ProviderError(
-                f"deezer: nothing attested for {query.artist} - {query.title} (catalog "
+                f"deezer: nothing attested (catalog "
                 f"{'/'.join(f'{w:.0f}s' for w in attested_lengths(query)) or '?'}; "
-                f"top hit {top['artist']!r} - {top['title']!r}, {top['duration']}s"
-                f"{self._refused_note(refused)})")
+                f"top hit {top['duration']}s{self._refused_note(refused)})")
         best = max(fit, key=lambda c: self._score(c, query))
         logger.debug("deezer resolve %r -> %s (%ss, %s)",
                      query.title, best["id"], best["duration"], best["artist"])

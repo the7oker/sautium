@@ -42,6 +42,13 @@ def _switch(conn, on: bool) -> None:
         """, (json.dumps(on),))
 
 
+def _db_now(conn) -> datetime:
+    """The database's clock — the one the switch's last change is dated by."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT clock_timestamp()")
+        return cur.fetchone()[0]
+
+
 def _count(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM diag_events")
@@ -96,7 +103,7 @@ def test_a_bundle_leaves_only_while_the_switch_stayed_on_since_its_collection_be
     _switch(conn, True)
     assert not diag_events.may_upload(conn, kept)           # back on: still withdrawn
     fresh = _warrant(conn)
-    diag_events.mark_collected(conn, fresh, 100, datetime.now(timezone.utc))
+    diag_events.mark_collected(conn, fresh, 100, _db_now(conn))
     assert diag_events.may_upload(conn, fresh)              # collected after it came back on
     assert not diag_events.may_upload(conn, _warrant(conn))  # nothing collected, nothing to leave
 
@@ -146,7 +153,7 @@ def test_a_value_sent_again_withdraws_nothing(conn, scratch_dsn, monkeypatch):
     try:
         settings_router._write("support.diagnostics_enabled", True)
         wid = _warrant(conn)
-        diag_events.mark_collected(conn, wid, 100, datetime.now(timezone.utc))
+        diag_events.mark_collected(conn, wid, 100, _db_now(conn))
         settings_router._write("support.diagnostics_enabled", True)
         assert diag_events.may_upload(conn, wid)
         settings_router._write("support.diagnostics_enabled", False)

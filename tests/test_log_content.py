@@ -82,34 +82,51 @@ def _message_text_logged(path: Path) -> list:
     return found
 
 
-# What a node plays, searches for, and who its owner is: names an INFO line
-# of these modules must not carry (their DEBUG lines may).
-_CONTENT_ATTRS = {"title", "artist", "username"}
+# What a node plays, searches for, and who its owner is: names these modules
+# must not put in a line logged at INFO or above (their DEBUG lines may) — nor
+# in the text of an exception they raise, which a caller logs or a playback
+# trace keeps, nor in what they hand to a call that logs it.
+_CONTENT_ATTRS = {"title", "artist", "album", "username"}
 _CONTENT_NAMES = {"search", "username"}
-_PLAY_MODULES = ["playback/tracker.py", "playback/substitute.py", "playback/hqp_backend.py",
-                 "streaming/youtube.py", "streaming/base.py", "streaming/deezer_catalog.py",
-                 "lastfm_auth.py", "auth_hmac.py"]
+_LOGGED_LEVELS = {"info", "warning", "error", "exception", "critical"}
+_LOGGING_CALLS = {"background", "lose_mirror"}      # each logs its first argument
+_PLAY_MODULES = sorted([*BACKEND.glob("playback/**/*.py"), *BACKEND.glob("streaming/**/*.py"),
+                        BACKEND / "routers" / "player.py", BACKEND / "lastfm_auth.py",
+                        BACKEND / "auth_hmac.py"])
 
 
-def _content_at_info(path: Path) -> list:
+def _names_content(node: ast.AST, fmt: ast.AST = None) -> bool:
+    return any(isinstance(sub, ast.Attribute) and sub.attr in _CONTENT_ATTRS
+               or isinstance(sub, ast.Name) and sub.id in _CONTENT_NAMES
+               or isinstance(sub, ast.Constant) and sub is not fmt and sub.value in _CONTENT_ATTRS
+               for sub in ast.walk(node))
+
+
+def _content_logged(path: Path) -> list:
     found = []
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("info", "warning")
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == "logger"):
+        where = f"{path.relative_to(BACKEND)}:{getattr(node, 'lineno', 0)}"
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            if any(isinstance(s, ast.JoinedStr) and _names_content(s) for s in ast.walk(node.exc)):
+                found.append(where)
             continue
-        for sub in ast.walk(node):
-            if (isinstance(sub, ast.Attribute) and sub.attr in _CONTENT_ATTRS) or (
-                    isinstance(sub, ast.Name) and sub.id in _CONTENT_NAMES):
-                found.append(f"{path.name}:{node.lineno}")
-        first = node.args[0] if node.args else None
-        if isinstance(first, ast.Constant) and str(first.value).startswith("Host guard accepts"):
-            found.append(f"{path.name}:{node.lineno}")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if (name in _LOGGED_LEVELS and isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name) and func.value.id == "logger"):
+            fmt = node.args[0] if node.args else None
+            if _names_content(node, fmt) or (isinstance(fmt, ast.Constant) and str(
+                    fmt.value).startswith("Host guard accepts")):
+                found.append(where)
+        elif name in _LOGGING_CALLS and node.args and _names_content(node.args[0]):
+            found.append(where)
     return found
 
 
-def test_no_info_line_names_what_is_played_searched_or_who_listens():
-    assert [hit for name in _PLAY_MODULES for hit in _content_at_info(BACKEND / name)] == []
+def test_no_logged_line_names_what_is_played_searched_or_who_listens():
+    assert [hit for path in _PLAY_MODULES for hit in _content_logged(path)] == []
 
 
 def test_no_agent_runner_logs_the_text_of_a_message():

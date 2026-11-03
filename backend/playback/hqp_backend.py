@@ -1762,8 +1762,8 @@ class HqpBackend(PlayerBackend):
                 # until HQPlayer reads them (_start_slot)
                 att.aim(park.item, park.second)
                 self._start_entry(*start, fallback=False, item=park.start)
-        background(f"HQPlayer: the start of {park.item.artist} — {park.item.title} that waited "
-                   "for its stream did not go", go,
+        background(f"HQPlayer: the start of slot {self._queue.index_of(park.item)} that "
+                   "waited for its stream did not go", go,
                    needed=lambda: link.superseded(park.start)
                    or ("HQPlayer was detached" if self._detached else None),
                    until=lambda: self._detached or link.superseded(park.start) is not None)
