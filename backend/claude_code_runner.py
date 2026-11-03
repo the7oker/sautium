@@ -17,6 +17,7 @@ Two flavours:
 """
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -87,6 +88,15 @@ LIBRARY_SERVERS = ("postgres", "assistant")
 # model's name — therefore carries it in the system prompt, and its -p is
 # this line. A chat turn's -p is what the owner typed.
 _ONE_SHOT_TURN = "Answer as the system prompt asks."
+
+# A CLI that records the system prompt (on by default since 2.1.312) resends
+# the first request's copy on every resume, whatever a later launch passes —
+# measured through this runner on 2.1.316: a resumed turn given prompt B sent
+# prompt A. A chat would keep its first turn's player context and catalogue
+# text for good, so recording is off wherever the CLI has the switch. Its
+# --help says so: 2.1.278 already lists it ("no effect where recording is not
+# yet enabled"), 2.1.241 refuses it as an unknown option.
+_SNAPSHOT_SWITCH = "--system-prompt-snapshot"
 
 # assistant turns are SQL + list-building; unbounded interleaved thinking burned
 # ~75% of output tokens on a measured chat turn (4.9k-token final turn =
@@ -294,6 +304,23 @@ def _end_assistant_sessions() -> None:
                        "running after its turns")
 
 
+@functools.lru_cache(maxsize=4)
+def _has_snapshot_switch(claude_exe: str, mtime_ns: int) -> bool:
+    """Whether the CLI at `claude_exe` lists the switch; keyed by its mtime,
+    so a CLI updated in place is asked again."""
+    kwargs = _agent_kwargs()
+    kwargs.update(capture_output=True, text=True, encoding="utf-8",
+                  errors="replace", timeout=30, check=True)
+    return _SNAPSHOT_SWITCH in subprocess.run([claude_exe, "--help"], **kwargs).stdout
+
+
+def _prompt_flags(claude_exe: str) -> list[str]:
+    """What keeps the system prompt as each launch passes it (above)."""
+    if _has_snapshot_switch(claude_exe, os.stat(claude_exe).st_mtime_ns):
+        return [_SNAPSHOT_SWITCH, "off"]
+    return []
+
+
 def _agent_kwargs() -> dict:
     """Popen setup of a call: spawn_kwargs, the agent's own working directory,
     and stdin closed — with stdin open the CLI waits 3 s for piped input."""
@@ -350,6 +377,7 @@ def call_claude_code(
     cmd = [
         claude_exe,
         *turn,
+        *_prompt_flags(claude_exe),
         "--output-format", "json",
         "--model", use_model,
         *_tool_flags(tools),
@@ -568,6 +596,7 @@ def _claude_code_stream(
         "--verbose",  # required for stream-json
         "--model", use_model,
         "--system-prompt", system_prompt,
+        *_prompt_flags(claude_exe),
         *_tool_flags(LIBRARY),
     ]
     if resume and session_id:

@@ -170,6 +170,56 @@ def test_a_library_turn_offers_the_model_its_servers_tools_and_runs_only_those(
     assert "No such tool available: Bash" in _results(api)
 
 
+def test_a_resumed_turn_sends_the_system_prompt_its_own_launch_passes(claude, shared, monkeypatch):
+    """The player context rides the system prompt, and a CLI that records
+    the first one (2.1.312 and later) would resend the first turn's on every
+    resume."""
+    library = shared / "mcp.json"
+    library.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setattr(runner, "MCP_CONFIG_PATH", str(library))
+    claude([{"text": "first"}])
+    first = list(runner.call_claude_code_stream("go", "Now playing: Alpha Song"))[-1]
+    assert first.error is None and first.agent_session_id
+    api = claude([{"text": "second"}])
+
+    done = list(runner.call_claude_code_stream(
+        "and now?", "Now playing: Beta Song", session_id=first.agent_session_id, resume=True))[-1]
+
+    assert done.error is None
+    system = json.dumps(api.bodies("/messages")[-1].get("system"))
+    assert "Beta Song" in system and "Alpha Song" not in system
+
+
+_FAKE_CLI = """#!/bin/sh
+here=$(dirname "$0")
+case "$1" in --help) cat "$here/help.txt"; exit 0;; esac
+printf '%s\\0' "$@" > "$here/argv.txt"
+echo '{"type":"result","result":"ok","session_id":"s1","is_error":false}'
+"""
+
+
+@pytest.mark.parametrize("help_text, switch", [
+    ("  --system-prompt <prompt>\n  --system-prompt-snapshot <on|off>\n", ["--system-prompt-snapshot", "off"]),
+    ("  --system-prompt <prompt>\n", []),
+])
+def test_a_call_turns_the_prompt_record_off_only_on_a_cli_that_lists_the_switch(
+        shared, monkeypatch, help_text, switch):
+    """An older CLI (2.1.241) refuses the switch as an unknown option."""
+    cli = shared / "claude"
+    cli.write_text(_FAKE_CLI)
+    cli.chmod(0o755)
+    (shared / "help.txt").write_text(help_text)
+    monkeypatch.setattr(runner, "_resolve_claude_executable", lambda: str(cli))
+
+    result = runner.call_claude_code("hi", "system", tools=runner.TEXT)
+
+    assert result["is_error"] is False
+    argv = (shared / "argv.txt").read_text().split("\0")
+    at = argv.index("--system-prompt") + 2
+    assert argv[at:at + len(switch)] == switch
+    assert ("--system-prompt-snapshot" in argv) == bool(switch)
+
+
 def test_gear_research_offers_the_web_pair_and_loads_no_server_of_the_users(claude, shared):
     import gear_research_worker
     (shared / "config" / ".claude.json").write_text(json.dumps(_probes(shared, "personal")))
