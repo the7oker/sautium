@@ -210,8 +210,12 @@ def load_scratch(reader: nb.BackupReader, target: nb.PgTarget, conn, *, tables: 
                             pass
                 elif member.name.startswith(nb.IDENTITY_PREFIX):
                     rel = member.name[len(nb.IDENTITY_PREFIX):]
-                    if ".." in rel.split("/") or rel.startswith("/"):
-                        raise nb.Tampered(f"identity member with an unsafe path: {rel}")
+                    if not nb.identity_member(rel):
+                        # an older writer carried every file of the folder:
+                        # what is no identity file is left unread, never written
+                        logger.warning("backup member %r is no file of the identity folder "
+                                       "— not merged", member.name[:200])
+                        continue
                     identity[rel] = member.read()
                 else:
                     raise nb.Tampered(f"unexpected member {member.name}")
@@ -584,8 +588,9 @@ def merge_identity(identity_dir: Optional[Path], files: Dict[str, bytes]) -> int
     node_info.json lists and this node's does not gets its archive directory
     (the notice, the certificate, the proof — a backup carries no key) and
     its entry. Nothing happens without a live node_info.json — a Docker node
-    keeps none. Returns how many were added."""
-    from desktop.node_identity import PREVIOUS_DIRNAME
+    keeps none. An entry whose `dir` is no archive's name (nb.ARCHIVE_DIR)
+    is not taken, and a file goes nowhere but its archive
+    (nb.identity_path). Returns how many were added."""
     if identity_dir is None or "node_info.json" not in files:
         return 0
     live_path = identity_dir / "node_info.json"
@@ -598,12 +603,12 @@ def merge_identity(identity_dir: Optional[Path], files: Dict[str, bytes]) -> int
     added = 0
     for entry in theirs.get("previous", []):
         pub = str(entry.get("public_key_hex", "")).lower()
-        if not pub or pub in known or not entry.get("dir"):
+        if not pub or pub in known or not nb.ARCHIVE_DIR.fullmatch(str(entry.get("dir", ""))):
             continue
-        prefix = f"{PREVIOUS_DIRNAME}/{entry['dir']}/"
+        prefix = f"{nb.PREVIOUS_DIRNAME}/{entry['dir']}/"
         for rel, data in files.items():
             if rel.startswith(prefix):
-                path = identity_dir / rel
+                path = nb.identity_path(identity_dir, rel)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if not path.exists():
                     path.write_bytes(data)

@@ -22,6 +22,7 @@ PW = "correct horse battery"
 USER = "vale"
 PUB = "ab" * 32
 CHUNK = 64
+ARCHIVE = "20260101T000000Z-0123456789ab"     # a retired identity's folder, as rotate names it
 
 
 MEMBERS = [
@@ -232,7 +233,7 @@ def test_identity_files_selection(tmp_path):
     for name in ("node_info.json", "node_ed25519.key", "node_ed25519.pub", "tls_cert.pem",
                  "tls_key.pem", "birth_certificate.json", "identity_proof.json", ".api_secret"):
         (tmp_path / name).write_text(name)
-    prev = tmp_path / "previous" / "20260101T000000Z-abc"
+    prev = tmp_path / "previous" / ARCHIVE
     prev.mkdir(parents=True)
     for name in ("node_info.json", "node_ed25519.key", "rotation.json"):
         (prev / name).write_text(name)
@@ -242,10 +243,40 @@ def test_identity_files_selection(tmp_path):
     assert names == [
         "identity/.api_secret", "identity/birth_certificate.json",
         "identity/identity_proof.json", "identity/node_info.json",
-        "identity/previous/20260101T000000Z-abc/node_info.json",
-        "identity/previous/20260101T000000Z-abc/rotation.json",
+        f"identity/previous/{ARCHIVE}/node_info.json",
+        f"identity/previous/{ARCHIVE}/rotation.json",
     ]
     assert nb.identity_files(None) == [] and nb.identity_files(tmp_path / "nope") == []
+
+
+def test_a_backup_carries_no_file_the_identity_folder_does_not_hold(tmp_path):
+    (tmp_path / "node_info.json").write_text("{}")
+    (tmp_path / "notes.txt").write_text("x")
+    (tmp_path / "previous" / "elsewhere").mkdir(parents=True)
+    (tmp_path / "previous" / "elsewhere" / "rotation.json").write_text("{}")
+    assert [n for n, _ in nb.identity_files(tmp_path)] == ["identity/node_info.json"]
+
+
+def test_an_identity_member_is_a_file_of_the_identity_folder():
+    for rel in ("node_info.json", "birth_certificate.json", "identity_proof.json", ".api_secret",
+                f"previous/{ARCHIVE}/node_info.json", f"previous/{ARCHIVE}/rotation.json"):
+        assert nb.identity_member(rel), rel
+    # every other name, whatever a platform's path rules make of it
+    for rel in ("notes.txt", "node_ed25519.key", "tls_key.pem", f"previous/{ARCHIVE}/node_ed25519.key",
+                "previous/x/rotation.json", f"previous/{ARCHIVE}", "sub/node_info.json",
+                f"previous/{ARCHIVE}/x/rotation.json", f"previous\\{ARCHIVE}\\rotation.json",
+                "C:node_info.json", "", "node_info.json/"):
+        assert not nb.identity_member(rel), rel
+
+
+def test_write_identity_writes_inside_the_identity_folder_or_nothing(tmp_path):
+    folder = tmp_path / "identity"
+    info = {"public_key_hex": "ab" * 32, "username": ""}
+    for rel in ("notes.txt", "../outside.json"):
+        with pytest.raises(nb.Tampered):
+            nb.write_identity(folder, {"node_info.json": json.dumps(info).encode(), rel: b"{}"},
+                              username="", password=None)
+    assert sorted(p.name for p in tmp_path.rglob("*")) == ["identity"]
 
 
 def test_backup_filename():
@@ -263,7 +294,7 @@ def test_write_identity_rederives_the_key_and_archives_a_foreign_one(tmp_path):
             "username": "second", "invite_code": invite, "email": "", "email_verified": False,
             "anonymous": False}
     files = {"node_info.json": json.dumps(info).encode(), ".api_secret": b"s3cret",
-             "birth_certificate.json": b"{}", "previous/x/rotation.json": b"{}"}
+             "birth_certificate.json": b"{}", f"previous/{ARCHIVE}/rotation.json": b"{}"}
 
     # a different identity lives here already → moved aside, never deleted
     (tmp_path / "node_info.json").write_text(json.dumps({"public_key_hex": "cd" * 32}))
@@ -278,7 +309,7 @@ def test_write_identity_rederives_the_key_and_archives_a_foreign_one(tmp_path):
     assert (moved / "node_ed25519.key").read_text() == "old key"
     assert json.loads((tmp_path / "node_info.json").read_text()) == info
     assert (tmp_path / ".api_secret").read_bytes() == b"s3cret"
-    assert (tmp_path / "previous" / "x" / "rotation.json").exists()
+    assert (tmp_path / "previous" / ARCHIVE / "rotation.json").exists()
     from cryptography.hazmat.primitives import serialization
     key = serialization.load_pem_private_key((tmp_path / "node_ed25519.key").read_bytes(), None)
     assert key.public_key().public_bytes(serialization.Encoding.Raw,

@@ -49,6 +49,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -64,6 +65,8 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple
 import psycopg2
 import psycopg2.extensions
 from psycopg2 import sql
+
+from desktop.node_identity import PREVIOUS_DIRNAME, ROTATION_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +93,18 @@ MANIFEST_MEMBER = "manifest.json"
 DB_MEMBER = "db.dump"
 IDENTITY_PREFIX = "identity/"
 
-# The identity dir minus what a backup must never carry (module doc) and
-# what is re-derived on restore (the public PEM comes with the key).
-IDENTITY_EXCLUDE = frozenset({"node_ed25519.key", "node_ed25519.pub",
-                              "tls_cert.pem", "tls_key.pem"})
+# What an identity member may name — one rule for the writer and both
+# readers (restore, merge), on every platform: a file of the identity
+# folder, or of a retired identity's archive (`previous/<rotated at>-<key
+# prefix>/`, desktop.node_identity.rotate), these exact strings and nothing
+# else. Never a key or TLS material (module doc; the public PEM comes with
+# the re-derived key), and so never a name another platform's path rules
+# would read as somewhere else.
+IDENTITY_FILES = frozenset({"node_info.json", "birth_certificate.json",
+                            "identity_proof.json", ".api_secret"})
+ARCHIVE_FILES = frozenset({"node_info.json", "birth_certificate.json",
+                           "identity_proof.json", ROTATION_FILENAME})
+ARCHIVE_DIR = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
 EXCLUDED_TABLE_PATTERNS = ("mb_*", "lb_*")        # pg_dump patterns
 EXCLUDED_TABLE_LIKES = ["mb\\_%", "lb\\_%"]       # the same sets, in SQL
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
@@ -459,20 +470,37 @@ class BackupReader:
 # Identity files
 # ---------------------------------------------------------------------------
 
+def identity_member(rel: str) -> bool:
+    """Whether `rel`, a name below `identity/`, is a file the identity
+    folder holds (IDENTITY_FILES, ARCHIVE_FILES in an ARCHIVE_DIR)."""
+    parts = rel.split("/")
+    if len(parts) == 1:
+        return rel in IDENTITY_FILES
+    return (len(parts) == 3 and parts[0] == PREVIOUS_DIRNAME
+            and ARCHIVE_DIR.fullmatch(parts[1]) is not None and parts[2] in ARCHIVE_FILES)
+
+
+def identity_path(identity_dir: Path, rel: str) -> Path:
+    """Where identity member `rel` is written: inside `identity_dir` by the
+    name's rule and by where the folder resolves, or Tampered."""
+    path = identity_dir / rel
+    if not identity_member(rel) or not path.resolve().is_relative_to(identity_dir.resolve()):
+        raise Tampered(f"identity member {rel!r} is no file of the identity folder")
+    return path
+
+
 def identity_files(identity_dir: Optional[Path]) -> List[Tuple[str, Path]]:
     """(member name, path) for every file the backup carries out of the
-    identity dir: the info, the certificate, the proof, the rotation archive
-    and `.api_secret`; never a private key or TLS material, at any depth."""
+    identity dir (identity_member): the info, the certificate, the proof,
+    the rotation archive and `.api_secret`; never a private key or TLS
+    material, at any depth."""
     if identity_dir is None or not identity_dir.is_dir():
         return []
     out = []
     for path in sorted(identity_dir.rglob("*")):
-        if not path.is_file() or path.name in IDENTITY_EXCLUDE:
-            continue
         rel = path.relative_to(identity_dir).as_posix()
-        if rel.startswith("replaced-"):
-            continue
-        out.append((IDENTITY_PREFIX + rel, path))
+        if path.is_file() and identity_member(rel):
+            out.append((IDENTITY_PREFIX + rel, path))
     return out
 
 
@@ -950,8 +978,12 @@ def restore_database(reader: BackupReader, target: PgTarget, *, manifest: Option
                         raise BackupError(f"pg_restore failed (exit {rc}): {_stderr_tail(stderr)}")
                 elif member.name.startswith(IDENTITY_PREFIX):
                     rel = member.name[len(IDENTITY_PREFIX):]
-                    if ".." in rel.split("/") or rel.startswith("/"):
-                        raise Tampered(f"identity member with an unsafe path: {rel}")
+                    if not identity_member(rel):
+                        # an older writer carried every file of the folder:
+                        # what is no identity file is left unread, never written
+                        logger.warning("backup member %r is no file of the identity folder "
+                                       "— not restored", member.name[:200])
+                        continue
                     data = member.read()
                     identity_seen.append(rel)
                     if identity_sink is not None:
@@ -1027,10 +1059,12 @@ def write_identity(identity_dir: Path, files: Dict[str, bytes], *, username: str
     deleted; the same key's files are overwritten in place. With
     `node_info.json` in the set and a password, the private key is
     re-derived and written like `create_account` does — nothing is written
-    unless the derivation reproduces the recorded public key."""
+    unless the derivation reproduces the recorded public key, and nothing
+    unless every name is a file of the identity folder (identity_path)."""
     from desktop import node_identity
 
     identity_dir.mkdir(parents=True, exist_ok=True)
+    targets = {rel: identity_path(identity_dir, rel) for rel in files}
     info = None
     if "node_info.json" in files:
         info = json.loads(files["node_info.json"].decode("utf-8"))
@@ -1062,10 +1096,10 @@ def write_identity(identity_dir: Path, files: Dict[str, bytes], *, username: str
             logger.info("existing identity %s… moved to %s", live_pub[:16], moved.name)
 
     for rel, data in files.items():
-        path = identity_dir / rel
+        path = targets[rel]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-        if rel == ".api_secret" or rel.endswith(".key"):
+        if rel == ".api_secret":
             try:
                 os.chmod(path, 0o600)
             except OSError:

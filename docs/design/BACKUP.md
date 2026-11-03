@@ -95,7 +95,7 @@ plaintext inside the stream = a tar:
                   (from _schema_migrations), node pubkey, table row counts,
                   sha256 of every member
   db.dump         pg_dump -Fc --exclude-table-data='mb_*' --exclude-table-data='lb_*' music_ai
-  identity/       the identity dir minus nothing (see above)
+  identity/       the identity folder's files, no key (see "Identity" below)
 ```
 
 - **KEK = Argon2id(password, salt = `"sautium-backup:v1:" + username`)** with
@@ -442,7 +442,10 @@ from the sketch above, each for a reason found while building:
   recorded public key. A rotation archive therefore loses its private keys
   in a restore (messages to a retired key can no longer be opened) — the
   accepted v1 limit of "the seed never leaves". `.api_secret` rides along
-  so paired browsers keep working.
+  so paired browsers keep working. An identity member is one of the names
+  the folder holds (`node_backup.identity_member`, 2026-11-03): its four
+  files and those of each `previous/<rotated at>-<key prefix>/`, exact
+  strings on every platform; a restore or a merge writes no other name.
 - **Restore is staged and reversible.** The dump lands in
   `<db>__restore`; only a complete, migrated restore is swapped in. A
   database holding own data (owned files, listens, friends, chat, gear,

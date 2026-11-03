@@ -2112,6 +2112,17 @@ it taught:
   merge alike, and a one-time `db_migrate` step (`play_stats_derived_v1`)
   re-derives what every node already holds — two histories merged in either
   order give one answer.
+- **An identity member is a name the identity folder holds (2026-11-03).**
+  The writer carried every file of the folder, and the restore and the
+  merge took a member's name as a path once it had no `..` segment and no
+  leading `/` — a check of POSIX names that Windows' path rules do not
+  share. Now one rule (`node_backup.identity_member`) serves the writer and
+  both readers on every platform: the folder's four files, and the four
+  files of each retired identity's `previous/<rotated at>-<key prefix>/`,
+  these exact strings. A reader leaves any other member unread (an older
+  writer carried a stray file too) and writes nothing for it; both sinks
+  check every name before they change anything (`identity_path`), and the
+  merge takes a retired identity only under an archive's name.
 
 ### Notices: a toast is a signal, the row is the fact (2026-09-13)
 

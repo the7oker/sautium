@@ -74,24 +74,42 @@ def test_same_account_rule():
         life_merge.check_same_account({"node": {}}, pubkey=own, previous=[])
 
 
+D0, D1 = "20260101T000000Z-000000000000", "20260201T000000Z-111111111111"   # as rotate names them
+
+
 def test_rotation_archive_union(tmp_path):
     live = {"public_key_hex": "ab" * 32, "username": "vale", "previous": [
-        {"public_key_hex": "11" * 32, "dir": "d1", "retired_at": "2026-02-01T00:00:00Z"}]}
+        {"public_key_hex": "11" * 32, "dir": D1, "retired_at": "2026-02-01T00:00:00Z"}]}
     (tmp_path / "node_info.json").write_text(json.dumps(live))
     theirs = {"public_key_hex": "ab" * 32, "previous": [
-        {"public_key_hex": "11" * 32, "dir": "d1", "retired_at": "2026-02-01T00:00:00Z"},
-        {"public_key_hex": "00" * 32, "dir": "d0", "retired_at": "2026-01-01T00:00:00Z"}]}
+        {"public_key_hex": "11" * 32, "dir": D1, "retired_at": "2026-02-01T00:00:00Z"},
+        {"public_key_hex": "00" * 32, "dir": D0, "retired_at": "2026-01-01T00:00:00Z"}]}
     files = {"node_info.json": json.dumps(theirs).encode(),
-             "previous/d0/rotation.json": b'{"v":1}', "previous/d0/birth_certificate.json": b"{}",
-             "previous/d1/rotation.json": b"stale"}
+             f"previous/{D0}/rotation.json": b'{"v":1}', f"previous/{D0}/birth_certificate.json": b"{}",
+             f"previous/{D1}/rotation.json": b"stale"}
     assert life_merge.merge_identity(tmp_path, files) == 1
     info = json.loads((tmp_path / "node_info.json").read_text())
-    assert [e["dir"] for e in info["previous"]] == ["d0", "d1"]          # oldest first
-    assert (tmp_path / "previous" / "d0" / "rotation.json").read_bytes() == b'{"v":1}'
-    assert not (tmp_path / "previous" / "d1").exists()                   # known: nothing written
+    assert [e["dir"] for e in info["previous"]] == [D0, D1]          # oldest first
+    assert (tmp_path / "previous" / D0 / "rotation.json").read_bytes() == b'{"v":1}'
+    assert not (tmp_path / "previous" / D1).exists()                 # known: nothing written
     assert life_merge.merge_identity(tmp_path, files) == 0
     assert life_merge.merge_identity(None, files) == 0
     assert life_merge.merge_identity(tmp_path / "nowhere", files) == 0
+
+
+def test_a_retired_identity_is_taken_only_under_an_archive_name(tmp_path):
+    folder = tmp_path / "identity"
+    folder.mkdir()
+    live = {"public_key_hex": "ab" * 32, "username": "vale", "previous": []}
+    (folder / "node_info.json").write_text(json.dumps(live))
+    theirs = {"public_key_hex": "ab" * 32, "previous": [
+        {"public_key_hex": "22" * 32, "dir": "../elsewhere", "retired_at": "2026-03-01T00:00:00Z"}]}
+    files = {"node_info.json": json.dumps(theirs).encode(),
+             "previous/../elsewhere/rotation.json": b"{}"}
+    assert life_merge.merge_identity(folder, files) == 0
+    assert json.loads((folder / "node_info.json").read_text()) == live
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == [
+        "identity", "identity/node_info.json"]
 
 
 # ---------------------------------------------------------------------------
