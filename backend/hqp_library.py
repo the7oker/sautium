@@ -65,7 +65,10 @@ _LIBRARY_LIMIT = 1024 * 1024 * 1024
 # What a box says about itself is shown and stored: a name, never a control
 # character, so long at most. A library hash is a token of plain ASCII.
 _FACT_MAX = 200
-_HASH_FORM = re.compile(rb'value="([0-9A-Za-z+/=_.:-]{1,256})"')
+_HASH_FORM = re.compile(rb'value="([0-9A-Za-z+/=_.:-]{0,256})"')   # empty: no library
+# GetInfo's and LibraryGetHash's answers are a line of attributes: what any
+# box that answers discovery may send for them
+_FACTS_LIMIT = 64 * 1024
 # ET refuses the C0 control characters a tag can carry; the raw bytes of
 # other encodings are already U+FFFD after the lenient decode.
 _XML_CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -92,7 +95,7 @@ def get_info(host: str, port: int) -> Dict[str, str]:
     """What HQPlayer says about itself: name (the machine's on Desktop, a
     generic "HQPlayerEmbedded" on a box), product, and its build (version,
     engine, platform — note_info)."""
-    line = _command(host, port, "<GetInfo/>", _HASH_TIMEOUT).decode("utf-8", "replace")
+    line = _command(host, port, "<GetInfo/>", _HASH_TIMEOUT, _FACTS_LIMIT).decode("utf-8", "replace")
     out = {}
     for k in ("name", "product", "version", "engine", "platform"):
         m = re.search(rf'\b{k}="([^"]*)"', line)
@@ -155,9 +158,9 @@ def discover(host: str, port: int = 4321, timeout: float = _DISCOVER_TIMEOUT) ->
 
 
 def library_hash(host: str, port: int) -> str:
-    """The library's hash; ConnectionError for an answer that carries none
-    of the token's shape."""
-    line = _command(host, port, "<LibraryGetHash/>", _HASH_TIMEOUT)
+    """The library's hash — empty when HQPlayer has no library; a
+    ConnectionError for an answer that carries none of the token's shape."""
+    line = _command(host, port, "<LibraryGetHash/>", _HASH_TIMEOUT, _FACTS_LIMIT)
     m = _HASH_FORM.search(line)
     if not m:
         raise ConnectionError(
@@ -314,6 +317,8 @@ def resolve_endpoint(host: str, port: int) -> Tuple[Optional[Dict[str, Any]], Op
     if ep and (ep["hqp_name"] or info["name"]) == info["name"] \
           and (ep["product"] or info["product"]) == info["product"]:
         return ep, "address", facts
+    if not facts["current_hash"]:                   # no library: nothing to know it by
+        return None, None, facts
     rows = db_query(f"SELECT {_ENDPOINT_COLS} FROM hqp_endpoints "
                     "WHERE library_hash = %(h)s AND library_hash IS NOT NULL ORDER BY id",
                     {"h": facts["current_hash"]})

@@ -3589,20 +3589,26 @@ device on the network; none of them may hold for it more than a bound.
   line names a token by its first six characters (`proxy.shown`): a token
   is a bearer credential for its file.
 - **The Output scan takes a device's word within bounds.** A multicast
-  answer's LOCATION is taken only as plain HTTP on the address the answer
-  came from — as the unicast sweep already made it (`_rehost`). A
-  description is fetched with no redirect followed and nothing compressed
-  taken, 256 KiB per document and 16 documents per device
-  (`_describe_requester`, for an address added by hand too); four
-  addresses per host and 64 in all are described, those of hosts a
-  renderer is remembered at first, all at once in a loop of a worker
-  thread's own — never parsed on the server's loop — within 20 s. Whatever
-  one HQPlayer answers is that box's failure alone: before, one answer the
-  resolve could not take ended the whole scan and kept the old list. A box's
-  name and product are stored without control characters and cut at 200; a
-  library hash is a token of plain ASCII or none; an answer line past
-  16 MiB ends the connection (`hqplayer_client.ANSWER_LIMIT`; the whole
-  library's LibraryGet asks for a gigabyte).
+  answer's LOCATION is taken only as plain HTTP, and described at the
+  address the answer came from — as the unicast sweep already made it
+  (`_rehost`). A scan, and an address added by hand, reads a device's
+  description alone (`_fetch_description`, `_described_devices` with
+  defusedxml): what it needs of a device is there, and the service
+  documents are the attach's — the library's device builder fetched every
+  one of them. The description is read to its end, as many pieces as it
+  comes in, with no redirect followed and nothing compressed taken, 256 KiB
+  at most (a declared length past that refused before a byte); four
+  addresses per host and 64 in all are described, those of hosts a renderer
+  is remembered at — the chosen output's among them — first, all at once in
+  a loop of a worker thread's own — never parsed on the server's loop —
+  within 20 s. Whatever one HQPlayer answers is that box's failure alone:
+  before, one answer the resolve could not take ended the whole scan and
+  kept the old list. A box's name and product are stored without control
+  characters and cut at 200; a library hash is a token of plain ASCII, or
+  empty for a box without a library — which nothing is then known by; the
+  answers to GetInfo and LibraryGetHash are taken up to 64 KiB, any other
+  up to 16 MiB (`hqplayer_client.ANSWER_LIMIT`; the whole library's
+  LibraryGet asks for a gigabyte).
 - **A renderer the node holds takes no new address while it answers where
   it is known.** UPnP authenticates no device, and a renderer's UDN is in
   its own announcements: a scan used to take whichever address claimed the

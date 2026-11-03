@@ -1,9 +1,10 @@
 """What the Output scan takes from a device that answers it (routers/player.py
 _scan_run, hqp_library, hqplayer_client): a multicast LOCATION only as plain
-HTTP on the address the answer came from; a description fetched with no
-redirect, nothing compressed, so many bytes and documents, all of them within
-one deadline and parsed off the server's loop; so many addresses per host and
-in all; and whatever one HQPlayer answers is that box's failure alone."""
+HTTP, described at the address the answer came from; a description read whole
+and alone — none of its services' documents — with no redirect, nothing
+compressed, so many bytes, all of them within one deadline and parsed off the
+server's loop; so many addresses per host and in all; and whatever one
+HQPlayer answers is that box's failure alone."""
 
 import asyncio
 import gzip
@@ -63,13 +64,30 @@ def device():
         await asyncio.sleep(3)
         return await text(_description())
 
+    async def streamed(request, body: bytes, *, length=None, pause=0.0):
+        """`body` in two writes, `pause` apart, with `length` declared or
+        chunked."""
+        response = web.StreamResponse(headers={"Content-Type": "text/xml"})
+        if length is not None:
+            response.content_length = length
+        await response.prepare(request)
+        half = len(body) // 2
+        await response.write(body[:half])
+        await asyncio.sleep(pause)
+        await response.write(body[half:])
+        return response
+
     routes = {
         "/plain.xml": lambda r: text(_description()),
         "/moved.xml": lambda r: asyncio.sleep(0, web.HTTPFound("/plain.xml")),
         "/packed.xml": lambda r: asyncio.sleep(0, web.Response(
             body=gzip.compress(_description().encode()), content_type="text/xml",
             headers={"Content-Encoding": "gzip"})),
-        "/large.xml": lambda r: text(_description(padding=300 * 1024)),
+        "/large.xml": lambda r: streamed(r, _description(padding=300 * 1024).encode()),
+        "/declared.xml": lambda r: streamed(r, _description().encode(),
+                                            length=player._DESCRIBE_BYTES + 1),
+        "/pieces.xml": lambda r: streamed(r, _description().encode(),
+                                          length=len(_description().encode()), pause=0.2),
         "/many.xml": lambda r: text(_description(services=24)),
         "/slow.xml": slow,
     }
@@ -95,14 +113,18 @@ def _describe(url):
     return asyncio.run(player._dlna_describe(url))
 
 
-def test_a_description_is_fetched_plainly_and_bounded(device):
+def test_a_description_is_read_whole_plainly_and_bounded(device):
     base, hits = device
     assert _describe(f"{base}/plain.xml")["udn"] == "uuid:shelf-1"
-    for shape in ("moved", "packed", "large", "many"):
-        with pytest.raises(Exception):
+    # a description that arrives in pieces, and one of a device of many services
+    assert _describe(f"{base}/pieces.xml")["udn"] == "uuid:shelf-1"
+    assert _describe(f"{base}/many.xml")["udn"] == "uuid:shelf-1"
+    for shape, said in (("moved", "answered 302"), ("packed", "compressed"),
+                        ("large", "past its size"), ("declared", "past its size")):
+        with pytest.raises(player.DescriptionRefused, match=said):
             _describe(f"{base}/{shape}.xml")
     assert hits["/plain.xml"] == 1                     # the redirect was not followed
-    assert sum(n for p, n in hits.items() if p.startswith("/scpd")) < player._DESCRIBE_DOCUMENTS
+    assert not [p for p in hits if p.startswith("/scpd")]   # no service document is read
 
 
 def test_the_descriptions_answer_within_one_deadline_off_the_servers_loop(device, monkeypatch):
@@ -114,12 +136,13 @@ def test_the_descriptions_answer_within_one_deadline_off_the_servers_loop(device
     assert list(described) == [f"{base}/plain.xml"]
 
 
-def test_a_multicast_location_is_taken_only_as_plain_http_from_its_source():
-    assert player._from_source("http://192.0.2.5:1400/d.xml", "192.0.2.5")
-    assert not player._from_source("http://192.0.2.6:1400/d.xml", "192.0.2.5")
-    assert not player._from_source("https://192.0.2.5/d.xml", "192.0.2.5")
-    assert not player._from_source("file:///d.xml", "192.0.2.5")
-    assert not player._from_source("http://192.0.2.5/d.xml", None)
+def test_a_multicast_location_is_described_as_plain_http_at_its_source():
+    assert player._multicast_location("http://192.0.2.5:1400/d.xml", "192.0.2.5") == "http://192.0.2.5:1400/d.xml"
+    assert player._multicast_location("http://10.9.9.9:1400/d.xml", "192.0.2.5") == "http://192.0.2.5:1400/d.xml"
+    assert player._multicast_location("http://10.9.9.9/d.xml", "fd00::5") == "http://[fd00::5]/d.xml"
+    for location, source in (("https://192.0.2.5/d.xml", "192.0.2.5"), ("file:///d.xml", "192.0.2.5"),
+                             ("http://192.0.2.5/d.xml", None), ("http://192.0.2.5:x/d.xml", "192.0.2.5")):
+        assert player._multicast_location(location, source) is None, location
 
 
 def test_a_scan_describes_so_many_addresses_per_host_and_the_remembered_first():
@@ -147,19 +170,20 @@ def quiet_scan(monkeypatch):
     return search
 
 
-def test_a_multicast_answer_naming_another_host_is_not_described(device, quiet_scan, monkeypatch):
+def test_a_multicast_answer_is_described_where_it_came_from(device, quiet_scan, monkeypatch):
     base, hits = device
+    port = base.rsplit(":", 1)[1]
 
     async def answers(callback, **_kw):
-        await callback({"location": f"{base}/plain.xml", "usn": "uuid:a", "_host": "192.0.2.9"})
-        await callback({"location": f"{base}/plain.xml?honest", "usn": "uuid:b", "_host": "127.0.0.1"})
+        await callback({"location": f"http://192.0.2.9:{port}/plain.xml", "usn": "uuid:a", "_host": "127.0.0.1"})
+        await callback({"location": f"https://127.0.0.1:{port}/plain.xml", "usn": "uuid:b", "_host": "127.0.0.1"})
 
     async def no_sweep(found, found_hqp):
         return None
     monkeypatch.setattr(quiet_scan, "async_search", answers)
     monkeypatch.setattr(player, "_unicast_sweep", no_sweep)
     result = asyncio.run(player._scan_run())
-    assert [r["location"] for r in result["renderers"]] == [f"{base}/plain.xml?honest"]
+    assert [r["location"] for r in result["renderers"]] == [f"http://127.0.0.1:{port}/plain.xml"]
     assert hits["/plain.xml"] == 1
 
 
@@ -191,12 +215,20 @@ def test_what_one_hqplayer_answers_is_its_failure_alone(quiet_scan, monkeypatch)
 def test_an_hqplayers_facts_are_plain_and_its_hash_a_token(monkeypatch):
     answers = {"<GetInfo/>": b'<GetInfo name="Stu\x00dio\x07" product="Signalyst HQPlayer Desktop 6"/>',
                "<LibraryGetHash/>": '<LibraryGetHash value="été"/>'.encode()}
-    monkeypatch.setattr(hqp_library, "_command", lambda host, port, xml, timeout, limit=None: answers[xml])
+    limits = {}
+
+    def command(host, port, xml, timeout, limit=None):
+        limits[xml] = limit
+        return answers[xml]
+    monkeypatch.setattr(hqp_library, "_command", command)
     assert hqp_library.get_info("192.0.2.7", 4321)["name"] == "Studio"
     with pytest.raises(ConnectionError):
         hqp_library.library_hash("192.0.2.7", 4321)
     answers["<LibraryGetHash/>"] = b'<LibraryGetHash value="9f86d081884c7d65"/>'
     assert hqp_library.library_hash("192.0.2.7", 4321) == "9f86d081884c7d65"
+    answers["<LibraryGetHash/>"] = b'<LibraryGetHash value=""/>'          # a Desktop without a library
+    assert hqp_library.library_hash("192.0.2.7", 4321) == ""
+    assert limits == {"<GetInfo/>": hqp_library._FACTS_LIMIT, "<LibraryGetHash/>": hqp_library._FACTS_LIMIT}
     assert hqp_library.parse_discover(b'<discover name="Box\x00\x01" version="Signalyst HQPlayer Embedded 6"/>') \
         == {"name": "Box", "product": "Signalyst HQPlayer Embedded 6"}
 
@@ -223,3 +255,14 @@ def test_an_answer_past_its_limit_ends_the_connection():
         client.raw("<GetInfo/>", 5, limit=64 * 1024)
     assert not client.is_connected()
     server.close()
+
+
+def test_an_hqplayer_without_a_library_is_known_by_no_hash(monkeypatch):
+    monkeypatch.setattr(hqp_library, "get_info",
+                        lambda host, port: {"name": "Desk", "product": "Signalyst HQPlayer Desktop 6"})
+    monkeypatch.setattr(hqp_library, "library_hash", lambda host, port: "")
+    monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: None)
+    asked = []
+    monkeypatch.setattr(hqp_library, "db_query", lambda *a, **k: asked.append(a) or [{"id": 1}])
+    assert hqp_library.resolve_endpoint("192.0.2.7", 4321)[:2] == (None, None)
+    assert asked == []

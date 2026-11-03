@@ -76,7 +76,7 @@ fastapi (MIT) · starlette (BSD-3-Clause) · uvicorn (BSD-3-Clause) · h11 (MIT)
 anyio (MIT) · pydantic, pydantic-settings (MIT) ·
 SQLAlchemy (MIT) · psycopg2-binary (LGPL with exceptions) · pgvector (MIT) ·
 mutagen (GPL-2.0-or-later) · soundfile (BSD-3-Clause) · audioread (MIT) ·
-sounddevice (MIT) · async-upnp-client (Apache-2.0) · Pillow (MIT-CMU) ·
+sounddevice (MIT) · async-upnp-client (Apache-2.0) · defusedxml (PSF-2.0) · Pillow (MIT-CMU) ·
 imagehash (BSD-2-Clause) · torch, torchvision, torchaudio (BSD-3-Clause) ·
 transformers (Apache-2.0) · sentence-transformers (Apache-2.0) · hear21passt
 (Apache-2.0) · librosa (ISC) · ctranslate2 (MIT) · anthropic (MIT) · openai

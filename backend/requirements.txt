@@ -33,6 +33,9 @@ sounddevice>=0.5.1
 # DLNA output: SSDP discovery + AVTransport/RenderingControl + GENA eventing
 # (Home Assistant's UPnP stack, rides the aiohttp already in the deps).
 async-upnp-client>=0.36.0
+# The Output scan reads a device's description itself (routers/player.py),
+# with the XML parser async-upnp-client uses.
+defusedxml>=0.7.1
 
 # Image Processing (cover art)
 Pillow>=10.2.0

@@ -8410,6 +8410,7 @@ def test_the_scan_lists_a_busy_hqplayer_as_answering(monkeypatch):
     import hqp_library
     import tls_gen
     from routers import player
+    from routers import settings as settings_router
 
     async def no_search(*a, **k):
         return None
@@ -8429,6 +8430,7 @@ def test_the_scan_lists_a_busy_hqplayer_as_answering(monkeypatch):
     monkeypatch.setattr(player, "_dlna_pins", lambda: {})
     monkeypatch.setattr(player, "_hqplayer_entries", lambda: [])
     monkeypatch.setattr(player, "_hqp_discovered", {})
+    monkeypatch.setattr(settings_router, "_read", lambda key, *a, **k: None)
     asyncio.run(player._scan_run())
     entry = player._hqp_discovered[("192.0.2.7", 4321)]
     assert entry["control"] is True and entry["endpoint_id"] == 9
@@ -10368,6 +10370,7 @@ def test_the_scan_reads_an_unfinished_build_as_busy(fake, monkeypatch):
     import hqp_library
     import tls_gen
     from routers import player
+    from routers import settings as settings_router
     _limit(monkeypatch, 0.5)
     link = _link()
     fake.build("SetFilter", 30, answer="last")
@@ -10392,6 +10395,7 @@ def test_the_scan_reads_an_unfinished_build_as_busy(fake, monkeypatch):
     monkeypatch.setattr(player, "_dlna_pins", lambda: {})
     monkeypatch.setattr(player, "_hqplayer_entries", lambda: [])
     monkeypatch.setattr(player, "_hqp_discovered", {})
+    monkeypatch.setattr(settings_router, "_read", lambda key, *a, **k: None)
     n = len(fake.arrivals)
     asyncio.run(player._scan_run())
     entry = player._hqp_discovered[("127.0.0.1", 4321)]

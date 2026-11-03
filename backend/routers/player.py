@@ -472,7 +472,8 @@ def _rehost(location: str, ip: str) -> str:
     parts = urlparse(location)
     if not parts.hostname or parts.hostname == ip:
         return location
-    netloc = f"{ip}:{parts.port}" if parts.port else ip
+    host = f"[{ip}]" if ":" in ip else ip
+    netloc = f"{host}:{parts.port}" if parts.port else host
     return urlunparse(parts._replace(netloc=netloc))
 
 
@@ -513,65 +514,77 @@ def _msearch_location(ip: str, timeout: float = 3.0) -> Optional[str]:
     return fallback
 
 
-# What a device that answers a scan may make the node fetch and hold: a
-# description and its services' are a few kilobytes each.
+# What a device that answers a scan may make the node fetch and hold: its
+# description, a few kilobytes — the one document a scan or an address added
+# by hand reads (_dlna_describe); its services' are the attach's business.
 _DESCRIBE_BYTES = 256 * 1024
-_DESCRIBE_DOCUMENTS = 16          # one description and its services
 _DESCRIBE_TIMEOUT_S = 5.0
 _LOCATIONS_PER_HOST = 4
 _LOCATIONS = 64
 _DESCRIBE_DEADLINE_S = 20.0
 
 
-def _describe_requester():
-    """What a description is fetched with (the scan's, an address added by
-    hand): plain-HTTP GETs only, no redirect followed, nothing compressed
-    taken, _DESCRIBE_BYTES per document and _DESCRIBE_DOCUMENTS per device.
-    A device's service URLs stay on its own host (async_upnp_client), and
-    with redirects refused, so does every fetch."""
+class DescriptionRefused(Exception):
+    """A description the scan does not take: its shape, its size, its URL."""
+
+
+async def _fetch_description(location: str) -> str:
+    """The device description at `location`, read to its end: one plain-HTTP
+    GET, no redirect followed, nothing compressed taken, _DESCRIBE_BYTES at
+    most — a declared length over that refused before a byte of it is
+    read — within _DESCRIBE_TIMEOUT_S."""
     from urllib.parse import urlparse
 
-    from aiohttp import ClientError, ClientSession, ClientTimeout
-    from async_upnp_client.client import UpnpRequester
-    from async_upnp_client.const import HttpResponse
-    from async_upnp_client.exceptions import UpnpCommunicationError, UpnpConnectionError
+    from aiohttp import ClientSession, ClientTimeout
 
-    class Requester(UpnpRequester):
-        left = _DESCRIBE_DOCUMENTS
-
-        async def async_http_request(self, http_request):
-            self.left -= 1
-            if self.left < 0:
-                raise UpnpCommunicationError("more documents than a device describes itself with")
-            if http_request.method != "GET" or urlparse(http_request.url).scheme != "http":
-                raise UpnpCommunicationError("a description is a plain-HTTP GET")
-            headers = {**(http_request.headers or {}), "Accept-Encoding": "identity"}
+    if urlparse(location).scheme != "http":
+        raise DescriptionRefused("a description is a plain-HTTP GET")
+    async with ClientSession(auto_decompress=False) as session:
+        async with session.get(location, headers={"Accept-Encoding": "identity"},
+                               allow_redirects=False,
+                               timeout=ClientTimeout(total=_DESCRIBE_TIMEOUT_S)) as r:
+            if r.status != 200:
+                raise DescriptionRefused(f"the description answered {r.status}")
+            if r.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise DescriptionRefused("a compressed description")
+            if (r.content_length or 0) > _DESCRIBE_BYTES:
+                raise DescriptionRefused("a description past its size")
+            body = bytearray()
+            async for chunk in r.content.iter_any():
+                body += chunk
+                if len(body) > _DESCRIBE_BYTES:
+                    raise DescriptionRefused("a description past its size")
             try:
-                async with ClientSession(auto_decompress=False) as session:
-                    async with session.get(http_request.url, headers=headers, allow_redirects=False,
-                                           timeout=ClientTimeout(total=_DESCRIBE_TIMEOUT_S)) as r:
-                        if r.headers.get("Content-Encoding", "identity").lower() != "identity":
-                            raise UpnpCommunicationError("a compressed description")
-                        body = await r.content.read(_DESCRIBE_BYTES + 1)
-                        if len(body) > _DESCRIBE_BYTES:
-                            raise UpnpCommunicationError("a description past its size")
-                        return HttpResponse(r.status, r.headers,
-                                            body.decode(r.charset or "utf-8", "replace"))
-            except (TimeoutError, ClientError) as e:
-                raise UpnpConnectionError(repr(e)) from e
-            except LookupError as e:                  # a charset no codec names
-                raise UpnpCommunicationError(repr(e)) from e
-    return Requester()
+                return body.decode(r.charset or "utf-8", "replace")
+            except LookupError:                       # a charset no codec names
+                return body.decode("utf-8", "replace")
 
 
-def _from_source(location: str, source: Optional[str]) -> bool:
-    """A multicast answer's LOCATION is taken only when it is plain HTTP on
-    the address the answer came from — the unicast sweep rewrites it to
-    that address (_rehost)."""
+def _described_devices(text: str) -> list:
+    """Every device a description names, the root's first then the embedded
+    ones, each as its own child elements' text by local name (deviceType,
+    friendlyName, UDN…) — namespaced or not, as devices write it."""
+    from defusedxml.ElementTree import fromstring
+
+    def local(tag) -> str:
+        return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+    return [{local(child.tag): (child.text or "").strip() for child in el}
+            for el in fromstring(text).iter() if local(el.tag) == "device"]
+
+
+def _multicast_location(location: str, source: Optional[str]) -> Optional[str]:
+    """A multicast answer's LOCATION as the scan describes it: plain HTTP,
+    on the address the answer came from (_rehost), as the unicast sweep
+    does — or none."""
     from urllib.parse import urlparse
     parts = urlparse(location)
-    return (parts.scheme == "http" and bool(source) and parts.hostname is not None
-            and parts.hostname == source.split("%", 1)[0].strip("[]"))
+    try:
+        parts.port                                    # a port that is no number is no URL
+    except ValueError:
+        return None
+    if parts.scheme != "http" or not parts.hostname or not source:
+        return None
+    return _rehost(location, source.split("%", 1)[0].strip("[]"))
 
 
 def _scan_locations(found: dict, remembered: set) -> list:
@@ -619,25 +632,28 @@ async def _dlna_describe(location: str) -> dict:
     """Fetch a device description and resolve the MediaRenderer in it →
     {udn, location, name, model}. Rejects descriptions without a renderer:
     multi-device hosts exist (the KANN serves its AK Connect media SERVER
-    on the same port) and a pinned server can never play."""
-    from async_upnp_client.client_factory import UpnpFactory
-    factory = UpnpFactory(_describe_requester(), non_strict=True)
-    device = await factory.async_create_device(location)
-    candidates = [device, *device.embedded_devices.values()]
-    renderer = next((d for d in candidates
-                     if ":MediaRenderer:" in (d.device_type or "")), None)
+    on the same port) and a pinned server can never play. Only the
+    description is read (_fetch_description): what a scan needs of a device
+    is in it, and the service documents are the attach's to fetch."""
+    devices = _described_devices(await _fetch_description(location))
+    if not devices:
+        raise DescriptionRefused("no device in the description")
+    renderer = next((d for d in devices if ":MediaRenderer:" in d.get("deviceType", "")), None)
     if renderer is None:
+        root = devices[0]
         raise HTTPException(
             status_code=422,
-            detail=f"'{device.friendly_name}' is {device.device_type or 'not a renderer'}"
+            detail=f"'{root.get('friendlyName', '')}' is {root.get('deviceType') or 'not a renderer'}"
                    " — no MediaRenderer at this address (a media-server "
                    "description of the same device is a common decoy)")
+    if not renderer.get("UDN"):
+        raise DescriptionRefused("a renderer without a UDN")
     return {
-        "udn": renderer.udn,
+        "udn": renderer["UDN"],
         "location": location,
-        "name": renderer.friendly_name,
-        "model": renderer.model_name,
-        "manufacturer": renderer.manufacturer,
+        "name": renderer.get("friendlyName", ""),
+        "model": renderer.get("modelName", ""),
+        "manufacturer": renderer.get("manufacturer", ""),
     }
 
 
@@ -837,8 +853,9 @@ async def _scan_run():
     async def _on_response(headers) -> None:
         loc = headers.get("location") or headers.get("LOCATION")
         usn = headers.get("usn") or headers.get("USN") or loc
-        if loc and _from_source(str(loc), headers.get("_host")):
-            found[(usn, str(loc))] = str(loc)
+        described = _multicast_location(str(loc), headers.get("_host")) if loc else None
+        if described:
+            found[(usn, described)] = described
 
     # Search from EVERY private interface: on a multi-homed host (Wi-Fi +
     # WSL/Hyper-V virtual adapters) the default-route multicast often egresses
@@ -921,11 +938,11 @@ async def _scan_run():
     known = {**_dlna_discovered, **pins}
     from playback.dlna_backend import known_locations
     from routers.settings import _read
-    remembered = {loc for record in known.values() for loc in known_locations(record)}
-    locations = _scan_locations(found, remembered)
-    described = await asyncio.to_thread(_describe_all, locations)
     active = _read("output.dlna_renderer") or {}
     chosen = udn_key(active.get("udn"))
+    remembered = {loc for record in (*known.values(), active) for loc in known_locations(record)}
+    locations = _scan_locations(found, remembered)
+    described = await asyncio.to_thread(_describe_all, locations)
     # Where the node knows each renderer it holds — pinned, or the output
     held = {key: set(known_locations(record)) for key, record in pins.items()}
     if chosen:
