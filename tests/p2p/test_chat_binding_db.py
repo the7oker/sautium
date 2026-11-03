@@ -3,9 +3,11 @@ to one message of one thread (desktop/p2p/chat_service.py,
 backend/p2p_chat.py), on a real PostgreSQL built from the migrations —
 skipped without a cluster: an earlier ciphertext under a new uuid is
 refused; the same message again is a duplicate, anything else under its
-uuid is refused; a history import touches its own thread only; a friend's
-retired key speaks for nobody on the Docker surface; the token hour's
-ceiling is checked before a use is spent."""
+uuid is refused; a history import touches its own thread only; a history
+page marks delivered only the messages it carries, and the next page starts
+after the last one's row, even within one second; a friend's retired key
+speaks for nobody on the Docker surface; the token hour's ceiling is checked
+before a use is spent."""
 
 import base64
 import sys
@@ -23,6 +25,7 @@ for p in (REPO, REPO / "backend"):
         sys.path.insert(0, str(p))
 
 from desktop import node_identity  # noqa: E402
+from desktop.p2p import chat_wire  # noqa: E402
 from desktop.p2p.chat_service import ChatService  # noqa: E402
 
 ed25519 = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
@@ -82,6 +85,35 @@ def test_a_message_is_bound_to_its_uuid_its_thread_and_its_text(conn, scratch_ds
     with conn.cursor() as cur:
         cur.execute("SELECT delivered FROM p2p_messages WHERE message_uuid = %s", (u2,))
         assert cur.fetchone() == (False,)
+
+
+def test_a_history_page_marks_delivered_only_what_it_carries(conn, scratch_dsn, monkeypatch):
+    from datetime import timedelta
+    me = _service(scratch_dsn, ME)
+    fid = me.add_friend(public_key_hex=FRIEND[1], invite_code=FRIEND[2], username="friend")
+    t0 = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    stamps = [t0, t0 + timedelta(seconds=1), t0 + timedelta(seconds=1), t0 + timedelta(seconds=2)]
+    with conn.cursor() as cur:
+        for n, stamp in enumerate(stamps):
+            cur.execute("""INSERT INTO p2p_messages (friend_id, direction, content, timestamp,
+                                                     delivered, message_uuid)
+                           VALUES (%s, 'out', %s, %s, FALSE, %s)""",
+                        (fid, f"m{n}", stamp, str(uuid.uuid4())))
+    monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_MAX", 2)
+    seal = lambda text, message_uuid, ts_iso: text
+    seen = []
+    after = None
+    while True:
+        rows = chat_wire.export_rows(conn, fid, chat_wire.history_cursor(after))
+        page, out_ids, after, more = chat_wire.export_page(rows, seal)
+        chat_wire.mark_exported(conn, fid, out_ids)
+        seen += [m["encrypted"] for m in page]
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM p2p_messages WHERE delivered")
+            assert cur.fetchone()[0] == len(seen)          # what the pages carried, and no more
+        if not more:
+            break
+    assert seen == ["m0", "m1", "m2", "m3"]                 # two in one second, both read
 
 
 @pytest.fixture

@@ -228,15 +228,39 @@ def _default_gateway() -> Optional[str]:
 # killed.
 _PEER_GRACE_S = 1
 
-# The peer surface's connections, each a place for a stranger. Every
+# The peer surface's connections, each a place for a stranger
+# (serving.peer_protocol): its TLS handshake and its request head within
+# _PEER_HEAD_S, a head of at most _PEER_HEAD_MAX bytes, a peer that reads
+# nothing of an answer for _PEER_STALL_S let go, _PEER_PER_ADDRESS from any
+# one address (not behind a trusted front: there every connection is the
+# front's), closed _PEER_KEEPALIVE_S after its last response. Every
 # launcher keeps a wake stream open to the master, so the ceiling is sized
-# for the network rather than for a request load; past it uvicorn answers
-# 503. A connection must send its request head within _PEER_HEAD_S
-# (serving.header_deadline) and is closed _PEER_KEEPALIVE_S after its last
-# response.
-_PEER_CONNECTIONS = 4096
+# for the network — half the process's descriptors, at most
+# _PEER_CONNECTIONS_MAX — and wake streams may take three quarters of it
+# (wake_registry), so a request always finds a place.
+_PEER_CONNECTIONS_MAX = 32768
+_PEER_PER_ADDRESS = 256
 _PEER_HEAD_S = 10
+_PEER_HEAD_MAX = 64 * 1024
+_PEER_STALL_S = 30
 _PEER_KEEPALIVE_S = 5
+
+
+def _descriptors() -> Optional[int]:
+    """This process's descriptor limit, its soft limit raised to the hard
+    one first (65 536 at most) — a soft 1 024 was what the peer surface,
+    the Web UI and the database pool shared. None where there is no such
+    limit (Windows)."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 65536 if hard == resource.RLIM_INFINITY else min(hard, 65536)
+    if soft < want:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+        soft = want
+    return soft
 
 
 async def _serve_p2p(port: int) -> None:
@@ -267,10 +291,13 @@ async def _serve_p2p(port: int) -> None:
     import os
     import socket
 
+    import ssl
+
     from uvicorn.protocols.http.auto import AutoHTTPProtocol
-    from serving import PeerSurfaceConfig, Server, header_deadline
+    from serving import PeerSurfaceConfig, Server, peer_protocol
     from tls_gen import ensure_cert
     from p2p_app import app as peer_app
+    from routers import peer_chat
 
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -285,8 +312,12 @@ async def _serve_p2p(port: int) -> None:
     finally:
         probe.close()
 
-    bounds = dict(limit_concurrency=_PEER_CONNECTIONS, timeout_keep_alive=_PEER_KEEPALIVE_S,
-                  http=header_deadline(AutoHTTPProtocol, _PEER_HEAD_S))
+    fds = _descriptors()
+    connections = (_PEER_CONNECTIONS_MAX if fds is None
+                   else max(256, min(_PEER_CONNECTIONS_MAX, fds // 2)))
+    peer_chat.limit_wake_streams(connections * 3 // 4)
+    bounds = dict(head_s=_PEER_HEAD_S, head_max=_PEER_HEAD_MAX, stall_s=_PEER_STALL_S,
+                  max_connections=connections)
     if settings.p2p_trusted_front:
         gateway = _default_gateway()
         if gateway is None:
@@ -298,7 +329,8 @@ async def _serve_p2p(port: int) -> None:
         config = PeerSurfaceConfig(
             peer_app, host="0.0.0.0", port=port,
             proxy_headers=True, forwarded_allow_ips=gateway,
-            timeout_graceful_shutdown=_PEER_GRACE_S, **bounds,
+            timeout_graceful_shutdown=_PEER_GRACE_S, timeout_keep_alive=_PEER_KEEPALIVE_S,
+            http=peer_protocol(AutoHTTPProtocol, per_address=None, **bounds),
         )
     else:
         from p2p_identity import tls_binding
@@ -306,10 +338,15 @@ async def _serve_p2p(port: int) -> None:
             _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
             binding=tls_binding(settings),
         )
+        # The handshake is the protocol's (serving.peer_protocol), so uvicorn
+        # serves plain TCP here and never sees the certificate.
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(str(cert_path), str(key_path))
         config = PeerSurfaceConfig(
             peer_app, host="0.0.0.0", port=port,
-            ssl_keyfile=str(key_path), ssl_certfile=str(cert_path),
-            timeout_graceful_shutdown=_PEER_GRACE_S, **bounds,
+            timeout_graceful_shutdown=_PEER_GRACE_S, timeout_keep_alive=_PEER_KEEPALIVE_S,
+            http=peer_protocol(AutoHTTPProtocol, per_address=_PEER_PER_ADDRESS, tls=tls,
+                               **bounds),
         )
     try:
         await Server(config, what="the peer surface").serve()

@@ -53,15 +53,23 @@ NAME_MAX_CHARS = 255
 _SPECIAL_PURPOSE = re.compile(r"^\[.*\]$|^various artists$")
 
 # A dump node's builds, node-wide: BUILD_CONCURRENCY at once and
-# BUILDS_PER_MINUTE in any minute; a miss past either is `missing` for that
-# answer, and the requester asks elsewhere or later. A stored blob is served
-# whatever the budget. Per match set (the matched artist ids, `match_key`)
-# one subtree is built and at most VARIANTS_PER_MATCH spellings are kept;
-# any other spelling is cut from that stored subtree and served unkept, and
-# a zero-match is served signed and never kept.
+# BUILDS_PER_MINUTE in any minute, a quarter of those for any one requester;
+# a miss past either is `missing` for that answer, and the requester asks
+# elsewhere or later. A stored blob is served whatever the budget. Per match
+# set (the matched artist ids, `match_key`) one subtree is built and at most
+# VARIANTS_PER_MATCH spellings are kept; any other spelling is cut from that
+# stored subtree and served unkept, and a zero-match is served signed and
+# never kept.
 BUILD_CONCURRENCY = 2
 BUILDS_PER_MINUTE = 120
 VARIANTS_PER_MATCH = 4
+
+# The blobs one answer carries, in their base64 bytes: under the 128 MiB a
+# requester reads (desktop/api_client._PEER_BOUNDS) with room for one blob
+# at the largest a build makes, so an honest batch of prolific names is cut,
+# never refused whole. One name_key is answered once per request. What is cut
+# is `missing`, and the requester asks for it again.
+ANSWER_MAX_BYTES = 16 * 1024 * 1024
 
 # Oversized-artist guard: a prolific matched set (think "Mozart" namesakes) can
 # explode the release/track walk. Responses carry a `truncated` list so the
@@ -260,28 +268,40 @@ def match_key(artist_ids) -> str:
 
 class BuildBudget:
     """A dump node's slice builds, node-wide (both families keep one each):
-    at most `concurrency` at once and `per_minute` in any minute. take()
-    never waits — a build past the budget is a miss in that answer."""
+    at most `concurrency` at once and `per_minute` in any minute, of which
+    a quarter at most for any one requester — one address never spends the
+    minute for the rest. Only a build that found something counts against
+    the minute: a name or an id nothing matches costs a few index probes,
+    and the slice request windows bound those. admit() never waits — a
+    build past the budget is a miss in that answer."""
 
     def __init__(self, concurrency: int, per_minute: int):
         self._slots = threading.BoundedSemaphore(concurrency)
         self._lock = threading.Lock()
-        self._times: deque = deque()
+        self._times: deque = deque()         # (when, requester) of each counted build
+        self._by: dict = {}                  # requester -> its counted builds in the minute
         self._per_minute = per_minute
+        self._per_requester = max(1, per_minute // 4)
 
-    def take(self) -> bool:
+    def admit(self, requester: str) -> bool:
         now = time.monotonic()
         with self._lock:
-            while self._times and now - self._times[0] >= 60:
-                self._times.popleft()
-            if len(self._times) >= self._per_minute:
+            while self._times and now - self._times[0][0] >= 60:
+                _, who = self._times.popleft()
+                if self._by[who] == 1:
+                    del self._by[who]
+                else:
+                    self._by[who] -= 1
+            if (len(self._times) >= self._per_minute
+                    or self._by.get(requester, 0) >= self._per_requester):
                 return False
-            if not self._slots.acquire(blocking=False):
-                return False
-            self._times.append(now)
-            return True
+        return self._slots.acquire(blocking=False)
 
-    def release(self) -> None:
+    def done(self, requester: str, counted: bool) -> None:
+        if counted:
+            with self._lock:
+                self._times.append((time.monotonic(), requester))
+                self._by[requester] = self._by.get(requester, 0) + 1
         self._slots.release()
 
 
@@ -767,7 +787,7 @@ def pending_slice_names(conn, limit: int = 200) -> list:
               -- a name would come back `missing` every cycle
               AND length(btrim(p.name)) <= %(name_max)s
               AND p.name !~ '[[:cntrl:]]'
-              AND lower(btrim(p.name)) !~ '^\[.*\]$'
+              AND lower(btrim(p.name)) !~ '^\\[.*\\]$'
               AND lower(btrim(p.name)) <> 'various artists'
               AND NOT EXISTS (SELECT 1 FROM mb_slice_fetches f
                               WHERE f.name_key = lower(btrim(p.name)))
@@ -795,26 +815,6 @@ def pending_slice_names(conn, limit: int = 200) -> list:
 # body of the distribution (tens of KB) is what spreads.
 
 RESERVE_BLOB_MAX_GZ = 2 * 1024 * 1024
-
-
-def ensure_blob_table(conn) -> None:
-    """Idempotent DDL — mirrored in 001_initial.sql; called by both servers
-    at startup so a node updated in place gains the table without a manual
-    migration."""
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS mb_slice_blobs (
-                name_key      TEXT PRIMARY KEY,
-                dump_version  TEXT NOT NULL,
-                author_pubkey CHAR(64) NOT NULL,
-                sig           CHAR(128) NOT NULL,
-                blob_gz       BYTEA NOT NULL,
-                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-            )""")
-        cur.execute("ALTER TABLE mb_slice_blobs ADD COLUMN IF NOT EXISTS match_key TEXT")
-        cur.execute("""CREATE INDEX IF NOT EXISTS idx_mb_slice_blobs_match
-                         ON mb_slice_blobs (match_key, dump_version)
-                         WHERE match_key IS NOT NULL""")
 
 
 def cached_slice(conn, nk: str):
@@ -853,15 +853,15 @@ def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
 
 
 def _stored_match(conn, match: str, dump_version: str):
-    """(spellings kept for `match` at `dump_version`, one blob of them)."""
+    """(spellings kept for `match` at `dump_version`, one blob of them) —
+    one statement, so a sweep or an upsert between two reads cannot part
+    the count from the blob."""
     with conn.cursor() as cur:
-        cur.execute("""SELECT count(*), min(name_key) FROM mb_slice_blobs
-                        WHERE match_key = %s AND dump_version = %s""", (match, dump_version))
-        n, nk = cur.fetchone()
-        if not n:
-            return 0, None
-        cur.execute("SELECT blob_gz FROM mb_slice_blobs WHERE name_key = %s", (nk,))
-        return int(n), bytes(cur.fetchone()[0])
+        cur.execute("""SELECT count(*) OVER (), blob_gz FROM mb_slice_blobs
+                        WHERE match_key = %s AND dump_version = %s
+                        ORDER BY name_key LIMIT 1""", (match, dump_version))
+        row = cur.fetchone()
+    return (int(row[0]), bytes(row[1])) if row else (0, None)
 
 
 def _respelled(blob_gz: bytes, name: str, artist_ids: list) -> bytes:
@@ -874,12 +874,15 @@ def _respelled(blob_gz: bytes, name: str, artist_ids: list) -> bytes:
                       ensure_ascii=False).encode("utf-8")
 
 
-def _build(conn, name: str, version: str, sign_fn, author_pubkey: str) -> Optional[dict]:
-    """A dump node's signed slice of `name`, kept when it is the first few
-    spellings of its match set — None past the build budget, or for a
-    subtree larger than any requester takes."""
-    if not _builds.take():
+def _build(conn, name: str, version: str, sign_fn, author_pubkey: str,
+           requester: str, replace: bool) -> Optional[dict]:
+    """A dump node's signed slice of `name`, kept when it replaces this
+    name's older blob or is among the first spellings of its match set —
+    None past the build budget, or for a subtree larger than any requester
+    takes."""
+    if not _builds.admit(requester):
         return None
+    ids = []
     try:
         ids = match_artist_ids(conn, name)          # may raise DumpBusy
         match = match_key(ids) if ids else None
@@ -892,13 +895,13 @@ def _build(conn, name: str, version: str, sign_fn, author_pubkey: str) -> Option
             return None
         sig = sign_fn(receipt_message_for(blob)).hex()
         blob_gz = gzip.compress(blob)
-        if match and kept < VARIANTS_PER_MATCH:
+        if match and (kept < VARIANTS_PER_MATCH or replace):
             store_slice_blob(conn, name_key(name), version, author_pubkey, sig, blob_gz,
                              cap=False, match=match)
         return {"dump_version": version, "author_pubkey": author_pubkey,
                 "sig": sig, "blob_gz": blob_gz}
     finally:
-        _builds.release()
+        _builds.done(requester, counted=bool(ids))
 
 
 def count_slice_blobs(conn) -> int:
@@ -908,15 +911,17 @@ def count_slice_blobs(conn) -> int:
 
 
 def serve_slices(conn, names: list, sign_fn=None,
-                 author_pubkey: str = "") -> dict:
+                 author_pubkey: str = "", requester: str = "") -> dict:
     """The shared v3 server body for both surfaces.
 
     Per name: cached blob wins (dump node's cache and replica's inventory
     are the same table); a dump node computes+signs+caches on a miss
-    (`sign_fn` present AND a local dump exists); everything else lands in
-    `missing` — the requester takes misses to the next candidate. The
-    response entry carries the ORIGINAL author's pubkey+sig, which on a
-    replica is not this node's identity — and that is the point."""
+    (`sign_fn` present AND a local dump exists), within the build budget
+    `requester` (its address) has a share of; everything else lands in
+    `missing` — the requester takes misses to the next candidate, and so
+    are a name_key asked twice and what ANSWER_MAX_BYTES cuts. The response
+    entry carries the ORIGINAL author's pubkey+sig, which on a replica is
+    not this node's identity — and that is the point."""
     import base64
 
     if not isinstance(names, list) or not names \
@@ -927,24 +932,33 @@ def serve_slices(conn, names: list, sign_fn=None,
 
     version = (dump_version_file() or "") if (
         sign_fn is not None and local_dump_available(conn)) else None
-    slices, missing = {}, []
+    slices, missing, answered, size = {}, [], set(), 0
     for name in names:
-        if not servable_name(name):
+        nk = name_key(name)
+        if size >= ANSWER_MAX_BYTES or nk in answered or not servable_name(name):
             missing.append(name)
             continue
-        entry = cached_slice(conn, name_key(name))
+        answered.add(nk)
+        entry = cached_slice(conn, nk)
         if version is not None and (entry is None or entry["dump_version"] != version):
             # A miss, or a blob cut from an earlier dump: built from this
             # one when the budget allows — a stale blob still beats none.
-            entry = _build(conn, name, version, sign_fn, author_pubkey) or entry
+            entry = _build(conn, name, version, sign_fn, author_pubkey,
+                           requester, replace=entry is not None) or entry
         if entry is None:
             missing.append(name)
             continue
+        blob_b64 = base64.b64encode(entry["blob_gz"]).decode("ascii")
+        if slices and size + len(blob_b64) > ANSWER_MAX_BYTES:
+            missing.append(name)
+            size = ANSWER_MAX_BYTES
+            continue
+        size += len(blob_b64)
         slices[name] = {
             "dump_version": entry["dump_version"],
             "author_pubkey": entry["author_pubkey"],
             "sig": entry["sig"],
-            "blob_gz": base64.b64encode(entry["blob_gz"]).decode("ascii"),
+            "blob_gz": blob_b64,
         }
     return {"v": PROTOCOL_VERSION, "slices": slices, "missing": missing}
 

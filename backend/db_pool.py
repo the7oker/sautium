@@ -9,9 +9,10 @@ The peer lanes: the peer surface (p2p_app) runs its blocking work — SQL,
 parsing, crypto — on threads of its own, and every connection taken on one
 of them comes from a pool of its own. Two lanes, because a peer sends two
 kinds of traffic: bulk data (inventory, pulls, slices, carry) in
-`in_peer_lane`, and the small, waited-on exchanges of chat, relay and
-diagnostics in `in_chat_lane`. A flood of either queues behind its own
-threads; the other lane, the Web UI's loop and its pool keep serving.
+`in_peer_lane`, and the small, waited-on exchanges of chat, relay,
+diagnostics and /health's counts in `in_chat_lane`. A flood of either
+queues behind its own threads; the other lane, the Web UI's loop and its
+pool keep serving.
 
 And Listener, the one way a backend module hears NOTIFY: a thread of its
 own on a connection of its own, stopped at once.

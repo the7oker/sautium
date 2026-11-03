@@ -2,10 +2,12 @@
 mb_slice_queries.serve_slices, desktop/p2p/lb_slice_queries.serve_slices),
 on a real PostgreSQL built from the migrations — skipped without a cluster:
 one subtree per match set, whatever the spelling asked, and only a few
-spellings kept; a zero-match served signed and never kept; a name past the
-rules or the build budget is `missing`, with no build; a blob cut from an
-earlier dump is rebuilt; LB builds share the loader's lock among
-themselves."""
+spellings kept, each the blob its own build would make; a zero-match served
+signed and never kept; a name past the rules or the build budget is
+`missing`, with no build — only a build that found something counts, and a
+requester has a share of the minute; a name_key is answered once and an
+answer is bounded; a blob cut from an earlier dump is rebuilt and replaced;
+LB builds share the loader's lock among themselves."""
 
 import base64
 import os
@@ -23,6 +25,8 @@ if str(REPO) not in sys.path:
 
 from desktop.p2p import lb_slice_queries as lb  # noqa: E402
 from desktop.p2p import mb_slice_queries as q  # noqa: E402
+
+BUILD = q.get_slice_one
 
 ed25519 = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
 
@@ -99,8 +103,13 @@ def dump_node(monkeypatch):
     return builds
 
 
-def _serve(conn, names):
-    return q.serve_slices(conn, names, KEY.sign, PUB)
+def _serve(conn, names, requester=""):
+    return q.serve_slices(conn, names, KEY.sign, PUB, requester)
+
+
+def _blob(entry) -> bytes:
+    import gzip
+    return gzip.decompress(base64.b64decode(entry["blob_gz"]))
 
 
 def _kept(conn) -> list:
@@ -115,14 +124,25 @@ def _verifies(name, entry) -> bool:
 
 def test_one_subtree_per_match_set_and_a_few_spellings_kept(conn, dump_node, monkeypatch):
     monkeypatch.setattr(q, "VARIANTS_PER_MATCH", 2)
-    spellings = ["Sigur Rós", "sigur ros", "SIGUR  RÓS", "Sigur Ros", "sigur rós"]
+    spellings = ["Sigur Rós", "sigur ros", "SIGUR  RÓS"]              # three name_keys, one match set
     out = _serve(conn, spellings)
     assert out["missing"] == []
     assert all(_verifies(n, out["slices"][n]) for n in spellings)
-    assert dump_node == ["Sigur Rós"]                     # one build for the five
+    assert dump_node == ["Sigur Rós"]                     # one build for the three
     assert len(_kept(conn)) == 2
+    for name in spellings:                                # a spelling cut from the stored subtree
+        assert _blob(out["slices"][name]) == q.name_blob(name, BUILD(conn, name))
     again = _serve(conn, ["sigur ros"])                     # a kept spelling: no work
     assert _verifies("sigur ros", again["slices"]["sigur ros"]) and dump_node == ["Sigur Rós"]
+
+
+def test_a_name_key_is_answered_once_and_an_answer_is_bounded(conn, dump_node, monkeypatch):
+    out = _serve(conn, ["Sigur Rós", "sigur rós", "Simon & Garfunkel"])
+    assert sorted(out["slices"]) == ["Sigur Rós", "Simon & Garfunkel"]
+    assert out["missing"] == ["sigur rós"]                # one name_key, asked again later
+    monkeypatch.setattr(q, "ANSWER_MAX_BYTES", 1)
+    out = _serve(conn, ["Sigur Rós", "Simon & Garfunkel"])
+    assert list(out["slices"]) == ["Sigur Rós"] and out["missing"] == ["Simon & Garfunkel"]
 
 
 def test_a_zero_match_is_served_signed_and_never_kept(conn, dump_node):
@@ -140,10 +160,17 @@ def test_a_name_past_the_rules_is_missing_with_no_build(conn, dump_node, name):
 
 
 def test_a_build_past_the_budget_is_missing(conn, dump_node, monkeypatch):
-    monkeypatch.setattr(q, "_builds", q.BuildBudget(1, 2))
-    names = [f"Unknown Name {i}" for i in range(5)]
-    out = _serve(conn, names)
-    assert sorted(out["slices"]) == names[:2] and out["missing"] == names[2:]
+    monkeypatch.setattr(q, "_builds", q.BuildBudget(1, 4))          # one a minute for any one requester
+    nobody = [f"Unknown Name {i}" for i in range(5)]
+    out = _serve(conn, nobody + ["Sigur Rós", "Simon & Garfunkel"], "a")
+    assert sorted(out["slices"]) == sorted(nobody + ["Sigur Rós"])     # a zero-match costs no build
+    assert out["missing"] == ["Simon & Garfunkel"]                    # a's share is spent
+    assert list(_serve(conn, ["Simon & Garfunkel"], "b")["slices"]) == ["Simon & Garfunkel"]
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM mb_slice_blobs")
+    monkeypatch.setattr(q, "_builds", q.BuildBudget(1, 1))
+    assert list(_serve(conn, ["Sigur Rós"], "a")["slices"]) == ["Sigur Rós"]
+    assert _serve(conn, ["Simon & Garfunkel"], "b")["missing"] == ["Simon & Garfunkel"]   # the minute is spent
 
 
 def test_a_blob_cut_from_an_earlier_dump_is_rebuilt(conn, dump_node):
@@ -160,6 +187,23 @@ def test_a_blob_cut_from_an_earlier_dump_is_rebuilt(conn, dump_node):
     with conn.cursor() as cur:
         cur.execute("SELECT dump_version, match_key FROM mb_slice_blobs")
         assert cur.fetchall() == [(VERSION, q.match_key([1]))]
+
+
+def test_an_earlier_dumps_blob_is_replaced_when_its_match_set_is_full(conn, dump_node, monkeypatch):
+    import gzip
+    monkeypatch.setattr(q, "VARIANTS_PER_MATCH", 1)
+    _serve(conn, ["Sigur Rós"])                                          # the one spelling kept
+    one = BUILD(conn, "sigur ros")
+    one["dump_version"] = "20200101-000000"
+    blob = q.name_blob("sigur ros", one)
+    q.store_slice_blob(conn, q.name_key("sigur ros"), "20200101-000000", PUB,
+                       KEY.sign(q.receipt_message_for(blob)).hex(), gzip.compress(blob), cap=False)
+    dump_node.clear()
+    assert _serve(conn, ["sigur ros"])["slices"]["sigur ros"]["dump_version"] == VERSION
+    assert dump_node == []                                               # cut from the kept subtree
+    with conn.cursor() as cur:
+        cur.execute("SELECT dump_version FROM mb_slice_blobs WHERE name_key = 'sigur ros'")
+        assert cur.fetchall() == [(VERSION,)]
 
 
 def test_an_mbid_listenbrainz_does_not_know_is_served_and_never_kept(conn):

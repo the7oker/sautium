@@ -137,6 +137,14 @@ class _Exchange:
     def expired(self) -> bool:
         return time.monotonic() >= self.deadline
 
+    def within(self, timeout: float) -> float:
+        """`timeout` cut to what is left of the deadline — the connect
+        happens before the watchdog holds the socket."""
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("peer exchange past its deadline")
+        return min(timeout, left)
+
     def close(self) -> None:
         for dup, token in self._held:
             _WATCHDOG.disarm(token)
@@ -155,7 +163,8 @@ def _peer_opener(ssl_ctx, exchange: _Exchange) -> urllib.request.OpenerDirector:
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self._create_connection = (
-                    lambda *a, **kw: exchange.watched(socket.create_connection(*a, **kw)))
+                    lambda address, timeout, *rest: exchange.watched(
+                        socket.create_connection(address, exchange.within(timeout), *rest)))
         return _Connection
 
     class _HTTP(urllib.request.HTTPHandler):
@@ -256,7 +265,10 @@ def _read_json_body(resp, limit: Optional[int] = None,
         raise wire.WireError("reply past its deadline")
     if inflater:
         inflater.finish()
-    return wire.loads(b"".join(parts).decode("utf-8"))
+    reply = wire.loads(b"".join(parts).decode("utf-8"))
+    if not isinstance(reply, dict):
+        raise wire.WireError("reply is not an object")
+    return reply
 
 
 def _read_breaker(resp) -> socket.socket:

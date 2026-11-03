@@ -1,6 +1,8 @@
 """The wake-stream registry both relay surfaces share
 (desktop/p2p/wake_registry.py): one stream per NODE of a key, so two
-machines signed into one account stop taking each other's stream."""
+machines signed into one account stop taking each other's stream; a relay
+holds at most its max_streams, and the streams that leave give their place
+back."""
 
 import asyncio
 
@@ -119,3 +121,18 @@ def test_instance_tokens():
     assert not valid_instance("0123456789ABCDEF")
     assert not valid_instance("a" * 33)
     assert not valid_instance("../x")
+
+
+def test_a_relay_holds_at_most_its_streams_and_a_place_comes_back():
+    async def go():
+        reg = WakeRegistry(max_streams=2)
+        a = reg.register("aa" * 32, "", "198.51.100.1")
+        b = reg.register("bb" * 32, "", "198.51.100.2")
+        assert a and b and reg.register("cc" * 32, "", "198.51.100.3") is None
+        again = reg.register("aa" * 32, "", "198.51.100.1")      # the same node anew
+        assert again is not None and a.closed
+        assert reg.unregister("aa" * 32, "", a) is False           # superseded: nothing to give back
+        reg.unregister("bb" * 32, "", b)
+        assert reg.register("cc" * 32, "", "198.51.100.3") is not None
+        assert reg.register("dd" * 32, "", "198.51.100.4") is None
+    asyncio.run(go())

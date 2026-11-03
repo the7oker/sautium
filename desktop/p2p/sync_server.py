@@ -11,7 +11,6 @@ Runs in a background asyncio event loop thread alongside the DHT service.
 """
 
 import asyncio
-import gzip
 import hashlib
 import json
 import logging
@@ -606,15 +605,16 @@ class SyncServer:
     def _json_response(self, request: web.Request, data: dict,
                        status: int = 200,
                        headers: Optional[dict] = None) -> web.Response:
-        """Create a JSON response, with gzip if client accepts it."""
-        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        """A small JSON answer, made on the loop — a bulk one is _answer's."""
+        body, encoding = wire.render(data, "gzip" in request.headers.get("Accept-Encoding", ""))
+        return self._encoded(body, encoding, status, headers)
+
+    @staticmethod
+    def _encoded(body: bytes, encoding: Optional[str], status: int = 200,
+                 headers: Optional[dict] = None) -> web.Response:
         headers = {"Content-Type": "application/json", **(headers or {})}
-
-        accept_enc = request.headers.get("Accept-Encoding", "")
-        if "gzip" in accept_enc and len(body) > 1024:
-            body = gzip.compress(body)
-            headers["Content-Encoding"] = "gzip"
-
+        if encoding:
+            headers["Content-Encoding"] = encoding
         return web.Response(body=body, status=status, headers=headers)
 
     async def _run_query(self, func, *args):
@@ -626,6 +626,21 @@ class SyncServer:
                 return func(conn, *args)
 
         return await loop.run_in_executor(None, _with_conn)
+
+    async def _answer(self, request: web.Request, func, *args, wrap=None) -> web.Response:
+        """`func(conn, *args)`'s answer (`wrap` of it, when given), made in
+        the executor with the query (wire.render): a bulk answer is tens of
+        MB, and its JSON and gzip on the loop held every other peer's
+        request meanwhile."""
+        gzip_ok = "gzip" in request.headers.get("Accept-Encoding", "")
+
+        def _work():
+            with self._db() as conn:
+                result = func(conn, *args)
+            return wire.render(wrap(result) if wrap else result, gzip_ok)
+
+        body, encoding = await asyncio.get_event_loop().run_in_executor(None, _work)
+        return self._encoded(body, encoding)
 
     # -----------------------------------------------------------------------
     # Route handlers
@@ -728,10 +743,7 @@ class SyncServer:
             )
 
         try:
-            result = await self._run_query(
-                sync_queries.get_inventory, track_uuids
-            )
-            return self._json_response(request, result)
+            return await self._answer(request, sync_queries.get_inventory, track_uuids)
         except Exception as e:
             logger.error(f"Inventory query failed: {e}")
             return self._json_response(
@@ -747,10 +759,8 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
         try:
-            result = await self._run_query(
-                sync_queries.get_holdings, request.query.get("have") or None
-            )
-            return self._json_response(request, result)
+            return await self._answer(request, sync_queries.get_holdings,
+                                      request.query.get("have") or None)
         except Exception as e:
             logger.error(f"Holdings query failed: {e}")
             return self._json_response(
@@ -788,8 +798,7 @@ class SyncServer:
             )
 
         try:
-            result = await self._run_query(handler, uuids)
-            return self._json_response(request, result)
+            return await self._answer(request, handler, uuids)
         except Exception as e:
             logger.error(f"Pull {category} failed: {e}")
             return self._json_response(
@@ -838,9 +847,8 @@ class SyncServer:
                 request, {"error": "recordings must be a list"}, status=400)
 
         budget = self._carry_budget()
-        wanted = await self._run_query(
-            sync_queries.wanted_tracks, recordings, budget)
-        return self._json_response(request, {"wanted": wanted})
+        return await self._answer(request, sync_queries.wanted_tracks, recordings, budget,
+                                  wrap=lambda wanted: {"wanted": wanted})
 
     async def handle_carry_push(self, request: web.Request) -> web.Response:
         """POST /api/sync/push/{category} — accept a pushed payload.
@@ -949,9 +957,8 @@ class SyncServer:
                 logger.warning(f"MB slice signing unavailable: {e}")
 
         try:
-            result = await self._run_query(
-                mb_slice_queries.serve_slices, names, sign_fn, author)
-            return self._json_response(request, result)
+            return await self._answer(request, mb_slice_queries.serve_slices,
+                                      names, sign_fn, author, request.remote or "")
         except ValueError as e:
             return self._json_response(request, {"error": str(e)}, status=400)
         except mb_slice_queries.DumpBusy:
@@ -994,9 +1001,8 @@ class SyncServer:
                 logger.warning(f"LB slice signing unavailable: {e}")
 
         try:
-            result = await self._run_query(
-                lb_slice_queries.serve_slices, mbids, min_version, sign_fn, author)
-            return self._json_response(request, result)
+            return await self._answer(request, lb_slice_queries.serve_slices,
+                                      mbids, min_version, sign_fn, author, request.remote or "")
         except ValueError as e:
             return self._json_response(request, {"error": str(e)}, status=400)
         except lb_slice_queries.DumpBusy:
@@ -1347,11 +1353,12 @@ class SyncServer:
         The requester sends their public key + Ed25519 signature to prove
         key ownership (prevents metadata leakage to third parties).
 
-        Request:  {public_key_hex, signature, ts, nonce, since (optional ISO)}
+        Request:  {public_key_hex, signature, ts, nonce, after (optional cursor)}
           signature = Ed25519_sign(chat_wire.history_payload(ts, nonce, our key))
-        Response: {messages: [{message_uuid, direction, encrypted, timestamp}]},
-          each `encrypted` an envelope (chat_wire.envelope), at most
-          chat_wire.HISTORY_EXPORT_MAX of them from `since`.
+        Response: {messages: [{message_uuid, direction, encrypted, timestamp}],
+                   next: cursor | null, more: bool} — one page
+          (chat_wire.export_page), each `encrypted` an envelope
+          (chat_wire.envelope); the requester asks after `next` while `more`.
 
         The timestamp bound (±TS_WINDOW) replaced the unbound nonce scheme —
         a captured signature used to replay forever. Hard cutover on both
@@ -1366,7 +1373,6 @@ class SyncServer:
         try:
             body = await request.json()
             requester_pubkey = body.get("public_key_hex", "")
-            since_iso = body.get("since")
             signature_hex = body.get("signature", "")
             nonce = body.get("nonce", "")
             ts = body.get("ts")
@@ -1416,54 +1422,25 @@ class SyncServer:
                 request, {"error": "not permitted"}, status=403
             )
 
-        # Parse optional since timestamp
-        from datetime import datetime
-        since = None
-        if since_iso:
-            try:
-                since = datetime.fromisoformat(since_iso)
-            except (ValueError, TypeError):
-                pass
+        gzip_ok = "gzip" in request.headers.get("Accept-Encoding", "")
 
-        # Get messages for this friend from our DB
-        messages = self._chat_service.get_history_for_export(
-            friend["id"], since=since, limit=chat_wire.HISTORY_EXPORT_MAX
-        )
+        def _page():
+            # The pool's own connection: the chat service's one belongs to
+            # the loop's thread.
+            with self._db() as conn:
+                rows = chat_wire.export_rows(conn, friend["id"],
+                                             chat_wire.history_cursor(body.get("after")))
+                page, out_ids, after, more = chat_wire.export_page(
+                    rows, lambda text, message_uuid, ts_iso: self._chat_service.encrypt_envelope(
+                        text, message_uuid, ts_iso, requester_pubkey))
+                if out_ids:
+                    chat_wire.mark_exported(conn, friend["id"], out_ids)
+            return len(page), wire.render({"messages": page, "next": after, "more": more},
+                                          gzip_ok)
 
-        # Encrypt each message's content with requester's public key
-        result_messages = []
-        max_out_id = 0
-        for msg in messages:
-            if msg["direction"] == "out":
-                max_out_id = max(max_out_id, msg["id"])
-            if not msg["message_uuid"]:
-                continue                     # a row from before uuids: nothing can bind it
-            msg_ts = msg["timestamp"]
-            ts_str = (
-                msg_ts.isoformat() if hasattr(msg_ts, "isoformat")
-                else str(msg_ts)
-            )
-            if "+" not in ts_str and not ts_str.endswith("Z"):
-                ts_str += "+00:00"
-            uuid_str = str(msg["message_uuid"])
-            result_messages.append({
-                "message_uuid": uuid_str,
-                "direction": msg["direction"],
-                "encrypted": self._chat_service.encrypt_envelope(
-                    msg["content"], uuid_str, ts_str, requester_pubkey),
-                "timestamp": ts_str,
-            })
-        if max_out_id:
-            # The requester proved key ownership and has the export now —
-            # export IS delivery.
-            self._chat_service.mark_exported_delivered(friend["id"],
-                                                       max_out_id)
-
-        logger.info(
-            f"History export for {friend.get('username', '?')}: "
-            f"{len(result_messages)} messages"
-        )
-        return self._json_response(request, {"messages": result_messages})
+        count, (payload, encoding) = await asyncio.get_event_loop().run_in_executor(None, _page)
+        logger.info(f"History export for {friend.get('username', '?')}: {count} messages")
+        return self._encoded(payload, encoding)
 
     async def handle_chat_key_rotation(
         self, request: web.Request
@@ -1484,7 +1461,7 @@ class SyncServer:
 
         import base64
         try:
-            body = await request.json()
+            body = wire.loads(await request.read())
             rotation_msg = base64.b64decode(body.get("rotation_message", ""))
             old_signature = bytes.fromhex(body.get("old_signature", ""))
             new_signature = bytes.fromhex(body.get("new_signature", ""))
@@ -2104,19 +2081,16 @@ class SyncServer:
 
     async def start(self):
         """Build aiohttp app, bind to port, start serving."""
-        # Replica inventory table (idempotent DDL) — a node updated in
-        # place gains it without a manual migration.
         try:
             def _prep():
                 with self._db() as conn:
-                    mb_slice_queries.ensure_blob_table(conn)
                     from desktop.p2p import gate_pool, identity_registry
                     identity_registry.ensure_schema(conn)
                     contact_log.ensure_schema(conn)
                     gate_pool.ensure_schema(conn)
             await asyncio.get_event_loop().run_in_executor(None, _prep)
         except Exception as e:
-            logger.warning(f"slice blob table init failed: {e}")
+            logger.warning(f"peer schema init failed: {e}")
         self._contact_log.start()
         try:
             await asyncio.get_event_loop().run_in_executor(None, self._price().calibrate_w)

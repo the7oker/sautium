@@ -459,7 +459,9 @@ class LbSliceCycle:
                 group = remaining[lane]
                 for i in range(0, len(group), batch_size):
                     batch = group[i:i + batch_size]
-                    if limited:
+                    # A session that is over has not failed: what is left
+                    # stays pending for the next source or cycle.
+                    if limited or time.monotonic() >= api.session_deadline:
                         leftovers[lane].extend(batch)
                         continue
                     result = await self._exchange(api, node, source_addr, batch, min_version)
@@ -471,6 +473,9 @@ class LbSliceCycle:
                         logger.info(f"LB slice: {node[:16]} rate-limited — re-asking in {wait}s")
                         waited = True
                         await asyncio.sleep(wait)
+                        if time.monotonic() >= api.session_deadline:
+                            leftovers[lane].extend(batch)
+                            continue
                         result = await self._exchange(api, node, source_addr, batch, min_version)
                     if "error" in result:
                         leftovers[lane].extend(batch)

@@ -33,10 +33,9 @@ from collections import defaultdict
 from typing import Optional
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
-from db_pool import get_conn, in_peer_lane
+from db_pool import get_conn, in_chat_lane, in_peer_lane
 from routers.sync import (
     SYNC_CAPABILITIES, carry_queries, lb_dump_version, lb_inventory, lb_router,
     mb_dump_version, mb_router, node_pubkey_hex, router, sharing_enabled,
@@ -70,7 +69,9 @@ app = FastAPI(
     docs_url=None, redoc_url=None, openapi_url=None,
 )
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# No compression middleware: a bulk answer is made whole — JSON and gzip —
+# on the peer lane with its work (routers/sync._answer, wire.render), and
+# the rest are a few hundred bytes.
 
 
 class PeerAuthMiddleware:
@@ -394,25 +395,40 @@ class _CIHeaders(dict):
 
 # What a request body may be, by route prefix — the first match wins. Every
 # peer request is a few fields, a list of at most 10 000 ids, or a sealed
-# payload; the largest is a support bundle, and only the master takes one
-# (routers/peer_diag). Mirrors the launcher's 1 MiB client_max_size.
+# payload — a carry push is packed under a MiB (desktop/p2p/sync_walk
+# .PUSH_MAX_BYTES); the largest is a support bundle, and only the master
+# takes one (routers/peer_diag). Mirrors the launcher's 1 MiB
+# client_max_size.
 BODY_CAPS = (
     ("/api/diag/bundle", 32 * 1024 * 1024 + 4096),
-    ("/api/sync/push/", 16 * 1024 * 1024),
     ("/api/", 1024 * 1024),
 )
 BODY_CAP_DEFAULT = 64 * 1024
-# A body arrives whole within this, or the request ends (408).
-BODY_DEADLINE_S = 60
-# Bodies read at once — what the caps can cost together. Larger bodies
-# take their own few slots, so a flood of them never holds the small ones.
-BODY_SLOTS = 256
-BODY_SLOTS_LARGE = 4
+# A body keeps arriving — never a pause of BODY_IDLE_S — and is whole within
+# BODY_DEADLINE_S and a second for every BODY_RATE bytes of its length, or
+# the request ends (408).
+BODY_IDLE_S = 10
+BODY_DEADLINE_S = 30
+BODY_RATE = 32 * 1024
+# Bodies read at once, by kind: (in all, from any one address). The chat
+# lane's, the bulk lane's and the large ones each have their own, so a flood
+# of one never holds another's, and one address holds a few of a kind at
+# most. A slot is taken at the body's first read and kept until the answer:
+# a request refused before its body — a stranger's support bundle — holds
+# none, and a lane's backlog holds its own kind's slots only.
+BODY_SLOTS = {"chat": (128, 8), "bulk": (128, 8), "large": (4, 1)}
 BODY_SLOT_WAIT_S = 10
+CHAT_PREFIXES = ("/api/chat/", "/api/relay/", "/api/diag/")
 
 
 def body_cap(path: str) -> int:
     return next((cap for prefix, cap in BODY_CAPS if path.startswith(prefix)), BODY_CAP_DEFAULT)
+
+
+def body_kind(path: str) -> str:
+    if body_cap(path) > 1024 * 1024:
+        return "large"
+    return "chat" if path.startswith(CHAT_PREFIXES) else "bulk"
 
 
 class _BodyRefused(Exception):
@@ -420,22 +436,54 @@ class _BodyRefused(Exception):
         self.status, self.error = status, error
 
 
+class _Slots:
+    """The bodies of one kind read at once, in all and per address — taken
+    and given back on the serving loop."""
+
+    def __init__(self, total: int, per_address: int):
+        self._free = asyncio.Semaphore(total)
+        self._per_address = per_address
+        self._by: dict[str, int] = {}
+
+    async def take(self, addr: str) -> bool:
+        held = self._by.get(addr, 0)
+        if held >= self._per_address:
+            return False
+        self._by[addr] = held + 1             # counted while it waits, too
+        try:
+            await asyncio.wait_for(self._free.acquire(), BODY_SLOT_WAIT_S)
+        except asyncio.TimeoutError:
+            self._leave(addr)
+            return False
+        return True
+
+    def give(self, addr: str) -> None:
+        self._free.release()
+        self._leave(addr)
+
+    def _leave(self, addr: str) -> None:
+        if self._by[addr] == 1:
+            del self._by[addr]
+        else:
+            self._by[addr] -= 1
+
+
 class PeerBodyGuard:
-    """The body cap, before anything reads a body: a declared length over
+    """The body bounds, before anything reads a body: a declared length over
     the route's cap is refused unread, a body that grows past it is refused
-    at the chunk that crosses it, and one that has not arrived whole within
-    BODY_DEADLINE_S is refused too. A request with a body takes one of the
-    slots first, so the bodies held at once are bounded together. Sits
-    inside the per-address limiter and outside PeerAuthMiddleware, which
-    buffers identity-bound bodies to check their signatures."""
+    at the chunk that crosses it, one that pauses or arrives too slowly
+    (BODY_IDLE_S, BODY_DEADLINE_S, BODY_RATE) is refused too, and reading
+    one takes a slot of its kind (BODY_SLOTS). Sits inside the per-address
+    limiter and outside PeerAuthMiddleware, which buffers identity-bound
+    bodies to check their signatures."""
 
     def __init__(self, app):
         self.app = app
         self._slots = None
 
-    def _semaphores(self):
+    def _kinds(self) -> dict:
         if self._slots is None:          # born on the serving loop
-            self._slots = (asyncio.Semaphore(BODY_SLOTS), asyncio.Semaphore(BODY_SLOTS_LARGE))
+            self._slots = {kind: _Slots(*n) for kind, n in BODY_SLOTS.items()}
         return self._slots
 
     async def __call__(self, scope, receive, send):
@@ -456,19 +504,20 @@ class PeerBodyGuard:
         if declared_n == 0:
             return await self.app(scope, receive, send)
 
-        slot = self._semaphores()[1 if cap > 1024 * 1024 else 0]
-        try:
-            await asyncio.wait_for(slot.acquire(), BODY_SLOT_WAIT_S)
-        except asyncio.TimeoutError:
-            return await _refuse(send, 503, "busy", retry_after=5)
-
-        deadline = time.monotonic() + BODY_DEADLINE_S
-        state = {"read": 0, "done": False, "started": False}
+        slots = self._kinds()[body_kind(scope["path"])]
+        addr = (scope.get("client") or ("",))[0]
+        length = declared_n if declared_n is not None else cap
+        state = {"read": 0, "done": False, "started": False, "slot": False, "deadline": 0.0}
 
         async def bounded_receive():
             if state["done"]:
                 return await receive()          # the body is whole: disconnect only
-            left = deadline - time.monotonic()
+            if not state["slot"]:
+                if not await slots.take(addr):
+                    raise _BodyRefused(503, "busy")
+                state["slot"] = True
+                state["deadline"] = time.monotonic() + BODY_DEADLINE_S + length / BODY_RATE
+            left = min(BODY_IDLE_S, state["deadline"] - time.monotonic())
             try:
                 message = await asyncio.wait_for(receive(), max(left, 0.001))
             except asyncio.TimeoutError:
@@ -489,9 +538,11 @@ class PeerBodyGuard:
             await self.app(scope, bounded_receive, tracking_send)
         except _BodyRefused as refused:
             if not state["started"]:
-                await _refuse(send, refused.status, refused.error)
+                await _refuse(send, refused.status, refused.error,
+                              retry_after=5 if refused.status == 503 else None)
         finally:
-            slot.release()
+            if state["slot"]:
+                slots.give(addr)
 
 
 async def _refuse(send, status: int, error: str, retry_after: Optional[int] = None) -> None:
@@ -581,13 +632,13 @@ async def rate_limit(request: Request, call_next):
 
 
 HEALTH_TTL_S = 60.0
-_health_counts_at = {"at": float("-inf"), "value": None}
+_health_counts = {"at": float("-inf"), "value": None, "refresh": None}
 
 
 def _dump_and_slice_counts() -> dict:
     """What /health says about the dumps and the slice inventories — five
     queries, so read at most once a HEALTH_TTL_S (every requester probes
-    before it asks) and on the peer lane, like the launcher's."""
+    before it asks), like the launcher's."""
     from routers.sync import mb_slice_queries
     mb_slices = 0
     if mb_slice_queries is not None:
@@ -602,6 +653,29 @@ def _dump_and_slice_counts() -> dict:
             "lb_slices_version": lb_slices_version}
 
 
+async def _refresh_counts() -> None:
+    try:
+        _health_counts["value"] = await in_chat_lane(_dump_and_slice_counts)
+    except Exception as e:
+        logger.warning(f"/health counts unreadable: {e}")   # asked again a HEALTH_TTL_S on
+    finally:
+        _health_counts["at"] = time.monotonic()
+        _health_counts["refresh"] = None
+
+
+async def _counts() -> dict:
+    """The counts /health carries: one refresh at a time, on the chat lane —
+    the bulk lane can be a peer's pull busy for longer than a walker waits
+    for /health — and the last value answers while it runs. Only the first
+    probe after a start waits for one."""
+    if (time.monotonic() - _health_counts["at"] >= HEALTH_TTL_S
+            and _health_counts["refresh"] is None):
+        _health_counts["refresh"] = asyncio.ensure_future(_refresh_counts())
+    if _health_counts["value"] is None and _health_counts["refresh"] is not None:
+        await asyncio.shield(_health_counts["refresh"])
+    return _health_counts["value"] or {}
+
+
 @app.get("/health")
 async def health() -> dict:
     """Peer-facing identity. Same contract as the launcher's sync server —
@@ -612,9 +686,7 @@ async def health() -> dict:
     in its LAN beacon only while it is on (desktop/p2p/lan_discovery.py)."""
     from config import settings
     from p2p_identity import served_certificate
-    now = time.monotonic()
-    if now - _health_counts_at["at"] >= HEALTH_TTL_S:
-        _health_counts_at.update(at=now, value=await in_peer_lane(_dump_and_slice_counts))
+    counts = await _counts()
     node_id = node_pubkey_hex()
     cert = served_certificate(settings)
     return {
@@ -623,7 +695,7 @@ async def health() -> dict:
         "node_id": node_id,
         "sharing": sharing_enabled(),
         "birth_cert": cert if cert is not None and node_id and cert["pubkey"] == node_id else None,
-        **_health_counts_at["value"],
+        **counts,
         "capabilities": SYNC_CAPABILITIES,
         # Version + counts of the holdings filter (None until built): the
         # asker prices fetching it against sending its own gaps.

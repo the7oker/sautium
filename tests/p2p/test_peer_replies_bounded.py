@@ -1,9 +1,10 @@
 """What a peer answers is bounded in bytes, shape and time on the client
 side (desktop/api_client.py, desktop/p2p/wire.py, desktop/p2p/bloom.py, the
 slice verifiers, the walk): a reply past its bound is refused, a gzip body
-is inflated against the same bound, an exchange past its deadline ends —
-headers included —, a redirect is not followed, and a peer's whole session
-and the walk's run end by their deadlines.
+is inflated against the same bound, a reply that is no object is refused, an
+exchange past its deadline ends — its connect, TLS handshake and headers
+included —, a redirect is not followed, and a peer's whole session and the
+walk's run end by their deadlines.
 
 A real HTTP server on loopback plays the peer; the client is a peer client
 (a PeerIdentity), so every exchange takes the bounded path."""
@@ -124,15 +125,56 @@ def test_a_slow_reply_ends_at_the_exchange_deadline(peer, monkeypatch):
 def test_slow_headers_end_at_the_exchange_deadline(peer, monkeypatch):
     monkeypatch.setitem(api_client._PEER_BOUNDS, "gate.quote", (256 * 1024, 2))
 
-    def drip_headers(h):
-        h.wfile.write(b"HTTP/1.1 200 OK\r\n")
+    def drip_header_line(h):
+        # One line that never ends: nothing but the deadline stops reading it.
+        h.wfile.write(b"HTTP/1.1 200 OK\r\nX-Pad: ")
         while not h.server.gone.is_set():
-            h.wfile.write(b"X-Pad: a\r\n")
+            h.wfile.write(b"a")
             h.wfile.flush()
             time.sleep(0.2)
 
-    peer.answers["/api/gate/quote"] = drip_headers
+    peer.answers["/api/gate/quote"] = drip_header_line
+    started = time.monotonic()
     assert _within(15, lambda: _client(peer)._get_json("/api/gate/quote")) is None
+    assert time.monotonic() - started < 6
+
+
+def test_a_reply_that_is_no_object_is_refused(peer):
+    peer.answers["/health"] = lambda h: _send(h, b"[1]")
+    peer.answers["/api/gate/quote"] = lambda h: _send(h, b'"tasks"')
+    client = _client(peer)
+    assert client.get_health() is None                 # no AttributeError on the way
+    assert client._get_json("/api/gate/quote") is None
+
+
+def test_the_connect_is_inside_the_exchange_deadline(peer, monkeypatch):
+    import socket
+    asked = []
+    real = socket.create_connection
+    monkeypatch.setattr(socket, "create_connection",
+                        lambda address, timeout, *rest: asked.append(timeout) or
+                        real(address, timeout, *rest))
+    monkeypatch.setitem(api_client._PEER_BOUNDS, "gate.quote", (256 * 1024, 2))
+    peer.answers["/api/gate/quote"] = lambda h: _send(h, b"{}")
+    _client(peer)._get_json("/api/gate/quote", timeout=600)
+    assert asked and asked[-1] <= 2                    # the quote's connect: its 2 s, not the 600
+
+
+def test_a_tls_handshake_that_never_ends_ends_at_the_exchange_deadline(monkeypatch):
+    import socket
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)                                 # accepts, never answers the ClientHello
+    monkeypatch.setitem(api_client._PEER_BOUNDS, "gate.quote", (256 * 1024, 2))
+    ident = peer_auth.PeerIdentity(pubkey="ab" * 32, sign=lambda m: b"\0" * 64,
+                                   cert_bundle=lambda: None)
+    client = BackendAPIClient(f"https://127.0.0.1:{listener.getsockname()[1]}", peer=ident)
+    started = time.monotonic()
+    try:
+        assert _within(15, lambda: client._get_json("/api/gate/quote", timeout=600)) is None
+    finally:
+        listener.close()
+    assert time.monotonic() - started < 6
 
 
 def test_a_redirect_is_not_followed(peer):
@@ -283,3 +325,39 @@ def test_each_peer_session_ends_by_its_deadline_and_by_the_runs(monkeypatch):
     asyncio.run(walk._sync_from_peer("x", ([], []), lambda m: None, None, peer_api=api))
     assert seen[0] is not None and seen[0] <= time.monotonic() + 5
     assert seen[1] <= time.monotonic() + sync_walk.PEER_SESSION_S
+
+
+def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
+    """Its session ended, not failed: no request is started past it, the
+    names stay pending, and the source is not dropped as one that failed."""
+    from desktop.p2p import mb_slice_cycle as cycle_mod
+    asked, dropped, published = [], [], []
+    cycle = cycle_mod.MbSliceCycle.__new__(cycle_mod.MbSliceCycle)
+    cycle.db_dsn, cycle.config, cycle._status_cleared = "postgresql://unused", {}, False
+    cycle._sources = SimpleNamespace(drop=dropped.append)
+
+    async def publish(**state):
+        published.append(state)
+
+    async def sources():
+        return [(SimpleNamespace(session_deadline=None, base_url="https://198.51.100.9:1"), "node")]
+
+    class _Client:
+        def __init__(self, api, db_dsn, source_node):
+            pass
+
+        def run(self, batch):
+            asked.append(batch)
+            return {"error": "no response"}
+
+        def close(self):
+            pass
+
+    cycle._publish, cycle.find_sources = publish, sources
+    monkeypatch.setattr(cycle_mod, "local_dump_available", lambda dsn: False)
+    monkeypatch.setattr(cycle_mod, "pending_names", lambda dsn, n: [("A", 1), ("B", 1)])
+    monkeypatch.setattr(cycle_mod, "PEER_SESSION_S", 0)
+    monkeypatch.setattr(cycle_mod, "MBSliceClient", _Client)
+    asyncio.run(cycle.run())
+    assert asked == [] and dropped == []
+    assert published[-1]["unserved"] == 2

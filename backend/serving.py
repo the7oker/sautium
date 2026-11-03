@@ -25,9 +25,11 @@ import json
 import logging
 import os
 import signal
+import ssl
 import sys
 import threading
 import weakref
+from typing import Optional
 
 import anyio
 import uvicorn
@@ -203,41 +205,18 @@ def _end_streams() -> None:
 
 
 class PeerSurfaceConfig(uvicorn.Config):
-    """The peer surface's server settings (main._serve_p2p): no access line
-    — a peer's address and the text of a search it sent are not this node's
-    log, and the contact log keeps what the defences need, for 30 days
-    (desktop/p2p/contact_log.py) — and no logging setup of its own.
+    """The peer surface's server settings (main._serve_p2p), served by the
+    peer protocol (`http=peer_protocol(...)`, which writes no access line
+    and takes no WebSocket): no logging setup of its own.
 
     The access logger is one per process, shared with the Web UI's server,
     and uvicorn's protocol writes to it whenever it has a handler; its own
     `access_log=False` works by emptying that logger, which would silence the
-    Web UI too. So this server's protocol is told by itself, and the
-    process's logging stays as its start made it (config.LOGGING_CONFIG).
-
-    No WebSocket either: the surface has no WebSocket route, and uvicorn's
-    WebSocket protocol logs each handshake with the asker's address and the
-    path it asked for, query and all — an upgrade is answered as the plain
-    request it also is."""
+    Web UI too. So the peer protocol is told by itself, and the process's
+    logging stays as its start made it (config.LOGGING_CONFIG)."""
 
     def configure_logging(self) -> None:
         pass
-
-    def load(self) -> None:
-        self.ws = "none"
-        super().load()
-        protocol = self.http_protocol_class
-
-        class WithoutAccessLine(protocol):
-            def __init__(self, *args, **kwargs) -> None:
-                super().__init__(*args, **kwargs)
-                self.access_log = False
-
-            def _unsupported_upgrade_warning(self) -> None:
-                # Anyone may ask this surface for an upgrade; answered as a
-                # plain request, it warns of nothing here
-                self.logger.debug("Unsupported upgrade request.")
-
-        self.http_protocol_class = WithoutAccessLine
 
 
 class Server(uvicorn.Server):
@@ -266,28 +245,107 @@ class Server(uvicorn.Server):
         await super().shutdown(sockets=sockets)
 
 
-def header_deadline(base: type, seconds: float) -> type:
-    """uvicorn's HTTP protocol class `base` with a deadline on every
-    request's head: a connection whose request line and headers are not
-    whole within `seconds` of its opening — or of its first byte after the
-    previous response — is closed. uvicorn has none of its own, so a
-    connection that sent nothing, or a byte at a time, held its place (and
-    a place under limit_concurrency) for good. A request in progress, a
-    long event stream included, is never cut: the clock runs only while no
-    request is."""
+class _Census:
+    """The connections a surface holds, in all and from each address — on
+    the loop, so no lock."""
 
-    class HeadDeadline(base):
+    def __init__(self, total: int, per_address: Optional[int]):
+        self.total, self.per_address = total, per_address
+        self.open = 0
+        self.by: dict[str, int] = {}
+
+    def admit(self, addr: str) -> bool:
+        if self.open >= self.total or (
+                self.per_address is not None and self.by.get(addr, 0) >= self.per_address):
+            return False
+        self.open += 1
+        self.by[addr] = self.by.get(addr, 0) + 1
+        return True
+
+    def leave(self, addr: str) -> None:
+        self.open -= 1
+        if self.by[addr] == 1:
+            del self.by[addr]
+        else:
+            self.by[addr] -= 1
+
+
+def _host(transport) -> str:
+    peer = transport.get_extra_info("peername")
+    return str(peer[0]) if peer else ""
+
+
+def peer_protocol(base: type, *, head_s: float, head_max: int, stall_s: float,
+                  max_connections: int, per_address: Optional[int],
+                  tls: Optional[ssl.SSLContext] = None):
+    """uvicorn's HTTP protocol class `base`, bounded for a surface strangers
+    reach — what uvicorn takes as `http=`. uvicorn bounds none of this:
+
+    - a request head not whole within `head_s` of the connection's opening
+      (or of its first byte after the previous response), or over
+      `head_max` bytes, closes the connection — httptools has no head size
+      of its own;
+    - a peer that reads nothing of an answer for `stall_s` — the write
+      buffer stays over its high-water mark — has its connection aborted,
+      and the answer held for it is freed. Under TLS the TLS layer takes an
+      answer whole at once, so the bound is the connection's close: the
+      keep-alive, then at most `stall_s` to deliver what is left;
+    - at most `max_connections` at once and `per_address` from any one
+      address (None behind a trusted front, where every connection is the
+      front's); one past either is closed before a byte is read;
+    - with `tls`, the handshake is made here (loop.start_tls) within
+      `head_s`: uvicorn gives asyncio no handshake timeout, whose own is
+      60 s, and a connection in its handshake was one no limit counted;
+    - no access line — a peer's address and the text of a search it sent
+      are not this node's log; the contact log keeps what the defences
+      need, for 30 days (desktop/p2p/contact_log.py) — and no WebSocket:
+      the surface has no WebSocket route, and uvicorn's WebSocket protocol
+      logs each handshake with the asker's address and the path it asked
+      for, query and all. An upgrade is answered as the plain request it
+      also is.
+
+    A request in progress, a long event stream included, is never cut by
+    the head clock."""
+    census = _Census(max_connections, per_address)
+
+    class Bounded(base):
+        _addr: Optional[str] = None       # its census entry, once admitted
+        # What a TLS connection delivers before start_tls returns it: the
+        # request bytes that rode the handshake's last flight, or its loss.
+        _early: Optional[list] = None
+        _lost = False
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.access_log = False
+            self.ws_protocol_class = None
+
+        def _unsupported_upgrade_warning(self) -> None:
+            # Anyone may ask this surface for an upgrade; answered as a
+            # plain request, it warns of nothing here
+            self.logger.debug("Unsupported upgrade request.")
+
         def connection_made(self, transport):
-            self._head_timer = None
+            self._head_timer = self._stall_timer = None
+            self._head_bytes = 0
             super().connection_made(transport)
+            if self._addr is None:
+                addr = _host(transport)
+                if not census.admit(addr):
+                    transport.abort()
+                    return
+                self._addr = addr
             self._arm_head()
+            early, self._early = self._early, None
+            for data in early or ():
+                self.data_received(data)
 
         def _between_requests(self) -> bool:
             return self.cycle is None or self.cycle.response_complete
 
         def _arm_head(self) -> None:
             if self._head_timer is None:
-                self._head_timer = self.loop.call_later(seconds, self._head_expired)
+                self._head_timer = self.loop.call_later(head_s, self._head_expired)
 
         def _disarm_head(self) -> None:
             if self._head_timer is not None:
@@ -297,21 +355,129 @@ def header_deadline(base: type, seconds: float) -> type:
         def _head_expired(self) -> None:
             self._head_timer = None
             if self._between_requests() and not self.transport.is_closing():
-                logger.info("connection closed: no request head within %s s", seconds)
+                logger.info("connection closed: no request head within %s s", head_s)
                 self.transport.close()
 
         def data_received(self, data: bytes) -> None:
+            if self.transport is None:
+                self._early = (self._early or []) + [data]
+                return
             if self._between_requests():
                 self._arm_head()
+                self._head_bytes += len(data)
             super().data_received(data)
             if not self._between_requests():
                 self._disarm_head()
+                self._head_bytes = 0
+            elif self._head_bytes > head_max and not self.transport.is_closing():
+                logger.info("connection closed: request head over %d bytes", head_max)
+                self.transport.close()
+
+        def pause_writing(self) -> None:
+            super().pause_writing()
+            if self._stall_timer is None:
+                self._stall_timer = self.loop.call_later(stall_s, self._stalled)
+
+        def resume_writing(self) -> None:
+            super().resume_writing()
+            if self._stall_timer is not None:
+                self._stall_timer.cancel()
+                self._stall_timer = None
+
+        def _stalled(self) -> None:
+            self._stall_timer = None
+            logger.info("connection aborted: its peer read nothing for %s s", stall_s)
+            self.transport.abort()
 
         def connection_lost(self, exc) -> None:
+            if self.transport is None:
+                self._lost = True
+                return
             self._disarm_head()
+            if self._stall_timer is not None:
+                self._stall_timer.cancel()
+                self._stall_timer = None
+            if self._addr is not None:
+                census.leave(self._addr)
+                self._addr = None
             super().connection_lost(exc)
 
-    return HeadDeadline
+    if tls is None:
+        Bounded.census = census
+        return Bounded
+
+    def factory(**kwargs) -> asyncio.Protocol:
+        return _TLSAcceptor(lambda: Bounded(**kwargs), tls, head_s, stall_s, census)
+
+    factory.census = census
+    return factory
+
+
+def _feed(protocol, data: bytes) -> None:
+    """`data` into a buffered protocol — the TLS one is — as its transport
+    would hand it over."""
+    view = memoryview(data)
+    while view:
+        buf = protocol.get_buffer(len(view))
+        n = min(len(buf), len(view))
+        buf[:n] = view[:n]
+        protocol.buffer_updated(n)
+        view = view[n:]
+
+
+class _TLSAcceptor(asyncio.Protocol):
+    """A connection until its TLS handshake is made: admitted by the census
+    at accept, handed to the HTTP protocol once the handshake is through,
+    closed when it is not within `handshake_s`."""
+
+    def __init__(self, make_protocol, ctx: ssl.SSLContext, handshake_s: float,
+                 flush_s: float, census: _Census):
+        self._make, self._ctx, self._handshake_s, self._flush_s, self._census = (
+            make_protocol, ctx, handshake_s, flush_s, census)
+        self._task = None
+        self._early: list = []
+
+    def connection_made(self, transport) -> None:
+        addr = _host(transport)
+        if not self._census.admit(addr):
+            transport.abort()
+            return
+        transport.pause_reading()            # the first bytes are the handshake's
+        self._task = asyncio.get_running_loop().create_task(self._handshake(transport, addr))
+
+    async def _handshake(self, transport, addr: str) -> None:
+        loop = asyncio.get_running_loop()
+        protocol = self._make()
+        if self._early:
+            # uvloop reads a connection before the pause above can hold it:
+            # what reached this protocol — the ClientHello — goes to the TLS
+            # protocol start_tls puts in its place, after that one's
+            # connection_made, which start_tls schedules as it begins. A
+            # client sends nothing more before the server's answer to it.
+            early = b"".join(self._early)
+            loop.call_soon(loop.call_soon, lambda: _feed(transport.get_protocol(), early))
+        try:
+            tls = await loop.start_tls(
+                transport, protocol, self._ctx, server_side=True,
+                ssl_handshake_timeout=self._handshake_s, ssl_shutdown_timeout=self._flush_s)
+        except (OSError, RuntimeError) as e:
+            # A peer that speaks no TLS, never finishes, or left: nothing
+            # was served, so nothing is lost but the connection.
+            logger.debug("TLS handshake from %s failed: %r", addr, e)
+            transport.abort()
+            self._census.leave(addr)
+            return
+        if protocol._lost or tls.is_closing():
+            self._census.leave(addr)
+            return
+        protocol._addr = addr                 # its census entry is the protocol's now
+        protocol.connection_made(tls)
+
+    def data_received(self, data: bytes) -> None:
+        self._early.append(data)
+
+    def connection_lost(self, exc) -> None:
+        pass                                 # the handshake's failure path counts it out
 
 
 def undumpable() -> None:

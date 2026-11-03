@@ -211,9 +211,10 @@ def encode_submission(core: dict, sig_hex: str, answers: Sequence[bytes]) -> str
 
 def decode_submission(value: str) -> Optional[dict]:
     """{"quote": core, "sig": hex, "answers": [bytes…]} or None if malformed."""
+    from desktop.p2p import wire
     try:
         padded = value + "=" * (-len(value) % 4)
-        data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        data = wire.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
         core, sig, answers = data["quote"], data["sig"], data["answers"]
         if not isinstance(core, dict) or not isinstance(sig, str) or not isinstance(answers, list):
             return None

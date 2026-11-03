@@ -246,16 +246,17 @@ def max_blob_version(conn) -> Optional[str]:
 
 
 def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
-                 sign_fn=None, author_pubkey: str = "") -> dict:
+                 sign_fn=None, author_pubkey: str = "", requester: str = "") -> dict:
     """The shared v1 server body for both surfaces.
 
     Per MBID: a cached blob answers when it is at least ``min_version`` AND
     not older than this node's own dump (a dump node never re-serves a cache
     its loader has superseded); a dump node computes+signs+caches otherwise
-    (`sign_fn` present, a local dump at least ``min_version``); everything
-    else lands in `missing` — the requester takes misses to the next
-    candidate. The response entry carries the ORIGINAL author's pubkey+sig,
-    which on a replica is not this node's identity — and that is the point."""
+    (`sign_fn` present, a local dump at least ``min_version``), within the
+    build budget `requester` (its address) has a share of; everything else
+    lands in `missing` — the requester takes misses to the next candidate.
+    The response entry carries the ORIGINAL author's pubkey+sig, which on a
+    replica is not this node's identity — and that is the point."""
     if not isinstance(artist_mbids, list) or not artist_mbids \
             or len(artist_mbids) > MAX_MBIDS_PER_REQUEST:
         raise ValueError(f"artist_mbids must be a list of 1..{MAX_MBIDS_PER_REQUEST}")
@@ -274,11 +275,12 @@ def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
         if entry is not None and ((min_version is not None and entry["dump_version"] < min_version)
                                   or (local is not None and entry["dump_version"] < local)):
             entry = None
-        if entry is None and can_build and _builds.take():
+        if entry is None and can_build and _builds.admit(requester):
+            one = None
             try:
                 one = get_slice_one(conn, key, local)          # may raise DumpBusy
             finally:
-                _builds.release()
+                _builds.done(requester, counted=bool(one and (one["artist"] or one["recordings"])))
             blob = slice_blob(key, one)
             sig = sign_fn(receipt_message_for(blob)).hex()
             blob_gz = gzip.compress(blob)

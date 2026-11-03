@@ -28,11 +28,13 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 import record_sig
 from config import settings
 from db_pool import db_query as _db_query, db_query_one as _db_query_one, get_conn, in_peer_lane
+from desktop.p2p import wire
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,16 @@ def _require_sharing() -> None:
 # ../desktop/p2p. Loaded by file path (not sys.path) so desktop modules can
 # never shadow backend ones. Absent → the endpoint 404s (launcher-mode
 # backends serve slices through the launcher's own sync server instead).
+async def _answer(request: Request, run) -> Response:
+    """`run()`'s answer, made on the peer lane with the work that produced
+    it (wire.render): a bulk answer is tens of MB, and its JSON and gzip on
+    the loop held every other request meanwhile, the Web UI's too."""
+    gzip_ok = "gzip" in request.headers.get("accept-encoding", "")
+    body, encoding = await in_peer_lane(lambda: wire.render(run(), gzip_ok))
+    return Response(body, media_type="application/json",
+                    headers={"Content-Encoding": encoding} if encoding else None)
+
+
 def _load_mb_slice_queries():
     import importlib.util
     here = Path(__file__).parent.parent
@@ -180,7 +192,7 @@ class CarryOffer(BaseModel):
 
 
 @router.post("/offer")
-async def carry_offer(req: CarryOffer) -> dict:
+async def carry_offer(req: CarryOffer, request: Request) -> Response:
     """"Here are the recordings I could give you" — we answer with OUR
     track uuids we actually want (carry v4).
 
@@ -195,7 +207,7 @@ async def carry_offer(req: CarryOffer) -> dict:
         with get_conn() as conn:
             return carry_queries.wanted_tracks(conn, req.recordings, _carry_budget())
 
-    return {"wanted": await in_peer_lane(_run)}
+    return await _answer(request, lambda: {"wanted": _run()})
 
 
 @router.post("/push/{category}")
@@ -220,7 +232,6 @@ async def carry_push(category: str, request: Request) -> dict:
     raw = await request.body()
 
     def _run():
-        from desktop.p2p import wire
         try:
             payload = wire.loads(raw)
         except ValueError:
@@ -352,7 +363,7 @@ class LBSliceRequest(BaseModel):
 
 
 @lb_router.post("/slice")
-async def lb_slice(req: LBSliceRequest) -> dict:
+async def lb_slice(req: LBSliceRequest, request: Request) -> Response:
     """Per-artist-MBID signed ListenBrainz statistics blobs (v1) — mirrors
     desktop/p2p/sync_server.handle_lb_slice. Dump holders compute+sign+
     cache misses; a replica answers what it holds, misses land in
@@ -372,10 +383,11 @@ async def lb_slice(req: LBSliceRequest) -> dict:
                 logger.warning(f"LB slice signing unavailable: {e}")
         with get_conn() as conn:
             return lb_slice_queries.serve_slices(
-                conn, req.artist_mbids, req.min_version, sign_fn, author)
+                conn, req.artist_mbids, req.min_version, sign_fn, author,
+                request.client.host if request.client else "")
 
     try:
-        return await in_peer_lane(_run)
+        return await _answer(request, _run)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except lb_slice_queries.DumpBusy:
@@ -411,7 +423,7 @@ async def mb_search(q: str = Query(..., min_length=2, max_length=255)) -> dict:
 
 
 @mb_router.post("/slice")
-async def mb_slice(req: MBSliceRequest) -> dict:
+async def mb_slice(req: MBSliceRequest, request: Request) -> Response:
     """Per-name signed blobs (v3) — mirrors
     desktop/p2p/sync_server.handle_mb_slice. Dump holders compute+sign+
     cache misses; a replica answers what it holds, misses land in
@@ -428,11 +440,12 @@ async def mb_slice(req: MBSliceRequest) -> dict:
             except Exception as e:
                 logger.warning(f"MB slice signing unavailable: {e}")
         with get_conn() as conn:
-            mb_slice_queries.ensure_blob_table(conn)
-            return mb_slice_queries.serve_slices(conn, req.names, sign_fn, author)
+            return mb_slice_queries.serve_slices(
+                conn, req.names, sign_fn, author,
+                request.client.host if request.client else "")
 
     try:
-        return await in_peer_lane(_run)
+        return await _answer(request, _run)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except mb_slice_queries.DumpBusy:
@@ -465,7 +478,7 @@ _EMPTY_INVENTORY = {"tracks": [], "embeddings": [], "audio_features": []}
 
 
 @router.post("/inventory")
-async def get_inventory(req: InventoryRequest) -> dict:
+async def get_inventory(req: InventoryRequest, request: Request) -> Response:
     """
     Check what analysis this node can serve for the given track UUIDs.
 
@@ -502,14 +515,14 @@ async def get_inventory(req: InventoryRequest) -> dict:
                 "audio_features": row["audio_features"]}
 
     try:
-        return await in_peer_lane(_run)
+        return await _answer(request, _run)
     except Exception as e:
         logger.error(f"Inventory query failed: {e}")
         raise HTTPException(status_code=500, detail="internal error")
 
 
 @router.get("/holdings")
-async def get_holdings(have: Optional[str] = None) -> dict:
+async def get_holdings(request: Request, have: Optional[str] = None) -> Response:
     """The holdings filters — what this node holds, compressed (Bloom
     filters over sealed track and artist uuids), so a peer with millions
     of gaps tests them locally and asks /inventory only about the hits.
@@ -525,7 +538,7 @@ async def get_holdings(have: Optional[str] = None) -> dict:
             return carry_queries.get_holdings(conn, have)
 
     try:
-        return await in_peer_lane(_run)
+        return await _answer(request, _run)
     except Exception as e:
         logger.error(f"Holdings query failed: {e}")
         raise HTTPException(status_code=500, detail="internal error")
@@ -545,7 +558,7 @@ def _parse_vector(vec_text: str) -> list[float]:
 # ---------------------------------------------------------------------------
 
 @router.post("/pull/tracks")
-async def pull_tracks(req: PullRequest) -> dict:
+async def pull_tracks(req: PullRequest, request: Request) -> Response:
     """Pull track metadata with associated artists."""
     _require_sharing()
     if not req.uuids:
@@ -591,7 +604,7 @@ async def pull_tracks(req: PullRequest) -> dict:
         return {"category": "tracks", "items": items}
 
     try:
-        return await in_peer_lane(_run)
+        return await _answer(request, _run)
     except Exception as e:
         logger.error(f"Pull tracks failed: {e}")
         raise HTTPException(status_code=500, detail="internal error")
@@ -655,7 +668,7 @@ def _batches_map(roots: set) -> dict:
 
 
 @router.post("/pull/segments")
-async def pull_segments(req: PullRequest) -> dict:
+async def pull_segments(req: PullRequest, request: Request) -> Response:
     """Per-track CLAP segment bundles with their seals — the signed, synced
     unit (the importer derives the mean locally; see record_sig.py). Vectors
     travel as base64 of the canonical float32-LE bytes so vector_hash verifies
@@ -718,14 +731,14 @@ async def pull_segments(req: PullRequest) -> dict:
                 "batches": _batches_map(roots)}
 
     try:
-        return await in_peer_lane(_run)
+        return await _answer(request, _run)
     except Exception as e:
         logger.error(f"Pull segments failed: {e}")
         raise HTTPException(status_code=500, detail="internal error")
 
 
 @router.post("/pull/audio-features")
-async def pull_audio_features(req: PullRequest) -> dict:
+async def pull_audio_features(req: PullRequest, request: Request) -> Response:
     """Pull audio analysis features with their provenance. Rows travel WITH
     their seals + a `batches` map (Worker timestamps) — imported rows stay
     verifiable and re-servable with authorship intact."""
@@ -759,7 +772,7 @@ async def pull_audio_features(req: PullRequest) -> dict:
                 "batches": _batches_map(roots)}
 
     try:
-        return await in_peer_lane(_run)
+        return await _answer(request, _run)
     except Exception as e:
         logger.error(f"Pull audio features failed: {e}")
         raise HTTPException(status_code=500, detail="internal error")

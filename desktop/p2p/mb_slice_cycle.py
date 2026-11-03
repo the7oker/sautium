@@ -333,6 +333,11 @@ class MbSliceCycle:
             waited = False
             for i in range(0, len(remaining), batch_size):
                 batch = remaining[i:i + batch_size]
+                if time.monotonic() >= api.session_deadline:
+                    # The source's session is over, not failed: the rest
+                    # stays pending for the next source or cycle.
+                    leftovers.extend(remaining[i:])
+                    break
                 stats = await loop.run_in_executor(None, client.run, batch)
                 if "retry_after" in stats and not waited:
                     # The peer's per-IP window is full — usually our own sync
@@ -342,6 +347,9 @@ class MbSliceCycle:
                     logger.info(f"MB slice: {node} rate-limited — re-asking in {wait}s")
                     waited = True
                     await asyncio.sleep(wait)
+                    if time.monotonic() >= api.session_deadline:
+                        leftovers.extend(remaining[i:])
+                        break
                     stats = await loop.run_in_executor(None, client.run, batch)
                 if "error" in stats:
                     leftovers.extend(batch)

@@ -606,7 +606,10 @@ flips only on a verified signature. Since 2026-11-03 a message's uuid and
 time travel inside its box with the text (`desktop/p2p/chat_wire.envelope`):
 an earlier ciphertext replayed under a new uuid does not open as one, and a
 uuid repeats only for the same message in the same thread — anything else
-under it is refused, and gets no receipt.
+under it is refused, and gets no receipt. A history export is read in pages
+(`chat_wire.export_page`: at most 2 000 messages or 4 MiB of ciphertext, each
+page after the cursor the one before ended on), and an exporter marks
+delivered exactly the outgoing messages a page carried.
 
 **The relay stores nothing** — not a row, not a table. Its only state: an
 in-memory future while it waits for the receipt (`FORWARD_ACK_TIMEOUT = 10 s`)
@@ -869,7 +872,9 @@ signature.
 
 **Blobs are stored verbatim (gzip)** — which removes the most brittle part of
 the job: re-serving hands back THE SAME bytes, so no re-serialization contract
-with the database exists at all. The single `mb_slice_blobs` table plays three
+with the database exists at all (a dump node's spelling of a match set it
+already holds is the one exception: cut from the stored blob, and signed
+anew, since 2026-11-03). The single `mb_slice_blobs` table plays three
 roles: a dump node's hot cache (Bach is computed once per dump version —
 **26.6 s → 103 ms, 257×**), a replica's re-serve inventory, and the wire
 payload itself. Replicas do not keep blobs over 2 MB: the expensive names are
@@ -884,9 +889,11 @@ most four spellings of it and cuts any other spelling from the stored blob,
 served unkept; a zero-match is served signed and never kept; a name over 255
 characters, with a control character, or one of MB's special-purpose artists
 is `missing`. Builds have a node-wide budget (two at once, 120 a minute; LB:
-300), and both slice routes a node-wide window of 300 requests a minute on top
-of the per-address one — a miss past either is `missing`, and the requester
-asks elsewhere or later. A finished dump load drops the blobs cut from the
+300), a quarter of it for any one requester, and only a build that found
+something counts; both slice routes have a node-wide window of 300 requests
+a minute on top of the per-address one; an answer carries one blob per
+name_key and 16 MiB of blobs at most — a miss past any of these is
+`missing`, and the requester asks elsewhere or later. A finished dump load drops the blobs cut from the
 dump before it.
 
 **Who answers.** `/health` reports `mb_slices` (inventory size);
@@ -1081,14 +1088,20 @@ auth (CLAUDE.md Security Posture rule #5 still stands). Consequence to accept:
 the master's per-IP 60/min limiter stops being an accidental global cap and
 becomes per-peer, like on every launcher node (`/health` has its own 60/min
 window since 2026-09-24, so probes never spend the work's). The node-wide
-bounds (since 2026-11-03) do not depend on the address: a body cap per route
-before anything reads it (1 MiB for the API, a support bundle's 32 MiB on the
-master; the front holds the same ceiling and a 10 s request head), a
-connection ceiling and a request-head deadline on the peer server, the peer
-surface's SQL and parsing on two lanes of their own (`db_pool.in_peer_lane`
-for data, `in_chat_lane` for chat, relay and diagnostics) beside the Web UI's
-loop and pool, the global `mb/search` and slice windows and the dump node's
-build budget; the load meter and the gate's backstops come on top.
+bounds (since 2026-11-03) are the rest: a body cap per route before anything
+reads it (1 MiB for the API — a carry push included, which the pusher packs
+under it —, a support bundle's 32 MiB on the master; the front holds the same
+ceiling and a 10 s request head), a body that keeps arriving at a floor rate,
+read in a slot of its kind (chat, bulk, large) of which one address holds a
+few; on the peer server (`serving.peer_protocol`) the TLS handshake and the
+request head within 10 s and a head of at most 64 KiB, a peer that reads
+nothing of an answer let go after 30 s, a connection ceiling of half the
+process's descriptors with 256 per address and three quarters of it for wake
+streams; the peer surface's SQL, parsing and answers made on two lanes of
+their own (`db_pool.in_peer_lane` for data, `in_chat_lane` for chat, relay,
+diagnostics and `/health`'s counts) beside the Web UI's loop and pool; the
+global `mb/search` and slice windows, the dump node's build budget and a
+slice answer's 16 MiB; the load meter and the gate's backstops come on top.
 
 ### Support diagnostics — SHIPPED 2026-08-26
 

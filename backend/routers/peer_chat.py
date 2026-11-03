@@ -22,11 +22,10 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 import invite_tokens
 from config import settings
@@ -147,6 +146,12 @@ def _find_friend_for_handshake(invite_code: str, pubkey: str) -> Optional[dict]:
 
 _wake = WakeRegistry()
 
+
+def limit_wake_streams(n: int) -> None:
+    """The most wake streams this surface holds at once — the peer server's
+    share of its connection ceiling (main._serve_p2p)."""
+    _wake.max_streams = n
+
 # Peer-relay clients (Phase D): pubkey -> {invite_code, until, signature}.
 # In-memory on purpose — a relay restart drops the registry and every
 # client re-issues its voucher on reconnect. The announce hooks are wired
@@ -243,19 +248,91 @@ def _witness_handshake(body: dict, peer_pubkey: str) -> None:
         witness_recorder(settings).note(cert, "handshake", peer_pubkey)
 
 
+# What _handshake answers for a token whose guest must prove its identity
+# first: that check is the serving loop's (chat_handshake).
+_GATED = object()
+
+
 @chat_router.post("/handshake")
 async def chat_handshake(request: Request):
     body = await _json_body(request)
     if body is None:
         return _err("invalid JSON", 400)
-    return await in_chat_lane(_handshake, body,
-                              request.client.host if request.client else None,
-                              asyncio.get_running_loop())
+    answer = await in_chat_lane(_handshake, body)
+    if answer is not _GATED:
+        return answer
+    # Identity gate BEFORE the use is burned (mirror of sync_server):
+    # certificate v2 + the mined proof for method:pow, verified once and
+    # cached in p2p_identities; "busy" → 503 with Retry-After. Awaited here,
+    # where its semaphore lives, between two chat-lane steps: a lane thread
+    # never waits out the gate's queue.
+    admission = await _identity_gate().admit(
+        body["public_key_hex"], body.get("birth_cert") or {}, body.get("identity_proof"),
+        request.client.host if request.client else None)
+    if admission.status != "verified":
+        headers = ({"Retry-After": str(admission.retry_after)}
+                   if admission.retry_after else None)
+        return JSONResponse({"error": admission.detail},
+                            status_code=admission.http_status, headers=headers)
+    return await in_chat_lane(_token_accept, body)
 
 
-def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
-    """The handshake on the chat lane; the identity gate's async check is
-    run on the serving loop, where its semaphore lives."""
+def _accepted(ident: dict, grant_out=None) -> JSONResponse:
+    payload = {
+        "accepted": True,
+        "public_key_hex": ident["public_key_hex"],
+        "username": ident["username"],
+        "invite_code": ident["invite_code"],
+    }
+    if grant_out:
+        payload["grant"] = grant_out
+    return JSONResponse(payload)
+
+
+def _minted(ident: dict, tid: str, rights: list, peer_pubkey: str):
+    return invite_tokens.sign_grant(
+        load_signing_key(settings), tid, rights, peer_pubkey, ident["public_key_hex"])
+
+
+def _token_accept(body: dict) -> JSONResponse:
+    """A token's use spent on a guest that passed every check before it —
+    the hour's ceiling the last of them."""
+    svc = get_peer_chat()
+    ident = resolve_identity(settings)
+    if svc is None or not ident:
+        return _err("no account configured", 503)
+    peer_pubkey, peer_invite = body["public_key_hex"], body["invite_code"]
+    peer_username, token_id = body.get("username", ""), body["token_id"]
+    # The hour's ceiling before the use is spent: a refusal burns nothing
+    # of the token.
+    recent = db_query_one(
+        "SELECT count(*) AS c FROM friends"
+        " WHERE source = 'token' AND added_at > NOW() - INTERVAL '1 hour'")
+    if recent and recent["c"] >= TOKEN_FRIENDS_PER_HOUR:
+        return JSONResponse({"error": "token accept rate exceeded"},
+                            status_code=429, headers={"Retry-After": "300"})
+    with get_conn() as conn:
+        tok = invite_tokens.consume_token(conn, token_id)
+    if tok is None:
+        return _err("token invalid", 403)
+
+    fid = svc.add_friend(peer_pubkey, peer_invite, peer_username,
+                         source="token", source_token_id=token_id)
+    with get_conn() as conn:
+        invite_tokens.snapshot_rights(conn, fid, tok["rights"])
+    if tok["welcome_message"]:
+        svc.store_message(fid, "out", tok["welcome_message"],
+                          delivered=True)
+    svc.update_friend_last_seen(peer_pubkey)
+    logger.info("Token handshake accepted from %s (%s...)",
+                peer_username, peer_pubkey[:16])
+    _witness_handshake(body, peer_pubkey)
+    return _accepted(ident, _minted(ident, token_id, tok["rights"], peer_pubkey))
+
+
+def _handshake(body: dict):
+    """The handshake on the chat lane, up to a token's identity gate: an
+    answer, or _GATED for chat_handshake to take on."""
     svc = get_peer_chat()
     ident = resolve_identity(settings)
     if svc is None or not ident:
@@ -302,22 +379,6 @@ def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
     resolved = (match if match
                 and match["public_key_hex"] == peer_pubkey else None)
 
-    def _accept(grant_out=None):
-        payload = {
-            "accepted": True,
-            "public_key_hex": ident["public_key_hex"],
-            "username": ident["username"],
-            "invite_code": ident["invite_code"],
-        }
-        if grant_out:
-            payload["grant"] = grant_out
-        return JSONResponse(payload)
-
-    def _mint(tid: str, rights: list):
-        return invite_tokens.sign_grant(
-            load_signing_key(settings), tid, rights, peer_pubkey,
-            ident["public_key_hex"])
-
     # -- idempotent re-accept: friendship already established ---------------
     if resolved is not None and (token_id or grant_in):
         tid = token_id or grant_in["token_id"]
@@ -332,51 +393,14 @@ def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
                 invite_tokens.snapshot_rights(conn, resolved["id"], rights)
         svc.update_friend_last_seen(peer_pubkey)
         _witness_handshake(body, peer_pubkey)
-        return _accept(_mint(tid, rights))
+        return _accepted(ident, _minted(ident, tid, rights, peer_pubkey))
 
     if token_id:
         with get_conn() as conn:
             requires_cert = invite_tokens.token_requires_cert(conn, token_id)
         if requires_cert is None:
             return _err("token invalid", 403)
-        if requires_cert:
-            # Identity gate BEFORE the use is burned (mirror of sync_server):
-            # certificate v2 + the mined proof for method:pow, verified once
-            # and cached in p2p_identities; "busy" → 503 with Retry-After.
-            admission = asyncio.run_coroutine_threadsafe(_identity_gate().admit(
-                peer_pubkey, body.get("birth_cert") or {},
-                body.get("identity_proof"), addr), loop).result()
-            if admission.status != "verified":
-                headers = ({"Retry-After": str(admission.retry_after)}
-                           if admission.retry_after else None)
-                return JSONResponse({"error": admission.detail},
-                                    status_code=admission.http_status,
-                                    headers=headers)
-        # The hour's ceiling before the use is spent: a refusal burns
-        # nothing of the token.
-        recent = db_query_one(
-            "SELECT count(*) AS c FROM friends"
-            " WHERE source = 'token' AND added_at > NOW() - INTERVAL '1 hour'")
-        if recent and recent["c"] >= TOKEN_FRIENDS_PER_HOUR:
-            return JSONResponse({"error": "token accept rate exceeded"},
-                                status_code=429, headers={"Retry-After": "300"})
-        with get_conn() as conn:
-            tok = invite_tokens.consume_token(conn, token_id)
-        if tok is None:
-            return _err("token invalid", 403)
-
-        fid = svc.add_friend(peer_pubkey, peer_invite, peer_username,
-                             source="token", source_token_id=token_id)
-        with get_conn() as conn:
-            invite_tokens.snapshot_rights(conn, fid, tok["rights"])
-        if tok["welcome_message"]:
-            svc.store_message(fid, "out", tok["welcome_message"],
-                              delivered=True)
-        svc.update_friend_last_seen(peer_pubkey)
-        logger.info("Token handshake accepted from %s (%s...)",
-                    peer_username, peer_pubkey[:16])
-        _witness_handshake(body, peer_pubkey)
-        return _accept(_mint(token_id, tok["rights"]))
+        return _GATED if requires_cert else _token_accept(body)
 
     if grant_in:
         # Recovery: our own signature over their grant replaces the friends
@@ -400,15 +424,15 @@ def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
         logger.info("Grant recovery accepted from %s (%s...)",
                     peer_username, peer_pubkey[:16])
         _witness_handshake(body, peer_pubkey)
-        return _accept(_mint(grant_in["token_id"],
-                             grant_in.get("rights", [])))
+        return _accepted(ident, _minted(ident, grant_in["token_id"],
+                                        grant_in.get("rights", []), peer_pubkey))
 
     # -- classic path: mutual-add consent (mirror of sync_server) -----------
     # A friend held under this key: presence only — never its name or
     # invite string, which stay as the contact was made.
     if resolved is not None:
         svc.update_friend_last_seen(peer_pubkey)
-        return _accept()
+        return _accepted(ident)
     # The operator's own pending contact for this invite code, and only
     # that: a token stub resolves through our token handshake, and a
     # contact already made with another key gets no second row.
@@ -421,7 +445,7 @@ def _handshake(body: dict, addr: Optional[str], loop) -> JSONResponse:
     svc.update_friend_last_seen(peer_pubkey)
     logger.info("Handshake accepted from %s (%s...)",
                 peer_username, peer_pubkey[:16])
-    return _accept()
+    return _accepted(ident)
 
 
 # ---------------------------------------------------------------------------
@@ -543,15 +567,15 @@ async def chat_history(request: Request):
     body = await _json_body(request)
     if body is None:
         return _err("invalid JSON", 400)
-    return await in_chat_lane(_history, body)
+    return await in_chat_lane(_history, body,
+                              "gzip" in request.headers.get("accept-encoding", ""))
 
 
-def _history(body: dict) -> JSONResponse:
+def _history(body: dict, gzip_ok: bool) -> Response:
     svc = get_peer_chat()
     if svc is None:
         return _err("chat not available", 503)
     requester_pubkey = body.get("public_key_hex", "")
-    since_iso = body.get("since")
     signature_hex = body.get("signature", "")
     nonce = body.get("nonce", "")
     ts = body.get("ts")
@@ -578,43 +602,21 @@ def _history(body: dict) -> JSONResponse:
                                               "can_message"):
             return _err("not permitted", 403)
 
-    since = None
-    if since_iso:
-        try:
-            since = datetime.fromisoformat(since_iso)
-        except (ValueError, TypeError):
-            pass
-
-    messages = svc.get_history_for_export(friend["id"], since=since,
-                                          limit=chat_wire.HISTORY_EXPORT_MAX)
-    result_messages = []
-    max_out_id = 0
-    for msg in messages:
-        if msg["direction"] == "out":
-            max_out_id = max(max_out_id, msg["id"])
-        if not msg["message_uuid"]:
-            continue                         # a row from before uuids: nothing can bind it
-        ts_val = msg["timestamp"]
-        ts_str = (ts_val.isoformat() if hasattr(ts_val, "isoformat")
-                  else str(ts_val))
-        if "+" not in ts_str and not ts_str.endswith("Z"):
-            ts_str += "+00:00"
-        uuid_str = str(msg["message_uuid"])
-        result_messages.append({
-            "message_uuid": uuid_str,
-            "direction": msg["direction"],
-            "encrypted": svc.encrypt_envelope(msg["content"], uuid_str, ts_str,
-                                              requester_pubkey),
-            "timestamp": ts_str,
-        })
-    if max_out_id:
-        # The requester proved key ownership and has the export now —
-        # export IS delivery (this node has no push loop).
-        svc.mark_exported_delivered(friend["id"], max_out_id)
+    with get_conn() as conn:
+        rows = chat_wire.export_rows(conn, friend["id"], chat_wire.history_cursor(body.get("after")))
+        result_messages, out_ids, after, more = chat_wire.export_page(
+            rows, lambda text, message_uuid, ts_iso: svc.encrypt_envelope(
+                text, message_uuid, ts_iso, requester_pubkey))
+        if out_ids:
+            # This node has no push loop: a page is how its messages arrive.
+            chat_wire.mark_exported(conn, friend["id"], out_ids)
 
     logger.info("History export for %s: %d messages",
                 friend.get("username", "?"), len(result_messages))
-    return JSONResponse({"messages": result_messages})
+    page, encoding = wire.render({"messages": result_messages, "next": after, "more": more},
+                                 gzip_ok)
+    return Response(page, media_type="application/json",
+                    headers={"Content-Encoding": encoding} if encoding else None)
 
 
 # ---------------------------------------------------------------------------

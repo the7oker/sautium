@@ -118,6 +118,15 @@ class P2PManager:
         self._friend_peer_cache: dict[int, list[tuple]] = {}
         # Friends whose history has been pulled this session (skip re-pull)
         self._history_synced_friends: set[int] = set()
+        # Friend id -> the history cursor the last pull ended on: a pull goes
+        # on from it (a wake pulls once per reply), so a thread is read whole
+        # once a session and then only what is new.
+        self._history_after: dict[int, str] = {}
+        # Friends a stored message is being pushed to at once (_deliver_now),
+        # and those a further message arrived for meanwhile.
+        self._pushing: set[int] = set()
+        self._push_again: set[int] = set()
+        self._push_tasks: set = set()
         self._master_wake_task: Optional[asyncio.Task] = None
         self._peer_relay_task: Optional[asyncio.Task] = None
         self._diag_task: Optional[asyncio.Task] = None
@@ -1240,7 +1249,10 @@ class P2PManager:
     async def _sync_chat_history(
         self, friend: dict, peers: list[tuple],
     ) -> dict:
-        """Request chat history from a friend's peer and import it.
+        """Request chat history from a friend's peer and import it, a page
+        at a time from where the last pull ended (_history_after), each
+        after the `next` cursor of the one before while the peer says there
+        is `more` — at most chat_wire.HISTORY_PAGES_PER_PULL pages a pull.
 
         Args:
             friend: friend dict with id, public_key_hex, username, etc.
@@ -1255,90 +1267,39 @@ class P2PManager:
         if not friend_pubkey or friend_pubkey.startswith("pending:"):
             return {}
 
-        from desktop.node_identity import get_account_info, sign_message
+        from desktop.node_identity import get_account_info
         account = get_account_info()
         if not account:
             return {}
 
-        # Sign request to prove key ownership (prevents metadata leakage).
-        # Timestamp-bound (±60s server-side) so a captured signature cannot
-        # replay forever — mirrors the HMAC window — and made for this one
-        # friend, so no node it reaches can present it to another.
-        import uuid as _uuid
-        nonce = str(_uuid.uuid4())
-        ts = int(time.time())
-        sig_bytes = sign_message(chat_wire.history_payload(ts, nonce, friend_pubkey))
-
-        payload = {
-            "public_key_hex": account["public_key_hex"],
-            "nonce": nonce,
-            "ts": ts,
-            "signature": sig_bytes.hex(),
-        }
-
-        import aiohttp
         for ip, port in peers:
             url = f"https://{fmt_addr(ip, port)}/api/chat/history"
-            try:
-                async with aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(
-                        ssl=pinned_ssl_context(friend_pubkey))
-                ) as session:
-                    async with session.post(
-                        url, json=payload,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        if resp.status != 200:
-                            continue
-                        data = await wire.read_json(resp, PEER_ANSWER_CAP)
-                        self._note_peer_alive(
-                            friend.get("id"), friend_pubkey, ip, port)
-            except Exception as e:
-                logger.debug(f"History request to {ip}:{port} failed: {e}")
+            stats = {"imported": 0, "skipped": 0, "delivered": 0}
+            pages = 0
+            while pages < chat_wire.HISTORY_PAGES_PER_PULL:
+                data = await self._history_page(url, friend_pubkey, account,
+                                                self._history_after.get(friend["id"]))
+                if data is None:
+                    break
+                if pages == 0:
+                    self._note_peer_alive(friend.get("id"), friend_pubkey, ip, port)
+                pages += 1
+                for k, v in self._import_history_page(friend, friend_pubkey, data).items():
+                    stats[k] += v
+                after = data.get("next")
+                if isinstance(after, str) and after:
+                    self._history_after[friend["id"]] = after
+                if data.get("more") is not True:
+                    break
+            if not pages:
                 continue
-
-            # Open each message's envelope and prepare for import: its uuid
-            # and time are the box's, never the listing's.
-            raw_messages = data.get("messages", [])
-            if not isinstance(raw_messages, list) or not raw_messages:
-                logger.debug(
-                    f"No history from {ip}:{port} for "
-                    f"{friend.get('username', '?')}"
-                )
-                return {"imported": 0, "skipped": 0, "delivered": 0}
-
-            decrypted = []
-            for msg in raw_messages[:chat_wire.HISTORY_EXPORT_MAX]:
-                try:
-                    env = self._chat_service.decrypt_envelope(
-                        msg["encrypted"], friend_pubkey)
-                except Exception as e:
-                    logger.debug(f"Failed to open history msg: {e}")
-                    continue
-                if (msg.get("message_uuid") != env["uuid"]
-                        or msg.get("direction") not in ("in", "out")):
-                    logger.debug("History msg disagrees with its envelope — skipped")
-                    continue
-                decrypted.append({
-                    "message_uuid": env["uuid"],
-                    "direction": msg["direction"],
-                    "content": env["text"],
-                    "timestamp": env["ts"],
-                })
-
-            if not decrypted:
-                return {"imported": 0, "skipped": 0, "delivered": 0}
-
-            stats = self._chat_service.import_history(
-                friend["id"], decrypted
-            )
             logger.info(
                 f"History sync with {friend.get('username', '?')}: "
-                f"{stats}"
+                f"{stats} in {pages} page(s)"
             )
 
             # Notify UI if new messages were imported
-            if stats.get("imported", 0) > 0 and self._on_message_cb:
+            if stats["imported"] > 0 and self._on_message_cb:
                 try:
                     self._on_message_cb({
                         "friend_id": friend["id"],
@@ -1352,6 +1313,66 @@ class P2PManager:
             return stats
 
         return {}
+
+    async def _history_page(self, url: str, friend_pubkey: str, account: dict,
+                            after: Optional[str]) -> Optional[dict]:
+        """One page of a friend's history export, or None when the peer did
+        not answer with one. Each request is signed for that friend alone
+        and bound to its time (±60 s server-side), so a captured signature
+        replays neither elsewhere nor later."""
+        from desktop.node_identity import sign_message
+        import uuid as _uuid
+        import aiohttp
+        nonce = str(_uuid.uuid4())
+        ts = int(time.time())
+        payload = {
+            "public_key_hex": account["public_key_hex"],
+            "nonce": nonce,
+            "ts": ts,
+            "signature": sign_message(chat_wire.history_payload(ts, nonce, friend_pubkey)).hex(),
+        }
+        if after:
+            payload["after"] = after
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=pinned_ssl_context(friend_pubkey))
+            ) as session:
+                async with session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    return await wire.read_json(resp, PEER_ANSWER_CAP)
+        except Exception as e:
+            logger.debug(f"History request to {url} failed: {e}")
+            return None
+
+    def _import_history_page(self, friend: dict, friend_pubkey: str, data: dict) -> dict:
+        """Open each message's envelope of one page and import them: a
+        message's uuid and time are the box's, never the listing's."""
+        raw_messages = data.get("messages", [])
+        if not isinstance(raw_messages, list) or not raw_messages:
+            return {}
+        decrypted = []
+        for msg in raw_messages[:chat_wire.HISTORY_EXPORT_MAX]:
+            try:
+                env = self._chat_service.decrypt_envelope(msg["encrypted"], friend_pubkey)
+            except Exception as e:
+                logger.debug(f"Failed to open history msg: {e}")
+                continue
+            if (msg.get("message_uuid") != env["uuid"]
+                    or msg.get("direction") not in ("in", "out")):
+                logger.debug("History msg disagrees with its envelope — skipped")
+                continue
+            decrypted.append({
+                "message_uuid": env["uuid"],
+                "direction": msg["direction"],
+                "content": env["text"],
+                "timestamp": env["ts"],
+            })
+        if not decrypted:
+            return {}
+        return self._chat_service.import_history(friend["id"], decrypted)
 
     async def _resolve_pending_friends(self):
         """Periodically resolve pending friends via LAN handshake. The 15 s
@@ -2930,7 +2951,8 @@ class P2PManager:
                             self._chat_notify.set()
                         replies = replied_friends(notes)
                         if replies:
-                            await self._ping_wake_for(replies)
+                            await self._ping_wake_for(conn, replies)
+                            self._deliver_now(replies)
                         if "sautium_diag" in channels:
                             self._diag_queue.put_nowait(("report",))
                         if ("sautium_identity_rotated" in channels
@@ -2946,24 +2968,57 @@ class P2PManager:
                     except Exception:
                         pass
 
-    async def _ping_wake_for(self, friend_ids: set) -> None:
+    async def _ping_wake_for(self, conn, friend_ids: set) -> None:
         """Signal the wake streams of friends a reply was just stored for —
-        the ones that hold a stream here pull at once."""
+        the ones that hold a stream here pull at once. `conn` is the LISTEN
+        loop's own, idle between its waits."""
         if not self._sync_server or not self._sync_server.has_wake_streams():
             return
 
         def keys() -> list:
-            conn = psycopg2.connect(self.db_dsn)
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT public_key_hex FROM friends WHERE id = ANY(%s)",
-                                (list(friend_ids),))
-                    return [r[0] for r in cur.fetchall()]
-            finally:
-                conn.close()
+            with conn.cursor() as cur:
+                cur.execute("SELECT public_key_hex FROM friends WHERE id = ANY(%s)",
+                            (list(friend_ids),))
+                return [r[0] for r in cur.fetchall()]
 
         for pubkey in await asyncio.get_event_loop().run_in_executor(None, keys):
             self._sync_server.ping_wake(pubkey)
+
+    def _deliver_now(self, friend_ids: set) -> None:
+        """Push what is pending for these friends at once, on the stored
+        message's own notice, beside the pass of _sync_chat_histories — which
+        works through every pending friend in turn, an offline one's
+        timeouts included. A friend a push is already under way for is
+        pushed to again when it ends."""
+        for fid in friend_ids:
+            if fid in self._pushing:
+                self._push_again.add(fid)
+            else:
+                self._pushing.add(fid)
+                task = asyncio.ensure_future(self._push_to(fid))
+                self._push_tasks.add(task)
+                task.add_done_callback(self._push_tasks.discard)
+
+    async def _push_to(self, fid: int) -> None:
+        try:
+            while self._running and self._chat_service:
+                self._push_again.discard(fid)
+                pending = [m for m in self._chat_service.get_pending_messages()
+                           if m["friend_id"] == fid]
+                if pending and not pending[0]["public_key_hex"].startswith("pending:"):
+                    friend_info = {"id": fid, "invite_code": pending[0]["invite_code"],
+                                   "public_key_hex": pending[0]["public_key_hex"],
+                                   "username": ""}
+                    peers = await self._find_friend_peers(friend_info)
+                    await self._push_pending_messages(
+                        fid, friend_info["public_key_hex"], pending, peers)
+                if fid not in self._push_again:
+                    break
+        except Exception as e:
+            # The pass delivers what this push did not.
+            logger.warning(f"Immediate push to friend {fid} failed: {e}")
+        finally:
+            self._pushing.discard(fid)
 
     async def _sync_chat_histories(self):
         """Sync chat histories with friends who have pending messages.

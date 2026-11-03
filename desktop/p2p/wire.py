@@ -1,4 +1,5 @@
-"""Bounded decoding of what a peer sends — request bodies and replies alike.
+"""Bounded decoding of what a peer sends — request bodies and replies alike
+— and the encoding of what a node answers.
 
 A peer chooses the bytes; what they cost to decode is ours. Everything here
 refuses with `WireError` (a ValueError, so a caller's existing "malformed"
@@ -10,8 +11,10 @@ Shared by both peer surfaces and every peer client (desktop/api_client.py,
 the slice verifiers, the Docker peer app); depends on the stdlib only.
 """
 
+import gzip
 import json
 import zlib
+from typing import Optional
 
 KiB = 1024
 MiB = 1024 * KiB
@@ -23,12 +26,30 @@ class WireError(ValueError):
     """What a peer sent is over its bound or not well-formed."""
 
 
+# An answer is mostly base64 and hex, which gzip shrinks by the encoding's
+# overhead at any level: on a segments answer level 1 came within 2 % of
+# level 9's size in under three quarters of its time.
+ANSWER_GZIP_LEVEL = 1
+ANSWER_GZIP_MIN = 1024
+
+
 def loads(data):
     """json.loads that refuses a document nested past the parser's limit."""
     try:
         return json.loads(data)
     except RecursionError:
         raise WireError("JSON nested too deeply") from None
+
+
+def render(answer: dict, gzip_ok: bool) -> tuple[bytes, Optional[str]]:
+    """An answer's bytes and their Content-Encoding (None: identity). Both
+    peer surfaces make a bulk answer with the work that produced it, off the
+    loop: tens of MB of JSON and its gzip, on the loop, held every other
+    request meanwhile."""
+    body = json.dumps(answer, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if gzip_ok and len(body) > ANSWER_GZIP_MIN:
+        return gzip.compress(body, compresslevel=ANSWER_GZIP_LEVEL, mtime=0), "gzip"
+    return body, None
 
 
 async def read_json(resp, limit: int) -> dict:

@@ -3,11 +3,17 @@ handshake on both surfaces, the history export, the relay's admission):
 a classic handshake is signed by its key, for its responder, just now,
 under its own name — unsigned, it reads and writes nothing; a known friend
 updates its presence only; one refusal for a blocked, an unknown and a
-colliding key; a history request made for one node fails at another; a
-stranger's relay slot needs the relay switch and a verified identity."""
+colliding key; a token's identity gate is awaited on the serving loop,
+never on a lane thread; a history request made for one node fails at
+another; a history page is bounded in messages and bytes, carries the ids it
+may mark delivered and the cursor the next page starts after, and a pull
+goes on from where the last one ended; a stored message is pushed at once on
+its own notice; a stranger's relay slot needs the relay switch and a
+verified identity."""
 
 import asyncio
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,12 +156,6 @@ class _Svc:
     def friend_for_key(self, pk):
         return self.friend
 
-    def get_history_for_export(self, fid, since=None, limit=None):
-        return []
-
-    def mark_exported_delivered(self, fid, max_id):
-        pass
-
 
 def test_the_docker_classic_handshake(monkeypatch):
     from fastapi.testclient import TestClient
@@ -186,6 +186,7 @@ def test_a_history_request_made_for_one_node_fails_at_another(monkeypatch):
             return False
 
     monkeypatch.setattr(peer_chat, "get_conn", lambda: _Conn())
+    monkeypatch.setattr(peer_chat.chat_wire, "export_rows", lambda conn, fid, after: [])
 
     def request(responder):
         ts, nonce = int(time.time()), "n-1"
@@ -233,3 +234,128 @@ def test_a_strangers_relay_slot_needs_the_switch_and_a_verified_identity(monkeyp
     monkeypatch.setattr(server, "_identity_gate", lambda: _Gate())
     headers = {peer_auth.HDR_CERT: peer_auth.encode_cert_bundle({"pubkey": STRANGER.pub}, None)}
     assert asyncio.run(_wake(server, query, headers)) == 403 and admitted == [STRANGER.pub]
+
+
+def test_a_tokens_identity_gate_is_awaited_on_the_serving_loop(monkeypatch):
+    """While the gate decides, the chat lane — one thread here — serves on."""
+    from concurrent.futures import ThreadPoolExecutor
+    from fastapi.testclient import TestClient
+    import db_pool
+    from routers import peer_chat
+    svc = _Svc()
+    app = _docker_app(monkeypatch, svc, None)
+    monkeypatch.setitem(db_pool._lane_executors, "chat",
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="chat-lane"))
+    gated = []
+
+    class _Gate:
+        async def admit(self, pk, cert, proof, addr):
+            try:
+                gated.append(await asyncio.wait_for(db_pool.in_chat_lane(lambda: "lane free"), 2))
+            except asyncio.TimeoutError:
+                gated.append("lane held by the waiting handshake")
+            return SimpleNamespace(status="unverified", detail="identity proof required",
+                                   http_status=403, retry_after=None)
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(peer_chat, "_identity_gate", lambda: _Gate())
+    monkeypatch.setattr(peer_chat, "get_conn", lambda: _Conn())
+    monkeypatch.setattr(peer_chat.invite_tokens, "token_requires_cert", lambda conn, tid: True)
+    monkeypatch.setattr(peer_chat.invite_tokens, "consume_token",
+                        lambda conn, tid: pytest.fail("a use spent past a refusing gate"))
+    ts, tid = int(time.time()), "t-1"
+    body = {"public_key_hex": FRIEND.pub, "username": FRIEND.name, "invite_code": FRIEND.invite,
+            "token_id": tid, "ts": ts,
+            "signature": FRIEND.key.sign(f"token_handshake:{ts}:{tid}:{HOST.invite}".encode()).hex()}
+    with TestClient(app) as http:
+        r = http.post("/api/chat/handshake", json=body)
+    assert r.status_code == 403 and r.json()["error"] == "identity proof required"
+    assert gated == ["lane free"]
+
+
+def test_a_history_page_is_bounded_and_says_where_the_next_one_starts(monkeypatch):
+    import uuid
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    rows = [{"id": i, "message_uuid": None if i == 2 else uuid.UUID(int=i),
+             "direction": "out" if i % 2 else "in", "content": "x" * 10,
+             "timestamp": t0 + timedelta(seconds=i)} for i in range(1, 5)]
+    seal = lambda text, message_uuid, ts_iso: text
+    monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_MAX", 3)          # read one past it: 4 rows
+    page, out_ids, after, more = chat_wire.export_page(rows, seal)
+    assert [m["message_uuid"] for m in page] == [str(uuid.UUID(int=1)), str(uuid.UUID(int=3))]
+    assert out_ids == [1, 3] and more                                # row 2: passed over, no id
+    assert chat_wire.history_cursor(after) == (t0 + timedelta(seconds=3), 3)
+    monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_MAX", 10)
+    monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_BYTES", 15)       # the second message reaches it
+    page, out_ids, after, more = chat_wire.export_page(rows, seal)
+    assert len(page) == 2 and more and chat_wire.history_cursor(after)[1] == 3
+    assert chat_wire.export_page(rows[:1], seal)[2:] == (f"{(t0 + timedelta(seconds=1)).isoformat()}|1", False)
+    assert chat_wire.export_page([], seal) == ([], [], None, False)
+    assert chat_wire.history_cursor("not a cursor") is None
+
+
+def test_a_pull_reads_page_by_page_and_the_next_goes_on_from_there(monkeypatch):
+    from desktop import node_identity
+    from desktop.p2p import p2p_manager
+    pages = {None: ({"messages": [1, 2], "next": "c1", "more": True}),
+             "c1": ({"messages": [3], "next": "c2", "more": True}),
+             "c2": ({"messages": [4], "next": "c3", "more": False}),
+             "c3": ({"messages": [], "next": None, "more": False})}
+    asked = []
+    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
+    manager._chat_service, manager._on_message_cb = SimpleNamespace(), None
+    manager._history_after = {}
+    manager._note_peer_alive = lambda *a: None
+
+    async def page(url, pubkey, account, after):
+        asked.append(after)
+        return pages[after]
+
+    manager._history_page = page
+    manager._import_history_page = lambda friend, pk, data: {
+        "imported": len(data["messages"]), "skipped": 0, "delivered": 0}
+    monkeypatch.setattr(node_identity, "get_account_info", lambda: {"public_key_hex": HOST.pub})
+    monkeypatch.setattr(chat_wire, "HISTORY_PAGES_PER_PULL", 2)
+    friend = {"id": 7, "public_key_hex": FRIEND.pub, "username": "friend"}
+    first = asyncio.run(manager._sync_chat_history(friend, [("198.51.100.5", 1)]))
+    second = asyncio.run(manager._sync_chat_history(friend, [("198.51.100.5", 1)]))
+    third = asyncio.run(manager._sync_chat_history(friend, [("198.51.100.5", 1)]))
+    assert asked == [None, "c1", "c2", "c3"]
+    assert (first["imported"], second["imported"], third["imported"]) == (3, 1, 0)
+    assert manager._history_after[7] == "c3"                # an empty page keeps the cursor
+
+
+def test_a_stored_message_is_pushed_at_once_and_again_if_another_arrives(monkeypatch):
+    from desktop.p2p import p2p_manager
+    pushed = []
+    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
+    manager._running = True
+    manager._pushing, manager._push_again, manager._push_tasks = set(), set(), set()
+    pending = [{"friend_id": 7, "public_key_hex": FRIEND.pub, "invite_code": FRIEND.invite}]
+    manager._chat_service = SimpleNamespace(get_pending_messages=lambda: list(pending))
+
+    async def peers(info, refresh=False):
+        return [("198.51.100.5", 1)]
+
+    async def push(fid, pubkey, messages, peer_list):
+        pushed.append(fid)
+        if len(pushed) == 1:
+            manager._deliver_now({7})                       # another message meanwhile
+            await asyncio.sleep(0)
+
+    manager._find_friend_peers, manager._push_pending_messages = peers, push
+
+    async def scene():
+        manager._deliver_now({7})
+        while manager._push_tasks:
+            await asyncio.sleep(0.01)
+
+    asyncio.run(scene())
+    assert pushed == [7, 7] and not manager._pushing

@@ -33,6 +33,10 @@ MAX_PER_IP = 20
 # Nodes of one account. Past it the OLDEST stream yields to the newcomer —
 # a stream whose node died without closing it is the oldest of its key.
 MAX_PER_KEY = 8
+# Streams a relay holds at once, whoever holds them: each is a connection,
+# and requests need connections too. The Docker peer surface sets its own
+# from its connection ceiling (backend/main._serve_p2p).
+MAX_STREAMS = 1024
 # Forwarded envelopes waiting on one stream.
 QUEUE_MAX = 100
 
@@ -66,8 +70,11 @@ class WakeSub:
 
 
 class WakeRegistry:
-    def __init__(self):
+    def __init__(self, max_streams: int = MAX_STREAMS):
         self._subs: dict[str, dict[str, WakeSub]] = {}   # key -> instance -> stream, oldest first
+        self._by_ip: dict[str, int] = {}
+        self._count = 0
+        self.max_streams = max_streams
         self._lock = threading.Lock()
 
     def _all(self) -> Iterator[WakeSub]:
@@ -82,22 +89,37 @@ class WakeRegistry:
         sub.closed = True
         sub.signal()
 
+    def _left(self, sub: WakeSub) -> None:
+        self._count -= 1
+        if self._by_ip[sub.ip] == 1:
+            del self._by_ip[sub.ip]
+        else:
+            self._by_ip[sub.ip] -= 1
+
     def register(self, pubkey: str, instance: str, ip: str) -> Optional[WakeSub]:
         """A stream for node `instance` of `pubkey`, superseding that node's
-        previous one; None when `ip` already holds MAX_PER_IP streams."""
+        previous one; None when `ip` already holds MAX_PER_IP streams or the
+        relay holds max_streams."""
         sub = WakeSub(asyncio.get_running_loop(), ip)
         with self._lock:
             slots = self._subs.get(pubkey, {})
             old = slots.pop(instance, None)
             if old is not None:
                 self._close(old)
+                self._left(old)
             else:
-                if sum(1 for s in self._all() if s.ip == ip) >= MAX_PER_IP:
+                if self._by_ip.get(ip, 0) >= MAX_PER_IP:
                     return None
                 if len(slots) >= MAX_PER_KEY:
-                    self._close(slots.pop(next(iter(slots))))
+                    oldest = slots.pop(next(iter(slots)))
+                    self._close(oldest)
+                    self._left(oldest)
+                elif self._count >= self.max_streams:
+                    return None
             slots[instance] = sub
             self._subs[pubkey] = slots
+            self._count += 1
+            self._by_ip[ip] = self._by_ip.get(ip, 0) + 1
         return sub
 
     def unregister(self, pubkey: str, instance: str, sub: WakeSub) -> bool:
@@ -109,6 +131,7 @@ class WakeRegistry:
                 return True
             if slots.get(instance) is sub:
                 del slots[instance]
+                self._left(sub)
             if slots:
                 return False
             del self._subs[pubkey]

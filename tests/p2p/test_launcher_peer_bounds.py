@@ -4,12 +4,15 @@ desktop/p2p/p2p_manager.py): the per-address window is checked before a
 body is read or a signature checked, slice requests have a node-wide window,
 a nested body is a refusal rather than an error, the contact log keeps what
 its columns hold, and delivery has no unauthenticated trigger — a stored
-reply wakes the friend's stream from the database's own notice."""
+reply wakes the friend's stream from the database's own notice, read on the
+LISTEN loop's own connection; the key-rotation notice takes a nested body as
+a refusal too."""
 
 import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
@@ -91,6 +94,23 @@ def test_a_nested_body_is_a_refusal_not_an_error():
     assert statuses == [200]                             # the stub answers; no 500 on the way
 
 
+def test_a_nested_rotation_notice_is_a_refusal_not_an_error():
+    from aiohttp.test_utils import TestClient
+    server = _server()
+    server._chat_service = SimpleNamespace()
+    body = b"[" * 100_000 + b"]" * 100_000
+
+    async def post():
+        app = web.Application()
+        app.router.add_post("/api/chat/key-rotation", server.handle_chat_key_rotation)
+        async with TestClient(TestServer(app)) as client:
+            r = await client.post("/api/chat/key-rotation", data=body,
+                                  headers={"Content-Type": "application/json"})
+            return r.status
+
+    assert asyncio.run(post()) == 400
+
+
 def test_the_contact_log_keeps_what_its_columns_hold():
     log = contact_log.ContactLog(lambda: None)
     log.record(endpoint="sync.push", status=200, wall_ms=1.0, cpu_ms=1.0,
@@ -161,13 +181,10 @@ def test_a_stored_reply_wakes_that_friends_stream():
         def fetchall(self):
             return [("ab" * 32,)] if self.ids == [7] else []
 
-        def close(self):
-            pass
-
     original = p2p_manager.psycopg2.connect
-    p2p_manager.psycopg2.connect = lambda dsn: _Conn()
+    p2p_manager.psycopg2.connect = lambda dsn: pytest.fail("a connection per notice")
     try:
-        asyncio.run(manager._ping_wake_for({7}))
+        asyncio.run(manager._ping_wake_for(_Conn(), {7}))      # the LISTEN loop's own
     finally:
         p2p_manager.psycopg2.connect = original
     assert pinged == ["ab" * 32]

@@ -579,44 +579,6 @@ class ChatService:
     # History sync
     # -------------------------------------------------------------------
 
-    def get_history_for_export(
-        self, friend_id: int, since: Optional[datetime] = None, limit: int = 2000,
-    ) -> list[dict]:
-        """A friend's thread for history sync export, oldest first from
-        `since`, at most `limit` messages (the requester pages on).
-
-        Returns messages from our perspective (direction as stored).
-        """
-        conn = self._get_db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT id, message_uuid, direction, content, timestamp
-                    FROM p2p_messages
-                    WHERE friend_id = %s AND (%s::timestamptz IS NULL OR timestamp > %s)
-                    ORDER BY timestamp
-                    LIMIT %s
-                """, (friend_id, since, since, limit))
-                cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, row)) for row in cur.fetchall()]
-        finally:
-            self._return_db(conn)
-
-    def mark_exported_delivered(self, friend_id: int, max_id: int) -> int:
-        """A requester that proved key ownership HAS the export — export is
-        delivery (mirrors backend/p2p_chat.mark_exported_delivered)."""
-        conn = self._get_db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE p2p_messages SET delivered = TRUE
-                     WHERE friend_id = %s AND direction = 'out'
-                       AND delivered = FALSE AND id <= %s
-                """, (friend_id, max_id))
-                return cur.rowcount
-        finally:
-            self._return_db(conn)
-
     def import_history(
         self,
         friend_id: int,

@@ -313,32 +313,6 @@ class PeerChatService:
         self.update_friend_last_seen(sender_public_key)
         return {"friend_id": friend["id"], "content": content, "timestamp": ts}
 
-    def get_history_for_export(self, friend_id: int,
-                               since: Optional[datetime] = None, limit: int = 2000) -> list:
-        """Messages for history sync, oldest first from `since`, at most
-        `limit` (mirror of chat_service) — with row ids so the caller can
-        mark exported outbound rows delivered (a requester that proved key
-        ownership HAS the export: export is delivery)."""
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, message_uuid, direction, content, timestamp
-                  FROM p2p_messages
-                 WHERE friend_id = %s AND (%s::timestamptz IS NULL OR timestamp > %s)
-                 ORDER BY timestamp
-                 LIMIT %s
-            """, (friend_id, since, since, limit))
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-    def mark_exported_delivered(self, friend_id: int, max_id: int) -> int:
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
-                UPDATE p2p_messages SET delivered = TRUE
-                 WHERE friend_id = %s AND direction = 'out'
-                   AND delivered = FALSE AND id <= %s
-            """, (friend_id, max_id))
-            return cur.rowcount
-
 
 _service: Optional[PeerChatService] = None
 
