@@ -72,7 +72,7 @@ def test_the_structural_scopes_name_no_path_address_or_person(scratch_dsn, tmp_p
                "since": None}
 
     data = diag_bundle.collect(db_dsn=scratch_dsn, data_dir=tmp_path, config=config,
-                               warrant=warrant, node_pubkey="ab" * 32,
+                               warrant=warrant, granted=[], node_pubkey="ab" * 32,
                                extra={"reachability": {"wan": "8.8.8.8", "lan": "192.0.2.3"}})
 
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:

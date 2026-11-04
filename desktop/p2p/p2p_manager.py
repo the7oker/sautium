@@ -2935,7 +2935,9 @@ class P2PManager:
 
         sautium_chat wakes ``_sync_chat_histories`` instantly when the
         backend inserts a new outgoing message; sautium_diag (the
-        diag_events insert trigger) wakes the support-report shipper.
+        diag_events insert trigger) wakes the support-report shipper, and
+        sautium_diag_consent (diag_events.decide) the collection of a
+        support request the person decided on.
         """
         while self._running:
             conn = None
@@ -2947,6 +2949,7 @@ class P2PManager:
                 with conn.cursor() as cur:
                     cur.execute("LISTEN sautium_chat")
                     cur.execute("LISTEN sautium_diag")
+                    cur.execute("LISTEN sautium_diag_consent")
                     cur.execute("LISTEN sautium_identity_rotated")
                     cur.execute("LISTEN sautium_relay_off")
 
@@ -2970,6 +2973,8 @@ class P2PManager:
                         self._deliver_now(replies)
                     if "sautium_diag" in channels:
                         self._diag_queue.put_nowait(("report",))
+                    if "sautium_diag_consent" in channels:
+                        self._diag_queue.put_nowait(("decided",))
                     if "sautium_relay_off" in channels and self._sync_server:
                         # The owner switched relaying off: the slots held end
                         # now, and the capability goes with them.
@@ -3292,6 +3297,8 @@ class P2PManager:
                     await self._diag_report()
                 elif job[0] == "report":
                     await self._diag_report()
+                elif job[0] == "decided":
+                    await self._diag_decided()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -3299,11 +3306,13 @@ class P2PManager:
                                exc_info=True)
 
     async def _diag_handle_warrant(self, warrant: dict, addr) -> None:
-        from desktop import diag_bundle
+        """A verified warrant: answered at once when it names structural
+        scopes only; one that names a content scope waits for the person's
+        decision on the request sheet (diag_events.decide → _diag_decided) —
+        the notices tell the Web UI it is there."""
         from desktop.config_manager import get_data_dir
-        from desktop.node_identity import get_account_info, get_private_key_raw
+        from desktop.node_identity import get_account_info
         from desktop.p2p import diag_events
-        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
 
         own = get_account_info()["public_key_hex"]
         ok, reason = diag_protocol.verify_warrant(warrant, own)
@@ -3319,28 +3328,71 @@ class P2PManager:
                         "fulfilled" if state["uploaded_at"] else "failed")
             return
         stage = diag_events.diag_dir(get_data_dir()) / f"{warrant['id']}.box"
+        if state["awaits"]:
+            # A bundle an earlier release staged before asking is not the
+            # person's to send: it goes, and the request waits like any other
+            stage.unlink(missing_ok=True)
+            if state["fresh"]:
+                logger.info("Support warrant %s… waits for the owner's decision: scopes=%s",
+                            short, ",".join(warrant["scopes"]))
+                await loop.run_in_executor(None, self._notify_blocking, "sautium_notices")
+            return
         if state["collected_at"] is None or not stage.exists():
-            logger.info("Support warrant %s… accepted: scopes=%s", short,
-                        ",".join(warrant["scopes"]))
-            extra = {"p2p_status": self.get_status(),
-                     "reachability": self._reachability_status}
-            began = datetime.now(timezone.utc)
-            try:
-                tar = await loop.run_in_executor(None, partial(
-                    diag_bundle.collect, db_dsn=self.db_dsn, data_dir=get_data_dir(),
-                    config=self.config, warrant=warrant, node_pubkey=own, extra=extra))
-            except Exception as e:
-                logger.error("Support bundle %s… collection failed: %s", short, e,
-                             exc_info=True)
-                await loop.run_in_executor(
-                    None, self._diag_db, diag_events.mark_failed, warrant["id"],
-                    f"collect: {e}")
+            if not await self._diag_collect(warrant, state["granted"], stage):
                 return
-            boxed = diag_protocol.encrypt_to(get_private_key_raw(), MASTER_PUBKEY_HEX, tar)
-            stage.write_bytes(boxed)
-            await loop.run_in_executor(
-                None, self._diag_db, diag_events.mark_collected, warrant["id"], len(boxed), began)
         await self._diag_upload(warrant["id"], stage, addr)
+
+    async def _diag_collect(self, warrant: dict, granted: list, stage: Path) -> bool:
+        """Collect a warrant's bundle — its content scopes as far as the
+        person granted them — box it to the master and stage it. False when
+        the collection failed; its warrant is closed with the error."""
+        from desktop import diag_bundle
+        from desktop.config_manager import get_data_dir
+        from desktop.node_identity import get_account_info, get_private_key_raw
+        from desktop.p2p import diag_events
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+
+        loop = asyncio.get_event_loop()
+        short = warrant["id"][:8]
+        logger.info("Support warrant %s… accepted: scopes=%s granted=%s", short,
+                    ",".join(warrant["scopes"]), ",".join(granted) or "-")
+        extra = {"p2p_status": self.get_status(),
+                 "reachability": self._reachability_status}
+        began = datetime.now(timezone.utc)
+        try:
+            tar = await loop.run_in_executor(None, partial(
+                diag_bundle.collect, db_dsn=self.db_dsn, data_dir=get_data_dir(),
+                config=self.config, warrant=warrant, granted=granted,
+                node_pubkey=get_account_info()["public_key_hex"], extra=extra))
+        except Exception as e:
+            logger.error("Support bundle %s… collection failed: %s", short, e,
+                         exc_info=True)
+            await loop.run_in_executor(
+                None, self._diag_db, diag_events.mark_failed, warrant["id"],
+                f"collect: {e}")
+            return False
+        boxed = diag_protocol.encrypt_to(get_private_key_raw(), MASTER_PUBKEY_HEX, tar)
+        stage.write_bytes(boxed)
+        await loop.run_in_executor(
+            None, self._diag_db, diag_events.mark_collected, warrant["id"], len(boxed), began)
+        return True
+
+    async def _diag_decided(self) -> None:
+        """The person decided on waiting requests (sautium_diag_consent): each
+        is collected with what they ticked and sent at once when the master's
+        stream holds an address, else staged for its next reconnect."""
+        from desktop.config_manager import get_data_dir
+        from desktop.p2p import diag_events
+
+        loop = asyncio.get_event_loop()
+        decided = await loop.run_in_executor(
+            None, self._diag_db, diag_events.decided_uncollected)
+        for warrant, granted in decided:
+            stage = diag_events.diag_dir(get_data_dir()) / f"{warrant['id']}.box"
+            if not await self._diag_collect(warrant, granted, stage):
+                continue
+            if self._master_addr is not None:
+                await self._diag_upload(warrant["id"], stage, self._master_addr)
 
     async def _diag_upload(self, warrant_id: str, stage: Path, addr) -> bool:
         """POST the staged box to the master's peer surface. A refusal

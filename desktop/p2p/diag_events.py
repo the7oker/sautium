@@ -9,8 +9,9 @@ start failure — events go to a spool file under <data_dir>/diag/ that the
 launcher drains at its next successful start.
 
 Also here: the per-warrant state machine on the receiving node
-(receive_warrant → mark_collected → mark_uploaded), whose PRIMARY KEY is
-what makes a warrant single-use.
+(receive_warrant → [decide] → mark_collected → mark_uploaded), whose PRIMARY
+KEY is what makes a warrant single-use; a warrant naming a content scope
+waits for the person's decision in between (AWAITS_THE_PERSON).
 
 python -m desktop.p2p.diag_events --selftest [--dsn …]
 """
@@ -24,7 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-from desktop.p2p.diag_protocol import REPORT_MAX_AGE_DAYS, REPORT_MAX_EVENTS, scrub_detail
+from desktop.p2p.diag_protocol import (CONTENT_SCOPES, REPORT_MAX_AGE_DAYS, REPORT_MAX_EVENTS,
+                                        scrub_detail)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,10 @@ _SETTINGS_UPSERT = """
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value is not None else None
 
 
 def _commit(conn) -> None:
@@ -64,6 +70,13 @@ SWITCH_ALLOWS = """NOT EXISTS (
        AND (s.value = 'false'::jsonb OR s.updated_at > {since}))"""
 
 WITHDRAWN = "withdrawn: diagnostics were switched off after it was collected"
+
+# A warrant that names a content scope and that the person has not decided
+# on: nothing of it is collected or leaves. A bundle an earlier release
+# collected for one before asking counts for nothing — the collection that
+# counts follows the decision (decide clears it).
+AWAITS_THE_PERSON = ("(w.scopes && ARRAY[" + ", ".join(f"'{s}'" for s in CONTENT_SCOPES)
+                     + "]::text[] AND w.decided_at IS NULL)")
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +295,9 @@ def clear_session_marker(data_dir: Path) -> None:
 def receive_warrant(conn, warrant: dict) -> dict:
     """First receipt inserts the row (ON CONFLICT decides — one statement,
     no read-then-write race); either way the current state comes back:
-    {"fresh", "collected_at", "uploaded_at", "error"}."""
+    {"fresh", "awaits", "granted", "collected_at", "uploaded_at", "error"} —
+    `awaits`: the person has yet to decide (AWAITS_THE_PERSON), `granted`:
+    the content scopes they ticked."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO diag_warrants (id, issuer, issued_at, expires_at, scopes, since)
@@ -292,12 +307,80 @@ def receive_warrant(conn, warrant: dict) -> dict:
         """, (warrant["id"], warrant["issuer"], int(warrant["issued_at"]),
               int(warrant["expires_at"]), list(warrant["scopes"]), warrant.get("since")))
         fresh = cur.fetchone() is not None
-        cur.execute("SELECT collected_at, uploaded_at, error FROM diag_warrants WHERE id = %s",
-                    (warrant["id"],))
-        collected_at, uploaded_at, error = cur.fetchone()
+        cur.execute(f"""
+            SELECT {AWAITS_THE_PERSON}, coalesce(w.granted, '{{}}'),
+                   w.collected_at, w.uploaded_at, w.error
+              FROM diag_warrants w WHERE w.id = %s
+        """, (warrant["id"],))
+        awaits, granted, collected_at, uploaded_at, error = cur.fetchone()
     _commit(conn)
-    return {"fresh": fresh, "collected_at": collected_at, "uploaded_at": uploaded_at,
-            "error": error}
+    return {"fresh": fresh, "awaits": awaits, "granted": list(granted),
+            "collected_at": collected_at, "uploaded_at": uploaded_at, "error": error}
+
+
+def waiting_warrants(conn) -> list:
+    """The requests the person has to decide on, oldest first: open, not
+    decided, and received while diagnostics have stayed on since — one the
+    switch withdrew is not asked about."""
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT w.id::text, w.scopes, w.since, w.issued_at, w.received_at, w.expires_at
+              FROM diag_warrants w
+             WHERE {AWAITS_THE_PERSON}
+               AND w.error IS NULL AND w.uploaded_at IS NULL AND w.expires_at > now()
+               AND {SWITCH_ALLOWS.format(since="w.received_at")}
+             ORDER BY w.received_at
+        """)
+        return [{"id": wid, "scopes": list(scopes), "since": _iso(since),
+                 "issued_at": _iso(issued), "received_at": _iso(received),
+                 "expires_at": _iso(expires)}
+                for wid, scopes, since, issued, received, expires in cur.fetchall()]
+
+
+def decide(conn, warrant_id: str, send: Iterable[str]) -> bool:
+    """The person's decision on a waiting request: `send` names the content
+    scopes they ticked (what the warrant did not ask for is not kept);
+    nothing ticked sends the structural part alone. False when the request
+    no longer waits — decided already, closed, expired, or withdrawn by the
+    switch. One statement: the decision and the wakes of the launcher's
+    worker (sautium_diag_consent) and the notices commit together."""
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            WITH decided AS (
+                UPDATE diag_warrants w
+                   SET decided_at = now(),
+                       granted = ARRAY(SELECT s FROM unnest(w.scopes) s WHERE s = ANY(%(send)s)),
+                       collected_at = NULL, size_bytes = NULL
+                 WHERE w.id = %(id)s
+                   AND {AWAITS_THE_PERSON}
+                   AND w.error IS NULL AND w.uploaded_at IS NULL AND w.expires_at > now()
+                   AND {SWITCH_ALLOWS.format(since="w.received_at")}
+             RETURNING w.id)
+            SELECT pg_notify('sautium_diag_consent', id::text), pg_notify('sautium_notices', '')
+              FROM decided
+        """, {"id": warrant_id, "send": list(send)})
+        decided = cur.fetchone() is not None
+    _commit(conn)
+    return decided
+
+
+def decided_uncollected(conn) -> list:
+    """Requests the person decided on whose bundle is still to collect —
+    what the launcher's worker does on sautium_diag_consent: each as the
+    warrant it was received as, with the content scopes granted."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id::text, issuer, extract(epoch FROM issued_at)::bigint,
+                   extract(epoch FROM expires_at)::bigint, scopes,
+                   extract(epoch FROM since)::bigint, granted
+              FROM diag_warrants
+             WHERE decided_at IS NOT NULL AND collected_at IS NULL
+               AND error IS NULL AND uploaded_at IS NULL AND expires_at > now()
+             ORDER BY decided_at
+        """)
+        return [({"id": wid, "issuer": issuer, "issued_at": issued, "expires_at": expires,
+                  "scopes": list(scopes), "since": since}, list(granted))
+                for wid, issuer, issued, expires, scopes, since, granted in cur.fetchall()]
 
 
 def mark_collected(conn, warrant_id: str, size_bytes: int, began: datetime) -> None:
@@ -311,10 +394,13 @@ def mark_collected(conn, warrant_id: str, size_bytes: int, began: datetime) -> N
 
 def may_upload(conn, warrant_id: str) -> bool:
     """Whether a collected bundle may still leave: diagnostics on, and not
-    switched since its collection began (SWITCH_ALLOWS)."""
+    switched since its collection began (SWITCH_ALLOWS) — and, for a warrant
+    that asks the person, collected after they decided and not switched since
+    their decision."""
     with conn.cursor() as cur:
         cur.execute(f"""
-            SELECT {SWITCH_ALLOWS.format(since="w.collected_at")}
+            SELECT {SWITCH_ALLOWS.format(since="coalesce(w.decided_at, w.collected_at)")}
+                   AND NOT {AWAITS_THE_PERSON}
               FROM diag_warrants w
              WHERE w.id = %s AND w.collected_at IS NOT NULL
         """, (warrant_id,))
@@ -336,14 +422,15 @@ def mark_failed(conn, warrant_id: str, error: str) -> None:
 
 
 def resumable_warrants(conn) -> list:
-    """Collected, not yet uploaded, not failed, not expired — what a master
-    reconnect retries."""
+    """Collected, not yet uploaded, not failed, not expired, and not waiting
+    for the person — what a master reconnect retries."""
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT id::text FROM diag_warrants
-             WHERE collected_at IS NOT NULL AND uploaded_at IS NULL
-               AND error IS NULL AND expires_at > now()
-             ORDER BY received_at
+        cur.execute(f"""
+            SELECT w.id::text FROM diag_warrants w
+             WHERE w.collected_at IS NOT NULL AND w.uploaded_at IS NULL
+               AND w.error IS NULL AND w.expires_at > now()
+               AND NOT {AWAITS_THE_PERSON}
+             ORDER BY w.received_at
         """)
         return [r[0] for r in cur.fetchall()]
 

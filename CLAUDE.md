@@ -368,8 +368,10 @@ See:
   P2P-SYNC-INTEGRITY.md § "Pricing formula v1"), `support.diagnostics_enabled`
   (default on: answer the master's signed diagnostic warrants and send
   content-free event reports — the LAUNCHER does both; a Docker node records
-  the events and sends nothing — silent by design, the switch and the
-  "Support" row are the disclosure; P2P_NETWORK.md § "Support diagnostics").
+  the events and sends nothing — silent for facts about the node, the switch
+  and the "Support" row are the disclosure; a warrant naming conversations,
+  logs or playback traces waits for the person's own ticks on the request
+  sheet, since 2026-11-04; P2P_NETWORK.md § "Support diagnostics").
 
 ---
 

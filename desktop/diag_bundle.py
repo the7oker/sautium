@@ -10,8 +10,10 @@ already has its own thread with this node), credentials of any kind
 (ai.api_key, the Last.fm session, config.json api_keys / postgres_password,
 node keys, TLS keys, .api_secret, the agents' auth files). Log tails go
 through diag_protocol.scrub_personal: no credential, email, address or
-absolute path. The `playback` scope — the HQPlayer
-output's playback traces and HQPlayer's own log, which are content — comes
+absolute path. The content scopes — `chat`, `logs` (with the events' log
+tails) and `playback` — go only with the person's own tick on the request
+sheet (diag_protocol.CONTENT_SCOPES). The `playback` scope — the HQPlayer
+output's playback traces and HQPlayer's own log — comes
 from the backend with each track named by its ids, format and length and
 every path cut to its last two components; a library file's name leaves as
 its extension (scrub_detail), even in a scope the person sends.
@@ -24,7 +26,7 @@ import platform
 import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import psycopg2
 
@@ -32,8 +34,8 @@ from desktop import os_locale
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import contact_log, diag_events
 from desktop.p2p.diag_protocol import (
-    BUNDLE_MAX_BYTES, CHAT_DEFAULT_DAYS, EVENTS_MAX_ROWS, LOG_TAIL_BYTES,
-    PROTOCOL_VERSION, scrub_detail, scrub_personal,
+    BUNDLE_MAX_BYTES, CHAT_DEFAULT_DAYS, CONTENT_SCOPES, EVENTS_MAX_ROWS, LOG_TAIL_BYTES,
+    PROTOCOL_VERSION, scrub_detail, scrub_personal, strip_local_only,
 )
 from desktop.p2p.master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX
 
@@ -325,17 +327,23 @@ def tail(path: Path, limit: int = LOG_TAIL_BYTES) -> Tuple[str, bool]:
 # ---------------------------------------------------------------------------
 
 def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
-            node_pubkey: str, extra: Optional[dict] = None) -> bytes:
+            granted: Iterable[str], node_pubkey: str, extra: Optional[dict] = None) -> bytes:
     """A tar.gz (in memory, bounded by BUNDLE_MAX_BYTES) with one entry per
-    requested scope plus manifest.json. A scope that fails to collect is
-    reported in the manifest and the rest still ships — a broken collector
-    must not void the bundle the maintainer is waiting for."""
-    scopes = set(warrant["scopes"])
+    scope it carries plus manifest.json. Of the content scopes the warrant
+    asked for it carries only those the person `granted` on the request
+    sheet; the manifest names the ones they left out (`withheld`), so the
+    desk knows to ask in the support chat. The events' log tails ride with
+    `logs`. A scope that fails to collect is reported in the manifest and the
+    rest still ships — a broken collector must not void the bundle the
+    maintainer is waiting for."""
+    asked = set(warrant["scopes"])
+    scopes = {s for s in asked if s not in CONTENT_SCOPES or s in set(granted)}
     now = datetime.now(timezone.utc)
     since = (datetime.fromtimestamp(int(warrant["since"]), tz=timezone.utc)
              if warrant.get("since") else now - timedelta(days=CHAT_DEFAULT_DAYS))
     manifest = {"v": PROTOCOL_VERSION, "warrant_id": warrant["id"], "node": node_pubkey,
-                "scopes": sorted(scopes), "since": _iso(since), "collected_at": _iso(now),
+                "scopes": sorted(scopes), "withheld": sorted(asked - scopes),
+                "since": _iso(since), "collected_at": _iso(now),
                 "entries": [], "errors": {}}
     buf = io.BytesIO()
     conn = psycopg2.connect(db_dsn)
@@ -374,8 +382,12 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
                 add("p2p_contact_log.txt", scrub_personal(contact_log.report(conn, 7)))
             scope("p2p", _p2p)
             scope("jobs", lambda: add("jobs.json", _json(scrub_detail(jobs_facts(conn, config)))))
-            scope("events", lambda: add("events.json", _json(scrub_detail(
-                diag_events.recent(conn, EVENTS_MAX_ROWS)))))
+            def _events() -> None:
+                rows = diag_events.recent(conn, EVENTS_MAX_ROWS)
+                if "logs" not in scopes:
+                    rows = [{**r, "detail": strip_local_only(r["detail"])} for r in rows]
+                add("events.json", _json(scrub_detail(rows)))
+            scope("events", _events)
 
             def _logs() -> None:
                 for name in LOG_FILES:

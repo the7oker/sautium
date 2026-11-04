@@ -8,7 +8,10 @@ collector with its own allowlist (desktop/diag_bundle.py). A node acts on
 a warrant only when it arrives on the node's own wake stream to the master
 AND verify_warrant() passes; the first receipt is decided by the
 diag_warrants primary key (diag_events.receive_warrant), so a re-delivery
-resumes an unfinished upload and a finished one is a no-op. The answer
+resumes an unfinished upload and a finished one is a no-op. A warrant that
+names a CONTENT scope waits on the node until the person decides on the
+request sheet (diag_events.decide): what they leave unticked never leaves,
+and the structural part goes either way. The answer
 goes to the pinned master, never to an address the warrant could name —
 a captured warrant buys an attacker nothing, and a warrant for node A is
 inert on node B.
@@ -42,6 +45,12 @@ SCOPES = ("system", "settings", "p2p", "jobs", "events", "logs", "chat", "playba
 # that names a scope it does not know, so a scope added later — `playback`,
 # the HQPlayer playback traces (2026-10-02) — is asked for by name.
 DEFAULT_SCOPES = ("system", "settings", "p2p", "jobs", "events", "logs", "chat")
+# What the person said, played and met — their conversations with the
+# assistant, log excerpts (the events' log tails ride with them), HQPlayer's
+# playback traces: these leave only with the person's own tick on the request
+# sheet their node shows, per warrant. The other scopes are facts about the
+# node, answered while the switch is on.
+CONTENT_SCOPES = ("chat", "logs", "playback")
 
 EVENT_KINDS = frozenset({
     "node.started",
@@ -161,6 +170,12 @@ def verify_warrant(warrant: dict, expected_target: str, now: Optional[float] = N
 
 def warrant_frame(warrant: dict) -> dict:
     return {"type": FRAME_TYPE, "warrant": warrant}
+
+
+def asks_the_person(scopes: Iterable[str]) -> bool:
+    """Whether a warrant waits for the person's decision: it names a
+    content scope."""
+    return not set(CONTENT_SCOPES).isdisjoint(scopes)
 
 
 # ---------------------------------------------------------------------------

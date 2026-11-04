@@ -2093,7 +2093,11 @@ CREATE TABLE IF NOT EXISTS diag_warrants (
     collected_at TIMESTAMPTZ,
     uploaded_at TIMESTAMPTZ,
     size_bytes BIGINT,
-    error TEXT
+    error TEXT,
+    -- A warrant naming a content scope waits for the person's own decision:
+    -- when they sent it, and the content scopes they ticked
+    decided_at TIMESTAMPTZ,
+    granted TEXT[]
 );
 
 CREATE TABLE IF NOT EXISTS support_warrants (

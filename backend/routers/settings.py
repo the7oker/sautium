@@ -16,6 +16,7 @@ import json
 import logging
 import shutil
 import threading
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
@@ -891,12 +892,51 @@ def _support_state() -> Dict[str, Any]:
     from desktop.p2p import diag_events
     with get_conn() as conn:
         pending = diag_events.pending_count(conn)
+        requests = diag_events.waiting_warrants(conn)
     return {
         "enabled":        bool(_read("support.diagnostics_enabled")),
         "last_report_at": _read("support.last_report_at"),
         "last_bundle_at": _read("support.last_bundle_at"),
         "pending_events": pending,
+        "requests":       [_support_request(r) for r in requests],
     }
+
+
+def _support_request(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A support request waiting for the person, as the request sheet shows
+    it: what support asked for, split into the structural part (it goes
+    either way) and the content scopes the person ticks."""
+    from desktop.p2p.diag_protocol import CHAT_DEFAULT_DAYS, CONTENT_SCOPES
+    return {**row,
+            "structural": [s for s in row["scopes"] if s not in CONTENT_SCOPES],
+            "content": [s for s in CONTENT_SCOPES if s in row["scopes"]],
+            # the conversations' window when support named no `since`
+            "window_days": CHAT_DEFAULT_DAYS}
+
+
+class SupportDecision(BaseModel):
+    send: List[str] = Field(default_factory=list, max_length=8)
+
+
+@router.post("/support/requests/{warrant_id}")
+def decide_support_request(warrant_id: uuid.UUID, req: SupportDecision) -> Dict[str, Any]:
+    """The person's answer to a support request (the request sheet): `send`
+    names the content scopes they ticked — none sends the structural part
+    alone. 409 when the request no longer waits (decided on another tab,
+    expired, or withdrawn by the switch). The launcher's worker collects and
+    sends it on the decision's own wake (diag_events.decide)."""
+    from desktop.p2p import diag_events
+    from desktop.p2p.diag_protocol import CONTENT_SCOPES
+    unknown = set(req.send) - set(CONTENT_SCOPES)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"not a content scope: {sorted(unknown)}")
+    with get_conn() as conn:
+        decided = diag_events.decide(conn, str(warrant_id), sorted(set(req.send)))
+    if not decided:
+        raise HTTPException(status_code=409, detail="This request no longer waits for an answer")
+    logger.info("Support request %s… decided: sent=%s", str(warrant_id)[:8],
+                ",".join(sorted(set(req.send))) or "-")
+    return {"ok": True}
 
 
 def _diag_observe_agent(agent: str, state: str) -> None:
@@ -1278,6 +1318,17 @@ def _notice_items() -> List[Dict[str, Any]]:
     if agent is not None and not agent["signed_in"] and provider == "codex":
         items.append({"key": "codex.signed_out", "kind": "error",
                       "since": agent["since"], "until": None, "data": {}})
+    # A support request that names the person's conversations, logs or
+    # playback traces waits for their own decision on the request sheet
+    # (desktop/p2p/diag_events.waiting_warrants); its Review opens it. Only a
+    # launcher node receives one.
+    from desktop.p2p import diag_events
+    with get_conn() as conn:
+        waiting = diag_events.waiting_warrants(conn)
+    for row in waiting:
+        items.append({"key": f"support.request.{row['id']}", "kind": "info",
+                      "since": row["received_at"], "until": row["expires_at"],
+                      "data": _support_request(row)})
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]
@@ -2324,6 +2375,9 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
             db_execute("NOTIFY sautium_relay_off")
     if req.diagnostics_enabled is not None:
         _write("support.diagnostics_enabled", bool(req.diagnostics_enabled))
+        # A support request waiting for the person is withdrawn by the
+        # switch: every open tab drops its notice now
+        db_execute("NOTIFY sautium_notices")
     if req.background_enrichment is not None:
         want = bool(req.background_enrichment)
         _write("enrichment.background_enabled", want)

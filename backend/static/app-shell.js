@@ -11711,6 +11711,14 @@
       return { title: `${escapeHtml((n.data && n.data.source) || n.key.slice(9))} paused`,
                text: `Rate-limited — resumes ${fmtUntil(n.until)}.` };
     }
+    // A support request that names the person's conversations, logs or
+    // playback traces waits for their decision (routers/settings.py
+    // _notice_items): Review opens the request sheet
+    if (n.key.startsWith('support.request.')) {
+      return { title: 'Sautium support asks for diagnostics from this node',
+               text: `Asked on ${fmtDayHm(n.since)} — nothing goes until you review it.`,
+               action: { label: 'Review', run: () => openSupportRequestSheet(n.data) } };
+    }
     if (n.key.startsWith('streaming.silent.')) {
       const name = (n.data && (n.data.name || n.data.provider)) || n.key.slice(17);
       const reason = (n.data && n.data.reason) ? ` (${escapeHtml(n.data.reason)})` : '';
@@ -13777,10 +13785,15 @@
           <span class="form-label">Share diagnostics with support</span>
           <button class="toggle ${sync.support && sync.support.enabled ? 'on' : ''}" data-action="toggle-support"><span class="knob"></span></button>
         </div>`;
+    // A request waiting for the person makes the row its way in: the label
+    // is the button that opens the request sheet
+    const waiting = !!(sync.support && sync.support.enabled && (sync.support.requests || []).length);
     const supportRow = `
         <div class="form-row">
           <span class="form-label">Support</span>
-          <span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>
+          ${waiting
+            ? `<button class="btn-link" type="button" data-action="review-support">${escapeProfileHtml(supportLabel(sync.support))}</button>`
+            : `<span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>`}
         </div>`;
 
     if (!on) {
@@ -13900,6 +13913,7 @@
   function supportLabel(s) {
     if (!s) return '—';
     if (!s.enabled) return 'off';
+    if (s.requests && s.requests.length) return 'request waiting — review';
     const parts = [s.last_report_at ? `report ${fmtRelative(s.last_report_at)}` : 'no report yet'];
     if (s.last_bundle_at) parts.push(`bundle ${fmtRelative(s.last_bundle_at)}`);
     return parts.join(' · ');
@@ -13907,10 +13921,84 @@
   function supportDetail(s) {
     if (!s) return '';
     const parts = [s.enabled
-      ? 'Event reports and signed diagnostic requests from Sautium support are answered silently'
+      ? 'Event reports and the facts about this node that Sautium support asks for are sent on their own; your conversations, logs and playback traces only when you tick them'
       : 'Nothing is sent to Sautium support'];
     if (s.pending_events) parts.push(`${fmtNum(s.pending_events)} event${s.pending_events === 1 ? '' : 's'} waiting`);
     return parts.join(' · ');
+  }
+
+  function fmtDayHm(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '—';
+    return `${escapeHtml(d.toLocaleDateString([], { month: 'short', day: 'numeric' }))} at <span class="num">${escapeHtml(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span>`;
+  }
+
+  /* A support request that waits for the person (diag_events.waiting_warrants):
+     what support asked for, the structural part that goes either way, and one
+     tick per content scope it names — all unticked. Send sends what is
+     ticked (nothing ticked: the structural part alone); Not now leaves the
+     request waiting until it expires. The notice and the Support row both
+     open it; the decision's wake drops them on every tab. */
+  const SUPPORT_STRUCTURAL_WORDS = {
+    system: 'System and build', settings: 'Settings (no paths)',
+    p2p: 'Network (no addresses)', jobs: 'Jobs', events: 'Events',
+  };
+  function openSupportRequestSheet(req) {
+    if (!req) return;
+    const day = iso => escapeProfileHtml(new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    const chatSince = req.since || new Date(Date.now() - (req.window_days || 14) * 86400000).toISOString();
+    const tickWords = {
+      chat: `Your conversations with the assistant since ${day(chatSince)}`,
+      logs: 'Log excerpts — they can name artists in your library, your devices and the errors your node met',
+      playback: 'HQPlayer playback traces — each track by its id, format and length',
+    };
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Diagnostics for support</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            Support asked for the facts below on ${day(req.issued_at)}. They are encrypted so only the maintainer's node can read them.
+          </p>
+          ${req.structural.length ? `<p style="margin:0;color:var(--color-text);font-size:calc(12.5*var(--px));line-height:1.5;">${
+            req.structural.map(s => escapeProfileHtml(SUPPORT_STRUCTURAL_WORDS[s] || s)).join(' · ')}</p>` : ''}
+          <div class="token-rights">
+            ${req.content.map(s => `
+            <label class="token-right"><input type="checkbox" data-scope="${escapeProfileHtml(s)}">
+              <span>${tickWords[s] || escapeProfileHtml(s)}</span></label>`).join('')}
+          </div>
+          <button class="profile-btn primary" data-send>Send</button>
+          <button class="profile-btn secondary" data-later>Not now</button>
+          <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    overlay.querySelector('[data-later]').addEventListener('click', close);
+    const msg = overlay.querySelector('[data-msg]');
+    overlay.querySelector('[data-send]').addEventListener('click', () => onceInFlight(overlay, async () => {
+      const send = [...overlay.querySelectorAll('input[data-scope]:checked')].map(el => el.dataset.scope);
+      try {
+        const r = await fetch(`/api/settings/support/requests/${encodeURIComponent(req.id)}`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ send }),
+        });
+        if (r.ok) { close(); return; }
+        const data = await r.json().catch(() => ({}));
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = data.detail || 'Not sent.';
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    }));
   }
 
   // Identity certificate + proof state published by the node's proof worker
@@ -15703,6 +15791,9 @@
     toggle('[data-action="toggle-reanalyze"]', 'reanalyze_imported');
     toggle('[data-action="toggle-relay"]',     'relay_enabled');
     toggle('[data-action="toggle-support"]',   'diagnostics_enabled');
+    onAction('[data-action="review-support"]', () => {
+      openSupportRequestSheet(sync.support.requests[0]);
+    });
     onAction('[data-action="pick-interval"]', async () => {
       const id = await openSettingsPicker({ title: 'Auto-sync interval', options: AUTO_SYNC_OPTIONS, currentId: sync.auto_interval_min || 0 });
       if (id != null) await putSync({ auto_interval_min: Number(id) });

@@ -1126,9 +1126,11 @@ slice answer's 16 MiB; the load meter and the gate's backstops come on top.
 Every identity auto-friends the master as its support contact, but a
 chat message is only part of a problem report: the diagnosis needs logs,
 the AI-assistant dialogs, the machine, the build, the P2P state — none of
-which fit a chat. Two mechanisms, both **silent** (no dialogs; a
+which fit a chat. Two mechanisms, both under a
 `support.diagnostics_enabled` toggle, on by default, and a "Support" row
-in the P2P card that says what went out when):
+in the P2P card that says what went out when — silent for facts about the
+node; since 2026-11-04 the person's own conversations, logs and playback
+traces go only with their tick on a request sheet (below):
 
 **Warrants (master → node → master).** The maintainer, from Claude Code
 (`mcp/support_server.py` → `/api/support/*` on the master's 8800), issues a
@@ -1184,6 +1186,26 @@ end is refused. Then it unpacks regular files and folders only, 256 entries
 and 512 MiB at most, judged from the headers before a byte is written,
 through the standard library's `data` filter (since 2026-11-03).
 
+**The person decides on content** (since 2026-11-04). `chat`, `logs` (with
+the events' log tails) and `playback` are `diag_protocol.CONTENT_SCOPES`: a
+warrant that names one waits on the node (`diag_events.AWAITS_THE_PERSON`;
+nothing of it is collected) and the Web UI shows a notice,
+`support.request.<id>`, whose Review — and the Support row's "request
+waiting" — opens the request sheet: what support asked for, the structural
+part that goes either way, one tick per content scope asked, all unticked.
+Send (`POST /api/settings/support/requests/{id}`, `diag_events.decide`)
+stores the decision — `decided_at`, `granted` = asked ∩ ticked — and in the
+same statement NOTIFYs `sautium_diag_consent`, which wakes the launcher's
+worker to collect and send it, and `sautium_notices`; nothing ticked sends
+the structural part alone. Not now leaves the request waiting until it
+expires. The bundle's manifest names what was left out (`withheld`), so the
+desk can ask in the support chat. A request received before the toggle's
+last change is not asked about and cannot be sent; a bundle leaves only if
+the toggle has not moved since the decision (`may_upload`); one an earlier
+release staged before asking is discarded and the request waits. The
+master is unchanged: it re-pushes the warrant on every subscribe, and the
+node keeps its decision.
+
 **Why a captured warrant is worthless.** The bundle's destination is not
 in the warrant — it is the pinned master, reached over the node's own
 pinned TLS. Replaying a warrant to its target re-delivers a bundle to the
@@ -1227,7 +1249,9 @@ reconnect resumes staged uploads and unshipped reports — no timers.
 the master, so they record `diag_events` but neither answer warrants nor
 report (v1 is for the launcher, where the users are). A node with the
 toggle off is silent — no "declined" signal, because that would disclose
-the toggle. `backend.log` is now rotated to `backend.log.1` on every
+the toggle; nor does a request the person has not decided on, or sent
+without a content scope, answer anything but its bundle (the manifest's
+`withheld`). `backend.log` is now rotated to `backend.log.1` on every
 backend start so the previous run's crash survives into the `logs`
 scope. Retention: 90 d locally, 180 d reports / 30 d bundles on the
 master (swept once per start).
