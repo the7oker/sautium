@@ -51,8 +51,16 @@ class OutputHeld(ConnectionError):
 
 class QueueRefused(RuntimeError):
     """The output took none of a new queue: nothing commits, the queue as it
-    was. Its words — and what the person's words made meanwhile could not do,
-    a note — are the play route's answer."""
+    was. Its words — and what the person's words made meanwhile could not do
+    (said_with) — are the play route's answer."""
+
+
+def said_with(e: BaseException) -> Optional[str]:
+    """What the person's words made meanwhile could not do, carried by the
+    refusal of the mutation they rode (PlaybackManager._output_mutation) for
+    the routes to answer — never a note: a traceback prints notes, and this
+    names a track."""
+    return getattr(e, "_said", None)
 
 
 class QueueChanged(RuntimeError):
@@ -968,8 +976,8 @@ class PlaybackManager:
         the output owes started and the person's words made meanwhile
         carried out, the queue committed or not (queue_start). What of them
         could not go on a mutation that did not commit is said with its
-        refusal (a note on the error, which the routes answer). Yields the
-        output, None when there is none."""
+        refusal (said_with, which the routes answer). Yields the output, None
+        when there is none."""
         backend = None
         try:
             with self._mutation():
@@ -979,7 +987,7 @@ class PlaybackManager:
         except BaseException as e:
             said = backend.queue_start() if backend is not None else None
             if said:
-                e.add_note(said)
+                e._said = said
             raise
         if backend is not None:
             backend.queue_start()

@@ -72,6 +72,51 @@ def test_a_listen_logs_no_title_at_info(monkeypatch, caplog):
                 if r.levelno >= logging.INFO and "Private" in r.getMessage()]
 
 
+@pytest.mark.parametrize("busy", [True, False])
+def test_a_refused_reorder_logs_no_title_of_a_track_the_person_tapped(monkeypatch, caplog, busy):
+    """A queue change the output refused carries what the person's words
+    made meanwhile could not do — a track tapped, by its title — for the
+    route to answer them: the answer names it, the log does not, nor does
+    the error's traceback."""
+    import traceback
+    import types
+
+    from fastapi import HTTPException
+    from playback.hqp_link import Dropped
+    from routers import player as player_router
+
+    from contextlib import nullcontext
+
+    from playback.manager import PlaybackManager
+
+    output = types.SimpleNamespace(
+        mutation=nullcontext,
+        queue_start=lambda: "A Private Title, played meanwhile, is not in the queue — not played")
+    raised = Dropped("a newer intent came first") if busy else RuntimeError("the database is away")
+    try:
+        with PlaybackManager()._output_mutation(lambda: output):
+            raise raised
+    except type(raised) as e:
+        error = e
+
+    def refuse(plan):
+        raise error
+
+    items = [types.SimpleNamespace(track_id=t) for t in ("t1", "t2", "t3")]
+    monkeypatch.setattr(player_router, "manager", types.SimpleNamespace(
+        queue=types.SimpleNamespace(snapshot=lambda: list(items)),
+        latest_status={"track_index": 1, "state": "playing", "position": 0},
+        active=None, held=None, apply_reorder=refuse))
+    with caplog.at_level(logging.INFO), pytest.raises(HTTPException) as answered:
+        player_router.reorder(player_router.ReorderRequest(order=["t1", "t3", "t2"]))
+    assert answered.value.status_code == (409 if busy else 503)
+    assert "A Private Title" in answered.value.detail
+    assert caplog.records and not [r for r in caplog.records if "Private" in r.getMessage()
+                                   or (r.exc_info and "Private" in "".join(
+                                       traceback.format_exception(*r.exc_info)))]
+    assert "Private" not in "".join(traceback.format_exception(error))
+
+
 def _message_text_logged(path: Path) -> list:
     """Logger calls that format `message` itself — its length is allowed."""
     found = []

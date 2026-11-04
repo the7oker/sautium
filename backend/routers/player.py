@@ -33,7 +33,7 @@ from playback.base import OutputRefused, ReorderPlan
 from playback import hqp_link
 from playback.hqp_link import Building, Dropped, GaveUp, NotAnswering, through
 from playback.hqp_meter import meter as hqp_meter
-from playback.manager import OutputHeld, QueueChanged, active_hqp_endpoint, manager
+from playback.manager import OutputHeld, QueueChanged, active_hqp_endpoint, manager, said_with
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
@@ -1928,13 +1928,14 @@ def reorder(req: ReorderRequest):
         raise _output_error(e)
     except Exception as e:
         # The output busy — held, building, silent, a newer intent first —
-        # is news; anything else is a fault, with its traceback
-        refused = _output_error(e)
-        if refused.status_code == 409:
-            logger.warning("reorder not applied: %s", refused.detail)
+        # is news; anything else is a fault, with its traceback. Either way
+        # without what the person's words could not do: it names a track
+        status, why = _output_refusal(e)
+        if status == 409:
+            logger.warning("reorder not applied: %s", why)
         else:
-            logger.error(f"reorder failed: {e}", exc_info=True)
-        raise refused
+            logger.error("reorder failed: %s", why, exc_info=True)
+        raise _output_error(e)
 
 @router.post("/jump")
 def jump(req: JumpRequest):
@@ -2797,28 +2798,33 @@ class PlayPhantomAlbumRequest(BaseModel):
     position: str = "end"     # queue endpoint only: 'next' | 'end'
 
 
-def _output_error(e: Exception) -> HTTPException:
+def _output_refusal(e: Exception) -> tuple[int, str]:
     """What a play intent or transport command the output did not take
-    answers: 409 while the output is lent (the HQPlayer benchmark), while
-    HQPlayer builds a setting or takes the connection and says nothing, and
-    for a command its link no longer sends (a newer intent came first, the
-    output was switched away) — busy, not broken: the UI must not send the
-    owner to the Output picker — 503 when it cannot take it. A backend
+    answers, and why: 409 while the output is lent (the HQPlayer benchmark),
+    while HQPlayer builds a setting or takes the connection and says nothing,
+    and for a command its link no longer sends (a newer intent came first,
+    the output was switched away) — busy, not broken: the UI must not send
+    the owner to the Output picker — 503 when it cannot take it. A backend
     detached by the hold that an intent took just before refuses with a
-    plain ConnectionError — the hold names it. What the person's words made
-    meanwhile could not do (a note on the error: a track tapped while a new
-    queue that did not commit loaded) is said with it."""
-    notes = list(getattr(e, "__notes__", ()))
+    plain ConnectionError — the hold names it."""
     hold = manager.held
     if isinstance(e, OutputHeld):
-        status, why = 409, str(e)
-    elif hold is not None and isinstance(e, ConnectionError):
-        status, why = 409, str(OutputHeld(hold))
-    elif isinstance(e, (Building, NotAnswering, Dropped)):
-        status, why = 409, str(e)
-    else:
-        status, why = 503, str(e)
-    return HTTPException(status_code=status, detail=" — ".join([why, *notes]))
+        return 409, str(e)
+    if hold is not None and isinstance(e, ConnectionError):
+        return 409, str(OutputHeld(hold))
+    if isinstance(e, (Building, NotAnswering, Dropped)):
+        return 409, str(e)
+    return 503, str(e)
+
+
+def _output_error(e: Exception) -> HTTPException:
+    """The refusal (_output_refusal) as the route's answer, with what the
+    person's words made meanwhile could not do (said_with: a track tapped
+    while a new queue that did not commit loaded) — for the person, never
+    for the log."""
+    status, why = _output_refusal(e)
+    said = said_with(e)
+    return HTTPException(status_code=status, detail=f"{why} — {said}" if said else why)
 
 
 def _ensure_output_ready() -> None:

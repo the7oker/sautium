@@ -12486,8 +12486,9 @@ def test_a_tap_held_by_a_replace_that_does_not_commit_is_said_with_its_refusal(
     _settled()
     assert _start_sent(fake, n) == []
     assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
-    said = getattr(failed[0], "__notes__", [])
-    assert said == ["Song 12, played meanwhile, is not in the queue — not played"], said
+    from playback.manager import said_with
+    said = said_with(failed[0])
+    assert said == "Song 12, played meanwhile, is not in the queue — not played", said
     from routers import player as player_router_mod
     assert player_router_mod._output_error(failed[0]).detail == (
         "the database is away — Song 12, played meanwhile, is not in the queue — not played")
@@ -12924,7 +12925,8 @@ def test_a_tap_held_by_a_replace_that_does_not_commit_plays_on_the_queue_it_left
     assert _quick(lambda: player_router.jump(
         player_router.JumpRequest(index=3, track_id="track-3")))["ok"]
     loading.join(10)
-    assert failed and not getattr(failed[0], "__notes__", [])
+    from playback.manager import said_with
+    assert failed and said_with(failed[0]) is None
     _settled()
     assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
     assert fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3)]
@@ -13647,7 +13649,8 @@ def test_a_tap_held_by_a_new_queue_hqplayer_refused_whole_is_said_with_its_refus
     assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
     error = out.get("error")
     assert isinstance(error, QueueRefused) and "refused all 3 tracks" in str(error), out
-    assert error.__notes__ == ["Song 12, played meanwhile, is not in the queue — not played"]
+    from playback.manager import said_with
+    assert said_with(error) == "Song 12, played meanwhile, is not in the queue — not played"
 
 
 def test_a_next_held_by_a_play_next_hqplayer_refused_whole_steps_on_the_queue_as_it_stands(
