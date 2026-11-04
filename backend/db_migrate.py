@@ -29,7 +29,12 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      folded key (accents, typography, a store's annotation — 2026-09-24).
      The support step (`diag_scrubbed_v1`) scrubs what was kept for support
      before its text was: the node's events, the master's received reports
-     (no path, address or email — 2026-11-03).
+     (no path, address or email — 2026-11-03). The consent step
+     (`diag_consent_v1`) makes every bundle staged and not yet sent count for
+     nothing, the day the person came to decide on the content scopes
+     (2026-11-04): an earlier release's carried the events' log tails
+     unasked; the warrant is collected again on its next delivery, under the
+     new rule.
      The slice step (`slice_authors_v1`) drops what slices of a key the
      release does not name left behind, the day a slice came to count only
      under its author (master_node.SLICE_AUTHORS, 2026-11-03).
@@ -173,6 +178,21 @@ def _scrub_support_records(conn) -> dict:
     return counts
 
 
+def _recollect_staged_bundles(conn) -> int:
+    """A bundle collected and staged, not yet sent, counts for nothing: it
+    was collected before the person decided on the content scopes, and even
+    a request for facts about the node alone carried the events' log tails.
+    Its warrant is collected again on its next delivery — one that names a
+    content scope only once the person decided (diag_events.AWAITS_THE_PERSON)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE diag_warrants SET collected_at = NULL, size_bytes = NULL
+             WHERE collected_at IS NOT NULL AND uploaded_at IS NULL AND error IS NULL""")
+        count = cur.rowcount
+    conn.commit()
+    return count
+
+
 def _drop_unauthored_slices(conn) -> dict:
     """The ledger rows that closed a name or an artist on the word of a key
     the release does not name — asked again, of an author — with the LB
@@ -272,6 +292,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "diag_scrubbed_v1"):
             out["support_records_scrubbed"] = _scrub_support_records(conn)
             _mark(conn, "diag_scrubbed_v1")
+
+        if not _marked(conn, "diag_consent_v1"):
+            out["staged_bundles_recollected"] = _recollect_staged_bundles(conn)
+            _mark(conn, "diag_consent_v1")
 
         if not _marked(conn, "slice_authors_v1"):
             out["unauthored_slices_dropped"] = _drop_unauthored_slices(conn)

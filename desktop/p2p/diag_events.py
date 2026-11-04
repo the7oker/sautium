@@ -69,7 +69,7 @@ SWITCH_ALLOWS = """NOT EXISTS (
      WHERE s.key = 'support.diagnostics_enabled'
        AND (s.value = 'false'::jsonb OR s.updated_at > {since}))"""
 
-WITHDRAWN = "withdrawn: diagnostics were switched off after it was collected"
+WITHDRAWN = "withdrawn: diagnostics were switched off after it was collected or decided"
 
 # A warrant that names a content scope and that the person has not decided
 # on: nothing of it is collected or leaves. A bundle an earlier release
@@ -168,9 +168,9 @@ def pending_count(conn, max_age_days: int = REPORT_MAX_AGE_DAYS) -> int:
 
 
 def recent(conn, limit: int) -> list:
-    """Newest-first rows for the `events` bundle scope — local-only fields
-    included, this is the bundle the master asked for — since diagnostics
-    were last switched on."""
+    """Newest-first rows for the `events` bundle scope, since diagnostics
+    were last switched on — local-only fields included: the collector drops
+    them unless the person sent the `logs` scope (diag_bundle.collect)."""
     with conn.cursor() as cur:
         cur.execute(f"""
             SELECT id, ts, kind, detail, reported_at
@@ -295,9 +295,10 @@ def clear_session_marker(data_dir: Path) -> None:
 def receive_warrant(conn, warrant: dict) -> dict:
     """First receipt inserts the row (ON CONFLICT decides — one statement,
     no read-then-write race); either way the current state comes back:
-    {"fresh", "awaits", "granted", "collected_at", "uploaded_at", "error"} —
-    `awaits`: the person has yet to decide (AWAITS_THE_PERSON), `granted`:
-    the content scopes they ticked."""
+    {"fresh", "awaits", "withdrawn", "granted", "collected_at", "uploaded_at",
+    "error"} — `awaits`: the person has yet to decide (AWAITS_THE_PERSON),
+    `withdrawn`: they decided and the switch moved since, `granted`: the
+    content scopes they ticked."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO diag_warrants (id, issuer, issued_at, expires_at, scopes, since)
@@ -308,13 +309,14 @@ def receive_warrant(conn, warrant: dict) -> dict:
               int(warrant["expires_at"]), list(warrant["scopes"]), warrant.get("since")))
         fresh = cur.fetchone() is not None
         cur.execute(f"""
-            SELECT {AWAITS_THE_PERSON}, coalesce(w.granted, '{{}}'),
-                   w.collected_at, w.uploaded_at, w.error
+            SELECT {AWAITS_THE_PERSON},
+                   w.decided_at IS NOT NULL AND NOT {SWITCH_ALLOWS.format(since="w.decided_at")},
+                   coalesce(w.granted, '{{}}'), w.collected_at, w.uploaded_at, w.error
               FROM diag_warrants w WHERE w.id = %s
         """, (warrant["id"],))
-        awaits, granted, collected_at, uploaded_at, error = cur.fetchone()
+        awaits, withdrawn, granted, collected_at, uploaded_at, error = cur.fetchone()
     _commit(conn)
-    return {"fresh": fresh, "awaits": awaits, "granted": list(granted),
+    return {"fresh": fresh, "awaits": awaits, "withdrawn": withdrawn, "granted": list(granted),
             "collected_at": collected_at, "uploaded_at": uploaded_at, "error": error}
 
 
@@ -367,15 +369,17 @@ def decide(conn, warrant_id: str, send: Iterable[str]) -> bool:
 def decided_uncollected(conn) -> list:
     """Requests the person decided on whose bundle is still to collect —
     what the launcher's worker does on sautium_diag_consent: each as the
-    warrant it was received as, with the content scopes granted."""
+    warrant it was received as, with the content scopes granted. A decision
+    the switch withdrew is not among them."""
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT id::text, issuer, extract(epoch FROM issued_at)::bigint,
                    extract(epoch FROM expires_at)::bigint, scopes,
                    extract(epoch FROM since)::bigint, granted
               FROM diag_warrants
              WHERE decided_at IS NOT NULL AND collected_at IS NULL
                AND error IS NULL AND uploaded_at IS NULL AND expires_at > now()
+               AND {SWITCH_ALLOWS.format(since="decided_at")}
              ORDER BY decided_at
         """)
         return [({"id": wid, "issuer": issuer, "issued_at": issued, "expires_at": expires,

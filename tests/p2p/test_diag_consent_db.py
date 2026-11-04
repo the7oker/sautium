@@ -145,14 +145,35 @@ def test_an_expired_request_cannot_be_sent(conn):
     assert not diag_events.decide(conn, w["id"], ["chat"])
 
 
-def test_a_decision_the_switch_changed_after_does_not_leave(conn):
+def test_a_decision_the_switch_changed_after_is_not_collected_and_does_not_leave(conn):
     w = _warrant(CONTENT)
     diag_events.receive_warrant(conn, w)
     assert diag_events.decide(conn, w["id"], ["chat"])
     _switch(conn, False)
     _switch(conn, True)
+    assert diag_events.decided_uncollected(conn) == []
+    assert diag_events.receive_warrant(conn, w)["withdrawn"]
     diag_events.mark_collected(conn, w["id"], 100, _db_now(conn))
     assert not diag_events.may_upload(conn, w["id"])
+
+
+def test_a_bundle_staged_before_the_person_decided_on_content_counts_for_nothing(
+        conn, settings_router):
+    """Before this rule, a request for facts about the node alone carried
+    the events' log tails too: whatever was staged and not sent is collected
+    again on the warrant's next delivery (the startup step)."""
+    from db_migrate import _recollect_staged_bundles
+
+    staged, sent = _warrant(["system", "events"]), _warrant(["system"])
+    for w in (staged, sent):
+        diag_events.receive_warrant(conn, w)
+        diag_events.mark_collected(conn, w["id"], 100, _db_now(conn))
+    diag_events.mark_uploaded(conn, sent["id"])
+
+    assert _recollect_staged_bundles(conn) == 1
+    assert diag_events.resumable_warrants(conn) == []
+    assert diag_events.receive_warrant(conn, staged)["collected_at"] is None
+    assert diag_events.receive_warrant(conn, sent)["uploaded_at"] is not None
 
 
 def _members(data: bytes) -> dict:
@@ -238,6 +259,53 @@ def test_the_worker_waits_for_the_person_then_sends_what_they_ticked(
     assert uploaded == [(w["id"], b"boxed:tar", addr)]
     asyncio.run(node._diag_handle_warrant(w, addr))           # re-delivered: sent, not collected again
     assert len(collected) == 1
+
+
+def test_a_decision_the_switch_withdrew_is_closed_without_collecting(
+        conn, scratch_dsn, tmp_path, monkeypatch):
+    addr = ("192.0.2.1", 20000)
+    node, collected, uploaded = _node(scratch_dsn, tmp_path, monkeypatch, master_addr=addr)
+    w = _warrant(CONTENT)
+    diag_events.receive_warrant(conn, w)
+    assert diag_events.decide(conn, w["id"], ["chat", "logs"])
+    _switch(conn, False)
+    _switch(conn, True)
+    asyncio.run(node._diag_decided())
+    asyncio.run(node._diag_handle_warrant(w, addr))           # re-delivered
+    assert collected == [] and uploaded == []
+    assert diag_events.receive_warrant(conn, w)["error"] == diag_events.WITHDRAWN
+
+
+def test_the_masters_reconnect_collects_a_decision_whose_wake_was_missed(
+        conn, scratch_dsn, tmp_path, monkeypatch):
+    """The decision's NOTIFY reached no LISTEN (the connection was down):
+    the master's reconnect looks for decisions too, before it resumes."""
+    from desktop.p2p.p2p_manager import P2PManager
+
+    addr = ("192.0.2.1", 20000)
+    node, collected, uploaded = _node(scratch_dsn, tmp_path, monkeypatch, master_addr=addr)
+    w = _warrant(CONTENT)
+    diag_events.receive_warrant(conn, w)
+    assert diag_events.decide(conn, w["id"], ["chat"])
+
+    async def run():
+        done = asyncio.Event()
+
+        async def report():
+            done.set()
+        node._running = True
+        node._diag_queue = asyncio.Queue()
+        node._diag_allowed = lambda: True
+        node._diag_resume = types.MethodType(P2PManager._diag_resume, node)
+        node._diag_report = report
+        node._diag_queue.put_nowait(("resume", addr))
+        worker = asyncio.create_task(P2PManager._diag_worker(node))
+        await asyncio.wait_for(done.wait(), 10)
+        node._running = False
+        worker.cancel()
+    asyncio.run(run())
+    assert collected == [(w["id"], ["chat"])]
+    assert {u[0] for u in uploaded} == {w["id"]}
 
 
 def test_a_decision_without_the_masters_address_waits_staged_for_its_reconnect(

@@ -240,7 +240,9 @@ def test_notices_a_query_collected_are_handled_before_the_next_wait(monkeypatch)
     monkeypatch.setattr(p2p_manager.psycopg2, "connect", lambda dsn: _Conn())
     monkeypatch.setattr(sync_walk, "readable", readable)
     asyncio.run(manager._listen_for_db_notifications())
-    assert handled == [("report",)] and waits == [0]       # handled first, then the wait
+    # the connect's look for decided support requests, then the notice
+    # handled first, then the wait
+    assert handled == [("decided",), ("report",)] and waits == [0]
 
 
 def test_the_relay_off_notice_ends_the_slots_and_the_capability(monkeypatch):
@@ -251,6 +253,7 @@ def test_the_relay_off_notice_ends_the_slots_and_the_capability(monkeypatch):
     manager.db_dsn = "postgresql://unused"
     manager._sync_server = SimpleNamespace(close_relay_clients=lambda: closed.append(True))
     manager._dht_service = SimpleNamespace(withdraw_capability=withdrawn.append)
+    manager._diag_queue = SimpleNamespace(put_nowait=lambda job: None)
 
     class _Conn:
         notifies = [SimpleNamespace(channel="sautium_relay_off", payload="")]

@@ -1128,9 +1128,10 @@ chat message is only part of a problem report: the diagnosis needs logs,
 the AI-assistant dialogs, the machine, the build, the P2P state — none of
 which fit a chat. Two mechanisms, both under a
 `support.diagnostics_enabled` toggle, on by default, and a "Support" row
-in the P2P card that says what went out when — silent for facts about the
-node; since 2026-11-04 the person's own conversations, logs and playback
-traces go only with their tick on a request sheet (below):
+in the P2P card that says what went out when — silent for a request for
+facts about the node alone; since 2026-11-04 a request that also names the
+person's conversations, logs or playback traces waits, all of it, for their
+review on a request sheet, and those go only with their tick (below):
 
 **Warrants (master → node → master).** The maintainer, from Claude Code
 (`mcp/support_server.py` → `/api/support/*` on the master's 8800), issues a
@@ -1202,7 +1203,13 @@ expires. The bundle's manifest names what was left out (`withheld`), so the
 desk can ask in the support chat. A request received before the toggle's
 last change is not asked about and cannot be sent; a bundle leaves only if
 the toggle has not moved since the decision (`may_upload`); one an earlier
-release staged before asking is discarded and the request waits. The
+release staged and had not sent counts for nothing — any warrant's, since
+an older events scope carried its log tails unasked (the `diag_consent_v1`
+startup step clears the collection; the next delivery collects it anew, a
+content warrant once the person decided); a decision the toggle moved after
+is closed without collecting. A decision made while the launcher was not
+listening is picked up on its LISTEN's every (re)connect and on the master's
+reconnect. The
 master is unchanged: it re-pushes the warrant on every subscribe, and the
 node keeps its decision.
 

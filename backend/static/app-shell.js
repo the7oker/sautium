@@ -11716,7 +11716,7 @@
     // _notice_items): Review opens the request sheet
     if (n.key.startsWith('support.request.')) {
       return { title: 'Sautium support asks for diagnostics from this node',
-               text: `Asked on ${fmtDayHm(n.since)} — nothing goes until you review it.`,
+               text: `Asked on ${fmtDayHm((n.data && n.data.issued_at) || n.since)} — nothing goes until you review it.`,
                action: { label: 'Review', run: () => openSupportRequestSheet(n.data) } };
     }
     if (n.key.startsWith('streaming.silent.')) {
@@ -13921,7 +13921,7 @@
   function supportDetail(s) {
     if (!s) return '';
     const parts = [s.enabled
-      ? 'Event reports and the facts about this node that Sautium support asks for are sent on their own; your conversations, logs and playback traces only when you tick them'
+      ? 'Event reports are sent on their own, and so is a request from Sautium support for facts about this node; a request that also asks for your conversations, logs or playback traces waits — all of it — until you review it, and those go only if you tick them'
       : 'Nothing is sent to Sautium support'];
     if (s.pending_events) parts.push(`${fmtNum(s.pending_events)} event${s.pending_events === 1 ? '' : 's'} waiting`);
     return parts.join(' · ');
@@ -13944,7 +13944,8 @@
     p2p: 'Network (no addresses)', jobs: 'Jobs', events: 'Events',
   };
   function openSupportRequestSheet(req) {
-    if (!req) return;
+    // one sheet at a time: the notice, its row and the Support row all open it
+    if (!req || document.querySelector('[data-support-sheet]')) return;
     const day = iso => escapeProfileHtml(new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' }));
     const chatSince = req.since || new Date(Date.now() - (req.window_days || 14) * 86400000).toISOString();
     const tickWords = {
@@ -13954,6 +13955,7 @@
     };
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
+    overlay.dataset.supportSheet = '';
     overlay.innerHTML = `
       <div class="add-gear-sheet">
         <div class="sheet-handle"></div>
@@ -13993,7 +13995,7 @@
         if (r.ok) { close(); return; }
         const data = await r.json().catch(() => ({}));
         msg.style.color = 'var(--color-negative)';
-        msg.textContent = data.detail || 'Not sent.';
+        msg.textContent = typeof data.detail === 'string' ? data.detail : 'Not sent.';
       } catch (err) {
         msg.style.color = 'var(--color-negative)';
         msg.textContent = String(err);

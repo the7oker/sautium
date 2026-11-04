@@ -2952,6 +2952,9 @@ class P2PManager:
                     cur.execute("LISTEN sautium_diag_consent")
                     cur.execute("LISTEN sautium_identity_rotated")
                     cur.execute("LISTEN sautium_relay_off")
+                # A decision made while this connection was not listening
+                # woke nobody: the worker looks once on every (re)connect
+                self._diag_queue.put_nowait(("decided",))
 
                 while self._running:
                     # Notices a query on this connection collected wait in
@@ -3293,6 +3296,7 @@ class P2PManager:
                 if job[0] == "warrant":
                     await self._diag_handle_warrant(job[1], job[2])
                 elif job[0] == "resume":
+                    await self._diag_decided()
                     await self._diag_resume(job[1])
                     await self._diag_report()
                 elif job[0] == "report":
@@ -3328,6 +3332,14 @@ class P2PManager:
                         "fulfilled" if state["uploaded_at"] else "failed")
             return
         stage = diag_events.diag_dir(get_data_dir()) / f"{warrant['id']}.box"
+        if state["withdrawn"]:
+            # The person decided, and the switch moved after: nothing of it
+            # is gathered
+            stage.unlink(missing_ok=True)
+            await loop.run_in_executor(
+                None, self._diag_db, diag_events.mark_failed, warrant["id"], diag_events.WITHDRAWN)
+            logger.info("Support warrant %s… %s", short, diag_events.WITHDRAWN)
+            return
         if state["awaits"]:
             # A bundle an earlier release staged before asking is not the
             # person's to send: it goes, and the request waits like any other

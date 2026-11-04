@@ -76,7 +76,7 @@ def test_what_was_kept_before_is_scrubbed_once_at_startup(conn):
         # a bundle collected before, staged, never uploaded
         cur.execute("INSERT INTO diag_warrants (id, issuer, issued_at, expires_at, scopes, "
                     "collected_at) VALUES (gen_random_uuid(), %s, now(), now() + interval '1 day', "
-                    "'{logs}', now())", ("ab" * 32,))
+                    "'{system}', now())", ("ab" * 32,))
     assert _scrub_support_records(conn) == {"diag_events": 1, "support_reports": 1,
                                             "staged_bundles_withdrawn": 1}
     assert diag_events.resumable_warrants(conn) == []

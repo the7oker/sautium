@@ -1930,12 +1930,12 @@ def reorder(req: ReorderRequest):
         # The output busy — held, building, silent, a newer intent first —
         # is news; anything else is a fault, with its traceback. Either way
         # without what the person's words could not do: it names a track
-        status, why = _output_refusal(e)
+        status, why = refusal = _output_refusal(e)
         if status == 409:
             logger.warning("reorder not applied: %s", why)
         else:
             logger.error("reorder failed: %s", why, exc_info=True)
-        raise _output_error(e)
+        raise _output_error(e, refusal)
 
 @router.post("/jump")
 def jump(req: JumpRequest):
@@ -2817,12 +2817,12 @@ def _output_refusal(e: Exception) -> tuple[int, str]:
     return 503, str(e)
 
 
-def _output_error(e: Exception) -> HTTPException:
-    """The refusal (_output_refusal) as the route's answer, with what the
-    person's words made meanwhile could not do (said_with: a track tapped
-    while a new queue that did not commit loaded) — for the person, never
-    for the log."""
-    status, why = _output_refusal(e)
+def _output_error(e: Exception, refusal: Optional[tuple[int, str]] = None) -> HTTPException:
+    """The refusal (_output_refusal, or the one the caller already read) as
+    the route's answer, with what the person's words made meanwhile could
+    not do (said_with: a track tapped while a new queue that did not commit
+    loaded) — for the person, never for the log."""
+    status, why = refusal or _output_refusal(e)
     said = said_with(e)
     return HTTPException(status_code=status, detail=f"{why} — {said}" if said else why)
 

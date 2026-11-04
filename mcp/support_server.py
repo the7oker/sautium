@@ -219,10 +219,11 @@ def support_issue_warrant(node: str, scopes: Optional[list] = None, since: str =
     master, bound to that node, single-use there, and rides the node's own
     wake stream — `dispatched: true` means the node is connected now,
     otherwise it is parked until the node next subscribes (up to
-    expires_hours). A warrant naming logs, chat or playback waits on the
-    node for the person to review it on their screen: they tick what of those
-    goes, and the bundle's manifest lists the rest as `withheld` — ask in the
-    support chat rather than re-issuing. The bundle arrives encrypted; see
+    expires_hours). On a node of 2026-11-04 or later (support_nodes shows its
+    build), a warrant naming logs, chat or playback waits — all of it — for the
+    person to review it on their screen: they tick what of those goes, and the
+    bundle's manifest lists the rest as `withheld`; ask in the support chat
+    rather than re-issuing. An older node answers it as before. The bundle arrives encrypted; see
     support_bundles / support_open_bundle."""
     try:
         body = {"node": node, "since": since or None,
