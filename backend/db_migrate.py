@@ -34,7 +34,7 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      nothing, the day the person came to decide on the content scopes
      (2026-11-04): an earlier release's carried the events' log tails
      unasked; the warrant is collected again on its next delivery, under the
-     new rule.
+     new rule, and one the switch withdrew is closed.
      The slice step (`slice_authors_v1`) drops what slices of a key the
      release does not name left behind, the day a slice came to count only
      under its author (master_node.SLICE_AUTHORS, 2026-11-03).
@@ -178,7 +178,7 @@ def _scrub_support_records(conn) -> dict:
     return counts
 
 
-def _recollect_staged_bundles(conn) -> int:
+def _recollect_staged_bundles(conn) -> dict:
     """A bundle collected and staged, not yet sent, counts for nothing: it
     was collected before the person decided on the content scopes, and even
     a request for facts about the node alone carried the events' log tails.
@@ -194,10 +194,11 @@ def _recollect_staged_bundles(conn) -> int:
              WHERE {staged}
                AND NOT {SWITCH_ALLOWS.format(since="coalesce(decided_at, collected_at)")}
         """, (WITHDRAWN,))
+        counts = {"withdrawn": cur.rowcount}
         cur.execute(f"UPDATE diag_warrants SET collected_at = NULL, size_bytes = NULL WHERE {staged}")
-        count = cur.rowcount
+        counts["recollected"] = cur.rowcount
     conn.commit()
-    return count
+    return counts
 
 
 def _drop_unauthored_slices(conn) -> dict:
@@ -301,7 +302,7 @@ def apply_pending() -> dict:
             _mark(conn, "diag_scrubbed_v1")
 
         if not _marked(conn, "diag_consent_v1"):
-            out["staged_bundles_recollected"] = _recollect_staged_bundles(conn)
+            out["staged_bundles"] = _recollect_staged_bundles(conn)
             _mark(conn, "diag_consent_v1")
 
         if not _marked(conn, "slice_authors_v1"):

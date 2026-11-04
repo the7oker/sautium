@@ -175,7 +175,7 @@ def test_a_bundle_staged_before_the_person_decided_on_content_counts_for_nothing
         diag_events.mark_collected(conn, w["id"], 100, _db_now(conn))
     diag_events.mark_uploaded(conn, sent["id"])
 
-    assert _recollect_staged_bundles(conn) == 1
+    assert _recollect_staged_bundles(conn) == {"withdrawn": 1, "recollected": 1}
     assert diag_events.resumable_warrants(conn) == []
     assert diag_events.receive_warrant(conn, staged)["collected_at"] is None
     assert diag_events.receive_warrant(conn, sent)["uploaded_at"] is not None
