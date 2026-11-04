@@ -183,11 +183,18 @@ def _recollect_staged_bundles(conn) -> int:
     was collected before the person decided on the content scopes, and even
     a request for facts about the node alone carried the events' log tails.
     Its warrant is collected again on its next delivery — one that names a
-    content scope only once the person decided (diag_events.AWAITS_THE_PERSON)."""
+    content scope only once the person decided (diag_events.AWAITS_THE_PERSON)
+    — unless the switch moved since its collection or decision: that one the
+    switch withdrew, and it is closed, never collected again."""
+    from desktop.p2p.diag_events import SWITCH_ALLOWS, WITHDRAWN
+    staged = "collected_at IS NOT NULL AND uploaded_at IS NULL AND error IS NULL"
     with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE diag_warrants SET collected_at = NULL, size_bytes = NULL
-             WHERE collected_at IS NOT NULL AND uploaded_at IS NULL AND error IS NULL""")
+        cur.execute(f"""
+            UPDATE diag_warrants SET error = %s
+             WHERE {staged}
+               AND NOT {SWITCH_ALLOWS.format(since="coalesce(decided_at, collected_at)")}
+        """, (WITHDRAWN,))
+        cur.execute(f"UPDATE diag_warrants SET collected_at = NULL, size_bytes = NULL WHERE {staged}")
         count = cur.rowcount
     conn.commit()
     return count

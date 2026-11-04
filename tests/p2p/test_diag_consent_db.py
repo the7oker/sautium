@@ -164,6 +164,11 @@ def test_a_bundle_staged_before_the_person_decided_on_content_counts_for_nothing
     again on the warrant's next delivery (the startup step)."""
     from db_migrate import _recollect_staged_bundles
 
+    withdrawn = _warrant(["system"])
+    diag_events.receive_warrant(conn, withdrawn)
+    diag_events.mark_collected(conn, withdrawn["id"], 100, _db_now(conn))
+    _switch(conn, False)
+    _switch(conn, True)
     staged, sent = _warrant(["system", "events"]), _warrant(["system"])
     for w in (staged, sent):
         diag_events.receive_warrant(conn, w)
@@ -174,6 +179,8 @@ def test_a_bundle_staged_before_the_person_decided_on_content_counts_for_nothing
     assert diag_events.resumable_warrants(conn) == []
     assert diag_events.receive_warrant(conn, staged)["collected_at"] is None
     assert diag_events.receive_warrant(conn, sent)["uploaded_at"] is not None
+    # collected before the switch moved: closed, never collected again
+    assert diag_events.receive_warrant(conn, withdrawn)["error"] == diag_events.WITHDRAWN
 
 
 def _members(data: bytes) -> dict:
@@ -215,6 +222,12 @@ def _node(scratch_dsn, tmp_path, monkeypatch, master_addr=None):
 
     async def upload(warrant_id, stage, addr):
         uploaded.append((warrant_id, stage.read_bytes(), addr))
+        conn = psycopg2.connect(scratch_dsn)
+        conn.autocommit = True
+        try:
+            diag_events.mark_uploaded(conn, warrant_id)
+        finally:
+            conn.close()
         return True
 
     monkeypatch.setattr(diag_protocol, "verify_warrant", lambda warrant, own: (True, None))
@@ -305,7 +318,7 @@ def test_the_masters_reconnect_collects_a_decision_whose_wake_was_missed(
         worker.cancel()
     asyncio.run(run())
     assert collected == [(w["id"], ["chat"])]
-    assert {u[0] for u in uploaded} == {w["id"]}
+    assert [u[0] for u in uploaded] == [w["id"]]
 
 
 def test_a_decision_without_the_masters_address_waits_staged_for_its_reconnect(

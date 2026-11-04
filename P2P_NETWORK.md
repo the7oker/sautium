@@ -1206,8 +1206,9 @@ the toggle has not moved since the decision (`may_upload`); one an earlier
 release staged and had not sent counts for nothing — any warrant's, since
 an older events scope carried its log tails unasked (the `diag_consent_v1`
 startup step clears the collection; the next delivery collects it anew, a
-content warrant once the person decided); a decision the toggle moved after
-is closed without collecting. A decision made while the launcher was not
+content warrant once the person decided — and one the toggle moved after
+is closed instead); a decision the toggle moved after is never collected,
+and is closed on its next delivery. A decision made while the launcher was not
 listening is picked up on its LISTEN's every (re)connect and on the master's
 reconnect. The
 master is unchanged: it re-pushes the warrant on every subscribe, and the
