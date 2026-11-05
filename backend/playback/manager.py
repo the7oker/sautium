@@ -49,6 +49,11 @@ class OutputHeld(ConnectionError):
                          "finishes, or cancel it on the HQPlayer screen")
 
 
+class Nowhere(ConnectionError):
+    """The chosen renderer answers at none of the addresses it is known at:
+    where it is now, only a scan can tell (PlaybackManager.ensure_active)."""
+
+
 class QueueRefused(RuntimeError):
     """The output took none of a new queue: nothing commits, the queue as it
     was. Its words — and what the person's words made meanwhile could not do
@@ -224,33 +229,68 @@ class PlaybackManager:
         edit or a play press's rebuild — unless the probe finds it moved (a
         renderer answering at another address now), which attaches it again. An attach takes the queue lock
         first, in the order the hold takes both: it mirrors the queue with
-        no mutation in flight."""
-        self._refuse_if_held()
-        b = probed = self._active
-        # A wait the probe says ("connecting") is said through the attach a
-        # move then needs: one word, never taken back in between
-        with ExitStack() as saying:
-            if b is not None and b.healthy():
-                self._probe(b, saying)
-                if b.healthy():
-                    return b
-            else:
-                probed = None
-            with self._mutate_lock, self._ensure_lock:
-                self._refuse_if_held()
-                return self.answering(probed)
+        no mutation in flight.
 
-    def answering(self, probed: Optional[PlayerBackend] = None) -> PlayerBackend:
+        A renderer that answers at none of the addresses it is known at is
+        looked for once by the Output scan, which takes it where it answers
+        now (routers.player._scan_run), and the press goes through the gate
+        again: a phone gone from the home Wi-Fi to a tunnel plays from the
+        first press. A wait the probe, the attach or the scan says
+        ("connecting") is said through what follows it: one word, never
+        taken back in between."""
+        self._refuse_if_held()
+        with ExitStack() as saying:
+            try:
+                return self._through_gate(saying)
+            except Nowhere:
+                if not self._found_by_scan(saying):
+                    raise
+            return self._through_gate(saying)
+
+    def _through_gate(self, saying: ExitStack) -> PlayerBackend:
+        """ensure_active's one pass: the output probed, or attached again
+        under the output-change locks."""
+        b = probed = self._active
+        if b is not None and b.healthy():
+            self._probe(b, saying)
+            if b.healthy():
+                return b
+        else:
+            probed = None
+        with self._mutate_lock, self._ensure_lock:
+            self._refuse_if_held()
+            return self.answering(probed, saying)
+
+    def _found_by_scan(self, saying: ExitStack) -> bool:
+        """Did the Output scan reach the chosen renderer? Run for a press
+        whose renderer answered nowhere it is known (ensure_active), no lock
+        held: the scan moves the output itself (renderer_reached). A scan
+        that fails leaves the press with the word it had."""
+        from routers.player import scan_once, udn_key
+        from routers.settings import _read
+        renderer = _read("output.dlna_renderer") or {}
+        saying.enter_context(self._connecting_to(renderer.get("name") or "DLNA renderer"))
+        try:
+            found = scan_once()
+        except Exception as e:
+            logger.warning("the scan for a renderer that answered nowhere failed (%s)", type(e).__name__)
+            logger.debug("its failure: %s", e)
+            return False
+        return udn_key(renderer.get("udn")) in {udn_key(r.get("udn")) for r in found["renderers"]}
+
+    def answering(self, probed: Optional[PlayerBackend] = None,
+                  saying: Optional[ExitStack] = None) -> PlayerBackend:
         """The active output where its device answers, under the output-change
         locks (ensure_active; output_change for a renderer picked again): the
         instance as it is when it answers where it talks to its device —
         `probed` was asked already; one believed lost is asked again too, an
         HQPlayer that is off says so at every press — else the output
         attached again from the persisted settings, at the spot the instance
-        left. A wait its probe says lasts through that attach, as at a press
-        (ensure_active)."""
+        left. A wait its probe says lasts through that attach, and through
+        `saying` (the caller's) when given, as at a press (ensure_active)."""
         b = self._active
-        with ExitStack() as saying:
+        with ExitStack() as own:
+            saying = own if saying is None else saying
             if b is not None and b is not probed:
                 self._probe(b, saying)
             if b is not None and b.healthy():
@@ -258,7 +298,7 @@ class PlaybackManager:
             from routers.settings import _read
             if _read("output.type") is None:
                 return self.backend()   # legacy: honest ConnectionError
-            self._attach_again(b)
+            self._attach_again(b, saying)
             return self.backend()
 
     def renderer_reached(self, udn: str, locations: list) -> None:
@@ -288,15 +328,16 @@ class PlaybackManager:
             logger.info("a scan reached %s elsewhere — the output moves where it answers", b.label)
             self._attach_again(b)
 
-    def _attach_again(self, b: Optional[PlayerBackend]) -> None:
+    def _attach_again(self, b: Optional[PlayerBackend], saying: Optional[ExitStack] = None) -> None:
         """The output attached again from the persisted settings, under the
         output-change locks, at the spot the instance `b` left (None: nothing
         was attached). A renderer is first looked for where it answers now —
         every address it is known at, at once: offline only when none does —
         and while it attaches every status says so (`connecting`: its name),
         never "disconnected": it is the same output, and a press waiting on
-        it shows as one in flight. The instance let go sends no Stop; the
-        attach resumes at the spot and starts nothing."""
+        it shows as one in flight — through `saying` (the caller's) when
+        given. The instance let go sends no Stop; the attach resumes at the
+        spot and starts nothing."""
         from routers.settings import _read
         otype = _read("output.type")
         renderer = None
@@ -305,11 +346,12 @@ class PlaybackManager:
             if not renderer:
                 raise ConnectionError("No DLNA renderer configured")
         label = (renderer.get("name") or "DLNA renderer") if renderer is not None else None
-        with self._connecting_to(label):
+        with ExitStack() as own:
+            (own if saying is None else saying).enter_context(self._connecting_to(label))
             if renderer is not None:
                 from playback.dlna_backend import renderer_online
                 if not renderer_online(renderer):
-                    raise ConnectionError(
+                    raise Nowhere(
                         f"'{label}' is offline — turn it on, or pick another "
                         "output in Settings → Audio output")
             logger.info("%s '%s' output — attaching it again",
@@ -372,7 +414,7 @@ class PlaybackManager:
             hint = getattr(b, "offline_hint",
                            "turn it on, or pick another output in "
                            "Settings → Audio output")
-            raise ConnectionError(f"'{b.label}' is offline — {hint}")
+            raise (Nowhere if b.id == "dlna" else ConnectionError)(f"'{b.label}' is offline — {hint}")
 
     @property
     def active(self) -> Optional[PlayerBackend]:

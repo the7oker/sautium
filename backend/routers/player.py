@@ -12,7 +12,7 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -833,7 +833,35 @@ async def _unicast_sweep(found: dict, found_hqp: dict) -> None:
             found_hqp[ip] = hqp
 
 
-_scan_task: Optional[asyncio.Task] = None
+# One Output scan at a time, whoever asks for it: the picker, or a play
+# press whose renderer answered at none of its known addresses (scan_once)
+_scan_lock = threading.Lock()
+_scan_running: Optional[Future] = None
+
+
+def _scan() -> Future:
+    """The scan under way, or one started now: _scan_run in an event loop
+    of its own thread, which no waiter that walks away can cancel."""
+    global _scan_running
+    with _scan_lock:
+        if _scan_running is None or _scan_running.done():
+            future: Future = Future()
+            future.set_running_or_notify_cancel()
+
+            def run() -> None:
+                try:
+                    future.set_result(asyncio.run(_scan_run()))
+                except BaseException as e:
+                    future.set_exception(e)
+            threading.Thread(target=run, daemon=True, name="output-scan").start()
+            _scan_running = future
+        return _scan_running
+
+
+def scan_once() -> dict:
+    """The Output scan's answer, from a thread that waits for it — the one
+    under way, or a new one (_scan)."""
+    return _scan().result()
 
 
 @router.post("/outputs/scan")
@@ -850,12 +878,7 @@ async def scan_outputs():
     was done" was: the two racing, not the device being slow. Two concurrent
     sweeps of the whole subnet also make discovery less reliable, not more,
     since a dozing phone renderer answers one M-SEARCH and drops the other."""
-    global _scan_task
-    if _scan_task is None or _scan_task.done():
-        _scan_task = asyncio.create_task(_scan_run())
-    # Not the task's owner, so a client that walks away cannot cancel the scan
-    # everyone else is waiting on.
-    return await asyncio.shield(_scan_task)
+    return await asyncio.wrap_future(_scan())
 
 
 async def _scan_run():

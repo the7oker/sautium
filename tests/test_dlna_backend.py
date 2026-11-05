@@ -1255,6 +1255,60 @@ def test_play_with_no_renderer_attached_goes_where_it_answers_now(tmp_path, prox
     wait_for(lambda: new.state == "PLAYING", what="playing at the new address")
 
 
+def test_play_where_no_known_address_answers_scans_and_plays_where_the_renderer_is(
+        tmp_path, proxy, renderers, manager, picker, quality):
+    """The chosen renderer answers at none of the addresses it is known at
+    (a phone gone from the home Wi-Fi to a tunnel) and no scan has run: the
+    play press scans, takes the renderer at the address the scan finds it
+    at, and plays the track there, loaded once. The probe, the scan and the
+    attach are one "connecting"."""
+    old, new = renderers(name="Phone"), renderers(name="Phone")
+    new.udn = old.udn
+    _on_renderer(manager, old, [track(tmp_path, 1, seconds=20.0)])
+    wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing at the old address")
+    manager.backend().pause()
+    wait_for(lambda: old.state == "PAUSED_PLAYBACK", what="paused")
+    old.stop_answering()
+    picker.found[:] = [new.location]
+    seen = _statuses(manager)
+    assert picker.play() == {"ok": True}
+    wait_for(lambda: new.state == "PLAYING", what="playing at the address the scan found")
+    assert len(new.called("SetAVTransportURI")) == 1
+    assert manager.store["output.dlna_renderer"]["location"] == new.location
+    words = [data.get("connecting") for data in seen]
+    first, last = words.index("Phone"), len(words) - 1 - words[::-1].index("Phone")
+    assert all(word == "Phone" for word in words[first:last + 1]), words
+
+
+def test_play_with_nothing_attached_scans_when_no_known_address_answers(
+        tmp_path, proxy, renderers, manager, picker, quality):
+    """Nothing attached (a node started while the phone was away) and the
+    chosen record naming an address that does not answer: the play press
+    scans and plays where the renderer is found."""
+    old, new = renderers(), renderers()
+    new.udn = old.udn
+    old.stop_answering()
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": old.record})
+    manager.queue.replace([track(tmp_path, 1, seconds=20.0)])
+    picker.found[:] = [new.location]
+    assert manager.ensure_active().play()
+    wait_for(lambda: new.state == "PLAYING", what="playing at the address the scan found")
+    assert len(new.called("SetAVTransportURI")) == 1
+
+
+def test_play_where_the_scan_finds_the_renderer_nowhere_says_it_is_offline(
+        tmp_path, renderers, manager, picker):
+    """A scan that does not find the renderer either leaves the press with
+    the word it had: offline."""
+    gone = renderers(name="Phone")
+    gone.stop_answering()
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": gone.record})
+    manager.queue.replace([track(tmp_path, 1, seconds=20.0)])
+    picker.found[:] = []
+    with pytest.raises(ConnectionError, match="'Phone' is offline"):
+        manager.ensure_active()
+
+
 def test_the_spot_is_read_from_the_outputs_latest_word(manager):
     """N-14: where an output stands — the slot, the second, whether it plays
     — is its latest status: a track it plays, starts or holds paused, or a

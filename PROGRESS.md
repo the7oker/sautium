@@ -3692,6 +3692,14 @@ device on the network; none of them may hold for it more than a bound.
   the last multicast answer's, so a device answering under the same USN
   put its address in the renderer's place before any check. The attach
   already refuses an address where another UDN answers (since 2026-11-02).
+  So an address that does not answer holds nothing either: a play press
+  that finds the chosen renderer at none of its known addresses runs the
+  Output scan once — one scan at a time, whoever asks, the picker or a
+  press (`routers.player.scan_once`) — and goes through the gate again,
+  playing where the scan found it; the probe, the scan and the attach are
+  one "connecting" (since 2026-11-05). A phone gone from the home Wi-Fi to
+  a tunnel plays from its first press instead of answering "offline" until
+  the Output picker is opened.
   Left: a renderer absent when a claimant answers — a phone asleep — moves
   to it.
 
