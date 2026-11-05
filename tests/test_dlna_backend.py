@@ -222,8 +222,10 @@ class FakeRenderer:
         self.opus_position = True
         self.opus_seek = "lands"
         # An action held this many seconds before it takes effect and is
-        # answered: a request still on its way
+        # answered: a request still on its way — or, named in `acts_first`,
+        # taken at once and answered only then (an answer held or lost)
         self.slow: dict[str, float] = {}
+        self.acts_first: set = set()
         self.answered: list[str] = []          # actions in the order their answers went
         self._base = 0.0                  # position at _t0
         self._t0: Optional[float] = None  # monotonic start while PLAYING
@@ -479,13 +481,15 @@ class FakeRenderer:
         element = body.find(f".//{{{st}}}{action}")
         args = {child.tag: child.text or "" for child in (element if element is not None else [])}
         self.calls.append((action, args))
-        if self.slow.get(action):
+        if self.slow.get(action) and action not in self.acts_first:
             await asyncio.sleep(self.slow[action])
         before = self._avt_state()
         try:
             if self.faults.get(action):
                 raise Fault(self.faults[action].pop(0), "Current state of service prevents invoking that action")
             out = self._act(svc, action, args)
+            if self.slow.get(action) and action in self.acts_first:
+                await asyncio.sleep(self.slow[action])
             self.answered.append(action)
         except Fault as f:
             fault = (f'<?xml version="1.0"?><s:Envelope xmlns:s="{SOAP_NS}" '
@@ -2913,3 +2917,30 @@ def test_a_tab_toasts_each_seek_it_sees_missed_once_and_none_it_connects_with():
                          input=json.dumps(ticks).encode(), capture_output=True, check=True)
     assert json.loads(out.stdout) == [["&#39;&#60;Study&#62;&#39; started the track from the top",
                                        "not at 01:24 — it is at 00:19"]]
+
+
+@pytest.mark.parametrize("answer", [5.0, 12.0], ids=["answered-late", "never-answered"])
+def test_a_start_the_renderer_takes_at_once_is_no_missed_start_however_late_its_answer(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, caplog, answer):
+    """A renderer that acts on the start's Seek as it receives it, and
+    answers 5 s later — or past the command's window, never. Its landing is
+    seen; a wait stamped again at the answer, or at the timeout, put the
+    second it was already past outside the landing window, and at the
+    deadline said "started the track from the top" of a start that went
+    where it was asked."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 3.0)
+    r = renderers(name="Study DAC")
+    r.slow["Seek"], r.acts_first = answer, {"Seek"}
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    with caplog.at_level("INFO", logger="playback.dlna_backend"):
+        assert n.backend.play()
+        wait_for(lambda: r.called("Seek"), what="the start sought")
+        wait_for(lambda: "Seek" in r.answered or "got no answer" in caplog.text, timeout=15,
+                 what="the Seek's answer, or its end")
+        wait_for(lambda: n.last.state == "playing" and n.last.position >= 35 + answer + 4.5, timeout=10,
+                 what="past the deadline after the answer")
+    assert not _anything_said(n)
+    assert abs(n.last.position - r.position()) <= 1.5

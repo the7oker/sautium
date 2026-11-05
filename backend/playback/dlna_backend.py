@@ -1322,17 +1322,26 @@ class DlnaBackend(PlayerBackend):
         settled, and a start mid-track it seeks itself goes now — its wait
         from now, not from the Play the renderer took this long to act on:
         a Play confirmed near its deadline left the Seek's wait over before
-        the Seek was answered, and said it did not land (_not_landed)."""
+        the Seek was answered, and said it did not land (_not_landed). The
+        Seek belongs to the load it is decided on (_seek_started)."""
         self._awaiting_play = False
         target, self._seek_on_start = self._seek_on_start, None
         if target:
-            self._seek_due = (float(int(target)), time.monotonic(), None, True)
-            asyncio.ensure_future(self._seek_started(target), loop=self._loop)
+            second, cur = float(int(target)), self._current_url or ""
+            # The renderer plays from its top until the Seek lands: the
+            # distance is the second itself
+            self._seek_due = (second, time.monotonic(), self._judged(cur, second), True)
+            asyncio.ensure_future(self._seek_started(second, cur, self._load_gen), loop=self._loop)
 
-    async def _seek_started(self, target: float) -> None:
-        """The start's Seek, and what its answer means for the load it was
-        made on — no other: a load since (the person's tap) is not its."""
-        cur, gen = self._current_url or "", self._load_gen
+    async def _seek_started(self, target: float, cur: str, gen: int) -> None:
+        """The start's Seek, and what its answer means for the load `gen`
+        it was decided on — no other: a load since (the person's tap) is
+        not its. Its wait runs from when it went (_confirmed): a renderer
+        acts on a Seek as it receives it, and may answer seconds later or
+        never — a wait counted from the answer took that landing, seen
+        already or not yet, for a start that played from the top."""
+        if self._load_gen != gen:
+            return
         try:
             await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(target))
         except Detached as e:
@@ -1344,26 +1353,23 @@ class DlnaBackend(PlayerBackend):
                 return
             if self._opus_refused(e, cur, target):
                 return
-            if not _connection_failure(e):
-                logger.warning("DLNA: the start at %d s was refused (%s) — playing "
-                               "from the top", target, _describe(e))
-                self._seek_due = None
-                self._rebaseline(0.0)
-                self._said_missed(f"'{self.label}' refused the start at {format_time(target)}",
-                                  "it plays from the top")
-                self._emit_now()
+            if _connection_failure(e):
+                # No answer is no refusal: the renderer may have acted on it,
+                # or act yet — its wait stands, and its deadline decides
+                logger.warning("DLNA: the start's Seek to %d s got no answer (%s) — waited for "
+                               "as sent", target, _describe(e))
                 return
-            # No answer is no refusal: the renderer may act on it yet — it
-            # is waited for as sent, and its deadline decides (_not_landed)
-            logger.warning("DLNA: the start's Seek to %d s got no answer (%s) — waited for "
-                           "as sent", target, _describe(e))
-        if self._load_gen != gen:
+            logger.warning("DLNA: the start at %d s was refused (%s) — playing "
+                           "from the top", target, _describe(e))
+            self._seek_due = None
+            self._rebaseline(0.0)
+            self._said_missed(f"'{self.label}' refused the start at {format_time(target)}",
+                              "it plays from the top")
+            self._emit_now()
             return
-        # The renderer plays from its top until the Seek lands: the distance
-        # is the second itself
-        self._seek_due = (float(int(target)), time.monotonic(),
-                          self._judged(cur, float(int(target))), True)
-        self._rebaseline(float(int(target)))
+        if self._load_gen != gen or self._seek_due is None or not self._seek_due[3]:
+            return      # another load's now, its landing seen already, or the person's seek since
+        self._rebaseline(target)
         self._emit_now()
 
     def _opus_seeks(self) -> Optional[bool]:
