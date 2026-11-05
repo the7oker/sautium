@@ -303,7 +303,8 @@
 
   const BUSY = "The node is busy — try again in a moment.";
   const SETUP_CODE_PLACE = "It is in the node's log (docker logs sautium-backend; the node " +
-    "writes a new one at each start) or in setup_code.txt in its identity folder (data/node_identity).";
+    "writes a new one at each start) or in setup_code.txt in its identity folder — data/node_identity, " +
+    "or backend/data/node_identity under the WSL and Mac compose files.";
   // Only a 401 says the password or the code was wrong; a 429 is the door
   // shut by wrong passwords, its wait named; anything else is the exchange
   // that did not finish, said as such.
@@ -404,7 +405,10 @@
         }
         throw e;
       }
-      if (!r.ok) return { ok: false, error: r.status === 503 ? BUSY : await errorDetail(r, `HTTP ${r.status}`) };
+      if (!r.ok) {
+        return { ok: false, error: r.status === 503 ? BUSY : r.status === 429 ? shut(r)
+          : await errorDetail(r, `HTTP ${r.status}`) };
+      }
       setToken(r.data.token);
       pinNode(r.data.public_key_hex);
       return { ok: true, ...r.data };

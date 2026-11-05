@@ -1324,23 +1324,33 @@ def test_a_press_that_replaces_the_queue_scans_with_no_queue_lock_held(
     wait_for(lambda: old.state == "PAUSED_PLAYBACK", what="paused")
     old.stop_answering()
     picker.found[:] = [new.location]
-    sweeping, go = threading.Event(), threading.Event()
+    sweeping, free = threading.Event(), []
+
+    def lock_is_free() -> bool:
+        if not manager._mutate_lock.acquire(timeout=2):
+            return False
+        manager._mutate_lock.release()
+        return True
 
     async def sweep(found_dlna, found_hqp):
         sweeping.set()
-        await asyncio.to_thread(go.wait, 20)
+        free.append(await asyncio.to_thread(lock_is_free))
+        if not free[-1]:
+            # the scan ends here, so a press that holds the lock answers and lets it go
+            raise RuntimeError("the queue lock is held while the press scans")
     monkeypatch.setattr(picker, "_unicast_sweep", sweep)
     answer = []
-    press = threading.Thread(target=lambda: answer.append(
-        manager.replace_queue([track(tmp_path, 2, seconds=20.0)], play=True)))
+
+    def pressed():
+        try:
+            answer.append(manager.replace_queue([track(tmp_path, 2, seconds=20.0)], play=True))
+        except ConnectionError as e:
+            answer.append(e)
+    press = threading.Thread(target=pressed, daemon=True)
     press.start()
-    try:
-        assert sweeping.wait(15), "the press scans"
-        assert manager._mutate_lock.acquire(timeout=2), "the queue lock is free while the press scans"
-        manager._mutate_lock.release()
-    finally:
-        go.set()
+    assert sweeping.wait(15), "the press scans"
     press.join(30)
+    assert not press.is_alive() and free == [True]
     assert answer and answer[0][0] == 1
     wait_for(lambda: new.state == "PLAYING", what="playing at the address the scan found")
     assert len(new.called("SetAVTransportURI")) == 1

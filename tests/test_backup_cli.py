@@ -169,3 +169,19 @@ def test_the_backup_cli_is_undumpable_from_its_start(backup_mod):
     out = os.read(r, 16).decode()
     os.waitpid(pid, 0)
     assert out == "0"
+
+
+def test_a_password_the_node_could_not_check_ends_the_backup_as_an_error(backup_mod, monkeypatch):
+    """A derivation that failed is no wrong password, and no traceback: the
+    backup ends with an error the caller reads."""
+    import asyncio
+
+    import device_auth
+    monkeypatch.setattr(backup_mod, "node", lambda: {"username": "owner"})
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+
+    async def failing(_password, **_kw):
+        raise device_auth.Busy()
+    monkeypatch.setattr(device_auth, "verify_password", failing)
+    with pytest.raises(backup_mod.nb.BackupError, match="could not be checked"):
+        backup_mod.create("the right one")

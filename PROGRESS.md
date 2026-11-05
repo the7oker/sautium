@@ -2374,7 +2374,8 @@ user brings.
   meanwhile is answered 429 with the wait, before anything is derived, and
   the page says how long; a try let in past the free five holds the door
   until its answer, so tries at once do not pass together. The current
-  password typed at an identity change passes the same door. Only a
+  password typed at an identity change passes a door of its own under the
+  same rule — a signed browser's — which the login's crowd never shuts. Only a
   derivation that ran and did not match counts; one that failed answers
   "busy", never "wrong password". One count for the node (behind Docker every
   request has the bridge's address), so a crowd at the door delays a new

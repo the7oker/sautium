@@ -47,10 +47,10 @@ BRUTE FORCE. The two doors need different locks:
     flight a request is turned away (Busy) instead of waiting — the last
     place kept for a signed caller — and a derivation runs to its end even
     when its caller has gone. Wrong passwords are counted, at the login
-    door and at an identity change alike: past LOGIN_FREE_FAILURES in a row
-    the door stays shut for a delay that doubles with each further one
-    (Shut, before any derivation) and one try at a time is let in, and the
-    owner is told (login_refused). An anonymous account has
+    door and, on a door of their own, at an identity change: past
+    LOGIN_FREE_FAILURES in a row a door stays shut for a delay that doubles
+    with each further one (Shut, before any derivation) and one try at a
+    time is let in, and the owner is told (login_refused). An anonymous account has
     no password anyone knows: its door is the PIN, and a password login there
     is refused before any derivation.
 """
@@ -110,18 +110,19 @@ _setup_code: Optional[str] = None
 _SETUP_CODE_FORM = re.compile("[%s]{4}(?:-[%s]{4}){%d}" % (
     "A-HJ-NP-Z2-9", "A-HJ-NP-Z2-9", SETUP_CODE_GROUPS - 1))
 
-# The password door's wrong guesses: one count for the node — behind Docker
-# every request comes from the bridge's address — so a crowd at the door
-# delays a new sign-in, never a browser signed in already. Past
-# LOGIN_FREE_FAILURES in a row the door stays shut for a delay that doubles
-# with each further one, up to LOGIN_DELAY_MAX, and a try let in meanwhile
-# holds the door for the delay its failure would cost — the next waits for
-# its answer; a right password clears the count. Process memory: a restart
-# opens the door, and the owner's record (LOGIN_FAILURES_KEY, a notice) stays.
+# The password doors' wrong guesses. Two doors, one rule: the login's, which
+# anyone on the LAN reaches — one count for the node, as behind Docker every
+# request comes from the bridge's address — and the signed callers' (an
+# identity change's current password), so a crowd at the login door never
+# turns a browser signed in already away. Past LOGIN_FREE_FAILURES in a row a
+# door stays shut for a delay that doubles with each further one, up to
+# LOGIN_DELAY_MAX, and a try let in meanwhile is the only one in until its
+# answer; a right password clears the count. Process memory: a restart opens
+# the doors, and the owner's record (LOGIN_FAILURES_KEY, a notice) stays.
 LOGIN_FREE_FAILURES = 5
 LOGIN_DELAY_MAX = 15 * 60
 LOGIN_FAILURES_KEY = "auth.login_failures"
-_door = {"failures": 0, "shut_until": 0.0}
+_doors = {name: {"failures": 0, "shut_until": 0.0, "trying": False} for name in ("login", "signed")}
 _failures_lock = threading.Lock()
 
 _pin: Optional[dict] = None          # {"code", "expires_at", "attempts"}
@@ -251,6 +252,12 @@ def account_anonymous() -> bool:
     return bool(re.fullmatch(r"anonymous-[0-9a-f]{4}", info.get("username") or ""))
 
 
+def identity_key_on_disk() -> bool:
+    """Is there a key in the identity folder — an identity, named or not?"""
+    d = _identity_dir()
+    return d is not None and (d / "node_ed25519.key").exists()
+
+
 def pin_door() -> bool:
     """Does a host show this node's pairing code — the launcher, which gives
     the backend its sync server's port? A Docker node shows none: its doors
@@ -283,8 +290,11 @@ def prepare_setup() -> None:
         return
     path = d / SETUP_CODE_FILE
     # A key on disk is an identity, named or not: creation could only refuse
-    if account_configured() or (d / "node_ed25519.key").exists():
+    if account_configured() or identity_key_on_disk():
         path.unlink(missing_ok=True)
+        if not account_configured():
+            logger.warning("The identity folder holds a key but no account name (node_info.json): "
+                           "no account can be created over it")
         return
     _setup_code = _code(SETUP_CODE_GROUPS)
     d.mkdir(parents=True, exist_ok=True)
@@ -320,7 +330,7 @@ async def create_account(username: str, password: str, setup_code: str) -> dict:
         raise RuntimeError("no identity directory configured")
 
     async with _create_lock:
-        if account_configured():
+        if account_configured() or identity_key_on_disk():
             raise AccountExists()
         found = _SETUP_CODE_FORM.search((setup_code or "").upper())
         if _setup_code is None or found is None or not hmac.compare_digest(
@@ -550,39 +560,40 @@ async def password_tried(password: str, *, signed: bool = False) -> bool:
     the delay its failure would cost; a wrong one is counted and told to the
     owner (login_refused), a right one clears the count. Only a derivation
     that ran and did not match counts — an empty password, or a node with
-    no password door, is refused for nothing. Busy as verify_password."""
-    left = _door["shut_until"] - time.time()
+    no password door, is refused for nothing. A `signed` caller passes the
+    signed door, the login's crowd never shuts it. Busy as verify_password."""
+    door = _doors["signed" if signed else "login"]
+    left = door["shut_until"] - time.time()
     if left > 0:
         raise Shut(math.ceil(left))
+    held = _delay(door["failures"] + 1)
+    if held and door["trying"]:
+        raise Shut(held)
     if not password or account_anonymous() or not account_configured():
         return False
-    held = _delay(_door["failures"] + 1)
-    if held:
-        _door["shut_until"] = time.time() + held
+    door["trying"] = bool(held)
     try:
         ok = await verify_password(password, signed=signed)
-    except Busy:
-        if held:
-            _door["shut_until"] = 0.0          # it did not run: nothing to hold for
-        raise
+    finally:
+        door["trying"] = False
     if ok:
-        _door["failures"] = 0
-        _door["shut_until"] = 0.0
+        door["failures"] = 0
+        door["shut_until"] = 0.0
     else:
-        await login_refused()
+        await login_refused(door)
     return ok
 
 
-async def login_refused() -> None:
-    """A wrong password: counted, the door shut past the free ones, and the
-    owner told — the record of wrong passwords since the notice was last
-    seen, which wakes the notices channel."""
-    _door["failures"] += 1
-    delay = _delay(_door["failures"])
+async def login_refused(door: dict) -> None:
+    """A wrong password at `door`: counted, the door shut past the free
+    ones, and the owner told — the record of wrong passwords since the
+    notice was last seen, which wakes the notices channel."""
+    door["failures"] += 1
+    delay = _delay(door["failures"])
     if delay:
-        _door["shut_until"] = time.time() + delay
+        door["shut_until"] = time.time() + delay
         logger.warning("%d wrong passwords in a row: the next is taken in %d s",
-                       _door["failures"], delay)
+                       door["failures"], delay)
     await asyncio.to_thread(_record_failure)
 
 

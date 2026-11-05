@@ -918,7 +918,7 @@ class DlnaBackend(PlayerBackend):
             loc, why = refused[0]
             raise DlnaAttachError(
                 f"'{self.label}' answered at {urlparse(loc).hostname or loc}, but its device "
-                f"description was not taken ({why})")
+                f"description was not taken ({_describe(why)})")
         if others:
             raise DlnaAttachError(
                 f"'{self.label}' is not where it was known: another device answers at "

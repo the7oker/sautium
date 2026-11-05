@@ -122,7 +122,7 @@ def doors():
 
 def test_a_busy_node_says_so_at_the_password_door(doors, monkeypatch):
     _account(monkeypatch, anonymous=False)
-    monkeypatch.setattr(device_auth, "_door", {"failures": 0, "shut_until": 0.0}, raising=False)
+    monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "trying": False} for name in ("login", "signed")}, raising=False)
     async def busy(_password, **_kw):
         raise device_auth.Busy()
     monkeypatch.setattr(device_auth, "verify_password", busy)
@@ -272,7 +272,7 @@ def rotations(doors, tmp_path, monkeypatch):
     monkeypatch.setattr(device_auth, "account_configured", lambda: True)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
     monkeypatch.setattr(device_auth, "pin_door", lambda: True, raising=False)
-    monkeypatch.setattr(device_auth, "_door", {"failures": 0, "shut_until": 0.0}, raising=False)
+    monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "trying": False} for name in ("login", "signed")}, raising=False)
     monkeypatch.setattr(device_auth, "_record_failure", lambda: None, raising=False)
     monkeypatch.setattr(device_auth, "_pin", None)
     monkeypatch.setattr(device_auth, "_pin_prev", None)
@@ -447,8 +447,12 @@ def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_n
     with pytest.raises(device_auth.WrongSetupCode):
         asyncio.run(device_auth.create_account("other", "a password", code))
     (fresh_node / "node_ed25519.key").write_text("k")     # a key with no name is an identity
-    device_auth.prepare_setup()
-    assert not path.exists()
+    with caplog.at_level("WARNING", logger="device_auth"):
+        device_auth.prepare_setup()
+    assert not path.exists() and "no account can be created over it" in caplog.text
+    assert device_auth.identity_key_on_disk()
+    with pytest.raises(device_auth.AccountExists):
+        asyncio.run(device_auth.create_account("other", "a password", code))
 
 
 def test_the_setup_code_is_read_out_of_what_was_pasted_around_it(fresh_node, monkeypatch):
@@ -484,7 +488,7 @@ def login_door(doors, monkeypatch):
     monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
     monkeypatch.setattr(device_auth, "account_configured", lambda: True)
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
-    monkeypatch.setattr(device_auth, "_door", {"failures": 0, "shut_until": 0.0}, raising=False)
+    monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "trying": False} for name in ("login", "signed")}, raising=False)
     monkeypatch.setattr(device_auth.time, "time", lambda: clock[0])
     monkeypatch.setattr(settings_router, "_read", lambda key: store.get(key))
     monkeypatch.setattr(settings_router, "_write", lambda key, value: store.__setitem__(key, value))
@@ -633,7 +637,7 @@ def test_the_pairing_code_is_the_hosts_to_read(tmp_path, monkeypatch):
 def test_tries_at_once_past_the_free_failures_are_let_in_one_at_a_time(login_door, doors):
     import httpx
     _login, _clock, derived, _store, _woken = login_door
-    device_auth._door["failures"] = device_auth.LOGIN_FREE_FAILURES
+    device_auth._doors["login"]["failures"] = device_auth.LOGIN_FREE_FAILURES
 
     async def at_once():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=doors.app),
@@ -660,7 +664,7 @@ def test_only_a_derivation_that_did_not_match_is_a_wrong_password(login_door, mo
         raise device_auth.Busy()
     monkeypatch.setattr(device_auth, "verify_password", failing)
     assert login("the right one").status_code == 503
-    assert device_auth._door == {"failures": 0, "shut_until": 0.0}
+    assert device_auth._doors["login"] == {"failures": 0, "shut_until": 0.0, "trying": False}
     assert device_auth.LOGIN_FAILURES_KEY not in store
 
 
@@ -674,16 +678,58 @@ def test_a_derivation_that_fails_says_the_node_is_busy(monkeypatch):
         asyncio.run(device_auth.verify_password("the right one"))
 
 
-def test_the_current_password_at_a_change_passes_the_password_door(rotations, monkeypatch):
+def test_a_crowd_at_the_login_door_never_turns_a_signed_change_away(rotations, doors, monkeypatch):
+    """Wrong passwords at the login shut the login's door; an identity
+    change's current password passes a door of its own, under the same rule:
+    its own wrong ones shut it, and the login's crowd never does."""
     change, done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
-    monkeypatch.setattr(device_auth, "_door", {"failures": device_auth.LOGIN_FREE_FAILURES, "shut_until": 0.0},
-                        raising=False)
-    monkeypatch.setattr(device_auth, "login_refused", lambda: asyncio.sleep(0, device_auth._door.update(
-        failures=device_auth._door["failures"] + 1, shut_until=time.time() + 60)), raising=False)
-    assert change(username="second", password="new password", current_password="a guess").status_code == 403
-    r = change(username="second", password="new password", current_password="the right one")
-    assert r.status_code == 429 and done == []
+    for _ in range(device_auth.LOGIN_FREE_FAILURES + 1):
+        doors.post("/api/auth/login", json=_seal(doors.get("/api/auth/handshake").json(),
+                                                 {"password": "a guess"}))
+    shut = doors.post("/api/auth/login", json=_seal(doors.get("/api/auth/handshake").json(),
+                                                    {"password": "the right one"}))
+    assert shut.status_code == 429                    # the login's door is shut
+    assert change(username="second", password="new password",
+                  current_password="the right one").status_code == 200
+    for _ in range(device_auth.LOGIN_FREE_FAILURES + 1):
+        assert change(username="third", password="new password", current_password="a guess").status_code == 403
+    r = change(username="third", password="new password", current_password="new password")
+    assert r.status_code == 429 and r.headers["retry-after"] == "1" and done == [("second", "new password")]
+
+
+def test_a_try_let_in_holds_the_door_until_its_answer_however_long_it_takes(login_door, monkeypatch):
+    """Past the free failures one try at a time: the next waits for the
+    first's answer, not for a clock the first outlives — and one the node
+    could not check holds nothing after it."""
+    _login, clock, derived, _store, _woken = login_door
+    device_auth._doors["login"]["failures"] = device_auth.LOGIN_FREE_FAILURES
+    release = []
+
+    async def slow(password, **_kw):
+        derived.append(password)
+        gate = asyncio.Event()
+        release.append(gate)
+        await gate.wait()
+        raise device_auth.Busy()
+    monkeypatch.setattr(device_auth, "verify_password", slow)
+
+    async def scenario():
+        first = asyncio.ensure_future(device_auth.password_tried("a guess"))
+        await asyncio.sleep(0.01)
+        clock[0] += 3600                                  # longer than any hold the clock could give
+        with pytest.raises(device_auth.Shut):
+            await device_auth.password_tried("another guess")
+        release[0].set()
+        with pytest.raises(device_auth.Busy):
+            await first
+        second = asyncio.ensure_future(device_auth.password_tried("another guess"))
+        await asyncio.sleep(0.01)
+        release[1].set()
+        with pytest.raises(device_auth.Busy):
+            await second
+    asyncio.run(scenario())
+    assert derived == ["a guess", "another guess"]
 
 
 def test_a_change_without_the_hosts_code_costs_its_code_nothing(rotations, monkeypatch):

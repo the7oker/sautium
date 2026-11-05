@@ -255,7 +255,12 @@ def create(password: str, *, out_dir: Optional[Path] = None,
     if device_auth.account_anonymous():
         raise nb.Refused("this identity's password was minted and never shown — "
                          "set one (Profile) before backing up")
-    if not asyncio.run(device_auth.verify_password(password)):
+    try:
+        right = asyncio.run(device_auth.verify_password(password))
+    except device_auth.Busy as e:
+        raise nb.BackupError("the password could not be checked: the key derivation failed — "
+                             "try again") from e
+    if not right:
         raise nb.WrongPassword("wrong password")
     kek = nb.derive_kek(password, ident["username"])
 
