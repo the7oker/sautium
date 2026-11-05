@@ -49,6 +49,10 @@
   // its QR), kept in memory for this load only: an account with no password
   // changes identity on its host's word, and this is that word.
   let hostCode = "";
+  // The person said, at the gate, to set up the node that presents no
+  // identity: the account being created may answer unsigned. The pin stays
+  // as it is until the account made replaces it.
+  let settingUp = false;
   const { sha256, hmacSha256, toHex } = window.Sautium.hash;
 
   function storedToken() {
@@ -263,7 +267,7 @@
       // A node with an account always signs: an answer without is no node
       // this browser can sign in to
       throw new NodeUnset();
-    } else if (pinned) {
+    } else if (pinned && !settingUp) {
       throw new NodeChanged("");
     }
     return { eph, ephB64: hs.eph, nodePubkey: hs.node_pubkey };
@@ -298,8 +302,8 @@
   }
 
   const BUSY = "The node is busy — try again in a moment.";
-  const SETUP_CODE_PLACE = "It is in the node's log (docker logs sautium-backend) " +
-    "or in data/node_identity/setup_code.txt.";
+  const SETUP_CODE_PLACE = "It is in the node's log (docker logs sautium-backend; the node " +
+    "writes a new one at each start) or in setup_code.txt in its identity folder (data/node_identity).";
   // Only a 401 says the password or the code was wrong; a 429 is the door
   // shut by wrong passwords, its wait named; anything else is the exchange
   // that did not finish, said as such.
@@ -337,8 +341,11 @@
     forget: () => setToken(""),
     status: async () => (await _origFetch("/api/auth/status")).json(),
     // The gate's answer to NodeChanged: this is the node from now on — or,
-    // for a node not set up yet, no node until the account made pins its key.
-    acceptNode: (pubkey) => pinNode(pubkey),
+    // for a node not set up yet, set it up: the pin stays until the account
+    // made replaces it.
+    acceptNode: (pubkey) => { if (pubkey) pinNode(pubkey); else settingUp = true; },
+    // Whether this page was opened from the host, with its pairing code
+    hasHostCode: () => !!hostCode,
     async login(password) {
       const r = await boxedPost("/api/auth/login", { password });
       if (!r.ok) return failure(r);
@@ -369,7 +376,13 @@
     async logoutEverywhere() {
       // The server hands back a fresh token so the browser that pressed the
       // button is not logged out by its own action.
-      const r = await boxedPost("/api/auth/logout-all", {}, true);
+      let r;
+      try {
+        r = await boxedPost("/api/auth/logout-all", {}, true);
+      } catch (e) {
+        if (e instanceof NodeChanged || e instanceof NodeUnset) return false;
+        throw e;
+      }
       if (!r.ok) return false;
       setToken(r.data.token);
       return true;
@@ -380,9 +393,17 @@
       // from the same reply and pins the new key. An account with a password
       // has it typed again (`currentPassword`); one without carries the code
       // the host opened this page with. Returns the reply, or {ok:false, error}.
-      const r = await boxedPost("/api/auth/change-identity",
-                                { username, password, current_password: currentPassword || "",
-                                  pin: hostCode }, true);
+      let r;
+      try {
+        r = await boxedPost("/api/auth/change-identity",
+                            { username, password, current_password: currentPassword || "",
+                              pin: hostCode }, true);
+      } catch (e) {
+        if (e instanceof NodeChanged || e instanceof NodeUnset) {
+          return { ok: false, error: "The node answering is not the one this browser signed in to — reload the page." };
+        }
+        throw e;
+      }
       if (!r.ok) return { ok: false, error: r.status === 503 ? BUSY : await errorDetail(r, `HTTP ${r.status}`) };
       setToken(r.data.token);
       pinNode(r.data.public_key_hex);
@@ -526,7 +547,8 @@
       mode = st.onboarding ? "create" : (st.password_login ? "password" : "pin");
       username = st.username || "";
       buildForm();
-      if (notice) msg.textContent = notice;
+      // The create form says itself what a node not set up yet needs
+      if (notice && mode !== "create") msg.textContent = notice;
       if (changed) askNodeChanged(changed, redeem);
     }).catch(() => {
       msg.textContent = "Cannot reach the server.";
@@ -651,11 +673,9 @@
           }
           if (!(e instanceof NodeChanged)) throw e;
           // The code stays in the URL until the gate redeems it.
-          showLoginGate({ changed: e, retry: async () => {
-            const done = await window.Sautium.auth.pair(code);
-            if (done === true) { stripFragmentCode(); hostCode = code; }
-            return done;
-          } });
+          // Redeemed, the gate reloads with the code still in the URL: the
+          // boot pairs with it again, keeps it as the host's and strips it
+          showLoginGate({ changed: e, retry: () => window.Sautium.auth.pair(code) });
           return;
         }
         // A code the node took or refused is spent; one the node did not get

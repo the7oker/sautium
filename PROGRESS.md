@@ -2348,17 +2348,23 @@ user brings.
   anonymous account has no password anyone has seen: its host vouches
   instead (since 2026-11-05) — the change carries the pairing code the page
   was opened with from the host, which the page keeps in memory for that
-  load, and a wrong one costs one of the code's attempts. A node whose host
+  load, and a wrong one costs one of the code's attempts. The code is the
+  host's to read: `/api/auth/pin` answers only a request the server secret
+  signed, never a browser's device token. A node whose host
   shows no pairing code (Docker) keeps a password: a change to none is
   refused, as creating an account without one always was.
 - **A fresh node's account needs its setup code (2026-11-05).** While a
   node has no account, whoever reached its port first could create one
   and own the node — with no deadline, and `/api/auth/status` said so. Now
   a node with no account writes a one-time setup code at its start to its
-  log and to `setup_code.txt` in the identity folder (a Docker node's
-  `./data/node_identity`, readable by the node's user alone); create-account
-  carries it in the box, checked under the creation's lock before anything
-  is derived, and the code dies with the account. Not a loopback rule: in
+  log (a warning, whatever the level) and to `setup_code.txt` in the
+  identity folder (`./data/node_identity` under `docker-compose.yml`,
+  `./backend/data/node_identity` under the wsl and mac files, readable by
+  the node's user alone); create-account takes it out of whatever was
+  pasted around it and
+  carries in the box, checked under the creation's lock before anything
+  is derived, and the code dies with the account; a 422 at these doors
+  names the field, never what was in it. Not a loopback rule: in
   Docker every request comes from the bridge gateway. Starting over is
   stopping the node, emptying the identity folder and starting it again.
 - **Wrong passwords shut the login door for a while (2026-11-05).** The
@@ -2366,7 +2372,11 @@ user brings.
   five wrong ones in a row the door stays shut for a second, then for a
   delay that doubles with each further wrong one, up to 15 min — a try
   meanwhile is answered 429 with the wait, before anything is derived, and
-  the page says how long. One count for the node (behind Docker every
+  the page says how long; a try let in past the free five holds the door
+  until its answer, so tries at once do not pass together. The current
+  password typed at an identity change passes the same door. Only a
+  derivation that ran and did not match counts; one that failed answers
+  "busy", never "wrong password". One count for the node (behind Docker every
   request has the bridge's address), so a crowd at the door delays a new
   sign-in, never a browser signed in already; a right password clears it,
   a restart opens it. The owner is told: the wrong passwords since the

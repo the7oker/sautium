@@ -46,9 +46,10 @@ BRUTE FORCE. The two doors need different locks:
     derivations run under a semaphore, and past DERIVE_QUEUE of them in
     flight a request is turned away (Busy) instead of waiting — the last
     place kept for a signed caller — and a derivation runs to its end even
-    when its caller has gone. Wrong passwords are counted: past
-    LOGIN_FREE_FAILURES in a row the door stays shut for a delay that
-    doubles with each further one (Shut, before any derivation), and the
+    when its caller has gone. Wrong passwords are counted, at the login
+    door and at an identity change alike: past LOGIN_FREE_FAILURES in a row
+    the door stays shut for a delay that doubles with each further one
+    (Shut, before any derivation) and one try at a time is let in, and the
     owner is told (login_refused). An anonymous account has
     no password anyone knows: its door is the PIN, and a password login there
     is refused before any derivation.
@@ -60,6 +61,7 @@ import hmac
 import json
 import logging
 import math
+import re
 import secrets
 import threading
 import time
@@ -104,14 +106,18 @@ _create_lock = asyncio.Lock()
 SETUP_CODE_FILE = "setup_code.txt"
 SETUP_CODE_GROUPS = 3
 _setup_code: Optional[str] = None
+# The code within whatever was pasted around it (a log line, a space)
+_SETUP_CODE_FORM = re.compile("[%s]{4}(?:-[%s]{4}){%d}" % (
+    "A-HJ-NP-Z2-9", "A-HJ-NP-Z2-9", SETUP_CODE_GROUPS - 1))
 
 # The password door's wrong guesses: one count for the node — behind Docker
 # every request comes from the bridge's address — so a crowd at the door
 # delays a new sign-in, never a browser signed in already. Past
 # LOGIN_FREE_FAILURES in a row the door stays shut for a delay that doubles
-# with each further one, up to LOGIN_DELAY_MAX; a right password clears the
-# count. Process memory: a restart opens the door, and the owner's record
-# (LOGIN_FAILURES_KEY, a notice) stays.
+# with each further one, up to LOGIN_DELAY_MAX, and a try let in meanwhile
+# holds the door for the delay its failure would cost — the next waits for
+# its answer; a right password clears the count. Process memory: a restart
+# opens the door, and the owner's record (LOGIN_FAILURES_KEY, a notice) stays.
 LOGIN_FREE_FAILURES = 5
 LOGIN_DELAY_MAX = 15 * 60
 LOGIN_FAILURES_KEY = "auth.login_failures"
@@ -276,7 +282,8 @@ def prepare_setup() -> None:
     if d is None:
         return
     path = d / SETUP_CODE_FILE
-    if account_configured():
+    # A key on disk is an identity, named or not: creation could only refuse
+    if account_configured() or (d / "node_ed25519.key").exists():
         path.unlink(missing_ok=True)
         return
     _setup_code = _code(SETUP_CODE_GROUPS)
@@ -285,8 +292,9 @@ def prepare_setup() -> None:
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(_setup_code + "\n")
-    logger.info("No account yet. The setup code to create it is %s (also in %s in the identity folder)",
-                _setup_code, SETUP_CODE_FILE)
+    # A warning: the owner has something to do, whatever the log level
+    logger.warning("No account yet. The setup code to create it is %s (also in %s in the identity folder; "
+                   "a new one at each start)", _setup_code, SETUP_CODE_FILE)
 
 
 class Busy(Exception):
@@ -314,8 +322,9 @@ async def create_account(username: str, password: str, setup_code: str) -> dict:
     async with _create_lock:
         if account_configured():
             raise AccountExists()
-        given = (setup_code or "").strip().upper()
-        if _setup_code is None or not hmac.compare_digest(_setup_code, given):
+        found = _SETUP_CODE_FORM.search((setup_code or "").upper())
+        if _setup_code is None or found is None or not hmac.compare_digest(
+                _setup_code.encode(), found.group().encode()):
             raise WrongSetupCode()
         info = await asyncio.to_thread(_write_identity, d, username, password)
         _setup_code = None
@@ -344,7 +353,8 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     checked under the lock, after the refusals that cost nothing and before
     anything else is derived — a rotation that raced another would
     otherwise change the identity the other just made, on the password of
-    the one before (WrongPassword; Busy past the derivation bound). An
+    the one before (WrongPassword, counted at the password door as a
+    login's is — Shut; Busy past the derivation bound). An
     anonymous account has no password anyone has seen: its host vouches
     for the change instead, by the pairing code it shows now — `pin`, the
     code a page opened from the host carries (WrongPin; a wrong one costs
@@ -364,9 +374,11 @@ async def rotate_identity(username: str, password: str, current_password: str = 
             raise RuntimeError("This identity comes from the node's environment "
                                "(P2P_USERNAME, P2P_PASSWORD): change it there")
         if account_anonymous():
-            if not await redeem_pin(pin):
+            # No code at all is a page that was not opened from the host: it
+            # costs the code the host shows nothing
+            if not pin or not await redeem_pin(pin):
                 raise WrongPin()
-        elif not await verify_password(current_password, signed=True):
+        elif not await password_tried(current_password, signed=True):
             raise WrongPassword()
         result = await _rotate_locked(d, username, password)
     _after_rotation()
@@ -470,7 +482,8 @@ async def verify_password(password: str, *, signed: bool = False) -> bool:
     the check; there is no password hash to store, leak or rotate. An
     anonymous account is refused before any derivation. Raises Busy
     (derive_guarded; `signed` for a caller a request signature vouches
-    for)."""
+    for) — and for a derivation that failed: the node could not check the
+    password, which says nothing of the password."""
     expected = _expected_pubkey()
     username = account_username()
     if not expected or not username or not password or account_anonymous():
@@ -481,8 +494,8 @@ async def verify_password(password: str, *, signed: bool = False) -> bool:
     except Busy:
         raise
     except Exception as e:
-        logger.info("password verification failed: %s", e)
-        return False
+        logger.warning("a password could not be checked: the derivation failed: %s", e)
+        raise Busy() from e
     return hmac.compare_digest(got.get("public_key_hex", ""), expected)
 
 
@@ -524,23 +537,51 @@ class Shut(Exception):
         self.seconds = seconds
 
 
-def login_door() -> None:
-    """Raises Shut while the password door waits out a delay."""
+def _delay(failures: int) -> int:
+    """How long the door stays shut after `failures` wrong passwords in a row."""
+    over = failures - LOGIN_FREE_FAILURES
+    return min(LOGIN_DELAY_MAX, 2 ** min(over - 1, 20)) if over > 0 else 0
+
+
+async def password_tried(password: str, *, signed: bool = False) -> bool:
+    """The account password checked at the door every typed password passes
+    (the login, an identity change): Shut while the door waits out a delay;
+    past the free failures the try is let in alone, holding the door for
+    the delay its failure would cost; a wrong one is counted and told to the
+    owner (login_refused), a right one clears the count. Only a derivation
+    that ran and did not match counts — an empty password, or a node with
+    no password door, is refused for nothing. Busy as verify_password."""
     left = _door["shut_until"] - time.time()
     if left > 0:
         raise Shut(math.ceil(left))
+    if not password or account_anonymous() or not account_configured():
+        return False
+    held = _delay(_door["failures"] + 1)
+    if held:
+        _door["shut_until"] = time.time() + held
+    try:
+        ok = await verify_password(password, signed=signed)
+    except Busy:
+        if held:
+            _door["shut_until"] = 0.0          # it did not run: nothing to hold for
+        raise
+    if ok:
+        _door["failures"] = 0
+        _door["shut_until"] = 0.0
+    else:
+        await login_refused()
+    return ok
 
 
 async def login_refused() -> None:
-    """A wrong password at the login door: counted, the door shut past the
-    free ones, and the owner told — the record of wrong passwords since the
-    notice was last seen, which wakes the notices channel."""
+    """A wrong password: counted, the door shut past the free ones, and the
+    owner told — the record of wrong passwords since the notice was last
+    seen, which wakes the notices channel."""
     _door["failures"] += 1
-    over = _door["failures"] - LOGIN_FREE_FAILURES
-    if over > 0:
-        delay = min(LOGIN_DELAY_MAX, 2 ** min(over - 1, 20))
+    delay = _delay(_door["failures"])
+    if delay:
         _door["shut_until"] = time.time() + delay
-        logger.warning("%d wrong passwords in a row at the login door: the next waits %d s",
+        logger.warning("%d wrong passwords in a row: the next is taken in %d s",
                        _door["failures"], delay)
     await asyncio.to_thread(_record_failure)
 
@@ -553,17 +594,13 @@ def _record_failure() -> None:
     now = datetime.now(timezone.utc).isoformat()
     with _failures_lock:
         record = _read(LOGIN_FAILURES_KEY) or {}
+        # The notice is marked seen by its latest failure: one recorded
+        # after the owner looked is news, and starts a new count
         seen = (_read("notice.seen") or {}).get("auth.login_failures")
-        if not record or seen == record.get("since"):
+        if not record or seen == record.get("last"):
             record = {"count": 0, "since": now}
         _write(LOGIN_FAILURES_KEY, {**record, "count": record["count"] + 1, "last": now})
     db_execute("NOTIFY sautium_notices")
-
-
-def login_admitted() -> None:
-    """A right password at the login door: the count starts again."""
-    _door["failures"] = 0
-    _door["shut_until"] = 0.0
 
 
 def _abandoned_derivation(task: asyncio.Task) -> None:
@@ -658,13 +695,13 @@ async def redeem_pin(code: str) -> bool:
     requests wait together."""
     global _pin, _pin_prev
     async with _pin_lock:
-        given = (code or "").strip().upper()
+        given = (code or "").strip().upper().encode()
         if (_pin_prev and time.time() <= _pin_prev["valid_until"]
-                and hmac.compare_digest(_pin_prev["code"], given)):
+                and hmac.compare_digest(_pin_prev["code"].encode(), given)):
             return True
         if not _pin or time.time() > _pin["expires_at"]:
             return False
-        if not hmac.compare_digest(_pin["code"], given):
+        if not hmac.compare_digest(_pin["code"].encode(), given):
             _pin["attempts"] += 1
             if _pin["attempts"] >= MAX_PIN_ATTEMPTS:
                 logger.warning("pairing PIN burned after %d failed attempts",

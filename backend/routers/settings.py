@@ -1162,6 +1162,17 @@ def _notices_state() -> Dict[str, Any]:
 _REPORTS = ("hqplayer.run_restored", "auth.login_failures")
 
 
+def _login_failures_notice() -> Optional[Dict[str, Any]]:
+    """Wrong passwords since the owner last saw them
+    (device_auth.login_refused): a report, dropped once seen. Its onset is
+    the latest failure, so one after the owner looked is news."""
+    failures = _read(device_auth.LOGIN_FAILURES_KEY)
+    if not failures:
+        return None
+    return {"key": "auth.login_failures", "kind": "warning", "since": failures["last"], "until": None,
+            "data": {"count": failures["count"], "first": failures["since"], "last": failures["last"]}}
+
+
 def _notice_items() -> List[Dict[str, Any]]:
     """Active conditions that change what the user sees without any action
     of theirs: an external API that cooled us down, catalog data the
@@ -1334,13 +1345,9 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": f"support.request.{row['id']}", "kind": "info",
                       "since": row["received_at"], "until": row["expires_at"],
                       "data": _support_request(row)})
-    # Wrong passwords at the login door since the owner last saw this
-    # (device_auth.login_refused): a report, dropped once seen
-    failures = _read(device_auth.LOGIN_FAILURES_KEY)
-    if failures:
-        items.append({"key": "auth.login_failures", "kind": "warning",
-                      "since": failures["since"], "until": None,
-                      "data": {"count": failures["count"], "last": failures["last"]}})
+    login_failures = _login_failures_notice()
+    if login_failures is not None:
+        items.append(login_failures)
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]

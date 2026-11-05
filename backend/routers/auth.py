@@ -16,7 +16,7 @@ channel").
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 import device_auth
@@ -77,7 +77,9 @@ def _open(req: BoxedRequest, model):
     try:
         return model.model_validate(payload), reply
     except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors(include_url=False))
+        # The refusal rides in the clear: it names the field, never what was in it
+        raise HTTPException(status_code=422, detail=e.errors(include_url=False, include_input=False,
+                                                             include_context=False))
 
 
 @router.get("/handshake")
@@ -114,8 +116,9 @@ async def auth_status() -> dict:
 class CreateAccountRequest(BaseModel):
     username: str = Field(default="", max_length=32)
     password: str = Field(default="", min_length=8, max_length=256)
-    # The code the node wrote to its log and its identity folder at start
-    setup_code: str = Field(default="", max_length=32)
+    # The code the node wrote to its log and its identity folder at start —
+    # or a line pasted around it, which the code is read out of
+    setup_code: str = Field(default="", max_length=256)
 
 
 @router.post("/create-account")
@@ -139,7 +142,8 @@ async def create_account(boxed: BoxedRequest) -> dict:
     except device_auth.AccountExists:
         raise HTTPException(status_code=409, detail="account already exists")
     except device_auth.WrongSetupCode:
-        raise HTTPException(status_code=403, detail="That is not this node's setup code")
+        raise HTTPException(status_code=403, detail="That is not this node's setup code: the node writes a "
+                                                    "new one at each start, to its log and its identity folder")
     except ValueError as e:                       # username shape
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -151,25 +155,26 @@ async def create_account(boxed: BoxedRequest) -> dict:
                   "public_key_hex": info.get("public_key_hex")})
 
 
+def _shut(e: "device_auth.Shut") -> HTTPException:
+    return HTTPException(status_code=429, detail="too many wrong passwords",
+                         headers={"Retry-After": str(e.seconds)})
+
+
 @router.post("/login")
 async def login(boxed: BoxedRequest) -> dict:
-    """Exchange the account password for a device token. A door shut by
-    wrong passwords answers 429 before anything is derived; each wrong one
-    is counted and told to the owner (device_auth.login_refused)."""
+    """Exchange the account password for a device token, through the
+    password door: shut by wrong passwords it answers 429 before anything is
+    derived; each wrong one is counted and told to the owner
+    (device_auth.password_tried)."""
     req, reply = _open(boxed, LoginRequest)
     try:
-        device_auth.login_door()
+        ok = await device_auth.password_tried(req.password)
     except device_auth.Shut as e:
-        raise HTTPException(status_code=429, detail="too many wrong passwords",
-                            headers={"Retry-After": str(e.seconds)})
-    try:
-        ok = await device_auth.verify_password(req.password)
+        raise _shut(e)
     except device_auth.Busy:
         raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
     if not ok:
-        await device_auth.login_refused()
         raise HTTPException(status_code=401, detail="invalid credentials")
-    device_auth.login_admitted()
     return reply({"token": device_auth.current_token(_secret())})
 
 
@@ -214,6 +219,8 @@ async def change_identity(boxed: BoxedRequest) -> dict:
         info = await device_auth.rotate_identity(username, req.password, req.current_password, req.pin)
     except device_auth.Busy:
         raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
+    except device_auth.Shut as e:
+        raise _shut(e)
     except device_auth.WrongPassword:
         raise HTTPException(status_code=403, detail="The current password is not this account's")
     except device_auth.WrongPin:
@@ -254,28 +261,38 @@ async def logout_all(boxed: BoxedRequest) -> dict:
     return reply({"token": device_auth.current_token(_secret())})
 
 
+def _host_only(request: Request) -> None:
+    """The pairing code is the host's to show: a request a browser's device
+    token signed is refused — the code is what vouches for a browser, and
+    for an identity change of an account with no password."""
+    if getattr(request.state, "signer", None) != "host":
+        raise HTTPException(status_code=403, detail="the host's own")
+
+
 @router.get("/pin")
-async def get_pin() -> dict:
+async def get_pin(request: Request) -> dict:
     """The pairing code to put on screen, with the deadline the host needs to
     schedule its own refresh. Idempotent: repeated calls return the same code
     while it lives, so the QR and the button that mints the URL cannot drift
     apart — asking used to replace it, which silently invalidated whatever was
     already drawn.
 
-    Signature-protected: the launcher holds the server secret, a stranger on
-    the LAN does not."""
+    Signed by the host alone (_host_only): the launcher holds the server
+    secret; a browser's device token is refused."""
+    _host_only(request)
     return device_auth.current_pin()
 
 
 @router.get("/pin/stream")
-async def pin_stream() -> EventStream:
+async def pin_stream(request: Request) -> EventStream:
     """SSE wake channel for the host displaying the code.
 
     The host knows when the code expires — it was told — so expiry needs no
     channel. What it cannot foresee is the code being burned by someone
     guessing at /pair, which would otherwise leave a dead QR on screen until
     the next scheduled refresh. Wake-event only; the code itself is pulled
-    over the signed API."""
+    over the signed API. The host's alone, as the code is."""
+    _host_only(request)
     entry = device_auth.pin_subscribe()
     evt = entry[0]
 

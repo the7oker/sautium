@@ -11730,7 +11730,7 @@
     return {
       title: 'Wrong passwords at sign-in',
       text: `<span class="num">${count}</span> sign-in${count === 1 ? '' : 's'} with a wrong account password ` +
-            `since ${at(n.since)}, the last on ${at(d.last)}. If they were not yours, someone on your ` +
+            `since ${at(d.first)}, the last on ${at(d.last)}. If they were not yours, someone on your ` +
             'network is trying to guess the password.',
     };
   };
@@ -12223,10 +12223,18 @@
       if (password && password.length < 8) return fail('Password must be at least 8 characters.');
       if (password && password !== pass2Input.value) return fail("Passwords don't match.");
       if (currentInput && !currentPassword) return fail('Enter the current password.');
+      if (!asksCurrent && !window.Sautium.auth.hasHostCode()) {
+        return fail('Open this page from the computer that runs Sautium, or scan its QR code, then change it.');
+      }
       confirmBtn.disabled = true;
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = 'Deriving the new key…';
-      const result = await window.Sautium.auth.changeIdentity(username, password, currentPassword);
+      let result;
+      try {
+        result = await window.Sautium.auth.changeIdentity(username, password, currentPassword);
+      } catch (err) {
+        result = { ok: false, error: 'Could not reach the node — try again.' };
+      }
       if (!result.ok) { confirmBtn.disabled = false; return fail(result.error); }
       close();
       if (result.restart_required) {

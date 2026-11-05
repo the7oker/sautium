@@ -245,10 +245,13 @@ docker compose logs -f backend     # wait for "Application startup complete"
 - **Web UI:** `http://localhost:8800/`
 
 The first visit sets the node up: a nickname, a password, and the setup code
-the backend writes at start to its log (`docker compose logs backend | grep
-"setup code"`) and to `data/node_identity/setup_code.txt`. The code dies with
-the account's creation. To start over, stop the stack, empty
-`data/node_identity` and start it again: the node writes a new code.
+the backend writes at each start to its log (`docker compose logs backend |
+grep "setup code"` — the last one is the live one) and to `setup_code.txt` in
+the node's identity folder: `data/node_identity` (under
+`docker-compose.wsl.yml` and `docker-compose.mac.yml`,
+`backend/data/node_identity`). The code dies with the account's creation. To
+start over, stop the stack, empty that folder and start it again: the node
+writes a new code.
 
 (`/openapi.json` sits behind the request signing like the rest of the API,
 so a bare browser tab gets 401 there. FastAPI's interactive `/docs` pages

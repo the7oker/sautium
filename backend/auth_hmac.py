@@ -493,8 +493,8 @@ class HMACAuthMiddleware:
             # declared one: its body comes from the small budget and is judged
             # once read
             return await self._admit(scope, receive, send, self._open_bodies, judge=lambda body: self._judge(
-                method, path, target, ts_raw, ts_int, nonce, hashlib.sha256(body).hexdigest(), sig)[0])
-        refusal, taken = self._judge(method, path, target, ts_raw, ts_int, nonce, digest, sig)
+                scope, method, path, target, ts_raw, ts_int, nonce, hashlib.sha256(body).hexdigest(), sig)[0])
+        refusal, taken = self._judge(scope, method, path, target, ts_raw, ts_int, nonce, digest, sig)
         if refusal is not None:
             return await self._refused(scope, receive, send, 401, *refusal)
         return await self._admit(scope, receive, send, self._signed_bodies, digest=digest, taken=taken)
@@ -507,9 +507,10 @@ class HMACAuthMiddleware:
         await self._open_bodies.dropping(scope, receive)
         await refuse(send, status, detail, _auth_error(kind) if kind else ())
 
-    def _judge(self, method, path, target, ts_raw, ts_int, nonce, digest, sig) -> tuple:
+    def _judge(self, scope, method, path, target, ts_raw, ts_int, nonce, digest, sig) -> tuple:
         """(None, the signature's entry) for a signature that verifies and is
         new — taken now (_take) — else (the refusal's detail and kind, None).
+        Which key signed is the request's `state.signer`: "host" or "device".
 
         Two keys are accepted, for two kinds of caller:
           * the DEVICE TOKEN — what a browser gets after logging in. The page
@@ -520,14 +521,17 @@ class HMACAuthMiddleware:
             by rejecting them: whoever can read the file has the host
             anyway."""
         secret = self._get_secret()
-        if not any(hmac.compare_digest(sig, _mac(key, method, target, ts_raw, nonce, digest))
-                   for key in (device_auth.current_token(secret).encode(), secret)):
+        signer = next((who for who, key in (("device", device_auth.current_token(secret).encode()),
+                                            ("host", secret))
+                       if hmac.compare_digest(sig, _mac(key, method, target, ts_raw, nonce, digest))), None)
+        if signer is None:
             logger.warning("bad request signature: %s %s", method, path)
             return ("bad signature", "bad-sig"), None
         taken = _take(sig, ts_int)
         if taken is None:
             logger.warning("request signature used again: %s %s", method, path)
             return ("signature already used", "replayed"), None
+        scope.setdefault("state", {})["signer"] = signer
         return None, taken
 
     async def _admit(self, scope, receive, send, budget: BodyBudget, *,

@@ -121,7 +121,9 @@ def doors():
 
 
 def test_a_busy_node_says_so_at_the_password_door(doors, monkeypatch):
-    async def busy(_password):
+    _account(monkeypatch, anonymous=False)
+    monkeypatch.setattr(device_auth, "_door", {"failures": 0, "shut_until": 0.0}, raising=False)
+    async def busy(_password, **_kw):
         raise device_auth.Busy()
     monkeypatch.setattr(device_auth, "verify_password", busy)
     r = doors.post("/api/auth/login", json=_seal(doors.get("/api/auth/handshake").json(),
@@ -270,6 +272,8 @@ def rotations(doors, tmp_path, monkeypatch):
     monkeypatch.setattr(device_auth, "account_configured", lambda: True)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
     monkeypatch.setattr(device_auth, "pin_door", lambda: True, raising=False)
+    monkeypatch.setattr(device_auth, "_door", {"failures": 0, "shut_until": 0.0}, raising=False)
+    monkeypatch.setattr(device_auth, "_record_failure", lambda: None, raising=False)
     monkeypatch.setattr(device_auth, "_pin", None)
     monkeypatch.setattr(device_auth, "_pin_prev", None)
     monkeypatch.setattr(device_auth, "_pin_lock", asyncio.Lock())
@@ -409,7 +413,7 @@ def fresh_node(tmp_path, monkeypatch):
     from config import settings
     monkeypatch.setattr(settings, "p2p_identity_dir", str(tmp_path))
     monkeypatch.setattr(settings, "p2p_username", "")
-    monkeypatch.setattr(device_auth, "_setup_code", None)
+    monkeypatch.setattr(device_auth, "_setup_code", None, raising=False)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
     monkeypatch.setattr(device_auth, "_expected_pubkey",
                         lambda: "ab" * 32 if (tmp_path / "node_ed25519.key").exists() else None)
@@ -438,8 +442,26 @@ def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_n
     assert written == ["owner"] and not path.exists()
     with pytest.raises(device_auth.AccountExists):
         asyncio.run(device_auth.create_account("other", "a password", code))
-    device_auth.prepare_setup()                       # a start with an account
+    for name in ("node_ed25519.key", "node_info.json"):   # the folder emptied while it runs
+        (fresh_node / name).unlink()
+    with pytest.raises(device_auth.WrongSetupCode):
+        asyncio.run(device_auth.create_account("other", "a password", code))
+    (fresh_node / "node_ed25519.key").write_text("k")     # a key with no name is an identity
+    device_auth.prepare_setup()
     assert not path.exists()
+
+
+def test_the_setup_code_is_read_out_of_what_was_pasted_around_it(fresh_node, monkeypatch):
+    """A line of the log, spaces, another layout's letters: the code inside
+    is taken, nothing else is, and nothing is a server error."""
+    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p: {"username": u})
+    device_auth.prepare_setup()
+    code = device_auth._setup_code
+    for given in ("\u0410\u0412\u0421\u0415-\u041d\u041a\u041c\u0420-\u0422\u0425\u0410\u0412", "", " - "):
+        with pytest.raises(device_auth.WrongSetupCode):
+            asyncio.run(device_auth.create_account("owner", "a password", given))
+    pasted = f"backend-1 | WARNING No account yet. The setup code to create it is {code} (also in …)"
+    assert asyncio.run(device_auth.create_account("owner", "a password", pasted)) == {"username": "owner"}
 
 
 def test_the_set_up_door_refuses_a_code_that_is_not_the_nodes(fresh_node, doors, monkeypatch):
@@ -460,7 +482,9 @@ def login_door(doors, monkeypatch):
     clock, derived, store, woken = [1000.0], [], {}, []
     monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
-    monkeypatch.setattr(device_auth, "_door", {"failures": 0, "shut_until": 0.0})
+    monkeypatch.setattr(device_auth, "account_configured", lambda: True)
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    monkeypatch.setattr(device_auth, "_door", {"failures": 0, "shut_until": 0.0}, raising=False)
     monkeypatch.setattr(device_auth.time, "time", lambda: clock[0])
     monkeypatch.setattr(settings_router, "_read", lambda key: store.get(key))
     monkeypatch.setattr(settings_router, "_write", lambda key, value: store.__setitem__(key, value))
@@ -504,7 +528,7 @@ def test_the_owner_is_told_of_wrong_passwords_since_the_notice_was_seen(login_do
         login("a guess")
     record = store[device_auth.LOGIN_FAILURES_KEY]
     assert record["count"] == 3 and woken == ["NOTIFY sautium_notices"] * 3
-    store["notice.seen"] = {"auth.login_failures": record["since"]}
+    store["notice.seen"] = {"auth.login_failures": record["last"]}
     clock[0] += 60
     login("a guess")
     fresh = store[device_auth.LOGIN_FAILURES_KEY]
@@ -570,3 +594,127 @@ def test_a_pin_is_a_key_or_nothing():
     out = _page("window.Sautium.auth.acceptNode('not a key'); return null",
                 store={**_SIGNED_IN, "sautium.node_pubkey": "cd" * 32})
     assert "sautium.node_pubkey" not in out["store"]
+
+
+def test_a_refusal_at_the_credential_doors_names_the_field_never_its_value(doors):
+    r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
+        "username": "owner", "password": "pw4321", "setup_code": "x"}))
+    assert r.status_code == 422 and "pw4321" not in r.text
+
+
+def test_the_pairing_code_is_the_hosts_to_read(tmp_path, monkeypatch):
+    """A request a browser's device token signed is refused the code — the
+    code vouches for a browser, and for an account's identity change — and
+    the host's own signature reads it."""
+    import collections
+
+    import auth_hmac
+    from routers import auth
+    from test_request_signing import TOKEN, signed
+    monkeypatch.setattr(device_auth, "current_token", lambda secret: TOKEN)
+    monkeypatch.setattr(auth_hmac, "_allowed_hosts", {"testserver"})
+    monkeypatch.setattr(auth_hmac, "_seen", type(auth_hmac._seen)(), raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen_wall", [], raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen_order", collections.deque(), raising=False)
+    monkeypatch.setattr(device_auth, "_pin", None)
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.add_middleware(auth_hmac.HMACAuthMiddleware, secret_path=tmp_path / ".api_secret")
+    client = TestClient(app)
+    secret = auth_hmac.ensure_secret(tmp_path / ".api_secret")
+    assert client.get("/api/auth/pin", headers=signed("GET", "/api/auth/pin")).status_code == 403
+    assert client.get("/api/auth/pin/stream", headers=signed("GET", "/api/auth/pin/stream")).status_code == 403
+    assert device_auth._pin is None                   # the refused read minted nothing
+    r = client.get("/api/auth/pin", headers=signed("GET", "/api/auth/pin", key=secret))
+    assert r.status_code == 200 and r.json()["code"] == device_auth._pin["code"]
+
+
+def test_tries_at_once_past_the_free_failures_are_let_in_one_at_a_time(login_door, doors):
+    import httpx
+    _login, _clock, derived, _store, _woken = login_door
+    device_auth._door["failures"] = device_auth.LOGIN_FREE_FAILURES
+
+    async def at_once():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=doors.app),
+                                     base_url="http://node") as client:
+            async def guess():
+                handshake = (await client.get("/api/auth/handshake")).json()
+                return (await client.post("/api/auth/login",
+                                          json=_seal(handshake, {"password": "a guess"}))).status_code
+            return await asyncio.gather(*(guess() for _ in range(3)))
+    assert sorted(asyncio.run(at_once())) == [401, 429, 429]
+    assert len(derived) == 1
+
+
+def test_only_a_derivation_that_did_not_match_is_a_wrong_password(login_door, monkeypatch):
+    """An empty password, or a node with no password door, is refused for
+    nothing; a derivation that failed is a busy node — none is counted."""
+    login, _clock, derived, store, _woken = login_door
+    assert login("").status_code == 401 and derived == []
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: True)
+    assert login("a guess").status_code == 401 and derived == []
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+
+    async def failing(password, **_kw):
+        raise device_auth.Busy()
+    monkeypatch.setattr(device_auth, "verify_password", failing)
+    assert login("the right one").status_code == 503
+    assert device_auth._door == {"failures": 0, "shut_until": 0.0}
+    assert device_auth.LOGIN_FAILURES_KEY not in store
+
+
+def test_a_derivation_that_fails_says_the_node_is_busy(monkeypatch):
+    _account(monkeypatch, anonymous=False)
+
+    def failing(*_a):
+        raise MemoryError("no room for the derivation")
+    monkeypatch.setattr(p2p_identity, "derive_identity", failing)
+    with pytest.raises(device_auth.Busy):
+        asyncio.run(device_auth.verify_password("the right one"))
+
+
+def test_the_current_password_at_a_change_passes_the_password_door(rotations, monkeypatch):
+    change, done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    monkeypatch.setattr(device_auth, "_door", {"failures": device_auth.LOGIN_FREE_FAILURES, "shut_until": 0.0},
+                        raising=False)
+    monkeypatch.setattr(device_auth, "login_refused", lambda: asyncio.sleep(0, device_auth._door.update(
+        failures=device_auth._door["failures"] + 1, shut_until=time.time() + 60)), raising=False)
+    assert change(username="second", password="new password", current_password="a guess").status_code == 403
+    r = change(username="second", password="new password", current_password="the right one")
+    assert r.status_code == 429 and done == []
+
+
+def test_a_change_without_the_hosts_code_costs_its_code_nothing(rotations, monkeypatch):
+    change, _done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: True)
+    device_auth.issue_pin()
+    left = device_auth.pin_state()["attempts_left"]
+    assert change(username="named", password="a password now").status_code == 403
+    assert device_auth.pin_state()["attempts_left"] == left
+    assert change(username="named", password="a password now", pin="AAAA-AAAA").status_code == 403
+    assert device_auth.pin_state()["attempts_left"] == left - 1
+
+
+def test_the_owners_notice_of_wrong_passwords_is_dropped_once_seen(monkeypatch):
+    import routers.settings as settings_router
+    store = {device_auth.LOGIN_FAILURES_KEY: {"count": 2, "since": "2026-11-05T10:00:00+00:00",
+                                              "last": "2026-11-05T10:05:00+00:00"}}
+    monkeypatch.setattr(settings_router, "_read", lambda key: store.get(key))
+    notice = settings_router._login_failures_notice()
+    assert notice["since"] == "2026-11-05T10:05:00+00:00" and notice["data"]["count"] == 2
+    monkeypatch.setattr(settings_router, "_notice_items", lambda: [{**notice, "seen": False}])
+    assert [n["key"] for n in settings_router._notices_state()["items"]] == ["auth.login_failures"]
+    monkeypatch.setattr(settings_router, "_notice_items", lambda: [{**notice, "seen": True}])
+    assert settings_router._notices_state()["items"] == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_setting_up_a_node_keeps_the_pin_until_the_account_is_made():
+    """"Set it up" on a node with no identity: a creation the node refuses
+    leaves the browser pinned to the node it knew."""
+    known = {**_SIGNED_IN, "sautium.node_pubkey": "cd" * 32}
+    create = "return await window.Sautium.auth.createAccount('owner', 'a password', 'AAAA-BBBB-CCCC')"
+    out = _page("window.Sautium.auth.acceptNode(''); " + create, unsigned=True, store=known,
+                replies={"/api/auth/create-account": [[403]]})
+    assert out["result"] != True and out["store"]["sautium.node_pubkey"] == "cd" * 32  # noqa: E712
