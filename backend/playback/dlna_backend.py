@@ -20,6 +20,7 @@ import contextvars
 import logging
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
@@ -488,8 +489,9 @@ class DlnaBackend(PlayerBackend):
         # distance is set for a Seek in an Opus stream judged as the
         # renderer's fact — a landing, or none by the pending-play deadline
         # (_remember_opus_seek), unlanded the stream loads again from the
-        # clock's second (_seek_unlanded) — and None for any other
-        self._seek_due: Optional[tuple[float, float, Optional[float]]] = None
+        # clock's second (_seek_unlanded) — and None for any other; and
+        # whether it is a start's (an output switch's spot), not the person's
+        self._seek_due: Optional[tuple[float, float, Optional[float], bool]] = None
         # RelTime readings taken as the renderer's word on this load — with
         # the clock, a move of its own, a Seek's landing (_heard)
         self._heard_on_load = 0
@@ -498,6 +500,10 @@ class DlnaBackend(PlayerBackend):
         # (`corrected`) — no play from the top, so the listen goes on
         # (tracker.track_play_event)
         self._corrected = False
+        # What the person is told of it — an event, its id toasted once by a
+        # tab that sees it arrive (`seek_missed`), never a standing `error` —
+        # with the URI it was said on: it goes with its load
+        self._seek_missed: Optional[tuple[str, dict]] = None
         # The poll's updates failed in a row since one last answered: three
         # lose the renderer; one already puts its address in doubt (reachable)
         self._misses = 0
@@ -962,6 +968,8 @@ class DlnaBackend(PlayerBackend):
         self._said = state
         if self._corrected:
             extra["corrected"], self._corrected = True, False
+        if self._seek_missed is not None and self._seek_missed[0] == self._current_url:
+            extra["seek_missed"] = self._seek_missed[1]
         vol = None
         if self._dmr is not None and self._dmr.volume_level is not None:
             vol = round(self._dmr.volume_level * 100.0, 1)
@@ -1053,7 +1061,7 @@ class DlnaBackend(PlayerBackend):
         due = self._seek_due
         if due is None:
             return False
-        second, asked, distance = due
+        second, asked, distance, start = due
         age = time.monotonic() - asked
         # Where the renderer would read had it stayed: the clock, which runs
         # from the Seek's second while it plays and holds while it is paused,
@@ -1069,7 +1077,7 @@ class DlnaBackend(PlayerBackend):
                 self._remember_opus_seek(True)
             return True
         if age > _PENDING_PLAY_DEADLINE and distance is None:
-            self._not_landed(second, real)
+            self._not_landed(second, real, start=start)
             return True
         self._rel_stray = None
         if paused:
@@ -1078,7 +1086,7 @@ class DlnaBackend(PlayerBackend):
             self._position = self._wall_estimate()
         return True
 
-    def _not_landed(self, second: float, real: float) -> None:
+    def _not_landed(self, second: float, real: float, *, start: bool) -> None:
         """A Seek of the node's to `second` — a start's (an output switch's
         spot), or the person's — not seen landing by the pending-play
         deadline: the renderer plays at `real`, its reading, which the clock
@@ -1086,15 +1094,35 @@ class DlnaBackend(PlayerBackend):
         held that reading back for one more and named the node's own lost
         Seek the renderer's move (N-19: "moved slot 1 from 105 s to 19 s by
         itself"). The clock falling back so is a correction, never a play
-        from the top: the listen it was carried in goes on (`corrected`)."""
+        from the top: the listen it was carried in goes on (`corrected`). A
+        start whose Play the renderer never confirmed had its Seek never
+        sent (_seek_on_start still set): the node's failure, said as such."""
+        unsent = start and self._seek_on_start is not None
+        if unsent:
+            self._seek_on_start = None
         self._seek_due = None
         self._heard(real)
+        if start:
+            self._said_missed(f"'{self.label}' started the track from the top",
+                              f"not at {format_time(second)} — it is at {format_time(real)}")
+        else:
+            self._said_missed(f"'{self.label}' did not go to {format_time(second)}",
+                              f"it is at {format_time(real)}")
+        tail = (self._state_name(), (getattr(self._dmr, "current_track_uri", None) or "")[-14:])
+        if unsent:
+            logger.info("the start's Seek to %.0f s on slot %d never went (its Play was never seen "
+                        "taken) — renderer '%s' is at %.0f s (%s, its track …%s)",
+                        second, self._index, self.label, real, *tail)
+        else:
+            logger.info("renderer '%s' did not land the Seek to %.0f s on slot %d — it is at %.0f s "
+                        "(%s, its track …%s)", self.label, second, self._index, real, *tail)
+
+    def _said_missed(self, title: str, text: str) -> None:
+        """A Seek of the node's that left the renderer elsewhere: the clock's
+        fall is a correction (`corrected`), and the person is told once, on
+        the load it was made on (`seek_missed`)."""
         self._corrected = True
-        self._error = (f"The seek to {format_time(second)} did not land — "
-                       f"'{self.label}' plays at {format_time(real)}")
-        logger.info("renderer '%s' did not land the Seek to %.0f s on slot %d — it plays at %.0f s "
-                    "(%s, its track …%s)", self.label, second, self._index, real, self._state_name(),
-                    (getattr(self._dmr, "current_track_uri", None) or "")[-14:])
+        self._seek_missed = (self._current_url, {"id": uuid.uuid4().hex, "title": title, "text": text})
 
     def _adopt_reltime(self, real: float, now: float, *, paused: bool = False) -> None:
         """A renderer's RelTime is its word on the position — when it moves
@@ -1298,32 +1326,43 @@ class DlnaBackend(PlayerBackend):
         self._awaiting_play = False
         target, self._seek_on_start = self._seek_on_start, None
         if target:
-            self._seek_due = (float(int(target)), time.monotonic(), None)
+            self._seek_due = (float(int(target)), time.monotonic(), None, True)
             asyncio.ensure_future(self._seek_started(target), loop=self._loop)
 
     async def _seek_started(self, target: float) -> None:
-        cur = self._current_url or ""
+        """The start's Seek, and what its answer means for the load it was
+        made on — no other: a load since (the person's tap) is not its."""
+        cur, gen = self._current_url or "", self._load_gen
         try:
             await self._avt("Seek", Unit="REL_TIME", Target=_rel_time(target))
         except Detached as e:
             logger.info("DLNA: the start's Seek ends — %s", e)
             return
         except Exception as e:
+            if self._load_gen != gen:
+                logger.debug("DLNA: the start's Seek answered after its load (%s)", _describe(e))
+                return
             if self._opus_refused(e, cur, target):
                 return
-            logger.warning("DLNA: the start at %d s was refused (%s) — playing "
-                           "from the top", target, _describe(e))
-            self._seek_due = None
-            self._rebaseline(0.0)
-            # A correction, as a Seek that did not land (_not_landed)
-            self._corrected = True
-            self._error = (f"'{self.label}' refused the seek to {format_time(target)} — "
-                           "it plays from the top")
-            self._emit_now()
+            if not _connection_failure(e):
+                logger.warning("DLNA: the start at %d s was refused (%s) — playing "
+                               "from the top", target, _describe(e))
+                self._seek_due = None
+                self._rebaseline(0.0)
+                self._said_missed(f"'{self.label}' refused the start at {format_time(target)}",
+                                  "it plays from the top")
+                self._emit_now()
+                return
+            # No answer is no refusal: the renderer may act on it yet — it
+            # is waited for as sent, and its deadline decides (_not_landed)
+            logger.warning("DLNA: the start's Seek to %d s got no answer (%s) — waited for "
+                           "as sent", target, _describe(e))
+        if self._load_gen != gen:
             return
         # The renderer plays from its top until the Seek lands: the distance
         # is the second itself
-        self._seek_due = (float(int(target)), time.monotonic(), self._judged(cur, float(int(target))))
+        self._seek_due = (float(int(target)), time.monotonic(),
+                          self._judged(cur, float(int(target))), True)
         self._rebaseline(float(int(target)))
         self._emit_now()
 
@@ -1602,7 +1641,7 @@ class DlnaBackend(PlayerBackend):
                         # A judged Seek's wait counts while the renderer
                         # plays: paused, it neither lands visibly nor plays on,
                         # and its reload would start it
-                        self._seek_due = (due[0], time.monotonic(), due[2])
+                        self._seek_due = (due[0], time.monotonic(), due[2], due[3])
                     elif time.monotonic() - due[1] > _PENDING_PLAY_DEADLINE:
                         # Not seen landing, with or without readings meanwhile
                         self._seek_unlanded()
@@ -2042,6 +2081,7 @@ class DlnaBackend(PlayerBackend):
             self._error = None      # something in the queue is playable after all
             self._awaiting_play = False   # a new load supersedes an unconfirmed Play
             self._seek_due = None         # ...and the old load's Seek
+            self._seek_missed = None      # ...and what was said of it
             self._heard_on_load = 0       # a new stream: what it reports is to be heard
             if play:
                 self._emit_now("loading")
@@ -2090,7 +2130,7 @@ class DlnaBackend(PlayerBackend):
             # second the start's own Seek goes to once the renderer plays —
             # due from now: it plays from the top until that Seek lands
             self._seek_on_start = start_at or None
-            self._seek_due = (start_at, time.monotonic(), None) if start_at else None
+            self._seek_due = (start_at, time.monotonic(), None, True) if start_at else None
             self._rebaseline(ss or start_at)
             # Accepted is not started: the renderer confirms by reporting
             # PLAYING (poll/GENA clear this), and until then the track is
@@ -2463,7 +2503,7 @@ class DlnaBackend(PlayerBackend):
                     return
                 raise
             self._rebaseline(float(int(seconds)))   # clock continues from the seek target
-            self._seek_due = (float(int(seconds)), time.monotonic(), self._judged(cur, seconds - was))
+            self._seek_due = (float(int(seconds)), time.monotonic(), self._judged(cur, seconds - was), False)
             self._emit_now()
         return self._call(_s())
 

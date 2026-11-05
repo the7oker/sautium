@@ -166,3 +166,15 @@ def test_a_correction_never_splits_the_listen_a_switch_carried(recorder, monkeyp
     assert _history_rows(writes) == [] and lastfm == ["update_now_playing"]
     tracker.track_play_event("playing", 1.0, 200.0, _item("t1"))          # the person's replay
     assert len(_history_rows(writes)) == 1 and lastfm == ["update_now_playing"] * 2
+
+
+def test_a_correction_on_a_tick_with_no_identity_is_still_the_listens(recorder):
+    """A corrected tick whose slot resolved to no item (a queue edit under
+    way) belongs to the listen in progress: the next play under 5 s goes on
+    with it."""
+    writes, lastfm = recorder
+    tracker.track_play_event("playing", 10.0, 200.0, _item("t1"))
+    tracker.track_play_event("playing", 84.0, 200.0, _item("t1"))
+    tracker.track_play_event("paused", 3.0, 200.0, None, corrected=True)
+    tracker.track_play_event("playing", 3.5, 200.0, _item("t1"))
+    assert _history_rows(writes) == [] and lastfm == ["update_now_playing"]

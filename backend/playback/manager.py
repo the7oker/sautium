@@ -916,6 +916,10 @@ class PlaybackManager:
         new_data.update({k: s.extra[k] for k in ("building", "not_answering", "dsp_change",
                                                  "resume", "rebuilding", "starting")
                          if s.extra.get(k) is not None})
+        # A Seek of the node's that left a renderer elsewhere (playback.
+        # dlna_backend): told once per id, while its load plays
+        if s.extra.get("seek_missed"):
+            new_data["seek_missed"] = s.extra["seek_missed"]
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the

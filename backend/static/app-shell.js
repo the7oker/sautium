@@ -6383,6 +6383,24 @@
                     text: escapeProfileHtml(reasons.join(' · ')) });
   });
 
+  // A Seek of the node's that left a renderer elsewhere — a start (an output
+  // switch's second) it played from the top, a seek it never took — is told
+  // once, as it arrives (dlna_backend._said_missed): the status a tab
+  // connects with paints nothing, and the words leave with their load. The
+  // renderer's name is a device's own: escaped.
+  let seekMissesSeen;
+  document.addEventListener('np-update', (e) => {
+    const m = e.detail && e.detail.seek_missed;
+    if (seekMissesSeen === undefined) {
+      seekMissesSeen = new Set(m ? [m.id] : []);
+      return;
+    }
+    if (!m || seekMissesSeen.has(m.id)) return;
+    seekMissesSeen.add(m.id);
+    notices.toast({ kind: 'info', key: 'player.seek_missed', title: escapeProfileHtml(m.title),
+                    text: escapeProfileHtml(m.text) });
+  });
+
   // Surface a queue/play failure as a toast instead of a swallowed
   // console.warn — the ONE reporter for every play intent, the transport
   // commands in player.js included (window.reportPlaybackResult): a 503 is

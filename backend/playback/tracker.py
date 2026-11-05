@@ -267,8 +267,8 @@ def track_play_event(state_name: str, position: float, length: float,
     set its clock to where it plays, a Seek of the node's having not taken
     it there — that fall is no restart, and never splits the listen (N-19:
     a switch's start the renderer played from the top while the clock ran
-    on from the switch's second; corrected under 5 s, the next play counted
-    as a second listen). An output switch carries the listen over
+    on from the switch's second; corrected under 5 s, the next play would
+    have counted as a second listen). An output switch carries the listen over
     (carry_listen); `holds`: the output holds the slot's spot, stopped
     there, and its play press resumes it."""
     global _play_session, _carried
@@ -286,7 +286,8 @@ def track_play_event(state_name: str, position: float, length: float,
     ident = _play_identity(item)
     same_track = (_play_session is not None and ident is not None
                   and ident["track_id"] == _play_session.track_id)
-    if corrected and same_track:
+    if corrected and _play_session is not None and (same_track or ident is None):
+        # A tick with no identity (mid-mutation) is still this listen's
         _play_session.corrected_to(position)
     if state_name != "playing":
         if _play_session is not None and (

@@ -2667,7 +2667,16 @@ def test_a_connecting_word_whose_first_status_fails_is_taken_back(manager):
 
 def _said(n: Node):
     """The first status that carried the node's words, and its index."""
-    return next((i, s) for i, s in enumerate(n.statuses) if s.extra.get("error"))
+    return next((i, s) for i, s in enumerate(n.statuses) if s.extra.get("seek_missed"))
+
+
+def _words(n: Node) -> bool:
+    return any(s.extra.get("seek_missed") for s in n.statuses)
+
+
+def _told(status) -> str:
+    m = status.extra["seek_missed"]
+    return f"{m['title']}: {m['text']}"
 
 
 def test_a_start_that_never_lands_is_said_and_the_renderer_followed_at_once(
@@ -2689,11 +2698,12 @@ def test_a_start_that_never_lands_is_said_and_the_renderer_followed_at_once(
     with caplog.at_level("INFO", logger="playback.dlna_backend"):
         assert n.backend.play()
         wait_for(lambda: r.called("Seek"), what="the start sought")
-        wait_for(lambda: any(s.extra.get("error") for s in n.statuses), timeout=10, what="the words")
+        wait_for(lambda: _words(n), timeout=10, what="the words")
     i, said = _said(n)
     assert said.extra.get("corrected") and said.position < 10, said
-    assert said.extra["error"] == ("The seek to 00:35 did not land — 'Study DAC' plays at "
-                                   f"{format_time(said.position)}")
+    assert _told(said) == ("'Study DAC' started the track from the top: not at 00:35 — it is at "
+                           f"{format_time(said.position)}")
+    assert not any(s.extra.get("error") for s in n.statuses)
     before = [s.position for s in n.statuses[:i] if s.state == "playing"]
     assert before and min(before) >= 35, before
     wait_for(lambda: n.last.state == "playing" and abs(n.last.position - r.position()) <= 1.5,
@@ -2717,10 +2727,10 @@ def test_a_seek_of_the_persons_that_never_lands_says_where_the_renderer_plays(
     r.seek_delay = 3600.0
     with caplog.at_level("INFO", logger="playback.dlna_backend"):
         assert n.backend.seek(60)
-        wait_for(lambda: any(s.extra.get("error") for s in n.statuses), timeout=10, what="the words")
+        wait_for(lambda: _words(n), timeout=10, what="the words")
     _i, said = _said(n)
     assert said.extra.get("corrected") and said.position < 15, said
-    assert said.extra["error"] == f"The seek to 01:00 did not land — 'Study' plays at {format_time(said.position)}"
+    assert _told(said) == f"'Study' did not go to 01:00: it is at {format_time(said.position)}"
     assert "by itself" not in caplog.text
 
 
@@ -2736,10 +2746,10 @@ def test_a_start_the_renderer_refuses_is_said_with_the_top_it_plays_from(
     n = nodes(q, r)
     n.backend.resume_at(1, 35.0)
     assert n.backend.play()
-    wait_for(lambda: any(s.extra.get("error") for s in n.statuses), timeout=10, what="the words")
+    wait_for(lambda: _words(n), timeout=10, what="the words")
     _i, said = _said(n)
     assert said.extra.get("corrected") and said.position < 3, said
-    assert said.extra["error"] == "'Study DAC' refused the seek to 00:35 — it plays from the top"
+    assert _told(said) == "'Study DAC' refused the start at 00:35: it plays from the top"
 
 
 def test_a_correction_of_a_switchs_start_never_splits_the_listen_it_carried(
@@ -2770,3 +2780,136 @@ def test_a_correction_of_a_switchs_start_never_splits_the_listen_it_carried(
              and manager.latest_status.get("position", 0) >= corrected + 1.5, what="playing on")
     assert listened == []
     assert lastfm == [("update_now_playing", "Track 1")]
+
+
+def _anything_said(n: Node, statuses=None) -> list:
+    """Every status that told or marked anything of a Seek: its slot, state,
+    second and what it carried."""
+    return [(s.queue_index, s.state, round(s.position, 1), s.extra.get("seek_missed") or s.extra.get("error"),
+             s.extra.get("corrected"))
+            for s in (n.statuses if statuses is None else statuses)
+            if s.extra.get("seek_missed") or s.extra.get("error") or s.extra.get("corrected")]
+
+
+def test_a_start_confirmed_late_waits_for_its_seek_from_when_it_goes(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, caplog):
+    """A Play the renderer is seen acting on only seconds late (its position
+    probe, its transport saying STOPPED), its start's Seek answered and
+    landed 3 s after it went, the deadline at 4 s: the Seek's wait counts
+    from when it went, so nothing is said — counted from the Play, it was
+    over before the Seek was answered, and called a start that did not land."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 4.0)
+    r = renderers(name="Study DAC")
+    r.notifying = False
+    r.says_stopped = True
+    r.slow["Seek"] = 3.0
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    with caplog.at_level("INFO", logger="playback.dlna_backend"):
+        assert n.backend.play()
+        wait_for(lambda: r.called("Seek"), timeout=15, what="the start sought")
+        wait_for(lambda: r.position() >= 37, timeout=15, what="the Seek landed")
+        wait_for(lambda: abs(n.last.position - r.position()) <= 1.5, timeout=5, what="the node there")
+    assert not _anything_said(n)
+    assert "did not land" not in caplog.text
+
+
+def test_a_start_refused_after_its_load_was_replaced_says_nothing_of_the_new_one(
+        tmp_path, proxy, renderers, nodes, quality):
+    """Slot 1 started at 35 s; its Seek is refused 1.5 s after it went, and
+    meanwhile the person tapped slot 2, which plays. The answer belongs to
+    the load it was made on: nothing of it is said on slot 2, nor its clock
+    set back."""
+    r = renderers(name="Study DAC")
+    r.slow["Seek"] = 1.5
+    r.faults["Seek"] = [701]
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0), track(tmp_path, 2, seconds=90.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    assert n.backend.play()
+    wait_for(lambda: r.called("Seek"), what="the start sought")
+    assert n.backend.select(2)
+    wait_for(lambda: r.faults["Seek"] == [], what="the Seek answered")
+    wait_for(lambda: n.statuses and n.last.queue_index == 2 and n.last.state == "playing"
+             and n.last.position >= 2.5, what="slot 2 playing past the answer")
+    assert not _anything_said(n)
+
+
+def test_the_words_of_a_seek_that_did_not_land_leave_with_their_track(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch):
+    """The person's seek on slot 1 never lands: said, on slot 1. The renderer
+    plays slot 1 out and moves on to slot 2 by its armed next: slot 2 carries
+    none of it — standing, the words greeted every tab opened later with a
+    moment long past."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 3.0)
+    r = renderers(name="Study")
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=12.0), track(tmp_path, 2, seconds=30.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.statuses and n.last.state == "playing" and n.last.position >= 1, what="playing")
+    r.seek_delay = 3600.0
+    assert n.backend.seek(10)
+    wait_for(lambda: _anything_said(n), timeout=10, what="the words")
+    mark = len(n.statuses)
+    wait_for(lambda: n.last.queue_index == 2 and n.last.state == "playing" and n.last.position >= 2,
+             timeout=25, what="slot 2 playing")
+    assert not [w for w in _anything_said(n, n.statuses[mark:]) if w[0] == 2]
+
+
+def test_a_start_seek_that_gets_no_answer_is_waited_for_as_sent(
+        tmp_path, proxy, renderers, nodes, quality, caplog):
+    """The start's Seek gets no answer within the command's window, and the
+    renderer acts on it after: nothing refused it. It is waited for as sent,
+    and its landing is seen — never "it plays from the top", then the
+    landing named the renderer's own move."""
+    r = renderers(name="Study DAC")
+    r.slow["Seek"] = 12.0
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    with caplog.at_level("INFO", logger="playback.dlna_backend"):
+        assert n.backend.play()
+        wait_for(lambda: r.called("Seek"), what="the start sought")
+        wait_for(lambda: r.position() >= 37, timeout=25, what="the renderer at the second")
+        wait_for(lambda: abs(n.last.position - r.position()) <= 1.5, timeout=5, what="the node there")
+    assert not _anything_said(n)
+    assert "by itself" not in caplog.text and "got no answer" in caplog.text
+
+
+_SEEK_MISSED_DRIVER = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const shell = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
+const start = shell.indexOf("  // A Seek of the node's that left a renderer elsewhere");
+const end = shell.indexOf('  // Surface a queue/play failure', start);
+if (start < 0 || end < 0) throw new Error('the seek_missed block was not found');
+const handlers = [], toasts = [];
+const document = { addEventListener: (t, f) => { if (t === 'np-update') handlers.push(f); } };
+const notices = { toast: t => toasts.push(t) };
+const escapeProfileHtml = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+vm.runInNewContext(shell.slice(start, end), { document, notices, escapeProfileHtml });
+for (const st of JSON.parse(fs.readFileSync(0, 'utf8'))) handlers.forEach(h => h({ detail: st }));
+process.stdout.write(JSON.stringify(toasts.map(t => [t.title, t.text])));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_tab_toasts_each_seek_it_sees_missed_once_and_none_it_connects_with():
+    """The page's side: the status a tab connects with paints nothing (a
+    moment long past); each id after it toasts once, its renderer's name
+    escaped; a status without one, and the same id again, say nothing."""
+    import json
+    import subprocess
+    old = {"id": "a", "title": "'Study' did not go to 01:00", "text": "it is at 00:45"}
+    new = {"id": "b", "title": "'<Study>' started the track from the top", "text": "not at 01:24 — it is at 00:19"}
+    ticks = [{"seek_missed": old}, {"seek_missed": old}, {}, {"seek_missed": new}, {"seek_missed": new}, {},
+             {"seek_missed": new}]
+    out = subprocess.run(["node", "-e", _SEEK_MISSED_DRIVER, "--",
+                          str(BACKEND / "static" / "app-shell.js")],
+                         input=json.dumps(ticks).encode(), capture_output=True, check=True)
+    assert json.loads(out.stdout) == [["&#39;&#60;Study&#62;&#39; started the track from the top",
+                                       "not at 01:24 — it is at 00:19"]]
