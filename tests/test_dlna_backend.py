@@ -1392,8 +1392,10 @@ def test_an_attach_takes_no_service_document_past_the_bound(renderers, shape):
     backend = DlnaBackend(emit=lambda b, s: None, queue=CanonicalQueue(), renderer=r.record)
     with pytest.raises(dlna_backend.DlnaAttachError, match="answered at 127.0.0.1, but") as refused:
         backend.start()
-    # the failure described, not a raw exception's repr
-    assert "UpnpCommunicationError(" not in str(refused.value)
+    # the failure described in its own words, not a raw exception's
+    words = {"large": "an answer past its size", "packed": "a compressed answer", "moved": "Did not receive HTTP 200 but 302"}
+    if shape in words:
+        assert f"was not taken ({words[shape]})" in str(refused.value), str(refused.value)
     backend.shutdown()
 
 

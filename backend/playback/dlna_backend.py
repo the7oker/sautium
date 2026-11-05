@@ -215,7 +215,7 @@ if HAS_UPNP:
             except ClientConnectionError as e:
                 raise UpnpConnectionError(repr(e)) from e
             except (ClientError, AnswerRefused) as e:
-                raise UpnpCommunicationError(str(e)) from e
+                raise UpnpCommunicationError(repr(e)) from e
 
 
 class _Requester:

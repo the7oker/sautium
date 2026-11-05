@@ -30,7 +30,7 @@ import p2p_identity  # noqa: E402
 @pytest.fixture(autouse=True)
 def _no_identity(monkeypatch):
     monkeypatch.setattr(p2p_identity, "load_signing_key", lambda settings: None)
-    monkeypatch.setattr(device_auth, "_derive_in_flight", 0, raising=False)
+    monkeypatch.setattr(device_auth, "_derive_in_flight", 0)
     device_auth._channels.clear()
 
 
@@ -272,10 +272,10 @@ def rotations(doors, tmp_path, monkeypatch):
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
     monkeypatch.setattr(device_auth, "account_configured", lambda: True)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
-    monkeypatch.setattr(device_auth, "pin_door", lambda: True, raising=False)
+    monkeypatch.setattr(device_auth, "pin_door", lambda: True)
     monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
                                               for name in ("login", "signed")})
-    monkeypatch.setattr(device_auth, "_record_failure", lambda: None, raising=False)
+    monkeypatch.setattr(device_auth, "_record_failure", lambda: None)
     monkeypatch.setattr(device_auth, "_pin", None)
     monkeypatch.setattr(device_auth, "_pin_prev", None)
     monkeypatch.setattr(device_auth, "_pin_lock", asyncio.Lock())
@@ -415,7 +415,7 @@ def fresh_node(tmp_path, monkeypatch):
     from config import settings
     monkeypatch.setattr(settings, "p2p_identity_dir", str(tmp_path))
     monkeypatch.setattr(settings, "p2p_username", "")
-    monkeypatch.setattr(device_auth, "_setup_code", None, raising=False)
+    monkeypatch.setattr(device_auth, "_setup_code", None)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
     monkeypatch.setattr(device_auth, "_expected_pubkey",
                         lambda: "ab" * 32 if (tmp_path / "node_ed25519.key").exists() else None)
@@ -621,9 +621,9 @@ def test_the_pairing_code_is_the_hosts_to_read(tmp_path, monkeypatch):
     from test_request_signing import TOKEN, signed
     monkeypatch.setattr(device_auth, "current_token", lambda secret: TOKEN)
     monkeypatch.setattr(auth_hmac, "_allowed_hosts", {"testserver"})
-    monkeypatch.setattr(auth_hmac, "_seen", type(auth_hmac._seen)(), raising=False)
-    monkeypatch.setattr(auth_hmac, "_seen_wall", [], raising=False)
-    monkeypatch.setattr(auth_hmac, "_seen_order", collections.deque(), raising=False)
+    monkeypatch.setattr(auth_hmac, "_seen", type(auth_hmac._seen)())
+    monkeypatch.setattr(auth_hmac, "_seen_wall", [])
+    monkeypatch.setattr(auth_hmac, "_seen_order", collections.deque())
     monkeypatch.setattr(device_auth, "_pin", None)
     app = FastAPI()
     app.include_router(auth.router)
@@ -772,9 +772,10 @@ def test_setting_up_a_node_keeps_the_pin_until_the_account_is_made():
 
 
 def test_a_free_try_answered_never_lets_two_in_past_the_free_failures(login_door, monkeypatch):
-    """Two free tries in flight as the count reaches the free ones: the
-    first's answer lets one more in, the second's answer leaves it the only
-    one in — the clock moved past any shut, the next still waits."""
+    """Two free tries in flight as the count reaches the free ones: after
+    the first's answer no try is let in beside the second, and the one let in
+    after the second's answer is the only one in — the clock moved past any
+    shut, the next still waits."""
     _login, clock, derived, _store, _woken = login_door
     device_auth._doors["login"]["failures"] = device_auth.LOGIN_FREE_FAILURES - 1
     gates = []
@@ -811,7 +812,70 @@ def test_a_free_try_answered_never_lets_two_in_past_the_free_failures(login_door
 
 def test_no_setup_is_offered_over_a_key_without_an_account(fresh_node, doors):
     (fresh_node / "node_ed25519.key").write_text("k")
-    assert doors.get("/api/auth/status").json()["onboarding"] is False
+    status = doors.get("/api/auth/status").json()
+    assert status["onboarding"] is False and status["unnamed_key"] is True
+
+
+_GATE_PAGE = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const [naclPath, shaPath, authPath, status] = process.argv.slice(-4);
+const made = {};
+function el(tag) {
+  const e = { tag, hidden: false, textContent: '', innerHTML: '', disabled: false, children: [],
+              listeners: {}, value: '',
+              addEventListener(k, f) { this.listeners[k] = f; }, focus() {}, showModal() {},
+              appendChild(c) { this.children.push(c); } };
+  e.querySelector = (sel) => {
+    const id = sel.replace(/^#/, '');
+    if (!made[id]) made[id] = el('x');
+    return made[id];
+  };
+  return e;
+}
+const ctx = {
+  window: { addEventListener() {}, dispatchEvent() {} },
+  localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+  location: { origin: 'http://node.test', hash: '', pathname: '/', search: '' },
+  document: { readyState: 'loading', addEventListener() {}, getElementById: () => null,
+              createElement: (t) => el(t), body: el('body') },
+  history: { replaceState() {} }, crypto: globalThis.crypto, Headers, URL, TextEncoder, TextDecoder,
+  console, setTimeout, clearTimeout, Request, btoa, atob, Uint8Array, BigInt, DataView, JSON,
+};
+ctx.self = ctx; ctx.window.crypto = globalThis.crypto;
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(naclPath, 'utf8'), ctx);
+ctx.nacl = ctx.nacl || ctx.window.nacl;
+ctx.window.fetch = async () => new Response(status);
+ctx.window.Sautium = {};
+vm.runInContext(fs.readFileSync(shaPath, 'utf8'), ctx);
+vm.runInContext(fs.readFileSync(authPath, 'utf8'), ctx);
+ctx.window.Sautium.auth.showLoginGate();
+setTimeout(async () => {
+  const msg = made['auth-gate-msg'].textContent;
+  await made['auth-gate-submit'].listeners.click?.();
+  process.stdout.write(JSON.stringify({ msg, after: made['auth-gate-msg'].textContent,
+                                        actions: made['auth-gate-form-actions'].hidden }));
+}, 50);
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.parametrize("status, says", [
+    ({"onboarding": False, "password_login": False, "pin_door": False, "unnamed_key": True,
+      "username": None}, "holds a key without its account"),
+    ({"onboarding": False, "password_login": False, "pin_door": False, "unnamed_key": False,
+      "username": "anonymous-1a2b"}, "loses this identity"),
+])
+def test_a_node_no_browser_can_sign_in_to_says_why_and_offers_no_form(status, says):
+    """A key with no account, or an account with no password where no host
+    shows a code: the gate says which, what starting over costs, and offers
+    nothing to submit — a press changes nothing."""
+    static = ROOT / "backend" / "static"
+    proc = subprocess.run(["node", "-e", _GATE_PAGE, "--", str(static / "vendor" / "nacl-fast.min.js"),
+                           str(static / "sha256.js"), str(static / "auth.js"), json.dumps(status)],
+                          capture_output=True, check=True, timeout=30)
+    out = json.loads(proc.stdout)
+    assert says in out["msg"] and out["after"] == out["msg"] and out["actions"] is True
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

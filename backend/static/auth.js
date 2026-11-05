@@ -470,13 +470,13 @@
               spellcheck="false" style="width:100%;margin-bottom:calc(10*var(--px));">`;
 
     let mode = "pin";
-    let pinDoor = true;
+    let unnamedKey = false;
     let username = "";
 
     function showForm() {
       title.textContent = mode === "create" ? "Set up Sautium" : "Sign in";
       fields.hidden = false;
-      formActions.hidden = false;
+      formActions.hidden = mode === "none";
       nodeActions.hidden = true;
       const first = fields.querySelector("input");
       if (first) first.focus();
@@ -505,14 +505,18 @@
           ? `Signing in as ${username}. Enter the account password.`
           : "Enter the account password.";
         fields.innerHTML = input("auth-pass", "password", "password");
-      } else if (!pinDoor) {
-        // An identity with no account name and no host to show a code (a
-        // Docker node): nothing here can sign a browser in
-        msg.textContent =
-          "This node's identity folder holds a key without its account. To start over, stop the " +
-          "node, empty that folder and start it again; the first visit then sets it up.";
+      } else if (mode === "none") {
+        // Nothing here can sign this browser in: a key with no account beside
+        // it, or an account with no password on a node no host shows a code
+        // for (Docker). Starting over is said for what it costs
+        msg.textContent = unnamedKey
+          ? "This node's identity folder holds a key without its account. To start over, stop the " +
+            "node, empty that folder and start it again; the first visit then sets it up."
+          : "This node's account has no password, and nothing here shows a pairing code, so no new " +
+            "browser can sign in. A browser already signed in keeps working: set a password from it " +
+            "(Profile). Starting over — emptying the node's identity folder — loses this identity, its " +
+            "invite code and its friends for good.";
         fields.innerHTML = "";
-        submit.hidden = true;
       } else {
         // Nothing to ask for but the PIN: this node's account was created
         // without a password anyone has seen. Both host affordances end
@@ -557,12 +561,14 @@
     }
 
     window.Sautium.auth.status().then((st) => {
-      mode = st.onboarding ? "create" : (st.password_login ? "password" : "pin");
-      pinDoor = st.pin_door !== false;
+      unnamedKey = !!st.unnamed_key;
+      mode = st.onboarding ? "create" : st.password_login ? "password"
+        : (unnamedKey || st.pin_door === false) ? "none" : "pin";
       username = st.username || "";
       buildForm();
-      // The create form says itself what a node not set up yet needs
-      if (notice && mode !== "create") msg.textContent = notice;
+      // The create form says itself what a node not set up yet needs, and
+      // no notice stands over what a node no browser can sign in to says
+      if (notice && mode !== "create" && mode !== "none") msg.textContent = notice;
       if (changed) askNodeChanged(changed, redeem);
     }).catch(() => {
       msg.textContent = "Cannot reach the server.";
@@ -587,7 +593,7 @@
     }
 
     async function attempt() {
-      if (submit.disabled || !nodeActions.hidden) return;   // Enter arrives here too
+      if (submit.disabled || !nodeActions.hidden || mode === "none") return;   // Enter arrives here too
       submit.disabled = true;
       const prev = submit.textContent;
       submit.textContent = "Checking…";

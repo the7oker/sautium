@@ -106,6 +106,8 @@ async def auth_status() -> dict:
         # offers to create one. The window closes for good the moment it is
         # — and is never open over a key on disk, named or not.
         "onboarding": not configured and not device_auth.identity_key_on_disk(),
+        # A key with no account beside it: nothing here can sign a browser in
+        "unnamed_key": not configured and device_auth.identity_key_on_disk(),
         "pairing_open": device_auth.pin_state() is not None,
         # A host that shows pairing codes (the launcher): without one the
         # account password is the only way in, so it is never minted away
