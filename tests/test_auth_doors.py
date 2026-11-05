@@ -492,6 +492,7 @@ def login_door(doors, monkeypatch):
 
     async def verify(password, **_kw):
         derived.append(password)
+        await asyncio.sleep(0.05)                     # a derivation takes its time
         return password == "the right one"
     monkeypatch.setattr(device_auth, "verify_password", verify)
 
