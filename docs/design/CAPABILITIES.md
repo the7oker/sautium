@@ -238,7 +238,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 - [L] Self-update mirrors `origin/main`; hand edits in an installed tree are set aside as a patch; a Docker node does not update itself — `desktop/updater.py: reset_to_origin`, `is_managed_install`
 - [auto] Hardware tier is detected, never picked: CUDA ≥ 7.5 GiB or MPS ≥ 23 GiB is Curator, ≥ 5.5 / ≥ 15 GiB Standard, the rest and every CPU-only machine Lite; under 12 GB of RAM drops one tier — `hardware_profile.py: _auto_tier`
 - [auto] A tier decides what the node computes (local analysis, pre-warm, thread caps), never what it stores — `hardware_profile.py: _PREWARM`, `local_analysis`
-- [UI] Sign-in by account password, by a pairing code, or by creating the account on a fresh node; sign out everywhere — `POST /api/auth/login`, `/pair`, `/create-account`, `/logout-all`
+- [UI] Sign-in by account password, by a pairing code, or by creating the account on a fresh node with the setup code it wrote at its start; sign out everywhere — `POST /api/auth/login`, `/pair`, `/create-account`, `/logout-all`
 - [L] The pairing code reaches a phone as a QR code or link from the launcher; valid 5 minutes, burned after 5 wrong tries — `desktop/launcher.py: _draw_pairing_qr`; `device_auth.py: PIN_TTL_SECONDS`, `MAX_PIN_ATTEMPTS`
 - [auto] Every request is signed (HMAC-SHA256, 60 s window) with a device token that is derived, never stored — `auth_hmac.py: HMACAuthMiddleware`, `REPLAY_WINDOW_SECONDS`; `device_auth.py: current_token`
 - [auto] Credentials cross the network in a box to a key the node signs; the browser pins the node on first sign-in and asks before accepting another — `device_auth.py: open_channel`; `static/auth.js: askNodeChanged`

@@ -11717,6 +11717,23 @@
     return { title: 'Claude Code is signed out',
              text: `${who} for a new sign-in — More → AI assistant.` };
   };
+  // Wrong passwords at the login door since the owner last saw this
+  // (backend/device_auth.py login_refused): a report, gone once seen.
+  NOTICE_COPY['auth.login_failures'] = n => {
+    const d = n.data || {};
+    const at = (iso) => {
+      const t = new Date(iso);
+      return `${escapeHtml(t.toLocaleDateString([], { month: 'short', day: 'numeric' }))} at ` +
+             `<span class="num">${escapeHtml(t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span>`;
+    };
+    const count = Number(d.count) || 0;
+    return {
+      title: 'Wrong passwords at sign-in',
+      text: `<span class="num">${count}</span> sign-in${count === 1 ? '' : 's'} with a wrong account password ` +
+            `since ${at(n.since)}, the last on ${at(d.last)}. If they were not yours, someone on your ` +
+            'network is trying to guess the password.',
+    };
+  };
   // Raised only while the assistant runs on Codex (backend/codex_cli.py).
   NOTICE_COPY['codex.signed_out'] = () => ({
     title: 'Codex is signed out',
@@ -12123,10 +12140,14 @@
   // one, so its arrival is what says "you are creating this"). An account
   // with a password has it typed again: a signed-in browser alone does not
   // change who the node is (routers/auth.py). Asked whenever the status is
-  // unknown — the node says what it needs either way.
+  // unknown — the node says what it needs either way. One without a password
+  // changes on its host's word: the pairing code a page opened from the host
+  // carries (auth.js). A node whose host shows no pairing code (Docker) keeps
+  // a password: it is the only way in.
   async function openChangeIdentityFlow(account, authStatus) {
     const current = (account && account.username) || '';
     const asksCurrent = !authStatus || authStatus.password_login !== false;
+    const needsPassword = !!authStatus && authStatus.pin_door === false;
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
@@ -12151,11 +12172,13 @@
             Latin letters, digits, - or _ — it sits inside your invite code.
           </p>
           <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
-            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Password — optional</span>
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${needsPassword ? 'Password' : 'Password — optional'}</span>
             <input class="add-gear-input" id="idPass" type="password" placeholder="min 8 characters" autocomplete="new-password">
           </label>
           <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
-            Makes this nickname yours on any device. Without it, the identity lives only on this machine.
+            ${needsPassword
+              ? 'This node is signed into by its password.'
+              : 'Makes this nickname yours on any device. Without it, the identity lives only on this machine.'}
           </p>
           <label id="idConfirmRow" style="display:flex;flex-direction:column;gap:calc(4*var(--px));" hidden>
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Confirm password</span>
@@ -12165,7 +12188,11 @@
           <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Current password</span>
             <input class="add-gear-input" id="idCurrent" type="password" autocomplete="current-password">
-          </label>` : ''}
+          </label>` : `
+          <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
+            This node has no password, so the computer that runs Sautium vouches for the change:
+            open this page from there, or scan its QR code, and change it within a few minutes.
+          </p>`}
           <button class="profile-btn primary" data-confirm>Change</button>
           <div id="idMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
         </div>
@@ -12192,6 +12219,7 @@
       const password = passInput.value;
       const currentPassword = currentInput ? currentInput.value : '';
       if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Nickname: 3-32 Latin letters, digits, - or _.');
+      if (needsPassword && !password) return fail('Enter a password: this node is signed into by it.');
       if (password && password.length < 8) return fail('Password must be at least 8 characters.');
       if (password && password !== pass2Input.value) return fail("Passwords don't match.");
       if (currentInput && !currentPassword) return fail('Enter the current password.');

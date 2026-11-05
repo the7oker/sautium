@@ -48,8 +48,10 @@ class ChangeIdentityRequest(BaseModel):
     # Empty = minted, as in the wizard: the identity stays this machine's.
     password: str = Field(default="", max_length=256)
     # The account's password as it is now — a device token alone does not
-    # change who the node is. An anonymous account has none anyone knows.
+    # change who the node is. An anonymous account has none anyone knows:
+    # its host vouches instead, by the pairing code it shows now.
     current_password: str = Field(default="", max_length=256)
+    pin: str = Field(default="", max_length=32)
 
 
 class BoxedRequest(BaseModel):
@@ -102,6 +104,9 @@ async def auth_status() -> dict:
         # offers to create one. The window closes for good the moment it is.
         "onboarding": not configured,
         "pairing_open": device_auth.pin_state() is not None,
+        # A host that shows pairing codes (the launcher): without one the
+        # account password is the only way in, so it is never minted away
+        "pin_door": device_auth.pin_door(),
         "username": device_auth.account_username(),
     }
 
@@ -109,6 +114,8 @@ async def auth_status() -> dict:
 class CreateAccountRequest(BaseModel):
     username: str = Field(default="", max_length=32)
     password: str = Field(default="", min_length=8, max_length=256)
+    # The code the node wrote to its log and its identity folder at start
+    setup_code: str = Field(default="", max_length=32)
 
 
 @router.post("/create-account")
@@ -116,10 +123,11 @@ async def create_account(boxed: BoxedRequest) -> dict:
     """First-run setup for a node with no identity — the Docker case, where
     there is no launcher to show a pairing code and no password to know.
 
-    Deliberately unauthenticated, because nothing exists yet to authenticate
-    against; the window shuts the instant an account exists, and a second
-    call is refused. This is the Jellyfin/Home Assistant bargain: whoever
-    reaches the machine first during setup owns it.
+    Unsigned, because nothing exists yet to sign with; what stands in for
+    a credential is the setup code the node wrote where only its owner
+    reads (its log, its identity folder — device_auth.prepare_setup). The
+    window shuts the instant an account exists, and a second call is
+    refused.
 
     The account is the node's P2P identity, not a local login — so this also
     turns on sync, chat and analysis signing, which stay dark without one."""
@@ -127,9 +135,11 @@ async def create_account(boxed: BoxedRequest) -> dict:
     try:
         # The check lives inside create_account, under its lock — testing it
         # out here as well would only re-open the race it exists to close.
-        info = await device_auth.create_account(req.username, req.password)
+        info = await device_auth.create_account(req.username, req.password, req.setup_code)
     except device_auth.AccountExists:
         raise HTTPException(status_code=409, detail="account already exists")
+    except device_auth.WrongSetupCode:
+        raise HTTPException(status_code=403, detail="That is not this node's setup code")
     except ValueError as e:                       # username shape
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -143,14 +153,23 @@ async def create_account(boxed: BoxedRequest) -> dict:
 
 @router.post("/login")
 async def login(boxed: BoxedRequest) -> dict:
-    """Exchange the account password for a device token."""
+    """Exchange the account password for a device token. A door shut by
+    wrong passwords answers 429 before anything is derived; each wrong one
+    is counted and told to the owner (device_auth.login_refused)."""
     req, reply = _open(boxed, LoginRequest)
+    try:
+        device_auth.login_door()
+    except device_auth.Shut as e:
+        raise HTTPException(status_code=429, detail="too many wrong passwords",
+                            headers={"Retry-After": str(e.seconds)})
     try:
         ok = await device_auth.verify_password(req.password)
     except device_auth.Busy:
         raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
     if not ok:
+        await device_auth.login_refused()
         raise HTTPException(status_code=401, detail="invalid credentials")
+    device_auth.login_admitted()
     return reply({"token": device_auth.current_token(_secret())})
 
 
@@ -176,22 +195,31 @@ async def change_identity(boxed: BoxedRequest) -> dict:
     in the reply, like logout-all.
 
     Signature-protected (not whitelisted): only a paired browser or the
-    host can rotate, and an account with a password has it typed again —
-    checked with the rotation, under its lock, before anything else is
-    derived (device_auth.rotate_identity). Boxed all the same — the
-    passwords go in and the new token comes out."""
+    host can rotate, and an account with a password has it typed again — an
+    anonymous one carries the pairing code its host shows now — checked with
+    the rotation, under its lock, before anything else is derived
+    (device_auth.rotate_identity). A node whose host shows no pairing code
+    (Docker) keeps a password: minted, it would leave no way in for a new
+    browser. Boxed all the same — the passwords go in and the new token
+    comes out."""
     req, reply = _open(boxed, ChangeIdentityRequest)
     username = req.username.strip()
     if not username:
         raise HTTPException(status_code=422, detail="Nickname required")
     if req.password and len(req.password) < 8:
         raise HTTPException(status_code=422, detail="Password: 8+ characters")
+    if not req.password and not device_auth.pin_door():
+        raise HTTPException(status_code=422, detail="Password required: this node is signed into by its password")
     try:
-        info = await device_auth.rotate_identity(username, req.password, req.current_password)
+        info = await device_auth.rotate_identity(username, req.password, req.current_password, req.pin)
     except device_auth.Busy:
         raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
     except device_auth.WrongPassword:
         raise HTTPException(status_code=403, detail="The current password is not this account's")
+    except device_auth.WrongPin:
+        raise HTTPException(status_code=403, detail="This node has no password: open this page from the "
+                                                    "computer that runs Sautium, or scan its QR code, "
+                                                    "and change it within a few minutes")
     except ValueError as e:                       # username shape / same pair
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:

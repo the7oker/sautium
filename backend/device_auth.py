@@ -40,13 +40,16 @@ BRUTE FORCE. The two doors need different locks:
     MAX_PIN_ATTEMPTS, and every check passes through a lock. Sleeping
     between attempts would be useless: a thousand parallel requests sleep
     concurrently. Serialising them is what makes attempts countable.
-  * password — Argon2id at 256 MB already makes guessing hopeless (a thousand
+  * password — Argon2id at 256 MB already makes guessing slow (a thousand
     parallel attempts would need 250 GB). The danger runs the other way: that
     same cost turns an unbounded login endpoint into a memory DoS, so
     derivations run under a semaphore, and past DERIVE_QUEUE of them in
     flight a request is turned away (Busy) instead of waiting — the last
     place kept for a signed caller — and a derivation runs to its end even
-    when its caller has gone. An anonymous account has
+    when its caller has gone. Wrong passwords are counted: past
+    LOGIN_FREE_FAILURES in a row the door stays shut for a delay that
+    doubles with each further one (Shut, before any derivation), and the
+    owner is told (login_refused). An anonymous account has
     no password anyone knows: its door is the PIN, and a password login there
     is refused before any derivation.
 """
@@ -56,6 +59,7 @@ import base64
 import hmac
 import json
 import logging
+import math
 import secrets
 import threading
 import time
@@ -90,6 +94,29 @@ _pin_lock = asyncio.Lock()
 # yet" test and for the second to overwrite the first's identity. Serialise
 # the whole operation, and re-check inside it.
 _create_lock = asyncio.Lock()
+
+# First-run setup's code. While a node has no account anyone who reaches its
+# port could make one — and own the node — so the account is made only with
+# a code the node writes where its owner alone reads: its log, and
+# SETUP_CODE_FILE in the identity folder (a Docker node's bind-mounted
+# ./data/node_identity). One per start of a node with no account; it dies
+# with the account's creation. 60 bits: nothing counts the attempts.
+SETUP_CODE_FILE = "setup_code.txt"
+SETUP_CODE_GROUPS = 3
+_setup_code: Optional[str] = None
+
+# The password door's wrong guesses: one count for the node — behind Docker
+# every request comes from the bridge's address — so a crowd at the door
+# delays a new sign-in, never a browser signed in already. Past
+# LOGIN_FREE_FAILURES in a row the door stays shut for a delay that doubles
+# with each further one, up to LOGIN_DELAY_MAX; a right password clears the
+# count. Process memory: a restart opens the door, and the owner's record
+# (LOGIN_FAILURES_KEY, a notice) stays.
+LOGIN_FREE_FAILURES = 5
+LOGIN_DELAY_MAX = 15 * 60
+LOGIN_FAILURES_KEY = "auth.login_failures"
+_door = {"failures": 0, "shut_until": 0.0}
+_failures_lock = threading.Lock()
 
 _pin: Optional[dict] = None          # {"code", "expires_at", "attempts"}
 _pin_prev: Optional[dict] = None     # {"code", "valid_until"} — rotation grace
@@ -218,15 +245,55 @@ def account_anonymous() -> bool:
     return bool(re.fullmatch(r"anonymous-[0-9a-f]{4}", info.get("username") or ""))
 
 
+def pin_door() -> bool:
+    """Does a host show this node's pairing code — the launcher, which gives
+    the backend its sync server's port? A Docker node shows none: its doors
+    are the account password and the first-run account."""
+    from config import settings
+    return bool(settings.p2p_listen_port)
+
+
 class AccountExists(Exception):
     """Raised when setup is attempted on a node that already has an identity."""
+
+
+class WrongSetupCode(Exception):
+    """The setup code given is not the one this node wrote at its start."""
+
+
+def _code(groups: int) -> str:
+    return "-".join("".join(secrets.choice(_PIN_ALPHABET) for _ in range(PIN_GROUP_LEN))
+                    for _ in range(groups))
+
+
+def prepare_setup() -> None:
+    """At start, on a node with no account: its setup code, minted and
+    written to SETUP_CODE_FILE (readable by the node's user alone) and to
+    the log. A node with an account leaves no code behind."""
+    import os
+    global _setup_code
+    d = _identity_dir()
+    if d is None:
+        return
+    path = d / SETUP_CODE_FILE
+    if account_configured():
+        path.unlink(missing_ok=True)
+        return
+    _setup_code = _code(SETUP_CODE_GROUPS)
+    d.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(_setup_code + "\n")
+    logger.info("No account yet. The setup code to create it is %s (also in %s in the identity folder)",
+                _setup_code, SETUP_CODE_FILE)
 
 
 class Busy(Exception):
     """DERIVE_QUEUE derivations are already in flight."""
 
 
-async def create_account(username: str, password: str) -> dict:
+async def create_account(username: str, password: str, setup_code: str) -> dict:
     """Create the node's identity from username+password and persist it.
 
     Mirrors desktop/node_identity._save_keypair so a Docker node and a
@@ -237,7 +304,9 @@ async def create_account(username: str, password: str) -> dict:
     Single-shot by construction: the whole check-derive-write runs under a
     lock, the account test is repeated inside it, and the key file is opened
     O_EXCL. Setup is the one moment this node has no owner, and it must
-    produce exactly one."""
+    produce exactly one — its owner's, who alone reads the setup code
+    (prepare_setup; WrongSetupCode, checked before anything is derived)."""
+    global _setup_code
     d = _identity_dir()
     if d is None:
         raise RuntimeError("no identity directory configured")
@@ -245,14 +314,25 @@ async def create_account(username: str, password: str) -> dict:
     async with _create_lock:
         if account_configured():
             raise AccountExists()
-        return await asyncio.to_thread(_write_identity, d, username, password)
+        given = (setup_code or "").strip().upper()
+        if _setup_code is None or not hmac.compare_digest(_setup_code, given):
+            raise WrongSetupCode()
+        info = await asyncio.to_thread(_write_identity, d, username, password)
+        _setup_code = None
+        (d / SETUP_CODE_FILE).unlink(missing_ok=True)
+        return info
 
 
 class WrongPassword(Exception):
     """The current password given is not this account's."""
 
 
-async def rotate_identity(username: str, password: str, current_password: str = "") -> dict:
+class WrongPin(Exception):
+    """The pairing code given is not the one the host shows now."""
+
+
+async def rotate_identity(username: str, password: str, current_password: str = "",
+                          pin: str = "") -> dict:
     """A new name and/or password for the node's identity — in a
     deterministic KDF that is a new key (desktop/node_identity.rotate_identity
     keeps the old one in the archive). An empty password is minted, as the
@@ -265,7 +345,10 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     anything else is derived — a rotation that raced another would
     otherwise change the identity the other just made, on the password of
     the one before (WrongPassword; Busy past the derivation bound). An
-    anonymous account has no password anyone has seen.
+    anonymous account has no password anyone has seen: its host vouches
+    for the change instead, by the pairing code it shows now — `pin`, the
+    code a page opened from the host carries (WrongPin; a wrong one costs
+    one of MAX_PIN_ATTEMPTS, as at the pairing door).
 
     Everything in this process that cached the old key is told; the P2P
     layer learns through NOTIFY (the launcher restarts its manager on it —
@@ -280,7 +363,10 @@ async def rotate_identity(username: str, password: str, current_password: str = 
         if not (d / "node_info.json").exists():
             raise RuntimeError("This identity comes from the node's environment "
                                "(P2P_USERNAME, P2P_PASSWORD): change it there")
-        if not account_anonymous() and not await verify_password(current_password, signed=True):
+        if account_anonymous():
+            if not await redeem_pin(pin):
+                raise WrongPin()
+        elif not await verify_password(current_password, signed=True):
             raise WrongPassword()
         result = await _rotate_locked(d, username, password)
     _after_rotation()
@@ -430,6 +516,56 @@ async def derive_guarded(fn, *args, signed: bool = False):
         raise
 
 
+class Shut(Exception):
+    """The password door waits out its delay: `seconds` left."""
+
+    def __init__(self, seconds: int):
+        super().__init__(f"the login door opens in {seconds} s")
+        self.seconds = seconds
+
+
+def login_door() -> None:
+    """Raises Shut while the password door waits out a delay."""
+    left = _door["shut_until"] - time.time()
+    if left > 0:
+        raise Shut(math.ceil(left))
+
+
+async def login_refused() -> None:
+    """A wrong password at the login door: counted, the door shut past the
+    free ones, and the owner told — the record of wrong passwords since the
+    notice was last seen, which wakes the notices channel."""
+    _door["failures"] += 1
+    over = _door["failures"] - LOGIN_FREE_FAILURES
+    if over > 0:
+        delay = min(LOGIN_DELAY_MAX, 2 ** min(over - 1, 20))
+        _door["shut_until"] = time.time() + delay
+        logger.warning("%d wrong passwords in a row at the login door: the next waits %d s",
+                       _door["failures"], delay)
+    await asyncio.to_thread(_record_failure)
+
+
+def _record_failure() -> None:
+    from datetime import datetime, timezone
+
+    from db_pool import db_execute
+    from routers.settings import _read, _write
+    now = datetime.now(timezone.utc).isoformat()
+    with _failures_lock:
+        record = _read(LOGIN_FAILURES_KEY) or {}
+        seen = (_read("notice.seen") or {}).get("auth.login_failures")
+        if not record or seen == record.get("since"):
+            record = {"count": 0, "since": now}
+        _write(LOGIN_FAILURES_KEY, {**record, "count": record["count"] + 1, "last": now})
+    db_execute("NOTIFY sautium_notices")
+
+
+def login_admitted() -> None:
+    """A right password at the login door: the count starts again."""
+    _door["failures"] = 0
+    _door["shut_until"] = 0.0
+
+
 def _abandoned_derivation(task: asyncio.Task) -> None:
     if not task.cancelled() and task.exception() is not None:
         logger.warning("a derivation whose caller went failed: %s", task.exception())
@@ -477,9 +613,7 @@ def issue_pin() -> str:
     if _pin and time.time() <= _pin["expires_at"]:
         _pin_prev = {"code": _pin["code"],
                      "valid_until": time.time() + PIN_ROTATE_GRACE}
-    code = "-".join(
-        "".join(secrets.choice(_PIN_ALPHABET) for _ in range(PIN_GROUP_LEN))
-        for _ in range(PIN_GROUPS))
+    code = _code(PIN_GROUPS)
     _pin = {"code": code, "expires_at": time.time() + PIN_TTL_SECONDS,
             "attempts": 0}
     logger.info("pairing PIN issued (valid %d min)", PIN_TTL_SECONDS // 60)

@@ -45,6 +45,10 @@
   const NODE_KEY = "sautium.node_pubkey";
   const enc = new TextEncoder();
   const dec = new TextDecoder();
+  // The pairing code this page was opened with from the host (its button or
+  // its QR), kept in memory for this load only: an account with no password
+  // changes identity on its host's word, and this is that word.
+  let hostCode = "";
   const { sha256, hmacSha256, toHex } = window.Sautium.hash;
 
   function storedToken() {
@@ -62,9 +66,14 @@
     } catch { /* nothing to do — auth degrades to "log in every load" */ }
   }
 
+  // A pin is a node's identity key, 32 bytes in hex, or nothing: an empty or
+  // malformed value pins no node, and is never written.
+  const KEY_FORM = /^[0-9a-f]{64}$/;
+
   function pinnedNode() {
     try {
-      return localStorage.getItem(NODE_KEY) || "";
+      const pinned = localStorage.getItem(NODE_KEY) || "";
+      return KEY_FORM.test(pinned) ? pinned : "";
     } catch {
       return "";
     }
@@ -72,7 +81,8 @@
 
   function pinNode(pubkey) {
     try {
-      localStorage.setItem(NODE_KEY, pubkey);
+      if (KEY_FORM.test(pubkey || "")) localStorage.setItem(NODE_KEY, pubkey);
+      else localStorage.removeItem(NODE_KEY);
     } catch { /* no storage — the next sign-in is a first sign-in again */ }
   }
 
@@ -212,6 +222,8 @@
 
   // The node answering on this address is not the one this browser signed
   // in to. Raised from the handshake; the gate turns it into a question.
+  // `seen` is the key it answered with — "" for a node not set up yet,
+  // which only an account being created meets.
   class NodeChanged extends Error {
     constructor(seen) {
       super("node identity changed");
@@ -219,12 +231,24 @@
     }
   }
 
-  async function handshake() {
+  // An answer without an identity where only a node that has one can sign
+  // this browser in (a password, a pairing code): refused, never pinned.
+  class NodeUnset extends Error {
+    constructor() {
+      super("This node presents no identity — it is not set up yet.");
+    }
+  }
+
+  // `creating`: the exchange creates the node's account, the one moment a
+  // node answers with no identity of its own.
+  async function handshake(creating = false) {
     const r = await _origFetch("/api/auth/handshake", { cache: "no-store" });
     if (!r.ok) throw new Error("handshake HTTP " + r.status);
     const hs = await r.json();
     const eph = unb64(hs.eph);
+    const pinned = pinnedNode();
     if (hs.node_pubkey) {
+      if (!KEY_FORM.test(hs.node_pubkey)) throw new Error("handshake identity malformed");
       const expires = new Uint8Array(8);
       new DataView(expires.buffer).setBigUint64(0, BigInt(hs.expires));
       const signed = new Uint8Array([
@@ -232,11 +256,16 @@
       if (!nacl.sign.detached.verify(signed, unhex(hs.sig), unhex(hs.node_pubkey))) {
         throw new Error("handshake signature invalid");
       }
+      // A pinned identity the answer does not carry is the case the pin
+      // exists for
+      if (pinned && pinned !== hs.node_pubkey) throw new NodeChanged(hs.node_pubkey);
+    } else if (!creating) {
+      // A node with an account always signs: an answer without is no node
+      // this browser can sign in to
+      throw new NodeUnset();
+    } else if (pinned) {
+      throw new NodeChanged("");
     }
-    // A pinned identity the answer does not carry — a different key, or no
-    // key where a signed one is expected — is the case the pin exists for.
-    const pinned = pinnedNode();
-    if (pinned && pinned !== hs.node_pubkey) throw new NodeChanged(hs.node_pubkey);
     return { eph, ephB64: hs.eph, nodePubkey: hs.node_pubkey };
   }
 
@@ -247,7 +276,7 @@
   // the node could not open (`channel`: its handshake let go meanwhile — the
   // node keeps a bounded number) is sealed again once, to a fresh handshake.
   async function boxedPost(path, payload, viaSigned, again = true) {
-    const hs = await handshake();
+    const hs = await handshake(path === "/api/auth/create-account");
     const kp = nacl.box.keyPair();
     const nonce = nacl.randomBytes(nacl.box.nonceLength);
     const sealed = nacl.box(enc.encode(JSON.stringify(payload)), nonce,
@@ -269,10 +298,19 @@
   }
 
   const BUSY = "The node is busy — try again in a moment.";
-  // Only a 401 says the password or the code was wrong; anything else is the
-  // exchange that did not finish, said as such.
+  const SETUP_CODE_PLACE = "It is in the node's log (docker logs sautium-backend) " +
+    "or in data/node_identity/setup_code.txt.";
+  // Only a 401 says the password or the code was wrong; a 429 is the door
+  // shut by wrong passwords, its wait named; anything else is the exchange
+  // that did not finish, said as such.
   const UNFINISHED = "The sign-in did not finish — try again.";
-  const failure = (r) => r.status === 401 ? false : r.status === 503 ? BUSY : UNFINISHED;
+  function shut(r) {
+    const seconds = Number(r.resp.headers.get("Retry-After")) || 60;
+    const wait = seconds < 120 ? `${seconds} s` : `${Math.ceil(seconds / 60)} min`;
+    return `Too many wrong passwords — the next try is taken in ${wait}.`;
+  }
+  const failure = (r) => r.status === 401 ? false : r.status === 503 ? BUSY
+    : r.status === 429 ? shut(r) : UNFINISHED;
 
   async function errorDetail(r, fallback) {
     try {
@@ -290,14 +328,16 @@
   //
   // login / pair / createAccount resolve false (or a message) on a refusal
   // and throw NodeChanged when the node answering is not the one this
-  // browser knows; the gate asks the user and retries. A busy node (503) is
-  // said as such, never as a wrong password.
+  // browser knows; the gate asks the user and retries. login and pair throw
+  // NodeUnset when it answers with no identity. A busy node (503) is said
+  // as such, never as a wrong password.
   window.Sautium = window.Sautium || {};
   window.Sautium.auth = {
     hasToken: () => !!storedToken(),
     forget: () => setToken(""),
     status: async () => (await _origFetch("/api/auth/status")).json(),
-    // The gate's answer to NodeChanged: this is the node from now on.
+    // The gate's answer to NodeChanged: this is the node from now on — or,
+    // for a node not set up yet, no node until the account made pins its key.
     acceptNode: (pubkey) => pinNode(pubkey),
     async login(password) {
       const r = await boxedPost("/api/auth/login", { password });
@@ -306,14 +346,16 @@
       pinNode(r.nodePubkey);
       return true;
     },
-    async createAccount(username, password) {
-      const r = await boxedPost("/api/auth/create-account", { username, password });
+    async createAccount(username, password, setupCode) {
+      const r = await boxedPost("/api/auth/create-account",
+                                { username, password, setup_code: setupCode });
       if (r.ok) {
         setToken(r.data.token);
         pinNode(r.data.public_key_hex);
         return true;
       }
       if (r.status === 409) return "This node already has an account — reload.";
+      if (r.status === 403) return `That is not this node's setup code. ${SETUP_CODE_PLACE}`;
       if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: 8+ characters.";
       return errorDetail(r, "Could not create the account.");
     },
@@ -336,10 +378,11 @@
       // A new name or password is a new key, and the token is bound to the
       // key — every paired browser is out, this one takes the fresh token
       // from the same reply and pins the new key. An account with a password
-      // has it typed again (`currentPassword`). Returns the reply, or
-      // {ok:false, error}.
+      // has it typed again (`currentPassword`); one without carries the code
+      // the host opened this page with. Returns the reply, or {ok:false, error}.
       const r = await boxedPost("/api/auth/change-identity",
-                                { username, password, current_password: currentPassword || "" }, true);
+                                { username, password, current_password: currentPassword || "",
+                                  pin: hostCode }, true);
       if (!r.ok) return { ok: false, error: r.status === 503 ? BUSY : await errorDetail(r, `HTTP ${r.status}`) };
       setToken(r.data.token);
       pinNode(r.data.public_key_hex);
@@ -403,8 +446,6 @@
 
     let mode = "pin";
     let username = "";
-    const escapeText = (s) => s.replace(/[&<>"']/g,
-      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
     function showForm() {
       title.textContent = mode === "create" ? "Set up Sautium" : "Sign in";
@@ -426,9 +467,11 @@
           "your invite code, so Latin letters, digits, - or _.<br><br>" +
           "<b>The password is never stored</b> — it derives your keys. If you " +
           "lose it you get a new identity, and your invite code and friends " +
-          "with it.";
+          "with it.<br><br>" +
+          "The setup code proves you run this node. " + SETUP_CODE_PLACE;
         fields.innerHTML = input("auth-user", "text", "nickname") +
-                           input("auth-pass", "password", "password (8+ characters)");
+                           input("auth-pass", "password", "password (8+ characters)") +
+                           input("auth-setup", "text", "setup code");
         submit.textContent = "Create account";
       } else if (mode === "password") {
         // The username is shown, not asked for — a node has one account.
@@ -452,18 +495,25 @@
 
     // The known_hosts moment. The typed values stay in the hidden fields, so
     // "Continue" needs nothing typed again; "Stop" is a refusal that leaves
-    // the browser signed out, and a later submit asks again.
+    // the browser signed out, and a later submit asks again. Nothing the
+    // answer says about itself is quoted: a name is no identity. A node with
+    // no identity is met only when an account is being created ("Set it up").
     function askNodeChanged(err, onAccept) {
-      title.textContent = "A different node";
-      msg.innerHTML =
-        "The node answering at this address is not the one this browser " +
-        "signed in to before" +
-        (username ? ` — it calls itself <b>${escapeText(username)}</b>.` : ".") +
-        " If you changed the account or set the node up again, continue. " +
-        "If you did not, stop: something else is answering on this network.";
+      const unset = !err.seen;
+      title.textContent = unset ? "A node that is not set up" : "A different node";
+      msg.textContent = unset
+        ? "This node presents no identity — it is not set up yet. This browser " +
+          "signed in to another node at this address before. If you are setting " +
+          "this node up again, set it up. If you are not, stop: something else is " +
+          "answering on this network."
+        : "The node answering at this address is not the one this browser " +
+          "signed in to before. If you changed the account or set the node up " +
+          "again, continue. If you did not, stop: something else is answering on " +
+          "this network.";
       fields.hidden = true;
       formActions.hidden = true;
       nodeActions.hidden = false;
+      overlay.querySelector("#auth-gate-accept").textContent = unset ? "Set it up" : "Continue";
       overlay.querySelector("#auth-gate-stop").onclick = () => showForm();
       overlay.querySelector("#auth-gate-accept").onclick = () => {
         window.Sautium.auth.acceptNode(err.seen);
@@ -489,6 +539,7 @@
       try {
         res = await retry();
       } catch (e) {
+        if (e instanceof NodeUnset) { msg.textContent = e.message; return; }
         if (!(e instanceof NodeChanged)) throw e;
         askNodeChanged(e, redeem);
         return;
@@ -509,7 +560,8 @@
         if (mode === "create") {
           const res = await window.Sautium.auth.createAccount(
             overlay.querySelector("#auth-user").value.trim(),
-            overlay.querySelector("#auth-pass").value);
+            overlay.querySelector("#auth-pass").value,
+            overlay.querySelector("#auth-setup").value.trim());
           ok = res === true;
           why = typeof res === "string" ? res : "Could not create the account.";
         } else if (mode === "password") {
@@ -527,6 +579,7 @@
         submit.disabled = false;
         submit.textContent = prev;
         if (e instanceof NodeChanged) { askNodeChanged(e, attempt); return; }
+        if (e instanceof NodeUnset) { msg.textContent = e.message; return; }
         msg.textContent = "Cannot reach the server.";
         throw e;
       }
@@ -590,11 +643,17 @@
         try {
           res = await window.Sautium.auth.pair(code);
         } catch (e) {
+          if (e instanceof NodeUnset) {
+            // Not a node this code can sign in to: spent, and said
+            stripFragmentCode();
+            showLoginGate({ notice: e.message });
+            return;
+          }
           if (!(e instanceof NodeChanged)) throw e;
           // The code stays in the URL until the gate redeems it.
           showLoginGate({ changed: e, retry: async () => {
             const done = await window.Sautium.auth.pair(code);
-            if (done === true) stripFragmentCode();
+            if (done === true) { stripFragmentCode(); hostCode = code; }
             return done;
           } });
           return;
@@ -603,7 +662,7 @@
         // to (busy, an exchange that did not finish) stays in the URL for the
         // next load, and the gate says why
         if (typeof res !== "string") stripFragmentCode();
-        if (res === true) return;
+        if (res === true) { hostCode = code; return; }
         notice = typeof res === "string" ? res : null;
       }
       if (storedToken()) return;

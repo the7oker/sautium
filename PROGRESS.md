@@ -2231,7 +2231,14 @@ user brings.
   (`sautium.node_pubkey` in localStorage) and, when a different one
   answers later, the gate asks before going on — SSH's known_hosts as a
   dialog. What stays out of scope is an active attacker present at a
-  browser's very first sign-in, exactly as with SSH.
+  browser's very first sign-in, exactly as with SSH. A pin is the node's
+  key, 64 hex digits, or nothing (since 2026-11-05): an answer without an
+  identity was taken as an empty pin, which checked nothing afterwards.
+  Now it is refused at the password and pairing doors — a node with an
+  account always signs — and met only when an account is being created,
+  where a browser that knew another node asks first ("Set it up") and
+  pins the new account's key. The dialog quotes nothing the answer says
+  about itself.
 - **What is accepted.** API and media traffic on the LAN is readable by a
   device on the same network; the threat model already drew the bar at
   "no random scanner", not "no targeted LAN attacker" (SECURITY.md).
@@ -2338,8 +2345,33 @@ user brings.
   identity's own key. An identity the environment configures is refused
   before any derivation. An account made on a Docker node says it has a
   password (`anonymous: false`), whatever its nickname looks like. An
-  anonymous account has no password anyone has seen: what its rotation
-  asks for instead is undecided (2026-11-03) and unchanged meanwhile.
+  anonymous account has no password anyone has seen: its host vouches
+  instead (since 2026-11-05) — the change carries the pairing code the page
+  was opened with from the host, which the page keeps in memory for that
+  load, and a wrong one costs one of the code's attempts. A node whose host
+  shows no pairing code (Docker) keeps a password: a change to none is
+  refused, as creating an account without one always was.
+- **A fresh node's account needs its setup code (2026-11-05).** While a
+  node has no account, whoever reached its port first could create one
+  and own the node — with no deadline, and `/api/auth/status` said so. Now
+  a node with no account writes a one-time setup code at its start to its
+  log and to `setup_code.txt` in the identity folder (a Docker node's
+  `./data/node_identity`, readable by the node's user alone); create-account
+  carries it in the box, checked under the creation's lock before anything
+  is derived, and the code dies with the account. Not a loopback rule: in
+  Docker every request comes from the bridge gateway. Starting over is
+  stopping the node, emptying the identity folder and starting it again.
+- **Wrong passwords shut the login door for a while (2026-11-05).** The
+  password is the identity's only secret and the login had no count: past
+  five wrong ones in a row the door stays shut for a second, then for a
+  delay that doubles with each further wrong one, up to 15 min — a try
+  meanwhile is answered 429 with the wait, before anything is derived, and
+  the page says how long. One count for the node (behind Docker every
+  request has the bridge's address), so a crowd at the door delays a new
+  sign-in, never a browser signed in already; a right password clears it,
+  a restart opens it. The owner is told: the wrong passwords since the
+  notice was last seen are a notice (`auth.login_failures`), a report gone
+  once seen.
 - **portmap maps the peer surface and nothing else (2026-11-03).** Its
   guard asked whether a port served the Web UI — by the inlined-secret
   marker of the 2026-08 page, later by the `sautium-webui` health type with

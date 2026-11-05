@@ -137,7 +137,8 @@ WHITELIST_EXACT = {
     # checks. They defend themselves: /login costs an Argon2id derivation
     # under a semaphore, /pair burns one of five attempts under a lock, and
     # /create-account only answers while the node has no identity at all
-    # (first-run setup) and refuses every call after that.
+    # (first-run setup), with the setup code the node wrote at its start,
+    # and refuses every call after that.
     "/api/auth/status",
     "/api/auth/handshake",
     "/api/auth/login",

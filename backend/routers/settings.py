@@ -25,6 +25,7 @@ from sqlalchemy import text
 
 import claude_code
 import codex_cli
+import device_auth
 import gear_research_worker
 from config import settings as app_settings
 from database import get_db_context
@@ -1152,9 +1153,13 @@ def _derived(key: str, active: bool) -> Optional[str]:
 
 def _notices_state() -> Dict[str, Any]:
     """What the notices channel serves: every derived notice (_notice_items)
-    but a report the owner has seen (the restored run's), which is dropped."""
+    but a report the owner has seen (the restored run's, the wrong
+    passwords'), which is dropped."""
     return {"items": [it for it in _notice_items()
-                      if not (it["key"] == "hqplayer.run_restored" and it["seen"])]}
+                      if not (it["key"] in _REPORTS and it["seen"])]}
+
+
+_REPORTS = ("hqplayer.run_restored", "auth.login_failures")
 
 
 def _notice_items() -> List[Dict[str, Any]]:
@@ -1329,6 +1334,13 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": f"support.request.{row['id']}", "kind": "info",
                       "since": row["received_at"], "until": row["expires_at"],
                       "data": _support_request(row)})
+    # Wrong passwords at the login door since the owner last saw this
+    # (device_auth.login_refused): a report, dropped once seen
+    failures = _read(device_auth.LOGIN_FAILURES_KEY)
+    if failures:
+        items.append({"key": "auth.login_failures", "kind": "warning",
+                      "since": failures["since"], "until": None,
+                      "data": {"count": failures["count"], "last": failures["last"]}})
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]

@@ -423,6 +423,7 @@ async def lifespan(app: FastAPI):
     # node key; load both now so the first request never reads the
     # DB on the event loop (the auth middleware runs there).
     await asyncio.to_thread(device_auth.prime)
+    await asyncio.to_thread(device_auth.prepare_setup)
 
     # Resolve the hardware profile (full/standard/lite — HARDWARE-TIERS.md).
     # Drives the pre-warm set below plus pool sizes, phantom minting and
