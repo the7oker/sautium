@@ -116,13 +116,13 @@ _SETUP_CODE_FORM = re.compile("[%s]{4}(?:-[%s]{4}){%d}" % (
 # identity change's current password), so a crowd at the login door never
 # turns a browser signed in already away. Past LOGIN_FREE_FAILURES in a row a
 # door stays shut for a delay that doubles with each further one, up to
-# LOGIN_DELAY_MAX, and a try let in meanwhile is the only one in until its
-# answer; a right password clears the count. Process memory: a restart opens
+# LOGIN_DELAY_MAX, and lets a try in only when none is in flight; a right
+# password clears the count. Process memory: a restart opens
 # the doors, and the owner's record (LOGIN_FAILURES_KEY, a notice) stays.
 LOGIN_FREE_FAILURES = 5
 LOGIN_DELAY_MAX = 15 * 60
 LOGIN_FAILURES_KEY = "auth.login_failures"
-_doors = {name: {"failures": 0, "shut_until": 0.0, "trying": False} for name in ("login", "signed")}
+_doors = {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0} for name in ("login", "signed")}
 _failures_lock = threading.Lock()
 
 _pin: Optional[dict] = None          # {"code", "expires_at", "attempts"}
@@ -363,8 +363,8 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     checked under the lock, after the refusals that cost nothing and before
     anything else is derived — a rotation that raced another would
     otherwise change the identity the other just made, on the password of
-    the one before (WrongPassword, counted at the password door as a
-    login's is — Shut; Busy past the derivation bound). An
+    the one before (WrongPassword, counted at the signed door under the
+    login's rule — Shut; Busy past the derivation bound). An
     anonymous account has no password anyone has seen: its host vouches
     for the change instead, by the pairing code it shows now — `pin`, the
     code a page opened from the host carries (WrongPin; a wrong one costs
@@ -556,8 +556,9 @@ def _delay(failures: int) -> int:
 async def password_tried(password: str, *, signed: bool = False) -> bool:
     """The account password checked at the door every typed password passes
     (the login, an identity change): Shut while the door waits out a delay;
-    past the free failures the try is let in alone, holding the door for
-    the delay its failure would cost; a wrong one is counted and told to the
+    past the free failures a try is let in only when none is in flight, and
+    holds its door until its answer — the wait it gives meanwhile is the
+    delay its failure would cost; a wrong one is counted and told to the
     owner (login_refused), a right one clears the count. Only a derivation
     that ran and did not match counts — an empty password, or a node with
     no password door, is refused for nothing. A `signed` caller passes the
@@ -567,33 +568,34 @@ async def password_tried(password: str, *, signed: bool = False) -> bool:
     if left > 0:
         raise Shut(math.ceil(left))
     held = _delay(door["failures"] + 1)
-    if held and door["trying"]:
+    if held and door["in_flight"]:
         raise Shut(held)
     if not password or account_anonymous() or not account_configured():
         return False
-    door["trying"] = bool(held)
+    door["in_flight"] += 1
     try:
         ok = await verify_password(password, signed=signed)
     finally:
-        door["trying"] = False
+        door["in_flight"] -= 1
     if ok:
         door["failures"] = 0
         door["shut_until"] = 0.0
     else:
-        await login_refused(door)
+        await login_refused("signed" if signed else "login")
     return ok
 
 
-async def login_refused(door: dict) -> None:
-    """A wrong password at `door`: counted, the door shut past the free
-    ones, and the owner told — the record of wrong passwords since the
+async def login_refused(name: str) -> None:
+    """A wrong password at the door `name`: counted, the door shut past the
+    free ones, and the owner told — the record of wrong passwords since the
     notice was last seen, which wakes the notices channel."""
+    door = _doors[name]
     door["failures"] += 1
     delay = _delay(door["failures"])
     if delay:
         door["shut_until"] = time.time() + delay
-        logger.warning("%d wrong passwords in a row: the next is taken in %d s",
-                       door["failures"], delay)
+        logger.warning("%d wrong passwords in a row at the %s door: the next is taken in %d s",
+                       door["failures"], name, delay)
     await asyncio.to_thread(_record_failure)
 
 

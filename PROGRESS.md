@@ -2372,8 +2372,8 @@ user brings.
   five wrong ones in a row the door stays shut for a second, then for a
   delay that doubles with each further wrong one, up to 15 min — a try
   meanwhile is answered 429 with the wait, before anything is derived, and
-  the page says how long; a try let in past the free five holds the door
-  until its answer, so tries at once do not pass together. The current
+  the page says how long; past the free five a try is let in only when
+  none is in flight, so tries at once do not pass together. The current
   password typed at an identity change passes a door of its own under the
   same rule — a signed browser's — which the login's crowd never shuts. Only a
   derivation that ran and did not match counts; one that failed answers

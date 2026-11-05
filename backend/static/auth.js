@@ -470,6 +470,7 @@
               spellcheck="false" style="width:100%;margin-bottom:calc(10*var(--px));">`;
 
     let mode = "pin";
+    let pinDoor = true;
     let username = "";
 
     function showForm() {
@@ -504,6 +505,14 @@
           ? `Signing in as ${username}. Enter the account password.`
           : "Enter the account password.";
         fields.innerHTML = input("auth-pass", "password", "password");
+      } else if (!pinDoor) {
+        // An identity with no account name and no host to show a code (a
+        // Docker node): nothing here can sign a browser in
+        msg.textContent =
+          "This node's identity folder holds a key without its account. To start over, stop the " +
+          "node, empty that folder and start it again; the first visit then sets it up.";
+        fields.innerHTML = "";
+        submit.hidden = true;
       } else {
         // Nothing to ask for but the PIN: this node's account was created
         // without a password anyone has seen. Both host affordances end
@@ -549,6 +558,7 @@
 
     window.Sautium.auth.status().then((st) => {
       mode = st.onboarding ? "create" : (st.password_login ? "password" : "pin");
+      pinDoor = st.pin_door !== false;
       username = st.username || "";
       buildForm();
       // The create form says itself what a node not set up yet needs

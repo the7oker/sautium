@@ -1390,8 +1390,10 @@ def test_an_attach_takes_no_service_document_past_the_bound(renderers, shape):
     r = renderers(name="Shelf")
     r.scpd_shape = shape
     backend = DlnaBackend(emit=lambda b, s: None, queue=CanonicalQueue(), renderer=r.record)
-    with pytest.raises(dlna_backend.DlnaAttachError, match="answered at 127.0.0.1, but"):
+    with pytest.raises(dlna_backend.DlnaAttachError, match="answered at 127.0.0.1, but") as refused:
         backend.start()
+    # the failure described, not a raw exception's repr
+    assert "UpnpCommunicationError(" not in str(refused.value)
     backend.shutdown()
 
 
