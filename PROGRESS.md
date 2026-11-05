@@ -3579,6 +3579,29 @@ a spot from the top and is sought there, as in any other format, instead of
 an offset stream; forgetting a renderer forgets what it showed. Lesson: ask
 the device, keep its answer — not its make.
 
+### A start that did not land is said, and its listen goes on (2026-11-05)
+
+A switch to a renderer at 84 s played the track from 0:00. The node's clock
+ran on from 84 s while the renderer played from its top; past the Seek's
+deadline the stray rule held the renderer's reading back for one more and
+then named the node's own lost Seek the renderer's move ("moved slot 1 from
+105 s to 19 s by itself"), and a correction found under 5 s, paused, made
+the next play a second listen with the first written as a skip. Now a Seek
+of the node's — a start's or the person's — not seen landing by the
+pending-play deadline is said, naming where the renderer plays ("The seek to
+01:24 did not land — '‹renderer›' plays at 00:19"); the clock takes that
+reading at once, and the status marks the fall as a correction
+(`corrected`). A start's Seek the renderer refuses says it plays from the
+top, marked alike. The play tracker reads a restart on the output's
+timeline since its last correction: a correction never splits a listen — a
+restart is a play from the top the node asked for, or the output's own. A
+start's Seek waits from when it goes, not from the Play the renderer took
+long to act on. The verdict stays at the deadline: a renderer may answer a
+Seek and act on it seconds later, reading where it was meanwhile, so any
+earlier one would guess its latency — and the lost start's own cause was not
+reproduced in 14 switches. Lesson: what the node failed to do is the node's
+to say, not the device's.
+
 ### What a LAN listener of the node holds for a device it does not know (2026-11-03)
 
 The GENA callback server, the media proxy and the Output scan answer any

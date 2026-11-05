@@ -51,6 +51,10 @@ class _PlaySession:
         self.started_at = started_at
         self.track_length = track_length
         self.max_position = 0.0
+        # The furthest second on the output's own timeline since the listen
+        # began or its position was last corrected: falling back to the top
+        # from past 30 s of it is a play from the top
+        self.reached = 0.0
         self.scrobbled = False
 
     @property
@@ -73,6 +77,14 @@ class _PlaySession:
 
     def update_position(self, position: float) -> None:
         self.max_position = max(self.max_position, position)
+        self.reached = max(self.reached, position)
+
+    def corrected_to(self, position: float) -> None:
+        """The output set its clock to where it plays (a Seek of the node's
+        that did not land): the listen keeps what it counted, and its
+        timeline goes on from here — a correction near the top is no play
+        from it."""
+        self.reached = position
 
     def update(self, position: float, length: float) -> None:
         """A tick of this very track. A listen opened before the player knew
@@ -232,7 +244,8 @@ def _save_play_session(s: "_PlaySession") -> None:
 
 
 def track_play_event(state_name: str, position: float, length: float,
-                     item, *, external: bool = False, holds: bool = False) -> None:
+                     item, *, external: bool = False, holds: bool = False,
+                     corrected: bool = False) -> None:
     """Advance listening-history / scrobble state from one status tick. Mirrors
     the retired daemon's _handle_event, but resolves identity from the
     canonical queue item (source-agnostic) — so phantom previews are tracked
@@ -249,9 +262,15 @@ def track_play_event(state_name: str, position: float, length: float,
     as `external` is no such gap — the output reads an entry that is not
     ours — so the listen before it ends there. The same track re-starting
     from the top (repeat-one, a duplicate slot, a deliberate replay) IS a new
-    listen — detected by the position falling back to the start. An output
-    switch carries the listen over (carry_listen); `holds`: the output holds
-    the slot's spot, stopped there, and its play press resumes it."""
+    listen — detected by the position falling back to the start: a play from
+    the top the node asked for, or the output's own. `corrected`: the output
+    set its clock to where it plays, a Seek of the node's having not taken
+    it there — that fall is no restart, and never splits the listen (N-19:
+    a switch's start the renderer played from the top while the clock ran
+    on from the switch's second; corrected under 5 s, the next play counted
+    as a second listen). An output switch carries the listen over
+    (carry_listen); `holds`: the output holds the slot's spot, stopped
+    there, and its play press resumes it."""
     global _play_session, _carried
 
     if external:
@@ -267,6 +286,8 @@ def track_play_event(state_name: str, position: float, length: float,
     ident = _play_identity(item)
     same_track = (_play_session is not None and ident is not None
                   and ident["track_id"] == _play_session.track_id)
+    if corrected and same_track:
+        _play_session.corrected_to(position)
     if state_name != "playing":
         if _play_session is not None and (
                 state_name == "paused"
@@ -303,7 +324,7 @@ def track_play_event(state_name: str, position: float, length: float,
         return
 
     restarted = (same_track and position < 5.0
-                 and _play_session.max_position > 30.0)
+                 and _play_session.reached > 30.0)
     if not same_track or restarted:
         if _play_session is not None:
             _save_play_session(_play_session)

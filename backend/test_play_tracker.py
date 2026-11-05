@@ -142,3 +142,27 @@ def test_a_stop_on_the_output_a_switch_went_to_ends_the_listen_it_carried(record
     tracker.track_play_event("stopped", 0.0, 200.0, _item("t1"))          # the person's Stop there
     assert len(_history_rows(writes)) == 1 and tracker._play_session is None
     assert not tracker._carried
+
+
+def test_a_correction_never_splits_the_listen_a_switch_carried(recorder, monkeypatch):
+    """N-19: a switch's start that the renderer played from the top while
+    the clock ran on from the switch's second. The output's correction to
+    where it plays — under 5 s here, while paused — is no play from the top:
+    the next play goes on with the listen, one row and one now-playing. A
+    play from the top after it, past 30 s of the corrected timeline, is a new
+    listen as before."""
+    monkeypatch.setattr(tracker, "_carried", False)
+    writes, lastfm = recorder
+    tracker.track_play_event("playing", 10.0, 200.0, _item("t1"))
+    tracker.track_play_event("playing", 84.0, 200.0, _item("t1"))
+    tracker.carry_listen(True)
+    tracker.track_play_event("stopped", 0.0, 0.0, None)                   # the new output attaches
+    tracker.track_play_event("loading", 84.0, 200.0, _item("t1"))
+    tracker.track_play_event("playing", 86.0, 200.0, _item("t1"))         # the clock, from the switch's second
+    tracker.track_play_event("paused", 90.0, 200.0, _item("t1"))
+    tracker.track_play_event("paused", 3.0, 200.0, _item("t1"), corrected=True)   # where it plays
+    tracker.track_play_event("playing", 3.5, 200.0, _item("t1"))
+    tracker.track_play_event("playing", 40.0, 200.0, _item("t1"))
+    assert _history_rows(writes) == [] and lastfm == ["update_now_playing"]
+    tracker.track_play_event("playing", 1.0, 200.0, _item("t1"))          # the person's replay
+    assert len(_history_rows(writes)) == 1 and lastfm == ["update_now_playing"] * 2

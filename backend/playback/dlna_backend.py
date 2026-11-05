@@ -30,6 +30,7 @@ from typing import Callable, ContextManager, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from config import settings
+from hqplayer_client import format_time
 
 from playback.base import Capabilities, PlaybackStatus, PlayerBackend
 from playback.queue import CanonicalQueue, QueueItem
@@ -492,6 +493,11 @@ class DlnaBackend(PlayerBackend):
         # RelTime readings taken as the renderer's word on this load — with
         # the clock, a move of its own, a Seek's landing (_heard)
         self._heard_on_load = 0
+        # The clock was set to where the renderer plays after a Seek of the
+        # node's did not take it there: said once, on the next status
+        # (`corrected`) — no play from the top, so the listen goes on
+        # (tracker.track_play_event)
+        self._corrected = False
         # The poll's updates failed in a row since one last answered: three
         # lose the renderer; one already puts its address in doubt (reachable)
         self._misses = 0
@@ -954,6 +960,8 @@ class DlnaBackend(PlayerBackend):
             state = "paused"          # a spot carried over, nothing of it loaded yet
         state = state or self._state_name()
         self._said = state
+        if self._corrected:
+            extra["corrected"], self._corrected = True, False
         vol = None
         if self._dmr is not None and self._dmr.volume_level is not None:
             vol = round(self._dmr.volume_level * 100.0, 1)
@@ -1033,8 +1041,9 @@ class DlnaBackend(PlayerBackend):
         as the time since it was asked, is the Seek landed — however late:
         the clock takes it at once. Till then the clock runs on from what the
         Seek set, and holds still while the renderer is paused; past the
-        pending-play deadline after it was asked, the renderer is believed
-        again. A Seek in an Opus stream judged as the renderer's fact lands
+        pending-play deadline after it was asked, the Seek did not land, and
+        the reading is where the renderer plays (_not_landed). A Seek in an
+        Opus stream judged as the renderer's fact lands
         only on a reading its staying where it was cannot explain — a
         renderer that ignores the Seek and plays on enters the window above
         once the distance is played, and was taken for one that seeks — and
@@ -1060,14 +1069,32 @@ class DlnaBackend(PlayerBackend):
                 self._remember_opus_seek(True)
             return True
         if age > _PENDING_PLAY_DEADLINE and distance is None:
-            self._seek_due = None
-            return False
+            self._not_landed(second, real)
+            return True
         self._rel_stray = None
         if paused:
             self._rebaseline(self._position)
         else:
             self._position = self._wall_estimate()
         return True
+
+    def _not_landed(self, second: float, real: float) -> None:
+        """A Seek of the node's to `second` — a start's (an output switch's
+        spot), or the person's — not seen landing by the pending-play
+        deadline: the renderer plays at `real`, its reading, which the clock
+        takes at once and the person is told. Its stray rule (_adopt_reltime)
+        held that reading back for one more and named the node's own lost
+        Seek the renderer's move (N-19: "moved slot 1 from 105 s to 19 s by
+        itself"). The clock falling back so is a correction, never a play
+        from the top: the listen it was carried in goes on (`corrected`)."""
+        self._seek_due = None
+        self._heard(real)
+        self._corrected = True
+        self._error = (f"The seek to {format_time(second)} did not land — "
+                       f"'{self.label}' plays at {format_time(real)}")
+        logger.info("renderer '%s' did not land the Seek to %.0f s on slot %d — it plays at %.0f s "
+                    "(%s, its track …%s)", self.label, second, self._index, real, self._state_name(),
+                    (getattr(self._dmr, "current_track_uri", None) or "")[-14:])
 
     def _adopt_reltime(self, real: float, now: float, *, paused: bool = False) -> None:
         """A renderer's RelTime is its word on the position — when it moves
@@ -1264,10 +1291,14 @@ class DlnaBackend(PlayerBackend):
 
     def _confirmed(self) -> None:
         """The renderer was seen acting on our Play: the pending play is
-        settled, and a start mid-track it seeks itself goes now."""
+        settled, and a start mid-track it seeks itself goes now — its wait
+        from now, not from the Play the renderer took this long to act on:
+        a Play confirmed near its deadline left the Seek's wait over before
+        the Seek was answered, and said it did not land (_not_landed)."""
         self._awaiting_play = False
         target, self._seek_on_start = self._seek_on_start, None
         if target:
+            self._seek_due = (float(int(target)), time.monotonic(), None)
             asyncio.ensure_future(self._seek_started(target), loop=self._loop)
 
     async def _seek_started(self, target: float) -> None:
@@ -1284,6 +1315,11 @@ class DlnaBackend(PlayerBackend):
                            "from the top", target, _describe(e))
             self._seek_due = None
             self._rebaseline(0.0)
+            # A correction, as a Seek that did not land (_not_landed)
+            self._corrected = True
+            self._error = (f"'{self.label}' refused the seek to {format_time(target)} — "
+                           "it plays from the top")
+            self._emit_now()
             return
         # The renderer plays from its top until the Seek lands: the distance
         # is the second itself

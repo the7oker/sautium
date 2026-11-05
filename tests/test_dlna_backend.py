@@ -30,6 +30,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from config import settings  # noqa: E402
+from hqplayer_client import format_time  # noqa: E402
 from playback import dlna_backend  # noqa: E402
 from playback import tracker  # noqa: E402
 from playback.dlna_backend import DlnaBackend  # noqa: E402
@@ -2659,3 +2660,113 @@ def test_a_connecting_word_whose_first_status_fails_is_taken_back(manager):
     manager._push_status = push
     push({**manager.latest_status, "state": "stopped"})
     assert "connecting" not in manager.latest_status, manager.latest_status
+
+
+# -- DLNA-N3: a Seek that did not land -------------------------------------------
+
+
+def _said(n: Node):
+    """The first status that carried the node's words, and its index."""
+    return next((i, s) for i, s in enumerate(n.statuses) if s.extra.get("error"))
+
+
+def test_a_start_that_never_lands_is_said_and_the_renderer_followed_at_once(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, caplog):
+    """N-19: a start at a second — an output switch's spot — whose Seek the
+    renderer answers and never takes, playing from the top. Past the Seek's
+    deadline the node says so, naming where the renderer plays, and the
+    clock takes that reading at once — it ran on from the spot until then.
+    Nothing of it is said as the renderer's own move (2026-11-01: "moved
+    slot 1 from 105 s to 19 s by itself"), and the status that says it
+    marks the fall as a correction."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 3.0)
+    r = renderers(name="Study DAC")
+    r.seek_delay = 3600.0                         # answered, never taken
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    with caplog.at_level("INFO", logger="playback.dlna_backend"):
+        assert n.backend.play()
+        wait_for(lambda: r.called("Seek"), what="the start sought")
+        wait_for(lambda: any(s.extra.get("error") for s in n.statuses), timeout=10, what="the words")
+    i, said = _said(n)
+    assert said.extra.get("corrected") and said.position < 10, said
+    assert said.extra["error"] == ("The seek to 00:35 did not land — 'Study DAC' plays at "
+                                   f"{format_time(said.position)}")
+    before = [s.position for s in n.statuses[:i] if s.state == "playing"]
+    assert before and min(before) >= 35, before
+    wait_for(lambda: n.last.state == "playing" and abs(n.last.position - r.position()) <= 1.5,
+             timeout=3, what="the node at the renderer's second")
+    assert "did not land the Seek to 35 s" in caplog.text and "by itself" not in caplog.text
+
+
+def test_a_seek_of_the_persons_that_never_lands_says_where_the_renderer_plays(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, caplog):
+    """The person's seek, answered and never taken: the same words at its
+    deadline, the renderer's reading taken at once — never the renderer's
+    move."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 3.0)
+    r = renderers(name="Study")
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.statuses and n.last.state == "playing" and n.last.position >= 2,
+             what="playing past 2 s")
+    r.seek_delay = 3600.0
+    with caplog.at_level("INFO", logger="playback.dlna_backend"):
+        assert n.backend.seek(60)
+        wait_for(lambda: any(s.extra.get("error") for s in n.statuses), timeout=10, what="the words")
+    _i, said = _said(n)
+    assert said.extra.get("corrected") and said.position < 15, said
+    assert said.extra["error"] == f"The seek to 01:00 did not land — 'Study' plays at {format_time(said.position)}"
+    assert "by itself" not in caplog.text
+
+
+def test_a_start_the_renderer_refuses_is_said_with_the_top_it_plays_from(
+        tmp_path, proxy, renderers, nodes, quality):
+    """A start at a second whose Seek the renderer refuses: it plays from the
+    top, and the person is told so at once — the clock's fall marked as a
+    correction, as for a Seek that did not land."""
+    r = renderers(name="Study DAC")
+    r.faults["Seek"] = [701]
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=90.0)])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 35.0)
+    assert n.backend.play()
+    wait_for(lambda: any(s.extra.get("error") for s in n.statuses), timeout=10, what="the words")
+    _i, said = _said(n)
+    assert said.extra.get("corrected") and said.position < 3, said
+    assert said.extra["error"] == "'Study DAC' refused the seek to 00:35 — it plays from the top"
+
+
+def test_a_correction_of_a_switchs_start_never_splits_the_listen_it_carried(
+        tmp_path, proxy, renderers, manager, switch, quality, heard, monkeypatch):
+    """N-19's listen: the phone at 41 s, switched to a renderer that plays the
+    track from the top and never takes the start's Seek; paused near its top,
+    the node corrects its clock there. Play goes on with the listen the
+    switch carried — a correction under 5 s made the next play a play from
+    the top, and wrote the listen before it as a skip."""
+    monkeypatch.setattr(dlna_backend, "_PENDING_PLAY_DEADLINE", 3.0)
+    listened, lastfm = heard
+    a, b = renderers(name="Phone"), renderers(name="Study DAC")
+    _on_renderer(manager, a, [track(tmp_path, 1, seconds=90.0)])
+    _playing_at(manager, a, 1)
+    assert manager.backend().seek(40)
+    _playing_at(manager, a, 41)
+    b.seek_delay = 3600.0
+    switch(type="dlna", renderer=b.record)
+    wait_for(lambda: b.called("Seek"), what="the start sought")
+    wait_for(lambda: b.position() >= 1.0, what="playing from its top")
+    assert manager.backend().pause()
+    wait_for(lambda: manager.latest_status.get("state") == "paused"
+             and manager.latest_status.get("position", 99) < 5, timeout=10, what="the correction")
+    corrected = manager.latest_status["position"]
+    import routers.player as player_router
+    assert player_router.play()["ok"]
+    wait_for(lambda: manager.latest_status.get("state") == "playing"
+             and manager.latest_status.get("position", 0) >= corrected + 1.5, what="playing on")
+    assert listened == []
+    assert lastfm == [("update_now_playing", "Track 1")]
