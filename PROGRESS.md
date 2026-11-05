@@ -3729,9 +3729,13 @@ device on the network; none of them may hold for it more than a bound.
   Output scan once — one scan at a time, whoever asks, the picker or a
   press (`routers.player.scan_once`) — and goes through the gate again,
   playing where the scan found it; the probe, the scan and the attach are
-  one "connecting" (since 2026-11-05). A phone gone from the home Wi-Fi to
-  a tunnel plays from its first press instead of answering "offline" until
-  the Output picker is opened.
+  one "connecting" (since 2026-11-05). A renderer the scan reaches at a new
+  address — a phone back on the LAN, or on its tunnel where the launcher's
+  sweep asks the tailnet's peers — plays from the first press instead of
+  answering "offline" until the Output picker is opened; one it reaches
+  nowhere is said offline after the scan. The scan runs with no lock held:
+  a press that replaces the queue passes the gate before it takes the
+  queue lock, which the scan's move of the output needs.
   Left: a renderer absent when a claimant answers — a phone asleep — moves
   to it.
 

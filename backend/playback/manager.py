@@ -234,10 +234,16 @@ class PlaybackManager:
         A renderer that answers at none of the addresses it is known at is
         looked for once by the Output scan, which takes it where it answers
         now (routers.player._scan_run), and the press goes through the gate
-        again: a phone gone from the home Wi-Fi to a tunnel plays from the
-        first press. A wait the probe, the attach or the scan says
-        ("connecting") is said through what follows it: one word, never
-        taken back in between."""
+        again: a renderer the scan reaches at a new address — a phone back
+        on the LAN, or on its tunnel where the launcher's sweep asks the
+        tailnet — plays from the first press; one it reaches nowhere is said
+        offline after the scan, not after the probe alone. A wait the probe,
+        the attach or the scan says ("connecting") is said through what
+        follows it: one word, never taken back in between.
+
+        Called with no lock held: the scan moves the output under the queue
+        lock (renderer_reached). A press that mutates the queue passes the
+        gate before it takes that lock (replace_queue)."""
         self._refuse_if_held()
         with ExitStack() as saying:
             try:
@@ -245,6 +251,12 @@ class PlaybackManager:
             except Nowhere:
                 if not self._found_by_scan(saying):
                     raise
+            return self._through_gate(saying)
+
+    def _gate_once(self) -> PlayerBackend:
+        """One pass of the gate and no scan: the output a queue mutation
+        picks under its lock, where a renderer found nowhere is offline."""
+        with ExitStack() as saying:
             return self._through_gate(saying)
 
     def _through_gate(self, saying: ExitStack) -> PlayerBackend:
@@ -396,8 +408,9 @@ class PlaybackManager:
 
     def _probe(self, b: PlayerBackend, saying: Optional[ExitStack] = None) -> None:
         """Fast offline-fail: a powered-off DLNA renderer must 503 within
-        the probe window with a clear message, not after stacked SOAP +
-        re-attach timeouts (34s, live) — and the first attempt must not
+        the probe window and one Output scan (ensure_active) with a clear
+        message, not after stacked SOAP + re-attach timeouts (34s, live) —
+        and the first attempt must not
         silently accept (fire-and-forget commands return 200 while the
         failure is async). A dozing-but-networked renderer passes the
         probe: its window is sized for a sleeping radio. A wait on a
@@ -1050,7 +1063,15 @@ class PlaybackManager:
         none of `items` raises QueueRefused. Returns (added, generation);
         generation is what background fillers must guard their appends
         with."""
-        with self._output_mutation(self.ensure_active if play else self.backend) as backend:
+        pick = self.backend
+        if play:
+            # The gate before the queue lock: its scan for a renderer found
+            # nowhere moves the output under that lock (ensure_active). Under
+            # it the output is taken as the gate left it, or passes it once
+            # more, with no scan
+            gated = self.ensure_active()
+            pick = lambda: gated if self._active is gated and gated.healthy() else self._gate_once()  # noqa: E731
+        with self._output_mutation(pick) as backend:
             accepted = backend.queue_replace(items, play=play)
             added = len(accepted)
             if items and not added:

@@ -215,6 +215,9 @@ class FakeRenderer:
         # Its description is held until this is set: an attach stopped half
         # way, as a phone waking on a tunnel answers late
         self.hold_description: Optional[threading.Event] = None
+        # How its services' documents are answered: "large" (past the node's
+        # bound on an answer), "packed" (compressed), "moved" (a redirect)
+        self.scpd_shape: Optional[str] = None
         self.describing = threading.Event()    # its description was asked
         # In an Opus stream (?q=opus…): False — its RelTime reads 0:00:00
         # throughout; "ignores" — a Seek is answered and moves nothing. A DAP
@@ -471,7 +474,16 @@ class FakeRenderer:
 
     async def _scpd(self, request):
         _st, _sid, actions, variables = _SERVICES[request.match_info["svc"]]
-        return web.Response(text=_scpd(actions, variables), content_type="text/xml")
+        text = _scpd(actions, variables)
+        if self.scpd_shape == "moved" and "moved" not in request.query:
+            raise web.HTTPFound(f"{request.path}?moved=1")
+        if self.scpd_shape == "large":
+            text = text.replace("</scpd>", f'<!--{"p" * dlna_backend.ANSWER_BYTES}--></scpd>')
+        if self.scpd_shape == "packed":
+            import gzip
+            return web.Response(body=gzip.compress(text.encode()), content_type="text/xml",
+                                headers={"Content-Encoding": "gzip"})
+        return web.Response(text=text, content_type="text/xml")
 
     async def _control(self, request):
         svc = request.match_info["svc"]
@@ -1256,7 +1268,7 @@ def test_play_with_no_renderer_attached_goes_where_it_answers_now(tmp_path, prox
 
 
 def test_play_where_no_known_address_answers_scans_and_plays_where_the_renderer_is(
-        tmp_path, proxy, renderers, manager, picker, quality):
+        tmp_path, proxy, renderers, manager, picker, quality, monkeypatch):
     """The chosen renderer answers at none of the addresses it is known at
     (a phone gone from the home Wi-Fi to a tunnel) and no scan has run: the
     play press scans, takes the renderer at the address the scan finds it
@@ -1270,8 +1282,10 @@ def test_play_where_no_known_address_answers_scans_and_plays_where_the_renderer_
     wait_for(lambda: old.state == "PAUSED_PLAYBACK", what="paused")
     old.stop_answering()
     picker.found[:] = [new.location]
+    sweeps = _sweeps(picker, monkeypatch)
     seen = _statuses(manager)
     assert picker.play() == {"ok": True}
+    assert len(sweeps) == 1
     wait_for(lambda: new.state == "PLAYING", what="playing at the address the scan found")
     assert len(new.called("SetAVTransportURI")) == 1
     assert manager.store["output.dlna_renderer"]["location"] == new.location
@@ -1296,8 +1310,93 @@ def test_play_with_nothing_attached_scans_when_no_known_address_answers(
     assert len(new.called("SetAVTransportURI")) == 1
 
 
+def test_a_press_that_replaces_the_queue_scans_with_no_queue_lock_held(
+        tmp_path, proxy, renderers, manager, picker, quality, monkeypatch):
+    """A play route that replaces the queue, its renderer held at an address
+    that went dark: the scan runs before the queue lock is taken — a queue
+    edit goes on meanwhile — and the track plays where the scan found the
+    renderer, loaded once."""
+    old, new = renderers(name="Phone"), renderers(name="Phone")
+    new.udn = old.udn
+    _on_renderer(manager, old, [track(tmp_path, 1, seconds=20.0)])
+    wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing at the old address")
+    manager.backend().pause()
+    wait_for(lambda: old.state == "PAUSED_PLAYBACK", what="paused")
+    old.stop_answering()
+    picker.found[:] = [new.location]
+    sweeping, go = threading.Event(), threading.Event()
+
+    async def sweep(found_dlna, found_hqp):
+        sweeping.set()
+        await asyncio.to_thread(go.wait, 20)
+    monkeypatch.setattr(picker, "_unicast_sweep", sweep)
+    answer = []
+    press = threading.Thread(target=lambda: answer.append(
+        manager.replace_queue([track(tmp_path, 2, seconds=20.0)], play=True)))
+    press.start()
+    try:
+        assert sweeping.wait(15), "the press scans"
+        assert manager._mutate_lock.acquire(timeout=2), "the queue lock is free while the press scans"
+        manager._mutate_lock.release()
+    finally:
+        go.set()
+    press.join(30)
+    assert answer and answer[0][0] == 1
+    wait_for(lambda: new.state == "PLAYING", what="playing at the address the scan found")
+    assert len(new.called("SetAVTransportURI")) == 1
+
+
+def test_one_scan_at_a_time_whoever_asks(picker, monkeypatch):
+    """A press waiting on a scan the picker started waits for that one: the
+    route and a press share the scan under way."""
+    sweeping, go, sweeps = threading.Event(), threading.Event(), []
+
+    async def sweep(found_dlna, found_hqp):
+        sweeps.append(1)
+        sweeping.set()
+        await asyncio.to_thread(go.wait, 20)
+    monkeypatch.setattr(picker, "_unicast_sweep", sweep)
+    monkeypatch.setattr(picker, "_scan_running", None)
+    answers = []
+
+    async def route():
+        return await picker.scan_outputs()
+    first = threading.Thread(target=lambda: answers.append(asyncio.run(route())))
+    first.start()
+    assert sweeping.wait(15)
+    second = threading.Thread(target=lambda: answers.append(picker.scan_once()))
+    second.start()
+    go.set()
+    first.join(20)
+    second.join(20)
+    assert len(answers) == 2 and answers[0] is answers[1] and sweeps == [1]
+
+
+@pytest.mark.parametrize("shape", ["large", "packed", "moved"])
+def test_an_attach_takes_no_service_document_past_the_bound(renderers, shape):
+    """The attach reads its renderer's every answer within the node's bound:
+    a service document past it, compressed or redirected fails the attach,
+    which says the renderer answered and what was not taken."""
+    r = renderers(name="Shelf")
+    r.scpd_shape = shape
+    backend = DlnaBackend(emit=lambda b, s: None, queue=CanonicalQueue(), renderer=r.record)
+    with pytest.raises(dlna_backend.DlnaAttachError, match="answered at 127.0.0.1, but"):
+        backend.start()
+    backend.shutdown()
+
+
+def _sweeps(picker, monkeypatch) -> list:
+    """The scans run from now on, one entry each (the sweep every scan makes)."""
+    sweeps = []
+
+    async def sweep(found_dlna, found_hqp):
+        sweeps.append(1)
+    monkeypatch.setattr(picker, "_unicast_sweep", sweep)
+    return sweeps
+
+
 def test_play_where_the_scan_finds_the_renderer_nowhere_says_it_is_offline(
-        tmp_path, renderers, manager, picker):
+        tmp_path, renderers, manager, picker, monkeypatch):
     """A scan that does not find the renderer either leaves the press with
     the word it had: offline."""
     gone = renderers(name="Phone")
@@ -1305,8 +1404,10 @@ def test_play_where_the_scan_finds_the_renderer_nowhere_says_it_is_offline(
     manager.store.update({"output.type": "dlna", "output.dlna_renderer": gone.record})
     manager.queue.replace([track(tmp_path, 1, seconds=20.0)])
     picker.found[:] = []
+    sweeps = _sweeps(picker, monkeypatch)
     with pytest.raises(ConnectionError, match="'Phone' is offline"):
         manager.ensure_active()
+    assert len(sweeps) == 1 and manager.active is None
 
 
 def test_the_spot_is_read_from_the_outputs_latest_word(manager):

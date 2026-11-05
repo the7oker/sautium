@@ -54,7 +54,7 @@ def _kept(handler) -> int:
 
 def test_an_event_no_subscription_expects_is_refused_and_not_kept(notify):
     async def scenario():
-        server = await dlna_backend._ensure_notify(dlna_backend.AiohttpRequester(), None)
+        server = await dlna_backend._ensure_notify(dlna_backend._BoundedRequester(timeout=10), None)
         try:
             statuses = [await _post(notify, f"uuid:nobody-{i}") for i in range(40)]
             return statuses, _kept(server.event_handler)
@@ -85,7 +85,7 @@ def _subscribe_meeting(notify, strangers: int, wait: float = 0.0):
 
     async def scenario():
         early_sid = "uuid:the-renderer-1"
-        server = await dlna_backend._ensure_notify(dlna_backend.AiohttpRequester(), None)
+        server = await dlna_backend._ensure_notify(dlna_backend._BoundedRequester(timeout=10), None)
         handler = server.event_handler
 
         class Renderer:
@@ -101,7 +101,7 @@ def _subscribe_meeting(notify, strangers: int, wait: float = 0.0):
             sid, _ = await handler.async_subscribe(service)
             return sid, service.changes, Renderer.statuses, _kept(handler)
         finally:
-            handler._requester = dlna_backend.AiohttpRequester()
+            handler._requester = dlna_backend._BoundedRequester(timeout=10)
             await server.async_stop_server()
             dlna_backend._shared_notify = None
     return asyncio.run(scenario())
@@ -118,7 +118,7 @@ def test_an_early_event_reaches_its_subscription_and_the_early_ones_are_bounded(
 
 def test_a_notify_body_is_bounded(notify):
     async def scenario():
-        server = await dlna_backend._ensure_notify(dlna_backend.AiohttpRequester(), None)
+        server = await dlna_backend._ensure_notify(dlna_backend._BoundedRequester(timeout=10), None)
         try:
             return await _post(notify, "uuid:nobody", "x" * (dlna_backend._NOTIFY_BODY_MAX + 1))
         finally:
@@ -134,7 +134,7 @@ def test_an_early_event_older_than_its_window_is_not_played(notify, monkeypatch)
 
 def test_an_event_without_a_sid_is_refused_and_kept_nowhere(notify):
     async def scenario():
-        server = await dlna_backend._ensure_notify(dlna_backend.AiohttpRequester(), None)
+        server = await dlna_backend._ensure_notify(dlna_backend._BoundedRequester(timeout=10), None)
         try:
             return await _post(notify, ""), _kept(server.event_handler)
         finally:

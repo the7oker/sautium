@@ -255,7 +255,7 @@ def get_outputs(rescan: bool = False):
 # in the path, prints one.
 #
 # Both snapshots are REPLACED, never mutated: /outputs runs on a worker
-# thread and iterates them while the scan lands on the event loop, and a
+# thread and iterates them while the scan lands in a thread of its own, and a
 # dict changing size under an iteration is a RuntimeError. A rebind is
 # atomic and a reader keeps the dict it started with.
 _dlna_discovered: dict[str, dict] = {}
@@ -2814,7 +2814,8 @@ def _output_error(e: Exception, refusal: Optional[tuple[int, str]] = None) -> HT
 def _ensure_output_ready() -> None:
     """Fast offline pre-flight for the streaming paths: fail with a clear
     503 BEFORE resolving/buffering a whole album, so a powered-off renderer
-    is reported in ~2s instead of after the buffer + stacked SOAP timeouts."""
+    is reported after its probe and one Output scan (ensure_active) instead
+    of after the buffer + stacked SOAP timeouts."""
     try:
         manager.ensure_active()
     except ConnectionError as e:

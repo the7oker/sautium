@@ -882,6 +882,7 @@ class DlnaBackend(PlayerBackend):
         known = known_locations(self._renderer)
         udn = udn_key(self._renderer.get("udn"))
         others = []
+        refused = []     # (address, why): it answered, its description was not taken
 
         async def probe(loc: str) -> tuple:
             return loc, await asyncio.to_thread(renderer_reachable, loc)
@@ -897,6 +898,7 @@ class DlnaBackend(PlayerBackend):
                     raise
                 except Exception as e:
                     logger.debug("renderer answered at %s but described badly: %s", loc, e)
+                    refused.append((loc, e))
                     continue
                 if udn in {udn_key(d.udn) for d in (device, *device.embedded_devices.values())}:
                     return device, loc
@@ -912,6 +914,11 @@ class DlnaBackend(PlayerBackend):
         finally:
             for p in probes:
                 p.cancel()
+        if refused and not others:
+            loc, why = refused[0]
+            raise DlnaAttachError(
+                f"'{self.label}' answered at {urlparse(loc).hostname or loc}, but its device "
+                f"description was not taken ({why})")
         if others:
             raise DlnaAttachError(
                 f"'{self.label}' is not where it was known: another device answers at "

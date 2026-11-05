@@ -406,30 +406,35 @@ def _requested(url):
     return asyncio.run(run())
 
 
-def test_the_attach_reads_a_renderers_answers_plainly_and_bounded(device):
+def test_the_attach_reads_a_renderers_answers_plainly_and_follows_no_redirect(device):
     """Every answer the attach reads — a description, a service's document,
-    a SOAP or GENA answer — as the scan reads a description: no redirect
-    followed, nothing compressed, so many bytes, in a text encoding."""
-    from async_upnp_client.exceptions import UpnpCommunicationError
+    a SOAP or GENA answer — as the scan reads a description: read whole, and
+    a redirect is an answer, not followed."""
     base, hits = device
     status, body = _requested(f"{base}/plain.xml")
     assert status == 200 and "uuid:shelf-1" in body
     assert _requested(f"{base}/moved.xml")[0] == 302
     assert hits["/plain.xml"] == 1                     # the redirect was not followed
-    for shape, said in (("packed", "compressed"), ("large", "past its size"),
-                        ("declared", "past its size"), ("punycode", "encoding"), ("zlib", "encoding")):
-        with pytest.raises(UpnpCommunicationError, match=said):
-            _requested(f"{base}/{shape}.xml")
 
 
-def test_the_attach_takes_no_renderer_whose_service_document_is_past_the_bound(device):
+@pytest.mark.parametrize("shape, said", [("packed", "compressed"), ("large", "past its size"),
+                                         ("declared", "past its size"), ("punycode", "encoding"),
+                                         ("zlib", "encoding")])
+def test_the_attach_takes_no_answer_compressed_past_its_size_or_in_no_text_encoding(device, shape, said):
+    from async_upnp_client.exceptions import UpnpCommunicationError
+    base, _hits = device
+    with pytest.raises(UpnpCommunicationError, match=said):
+        _requested(f"{base}/{shape}.xml")
+
+
+@pytest.mark.parametrize("shape", ["big-service", "moved-service"])
+def test_the_attach_takes_no_renderer_whose_service_document_is_past_the_bound(device, shape):
     """A service document is an answer as any other: one past the bound, or
     one that redirects, fails the attach, and the redirect is not followed."""
     base, hits = device
     assert _attached(f"{base}/many.xml") == "uuid:shelf-1"
-    assert _attached(f"{base}/big-service.xml") is None
     before = hits.get("/scpd0.xml", 0)
-    assert _attached(f"{base}/moved-service.xml") is None
+    assert _attached(f"{base}/{shape}.xml") is None
     assert hits.get("/scpd0.xml", 0) == before
 
 
