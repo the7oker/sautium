@@ -4,7 +4,8 @@ HTTP, described at the address the answer came from; a description read whole
 and alone — none of its services' documents — with no redirect, nothing
 compressed, so many bytes, all of them within one deadline and parsed off the
 server's loop; so many addresses per host and in all; and whatever one
-HQPlayer answers is that box's failure alone."""
+HQPlayer answers is that box's failure alone. The attach reads a renderer's
+every answer by the same rule (playback/dlna_backend.py _BoundedRequester)."""
 
 import asyncio
 import gzip
@@ -23,6 +24,7 @@ if str(BACKEND) not in sys.path:
 
 import hqp_library  # noqa: E402
 import hqplayer_client  # noqa: E402
+from playback import dlna_backend  # noqa: E402
 from routers import player  # noqa: E402
 
 pytest.importorskip("async_upnp_client")
@@ -115,7 +117,7 @@ def device():
             headers={"Content-Encoding": "gzip"})),
         "/large.xml": lambda r: streamed(r, _description(padding=300 * 1024).encode()),
         "/declared.xml": lambda r: streamed(r, _description().encode(),
-                                            length=player._DESCRIBE_BYTES + 1),
+                                            length=dlna_backend.ANSWER_BYTES + 1),
         "/pieces.xml": lambda r: streamed(r, _description().encode(),
                                           length=len(_description().encode()), pause=0.2),
         "/embedded.xml": lambda r: text(_nested(1)),
@@ -139,6 +141,10 @@ def device():
         "/udn-tab.xml": lambda r: text(_nested(0).replace("uuid:shelf-1", "uuid:shelf\t1")),
         "/udn-long.xml": lambda r: text(_nested(0).replace("uuid:shelf-1", "uuid:" + "1" * 124)),
         "/many.xml": lambda r: text(_description(services=24)),
+        "/big-service.xml": lambda r: text(_description(services=1).replace("/scpd0.xml", "/big-scpd.xml")),
+        "/moved-service.xml": lambda r: text(_description(services=1).replace("/scpd0.xml", "/moved-scpd.xml")),
+        "/big-scpd.xml": lambda r: text(SCPD.replace("</scpd>", f'<!--{"p" * 300 * 1024}--></scpd>')),
+        "/moved-scpd.xml": lambda r: asyncio.sleep(0, web.HTTPFound("/scpd0.xml")),
         "/slow.xml": slow,
     }
     app = web.Application()
@@ -171,7 +177,7 @@ def test_a_description_is_read_whole_plainly_and_bounded(device):
     assert _describe(f"{base}/many.xml")["udn"] == "uuid:shelf-1"
     for shape, said in (("moved", "answered 302"), ("packed", "compressed"),
                         ("large", "past its size"), ("declared", "past its size")):
-        with pytest.raises(player.DescriptionRefused, match=said):
+        with pytest.raises(dlna_backend.AnswerRefused, match=said):
             _describe(f"{base}/{shape}.xml")
     assert hits["/plain.xml"] == 1                     # the redirect was not followed
     assert not [p for p in hits if p.startswith("/scpd")]   # no service document is read
@@ -341,7 +347,7 @@ def test_a_description_in_a_codec_that_is_no_text_encoding_is_refused_undecoded(
     event loop, zlib is no text encoding at all."""
     base, _hits = device
     for shape in ("punycode", "zlib"):
-        with pytest.raises(player.DescriptionRefused, match="encoding the scan does not read"):
+        with pytest.raises(dlna_backend.AnswerRefused, match="encoding the node does not read"):
             _describe(f"{base}/{shape}.xml")
 
 
@@ -350,21 +356,22 @@ def _listed(url):
     from xml.etree.ElementTree import ParseError
     try:
         return player.udn_key(_describe(url)["udn"])
-    except (player.DescriptionRefused, player.HTTPException, ParseError):
+    except (dlna_backend.AnswerRefused, player.HTTPException, ParseError):
         return None
 
 
 def _attached(url):
-    """What the attach's library makes of the description at `url`: the UDN
-    of the renderer among the device and those it embeds directly — where
-    the attach looks for the one the scan listed — or None."""
-    from async_upnp_client.aiohttp import AiohttpRequester
+    """What the attach makes of the description at `url` — its requester,
+    the library's factory: the UDN of the renderer among the device and
+    those it embeds directly — where the attach looks for the one the scan
+    listed — or None."""
     from async_upnp_client.client_factory import UpnpFactory
     from async_upnp_client.exceptions import UpnpError
 
     async def run():
         try:
-            device = await UpnpFactory(AiohttpRequester(timeout=5), non_strict=True).async_create_device(url)
+            device = await UpnpFactory(dlna_backend._BoundedRequester(timeout=5),
+                                       non_strict=True).async_create_device(url)
         except UpnpError:
             return None
         found = [d for d in (device, *device.embedded_devices.values())
@@ -385,6 +392,45 @@ def test_the_scan_reads_a_description_as_the_attach_does(device, shape, udn):
     embedded device of a type, the last; each word from its first element."""
     base, _hits = device
     assert (_listed(f"{base}/{shape}.xml"), _attached(f"{base}/{shape}.xml")) == (udn, udn)
+
+
+def _requested(url):
+    """The attach's requester asked for `url` as the library asks: its
+    status and its text."""
+    from async_upnp_client.const import HttpRequest
+
+    async def run():
+        answer = await dlna_backend._BoundedRequester(timeout=5).async_http_request(
+            HttpRequest("GET", url, {}, None))
+        return answer.status_code, answer.body
+    return asyncio.run(run())
+
+
+def test_the_attach_reads_a_renderers_answers_plainly_and_bounded(device):
+    """Every answer the attach reads — a description, a service's document,
+    a SOAP or GENA answer — as the scan reads a description: no redirect
+    followed, nothing compressed, so many bytes, in a text encoding."""
+    from async_upnp_client.exceptions import UpnpCommunicationError
+    base, hits = device
+    status, body = _requested(f"{base}/plain.xml")
+    assert status == 200 and "uuid:shelf-1" in body
+    assert _requested(f"{base}/moved.xml")[0] == 302
+    assert hits["/plain.xml"] == 1                     # the redirect was not followed
+    for shape, said in (("packed", "compressed"), ("large", "past its size"),
+                        ("declared", "past its size"), ("punycode", "encoding"), ("zlib", "encoding")):
+        with pytest.raises(UpnpCommunicationError, match=said):
+            _requested(f"{base}/{shape}.xml")
+
+
+def test_the_attach_takes_no_renderer_whose_service_document_is_past_the_bound(device):
+    """A service document is an answer as any other: one past the bound, or
+    one that redirects, fails the attach, and the redirect is not followed."""
+    base, hits = device
+    assert _attached(f"{base}/many.xml") == "uuid:shelf-1"
+    assert _attached(f"{base}/big-service.xml") is None
+    before = hits.get("/scpd0.xml", 0)
+    assert _attached(f"{base}/moved-service.xml") is None
+    assert hits.get("/scpd0.xml", 0) == before
 
 
 def test_a_location_that_is_no_url_is_its_answers_failure_alone(device, quiet_scan, monkeypatch):

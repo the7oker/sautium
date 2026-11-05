@@ -16,6 +16,8 @@ host (renderers can't fetch from 127.0.0.1).
 """
 
 import asyncio
+import codecs
+import contextlib
 import contextvars
 import logging
 import threading
@@ -42,11 +44,14 @@ from streaming.proxy import MIME_BY_FORMAT
 logger = logging.getLogger(__name__)
 
 try:
-    from aiohttp import ClientConnectionError
-    from async_upnp_client.aiohttp import AiohttpNotifyServer, AiohttpRequester
+    from aiohttp import ClientConnectionError, ClientError, ClientSession, ClientTimeout
+    from async_upnp_client.aiohttp import AiohttpNotifyServer
+    from async_upnp_client.client import UpnpRequester
     from async_upnp_client.client_factory import UpnpFactory
+    from async_upnp_client.const import HttpResponse
     from async_upnp_client.event_handler import UpnpEventHandler
-    from async_upnp_client.exceptions import UpnpError
+    from async_upnp_client.exceptions import (
+        UpnpCommunicationError, UpnpConnectionError, UpnpConnectionTimeoutError, UpnpError)
     from async_upnp_client.profiles.dlna import DmrDevice, TransportState
     HAS_UPNP = True
 except ImportError:
@@ -122,6 +127,95 @@ class Detached(RuntimeError):
     """A request of an instance the manager has let go (DlnaBackend.release,
     shutdown): it never reaches the renderer, and the intent it belonged to
     ends with the instance — nothing failed."""
+
+
+# What a UPnP device's answer may make the node hold: a description and its
+# services' documents are a few kilobytes, a SOAP answer less. The Output
+# scan reads a description by the same rule (routers.player), so it lists
+# only what the attach can read.
+ANSWER_BYTES = 256 * 1024
+
+# The text encodings an answer is read in: Unicode, the ISO and Windows
+# single-byte sets, and the CJK multi-byte ones — each decodes in linear time.
+TEXT_CODECS = frozenset(codecs.lookup(name).name for name in (
+    "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be",
+    "ascii", *(f"iso8859-{n}" for n in (*range(1, 12), 13, 14, 15, 16)),
+    *(f"cp125{n}" for n in range(9)), "koi8-r", "koi8-u", "mac-roman",
+    "shift_jis", "cp932", "euc_jp", "iso2022_jp", "gb2312", "gbk", "gb18030",
+    "big5", "big5hkscs", "cp950", "euc_kr", "cp949"))
+
+
+class AnswerRefused(Exception):
+    """An answer of a UPnP device the node does not read: its size, its
+    compression, its encoding."""
+
+
+async def read_answer(response) -> str:
+    """An aiohttp answer's body, read to its end, as text: nothing
+    compressed taken, ANSWER_BYTES at most — a declared length over that
+    refused before a byte of it is read. Decoded as async_upnp_client's own
+    requester decodes (aiohttp's text()): in the charset the answer names,
+    read from its Content-Type as aiohttp reads it, when Python knows it,
+    else as UTF-8, strictly — the XML declaration's own word is not read. A
+    charset outside TEXT_CODECS is refused: the device picks the codec, and
+    some of Python's are no text encoding or decode in quadratic time
+    (punycode), on an event loop where no deadline can stop them."""
+    from aiohttp.helpers import parse_mimetype
+
+    if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+        raise AnswerRefused("a compressed answer")
+    if (response.content_length or 0) > ANSWER_BYTES:
+        raise AnswerRefused("an answer past its size")
+    body = bytearray()
+    async for chunk in response.content.iter_any():
+        body += chunk
+        if len(body) > ANSWER_BYTES:
+            raise AnswerRefused("an answer past its size")
+    encoding = "utf-8"
+    charset = parse_mimetype(response.headers.get("Content-Type", "").lower()).parameters.get("charset")
+    if charset:
+        with contextlib.suppress(LookupError, ValueError):   # unknown: UTF-8, as aiohttp
+            encoding = codecs.lookup(charset).name
+    if encoding not in TEXT_CODECS:
+        raise AnswerRefused("an answer in an encoding the node does not read")
+    try:
+        return body.decode(encoding)
+    except UnicodeError:
+        raise AnswerRefused("an answer its encoding does not read") from None
+
+
+if HAS_UPNP:
+    class _BoundedRequester(UpnpRequester):
+        """The attach's HTTP to a renderer — its description, its services'
+        documents, every SOAP action and GENA request: the library's
+        AiohttpRequester with no redirect followed and each answer read as
+        read_answer reads it. The library's own follows redirects and reads
+        whatever arrives, decompressed."""
+
+        def __init__(self, timeout: float) -> None:
+            self._timeout = timeout
+
+        async def async_http_request(self, http_request):
+            headers = {**(http_request.headers or {}), "Accept-Encoding": "identity"}
+            host = urlparse(http_request.url).hostname or ""
+            if "%" in host:     # an IPv6 scope is no part of the Host header, as the library sends it
+                port = urlparse(http_request.url).port
+                bare = host.rpartition("%")[0]
+                bare = f"[{bare}]" if ":" in bare else bare
+                headers["Host"] = f"{bare}:{port}" if port else bare
+            timeout = http_request.timeout if http_request.timeout is not None else self._timeout
+            try:
+                async with ClientSession(auto_decompress=False) as session:
+                    async with session.request(http_request.method, http_request.url, headers=headers,
+                                               data=http_request.body, allow_redirects=False,
+                                               timeout=ClientTimeout(total=float(timeout))) as r:
+                        return HttpResponse(r.status, r.headers, await read_answer(r))
+            except TimeoutError as e:
+                raise UpnpConnectionTimeoutError(repr(e)) from e
+            except ClientConnectionError as e:
+                raise UpnpConnectionError(repr(e)) from e
+            except (ClientError, AnswerRefused) as e:
+                raise UpnpCommunicationError(str(e)) from e
 
 
 class _Requester:
@@ -831,7 +925,7 @@ class DlnaBackend(PlayerBackend):
     async def _async_start(self) -> None:
         # 10s over the default 5s: phone renderers in Wi-Fi power-save can
         # stall the first request for seconds while the radio wakes up.
-        requester = AiohttpRequester(timeout=10)
+        requester = _BoundedRequester(timeout=10)
         self._requester = _Requester(requester, self)
         factory = UpnpFactory(self._requester, non_strict=True)
         device, location = await self._create_device(factory)

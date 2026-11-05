@@ -6,7 +6,6 @@ but exposed as HTTP endpoints for the Web UI.
 """
 
 import asyncio
-import codecs
 import json
 import logging
 import os
@@ -30,6 +29,7 @@ from lrclib import LrclibService
 from playback import queue as queue_mod
 from playback import sessions
 from playback.base import OutputRefused, ReorderPlan
+from playback.dlna_backend import AnswerRefused, read_answer
 from playback import hqp_link
 from playback.hqp_link import Building, Dropped, GaveUp, NotAnswering, through
 from playback.hqp_meter import meter as hqp_meter
@@ -525,37 +525,28 @@ def _msearch_location(ip: str, timeout: float = 3.0) -> Optional[str]:
     return fallback
 
 
-# What a device that answers a scan may make the node fetch and hold: its
-# description, a few kilobytes — the one document a scan or an address added
-# by hand reads (_dlna_describe); its services' are the attach's business.
-_DESCRIBE_BYTES = 256 * 1024
+# What a scan waits for: a device's description — the one document a scan
+# or an address added by hand reads (_dlna_describe); its services' are the
+# attach's business. Its size and encoding are the attach's own rule
+# (dlna_backend.read_answer).
 _DESCRIBE_TIMEOUT_S = 5.0
 _LOCATIONS_PER_HOST = 4
 _LOCATIONS = 64
 _DESCRIBE_DEADLINE_S = 20.0
 
 
-class DescriptionRefused(Exception):
+class DescriptionRefused(AnswerRefused):
     """A description the scan does not take: its shape, its size, its URL."""
 
 
 async def _fetch_description(location: str) -> str:
-    """The device description at `location`, read to its end: one plain-HTTP
-    GET, no redirect followed, nothing compressed taken, _DESCRIBE_BYTES at
-    most — a declared length over that refused before a byte of it is
-    read — within _DESCRIBE_TIMEOUT_S. Decoded as the attach's library
-    decodes it (aiohttp's text()): in the charset the answer names, read
-    from its Content-Type as aiohttp reads it, when Python knows it, else as
-    UTF-8, strictly — the XML declaration's own word is not read — so the
-    scan lists what the attach can read. A charset outside
-    _DESCRIPTION_CODECS is refused: the device picks the codec, and some of
-    Python's are no text encoding or decode in quadratic time (punycode),
-    on the event loop where no deadline can stop them."""
-    import contextlib
+    """The device description at `location`: one plain-HTTP GET, no
+    redirect followed, within _DESCRIBE_TIMEOUT_S, read and decoded as the
+    attach reads it (dlna_backend.read_answer), so the scan lists what the
+    attach can read."""
     from urllib.parse import urlparse
 
     from aiohttp import ClientSession, ClientTimeout
-    from aiohttp.helpers import parse_mimetype
 
     if urlparse(location).scheme != "http":
         raise DescriptionRefused("a description is a plain-HTTP GET")
@@ -565,37 +556,7 @@ async def _fetch_description(location: str) -> str:
                                timeout=ClientTimeout(total=_DESCRIBE_TIMEOUT_S)) as r:
             if r.status != 200:
                 raise DescriptionRefused(f"the description answered {r.status}")
-            if r.headers.get("Content-Encoding", "identity").lower() != "identity":
-                raise DescriptionRefused("a compressed description")
-            if (r.content_length or 0) > _DESCRIBE_BYTES:
-                raise DescriptionRefused("a description past its size")
-            body = bytearray()
-            async for chunk in r.content.iter_any():
-                body += chunk
-                if len(body) > _DESCRIBE_BYTES:
-                    raise DescriptionRefused("a description past its size")
-            encoding = "utf-8"
-            charset = parse_mimetype(r.headers.get("Content-Type", "").lower()).parameters.get("charset")
-            if charset:
-                with contextlib.suppress(LookupError, ValueError):   # unknown: UTF-8, as aiohttp
-                    encoding = codecs.lookup(charset).name
-            if encoding not in _DESCRIPTION_CODECS:
-                raise DescriptionRefused("a description in an encoding the scan does not read")
-            try:
-                return body.decode(encoding)
-            except UnicodeError:
-                raise DescriptionRefused("a description its encoding does not read") from None
-
-
-# The text encodings a device description is read in: Unicode, the ISO and
-# Windows single-byte sets, and the CJK multi-byte ones — each decodes in
-# linear time.
-_DESCRIPTION_CODECS = frozenset(codecs.lookup(name).name for name in (
-    "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be",
-    "ascii", *(f"iso8859-{n}" for n in (*range(1, 12), 13, 14, 15, 16)),
-    *(f"cp125{n}" for n in range(9)), "koi8-r", "koi8-u", "mac-roman",
-    "shift_jis", "cp932", "euc_jp", "iso2022_jp", "gb2312", "gbk", "gb18030",
-    "big5", "big5hkscs", "cp950", "euc_kr", "cp949"))
+            return await read_answer(r)
 
 
 _UPNP_DEVICE = "{urn:schemas-upnp-org:device-1-0}"

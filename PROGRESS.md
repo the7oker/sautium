@@ -3654,7 +3654,7 @@ device on the network; none of them may hold for it more than a bound.
   `_described_devices` with defusedxml): what it needs of a device is
   there, and the service documents are the attach's — the library's device
   builder fetched every one of them. It reads the description as the
-  attach's library does, so a renderer the attach would not find there is
+  attach does, so a renderer the attach would not find there is
   not listed: decoded in the charset the answer names when Python knows it,
   else as UTF-8 (the XML declaration is not read) — and only in a text
   encoding: the device picks the codec, and punycode decodes in quadratic
@@ -3666,7 +3666,11 @@ device on the network; none of them may hold for it more than a bound.
   characters, is refused (a UDN is an identity, kept whole or not at all).
   The description is read to its end, as many pieces as it comes in, with
   no redirect followed and nothing compressed taken, 256 KiB at most (a
-  declared length past that refused before a byte); four addresses per host
+  declared length past that refused before a byte). The attach reads every
+  answer of a renderer by the same rule (`dlna_backend.read_answer`, through
+  its own requester since 2026-11-05): the description, each service's
+  document, every SOAP and GENA answer — the library's requester followed
+  redirects and read whatever arrived, decompressed. Four addresses per host
   and 64 in all are described, those of hosts a renderer is remembered at — the chosen output's among them — first, all at once in
   a loop of a worker thread's own — never parsed on the server's loop —
   within 20 s. Whatever one HQPlayer answers is that box's failure alone:
