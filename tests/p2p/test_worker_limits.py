@@ -198,6 +198,14 @@ def test_one_call_at_a_time_holds_the_right_to_mail_the_inviter():
     assert r["retriesAtOnce"] == [200, 200] and r["mailsByRetriesAtOnce"] == 1
 
 
+def test_the_right_to_mail_is_the_inviters_own_address_and_a_mail_that_never_left_gives_it_back():
+    r = _run("told")
+    assert r["anothersRecord"] is False and r["mailsToAnothersRecord"] == 0
+    assert r["notifyDown"] == 503 and r["retryAfterNotifyDown"] is True and r["mailsAfterNotifyDown"] == 1
+    # a call's give-back clears its own lease only, never the next call's
+    assert r["leases"] == {"firstHeld": True, "secondHeld": True, "secondKept": True}
+
+
 def test_a_mail_that_went_never_fails_the_answer_and_a_right_not_given_back_runs_out():
     r = _run("told")
     assert r["recordFailed"]["status"] == 200 and r["recordFailed"]["body"]["notified"] is True
@@ -346,6 +354,25 @@ def test_a_birth_never_waits_on_the_owners_instance_and_its_claim_lands_from_its
     assert r["birthOwnersDown"] == 200 and r["owedWhileDown"] == 1
     assert 60_000 <= r["retryAfterMs"] <= 61_000
     assert r["claimedLater"] is True and r["owedAfter"] == 0 and r["alarmAfter"] is None
+
+
+def test_a_claim_owed_during_a_handover_lands_with_the_next():
+    r = _run("owed")
+    assert r["afterFirstHandover"] == {"k1": True, "k2": False, "owed": 1, "again": True}
+    assert r["afterSecond"] == {"k1": True, "k2": True, "owed": 0, "alarm": None}
+    assert r["page"] == {"handovers": 2, "held": 600, "owed": 0}       # a page of 500 a handover
+
+
+def test_a_claim_owed_while_a_handover_waits_waits_with_it_and_a_refusal_is_no_handover():
+    r = _run("owed")
+    assert r["secondOweLeavesTheWait"] is True
+    assert r["refusedAnswer"] == {"owed": 2, "waits": True}
+
+
+def test_a_handover_the_owners_instance_never_answers_ends_at_its_deadline():
+    r = _run("owedhang", "--owed-timeout", "50")
+    assert r["tookMs"] < 5000 and r["owed"] == 1 and r["waits"] is True
+    assert r["landed"] is True
 
 
 def test_a_birth_whose_own_instance_cannot_keep_its_claim_is_answered_and_claims_at_first_use():

@@ -4,6 +4,7 @@
 // the Worker code actually does (test_birth_cert.py, test_worker_limits.py).
 //
 // usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--scenario NAME] [--armed]
+//                                [--owed-timeout MS]
 //        node worker_harness.mjs <authority_seed_hex> <email_pepper> --serve [--stamp-brake N]
 // Without --serve: runs one scenario (default: contract) and prints one JSON
 // object on stdout; --armed runs it with the stamp budget armed, as a refusal
@@ -30,6 +31,7 @@ const serveMode = harnessArgs.includes("--serve");
 const brakeAt = harnessArgs.indexOf("--stamp-brake");
 const stampBrake = brakeAt >= 0 ? Number(harnessArgs[brakeAt + 1]) : Infinity;
 const armed = harnessArgs.includes("--armed");
+const owedTimeoutAt = harnessArgs.indexOf("--owed-timeout");
 const here = dirname(fileURLToPath(import.meta.url));
 const workerPath = resolve(here, "../../worker/verify.js");
 
@@ -73,6 +75,14 @@ const swapped2 = swapped.replace(/const MASTER_PUBKEY = "[0-9a-f]{64}";/, `const
 if (swapped2 === swapped) throw new Error("MASTER_PUBKEY pattern not found");
 swapped = swapped2.replace("const MAIL_PER_SENDER_DAY = 30;", "const MAIL_PER_SENDER_DAY = 3;");
 if (swapped === swapped2) throw new Error("MAIL_PER_SENDER_DAY pattern not found");
+if (owedTimeoutAt >= 0) {
+  // How long the birth instance waits on a handover the owners instance does
+  // not answer, cut for the scenario that waits it out.
+  const before = swapped;
+  swapped = before.replace("const OWED_CALL_TIMEOUT_MS = 10 * 1000;",
+                           `const OWED_CALL_TIMEOUT_MS = ${Number(harnessArgs[owedTimeoutAt + 1])};`);
+  if (swapped === before) throw new Error("OWED_CALL_TIMEOUT_MS pattern not found");
+}
 if (armed) {
   const shadow = swapped;
   swapped = shadow.replace("const STAMP_BUDGET_ARMED = false;", "const STAMP_BUDGET_ARMED = true;");
@@ -1320,6 +1330,7 @@ async function stamps() {
 
 async function storeFaults() {
   const out = {};
+  const addrsBefore = new Set(counterKeys("birth:addr:"));
   const k = await newKey();
   kvState.fail = "put";
   out.birthKvDown = await issue(k);
@@ -1346,7 +1357,7 @@ async function storeFaults() {
   unset("birth:all:");
   // births per address and day
   out.perAddress = [];
-  preset(counterKeys("birth:addr:")[0] || "none", 49);
+  preset(counterKeys("birth:addr:").find((key) => !addrsBefore.has(key)), 49);
   out.perAddress.push((await issue(await newKey())).status, (await issue(await newKey())).status);
   // the request itself
   const k3 = await newKey();
@@ -1822,7 +1833,7 @@ async function toldOnce() {
     await issue(acceptor, { ip: theirIp });
     const code = await inviteOf(inviter, name);
     return {
-      id: await inviteIdOf(token),
+      id: await inviteIdOf(token), code,
       go: (opts = {}) => accept(acceptor, `ada${n}`, code, { ip: theirIp, token, ...opts }),
       told: (from) => mails.slice(from).filter((m) => m.to[0] === `${name}@example.org`).length,
     };
@@ -1873,6 +1884,111 @@ async function toldOnce() {
   invites.db.prepare("UPDATE invites SET mailing = ? WHERE id = ?").run(Date.now() - 1, c.id);
   out.retryAfterLease = (await c.go()).body.notified;
   out.mailsAfterLease = c.told(sent);
+  // the verified record under the inviter's code naming another key: the
+  // right to mail is nobody's, and no address is mailed
+  c = await invited();
+  const other = await newKey();
+  store.set(`verified:${c.code.replace("#", ":")}`, JSON.stringify({
+    email: "someone-else@example.org", pubkey: other.pubHex, born_at: "2026-11-01T00:00:00Z",
+    verified_at: "2026-11-01T00:00:00Z" }));
+  sent = mails.length;
+  out.anothersRecord = (await c.go()).body.notified;
+  out.mailsToAnothersRecord = mails.slice(sent).filter((m) => m.to[0] === "someone-else@example.org").length;
+  // the notify instance failing after the right was taken: the answer is a
+  // 503, and the right is given back for the retry, which mails
+  c = await invited();
+  const notifyDown = { ...env, LIMITER: { idFromName: (x) => x, get: (x) => x === "notify"
+    ? { fetch: () => Promise.reject(new Error("Durable Object is overloaded")) } : limiterShard(x).stub } };
+  out.notifyDown = (await c.go({ useEnv: notifyDown })).status;
+  sent = mails.length;
+  out.retryAfterNotifyDown = (await c.go()).body.notified;
+  out.mailsAfterNotifyDown = c.told(sent);
+  // a right whose lease ran out is another call's: the first call's give-back
+  // leaves the second's lease as it is
+  c = await invited();
+  const step = async (path, body) => (await (await invites.stub.fetch(`https://object${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json());
+  const row = invites.db.prepare("SELECT inviter, inviter_code FROM invites WHERE id = ?").get(c.id);
+  const acceptance = { id: c.id, acceptor: "ab".repeat(32), acceptor_code: "x#AAAA-BBBB-CCCC",
+                       their_code: row.inviter_code, statement_ts: nowS(), signature: "00".repeat(64),
+                       mailable: row.inviter };
+  const first = await step("/invite/accept", { ...acceptance, now: Date.now() });
+  const second = await step("/invite/accept", { ...acceptance, now: first.lease + 1 });
+  await step("/invite/mailed", { id: c.id, lease: first.lease, sent: false });
+  out.leases = { firstHeld: first.mail, secondHeld: second.mail,
+                 secondKept: Number(invites.db.prepare("SELECT mailing FROM invites WHERE id = ?").get(c.id).mailing)
+                   === second.lease };
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// owed: the claims births leave in their instance, handed over
+// -------------------------------------------------------------------------
+
+const birthOf = async (key) => call("POST", "/birth-certificate", {
+  pubkey_hex: key.pubHex, signature: await sign(key, `birth:${key.pubHex}`) });
+const holdsDigest = (key) => limiterShard("owners").db
+  .prepare("SELECT count(*) AS n FROM owners WHERE pubkey = ?").get(key.pubHex).n === 1;
+const owedRows = () => limiterShard("birth").db.prepare("SELECT count(*) AS n FROM owed").get().n;
+const ownersOnly = (fetch) => ({ idFromName: (n) => n, get: (n) => n === "owners" ? { fetch } : limiterShard(n).stub });
+
+async function owedClaims() {
+  const out = {};
+  const births = limiterShard("birth");
+  // a claim owed while a handover is out stays for the next one
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  limiterEnv.LIMITER = ownersOnly(async (url, init) => { await gate; return limiterShard("owners").stub.fetch(url, init); });
+  const [k1, k2] = [await newKey(), await newKey()];
+  await birthOf(k1);
+  const handing = births.fire();
+  await birthOf(k2);
+  release();
+  await handing;
+  limiterEnv.LIMITER = limiter.namespace;
+  out.afterFirstHandover = { k1: holdsDigest(k1), k2: holdsDigest(k2), owed: owedRows(),
+                             again: births.alarm() !== null };
+  await births.fire();
+  out.afterSecond = { k1: holdsDigest(k1), k2: holdsDigest(k2), owed: owedRows(), alarm: births.alarm() };
+  // more than a page: every claim lands, a page a handover
+  const owe = (pubkey) => births.stub.fetch("https://object/owner/owe", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ digest: pubkey.slice(0, 12).toUpperCase(), pubkey, issued: Date.now(), now: Date.now() }) });
+  const many = Array.from({ length: 600 }, () => hex(webcrypto.getRandomValues(new Uint8Array(32))));
+  for (const pubkey of many) await owe(pubkey);
+  let handovers = 0;
+  while (births.alarm() !== null && handovers < 5) { await births.fire(); handovers += 1; }
+  const held = limiterShard("owners").db.prepare(
+    `SELECT count(*) AS n FROM owners WHERE pubkey IN (${many.map(() => "?").join(",")})`).get(...many).n;
+  out.page = { handovers, held, owed: owedRows() };
+  // a claim owed while a failed handover waits its minute waits with it
+  limiterEnv.LIMITER = ownersOnly(() => Promise.reject(new Error("Durable Object is overloaded")));
+  await birthOf(await newKey());
+  await births.fire();
+  const waiting = births.alarm();
+  await birthOf(await newKey());
+  out.secondOweLeavesTheWait = births.alarm() === waiting && waiting - Date.now() > 50_000;
+  // an answer that is not the claims' taking is no handover
+  limiterEnv.LIMITER = ownersOnly(async () => new Response(JSON.stringify({ ok: false }), { status: 500 }));
+  await births.fire();
+  out.refusedAnswer = { owed: owedRows(), waits: births.alarm() - Date.now() > 50_000 };
+  limiterEnv.LIMITER = limiter.namespace;
+  return out;
+}
+
+async function owedHang() {
+  // Run with --owed-timeout: an owners instance that never answers holds a
+  // handover no longer than that, then the claims wait their minute.
+  const births = limiterShard("birth");
+  limiterEnv.LIMITER = ownersOnly(() => new Promise(() => {}));
+  const k = await newKey();
+  await birthOf(k);
+  const started = Date.now();
+  await births.fire();
+  const out = { tookMs: Date.now() - started, owed: owedRows(), waits: births.alarm() - Date.now() > 50_000 };
+  limiterEnv.LIMITER = limiter.namespace;
+  await births.fire();
+  out.landed = holdsDigest(k) && owedRows() === 0;
   return out;
 }
 
@@ -1946,7 +2062,7 @@ const scenarios = {
   directory: directoryLimits, ledger: ledgerWave, burst: birthBurst, paused: pausedWrites,
   names: nameRetention, mailbox: mailboxFull, shards: shardFailure, history: issuanceHistory,
   drops: mailboxDrops, armed: armedStamps, vectors: inviteVectors, owners: inviteOwners,
-  reserve: reserveShare, smallorder: smallOrder, told: toldOnce,
+  reserve: reserveShare, smallorder: smallOrder, told: toldOnce, owed: owedClaims, owedhang: owedHang,
 };
 if (serveMode) {
   const { createServer } = await import("node:http");

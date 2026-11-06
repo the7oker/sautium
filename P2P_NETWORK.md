@@ -345,7 +345,8 @@ An add by plain code tells the code's owner through the Worker's mail (the
 adder's username and code, nothing else), and the owner adds back.
 
 **A mailed invite** is the one way one side's add makes the contact on the
-other (since 2026-11-07): its single-use token, spent on the Worker when the
+other (the nodes and the Worker of 2026-11-07, in force from the Worker's
+deploy): its single-use token, spent on the Worker when the
 recipient adds the invite string, ties the acceptance to the mailbox the
 inviter chose. The inviter's node keeps the invite's id (`sent_invites`) and
 picks its acceptances up — at the launcher's start, when Friends opens (once
