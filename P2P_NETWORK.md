@@ -323,13 +323,14 @@ KDF inputs, so either change is a new key; the old one is kept:
 Cloudflare Worker (`sautium-verify.sautium.workers.dev`) + Resend:
 - Signed requests (Ed25519) — a modified client cannot forge one; the invite
   texts carry their time (±300 s), and every invite route answers only the
-  key born first under its code's 48-bit digest (since 2026-11-07)
+  key born first under its code's 48-bit digest (the Worker code of
+  2026-11-07, in force from its deploy)
 - KV store maps `invite_code → verified_email`
 - Invite emails go out only from a key with a certificate and a verified
   email, and name that address (since 2026-11-02); every mail is capped per
   key, per mailbox and per route, the email code is spent by five wrong tries
 - Each invite email carries a single-use token, which the Worker keeps only
-  as its hash (since 2026-11-07): `/accept-invite` spends it once, and the
+  as its hash (the same Worker code): `/accept-invite` spends it once, and the
   inviter's node reads its accepted invites, each with its acceptor's signed
   statement, with a signed `/pending-accepts`. An add by plain code keeps
   nothing there: the code's owner is mailed the adder's username and adds

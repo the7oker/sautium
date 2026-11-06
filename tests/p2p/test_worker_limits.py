@@ -187,9 +187,23 @@ def test_an_invites_token_is_spent_once_and_its_acceptor_hears_the_same_answer_a
 
 
 def test_an_acceptance_whose_mail_failed_is_told_at_the_retry_once():
-    r = _run("accepts")
+    r = _run("told")
     assert r["toldFirst"] is False and r["toldRetry"] is True and r["toldAgain"] is True
     assert r["mailsByRetries"] == 1
+
+
+def test_one_call_at_a_time_holds_the_right_to_mail_the_inviter():
+    r = _run("told")
+    assert r["atOnce"] == [200, 200] and r["mailsAtOnce"] == 1
+    assert r["retriesAtOnce"] == [200, 200] and r["mailsByRetriesAtOnce"] == 1
+
+
+def test_a_mail_that_went_never_fails_the_answer_and_a_right_not_given_back_runs_out():
+    r = _run("told")
+    assert r["recordFailed"]["status"] == 200 and r["recordFailed"]["body"]["notified"] is True
+    assert r["retryAfterRecordFailed"] is False and r["mailsAfterRecordFailed"] == 1
+    assert r["releaseFailed"] == 200
+    assert r["retryWhileHeld"] is False and r["retryAfterLease"] is True and r["mailsAfterLease"] == 1
 
 
 def test_a_refused_invite_names_its_reason():
@@ -234,6 +248,9 @@ def test_an_add_mails_only_the_address_the_codes_own_key_verified():
     r = _run("accepts")
     assert r["addToAnothersRecord"]["body"] == {"status": "added", "notified": False}
     assert r["mailsToAnothersRecord"] == 0
+    # a record naming a key whose digest is not the code's, though it holds its own
+    assert r["addToMismatchedRecord"]["body"] == {"status": "added", "notified": False}
+    assert r["mailsToMismatchedRecord"] == 0
 
 
 def test_the_pickup_is_a_signed_read_of_every_accepted_invite():
@@ -322,10 +339,19 @@ def test_an_elder_whose_claim_never_landed_holds_its_code_at_its_first_use():
     assert r["undated"]["body"] == {"error": "no certificate for this key"}
 
 
-def test_a_birth_does_not_wait_on_the_owners_instance():
+def test_a_birth_never_waits_on_the_owners_instance_and_its_claim_lands_from_its_own():
     r = _run("shards")
-    assert r["birthOwnersDown"] == 200 and r["claimedAtBirth"] == 0
-    assert r["firstUse"] == 200                                 # claimed there
+    assert r["birthOwnersHang"] == 200 and r["claimedFromBirth"] is True
+    # the owners instance failing: kept, retried a minute later, landed
+    assert r["birthOwnersDown"] == 200 and r["owedWhileDown"] == 1
+    assert 60_000 <= r["retryAfterMs"] <= 61_000
+    assert r["claimedLater"] is True and r["owedAfter"] == 0 and r["alarmAfter"] is None
+
+
+def test_a_birth_whose_own_instance_cannot_keep_its_claim_is_answered_and_claims_at_first_use():
+    r = _run("shards")
+    assert r["oweFails"] == 200 and r["claimedAfterOweFailed"] is False
+    assert r["firstUse"] == 200 and r["claimedAtFirstUse"] is True
 
 
 def test_the_births_stored_before_are_read_once_and_until_then_no_owner_is_answered():
@@ -335,6 +361,8 @@ def test_the_births_stored_before_are_read_once_and_until_then_no_owner_is_answe
     # a step whose reads fail writes nothing; the alarm, retried, chains
     # itself to the end over pages KV may hand back short
     assert r["failedStep"].startswith("KV GET failed") and r["failedStepWroteNothing"] is True
+    # a page's claims and the cursor past it are one transaction
+    assert r["fullStep"].startswith("SQLITE_FULL") and r["fullStepWroteNothing"] is True
     assert r["steps"] >= 2 and r["backfillDone"] is True
     assert r["backfilled"] == 1201
     assert r["elderHolds"] is True                              # the earlier birth wins a later claim
@@ -486,6 +514,22 @@ def test_the_owners_brake_stops_every_write_and_no_read():
     # the master still wakes and drains its mailbox; only its address hint waits
     assert r["masterWake"]["status"] == 426 and r["hintUnchanged"] is True
     assert r["masterDrain"]["status"] == 200
+
+
+def test_under_the_brake_the_owner_claims_wait_and_go_on_once_it_is_lifted():
+    r = _run("paused")
+    assert r["firstStep"] == 503 and r["cursorAfterFirstStep"] is True
+    # the backfill's alarm: no step, no list, a minute's wait
+    a = r["alarmUnderBrake"]
+    assert a["lists"] == 0 and a["cursorKept"] is True and 60_000 <= a["waitsMs"] <= 61_000
+    assert r["backfillDoneAfterBrake"] is True
+    # an elder's first use past the backfill claims nothing under the brake
+    assert r["elderUnderBrake"]["status"] == 503 and r["elderClaimedNothing"] is True
+    assert r["elderAfterBrake"] == 200 and r["elderHolds"] is True
+    # a birth's claim kept in its instance is not handed over under the brake
+    o = r["owedUnderBrake"]
+    assert o["ownersUntouched"] is True and o["kept"] == 1 and 60_000 <= o["waitsMs"] <= 61_000
+    assert r["owedAfterBrake"] == 0
 
 
 def test_one_routes_limiter_failing_leaves_the_others_working():

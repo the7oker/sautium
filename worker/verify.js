@@ -22,8 +22,8 @@
  * Masha can't impersonate Alice because she can't sign with Alice's keys.
  * An invite code (name#XXXX-XXXX-XXXX, 48 bits of the key's digest) belongs
  * to the first key born under its digest: every invite route refuses any
- * other key (the Limiter's "owners", filled at each birth and, once, from
- * the births stored before it).
+ * other key (the Limiter's "owners", filled from each birth through the
+ * birth route's own instance and, once, from the births stored before it).
  *
  * Admission (Durable Object LIMITER, one SQLite instance per route): every
  * write a caller can repeat and every mail passes its route's counters there
@@ -161,6 +161,14 @@ const INVITE_TTL_MS = 30 * DAY_MS;
 // each, inside the thousand operations one invocation may make.
 const OWNER_BACKFILL_PAGE = 500;
 const BACKFILL_DONE = "done";
+// Births' claims the birth instance hands to the owners instance in one
+// call; while that instance fails, or the owner's brake holds, they wait a
+// minute at a time.
+const OWED_PAGE = 500;
+const OWED_RETRY_MS = 60 * 1000;
+// The right to mail an invite's inviter: one call holds it while it sends,
+// and a call that never says how its mail went loses it after this long.
+const MAIL_LEASE_MS = 10 * 60 * 1000;
 // The routes that send mail. Their ceilings count the provider's day, from
 // 00:00 UTC, not 24 h from first use: two windows that each straddle a
 // midnight would otherwise let both ceilings' mail into one of its days.
@@ -649,10 +657,12 @@ async function handleBirthCertificate(request, env) {
    * The birth is in KV before the ledger records it: a write that fails
    * leaves no ledger row for a birth that never happened. Every issuance,
    * the first and each repeat, then claims the key's invite code for it
-   * (the earliest-born key under a digest holds it). A birth does not wait
-   * on that claim: the invite routes' traffic reaches the same instance,
-   * and a key whose claim failed makes it at its first invite route, under
-   * the same birth date (ownerRefusal).
+   * (the earliest-born key under a digest holds it) through the birth
+   * route's own instance, which keeps the claim until the owners instance
+   * has taken it (Limiter.alarm): the invite routes' traffic reaches that
+   * instance, and no state of it reaches a birth's answer. Only when the
+   * birth's own instance fails too is the claim left to the key's first
+   * invite route, under the same birth date (ownerRefusal).
    */
   const { body, refusal: bad } = await readJson(request);
   if (bad) return bad;
@@ -710,8 +720,8 @@ async function handleBirthCertificate(request, env) {
     await ledgerCall(env, "/birth", score ? { ...facts, m: mult } : facts);
   }
   try {
-    await limiterCall(env, "owners", "/owner/claim", {
-      digest: await inviteDigest(pubkey), pubkey, issued: Date.parse(record.issued_at),
+    await limiterCall(env, "birth", "/owner/owe", {
+      digest: await inviteDigest(pubkey), pubkey, issued: Date.parse(record.issued_at), now: Date.now(),
     });
   } catch (e) {
     if (!(e instanceof StoreUnavailable)) throw e;
@@ -1191,10 +1201,14 @@ export class Limiter {
    *              the wrong tries each has taken; an alarm removes each when
    *              it expires.
    *   owners   — ("owners") the key each invite code's digest belongs to:
-   *              the earliest born, whichever claims first — every birth
-   *              claims, and the births stored before claims existed are
-   *              read once from KV (the backfill, a page a step; until it is
-   *              done no owner is answered).
+   *              the earliest born, whichever claims first — every birth's
+   *              claim comes from the birth instance, the births stored
+   *              before claims existed are read once from KV (the backfill,
+   *              a page a step; until it is done no owner is answered), and
+   *              a key that does not hold its digest claims at its first
+   *              invite route under its stored birth.
+   *   owed     — ("birth") each birth's claim, until the owners instance
+   *              has taken it: the alarm hands them over a page at a time.
    *   invites  — ("invites") each mailed invite under its id (its token's
    *              hash: never the token, the recipient or the message), its
    *              inviter, and once spent its acceptor's signed statement; an
@@ -1225,11 +1239,13 @@ export class Limiter {
       id TEXT PRIMARY KEY, inviter TEXT NOT NULL, inviter_code TEXT NOT NULL,
       sent INTEGER NOT NULL, expires INTEGER NOT NULL,
       acceptor TEXT, acceptor_code TEXT, accepted INTEGER, statement_ts INTEGER, signature TEXT,
-      notified INTEGER NOT NULL DEFAULT 0)`);
+      notified INTEGER NOT NULL DEFAULT 0, mailing INTEGER)`);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS invites_accepted ON invites (inviter, accepted)
                    WHERE acceptor IS NOT NULL`);
     this.sql.exec("CREATE INDEX IF NOT EXISTS invites_expires ON invites (expires)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS owed (
+      pubkey TEXT PRIMARY KEY, digest TEXT NOT NULL, issued INTEGER NOT NULL)`);
   }
 
   async fetch(request) {
@@ -1249,21 +1265,29 @@ export class Limiter {
       return Response.json({ ok: true });
     }
     if (path === "/owner") {
-      if (!await this._ownersReady(body.paused === true)) return Response.json({ ready: false });
+      if (!await this._ownersReady()) return Response.json({ ready: false });
       return Response.json({ ready: true, owner: this._owner(body.digest) });
     }
     if (path === "/owner/claim") {
       this._claim(body.digest, body.pubkey, body.issued);
       return Response.json({ owner: this._owner(body.digest) });
     }
+    if (path === "/owner/claims") {
+      for (const [digest, pubkey, issued] of body.claims) this._claim(digest, pubkey, issued);
+      return Response.json({ ok: true });
+    }
+    if (path === "/owner/owe") return Response.json(await this.owe(body));
     if (path === "/invite/put") return Response.json(await this.putInvite(body));
     if (path === "/invite/drop") {
       this.sql.exec("DELETE FROM invites WHERE id = ? AND acceptor IS NULL", body.id);
       return Response.json({ ok: true });
     }
     if (path === "/invite/accept") return Response.json(this.acceptInvite(body));
-    if (path === "/invite/notified") {
-      this.sql.exec("UPDATE invites SET notified = 1 WHERE id = ?", body.id);
+    if (path === "/invite/mailed") {
+      // Told is told; a right given back is cleared only while it is still
+      // this call's (a lease that ran out may be another call's by now).
+      if (body.sent) this.sql.exec("UPDATE invites SET notified = 1, mailing = NULL WHERE id = ?", body.id);
+      else this.sql.exec("UPDATE invites SET mailing = NULL WHERE id = ? AND mailing = ?", body.id, body.lease);
       return Response.json({ ok: true });
     }
     if (path === "/invite/pickup") return Response.json(this.pickup(body));
@@ -1297,20 +1321,55 @@ export class Limiter {
   async alarm() {
     // An expired code (it holds the address it was sent to) or invite is
     // removed when it expires, not when the next one happens to be asked
-    // for; an owners' backfill under way takes its next step.
+    // for; an owners' backfill under way takes its next step; births'
+    // claims kept here go to the owners instance. Under the owner's brake
+    // neither of the last two writes, and each waits a minute at a time.
     const now = Date.now();
     this.sql.exec("DELETE FROM codes WHERE expires <= ?", now);
     this.sql.exec("DELETE FROM invites WHERE expires <= ?", now);
     const at = this._backfillAt();
-    const paused = writesPaused(this.env || {});
+    const paused = writesPaused(this.env);
     if (at !== null && at !== BACKFILL_DONE && !paused) await this._backfillStep();
+    const handed = !paused && await this._handOverClaims();
+    const owed = this.sql.exec("SELECT count(*) AS n FROM owed").one().n > 0;
     const due = [
       this.sql.exec("SELECT min(expires) AS t FROM codes").one().t,
       this.sql.exec("SELECT min(expires) AS t FROM invites").one().t,
       at !== null && this._backfillAt() !== BACKFILL_DONE
         ? Date.now() + (paused ? BRAKE_RETRY_AFTER_S * 1000 : 0) : null,
+      owed ? Date.now() + (handed ? 0 : OWED_RETRY_MS) : null,
     ].filter((t) => t !== null).map(Number);
     if (due.length) await this.state.storage.setAlarm(Math.min(...due));
+  }
+
+  async owe({ digest, pubkey, issued, now }) {
+    // A birth's claim, kept until the owners instance has taken it; the
+    // alarm hands it over at once unless one is already set (a handover
+    // waiting out a failure takes the new claim with it).
+    this.sql.exec("INSERT INTO owed (pubkey, digest, issued) VALUES (?, ?, ?) ON CONFLICT(pubkey) DO NOTHING",
+                  pubkey, digest, issued);
+    if (await this.state.storage.getAlarm() === null) await this.state.storage.setAlarm(now);
+    return { ok: true };
+  }
+
+  async _handOverClaims() {
+    // The oldest page of the claims kept here, in one call to the owners
+    // instance; only the claims it took are dropped (a birth's owed while
+    // the call was out stays for the next page). → false when the owners
+    // instance could not take them.
+    const page = this.sql.exec("SELECT rowid AS r, digest, pubkey, issued FROM owed ORDER BY rowid LIMIT ?",
+                               OWED_PAGE).toArray();
+    if (!page.length) return true;
+    try {
+      await objectCall(this.env.LIMITER, "owners", "/owner/claims",
+                       { claims: page.map((c) => [c.digest, c.pubkey, Number(c.issued)]) });
+    } catch (e) {
+      if (!(e instanceof StoreUnavailable)) throw e;
+      console.error("owner claims wait for the owners instance:", e.cause);
+      return false;
+    }
+    this.sql.exec("DELETE FROM owed WHERE rowid <= ?", page[page.length - 1].r);
+    return true;
   }
 
   _owner(digest) {
@@ -1336,13 +1395,13 @@ export class Limiter {
     return row ? row.v : null;
   }
 
-  async _ownersReady(paused) {
+  async _ownersReady() {
     // An owner is answered only once every birth stored before claims were
     // recorded has been read: until then the earliest of a digest's keys
     // may not have claimed yet. One step per call, the alarm doing the rest
     // — none while the owner's brake holds.
     if (this._backfillAt() === BACKFILL_DONE) return true;
-    if (paused) return false;
+    if (writesPaused(this.env)) return false;
     await this._backfillStep();
     if (this._backfillAt() === BACKFILL_DONE) return true;
     if (await this.state.storage.getAlarm() === null) await this.state.storage.setAlarm(Date.now());
@@ -1369,12 +1428,14 @@ export class Limiter {
         claims.push([await inviteDigest(pubkey), pubkey, issued]);
       }
     }
-    // The claims and the cursor in one synchronous step.
-    for (const [digest, pubkey, issued] of claims) this._claim(digest, pubkey, issued);
-    this.sql.exec(
-      `INSERT INTO meta (k, v) VALUES ('owners_backfill', ?)
-       ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
-      page.list_complete ? BACKFILL_DONE : page.cursor);
+    // The page's claims and the cursor past it in one transaction.
+    this.state.storage.transactionSync(() => {
+      for (const [digest, pubkey, issued] of claims) this._claim(digest, pubkey, issued);
+      this.sql.exec(
+        `INSERT INTO meta (k, v) VALUES ('owners_backfill', ?)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
+        page.list_complete ? BACKFILL_DONE : page.cursor);
+    });
   }
 
   async putInvite({ id, inviter, inviter_code, now }) {
@@ -1388,26 +1449,33 @@ export class Limiter {
     return { ok: true };
   }
 
-  acceptInvite({ id, acceptor, acceptor_code, their_code, statement_ts, signature, now }) {
+  acceptInvite({ id, acceptor, acceptor_code, their_code, statement_ts, signature, mailable, now }) {
     // The token's one spending, in one step: an open invite becomes this
     // acceptor's, kept 30 days for its inviter's pickup; the same acceptor
     // asking again finds its answer again, and whether its inviter was told.
+    // The right to mail the inviter (`mail`, until `lease`) goes to one call
+    // at a time, and only while the inviter is untold and `mailable` — the
+    // key the caller found a verified address for — is the inviter's.
     const row = this.sql.exec(
-      "SELECT inviter, inviter_code, acceptor, notified FROM invites WHERE id = ? AND expires > ?",
+      "SELECT inviter, inviter_code, acceptor, notified, mailing FROM invites WHERE id = ? AND expires > ?",
       id, now).toArray()[0];
     if (!row) return { ok: false, reason: "not_found" };
     if (row.inviter === acceptor) return { ok: false, reason: "own" };
     if (row.inviter_code !== their_code) return { ok: false, reason: "not_this_code" };
-    const answer = { ok: true, inviter: row.inviter, inviter_code: row.inviter_code,
-                     notified: Number(row.notified) === 1 };
-    if (row.acceptor !== null) {
-      return row.acceptor === acceptor ? { ...answer, again: true } : { ok: false, reason: "used" };
+    if (row.acceptor !== null && row.acceptor !== acceptor) return { ok: false, reason: "used" };
+    const told = Number(row.notified) === 1;
+    const mail = !told && mailable === row.inviter && (row.mailing === null || Number(row.mailing) <= now);
+    const lease = mail ? now + MAIL_LEASE_MS : row.mailing;
+    if (row.acceptor === null) {
+      this.sql.exec(
+        `UPDATE invites SET acceptor = ?, acceptor_code = ?, accepted = ?, statement_ts = ?,
+           signature = ?, expires = ?, mailing = ? WHERE id = ?`,
+        acceptor, acceptor_code, now, statement_ts, signature, now + INVITE_TTL_MS, lease, id);
+    } else if (mail) {
+      this.sql.exec("UPDATE invites SET mailing = ? WHERE id = ?", lease, id);
     }
-    this.sql.exec(
-      `UPDATE invites SET acceptor = ?, acceptor_code = ?, accepted = ?, statement_ts = ?,
-         signature = ?, expires = ? WHERE id = ?`,
-      acceptor, acceptor_code, now, statement_ts, signature, now + INVITE_TTL_MS, id);
-    return { ...answer, again: false };
+    return { ok: true, inviter: row.inviter, inviter_code: row.inviter_code, notified: told, mail,
+             lease: mail ? lease : null };
   }
 
   pickup({ inviter, now }) {
@@ -2311,14 +2379,13 @@ async function ownerRefusal(env, pubkey) {
   // made up for at the key's first use, whoever claimed meanwhile. Under
   // the owner's brake nothing is claimed.
   const digest = await inviteDigest(pubkey);
-  const paused = writesPaused(env);
-  const held = await limiterCall(env, "owners", "/owner", { digest, paused });
+  const held = await limiterCall(env, "owners", "/owner", { digest });
   if (!held.ready) return unavailable();
   if (held.owner === pubkey) return null;
   const born = await env.RATE_LIMITS.get(`born:${pubkey}`, "json");
   const issued = born ? Date.parse(born.issued_at || born.born_at) : NaN;
   if (!Number.isFinite(issued)) return json({ error: "no certificate for this key" }, 403);
-  if (paused) return unavailable();
+  if (writesPaused(env)) return unavailable();
   const { owner } = await limiterCall(env, "owners", "/owner/claim", { digest, pubkey, issued });
   return owner === pubkey ? null : json({ error: "invite code doesn't match public key" }, 403);
 }
@@ -2557,8 +2624,11 @@ async function handleCheckEmail(request, url, env) {
    * Safe: requires signature (proves key ownership), doesn't leak emails.
    * When verified for this very pubkey, also returns (and, if needed,
    * upgrades to) the method:email identity certificate. A read: its only
-   * writes upgrade a record stored before certificate v2, once each, so it
-   * takes no counters and binds no name — the brake alone stands in front.
+   * writes are once-only repairs — a record stored before certificate v2
+   * upgraded, a step of the owners' backfill, a key's claim on its own code
+   * at its first use (ownerRefusal) — so it takes no counters and binds no
+   * name; the brake alone stands in front, and under the owner's brake none
+   * of them is made.
    */
   const braked = await routeBrake(env, request, "check");
   if (braked) return braked;
@@ -2614,11 +2684,13 @@ async function handleAcceptInvite(request, env) {
    * One route, two texts, and the token tells which. With `invite_token`
    * (acceptText): the invite the token names is spent for this key in one
    * step of the invites instance — open, or already this key's (its answer
-   * again, and no second mail); unexpired; sent under `their_invite_code`;
-   * not by the caller — and its inviter is mailed, with no address of the
-   * acceptor's. Without one (addText): an add by plain code. Nothing is
-   * kept, and the code's owner, if it has a verified address, is mailed the
-   * adder's username and the code to add back.
+   * again); unexpired; sent under `their_invite_code`; not by the caller —
+   * and its inviter is mailed once, with no address of the acceptor's: the
+   * step hands the right to send to one call at a time, a mail that does
+   * not go gives it back for the acceptor's retry, and a mail that went is
+   * never a failure of the answer. Without one (addText): an add by plain
+   * code. Nothing is kept, and the code's owner, if it has a verified
+   * address, is mailed the adder's username and the code to add back.
    *
    * Body: {my_invite_code, their_invite_code, public_key_hex, ts, invite_token?, signature}
    * → {status: "accepted", invite_id, inviter: {invite_code, public_key_hex}, notified}
@@ -2674,22 +2746,24 @@ async function handleAcceptInvite(request, env) {
     return json({ status: "added", notified });
   }
 
+  const inviter = await getVerified(env, theirs);
   const taken = await limiterCall(env, "invites", "/invite/accept", {
     id: inviteId, acceptor: caller.pubkey, acceptor_code: my_invite_code, their_code: theirs,
-    statement_ts: ts, signature: signature.toLowerCase(), now: Date.now(),
+    statement_ts: ts, signature: signature.toLowerCase(),
+    mailable: inviter?.email ? inviter.pubkey : null, now: Date.now(),
   });
   if (!taken.ok) return refusedInvite(taken.reason);
-  // Told once: an acceptor asking again after a failure between the step and
-  // the mail has the mail sent then.
   let notified = taken.notified;
-  if (!notified) {
-    const inviter = await getVerified(env, theirs);
-    if (inviter?.email && inviter.pubkey === taken.inviter) {
-      notified = await notify(
+  if (taken.mail) {
+    let sent = false;
+    try {
+      sent = await notify(
         env, request, caller.pubkey, inviter.email, `${username} accepted your Sautium invite`,
         acceptNotificationEmailHtml(username, longCode));
-      if (notified) await limiterCall(env, "invites", "/invite/notified", { id: inviteId });
+    } finally {
+      await recordMail(env, inviteId, taken.lease, sent);
     }
+    notified = sent;
   }
   return json({
     status: "accepted", invite_id: inviteId,
@@ -2706,12 +2780,25 @@ const INVITE_REFUSALS = {
   own: [403, "your own invite"],
 };
 
+async function recordMail(env, id, lease, sent) {
+  // What became of the mail this call had the right to send: the inviter
+  // told, or the right given back. A store failure here is the log's, not
+  // the answer's — the acceptance is made, and a right never given back
+  // runs out by itself (MAIL_LEASE_MS).
+  try {
+    await limiterCall(env, "invites", "/invite/mailed", { id, lease, sent });
+  } catch (e) {
+    if (!(e instanceof StoreUnavailable)) throw e;
+    console.error("invite mail's outcome not recorded:", e.cause);
+  }
+}
+
 async function holdsCode(env, pubkey, code) {
   // True when `pubkey` is the key that holds `code`'s digest.
   if (!isValidPubkeyHex(pubkey)) return false;
   const digest = await inviteDigest(pubkey);
   if (code.split("#")[1].replace(/-/g, "") !== digest) return false;
-  const held = await limiterCall(env, "owners", "/owner", { digest, paused: writesPaused(env) });
+  const held = await limiterCall(env, "owners", "/owner", { digest });
   return held.ready === true && held.owner === pubkey;
 }
 

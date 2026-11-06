@@ -87,12 +87,15 @@ const worker = workerModule.default;
 // SQL handles for the Durable Objects: each class the Worker exports runs
 // in-process on node:sqlite — its SQL is exercised for real, only the storage
 // handle is emulated. `trace`, when set to an array, collects every statement
-// and its parameters.
+// and its parameters; `failOn`, when set to a pattern, makes a statement
+// that matches it fail as a full disk would.
 function sqlHandle(db) {
   const handle = {
     trace: null,
+    failOn: null,
     exec(query, ...params) {
       if (handle.trace) handle.trace.push([query, params]);
+      if (handle.failOn && handle.failOn.test(query)) throw new Error("SQLITE_FULL: database or disk is full");
       const stmt = db.prepare(query);
       const rows = /^\s*SELECT|\bRETURNING\b/i.test(query) ? stmt.all(...params) : (stmt.run(...params), []);
       return { toArray: () => rows, one: () => rows[0] };
@@ -121,19 +124,26 @@ function objectOf(Cls, db, objEnv = {}) {
   let ready;
   const obj = new Cls({ storage, blockConcurrencyWhile: (fn) => { ready = fn(); } }, objEnv);
   const stub = { fetch: (url, init) => obj.fetch(url instanceof Request ? url : new Request(url, init)) };
-  // fire(): the alarm runs as Cloudflare runs one — spent as it fires, so
-  // only a handler that sets it again leaves one; a handler that throws has
-  // it retried.
-  const fire = async () => {
-    alarmAt = null;
-    try {
-      await obj.alarm();
-    } catch (e) {
-      if (alarmAt === null) alarmAt = Date.now();
-      throw e;
-    }
+  // fire(): the alarm runs as Cloudflare runs one — one at a time, spent as
+  // it fires, so only a handler that sets it again leaves one; a handler
+  // that throws has it retried. Cloudflare retries it from 2 s on, six times
+  // at most; here the retry is left set for the test to fire, and no test
+  // depends on its timing or its limit.
+  let firing = Promise.resolve();
+  const fire = () => {
+    const run = firing.then(async () => {
+      alarmAt = null;
+      try {
+        await obj.alarm();
+      } catch (e) {
+        if (alarmAt === null) alarmAt = Date.now();
+        throw e;
+      }
+    });
+    firing = run.catch(() => {});
+    return run;
   };
-  return { obj, stub, db, ready, alarm: () => alarmAt, fire,
+  return { obj, stub, db, sql: storage.sql, ready, alarm: () => alarmAt, fire,
            namespace: { idFromName: (name) => name, get: () => stub } };
 }
 
@@ -191,17 +201,28 @@ const mailbox = objectOf(workerModule.MasterMailbox, mailDb);
 const dirDb = new DatabaseSync(":memory:");
 const directory = objectOf(workerModule.NodeDirectory, dirDb);
 // The Limiter: one instance per name, each on its own database, as Cloudflare
-// keeps one object per id; its env holds the KV the owners' backfill reads.
+// keeps one object per id. Its env is the Worker's, as an object's is: the
+// KV the owners' backfill reads, the namespace the birth instance hands its
+// claims over through, and the owner's brake (call() sets it as the request
+// it makes has it; a test sets it itself for an alarm).
+const limiterEnv = { RATE_LIMITS: kv };
 const limiterShards = new Map();
 function limiterShard(name) {
   if (!limiterShards.has(name)) {
-    limiterShards.set(name, objectOf(workerModule.Limiter, new DatabaseSync(":memory:"), { RATE_LIMITS: kv }));
+    limiterShards.set(name, objectOf(workerModule.Limiter, new DatabaseSync(":memory:"), limiterEnv));
   }
   return limiterShards.get(name);
 }
 const limiter = workerModule.Limiter ? {
   namespace: { idFromName: (name) => name, get: (name) => limiterShard(name).stub },
 } : null;
+if (limiter) limiterEnv.LIMITER = limiter.namespace;
+async function settleBirths() {
+  // The birth instance's alarm, as Cloudflare runs it right after a birth
+  // set it: the claims births left there handed to the owners instance.
+  const births = limiterShards.get("birth");
+  if (births && births.alarm() !== null && births.alarm() <= Date.now()) await births.fire();
+}
 
 // Rate Limiting bindings emulated as plain counters (the real ones count per
 // location over a 60 s window; the contract is only `limit({key}) → {success}`).
@@ -246,6 +267,7 @@ async function call(method, path, body, { ip = "203.0.113.7", cf, type = "applic
   else if (body !== undefined) init.body = JSON.stringify(body);
   const req = new Request(`https://worker.test${path}`, init);
   if (cf) req.cf = cf;                       // request.cf as the edge would set it
+  limiterEnv.WRITES_PAUSED = useEnv.WRITES_PAUSED;   // one variable for the Worker and its objects
   const res = await worker.fetch(req, useEnv);
   const text = await res.text();
   let parsed;
@@ -253,9 +275,13 @@ async function call(method, path, body, { ip = "203.0.113.7", cf, type = "applic
   return { status: res.status, body: parsed, headers: Object.fromEntries(res.headers) };
 }
 
-const issue = async (key, opts) => call("POST", "/birth-certificate", {
-  pubkey_hex: key.pubHex, signature: await sign(key, `birth:${key.pubHex}`),
-}, opts);
+async function issue(key, opts) {
+  const answer = await call("POST", "/birth-certificate", {
+    pubkey_hex: key.pubHex, signature: await sign(key, `birth:${key.pubHex}`),
+  }, opts);
+  await settleBirths();
+  return answer;
+}
 const certOf = async (key) => (await call("GET", `/birth-certificate?pubkey=${key.pubHex}`)).body;
 
 async function sendCode(key, name, email, opts) {
@@ -809,8 +835,10 @@ async function accepts() {
   // the token spent once: accepted, then the same answer again with no
   // second mail, then refused for another key
   sent = mails.length;
+  const notifyToBefore = new Set(counterKeys("notify:to:"));
   out.accepted = await accept(sasha, "sasha", mashaCode, { ip: "198.51.100.51", token });
   out.acceptMail = mails.slice(sent);
+  const mashaNotifyTo = counterKeys("notify:to:").find((key) => !notifyToBefore.has(key));
   sent = mails.length;
   out.acceptedAgain = await accept(sasha, "sasha", mashaCode, { ip: "198.51.100.51", token });
   out.mailsByAgain = mails.length - sent;
@@ -829,18 +857,6 @@ async function accepts() {
                                   accept(r2, "rita", ninaCode, { ip: "198.51.100.59", token: raced })]))
     .map((r) => r.status).sort();
   out.racedRows = invitesTable().filter((r) => r.acceptor === r1.pubHex || r.acceptor === r2.pubHex).length;
-  // an acceptance whose mail failed is told at the acceptor's retry, once
-  await invite(nina, "nina", "late@example.net", { ip: "198.51.100.61" });
-  const lateToken = tokenIn(mails[mails.length - 1]);
-  const lark = await newKey();
-  await issue(lark);
-  mailState.down = true;
-  out.toldFirst = (await accept(lark, "lark", ninaCode, { ip: "198.51.100.60", token: lateToken })).body.notified;
-  mailState.down = false;
-  sent = mails.length;
-  out.toldRetry = (await accept(lark, "lark", ninaCode, { ip: "198.51.100.60", token: lateToken })).body.notified;
-  out.toldAgain = (await accept(lark, "lark", ninaCode, { ip: "198.51.100.60", token: lateToken })).body.notified;
-  out.mailsByRetries = mails.length - sent;
   // what a token can be refused for
   out.badToken = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: "0".repeat(31) });
   out.upperToken = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: "A".repeat(32) });
@@ -898,6 +914,15 @@ async function accepts() {
   sent = mails.length;
   out.addToAnothersRecord = await accept(sasha, "sasha", await inviteOf(quin, "quin"), { ip: "198.51.100.51" });
   out.mailsToAnothersRecord = mails.slice(sent).filter((m) => m.to[0] === "quin@example.org").length;
+  // a record under a code whose digest is not its key's is nobody's to
+  // mail, though that key holds a digest of its own
+  const xeno = "xeno#ABCD-EF01-2345";
+  store.set(`verified:${xeno.replace("#", ":")}`, JSON.stringify({
+    email: "xeno@example.org", pubkey: nina.pubHex, born_at: "2026-11-01T00:00:00Z",
+    verified_at: "2026-11-01T00:00:00Z" }));
+  sent = mails.length;
+  out.addToMismatchedRecord = await accept(sasha, "sasha", xeno, { ip: "198.51.100.51" });
+  out.mailsToMismatchedRecord = mails.slice(sent).filter((m) => m.to[0] === "xeno@example.org").length;
   out.invalidTheirs = await accept(sasha, "sasha", "nonsense", { ip: "198.51.100.51" });
   // a mail that fails leaves no invite behind
   const idsBeforeDown = new Set(invitesTable().map((r) => r.id));
@@ -914,13 +939,12 @@ async function accepts() {
   out.acceptAtKeyCap = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: token3 });
   out.stepUntouchedAtCap = JSON.stringify(invitesTable()) === rowsAtCap;
   unset(`accept:key:${pasha.pubHex}`);
-  const notifyTo = counterKeys("notify:to:")[0];
-  if (notifyTo) preset(notifyTo, 3);
+  preset(mashaNotifyTo, 3);
   sent = mails.length;
   out.acceptAtNotifyCap = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: token3 });
   out.mailsAtNotifyCap = mails.length - sent;
   // the mails one address may set off in a day
-  if (notifyTo) unset(notifyTo);
+  unset(mashaNotifyTo);
   const notifyAddrsBefore = new Set(counterKeys("notify:addr:"));
   const adder = async (name, ip) => { const k = await newKey(); await issue(k, { ip }); return accept(k, name, mashaCode, { ip }); };
   await adder("kasia", "198.51.100.53");
@@ -1064,6 +1088,12 @@ async function inviteOwners() {
   out.failedStep = await owners.fire().then(() => "ran", (e) => String(e.message));
   kvState.failGetAfter = null;
   out.failedStepWroteNothing = owners.db.prepare("SELECT count(*) AS n FROM owners").get().n === rowsBefore
+    && metaOf() === cursorBefore;
+  // a step whose cursor cannot be written keeps none of its page's claims
+  owners.sql.failOn = /INSERT INTO meta/;
+  out.fullStep = await owners.fire().then(() => "ran", (e) => String(e.message));
+  owners.sql.failOn = null;
+  out.fullStepWroteNothing = owners.db.prepare("SELECT count(*) AS n FROM owners").get().n === rowsBefore
     && metaOf() === cursorBefore;
   // the alarm chains itself to the end: each step sets the next
   let steps = 0;
@@ -1503,6 +1533,57 @@ async function pausedWrites() {
   out.hintUnchanged = (store.get("master:hint") ?? null) === hintBefore;
   out.masterDrain = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${t}&after=0&signature=${await sign(master, `mailbox-drain:v1:${t}:0`)}`, undefined, { useEnv: paused });
   out.zeroIsOff = (await issue(await newKey(), { useEnv: { ...env, WRITES_PAUSED: "0" } })).status;
+  // the owners' backfill begun, then the brake in the objects' env: its
+  // alarm takes no step, lists nothing and waits a minute; lifted, it goes on
+  for (let i = 0; i < 600; i++) {
+    store.set(`born:${hex(webcrypto.getRandomValues(new Uint8Array(32)))}`,
+              JSON.stringify({ born_at: "2026-07-05T10:11:12Z", sig: "ab".repeat(64) }));
+  }
+  const owners = limiterShard("owners");
+  const metaOf = () => owners.db.prepare("SELECT v FROM meta WHERE k = 'owners_backfill'").get()?.v ?? null;
+  const check = async (key, name, opts) => {
+    const c = await inviteOf(key, name);
+    return call("GET", `/check-email?invite_code=${encodeURIComponent(c)}&email=x%40example.org`
+      + `&public_key_hex=${key.pubHex}&signature=${await sign(key, `check-email:${c}:x@example.org`)}`, undefined, opts);
+  };
+  out.firstStep = (await check(k, "kim")).status;
+  out.cursorAfterFirstStep = ![null, "done"].includes(metaOf());
+  limiterEnv.WRITES_PAUSED = "1";
+  const [lists, cursor, at] = [kvState.lists, metaOf(), Date.now()];
+  await owners.fire();
+  out.alarmUnderBrake = { lists: kvState.lists - lists, cursorKept: metaOf() === cursor,
+                          waitsMs: owners.alarm() - at };
+  limiterEnv.WRITES_PAUSED = undefined;
+  for (let steps = 0; owners.alarm() !== null && steps < 5; steps++) await owners.fire();
+  out.backfillDoneAfterBrake = metaOf() === "done";
+  // past the backfill, an elder whose digest a later key holds: under the
+  // brake its first use claims nothing; lifted, it holds its code
+  const elder = await newKey();
+  store.set(`born:${elder.pubHex}`, JSON.stringify({ v: 4, issued_at: "2026-05-01T00:00:00Z", method: "pow",
+    difficulty: 32, params_version: 1, sig_v4: "cd".repeat(64) }));
+  const elderDigest = (await inviteOf(elder, "x")).split("#")[1].replace(/-/g, "");
+  owners.db.prepare("INSERT INTO owners (digest, pubkey, issued) VALUES (?, ?, ?)")
+    .run(elderDigest, "dd".repeat(32), Date.parse("2026-10-30T00:00:00Z"));
+  const beforeElder = ownersOf();
+  out.elderUnderBrake = await check(elder, "eden", { useEnv: paused });
+  out.elderClaimedNothing = ownersOf() === beforeElder;
+  out.elderAfterBrake = (await check(elder, "eden")).status;
+  out.elderHolds = owners.db.prepare("SELECT pubkey FROM owners WHERE digest = ?").get(elderDigest).pubkey
+    === elder.pubHex;
+  // a birth's claim its instance keeps waits out the brake as well
+  limiterEnv.LIMITER = { idFromName: (n) => n, get: (n) => n === "owners"
+    ? { fetch: async () => { throw new Error("Durable Object is overloaded"); } } : limiterShard(n).stub };
+  await issue(await newKey());
+  limiterEnv.LIMITER = limiter.namespace;
+  const births = limiterShard("birth");
+  const owed = () => births.db.prepare("SELECT count(*) AS n FROM owed").get().n;
+  limiterEnv.WRITES_PAUSED = "1";
+  const [beforeOwed, atOwed] = [ownersOf(), Date.now()];
+  await births.fire();
+  out.owedUnderBrake = { ownersUntouched: ownersOf() === beforeOwed, kept: owed(), waitsMs: births.alarm() - atOwed };
+  limiterEnv.WRITES_PAUSED = undefined;
+  await births.fire();
+  out.owedAfterBrake = owed();
   return out;
 }
 
@@ -1721,32 +1802,130 @@ async function armedStamps() {
 }
 
 // -------------------------------------------------------------------------
+// told: an acceptance's inviter is mailed once
+// -------------------------------------------------------------------------
+
+async function toldOnce() {
+  // Each case its own inviter, acceptor and addresses, so that no notify
+  // cap (three a day per key, per mailbox, per address) decides one.
+  const out = {};
+  const invites = limiterShard("invites");
+  let n = 0;
+  async function invited() {
+    n += 1;
+    const [ip, theirIp, name] = [`198.51.100.${120 + n}`, `198.51.100.${160 + n}`, `teo${n}`];
+    const inviter = await newKey(), acceptor = await newKey();
+    await issue(inviter, { ip });
+    await verifyEmail(inviter, name, `${name}@example.org`, { ip });
+    await invite(inviter, name, `guest${n}@example.net`, { ip });
+    const token = tokenIn(mails[mails.length - 1]);
+    await issue(acceptor, { ip: theirIp });
+    const code = await inviteOf(inviter, name);
+    return {
+      id: await inviteIdOf(token),
+      go: (opts = {}) => accept(acceptor, `ada${n}`, code, { ip: theirIp, token, ...opts }),
+      told: (from) => mails.slice(from).filter((m) => m.to[0] === `${name}@example.org`).length,
+    };
+  }
+  // the invites instance failing on one path only, as an overloaded object
+  const failingOn = (path) => ({ ...env, LIMITER: { idFromName: (x) => x, get: (x) => x !== "invites"
+    ? limiterShard(x).stub
+    : { fetch: (url, init) => String(url).endsWith(path)
+        ? Promise.reject(new Error("Durable Object is overloaded")) : limiterShard(x).stub.fetch(url, init) } } });
+  let sent;
+  // a mail that failed is sent at the acceptor's retry, once
+  let c = await invited();
+  mailState.down = true;
+  out.toldFirst = (await c.go()).body.notified;
+  mailState.down = false;
+  sent = mails.length;
+  out.toldRetry = (await c.go()).body.notified;
+  out.toldAgain = (await c.go()).body.notified;
+  out.mailsByRetries = c.told(sent);
+  // one acceptor's two first acceptances at once: one mail
+  c = await invited();
+  sent = mails.length;
+  out.atOnce = (await Promise.all([c.go(), c.go()])).map((r) => r.status);
+  out.mailsAtOnce = c.told(sent);
+  // a failed mail, then two retries at once: one mail
+  c = await invited();
+  mailState.down = true;
+  await c.go();
+  mailState.down = false;
+  sent = mails.length;
+  out.retriesAtOnce = (await Promise.all([c.go(), c.go()])).map((r) => r.status);
+  out.mailsByRetriesAtOnce = c.told(sent);
+  // the mail sent, its record failing: the answer is the acceptance's, and
+  // the right still held keeps a retry from mailing again
+  c = await invited();
+  sent = mails.length;
+  out.recordFailed = await c.go({ useEnv: failingOn("/invite/mailed") });
+  out.retryAfterRecordFailed = (await c.go()).body.notified;
+  out.mailsAfterRecordFailed = c.told(sent);
+  // a mail that failed, its right not given back: a retry mails only once
+  // the right has run out
+  c = await invited();
+  mailState.down = true;
+  out.releaseFailed = (await c.go({ useEnv: failingOn("/invite/mailed") })).status;
+  mailState.down = false;
+  sent = mails.length;
+  out.retryWhileHeld = (await c.go()).body.notified;
+  invites.db.prepare("UPDATE invites SET mailing = ? WHERE id = ?").run(Date.now() - 1, c.id);
+  out.retryAfterLease = (await c.go()).body.notified;
+  out.mailsAfterLease = c.told(sent);
+  return out;
+}
+
+// -------------------------------------------------------------------------
 // shards: one route's limiter failing leaves the others working
 // -------------------------------------------------------------------------
 
 async function shardFailure() {
-  const broken = {
-    idFromName: (n) => n,
-    get: (n) => n === "pending"
-      ? { fetch: async () => { throw new Error("Durable Object is overloaded"); } }
-      : limiterShard(n).stub,
-  };
-  const useEnv = { ...env, LIMITER: broken };
+  // A namespace whose instance `name` fails on `path` (on every path when
+  // none is given) the way an overloaded object does, or never answers.
+  const failing = (name, path = null, hang = false) => ({ idFromName: (n) => n, get: (n) => n !== name
+    ? limiterShard(n).stub
+    : { fetch: (url, init) => (path === null || String(url).endsWith(path))
+        ? (hang ? new Promise(() => {}) : Promise.reject(new Error("Durable Object is overloaded")))
+        : limiterShard(n).stub.fetch(url, init) } });
+  const holds = (key) => limiterShard("owners").db
+    .prepare("SELECT count(*) AS n FROM owners WHERE pubkey = ?").get(key.pubHex).n === 1;
+  const births = limiterShard("birth");
+  const owed = () => births.db.prepare("SELECT count(*) AS n FROM owed").get().n;
+  const out = {};
+  const useEnv = { ...env, LIMITER: failing("pending") };
   const k = await newKey();
-  const birth = (await issue(k, { useEnv })).status;
-  // a birth does not wait on the owners' instance: its claim is made at the
-  // key's first invite route
-  const ownersDown = { idFromName: (n) => n, get: (n) => n === "owners"
-    ? { fetch: async () => { throw new Error("Durable Object is overloaded"); } }
-    : limiterShard(n).stub };
+  out.birth = (await issue(k, { useEnv })).status;
+  out.pickup = (await pending(k, "pia", { useEnv })).status;
+  // a birth never calls the owners instance: one that never answers holds
+  // no birth up, and the claim comes from the birth's own instance
   const k2 = await newKey();
-  const birthOwnersDown = (await issue(k2, { useEnv: { ...env, LIMITER: ownersDown } })).status;
-  const claimedAtBirth = limiterShard("owners").db
-    .prepare("SELECT count(*) AS n FROM owners WHERE pubkey = ?").get(k2.pubHex).n;
-  const c2 = await inviteOf(k2, "otto");
-  const firstUse = (await call("GET", `/check-email?invite_code=${encodeURIComponent(c2)}&email=o%40example.org`
-    + `&public_key_hex=${k2.pubHex}&signature=${await sign(k2, `check-email:${c2}:o@example.org`)}`)).status;
-  return { birth, pickup: (await pending(k, "pia", { useEnv })).status, birthOwnersDown, claimedAtBirth, firstUse };
+  out.birthOwnersHang = (await issue(k2, { useEnv: { ...env, LIMITER: failing("owners", null, true) } })).status;
+  out.claimedFromBirth = holds(k2);
+  // the owners instance failing: the claim waits in the birth instance, a
+  // minute at a time, and lands when that instance answers again, whether
+  // or not the key ever calls an invite route
+  limiterEnv.LIMITER = failing("owners");
+  const k3 = await newKey();
+  const before = Date.now();
+  out.birthOwnersDown = (await issue(k3, { useEnv: { ...env, LIMITER: failing("owners") } })).status;
+  out.owedWhileDown = owed();
+  out.retryAfterMs = births.alarm() - before;
+  limiterEnv.LIMITER = limiter.namespace;
+  await births.fire();
+  out.claimedLater = holds(k3);
+  out.owedAfter = owed();
+  out.alarmAfter = births.alarm();
+  // the birth's own instance unable to keep the claim: the birth is
+  // answered, and the key claims at its first invite route
+  const k4 = await newKey();
+  out.oweFails = (await issue(k4, { useEnv: { ...env, LIMITER: failing("birth", "/owner/owe") } })).status;
+  out.claimedAfterOweFailed = holds(k4);
+  const c4 = await inviteOf(k4, "otto");
+  out.firstUse = (await call("GET", `/check-email?invite_code=${encodeURIComponent(c4)}&email=o%40example.org`
+    + `&public_key_hex=${k4.pubHex}&signature=${await sign(k4, `check-email:${c4}:o@example.org`)}`)).status;
+  out.claimedAtFirstUse = holds(k4);
+  return out;
 }
 
 // -------------------------------------------------------------------------
@@ -1767,7 +1946,7 @@ const scenarios = {
   directory: directoryLimits, ledger: ledgerWave, burst: birthBurst, paused: pausedWrites,
   names: nameRetention, mailbox: mailboxFull, shards: shardFailure, history: issuanceHistory,
   drops: mailboxDrops, armed: armedStamps, vectors: inviteVectors, owners: inviteOwners,
-  reserve: reserveShare, smallorder: smallOrder,
+  reserve: reserveShare, smallorder: smallOrder, told: toldOnce,
 };
 if (serveMode) {
   const { createServer } = await import("node:http");
@@ -1794,6 +1973,7 @@ if (serveMode) {
                    "CF-Connecting-IP": "203.0.113.7" },
         body: body.length ? body : undefined,
       }), env);
+      await settleBirths();
       res.writeHead(response.status, Object.fromEntries(response.headers));
       res.end(Buffer.from(await response.arrayBuffer()));
     } catch (e) {

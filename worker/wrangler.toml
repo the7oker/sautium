@@ -46,7 +46,8 @@ storage = "sqlite"
 # counters a write or a mail passes first (per key, per mailbox, per address,
 # the route's daily ceiling); the instance "names" the username each key
 # speaks under, "code" the pending email codes, "owners" the key each invite
-# code's digest belongs to, "invites" the invites mailed and their
+# code's digest belongs to (the route's "birth" keeps each birth's claim
+# until "owners" has taken it), "invites" the invites mailed and their
 # acceptances — atomic there, so a refused request writes nothing to KV and
 # a token is spent once. The master's mailbox and the directory count what
 # they store in their own objects.
