@@ -8,8 +8,11 @@ Uses the Cloudflare Worker as a trusted CA:
 - Registration requires a birth certificate for the same identity — the
   Worker stores {email, pubkey, born_at, verified_at}, so a verified badge
   can cite identity age.
-- Invite: signed request → Worker verifies signature → sends email with
-  verified badge.
+- Invite: the Web UI's route (backend/routers/p2p.py) signs the request;
+  the Worker mails a single-use token under the verified badge. The
+  inviter's pickup (pick_up_acceptances) adds whoever accepted.
+- Every route is a key's own code's, and the Worker answers only a key it
+  issued a certificate to: the wizard asks for it before its first request.
 
 All state-changing requests are signed with the user's Ed25519 private key.
 The Worker verifies the signature, so a modified client can't impersonate
@@ -18,10 +21,13 @@ others.
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
+
+from desktop.p2p import chat_wire
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +122,17 @@ def _identity_ctx(username: str = "", password: str = "") -> Optional[dict]:
     }
 
 
+def _born(ctx: dict) -> Optional[dict]:
+    """This identity's certificate — the stored one, else asked for: a new
+    account's wizard verifies its email before the launcher's first start,
+    and the Worker answers only a key it issued a certificate to."""
+    from desktop.p2p import birth_cert
+    cert = birth_cert.load_certificate()
+    if cert is None or cert["pubkey"] != ctx["public_key_hex"].lower():
+        cert = birth_cert.request_certificate(ctx["public_key_hex"], ctx["sign"])
+    return cert
+
+
 # -------------------------------------------------------------------
 # Check if email already verified
 # -------------------------------------------------------------------
@@ -132,7 +149,7 @@ def is_email_already_verified(
     still has the mapping — no need to re-verify.
     """
     ctx = _identity_ctx(username, password)
-    if not ctx:
+    if not ctx or not _born(ctx):
         return False
 
     message = f"check-email:{ctx['invite_code']}:{email}"
@@ -170,6 +187,9 @@ def send_verification_email(
     if not ctx:
         logger.error("No identity — can't request verification email")
         return False
+    if not _born(ctx):
+        logger.error("No birth certificate — can't request verification email")
+        return False
 
     message = f"sendcode:{ctx['invite_code']}:{to_email}"
     result = _post_worker("/send-verification", {
@@ -204,11 +224,7 @@ def register_verified_email(
         logger.error("No identity — can't register email")
         return False
 
-    from desktop.p2p import birth_cert
-    cert = birth_cert.load_certificate()
-    if cert is None or cert["pubkey"] != ctx["public_key_hex"].lower():
-        cert = birth_cert.request_certificate(
-            ctx["public_key_hex"], ctx["sign"])
+    cert = _born(ctx)
     if cert is None:
         logger.error("No birth certificate — can't register email")
         return False
@@ -233,111 +249,71 @@ def register_verified_email(
 
 
 # -------------------------------------------------------------------
-# Invite (send signed invite to someone)
+# The inviter's pickup (one function, three triggers: the Friends screen on
+# either runtime, the launcher's start, a peer's nudge)
 # -------------------------------------------------------------------
 
-def send_invite_email(
-    to_email: str,
-    message: str = "",
-) -> bool:
-    """
-    Send a signed invite email. Worker includes verified sender badge.
+# Accepted invites one pickup takes (the Worker's page).
+PICKUP_PAGE = 300
 
-    Returns True if sent.
-    """
-    identity = _get_identity()
-    if not identity:
-        logger.error("No account — can't send invite")
-        return False
 
-    invite_code = identity["invite_code"]
-    public_key_hex = identity["public_key_hex"]
+def has_open_invites(conn) -> bool:
+    """An invite this node mailed whose acceptance it has not taken, young
+    enough for the Worker to still hold it (chat_wire.INVITE_PICKUP_DAYS)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM sent_invites
+             WHERE invite_id IS NOT NULL AND taken_at IS NULL
+               AND sent_at > now() - make_interval(days => %s)
+             LIMIT 1
+        """, (chat_wire.INVITE_PICKUP_DAYS,))
+        return cur.fetchone() is not None
 
-    sig_message = f"invite:{invite_code}:to:{to_email}"
-    signature = _sign_message(sig_message)
 
-    result = _post_worker("/send-invite", {
-        "to": to_email,
+def pick_up_acceptances(conn, invite_code: str, public_key_hex: str, sign) -> list[str]:
+    """Ask the Worker for this node's accepted invites and add every one
+    that holds up (chat_wire.take_acceptance), each in a transaction of its
+    own → the codes of the contacts added. Only while an invite is open;
+    the Worker deletes nothing, so a node of the same account, a restore or
+    a pickup lost on its way loses nothing. `sign(bytes) -> bytes` is this
+    node's key; `conn` a connection the caller holds."""
+    if not has_open_invites(conn):
+        return []
+    ts = int(time.time())
+    result = _post_worker("/pending-accepts", {
         "invite_code": invite_code,
         "public_key_hex": public_key_hex,
-        "signature": signature,
-        "message": message,
+        "ts": ts,
+        "signature": sign(chat_wire.pickup_text(ts, invite_code, public_key_hex).encode("utf-8")).hex(),
     })
-    if result and result.get("status") == "sent":
-        verified = result.get("verified_sender", False)
-        logger.info(
-            f"Invite sent to {to_email} "
-            f"(verified={verified})"
-        )
-        return True
-    return False
-
-
-# -------------------------------------------------------------------
-# Accept invite (auto-reciprocate)
-# -------------------------------------------------------------------
-
-def accept_invite(their_invite_code: str) -> Optional[dict]:
-    """
-    Notify the Worker that we accepted someone's invite.
-
-    The Worker stores the acceptance and sends our invite code to the
-    sender's verified email (if available).
-
-    Returns {"status": "accepted", "notified": bool} or None on failure.
-    """
-    identity = _get_identity()
-    if not identity:
-        logger.error("No account — can't accept invite")
-        return None
-
-    my_invite = identity["invite_code"]
-    public_key_hex = identity["public_key_hex"]
-
-    message = f"accept:{my_invite}:{their_invite_code}"
-    signature = _sign_message(message)
-
-    result = _post_worker("/accept-invite", {
-        "my_invite_code": my_invite,
-        "their_invite_code": their_invite_code,
-        "public_key_hex": public_key_hex,
-        "signature": signature,
-    })
-    if result and result.get("status") == "accepted":
-        notified = result.get("notified", False)
-        logger.info(
-            f"Accepted invite from {their_invite_code} "
-            f"(sender notified={notified})"
-        )
-        return result
-    return None
-
-
-def check_pending_accepts() -> list[dict]:
-    """
-    Poll the Worker for invite codes that accepted our invites.
-
-    Returns list of {"invite_code": "...", "accepted_at": "..."}.
-    Worker deletes entries after pickup (one-time).
-    """
-    identity = _get_identity()
-    if not identity:
+    accepts = result.get("accepts") if isinstance(result, dict) else None
+    if not isinstance(accepts, list):
         return []
+    added = []
+    for accept in accepts[:PICKUP_PAGE]:
+        outcome = _in_transaction(conn, lambda: chat_wire.take_acceptance(
+            conn, accept, invite_code, public_key_hex))
+        if outcome == "added":
+            added.append(accept["acceptor"]["invite_code"])
+            logger.info("Pickup: the invite accepted by %s added", accept["acceptor"]["invite_code"])
+        elif outcome not in ("taken", "held", "not an invite of this node"):
+            logger.warning("Pickup: an acceptance skipped — %s", outcome)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM sent_invites WHERE sent_at < now() - make_interval(days => %s)",
+                    (chat_wire.INVITE_PICKUP_DAYS,))
+    return added
 
-    my_invite = identity["invite_code"]
-    public_key_hex = identity["public_key_hex"]
 
-    message = f"pending-accepts:{my_invite}"
-    signature = _sign_message(message)
-
-    result = _get_worker("/pending-accepts", {
-        "invite_code": my_invite,
-        "public_key_hex": public_key_hex,
-        "signature": signature,
-    })
-    if result and "accepts" in result:
-        accepts = result["accepts"]
-        if accepts:
-            logger.info(f"Pending accepts: {len(accepts)} new")
-        return accepts
-    return []
+def _in_transaction(conn, step):
+    """`step()` committed as one transaction, whatever mode `conn` is in."""
+    autocommit = conn.autocommit
+    conn.autocommit = False
+    try:
+        outcome = step()
+        conn.commit()
+        return outcome
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = autocommit

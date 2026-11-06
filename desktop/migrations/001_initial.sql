@@ -1885,7 +1885,12 @@ CREATE TABLE IF NOT EXISTS friends (
     -- know: set when the friendship is made under it, advanced when the
     -- friend accepts a rotation notice. NULL = unknown (a row from before
     -- the column) — the notice chain is walked until one is accepted.
-    bound_identity VARCHAR(128)
+    bound_identity VARCHAR(128),
+    -- A contact made from a long code, or from an accepted invite, waits
+    -- for the key whose SHA-256 begins with these 16 bytes; NULL for one
+    -- made from a short code, whose 48 bits the invite code carries alone
+    -- (049, 2026-11-07).
+    key_fingerprint BYTEA CONSTRAINT friends_key_fingerprint_len CHECK (octet_length(key_fingerprint) = 16)
 );
 
 CREATE TABLE IF NOT EXISTS p2p_messages (
@@ -1896,7 +1901,15 @@ CREATE TABLE IF NOT EXISTS p2p_messages (
     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     delivered BOOLEAN DEFAULT FALSE,
     read BOOLEAN DEFAULT FALSE,
-    message_uuid UUID DEFAULT gen_random_uuid()
+    message_uuid UUID DEFAULT gen_random_uuid(),
+    -- A received message's sender's signature over who wrote it to whom,
+    -- its uuid, time and text (chat_wire.message_statement), and the time
+    -- it signed — `timestamp` may be clamped to the arrival — so the row
+    -- can go back to its sender in a history export and stand there as
+    -- theirs. NULL on outgoing rows (this node signs its own as it boxes
+    -- them) and on rows from before (049, 2026-11-07).
+    sender_sig BYTEA CONSTRAINT p2p_messages_sender_sig_len CHECK (octet_length(sender_sig) = 64),
+    sent_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS pending_key_rotations (
@@ -1910,11 +1923,19 @@ CREATE TABLE IF NOT EXISTS pending_key_rotations (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+-- An invite this node mailed: the address, and the invite's id (the hash of
+-- the single-use token its mail carried, which the Worker keeps the invite
+-- under); `taken_at` once a pickup has added whoever accepted it. A row
+-- without an id predates the token and never matches an acceptance (049,
+-- 2026-11-07).
 CREATE TABLE IF NOT EXISTS sent_invites (
     id SERIAL PRIMARY KEY,
     to_email VARCHAR(255) NOT NULL,
-    sent_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    sent_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    invite_id UUID,
+    taken_at TIMESTAMPTZ
 );
+CREATE UNIQUE INDEX IF NOT EXISTS sent_invites_invite_id ON sent_invites (invite_id);
 
 CREATE INDEX IF NOT EXISTS idx_friends_invite_code ON friends(invite_code);
 CREATE INDEX IF NOT EXISTS idx_friends_username ON friends(username);

@@ -93,6 +93,11 @@ class ChatService:
 
         self.db_dsn = db_dsn
         self.public_key_hex = public_key_hex
+        self._signing_key = SigningKey(private_key_raw)
+        # This node's key and the ones it retired: a message a friend wrote
+        # before applying our rotation names one of the retired ones.
+        self.own_keys = (public_key_hex,) + tuple(
+            SigningKey(s).verify_key.encode().hex() for s in previous_seeds)
         self._curve_private = ed25519_to_curve25519_private(private_key_raw)
         self._previous_curve = [ed25519_to_curve25519_private(s) for s in previous_seeds]
         # Cache Box instances per friend public key
@@ -111,15 +116,33 @@ class ChatService:
 
     def encrypt_envelope(self, text: str, message_uuid: str, ts_iso: str,
                          friend_public_key_hex: str) -> str:
-        """One message boxed for a friend with its uuid and time inside
+        """One message of ours boxed for a friend with its uuid, its time and
+        our signature over both, the text and the pair inside
         (chat_wire.envelope) — every message this node sends, any path."""
-        box = self._get_box(friend_public_key_hex)
-        encrypted = box.encrypt(chat_wire.envelope(text, message_uuid, ts_iso))
-        return base64.b64encode(encrypted).decode("ascii")
+        sig = self._signing_key.sign(chat_wire.message_statement(
+            self.public_key_hex, friend_public_key_hex, message_uuid,
+            chat_wire.sent_time(ts_iso), text)).signature.hex()
+        return self._box(friend_public_key_hex, chat_wire.envelope(text, message_uuid, ts_iso, sig))
+
+    def seal_exported(self, row: dict, friend_public_key_hex: str) -> str:
+        """A row of a history export (chat_wire.export_rows), boxed for the
+        friend asking: ours signed as we send them, theirs with the
+        signature they came with (none on a row stored before messages
+        carried one), each under the time it was signed."""
+        if row["direction"] == "out":
+            return self.encrypt_envelope(row["content"], str(row["message_uuid"]),
+                                         row["timestamp"].isoformat(), friend_public_key_hex)
+        sig = bytes(row["sender_sig"]).hex() if row["sender_sig"] is not None else None
+        sent = row["sent_at"] or row["timestamp"]
+        return self._box(friend_public_key_hex, chat_wire.envelope(
+            row["content"], str(row["message_uuid"]), sent.isoformat(), sig))
+
+    def _box(self, friend_public_key_hex: str, plaintext: bytes) -> str:
+        return base64.b64encode(self._get_box(friend_public_key_hex).encrypt(plaintext)).decode("ascii")
 
     def decrypt_envelope(self, encrypted_b64: str, sender_public_key_hex: str) -> dict:
-        """{uuid, ts, text} of a message a friend boxed — CryptoError for a
-        box that does not open, ValueError for one that holds no envelope."""
+        """{uuid, ts, text, sig} of a message a friend boxed — CryptoError for
+        a box that does not open, ValueError for one that holds no envelope."""
         return chat_wire.open_envelope(self._open(encrypted_b64, sender_public_key_hex))
 
     def _open(self, encrypted_b64: str, sender_public_key_hex: str) -> bytes:
@@ -185,7 +208,10 @@ class ChatService:
         """Add a friend. Resolves pending entries by invite_code. Returns
         friend ID. `source`/`source_token_id` are set only when passed
         (token-handshake accepts) — None preserves whatever the row has, so
-        resolving a guest-side 'master' stub never relabels it."""
+        resolving a guest-side 'master' stub never relabels it. A pending
+        entry bound to a fingerprint resolves only for the key it names;
+        for any other, nothing is added (None) — the callers check first
+        (chat_wire.binds), this holds whoever calls."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
@@ -201,9 +227,11 @@ class ChatService:
                         source_token_id = COALESCE(%s, source_token_id),
                         bound_identity = %s
                     WHERE invite_code = %s AND public_key_hex LIKE 'pending:%%'
+                      AND (key_fingerprint IS NULL
+                           OR key_fingerprint = substring(sha256(decode(%s, 'hex')) FROM 1 FOR 16))
                     RETURNING id
                 """, (public_key_hex, username, display_name, source,
-                      source_token_id, self.public_key_hex, invite_code))
+                      source_token_id, self.public_key_hex, invite_code, public_key_hex))
                 row = cur.fetchone()
                 if row:
                     logger.info(
@@ -211,6 +239,12 @@ class ChatService:
                         f"{public_key_hex[:16]}..."
                     )
                     return row[0]
+                cur.execute("SELECT 1 FROM friends WHERE invite_code = %s"
+                            " AND public_key_hex LIKE 'pending:%%'", (invite_code,))
+                if cur.fetchone() is not None:
+                    logger.warning("A key %s… that the contact %s is not bound to — nothing added",
+                                   public_key_hex[:16], invite_code)
+                    return None
 
                 # No pending entry — regular upsert by public_key_hex
                 cur.execute("""
@@ -250,14 +284,15 @@ class ChatService:
         code to the key it accepted, so the friendship is one-sided until we
         introduce ourselves again. `pending:` is the state the resolver
         already knows how to repair, and reclaiming a row is not
-        trust-on-first-use — an invite code carries a digest of the peer's
-        public key, so only that peer can resolve it back."""
+        trust-on-first-use — each row is bound to the fingerprint of the key
+        it held, so only that peer can resolve it back."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
                     UPDATE friends
-                       SET public_key_hex = 'pending:' || invite_code
+                       SET public_key_hex = 'pending:' || invite_code,
+                           key_fingerprint = substring(sha256(decode(public_key_hex, 'hex')) FROM 1 FOR 16)
                      WHERE public_key_hex NOT LIKE 'pending:%'
                        AND invite_code <> ''
                 """)
@@ -302,7 +337,8 @@ class ChatService:
             with conn.cursor() as cur:
                 cur.execute("""
                     UPDATE friends
-                       SET public_key_hex = 'pending:' || invite_code
+                       SET public_key_hex = 'pending:' || invite_code,
+                           key_fingerprint = substring(sha256(decode(public_key_hex, 'hex')) FROM 1 FOR 16)
                      WHERE id = %s AND public_key_hex NOT LIKE 'pending:%%'
                        AND invite_code <> ''
                 """, (friend_id,))
@@ -318,7 +354,8 @@ class ChatService:
                     SELECT id, username, public_key_hex, invite_code,
                            display_name, added_at, last_seen, is_blocked,
                            source::text AS source,
-                           join_token_id::text AS join_token_id, favorite
+                           join_token_id::text AS join_token_id, favorite,
+                           upper(encode(key_fingerprint, 'hex')) AS key_fingerprint
                     FROM friends
                     ORDER BY display_name, username
                 """)
@@ -371,15 +408,16 @@ class ChatService:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT invite_code FROM friends
+                    SELECT invite_code, upper(encode(key_fingerprint, 'hex')) FROM friends
                     WHERE public_key_hex LIKE 'pending:%'
                       AND join_token_id IS NULL
                 """)
-                stubs = [row[0] for row in cur.fetchall()]
+                stubs = cur.fetchall()
         finally:
             self._return_db(conn)
-        invite = next((code for code in stubs
-                       if verify_invite_code(code, public_key_hex)), None)
+        invite = next((code for code, fingerprint in stubs
+                       if verify_invite_code(code, public_key_hex)
+                       and chat_wire.binds(fingerprint, public_key_hex)), None)
         if invite is None:
             return None
         self.add_friend(public_key_hex=public_key_hex, invite_code=invite)
@@ -576,8 +614,12 @@ class ChatService:
           peer's "in"  → our "out" (we sent it, they received it)
           peer's "out" → our "in"  (they sent it to us)
 
-        Deduplicates by message_uuid. Marks our outgoing messages as
-        delivered (the peer has them).
+        A line the export claims as ours is taken only under our own valid
+        signature — a friend can write nothing into the thread as written
+        by us; one claimed as theirs, under theirs when it carries one (a
+        row of theirs from before signatures carries none). Deduplicates by
+        message_uuid; marks our outgoing messages as delivered (the peer
+        has them).
 
         Returns: {imported: int, skipped: int, delivered: int}
         """
@@ -589,6 +631,9 @@ class ChatService:
         conn.autocommit = False
         try:
             with conn.cursor() as cur:
+                cur.execute("SELECT public_key_hex, previous_public_key_hex FROM friends WHERE id = %s",
+                            (friend_id,))
+                theirs = tuple(k for k in (cur.fetchone() or ()) if k and not k.startswith("pending:"))
                 for msg in messages:
                     msg_uuid = msg.get("message_uuid")
                     if not msg_uuid:
@@ -626,10 +671,22 @@ class ChatService:
                     # Flip direction: peer's perspective → our perspective
                     peer_dir = msg["direction"]
                     our_dir = "out" if peer_dir == "in" else "in"
-
-                    ts = msg["timestamp"]
-                    if isinstance(ts, str):
-                        ts = _sender_timestamp(ts)
+                    try:
+                        sent_at = chat_wire.sent_time(msg["timestamp"])
+                    except (TypeError, ValueError):
+                        skipped += 1
+                        continue
+                    sig = msg.get("sig")
+                    if our_dir == "out":
+                        signed = chat_wire.signed_by(sig, self.own_keys, theirs, msg_uuid,
+                                                     sent_at, msg["content"])
+                    else:
+                        signed = sig is None or chat_wire.signed_by(
+                            sig, theirs, self.own_keys, msg_uuid, sent_at, msg["content"])
+                    if not signed:
+                        skipped += 1
+                        continue
+                    ts = min(sent_at, datetime.now(timezone.utc))
 
                     # Fallback dedup for old messages (pre-UUID migration):
                     # check by timestamp + direction + content
@@ -644,14 +701,16 @@ class ChatService:
                         continue
 
                     is_delivered = True  # both in & out are confirmed
+                    kept = our_dir == "in" and sig is not None
 
                     cur.execute("""
                         INSERT INTO p2p_messages
                             (friend_id, direction, content, timestamp,
-                             delivered, message_uuid)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                             delivered, message_uuid, sender_sig, sent_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """, (friend_id, our_dir, msg["content"], ts,
-                          is_delivered, msg_uuid))
+                          is_delivered, msg_uuid, bytes.fromhex(sig) if kept else None,
+                          sent_at if kept else None))
                     imported += 1
 
             conn.commit()
@@ -837,6 +896,17 @@ class ChatService:
         if len(content) > MAX_PLAINTEXT_CHARS:
             logger.warning(f"Oversized plaintext from {friend.get('username', '?')} rejected")
             return None
+        # Its sender signed it, for this node, as boxed — what lets the row
+        # go back to them in a history export and stand there as theirs.
+        try:
+            sent_at = chat_wire.sent_time(env["ts"])
+        except ValueError:
+            sent_at = None
+        if sent_at is None or not chat_wire.signed_by(
+                env["sig"], (sender_public_key,), self.own_keys, env["uuid"], sent_at, content):
+            logger.warning(f"Message from {friend.get('username', '?')} without its sender's "
+                           f"signature — rejected")
+            return None
 
         # One message per uuid in a thread: the same message again is a
         # duplicate (and answered so); anything else under its uuid — or a
@@ -844,7 +914,7 @@ class ChatService:
         ts = _sender_timestamp(env["ts"])
         stored = self._stored_message(env["uuid"])
         if stored is None:
-            if self._store_incoming(friend["id"], content, ts, env["uuid"]):
+            if self._store_incoming(friend["id"], content, ts, env["uuid"], env["sig"], sent_at):
                 self.update_friend_last_seen(sender_public_key)
                 return {"friend_id": friend["id"], "content": content, "timestamp": ts}
             stored = self._stored_message(env["uuid"])      # another copy of it landed first
@@ -857,19 +927,21 @@ class ChatService:
         return None
 
     def _store_incoming(self, friend_id: int, content: str, ts: datetime,
-                        message_uuid: str) -> bool:
-        """An incoming message stored, False when its uuid already is — two
-        copies of one message side by side (mirrors backend/p2p_chat)."""
+                        message_uuid: str, sig: str, sent_at: datetime) -> bool:
+        """An incoming message stored with its sender's signature and the
+        time it signed, False when its uuid already is — two copies of one
+        message side by side (mirrors backend/p2p_chat)."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO p2p_messages
-                        (friend_id, direction, content, timestamp, delivered, message_uuid)
-                    VALUES (%s, 'in', %s, %s, TRUE, %s)
+                        (friend_id, direction, content, timestamp, delivered, message_uuid,
+                         sender_sig, sent_at)
+                    VALUES (%s, 'in', %s, %s, TRUE, %s, %s, %s)
                     ON CONFLICT (message_uuid) WHERE message_uuid IS NOT NULL DO NOTHING
                     RETURNING id
-                """, (friend_id, content, ts, message_uuid))
+                """, (friend_id, content, ts, message_uuid, bytes.fromhex(sig), sent_at))
                 return cur.fetchone() is not None
         finally:
             self._return_db(conn)

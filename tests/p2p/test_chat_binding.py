@@ -288,7 +288,7 @@ def test_a_history_page_is_bounded_and_says_where_the_next_one_starts(monkeypatc
     rows = [{"id": i, "message_uuid": uuid.UUID(int=i),
              "direction": "out" if i % 2 else "in", "content": "x" * 10,
              "timestamp": t0 + timedelta(seconds=i)} for i in range(1, 5)]
-    seal = lambda text, message_uuid, ts_iso: text
+    seal = lambda row: row["content"]
     monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_MAX", 3)          # read one past it: 4 rows
     page, out_ids, after, more = chat_wire.export_page(rows, seal)
     assert [m["message_uuid"] for m in page] == [str(uuid.UUID(int=i)) for i in (1, 2, 3)]

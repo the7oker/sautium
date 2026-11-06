@@ -329,7 +329,8 @@ def test_two_clones_merge_to_the_union_in_either_order(clones, tmp_path):
     m = got["merged"]
     assert (m["listens"], m["sessions"], m["friends"], m["rights"], m["messages"]) == (2, 1, 1, 1, 2)
     assert (m["chats"], m["chat_messages"], m["gear"], m["identities"], m["bans"]) == (1, 2, 1, 1, 1)
-    assert (m["tokens"], m["invites"], m["settings"], m["profile"], m["rotations"]) == (1, 1, 0, 1, 0)
+    # (the sent invite from before invite ids stays behind: it matches no acceptance)
+    assert (m["tokens"], m["invites"], m["settings"], m["profile"], m["rotations"]) == (1, 0, 0, 1, 0)
     assert m["demo_plays"] == 2                          # T3 new, T1 spent earlier on B
     assert got["waiting"] == {"listens": 1, "tracks": 1, "sessions": 1, "demo_plays": 1}  # T4 is unknown to A
 
@@ -388,6 +389,47 @@ def test_two_clones_merge_to_the_union_in_either_order(clones, tmp_path):
     assert not any(again["merged"].values()), again["merged"]
     assert again["waiting"] == got["waiting"]
     assert _stats(a) == sa and _friends(a) == fa and len(hist(a)) == 5 and len(demos(a)) == 2
+
+
+def test_sent_invites_merge_by_their_id_and_a_bound_contact_keeps_its_key(clones, tmp_path):
+    """After the union case: invites by their id (taken on either side is
+    taken; one from before ids stays behind), a pending contact bound to a
+    key's fingerprint resolved only by that key, a message's sender signature
+    carried."""
+    import hashlib
+    a, b = clones["a"], clones["b"]
+    inv1, inv2 = uuid.UUID(int=51), uuid.UUID(int=52)
+    f5, f6, f7 = "66" * 32, "77" * 32, "88" * 32
+    fp = lambda key: hashlib.sha256(bytes.fromhex(key)).digest()[:16]
+    m5 = uuid.UUID(int=53)
+    _exec(a, [
+        ("INSERT INTO sent_invites (to_email, sent_at, invite_id) VALUES ('p@b.c', %s, %s), ('q@b.c', %s, %s)",
+         (T0, str(inv1), T0, str(inv2))),
+        ("INSERT INTO friends (username, public_key_hex, invite_code, key_fingerprint) "
+         "VALUES ('inv5', 'pending:inv5', 'inv5', %s), ('inv7', 'pending:inv7', 'inv7', %s)", (fp(f5), fp(f7))),
+    ])
+    _exec(b, [
+        ("INSERT INTO sent_invites (to_email, sent_at, invite_id, taken_at) VALUES ('p@b.c', %s, %s, %s)",
+         (T0, str(inv1), T0 + timedelta(hours=1))),
+        ("INSERT INTO sent_invites (to_email, sent_at) VALUES ('old@b.c', %s)", (T0,)),
+        _friend(f6, "inv5"), _friend(f7, "inv7"),
+        ("INSERT INTO p2p_messages (friend_id, direction, content, timestamp, message_uuid, sender_sig, sent_at) "
+         "SELECT id, 'in', 'signed', %s, %s, %s, %s FROM friends WHERE public_key_hex = %s",
+         (T0, str(m5), b"\x01" * 64, T0 - timedelta(seconds=3), f7)),
+    ])
+    got = _merge(_backup(b, tmp_path / "b2"), a)
+    assert got["merged"]["invites"] == 0                             # inv1 is here; the old one stays behind
+    assert dict(_rows(a, "SELECT invite_id::text, taken_at IS NOT NULL FROM sent_invites WHERE invite_id IS NOT NULL")) \
+        == {str(inv1): True, str(inv2): False}
+    assert _rows(a, "SELECT count(*) FROM sent_invites WHERE to_email = 'old@b.c'")[0][0] == 0
+    # inv5 waits for f5's key: f6 on the other side does not bind it; inv7's is f7
+    assert _rows(a, "SELECT public_key_hex FROM friends WHERE invite_code = 'inv5'") == [("pending:inv5",)]
+    assert _rows(a, "SELECT public_key_hex FROM friends WHERE invite_code = 'inv7'") == [(f7,)]
+    [(sig, sent_at)] = _rows(a, "SELECT sender_sig, sent_at FROM p2p_messages WHERE message_uuid = %s", (str(m5),))
+    assert (bytes(sig), sent_at) == (b"\x01" * 64, T0 - timedelta(seconds=3))
+    back = _merge(_backup(a, tmp_path / "a2"), b)
+    assert back["merged"]["invites"] == 1                            # inv2
+    assert _rows(b, "SELECT taken_at IS NOT NULL FROM sent_invites WHERE invite_id = %s", (str(inv1),)) == [(True,)]
 
 
 def _witness(subject, channel="probe", seen=T0, *, signed=False):

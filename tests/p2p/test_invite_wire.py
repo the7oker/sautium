@@ -1,0 +1,303 @@
+"""The invite wire on the nodes (desktop/p2p/chat_wire.py), against the
+vectors the Worker's harness asserts too (tests/p2p/vectors/invite_wire_v1.json):
+the codes, the invite's id, the four texts and their signatures; the parse of
+what is pasted into Add; a contact bound to a long code's fingerprint; a
+message's signature over who wrote it to whom, which, when and what; and a
+classic handshake that a contact bound to a fingerprint answers for its own
+key alone, on both surfaces."""
+
+import asyncio
+import json
+import sys
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+BACKEND = Path(__file__).resolve().parent.parent.parent / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+from desktop import node_identity  # noqa: E402
+from desktop.p2p import chat_wire  # noqa: E402
+
+nacl_signing = pytest.importorskip("nacl.signing")
+V = json.loads((Path(__file__).parent / "vectors" / "invite_wire_v1.json").read_text())
+
+
+def _key(seed_hex):
+    return nacl_signing.SigningKey(bytes.fromhex(seed_hex))
+
+
+def _pub(key):
+    return key.verify_key.encode().hex()
+
+
+INVITER, ACCEPTOR = _key(V["inviter_seed"]), _key(V["acceptor_seed"])
+
+
+# --- the vectors ---------------------------------------------------------------
+
+def test_the_codes_and_the_invite_id_are_the_vectors():
+    for who, key in (("inviter", INVITER), ("acceptor", ACCEPTOR)):
+        v = V[who]
+        assert _pub(key) == v["pubkey"]
+        assert node_identity.make_invite_code(v["name"], bytes.fromhex(v["pubkey"])) == v["short_code"]
+        assert chat_wire.long_code(v["name"], v["pubkey"]) == v["long_code"]
+        assert v["long_code"].startswith(v["short_code"] + "-")     # a person recognises it
+    assert chat_wire.invite_id(V["token"]) == V["invite_id"]
+    assert V["invite_string"] == f"{V['inviter']['long_code']}#i-{V['token']}"
+
+
+def test_the_four_texts_and_their_signatures_are_the_vectors():
+    inviter, acceptor = V["inviter"], V["acceptor"]
+    texts = {
+        "send": chat_wire.send_text(V["ts"], inviter["short_code"], V["to"], V["message"]),
+        "accept": chat_wire.accept_text(V["ts"], V["invite_id"], inviter["short_code"],
+                                        acceptor["short_code"], acceptor["pubkey"]),
+        "add": chat_wire.add_text(V["ts"], inviter["short_code"], acceptor["short_code"], acceptor["pubkey"]),
+        "pickup": chat_wire.pickup_text(V["ts"], inviter["short_code"], inviter["pubkey"]),
+    }
+    assert texts == V["texts"]
+    assert V["texts"]["send"].endswith(V["message_sha256"])
+    for name, text in texts.items():
+        signer = INVITER if V["signed_by"][name] == "inviter" else ACCEPTOR
+        assert signer.sign(text.encode()).signature.hex() == V["signatures"][name], name
+        assert chat_wire.verify(_pub(signer), text.encode(), V["signatures"][name])
+    # no field holds ':', so a text splits one way
+    assert all(len(t.split(":")) == {"send": 6, "accept": 7, "add": 6, "pickup": 5}[n] for n, t in texts.items())
+
+
+def test_an_empty_message_signs_the_hash_of_nothing():
+    assert chat_wire.send_text(1, "a#B", "c@d.e", "").endswith(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+
+# --- the parse -------------------------------------------------------------------
+
+def test_the_parse_takes_a_wrapped_invite_and_every_spelling_of_its_token():
+    inviter = V["inviter"]
+    share = chat_wire.parse_share(V["parse"]["wrapped"])
+    assert share == chat_wire.parse_share(V["invite_string"])
+    assert share.code == inviter["short_code"]                       # what every consumer keys by
+    assert share.fingerprint == inviter["long_code"].split("#")[1].replace("-", "")
+    assert share.invite_token == V["token"] and share.link_token is None
+    for prefix in V["parse"]["token_prefixes"]:
+        assert chat_wire.parse_share(f"{inviter['long_code']}#{prefix}{V['token'].upper()}").invite_token \
+            == V["token"]
+    assert chat_wire.parse_share("masha#10ba682c8ad1").code == inviter["short_code"]   # any case, no dashes
+    assert chat_wire.parse_share(inviter["short_code"]).fingerprint is None
+
+
+def test_an_invite_link_keeps_its_uuid_token():
+    token = str(uuid.uuid4())
+    share = chat_wire.parse_share(f"{V['inviter']['long_code']}#{token}")
+    assert share.link_token == token and share.invite_token is None
+
+
+@pytest.mark.parametrize("text", [
+    "masha", "masha#10BA-682C-8AD", "masha#10BA-682C-8AD1-3513", "ma#10BA-682C-8AD1",
+    "masha#10BA-682C-8ADZ", "masha#10BA-682C-8AD1#i-0001", "masha#10BA-682C-8AD1#nonsense",
+    "masha#10BA-682C-8AD1#i-000102030405060708090a0b0c0d0e0f#x", "a b#10BA-682C-8AD1", "",
+    "masha#10BA-682C-8AD1#i-" + "g" * 32,
+])
+def test_the_parse_refuses_anything_else(text):
+    with pytest.raises(ValueError):
+        chat_wire.parse_share(text)
+
+
+# --- the fingerprint ---------------------------------------------------------------
+
+def test_a_contact_bound_to_a_fingerprint_answers_to_its_own_key_alone():
+    fingerprint = chat_wire.key_fingerprint(V["inviter"]["pubkey"])
+    assert chat_wire.binds(fingerprint, V["inviter"]["pubkey"])
+    assert not chat_wire.binds(fingerprint, V["acceptor"]["pubkey"])
+    assert chat_wire.binds(None, V["acceptor"]["pubkey"])            # a short code's contact: its code decides
+    assert not chat_wire.binds(fingerprint, "zz")
+
+
+def test_a_small_order_key_verifies_nothing():
+    assert not chat_wire.verify("01" + "00" * 31, b"anything", "01" + "00" * 63)
+
+
+# --- a message's signature -----------------------------------------------------------
+
+def test_a_message_is_signed_for_its_author_recipient_uuid_time_and_text():
+    me, friend = _key("33" * 32), _key("44" * 32)
+    u, at = str(uuid.uuid4()), datetime(2026, 11, 7, 1, 2, 3, 456789, tzinfo=timezone.utc)
+    sig = me.sign(chat_wire.message_statement(_pub(me), _pub(friend), u, at, "hello")).signature.hex()
+    ok = lambda **over: chat_wire.signed_by(
+        over.get("sig", sig), over.get("senders", (_pub(me),)), over.get("recipients", (_pub(friend),)),
+        over.get("u", u), over.get("at", at), over.get("text", "hello"))
+    assert ok()
+    assert ok(at=at.astimezone(timezone(timedelta(hours=2))))        # one instant, any offset
+    assert not ok(text="hello!") and not ok(u=str(uuid.uuid4()))
+    assert not ok(at=at + timedelta(microseconds=1))
+    assert not ok(senders=(_pub(friend),)) and not ok(recipients=(_pub(me),))
+    assert ok(senders=("", _pub(friend), _pub(me)), recipients=(None, _pub(friend)))   # one of each
+    assert not ok(sig=None)
+
+
+def test_an_envelope_carries_its_signature_and_refuses_the_last_version():
+    env = chat_wire.open_envelope(chat_wire.envelope("t", str(uuid.UUID(int=1)), "2026-11-07T00:00:00+00:00",
+                                                     "ab" * 64))
+    assert env["sig"] == "ab" * 64
+    assert chat_wire.open_envelope(chat_wire.envelope("t", str(uuid.UUID(int=1)), "x", None))["sig"] is None
+    with pytest.raises(ValueError):
+        chat_wire.open_envelope(json.dumps({"v": 2, "uuid": str(uuid.UUID(int=1)), "ts": "x",
+                                            "text": "t"}).encode())
+    with pytest.raises(ValueError):
+        chat_wire.open_envelope(chat_wire.envelope("t", str(uuid.UUID(int=1)), "x", "AB" * 64))
+    with pytest.raises(ValueError):
+        chat_wire.sent_time("2026-11-07T00:00:00")                    # no offset: no instant
+
+
+# --- the classic handshake and a bound contact ------------------------------------------
+
+def _who(name, seed):
+    key = _key(seed)
+    return SimpleNamespace(key=key, pub=_pub(key), name=name,
+                           invite=node_identity.make_invite_code(name, bytes.fromhex(_pub(key))))
+
+
+HOST, FRIEND, COLLIDER = _who("host", "55" * 32), _who("friend", "66" * 32), _who("friend", "77" * 32)
+
+
+def _signed(who):
+    # The collider speaks under the friend's code: a key sharing its 48 bits
+    # (verify_invite_code is made to agree below).
+    invite = FRIEND.invite if who is COLLIDER else who.invite
+    return chat_wire.sign_handshake(lambda m: who.key.sign(m).signature,
+                                    {"public_key_hex": who.pub, "username": who.name,
+                                     "invite_code": invite}, HOST.invite)
+
+
+class _Chat:
+    def __init__(self, friends):
+        self.friends, self.writes = friends, []
+
+    def get_friends(self):
+        return list(self.friends)
+
+    def add_friend(self, **kw):
+        self.writes.append(("add", kw["public_key_hex"]))
+        return 1
+
+    def update_friend_last_seen(self, pk):
+        self.writes.append(("seen", pk))
+
+    def db_conn(self):
+        return None
+
+
+def _stub(fingerprint, **over):
+    return {"id": 7, "username": FRIEND.name, "public_key_hex": f"pending:{FRIEND.invite}",
+            "invite_code": FRIEND.invite, "is_blocked": False, "source": "manual",
+            "join_token_id": None, "key_fingerprint": fingerprint, **over}
+
+
+def test_the_launchers_handshake_resolves_a_bound_contact_for_its_key_alone(monkeypatch):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient as AioClient, TestServer
+    from desktop.p2p.sync_server import SyncServer
+
+    async def run(chat, who):
+        server = SyncServer("postgresql://unused", account_info={
+            "public_key_hex": HOST.pub, "username": HOST.name, "invite_code": HOST.invite})
+        server._chat_service = chat
+        app = web.Application()
+        app.router.add_post("/api/chat/handshake", server.handle_chat_handshake)
+        async with AioClient(TestServer(app)) as client:
+            r = await client.post("/api/chat/handshake", json=_signed(who))
+            return r.status
+    # A key that shares the short code's 48 bits is not the one the long code named.
+    monkeypatch.setattr(node_identity, "verify_invite_code", lambda code, pk: True)
+    bound = _Chat([_stub(chat_wire.key_fingerprint(FRIEND.pub))])
+    assert asyncio.run(run(bound, COLLIDER)) == 403 and bound.writes == []
+    assert asyncio.run(run(bound, FRIEND)) == 200 and ("add", FRIEND.pub) in bound.writes
+    unbound = _Chat([_stub(None)])
+    assert asyncio.run(run(unbound, COLLIDER)) == 200                 # a short code's contact: as before
+
+
+def test_the_docker_handshake_resolves_a_bound_contact_for_its_key_alone(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import peer_chat
+
+    class Svc:
+        def __init__(self):
+            self.writes = []
+
+        def add_friend(self, *a, **kw):
+            self.writes.append(("add", a[0]))
+            return 1
+
+        def update_friend_last_seen(self, pk):
+            self.writes.append(("seen", pk))
+
+    def app(svc, match):
+        monkeypatch.setattr(peer_chat, "get_peer_chat", lambda: svc)
+        monkeypatch.setattr(peer_chat, "resolve_identity", lambda s: {
+            "public_key_hex": HOST.pub, "username": HOST.name, "invite_code": HOST.invite})
+        monkeypatch.setattr(peer_chat, "_find_friend_for_handshake", lambda invite, pk: match)
+        monkeypatch.setattr(peer_chat, "verify_invite_code", lambda code, pk: True)
+        a = FastAPI()
+        a.include_router(peer_chat.chat_router)
+        return a
+
+    svc = Svc()
+    with TestClient(app(svc, _stub(chat_wire.key_fingerprint(FRIEND.pub)))) as http:
+        assert http.post("/api/chat/handshake", json=_signed(COLLIDER)).status_code == 403
+        assert svc.writes == []
+        assert http.post("/api/chat/handshake", json=_signed(FRIEND)).status_code == 200
+        assert ("add", FRIEND.pub) in svc.writes
+
+
+def test_the_initiator_takes_only_the_key_its_contact_is_bound_to():
+    from desktop.p2p.p2p_manager import P2PManager
+    fingerprint = chat_wire.key_fingerprint(FRIEND.pub)
+    answer = lambda who: {"public_key_hex": who.pub}
+    assert P2PManager._accepted_pubkey(answer(FRIEND), FRIEND.invite, fingerprint=fingerprint) == FRIEND.pub
+    assert P2PManager._accepted_pubkey(answer(COLLIDER), COLLIDER.invite, fingerprint=fingerprint) is None
+
+
+# --- the nudge ---------------------------------------------------------------------------
+
+def test_a_nudge_runs_the_pickup_and_answers_nothing_of_the_node(monkeypatch):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient as AioClient, TestServer
+    from desktop.p2p import sync_server as ss
+
+    ran = []
+
+    async def pickup():
+        ran.append(time.monotonic())
+        return ["someone#AAAA-BBBB-CCCC"]
+
+    async def run(open_invites, nudges):
+        server = ss.SyncServer("postgresql://unused", account_info={
+            "public_key_hex": HOST.pub, "username": HOST.name, "invite_code": HOST.invite})
+        server._chat_service = _Chat([])
+        server.set_pickup(pickup)
+        server._has_open_invites = lambda: open_invites
+        app = web.Application()
+        app.router.add_post("/api/chat/invite-accepted", server.handle_invite_accepted)
+        async with AioClient(TestServer(app)) as client:
+            out = []
+            for body in nudges:
+                r = await client.post("/api/chat/invite-accepted", json=body)
+                out.append((r.status, await r.json()))
+            return out, server._chat_service.writes
+
+    unsigned = {"public_key_hex": FRIEND.pub, "username": FRIEND.name, "invite_code": FRIEND.invite}
+    answers, writes = asyncio.run(run(True, [unsigned, _signed(FRIEND), _signed(FRIEND)]))
+    assert answers[0][0] == 403                                       # signed, as the handshake it follows
+    assert answers[1] == (200, {"picked_up": True}) and len(ran) == 1
+    assert answers[2][0] == 429                                       # one pickup a nudge-interval, whoever nudges
+    assert writes == []                                               # it adds nobody itself
+    assert "public_key_hex" not in json.dumps(answers)
+    answers, _ = asyncio.run(run(False, [_signed(FRIEND)]))
+    assert answers == [(403, {"error": "no open invites"})] and len(ran) == 1

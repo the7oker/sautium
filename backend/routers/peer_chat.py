@@ -132,7 +132,8 @@ def _find_friend_for_handshake(invite_code: str, pubkey: str) -> Optional[dict]:
     key matches nothing (mirror of the launcher)."""
     return db_query_one("""
         SELECT id, username, public_key_hex, invite_code, is_blocked,
-               source::text AS source, join_token_id
+               source::text AS source, join_token_id,
+               upper(encode(key_fingerprint, 'hex')) AS key_fingerprint
           FROM friends
          WHERE public_key_hex = %s OR invite_code = %s
          ORDER BY public_key_hex = %s DESC
@@ -390,6 +391,11 @@ def _handshake(body: dict):
     match = _find_friend_for_handshake(peer_invite, peer_pubkey)
     if match and match["is_blocked"]:
         return refused
+    # A pending contact bound to a fingerprint answers to the key it names
+    # alone, on every path: nothing is spent or written for another one.
+    if (match and match["public_key_hex"].startswith("pending:")
+            and not chat_wire.binds(match["key_fingerprint"], peer_pubkey)):
+        return refused
     resolved = (match if match
                 and match["public_key_hex"] == peer_pubkey else None)
 
@@ -620,8 +626,7 @@ def _history(body: dict, gzip_ok: bool) -> Response:
     with get_conn() as conn:
         rows = chat_wire.export_rows(conn, friend["id"], after)
         result_messages, out_ids, after, more = chat_wire.export_page(
-            rows, lambda text, message_uuid, ts_iso: svc.encrypt_envelope(
-                text, message_uuid, ts_iso, requester_pubkey), after)
+            rows, lambda row: svc.seal_exported(row, requester_pubkey), after)
         if out_ids:
             # This node has no push loop: a page is how its messages arrive.
             chat_wire.mark_exported(conn, friend["id"], out_ids)

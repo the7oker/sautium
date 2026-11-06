@@ -7447,10 +7447,30 @@
   // The Friends screen's steady hint. The Worker sends an invite only under
   // a verified address, so an account without one is told where to verify.
   function friendsInviteHint(status) {
-    if (status.verified) return 'Send invite — they get a verified email with a link.';
+    if (status.verified) return 'Send invite — they get a verified email with a one-time invite to paste.';
     return status.email
       ? 'Verify your email in Profile to send invites — they go out under your verified address.'
       : 'Add and verify an email in Profile to send invites — they go out under your verified address.';
+  }
+
+  // What came of a mailed invite pasted into Add (the server's `invite`).
+  // The contact is added either way: by the invite, or by code.
+  function inviteOutcomeHint(data) {
+    const name = data.username || 'They';
+    switch (data.invite) {
+      case 'accepted':
+        return `Invite accepted. You can chat once ${name}'s Sautium answers.`;
+      case 'used':
+        return `This invite was already used. ${name} is added by code: ask them to add yours. If you did not use it, tell them.`;
+      case 'not_this_code':
+        return `This invite belongs to another code. ${name} is added by code.`;
+      case 'own':
+        return 'That is your own invite.';
+      case 'unreachable':
+        return `${name} is added, but the invite service did not answer. Add the same invite again later.`;
+      default:   // not_found, bad_token: gone from the Worker
+        return `This invite has expired. ${name} is added by code: ask them to add yours, or to send a new invite.`;
+    }
   }
 
   async function renderFriends(root) {
@@ -7532,7 +7552,7 @@
 
     try {
       const data = acctResp && acctResp.ok ? await acctResp.json() : {};
-      codeEl.textContent = data.invite_code || '— not set —';
+      codeEl.textContent = data.share_code || data.invite_code || '— not set —';
     } catch (_) { codeEl.textContent = 'unavailable'; }
 
     try {
@@ -7688,9 +7708,9 @@
 
     refreshFriends();
 
-    // Pull pending email-invite acceptances. The Worker holds a
-    // 30-day record of recipients who clicked our email link; this
-    // endpoint auto-creates a friend entry locally for each one
+    // Pick up the acceptances of our email invites: the Worker keeps
+    // each accepted invite, with its acceptor's signed statement, for 30
+    // days; this endpoint adds a contact for each one that holds up
     // and wakes the chat SSE on success. We also kick a manual
     // refresh on the `added` list — SSE may have only just
     // connected when the wake fires, and missing that one
@@ -7731,8 +7751,10 @@
           showHint(err.detail || 'Could not add friend.', true);
           return;
         }
+        const data = await resp.json().catch(() => ({}));
         input.value = '';
-        showHint('Friend added.', true);
+        if (data.invite) showHint(inviteOutcomeHint(data), false);
+        else showHint('Friend added.', true);
         refreshFriends();
       } catch (err) {
         showHint('Network error.', true);
@@ -7922,7 +7944,7 @@
       if (!token) return;
       if (e.target.closest('[data-copy]')) {
         const acct = await (await fetch('/api/p2p/account')).json();
-        if (await copyText(`${acct.invite_code}#${token.id}`)) {
+        if (await copyText(`${acct.share_code || acct.invite_code}#${token.id}`)) {
           e.target.closest('[data-copy]').classList.add('copied');
         }
         return;

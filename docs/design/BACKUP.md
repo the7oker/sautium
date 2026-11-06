@@ -313,10 +313,10 @@ after a rebuild): union, keyed so that a second import changes nothing.
 | `local_play_stats` | — | **recompute** from history for every track the merge touched, never merge counters |
 | `demo_plays` | `track_id` | the one full demo stream of a track is spent on whichever machine heard it first: insert missing, and an earlier `played_at` replaces a later one |
 | `listening_sessions`, `session_tracks` | session uuid | insert missing **closed** sessions whose tracks are all known here (an open one is the other machine's live queue; a partial card would never complete) |
-| `friends`, `friend_rights`, `friend_grants` | friend pubkey | insert missing; rights = union; blocked on either side = blocked; a friend who rotated is one row under the newer key; a `pending:<invite>` row binds when the other side has the key |
-| `p2p_messages` | `message_uuid` | insert missing (already the dedup key) |
+| `friends`, `friend_rights`, `friend_grants` | friend pubkey | insert missing; rights = union; blocked on either side = blocked; a friend who rotated is one row under the newer key; a `pending:<invite>` row binds when the other side has the key — one bound to a key's fingerprint (a long code, an accepted invite; 2026-11-07) only to the key it names |
+| `p2p_messages` | `message_uuid` | insert missing (already the dedup key), with a received message's sender signature and the time it signed |
 | `chat_sessions`, `chat_messages` | session `created_at`, message `(created_at, role)` | insert missing — the tables have no uuid; the agent session ids (`claude_session_id`, `codex_thread_id`) stay behind, they name a session on the other machine |
-| `invite_tokens`, `sent_invites` | token uuid, `(email, sent_at)` | insert missing; revoked on either side = revoked (tokens are parents of `friends.source_token_id`) |
+| `invite_tokens`, `sent_invites` | token uuid, the invite's id | insert missing; revoked on either side = revoked (tokens are parents of `friends.source_token_id`); taken on either side = taken; a sent invite from before invite ids (2026-11-07) is left behind — it matches no acceptance |
 | `gear_brands`, `gear_models`, `user_gear`, `gear_pair_notes` | deterministic ids | insert missing (the catalogue rows the chain needs come along; a model already here keeps its own research) |
 | `user_profile` | the one row | fields empty here fill in |
 | `p2p_identities`, `p2p_node_bans` | pubkey, `(pubkey, addr)` | insert missing; a ban on either side is a ban |

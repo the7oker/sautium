@@ -56,22 +56,6 @@ def verify_invite_code(invite_code: str, public_key_hex: str) -> bool:
     return digest.hex().upper() == hash_part
 
 
-def parse_share_string(share: str) -> tuple:
-    """Mirror of desktop/node_identity.parse_share_string — keep in step.
-
-    `username#XXXX-XXXX-XXXX[#token-uuid]` -> (invite_code, token_id|None);
-    downstream consumers always receive the canonical 2-segment code."""
-    import uuid as uuid_mod
-    parts = share.strip().split("#")
-    if len(parts) not in (2, 3):
-        raise ValueError(f"Invalid share string: {share}")
-    invite_code = f"{parts[0]}#{parts[1]}"
-    parse_invite_code(invite_code)
-    if len(parts) == 2:
-        return invite_code, None
-    return invite_code, str(uuid_mod.UUID(parts[2].strip()))
-
-
 def derive_identity(username: str, password: str, email: str = "") -> dict:
     """
     Derive P2P identity from username + password.

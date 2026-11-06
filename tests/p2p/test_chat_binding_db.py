@@ -102,7 +102,7 @@ def test_a_history_page_marks_delivered_only_what_it_carries(conn, scratch_dsn, 
                            VALUES (%s, 'out', %s, %s, FALSE, %s)""",
                         (fid, f"m{n}", stamp, str(uuid.uuid4())))
     monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_MAX", 2)
-    seal = lambda text, message_uuid, ts_iso: text
+    seal = lambda row: row["content"]
     seen = []
     after = None
     while True:
@@ -135,11 +135,11 @@ def test_a_page_carries_this_nodes_undelivered_rows_behind_the_cursor(conn, scra
         ids = [r[0] for r in cur.fetchall()]
     ahead = (t0 + timedelta(minutes=30), 10 ** 9)      # a cursor another node of the account gave
     rows = chat_wire.export_rows(conn, fid, ahead)
-    page, out_ids, after, more = chat_wire.export_page(rows, lambda t, u, ts: t, ahead)
+    page, out_ids, after, more = chat_wire.export_page(rows, lambda row: row["content"], ahead)
     assert [m["encrypted"] for m in page] == ["older, never delivered", "newer"]
     assert out_ids == [ids[0], ids[2]] and not more
     assert chat_wire.history_cursor(after) == (t0 + timedelta(hours=1), ids[2])
-    assert chat_wire.history_cursor(chat_wire.export_page([], lambda t, u, ts: t, ahead)[2]) == ahead
+    assert chat_wire.history_cursor(chat_wire.export_page([], lambda row: row["content"], ahead)[2]) == ahead
 
 
 def test_a_page_reads_no_text_past_its_bytes(conn, scratch_dsn, monkeypatch):
@@ -156,7 +156,7 @@ def test_a_page_reads_no_text_past_its_bytes(conn, scratch_dsn, monkeypatch):
     monkeypatch.setattr(chat_wire, "HISTORY_EXPORT_BYTES", 30)
     rows = chat_wire.export_rows(conn, fid, None)
     assert [r["content"] is not None for r in rows] == [True, True, False, False]
-    page, _, after, more = chat_wire.export_page(rows, lambda t, u, ts: t)
+    page, _, after, more = chat_wire.export_page(rows, lambda row: row["content"])
     assert len(page) == 2 and more
 
 

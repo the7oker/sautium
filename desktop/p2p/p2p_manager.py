@@ -100,6 +100,11 @@ class P2PManager:
         self._pending_retry_task: Optional[asyncio.Task] = None
         self._resolve_friends_task: Optional[asyncio.Task] = None
         self._pending_accepts_task: Optional[asyncio.Task] = None
+        # One pickup at a time (_pick_up); created on the loop at start.
+        self._pickup_lock: Optional[asyncio.Lock] = None
+        # The contacts we nudged, each with the time it was added: a nudge
+        # goes once per add, at the first refusal of its handshake.
+        self._nudged: dict[str, object] = {}
         self._lan_discovery_task: Optional[asyncio.Task] = None
         self._db_listen_task: Optional[asyncio.Task] = None
         self._sync_request_task: Optional[asyncio.Task] = None
@@ -320,6 +325,7 @@ class P2PManager:
                 self._sync_server.set_chat_service(
                     self._chat_service, self._on_message_cb
                 )
+                self._sync_server.set_pickup(self._pick_up)
                 self._sync_server.set_inbound_cb(
                     self._note_inbound_reachable
                 )
@@ -486,6 +492,7 @@ class P2PManager:
                 self._db_listen_task = asyncio.create_task(
                     self._listen_for_db_notifications()
                 )
+                self._pickup_lock = asyncio.Lock()
                 self._pending_accepts_task = asyncio.create_task(
                     self._poll_pending_accepts()
                 )
@@ -970,29 +977,10 @@ class P2PManager:
         logger.info(f"Could not deliver to {friend.get('username', '?')}")
         return False
 
-    def add_friend_by_invite(self, invite_code: str) -> Optional[dict]:
-        """
-        Add a friend by invite code: DHT lookup → handshake → add.
-
-        Returns friend info dict or None if failed.
-        Called from launcher thread (blocking).
-        """
-        if not self._running:
-            return None
-
-        future = asyncio.run_coroutine_threadsafe(
-            self._async_add_friend(invite_code),
-            self._loop,
-        )
-        try:
-            return future.result(timeout=30)
-        except Exception as e:
-            logger.error(f"Add friend failed: {e}")
-            return None
-
     @staticmethod
     def _accepted_pubkey(result: dict, expected_invite: str,
-                         expect_master: bool = False) -> Optional[str]:
+                         expect_master: bool = False,
+                         fingerprint: Optional[str] = None) -> Optional[str]:
         """The responder's public key — or None when it does not belong to
         the contact we set out to reach.
 
@@ -1022,96 +1010,15 @@ class P2PManager:
                                "foreign key %s… — ignoring", pubkey[:16])
                 return None
             return pubkey
-        if not verify_invite_code(expected_invite, pubkey):
+        if not verify_invite_code(expected_invite, pubkey) or not chat_wire.binds(fingerprint, pubkey):
             logger.warning(
                 "Handshake for %s answered with key %s… that does not match "
-                "the invite code — ignoring (impersonation attempt or a "
-                "peer that rotated keys without notifying us)",
+                "the invite code or the key the contact was made with — "
+                "ignoring (impersonation attempt or a peer that rotated keys "
+                "without notifying us)",
                 expected_invite, pubkey[:16])
             return None
         return pubkey
-
-    async def _async_add_friend(self, invite_code: str) -> Optional[dict]:
-        """Async: lookup invite code in DHT, handshake, add friend."""
-        if not self._dht_service:
-            return None
-
-        from desktop.node_identity import get_account_info, parse_invite_code
-        account = get_account_info()
-        if not account:
-            return None
-
-        # DHT lookup
-        peers = await self._dht_service.lookup_user(invite_code)
-        if not peers:
-            logger.info(f"User {invite_code} not found in DHT")
-            return None
-
-        # Try handshake with each peer
-        import aiohttp
-        handshake_data = {
-            "public_key_hex": account["public_key_hex"],
-            "username": account["username"],
-            "invite_code": account["invite_code"],
-        }
-
-        from desktop.node_identity import sign_message
-        for ip, port in peers:
-            url = f"https://{fmt_addr(ip, port)}/api/chat/handshake"
-            try:
-                # No expectation yet — the context still demands a bound
-                # cert and locks onto the candidate's verified node key;
-                # the claimed pubkey is checked against the channel below.
-                channel_ctx = pinned_ssl_context()
-                async with aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(ssl=channel_ctx)
-                ) as session:
-                    async with session.post(
-                        url, json=chat_wire.sign_handshake(
-                            sign_message, handshake_data, invite_code),
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        if resp.status == 200:
-                            result = await wire.read_json(resp, PEER_ANSWER_CAP)
-                            if result.get("accepted"):
-                                peer_pubkey = self._accepted_pubkey(
-                                    result, invite_code)
-                                if (not peer_pubkey or peer_pubkey.lower()
-                                        != pinned_pubkey(channel_ctx)):
-                                    continue
-                                # Add friend locally, under the invite code
-                                # the user typed — never the one the
-                                # responder claims for itself.
-                                if self._chat_service:
-                                    self._chat_service.add_friend(
-                                        public_key_hex=peer_pubkey,
-                                        invite_code=invite_code,
-                                        username=result.get("username", ""),
-                                    )
-                                    # Receiving "accepted" means the
-                                    # remote launcher is reachable; mark
-                                    # the friend live so the UI shows
-                                    # them online without waiting for a
-                                    # message exchange.
-                                    self._chat_service.update_friend_last_seen(
-                                        peer_pubkey
-                                    )
-                                    # Sync chat history after handshake
-                                    friend = (
-                                        self._chat_service
-                                        .get_friend_by_public_key(
-                                            peer_pubkey
-                                        )
-                                    )
-                                    if friend:
-                                        await self._sync_chat_history(
-                                            friend, [(ip, port)]
-                                        )
-                                return result
-            except Exception as e:
-                logger.debug(f"Handshake with {ip}:{port} failed: {e}")
-
-        return None
 
     def _note_peer_alive(self, friend_id: Optional[int],
                          pubkey: Optional[str], ip: str, port: int) -> None:
@@ -1376,6 +1283,7 @@ class P2PManager:
                 "direction": msg["direction"],
                 "content": env["text"],
                 "timestamp": env["ts"],
+                "sig": env["sig"],
             })
         if not decrypted:
             return {}
@@ -1509,7 +1417,8 @@ class P2PManager:
                                     peer_pubkey = self._accepted_pubkey(
                                         result, invite,
                                         expect_master=friend.get("source")
-                                        == "master")
+                                        == "master",
+                                        fingerprint=friend.get("key_fingerprint"))
                                     if (not peer_pubkey
                                             or peer_pubkey.lower()
                                             != pinned_pubkey(channel_ctx)):
@@ -1588,14 +1497,19 @@ class P2PManager:
                                         f"Handshake for {invite} refused by "
                                         f"{ip}:{port}: {err}")
                                     continue
-                                resolved = await self._try_nudge(
-                                    ip, port, invite,
-                                    chat_wire.sign_handshake(
-                                        sign_message, handshake_data, invite),
-                                    session,
-                                )
-                                if resolved:
-                                    break
+                                # A nudge goes once per add, whatever it
+                                # meets: the peer picked up (our acceptance
+                                # is a contact there now — the handshake
+                                # once more), or nothing would make it one.
+                                if not join_token and self._nudged.get(invite) != friend.get("added_at"):
+                                    self._nudged[invite] = friend.get("added_at")
+                                    if await self._try_nudge(
+                                            ip, port, invite,
+                                            chat_wire.sign_handshake(
+                                                sign_message, handshake_data, invite),
+                                            session):
+                                        self._resolve_soon()
+                                        break
                 except Exception as e:
                     logger.debug(
                         f"Handshake to {ip}:{port} for {invite} "
@@ -1612,11 +1526,10 @@ class P2PManager:
         handshake_data: dict,
         session,
     ) -> bool:
-        """Send invite-accepted nudge to a peer after handshake rejection.
-
-        The peer checks the Worker for pending accepts and auto-adds us.
-        Returns True if the nudge succeeded and the friend was resolved.
-        """
+        """Nudge a peer whose handshake refused us after our add: if we
+        accepted one of its invites, its pickup adds us. True when the peer
+        ran its pickup — the nudge is spent either way it answers; nothing
+        of the peer's comes back in it."""
         url = f"https://{fmt_addr(ip, port)}/api/chat/invite-accepted"
         try:
             import aiohttp
@@ -1625,38 +1538,7 @@ class P2PManager:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status == 200:
-                    result = await wire.read_json(resp, PEER_ANSWER_CAP)
-                    if result.get("accepted"):
-                        peer_pubkey = self._accepted_pubkey(result, invite)
-                        if not peer_pubkey:
-                            return False
-                        self._chat_service.add_friend(
-                            public_key_hex=peer_pubkey,
-                            invite_code=invite,
-                            username=result.get("username", ""),
-                        )
-                        # Mirror the bump in the regular handshake
-                        # initiator path: a successful nudge proves
-                        # the peer is alive, so record presence now
-                        # — the friend would otherwise read "offline"
-                        # in the UI right after pairing.
-                        self._chat_service.update_friend_last_seen(
-                            peer_pubkey
-                        )
-                        logger.info(
-                            f"Pending friend resolved via nudge: "
-                            f"{invite} ({ip}:{port})"
-                        )
-                        resolved_friend = (
-                            self._chat_service.get_friend_by_public_key(
-                                peer_pubkey
-                            )
-                        )
-                        if resolved_friend:
-                            await self._sync_chat_history(
-                                resolved_friend, [(ip, port)],
-                            )
-                        return True
+                    return bool((await wire.read_json(resp, PEER_ANSWER_CAP)).get("picked_up"))
         except Exception as e:
             logger.debug(f"Nudge to {ip}:{port} for {invite} failed: {e}")
         return False
@@ -1875,11 +1757,12 @@ class P2PManager:
                 return
             cur.execute("""
                 INSERT INTO friends (username, public_key_hex, invite_code,
-                                     display_name, source, join_token_id)
-                VALUES (%s, %s, %s, %s, 'master', %s)
+                                     display_name, source, join_token_id, key_fingerprint)
+                VALUES (%s, %s, %s, %s, 'master', %s, %s)
                 ON CONFLICT (public_key_hex) DO NOTHING
             """, (MASTER_USERNAME, f"pending:{MASTER_INVITE_CODE}",
-                  MASTER_INVITE_CODE, MASTER_USERNAME, MASTER_TOKEN_ID))
+                  MASTER_INVITE_CODE, MASTER_USERNAME, MASTER_TOKEN_ID,
+                  bytes.fromhex(chat_wire.key_fingerprint(MASTER_PUBKEY_HEX))))
         logger.info("Master contact seeded (%s) — resolver will connect",
                     MASTER_INVITE_CODE)
 
@@ -2533,71 +2416,44 @@ class P2PManager:
             await asyncio.sleep(RETRY_UNKNOWN if retry_soon else 6 * 3600)
 
     async def _poll_pending_accepts(self):
-        """One-time startup check for pending accepts from the Worker.
-
-        Picks up accepts that arrived while we were offline.
-        Only runs if we have outstanding email invites (marker file).
-        After startup, accepts are handled via the nudge mechanism
-        (peer sends /api/chat/invite-accepted when both are online).
-        """
+        """The start's pickup: the acceptances of our invites that came
+        while this node was off (email_verify.pick_up_acceptances — the
+        same function the Friends screen and a peer's nudge run). Later
+        ones come with Friends opening, or a nudge."""
         await asyncio.sleep(10)  # initial delay for network setup
         try:
-            loop = asyncio.get_event_loop()
-
-            has_pending = await loop.run_in_executor(
-                None, self._has_pending_invites
-            )
-            if not has_pending:
-                return
-
-            accepts = await loop.run_in_executor(
-                None, self._fetch_pending_accepts_sync
-            )
-            for accept in accepts:
-                inv = accept.get("invite_code", "")
-                if not inv or not self._chat_service:
-                    continue
-                # Skip if already exists (may have been added via nudge)
-                existing = self._chat_service.get_friends()
-                if any(f["invite_code"] == inv for f in existing):
-                    continue
-                username = inv.split("#")[0]
-                self._chat_service.add_friend(
-                    public_key_hex=f"pending:{inv}",
-                    invite_code=inv,
-                    username=username,
-                    display_name=username,
-                )
-                logger.info(f"Startup: auto-added friend from pending accept: {inv}")
-            if accepts and self._sync_server:
-                await self._sync_server._wake_backend_sse()
+            if await self._pick_up():
+                self._resolve_soon()
         except Exception as e:
-            logger.debug(f"Startup pending accepts check error: {e}")
+            logger.warning(f"Startup pickup failed: {e}")
 
-    def _has_pending_invites(self) -> bool:
-        """Check DB for unreciprocated sent invites."""
+    async def _pick_up(self) -> list:
+        """One pickup at a time on this node (the start, a nudge): the
+        contacts it added."""
+        async with self._pickup_lock:
+            return await asyncio.get_running_loop().run_in_executor(None, self._pick_up_blocking)
+
+    def _pick_up_blocking(self) -> list:
+        from desktop.node_identity import get_account_info, sign_message
+        from desktop.p2p import email_verify
+        account = get_account_info()
+        if not account:
+            return []
+        import psycopg2
+        conn = psycopg2.connect(self.db_dsn)
+        conn.autocommit = True
         try:
-            import psycopg2
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT 1 FROM sent_invites "
-                        "WHERE sent_at > NOW() - INTERVAL '30 days' "
-                        "LIMIT 1"
-                    )
-                    return cur.fetchone() is not None
-            finally:
-                conn.close()
-        except Exception:
-            return False
+            added = email_verify.pick_up_acceptances(
+                conn, account["invite_code"], account["public_key_hex"], sign_message)
+        finally:
+            conn.close()
+        if added and self._sync_server:
+            asyncio.run_coroutine_threadsafe(self._sync_server._wake_backend_sse(), self._loop)
+        return added
 
-    @staticmethod
-    def _fetch_pending_accepts_sync() -> list[dict]:
-        """Blocking: fetch pending accepts from Worker."""
-        from desktop.p2p.email_verify import check_pending_accepts
-        return check_pending_accepts()
+    def _resolve_soon(self) -> None:
+        if self._resolve_nudge is not None and self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._resolve_nudge.set)
 
     async def _push_pending_messages(
         self,

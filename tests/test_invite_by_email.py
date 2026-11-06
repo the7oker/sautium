@@ -29,7 +29,7 @@ def _account(monkeypatch, verified: bool) -> list:
 
     async def post(path, payload):
         sent.append(path)
-        return {"status": "sent", "verified_sender": True}
+        return {"status": "sent", "verified_sender": True, "invite_id": "9e114e70-db9a-664c-1804-84e25be59859"}
 
     monkeypatch.setattr(p2p, "_get_identity", lambda: {
         "invite_code": "alice#ABCD-EF01-2345", "public_key_hex": "ab" * 32,
@@ -75,7 +75,7 @@ def test_the_friends_screen_tells_an_account_without_a_verified_email_where_to_v
                          capture_output=True, text=True, check=True).stdout.splitlines()
     unverified = "Verify your email in Profile to send invites — they go out under your verified address."
     none = "Add and verify an email in Profile to send invites — they go out under your verified address."
-    assert out == ["Send invite — they get a verified email with a link.", unverified, none, none]
+    assert out == ["Send invite — they get a verified email with a one-time invite to paste.", unverified, none, none]
 
 
 class _Refusing:

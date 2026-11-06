@@ -89,6 +89,9 @@ TS_WINDOW = 60
 # Token friendships accepted in any hour, all tokens together — sized for an
 # announcement's newcomers, each of whom has mined its own identity proof.
 TOKEN_FRIENDS_PER_HOUR = 600
+# A peer's nudge runs our pickup, a Worker request on our key's day: at most
+# one in this many seconds, whoever nudges.
+NUDGE_PICKUP_INTERVAL = 600
 PROBE_COOLDOWN = 60
 PROBE_TIMEOUT = 3
 PROBE_HEALTH_CAP = 256 * 1024
@@ -142,6 +145,8 @@ class SyncServer:
         self.mb_dump_version = mb_dump_version  # full-dump version served via /api/mb/slice
         self._chat_service = None  # set via set_chat_service()
         self._on_message_cb: Optional[Callable] = None
+        self._pickup: Optional[Callable] = None
+        self._nudge_pickup_at = float("-inf")
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
@@ -399,6 +404,11 @@ class SyncServer:
         """Attach chat service for handling chat endpoints."""
         self._chat_service = chat_service
         self._on_message_cb = on_message_cb
+
+    def set_pickup(self, pickup: Callable) -> None:
+        """The manager's pickup of our accepted invites (a coroutine
+        function) — what a peer's nudge runs."""
+        self._pickup = pickup
 
     def _admission(self):
         """The admission gate of this surface (dormant: price 0). Lazy — the
@@ -1146,6 +1156,12 @@ class SyncServer:
                  or next((f for f in friends if f["invite_code"] == peer_invite), None))
         if match and match.get("is_blocked"):
             return _refused()
+        # A pending contact bound to a fingerprint answers to the key it
+        # names alone, on every path: nothing is spent or written for
+        # another one.
+        if (match and match["public_key_hex"].startswith("pending:")
+                and not chat_wire.binds(match.get("key_fingerprint"), peer_pubkey)):
+            return _refused()
         resolved = (match if match
                     and match["public_key_hex"] == peer_pubkey else None)
 
@@ -1435,8 +1451,7 @@ class SyncServer:
             with self._db() as conn:
                 rows = chat_wire.export_rows(conn, friend["id"], after)
                 page, out_ids, after, more = chat_wire.export_page(
-                    rows, lambda text, message_uuid, ts_iso: self._chat_service.encrypt_envelope(
-                        text, message_uuid, ts_iso, requester_pubkey), after)
+                    rows, lambda row: self._chat_service.seal_exported(row, requester_pubkey), after)
                 if out_ids:
                     chat_wire.mark_exported(conn, friend["id"], out_ids)
             return len(page), wire.render({"messages": page, "next": after, "more": more},
@@ -1962,18 +1977,19 @@ class SyncServer:
         return self._json_response(request, {"ok": True})
 
     async def handle_invite_accepted(self, request: web.Request) -> web.Response:
-        """POST /api/chat/invite-accepted — peer nudge after accepting our invite.
+        """POST /api/chat/invite-accepted — a peer's nudge: it accepted one
+        of our invites, so our pickup runs now (the manager's, one at a
+        time) instead of at the next start or Friends screen. That is all a
+        nudge does: it adds no friend and answers no identity — whoever the
+        pickup adds is the acceptor its own signed statement names, and the
+        nudger's next classic handshake finds that contact.
 
-        When Sasha accepts Masha's invite (via Worker), Sasha's P2P manager
-        finds Masha online and sends this nudge. Masha's server checks the
-        Worker for pending accepts, auto-adds Sasha, and returns handshake
-        data so Sasha can resolve the friend immediately.
+        Request: the classic handshake's signed body.
+        Response: {picked_up: true}; 403 when no invite of ours is open; 429
+        while the last nudge's pickup is recent (any peer can nudge, and a
+        pickup is a Worker request)."""
 
-        Request:  {public_key_hex, username, invite_code}
-        Response: {accepted: true/false, public_key_hex, username, invite_code}
-        """
-
-        if not self.account_info:
+        if not self.account_info or self._pickup is None:
             return self._json_response(
                 request, {"error": "no account configured"}, status=503
             )
@@ -1981,19 +1997,18 @@ class SyncServer:
         try:
             body = await request.json()
             peer_pubkey = body.get("public_key_hex", "")
-            peer_username = body.get("username", "")
             peer_invite = body.get("invite_code", "")
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400
             )
 
-        if not peer_pubkey or not peer_invite:
+        if not isinstance(peer_pubkey, str) or not isinstance(peer_invite, str) \
+                or not peer_pubkey or not peer_invite:
             return self._json_response(
                 request, {"error": "missing fields"}, status=400
             )
 
-        # Verify invite code matches public key
         from desktop.node_identity import verify_invite_code
         if not verify_invite_code(peer_invite, peer_pubkey):
             return self._json_response(
@@ -2006,78 +2021,23 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "handshake signature required"}, status=403)
 
-        # Check DB first — skip Worker call if no pending invites
         loop = asyncio.get_event_loop()
-        has_pending = await loop.run_in_executor(
-            None, self._has_pending_invites_db
-        )
-        if not has_pending:
+        if not await loop.run_in_executor(None, self._has_open_invites):
             return self._json_response(
-                request, {"accepted": False, "error": "no pending invites"},
-                status=403,
-            )
-
-        # Check Worker for pending accepts (blocking call → run in executor)
-        accepts = await loop.run_in_executor(None, self._fetch_pending_accepts)
-
-        # Look for this peer among the accepts
-        found = any(a.get("invite_code") == peer_invite for a in accepts)
-
-        if not found:
+                request, {"error": "no open invites"}, status=403)
+        wait = self._nudge_pickup_at + NUDGE_PICKUP_INTERVAL - time.monotonic()
+        if wait > 0:
             return self._json_response(
-                request, {"accepted": False, "error": "no pending accept found"},
-                status=403,
-            )
+                request, {"error": "picked up lately"}, status=429,
+                headers={"Retry-After": str(int(wait) + 1)})
+        self._nudge_pickup_at = time.monotonic()
+        await self._pickup()
+        return self._json_response(request, {"picked_up": True})
 
-        # Auto-add the peer as friend
-        if self._chat_service:
-            self._chat_service.add_friend(
-                public_key_hex=peer_pubkey,
-                invite_code=peer_invite,
-                username=peer_username,
-            )
-            # Same passive-presence rule as for ordinary handshake:
-            # a successful nudge means the peer's launcher is up
-            # right now, so mark them online. Without this the
-            # auto-added friend stays offline in the UI until the
-            # next chat message or 15-min handshake refresh.
-            self._chat_service.update_friend_last_seen(peer_pubkey)
-            logger.info(
-                f"Invite-accepted nudge: auto-added {peer_username} "
-                f"({peer_pubkey[:16]}...)"
-            )
-            # Wake Web UI so the new friend appears immediately
-            asyncio.ensure_future(self._wake_backend_sse())
-
-        return self._json_response(request, {
-            "accepted": True,
-            "public_key_hex": self.account_info.get("public_key_hex", ""),
-            "username": self.account_info.get("username", ""),
-            "invite_code": self.account_info.get("invite_code", ""),
-        })
-
-    def _has_pending_invites_db(self) -> bool:
-        """Blocking: check DB for unreciprocated sent invites."""
-        try:
-            with self._db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT 1 FROM sent_invites "
-                        "WHERE sent_at > NOW() - INTERVAL '30 days' LIMIT 1"
-                    )
-                    return cur.fetchone() is not None
-        except Exception:
-            return False
-
-    @staticmethod
-    def _fetch_pending_accepts() -> list[dict]:
-        """Blocking: check Worker for pending accepts."""
-        try:
-            from desktop.p2p.email_verify import check_pending_accepts
-            return check_pending_accepts()
-        except Exception as e:
-            logger.error(f"Failed to fetch pending accepts: {e}")
-            return []
+    def _has_open_invites(self) -> bool:
+        from desktop.p2p import email_verify
+        with self._db() as conn:
+            return email_verify.has_open_invites(conn)
 
     async def _wake_backend_sse(self):
         """Tell the local backend to wake SSE clients (incoming message)."""

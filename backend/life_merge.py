@@ -315,11 +315,16 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
         merged["tokens"] = _whole_rows(cur, "invite_tokens")
         run("""UPDATE invite_tokens t SET revoked_at = s.revoked_at FROM _S_.invite_tokens s
                 WHERE s.id = t.id AND s.revoked_at IS NOT NULL AND t.revoked_at IS NULL""")
+        # --- sent invites by the invite's id (a row from before the id never
+        # matches an acceptance, so it is left behind); taken on either side
+        # is taken.
         merged["invites"] = run("""
-            INSERT INTO sent_invites (to_email, sent_at)
-            SELECT s.to_email, s.sent_at FROM _S_.sent_invites s
-             WHERE NOT EXISTS (SELECT 1 FROM sent_invites x WHERE x.to_email = s.to_email
-                                  AND x.sent_at IS NOT DISTINCT FROM s.sent_at)""")
+            INSERT INTO sent_invites (to_email, sent_at, invite_id, taken_at)
+            SELECT s.to_email, s.sent_at, s.invite_id, s.taken_at FROM _S_.sent_invites s
+             WHERE s.invite_id IS NOT NULL
+            ON CONFLICT (invite_id) DO NOTHING""")
+        run("""UPDATE sent_invites i SET taken_at = s.taken_at FROM _S_.sent_invites s
+                WHERE s.invite_id = i.invite_id AND s.taken_at IS NOT NULL AND i.taken_at IS NULL""")
 
         # --- friends by public key. A friend who rotated: the newer key wins
         # on whichever side has it (chat_service applies a rotation the same
@@ -340,17 +345,20 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
                  FROM _S_.friends s
                 WHERE f.public_key_hex = 'pending:' || f.invite_code
                   AND s.invite_code = f.invite_code AND s.public_key_hex NOT LIKE 'pending:%'
+                  AND (f.key_fingerprint IS NULL OR f.key_fingerprint
+                       = substring(sha256(decode(s.public_key_hex, 'hex')) FROM 1 FOR 16))
                   AND NOT EXISTS (SELECT 1 FROM friends x WHERE x.public_key_hex = s.public_key_hex)""")
         merged["friends"] = run("""
             INSERT INTO friends (username, public_key_hex, invite_code, display_name, added_at,
                                  last_seen, is_blocked, previous_public_key_hex, city, bio,
                                  avatar_cover_id, source, source_token_id, join_token_id,
-                                 favorite, last_activity_at, bound_identity)
+                                 favorite, last_activity_at, bound_identity, key_fingerprint)
             SELECT s.username, s.public_key_hex, s.invite_code, s.display_name, s.added_at,
                    s.last_seen, s.is_blocked, s.previous_public_key_hex, s.city, s.bio,
                    (SELECT c.id FROM covers c WHERE c.id = s.avatar_cover_id), s.source,
                    (SELECT t.id FROM invite_tokens t WHERE t.id = s.source_token_id),
-                   s.join_token_id, s.favorite, s.last_activity_at, s.bound_identity
+                   s.join_token_id, s.favorite, s.last_activity_at, s.bound_identity,
+                   s.key_fingerprint
               FROM _S_.friends s
              WHERE NOT EXISTS (SELECT 1 FROM friends f
                                 WHERE f.previous_public_key_hex = s.public_key_hex
@@ -384,8 +392,9 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
                    ON CONFLICT DO NOTHING""", {"ids": granted})
         merged["messages"] = run("""
             INSERT INTO p2p_messages (friend_id, direction, content, "timestamp", delivered,
-                                      read, message_uuid)
-            SELECT f.id, m.direction, m.content, m."timestamp", m.delivered, m.read, m.message_uuid
+                                      read, message_uuid, sender_sig, sent_at)
+            SELECT f.id, m.direction, m.content, m."timestamp", m.delivered, m.read, m.message_uuid,
+                   m.sender_sig, m.sent_at
               FROM _S_.p2p_messages m
               JOIN _S_.friends sf ON sf.id = m.friend_id
               JOIN friends f ON f.public_key_hex = sf.public_key_hex

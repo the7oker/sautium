@@ -264,7 +264,16 @@ username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed2551
 
 **Invite Code**: `username#XXXX-XXXX-XXXX` where XXXX is `SHA-256(public_key)[:6]`
 in hex. Human-readable, and the hash part defends against forgery (a different
-"bob42" gets a different hash).
+"bob42" gets a different hash). It is what every node keys a contact by and
+what the Worker's wire carries. **The long code** (since 2026-11-07), what a
+person copies — "My invite code", an invite link's share string, an invite
+mail —, is `username#` and `SHA-256(public_key)[:16]` in eight groups of four,
+starting with the short code: a contact made from it waits for the key those
+128 bits name (`friends.key_fingerprint`), not for whoever grinds a key for 48.
+A short code typed in still works, and existing contacts keep theirs. What Add
+takes, one parse on every node (`chat_wire.parse_share`, whitespace dropped):
+a code, short or long, `#<uuid>` (an invite link) or `#i-<token>` (a mailed
+invite).
 
 **Key rotation** (name or password change — SHIPPED 2026-09-10). Both are
 KDF inputs, so either change is a new key; the old one is kept:
@@ -331,13 +340,30 @@ Cloudflare Worker (`sautium-verify.sautium.workers.dev`) + Resend:
 A leaked invite code does not create a friendship on its own — **both** sides
 must add each other's invite code. The handshake only completes on
 seen_by_both. Without it, one leaked code would produce a fake friendship.
+An add by plain code tells the code's owner through the Worker's mail (the
+adder's username and code, nothing else), and the owner adds back.
+
+**A mailed invite** is the one way one side's add makes the contact on the
+other (since 2026-11-07): its single-use token, spent on the Worker when the
+recipient adds the invite string, ties the acceptance to the mailbox the
+inviter chose. The inviter's node keeps the invite's id (`sent_invites`) and
+picks its acceptances up — at the launcher's start, when Friends opens, or on
+a peer's nudge, one function (`email_verify.pick_up_acceptances`) — adding
+one only for an invite it sent and has not taken, under the acceptor's own
+signed statement, as a contact bound to the acceptor's key. The acceptor's
+contact is bound to the inviter's key the Worker answered with. The nudge
+(`/api/chat/invite-accepted`, signed as the classic handshake) only makes the
+inviter's pickup run sooner, at most one every ten minutes; it adds nobody and
+answers no identity, and an acceptor sends it once per add, at the first
+refusal of its handshake.
 
 Adding a code stores a `pending:<invite>` stub — the operator's half of the
 consent. The stub resolves on the peer's classic handshake and, since
 2026-09-04, on ANY request that peer makes to us (wake-stream, probe,
 history, message, forward, diag — `friend_for_key` in both chat services):
-the digest inside the invite code names the one key that can ever claim the
-stub, so a request from that key carries what the handshake would. That is
+the fingerprint the contact was made with — 128 bits of the key from a long
+code or an accepted invite, the 48 of a short code — names the key that may
+claim the stub, so a request from that key carries what the handshake would. That is
 what repairs a friendship deleted and re-added on one side only — the other
 side still holds us resolved and never handshakes again, and a node that
 never initiates (the master) would otherwise keep the stub forever, both
@@ -347,7 +373,8 @@ rights.
 
 ### Invite tokens (auto-confirm) — SHIPPED 2026-07-31
 
-The share string gains a third segment: `username#XXXX-XXXX-XXXX#<token-uuid>`.
+The share string gains a third segment: `username#<long code>#<token-uuid>`
+(the short code there still parses).
 Any node mints tokens (`invite_tokens`) with its own parameters: rights
 (`p2p_right`: `can_message`, `can_search`), use limit, expiry, revocation,
 welcome message, `require_birth_cert`. Presenting a live token in the handshake
@@ -613,7 +640,13 @@ flips only on a verified signature. Since 2026-11-03 a message's uuid and
 time travel inside its box with the text (`desktop/p2p/chat_wire.envelope`):
 an earlier ciphertext replayed under a new uuid does not open as one, and a
 uuid repeats only for the same message in the same thread — anything else
-under it is refused, and gets no receipt. A history export is read in pages
+under it is refused, and gets no receipt. Since 2026-11-07 its sender's
+signature travels there too, over who wrote it to whom, its uuid, time and
+text (`chat_wire.message_statement`), and a message without one is refused;
+the receiver keeps it with the row, so a history export gives each message
+back under its own author's signature, and an import takes a line as the
+importer's own only under the importer's own signature — a friend can write
+nothing into the thread as written by us. A history export is read in pages
 (`chat_wire.export_page`: at most 2 000 messages or 4 MiB of ciphertext, each
 page after the cursor the one before ended on — the requester keeps one per
 answering node —, the exporter's undelivered outgoing messages whatever the
