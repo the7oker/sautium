@@ -1,0 +1,50 @@
+{
+  "_comment": "Invite wire v1 — contract for worker/verify.js and desktop/p2p/invite_wire.py (both node runtimes). Keys are fixed test seeds (0x11.., 0x22..); never use in production. ts is 2025-11-13T02:13:20Z: a test that checks freshness sets its clock.",
+  "inviter_seed": "1111111111111111111111111111111111111111111111111111111111111111",
+  "acceptor_seed": "2222222222222222222222222222222222222222222222222222222222222222",
+  "inviter": {
+    "name": "masha",
+    "pubkey": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "short_code": "masha#10BA-682C-8AD1",
+    "long_code": "masha#10BA-682C-8AD1-3513-971E-8B56-881A-AB8B"
+  },
+  "acceptor": {
+    "name": "sasha",
+    "pubkey": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+    "short_code": "sasha#1325-B850-C287",
+    "long_code": "sasha#1325-B850-C287-1916-EAE2-03F0-EFC3-C898"
+  },
+  "token": "000102030405060708090a0b0c0d0e0f",
+  "invite_string": "masha#10BA-682C-8AD1-3513-971E-8B56-881A-AB8B#i-000102030405060708090a0b0c0d0e0f",
+  "invite_id": "9e114e70-db9a-664c-1804-84e25be59859",
+  "ts": 1763000000,
+  "to": "sasha@example.net",
+  "message": "hello",
+  "message_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+  "texts": {
+    "send": "sautium-invite-send:v1:1763000000:masha#10BA-682C-8AD1:sasha@example.net:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    "accept": "sautium-invite-accept:v1:1763000000:9e114e70-db9a-664c-1804-84e25be59859:masha#10BA-682C-8AD1:sasha#1325-B850-C287:a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+    "add": "sautium-invite-add:v1:1763000000:masha#10BA-682C-8AD1:sasha#1325-B850-C287:a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+    "pickup": "sautium-invite-pickup:v1:1763000000:masha#10BA-682C-8AD1:d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+  },
+  "signatures": {
+    "send": "fbe23ad4a774d233342e24e612e63a3c30c1db6fc703b0f3e537e834e595efaae05768ba6e1e5a482388625aa6e45e3024a76cb81b122c26cae2240ee4deb40b",
+    "accept": "4c036806ddb03054647c0d957b503dc739446baa1748c69831aed68bedccaea42077645f528af770983df60ea6c09fc1b7b94e1d55713c481445a559612f0f0d",
+    "add": "179f860ca8839aed49e9d46febf9fbf4d0ad1ddde4b0814a6886256b04ed28cdbc15bbc5ed41a66c25e6e6246c66bf01f942ab9c7005152a0fba2ee156dc420c",
+    "pickup": "845be32055bef27e26c25c6c0a9500186ee4b1629cb087432fc7440f15398a8a7316ebe04f0f970815df27a46a222bf4a4e161d9bf3b4cb62d13c21a6d5b5f0e"
+  },
+  "signed_by": {
+    "send": "inviter",
+    "accept": "acceptor",
+    "add": "acceptor",
+    "pickup": "inviter"
+  },
+  "parse": {
+    "wrapped": "masha#10BA-682C-8AD1-3513-971E-8B56-881A\n  -AB8B#i-000102030405060708090a0b0c0d0e0f",
+    "token_prefixes": [
+      "i-",
+      "I-",
+      "i"
+    ]
+  }
+}

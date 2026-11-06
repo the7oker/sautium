@@ -13,6 +13,7 @@ import pytest
 
 HERE = Path(__file__).parent
 DAY_MS = 86_400_000
+VECTORS = json.loads((HERE / "vectors" / "invite_wire_v1.json").read_text())
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
@@ -156,37 +157,189 @@ def test_codes_to_one_mailbox_are_capped_however_many_keys_ask():
     assert _run("codes")["codesToOneMailbox"] == [200] * 5 + [429]
 
 
-# --- acceptances -------------------------------------------------------------
+# --- invites: the token, its one spending, the add by plain code, the pickup ---
 
-def test_an_acceptance_is_kept_under_the_code_its_owner_builds():
+def test_an_invite_mail_carries_a_token_the_worker_keeps_only_hashed():
     r = _run("accepts")
-    assert r["invalidTheirs"]["status"] == 400
-    assert r["ownCode"]["status"] == 400
-    assert r["accepted"]["status"] == 200 and r["accepted"]["body"]["notified"] is True
-    assert r["notifiedTo"] == [["masha@example.org"]]
+    assert r["sent"]["status"] == 200 and r["sent"]["body"]["verified_sender"] is True
+    assert r["tokenIdMatches"] is True and r["stringInMail"] is True
+    assert r["inviteMailTo"] == ["sasha@example.net"]
+    [row] = r["rowsAfterSend"]
+    assert row["inviter"] == r["keys"]["masha"] and row["inviter_code"] == r["keys"]["masha_code"]
+    assert row["acceptor"] is None
+    # no token, recipient or message in what the Worker keeps
+    assert r["rowHoldsNothingOfTheMail"] is True
+
+
+def test_an_invites_token_is_spent_once_and_its_acceptor_hears_the_same_answer_again():
+    r = _run("accepts")
+    accepted = r["accepted"]["body"]
+    assert r["accepted"]["status"] == 200 and accepted["status"] == "accepted"
+    assert accepted["invite_id"] == r["sent"]["body"]["invite_id"]
+    assert accepted["inviter"] == {"invite_code": r["keys"]["masha_code"], "public_key_hex": r["keys"]["masha"]}
+    assert accepted["notified"] is True
+    again = r["acceptedAgain"]
+    assert again["status"] == 200 and {k: v for k, v in again["body"].items() if k != "notified"} \
+        == {k: v for k, v in accepted.items() if k != "notified"}
+    assert r["mailsByAgain"] == 0
+    assert r["usedByAnother"]["status"] == 409 and r["usedByAnother"]["body"]["reason"] == "used"
+
+
+def test_a_refused_invite_names_its_reason():
+    r = _run("accepts")
+    for name, status, reason in (("badToken", 400, "bad_token"), ("upperToken", 400, "bad_token"),
+                                 ("unknownToken", 404, "not_found"), ("expired", 404, "not_found"),
+                                 ("notThisCode", 403, "not_this_code"), ("own", 403, "own")):
+        assert r[name]["status"] == status and r[name]["body"]["reason"] == reason, name
+    assert r["ownByCode"]["status"] == 400 and r["invalidTheirs"]["status"] == 400
+
+
+def test_the_invite_routes_take_a_fresh_time_and_send_binds_its_message():
+    r = _run("accepts")
+    for name in ("staleSend", "staleAccept", "stalePickup"):
+        assert r[name]["status"] == 403 and r[name]["body"] == {"error": "stale timestamp"}, name
+    assert r["unsignedMessage"]["status"] == 403
+    assert r["textTs"]["status"] == 400                         # a time is a number
+
+
+def test_the_acceptance_mail_names_no_address_of_the_acceptors():
+    r = _run("accepts")
+    [mail] = r["acceptMail"]
+    assert mail["to"] == ["masha@example.org"]
+    assert mail["subject"] == "sasha accepted your Sautium invite"
+    assert "Accepted through the invite you sent" in mail["html"]
+    assert "sasha@example.net" not in mail["html"] and "Unverified" not in mail["html"]
+    assert r["keys"]["sasha_code"] + "-" in mail["html"]        # the long code: the short one and more
+
+
+def test_an_add_by_plain_code_keeps_nothing_and_mails_the_username_only():
+    r = _run("accepts")
+    assert r["added"]["body"] == {"status": "added", "notified": True}
+    assert r["addKeptNothing"] is True
+    [mail] = r["addMail"]
+    assert mail["to"] == ["masha@example.org"]
+    assert mail["subject"] == "sasha added your Sautium invite code"
+    assert "sasha@example.net" not in mail["html"] and "@" not in mail["html"].split("<hr")[0]
+    assert r["addToNoMailbox"]["body"] == {"status": "added", "notified": False}
+
+
+def test_the_pickup_is_a_signed_read_of_every_accepted_invite():
+    r = _run("accepts")
     [picked] = r["pickup"]["body"]["accepts"]
-    assert picked["invite_code"].startswith("sasha#")
-    assert r["pickupAgain"]["body"] == {"accepts": []}
+    assert picked["invite_id"] == r["sent"]["body"]["invite_id"]
+    assert picked["acceptor"]["invite_code"] == r["keys"]["sasha_code"]
+    assert picked["acceptor"]["public_key_hex"] == r["keys"]["sasha"]
+    assert isinstance(picked["acceptor"]["ts"], int) and len(picked["acceptor"]["signature"]) == 128
+    assert r["pickupAgain"]["body"] == r["pickup"]["body"]       # nothing deleted
+    assert r["pickupAfterOldKey"]["body"] == r["pickup"]["body"]   # stored acceptances are never read
     assert r["pickupUnderAnotherName"]["status"] == 403
+    assert r["pickupByGet"]["status"] == 404
 
 
-def test_acceptances_and_their_mail_and_pickups_are_capped_before_any_write():
+def test_a_mail_that_fails_leaves_no_invite_behind():
     r = _run("accepts")
-    assert r["acceptAtKeyCap"]["status"] == 429 and r["writesByAcceptRefusal"] == 0
-    assert r["acceptAtNotifyCap"]["body"] == {"status": "accepted", "notified": False}
+    assert r["sendMailDown"]["status"] == 502 and r["invitesLeftByMailDown"] == 0
+
+
+def test_acceptances_and_their_mail_and_pickups_are_capped_before_their_step():
+    r = _run("accepts")
+    assert r["acceptAtKeyCap"]["status"] == 429 and r["stepUntouchedAtCap"] is True
+    assert r["acceptAtNotifyCap"]["status"] == 200 and r["acceptAtNotifyCap"]["body"]["notified"] is False
     assert r["mailsAtNotifyCap"] == 0
-    assert r["pickupAtCap"]["status"] == 429 and r["writesByPickupRefusal"] == 0
+    assert r["pickupAtCap"]["status"] == 429
 
 
 def test_the_acceptance_mails_one_address_sets_off_are_capped():
     r = _run("accepts")
-    assert r["acceptAtNotifyAddrCap"]["body"] == {"status": "accepted", "notified": False}
+    assert r["addAtNotifyAddrCap"]["body"] == {"status": "added", "notified": False}
     assert r["mailsAtNotifyAddrCap"] == 0
-    assert r["acceptFromOtherAddr"]["body"] == {"status": "accepted", "notified": True}
+    assert r["addFromOtherAddr"]["body"] == {"status": "added", "notified": True}
 
 
-def test_a_pickup_takes_a_page_and_leaves_the_rest_for_the_next():
-    assert _run("accepts")["pages"] == [300, 100]
+def test_a_pickup_returns_a_page_oldest_acceptance_first():
+    assert _run("accepts")["page"] == [300, "x0#AAAA-BBBB-CCCC", "x299#AAAA-BBBB-CCCC"]
+
+
+def test_an_expired_invite_is_removed_by_its_alarm():
+    r = _run("accepts")
+    assert r["alarmSet"] is True and r["expiredLeft"] == 0
+
+
+# --- the invite wire's vectors, through the Worker ---------------------------
+
+def test_the_worker_speaks_the_invite_wires_vectors():
+    v, r = VECTORS, _run("vectors")
+    assert r["keys"] == {"inviter": v["inviter"]["pubkey"], "acceptor": v["acceptor"]["pubkey"]}
+    for name in ("send", "accept", "add", "pickup"):
+        assert r[f"{name}Sig"] == v["signatures"][name], name
+    assert r["sent"]["status"] == 200 and r["sent"]["body"]["invite_id"] == v["invite_id"]
+    [mail] = r["inviteMail"]
+    assert v["invite_string"] in mail["html"]
+    assert "until 13 December 2025" in mail["html"]           # thirty days from the vectors' time
+    assert r["accepted"]["status"] == 200
+    assert r["accepted"]["body"]["inviter"] == {"invite_code": v["inviter"]["short_code"],
+                                                "public_key_hex": v["inviter"]["pubkey"]}
+    [accept_mail] = r["acceptMail"]
+    assert v["acceptor"]["long_code"] in accept_mail["html"]
+    [picked] = r["pickup"]["body"]["accepts"]
+    assert picked == {"invite_id": v["invite_id"], "accepted_at": "2025-11-13T02:13:20.000Z",
+                      "acceptor": {"invite_code": v["acceptor"]["short_code"], "public_key_hex": v["acceptor"]["pubkey"],
+                                   "ts": v["ts"], "signature": v["signatures"]["accept"]}}
+    assert r["added"]["body"] == {"status": "added", "notified": True}
+    [add_mail] = r["addMail"]
+    assert v["acceptor"]["long_code"] in add_mail["html"]
+
+
+# --- an invite code's owner --------------------------------------------------
+
+def test_an_invite_code_belongs_to_the_earliest_key_born_under_its_digest():
+    r = _run("owners")
+    assert r["lateHolds"] != r["lateCode"]                     # a later birth leaves the elder's claim
+    assert r["lateRoutes"] == [403] * 6                         # every invite route refuses the later key
+    assert r["freshHolds"] is True                              # a birth claims its digest
+
+
+def test_the_births_stored_before_are_read_once_and_until_then_no_owner_is_answered():
+    r = _run("owners")
+    assert r["beforeBackfill"]["status"] == 503
+    assert r["alarmAfterFirstStep"] is True and r["listsSoFar"] == 1
+    assert r["steps"] == 2                                      # 1 201 births, pages of 500
+    assert r["backfilled"] == 1201
+    assert r["elderHolds"] is True                              # the earlier birth wins a later claim
+    assert r["afterBackfill"]["status"] == 200
+
+
+def test_a_stored_birth_the_backfill_missed_claims_at_its_first_use():
+    r = _run("owners")
+    assert r["missedFirstUse"]["status"] == 200 and r["missedHolds"] is True
+
+
+def test_a_key_with_no_birth_holds_no_code():
+    assert _run("owners")["unborn"]["body"] == {"error": "no certificate for this key"}
+
+
+# --- the reserve share -------------------------------------------------------
+
+def test_the_newcomers_share_of_the_stamp_ceilings_leaves_the_rest_to_nodes_already_known():
+    r = _run("reserve")
+    assert r["stampNewcomer"] == 429 and r["stampKnown"] == 200
+    assert r["stampKnownAtCeiling"] == 429                     # the ceiling itself still holds
+    assert r["lookupNewcomer"] == 429 and r["lookupKnown"] == 200
+    assert r["newcomerAfter"] == 200
+
+
+def test_the_newcomers_share_of_the_directorys_day_leaves_the_rest_to_nodes_already_known():
+    r = _run("reserve")
+    assert r["dirNewcomer"] == 429 and r["dirKnown"] == 200
+    assert r["newCountedForKnown"] is True                     # a known node spends none of the share
+
+
+# --- keys ----------------------------------------------------------------------
+
+def test_a_small_order_key_gets_no_certificate():
+    r = _run("smallorder")
+    assert r["birth"]["status"] == 403 and r["signedHigh"]["status"] == 403
+    assert r["certified"] is False
 
 
 # --- timestamps --------------------------------------------------------------

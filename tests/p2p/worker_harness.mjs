@@ -127,7 +127,7 @@ function objectOf(Cls, db, objEnv = {}) {
 // way the runtime's own KV errors do, and (when asked) KV's rule of one write
 // a second to a key.
 const store = new Map();
-const kvState = { writes: 0, reads: 0, fail: null, perKeyRule: false };   // fail: null | "put" | "get"
+const kvState = { writes: 0, reads: 0, lists: 0, fail: null, perKeyRule: false };   // fail: null | "put" | "get"
 const lastWrite = new Map();
 const kv = {
   async get(k, type) {
@@ -153,9 +153,14 @@ const kv = {
     kvState.writes += 1;
     store.delete(k);
   },
-  async list({ prefix, limit = 1000 }) {
-    const all = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
-    return { keys: all.slice(0, limit).map((name) => ({ name })), list_complete: all.length <= limit };
+  async list({ prefix, limit = 1000, cursor }) {
+    // A page at a time, as KV lists: the cursor names where the next begins.
+    const all = [...store.keys()].filter((k) => k.startsWith(prefix) && (!cursor || k > cursor)).sort();
+    const keys = all.slice(0, limit);
+    const complete = all.length <= limit;
+    kvState.lists += 1;
+    return { keys: keys.map((name) => ({ name })), list_complete: complete,
+             ...(complete ? {} : { cursor: keys[keys.length - 1] }) };
   },
 };
 
@@ -166,11 +171,11 @@ const mailbox = objectOf(workerModule.MasterMailbox, mailDb);
 const dirDb = new DatabaseSync(":memory:");
 const directory = objectOf(workerModule.NodeDirectory, dirDb);
 // The Limiter: one instance per name, each on its own database, as Cloudflare
-// keeps one object per id.
+// keeps one object per id; its env holds the KV the owners' backfill reads.
 const limiterShards = new Map();
 function limiterShard(name) {
   if (!limiterShards.has(name)) {
-    limiterShards.set(name, objectOf(workerModule.Limiter, new DatabaseSync(":memory:")));
+    limiterShards.set(name, objectOf(workerModule.Limiter, new DatabaseSync(":memory:"), { RATE_LIMITS: kv }));
   }
   return limiterShards.get(name);
 }
@@ -253,26 +258,51 @@ async function verifyEmail(key, name, email, opts) {
   await sendCode(key, name, email, opts);
   return register(key, name, email, codeIn(mails[mails.length - 1]), opts);
 }
+// The invite wire as a node speaks it: the signed texts in the short code a
+// client builds, keys in lower-case hex, `ts` in integer seconds.
+const nowS = () => Math.floor(Date.now() / 1000);
+function canonical(code) {
+  const [name, h = ""] = code.trim().split("#");
+  const x = h.replace(/-/g, "").toUpperCase();
+  return `${name}#${x.slice(0, 4)}-${x.slice(4, 8)}-${x.slice(8)}`;
+}
+async function inviteIdOf(token) {
+  const h = await sha256Hex(`sautium-invite-id:v1:${token}`);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
 async function invite(key, name, to, opts = {}, message = "") {
   const code = opts.invite || await inviteOf(key, name);
+  const ts = opts.ts ?? nowS();
+  const text = `sautium-invite-send:v1:${ts}:${code}:${to}:${await sha256Hex(opts.signedMessage ?? message ?? "")}`;
   return call("POST", "/send-invite", {
-    to, invite_code: code, public_key_hex: key.pubHex,
-    signature: await sign(key, `invite:${code}:to:${to}`), message,
+    to, invite_code: code, public_key_hex: key.pubHex, ts, signature: await sign(key, text), message,
   }, opts);
 }
-async function accept(key, name, theirs, opts) {
+async function accept(key, name, theirs, opts = {}) {
+  // With opts.token, an acceptance of the invite it names; without, an add
+  // by plain code.
   const mine = await inviteOf(key, name);
+  const ts = opts.ts ?? nowS();
+  const their = /^[A-Za-z0-9_-]{3,32}#[0-9A-Fa-f-]{12,}$/.test(theirs.trim()) ? canonical(theirs) : theirs;
+  const text = opts.token !== undefined
+    ? `sautium-invite-accept:v1:${ts}:${await inviteIdOf(opts.token)}:${their}:${mine}:${key.pubHex}`
+    : `sautium-invite-add:v1:${ts}:${their}:${mine}:${key.pubHex}`;
   return call("POST", "/accept-invite", {
-    my_invite_code: mine, their_invite_code: theirs, public_key_hex: key.pubHex,
-    signature: await sign(key, `accept:${mine}:${theirs}`),
+    my_invite_code: mine, their_invite_code: theirs, public_key_hex: key.pubHex, ts,
+    ...(opts.token !== undefined ? { invite_token: opts.token } : {}),
+    signature: await sign(key, text),
   }, opts);
 }
-async function pending(key, name, opts) {
+async function pending(key, name, opts = {}) {
   const mine = await inviteOf(key, name);
-  const q = `invite_code=${encodeURIComponent(mine)}&public_key_hex=${key.pubHex}`
-    + `&signature=${await sign(key, `pending-accepts:${mine}`)}`;
-  return call("GET", `/pending-accepts?${q}`, undefined, opts);
+  const ts = opts.ts ?? nowS();
+  return call("POST", "/pending-accepts", {
+    invite_code: mine, public_key_hex: key.pubHex, ts,
+    signature: await sign(key, `sautium-invite-pickup:v1:${ts}:${mine}:${key.pubHex}`),
+  }, opts);
 }
+const tokenIn = (mail) => mail.html.match(/#i-([0-9a-f]{32})</)[1];
+const invitesTable = () => limiterShard("invites").db.prepare("SELECT * FROM invites ORDER BY sent, id").all();
 async function stamp(key, roots, opts, ts = Math.floor(Date.now() / 1000)) {
   return call("POST", "/timestamp", {
     ...(roots.length === 1 ? { root: roots[0] } : { roots }),
@@ -281,6 +311,7 @@ async function stamp(key, roots, opts, ts = Math.floor(Date.now() / 1000)) {
   }, opts);
 }
 const root = (n) => n.toString(16).padStart(64, "0");
+const DAY_MS = 86400e3;
 
 // A counter set by hand — in its route's limiter instance, or in an object
 // that keeps its own (the mailbox, the directory): how close a route already
@@ -365,7 +396,10 @@ async function contract() {
   const check2 = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode2)}&email=${encodeURIComponent(email2)}&public_key_hex=${s2.pubHex}&signature=${await sign(s2, `check-email:${inviteCode2}:${email2}`)}`);
   const legacyRecordAfterCheck = JSON.parse(store.get(`born:${s2.pubHex}`));
   // a verified: record bound to ANOTHER pubkey must not upgrade anything
+  // (s5's own birth, stored before: every invite route needs a key's code to be its own)
   const s5 = await newKey();
+  store.set(`born:${s5.pubHex}`, JSON.stringify({ v: 4, issued_at: "2026-07-07T00:00:00Z", method: "pow",
+    difficulty: 32, params_version: 1, sig_v4: "cd".repeat(64) }));
   const inviteCode5 = await inviteOf(s5, "eve");
   store.set(`verified:${inviteCode5.replace("#", ":")}`,
     JSON.stringify({ email: email2, pubkey: s2.pubHex, born_at: "2026-07-05T10:11:12Z", verified_at: "2026-07-05T10:20:00Z" }));
@@ -567,11 +601,13 @@ async function mail() {
   out.otherName = await invite(alice, "mallory", "a2@example.net", { ip: "198.51.100.1" });
   out.otherNameCode = await sendCode(alice, "mallory", "a3@example.net", { ip: "198.51.100.1" });
   const fresh = await newKey();
+  await issue(fresh);
   await sendCode(fresh, "first", "b@example.org", { ip: "198.51.100.4" });
   out.boundByFirstUse = await sendCode(fresh, "second", "b2@example.org", { ip: "198.51.100.4" });
   out.firstNameStill = await sendCode(fresh, "first", "b3@example.org", { ip: "198.51.100.4" });
   // a read fixes no name: check-email under any name, then a write under another
   const reader = await newKey();
+  await issue(reader);
   out.readUnderAName = await call("GET", `/check-email?invite_code=${encodeURIComponent(await inviteOf(reader, "rita"))}&email=r%40example.org&public_key_hex=${reader.pubHex}&signature=${await sign(reader, `check-email:${await inviteOf(reader, "rita")}:r@example.org`)}`);
   out.namesAfterRead = namesTable().filter((r) => r.pubkey === reader.pubHex).length;
   out.writeUnderAnother = await sendCode(reader, "rosa", "r@example.org", { ip: "198.51.100.4" });
@@ -709,84 +745,347 @@ async function codes() {
   // five codes a day to one mailbox, however many keys ask, however spelled
   out.codesToOneMailbox = [];
   for (let i = 0; i < 6; i++) {
-    out.codesToOneMailbox.push((await sendCode(await newKey(), "tom", i % 2 ? "tom@example.org" : "Tom+x@example.org",
+    const asker = await newKey();
+    await issue(asker, { ip: `198.51.100.${40 + i}` });
+    out.codesToOneMailbox.push((await sendCode(asker, "tom", i % 2 ? "tom@example.org" : "Tom+x@example.org",
                                                { ip: `198.51.100.${40 + i}` })).status);
   }
   // the day's 60th code goes, the 61st waits for 00:00 UTC
   preset("code:all:", 59);
   out.codeCeiling = [];
   for (let i = 0; i < 2; i++) {
-    out.codeCeiling.push((await sendCode(await newKey(), "cleo", `cleo${i}@example.org`,
+    const asker = await newKey();
+    await issue(asker, { ip: `198.51.100.${70 + i}` });
+    out.codeCeiling.push((await sendCode(asker, "cleo", `cleo${i}@example.org`,
                                          { ip: `198.51.100.${70 + i}` })).status);
   }
   return out;
 }
 
 // -------------------------------------------------------------------------
-// accepts: the acceptance and its pickup
+// accepts: an invite's token, its one spending, the add by plain code, the pickup
 // -------------------------------------------------------------------------
 
 async function accepts() {
   const out = {};
-  const masha = await newKey(), sasha = await newKey();
-  await issue(masha); await issue(sasha);
+  const masha = await newKey(), sasha = await newKey(), pasha = await newKey();
+  await issue(masha); await issue(sasha); await issue(pasha);
   await verifyEmail(masha, "masha", "masha@example.org", { ip: "198.51.100.50" });
+  await verifyEmail(sasha, "sasha", "sasha@example.net", { ip: "198.51.100.51" });
   const mashaCode = await inviteOf(masha, "masha");
-  const typed = mashaCode.toLowerCase().replace(/-/g, "");            // as a person might type it
-  out.invalidTheirs = await accept(sasha, "sasha", "nonsense", { ip: "198.51.100.51" });
-  out.ownCode = await accept(sasha, "sasha", await inviteOf(sasha, "sasha"), { ip: "198.51.100.51" });
-  const sent = mails.length;
-  out.accepted = await accept(sasha, "sasha", typed, { ip: "198.51.100.51" });
-  out.notifiedTo = mails.slice(sent).map((m) => m.to);
+  // an invite mail carries the inviter's long code and a token; the Worker
+  // keeps the invite under the token's hash, and nothing of the mail
+  let sent = mails.length;
+  out.sent = await invite(masha, "masha", "sasha@example.net", { ip: "198.51.100.50" }, "come and listen");
+  const [mail] = mails.slice(sent);
+  const token = tokenIn(mail);
+  out.inviteMailTo = mail.to;
+  out.tokenIdMatches = out.sent.body.invite_id === await inviteIdOf(token);
+  out.stringInMail = mail.html.includes(`${(await inviteOf(masha, "masha")).split("#")[0]}#`)
+    && /masha#[0-9A-F]{4}(-[0-9A-F]{4}){7}#i-[0-9a-f]{32}/.test(mail.html);
+  out.rowsAfterSend = invitesTable();
+  out.rowHoldsNothingOfTheMail = JSON.stringify(out.rowsAfterSend).match(
+    new RegExp([token, "sasha@example.net", "come and listen"].join("|"))) === null;
+  // the token spent once: accepted, then the same answer again with no
+  // second mail, then refused for another key
+  sent = mails.length;
+  out.accepted = await accept(sasha, "sasha", mashaCode, { ip: "198.51.100.51", token });
+  out.acceptMail = mails.slice(sent);
+  sent = mails.length;
+  out.acceptedAgain = await accept(sasha, "sasha", mashaCode, { ip: "198.51.100.51", token });
+  out.mailsByAgain = mails.length - sent;
+  out.usedByAnother = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token });
+  // what a token can be refused for
+  out.badToken = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: "0".repeat(31) });
+  out.upperToken = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: "A".repeat(32) });
+  out.unknownToken = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: "ab".repeat(16) });
+  sent = mails.length;
+  await invite(masha, "masha", "pasha@example.net", { ip: "198.51.100.50" });
+  const token2 = tokenIn(mails[mails.length - 1]);
+  const vera = await newKey();
+  await issue(vera);
+  out.notThisCode = await accept(pasha, "pasha", await inviteOf(vera, "vera"), { ip: "198.51.100.52", token: token2 });
+  out.own = await accept(masha, "masha", mashaCode, { ip: "198.51.100.50", token: token2 });
+  out.ownByCode = await accept(masha, "masha", mashaCode, { ip: "198.51.100.50" });
+  // an expired invite is gone
+  limiterShard("invites").db.prepare("UPDATE invites SET expires = ? WHERE id = ?")
+    .run(Date.now() - 1, await inviteIdOf(token2));
+  out.expired = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: token2 });
+  // a request is fresh: each signed text carries its time
+  const stale = nowS() - 3600;
+  out.staleSend = await invite(masha, "masha", "x@example.net", { ip: "198.51.100.50", ts: stale });
+  out.staleAccept = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", ts: stale });
+  out.stalePickup = await pending(masha, "masha", { ip: "198.51.100.50", ts: stale });
+  out.unsignedMessage = await invite(masha, "masha", "y@example.net",
+                                     { ip: "198.51.100.50", signedMessage: "something else" }, "this text");
+  out.textTs = await call("POST", "/pending-accepts", {
+    invite_code: mashaCode, public_key_hex: masha.pubHex, ts: String(nowS()),
+    signature: await sign(masha, `sautium-invite-pickup:v1:${nowS()}:${mashaCode}:${masha.pubHex}`),
+  }, { ip: "198.51.100.50" });
+  // the pickup: every accepted invite, each with its acceptor's statement; a
+  // read, so a second pickup finds the same
   out.pickup = await pending(masha, "masha", { ip: "198.51.100.50" });
   out.pickupAgain = await pending(masha, "masha", { ip: "198.51.100.50" });
   out.pickupUnderAnotherName = await pending(masha, "mallory", { ip: "198.51.100.50" });
-  // the acceptance's caps come before its write; the mail's are its own
-  preset(`accept:key:${sasha.pubHex}`, 20);
-  let writes = kvState.writes;
-  out.acceptAtKeyCap = await accept(sasha, "sasha", typed, { ip: "198.51.100.51" });
-  out.writesByAcceptRefusal = kvState.writes - writes;
-  const pasha = await newKey();
+  out.pickupByGet = await call("GET", `/pending-accepts?invite_code=${encodeURIComponent(mashaCode)}`);
+  // acceptances kept before this Worker are never read again
+  store.set(`accepted:${mashaCode.replace("#", ":")}:old:AAAA-BBBB-CCCC`,
+            JSON.stringify({ invite_code: "old#AAAA-BBBB-CCCC", accepted_at: "2026-11-01T00:00:00Z" }));
+  out.pickupAfterOldKey = await pending(masha, "masha", { ip: "198.51.100.50" });
+  // an add by plain code keeps nothing and mails the code's owner the
+  // username and the code to add back
+  const rowsBefore = JSON.stringify(invitesTable());
+  sent = mails.length;
+  const typed = mashaCode.toLowerCase().replace(/-/g, "");            // as a person might type it
+  out.added = await accept(sasha, "sasha", typed, { ip: "198.51.100.51" });
+  out.addMail = mails.slice(sent);
+  out.addKeptNothing = JSON.stringify(invitesTable()) === rowsBefore;
+  out.addToNoMailbox = await accept(masha, "masha", await inviteOf(pasha, "pasha"), { ip: "198.51.100.50" });
+  out.invalidTheirs = await accept(sasha, "sasha", "nonsense", { ip: "198.51.100.51" });
+  // a mail that fails leaves no invite behind
+  const idsBeforeDown = new Set(invitesTable().map((r) => r.id));
+  mailState.down = true;
+  out.sendMailDown = await invite(masha, "masha", "down@example.net", { ip: "198.51.100.50" });
+  mailState.down = false;
+  out.invitesLeftByMailDown = invitesTable().filter((r) => !idsBeforeDown.has(r.id)).length;
+  // the acceptance's caps come before its step; the mail's are its own
+  sent = mails.length;
+  await invite(masha, "masha", "kasia@example.net", { ip: "198.51.100.50" });
+  const token3 = tokenIn(mails[mails.length - 1]);
+  preset(`accept:key:${pasha.pubHex}`, 20);
+  const rowsAtCap = JSON.stringify(invitesTable());
+  out.acceptAtKeyCap = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: token3 });
+  out.stepUntouchedAtCap = JSON.stringify(invitesTable()) === rowsAtCap;
+  unset(`accept:key:${pasha.pubHex}`);
   const notifyTo = counterKeys("notify:to:")[0];
   if (notifyTo) preset(notifyTo, 3);
-  const sent2 = mails.length;
-  out.acceptAtNotifyCap = await accept(pasha, "pasha", typed, { ip: "198.51.100.52" });
-  out.mailsAtNotifyCap = mails.length - sent2;
-  // the acceptance mails one address may set off in a day
+  sent = mails.length;
+  out.acceptAtNotifyCap = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: token3 });
+  out.mailsAtNotifyCap = mails.length - sent;
+  // the mails one address may set off in a day
   if (notifyTo) unset(notifyTo);
   const notifyAddrsBefore = new Set(counterKeys("notify:addr:"));
-  await accept(await newKey(), "kasia", typed, { ip: "198.51.100.53" });
+  const adder = async (name, ip) => { const k = await newKey(); await issue(k, { ip }); return accept(k, name, mashaCode, { ip }); };
+  await adder("kasia", "198.51.100.53");
   const notifyAddr = counterKeys("notify:addr:").find((key) => !notifyAddrsBefore.has(key));
   if (notifyAddr) preset(notifyAddr, 3);
-  const sent3 = mails.length;
-  out.acceptAtNotifyAddrCap = await accept(await newKey(), "lena", typed, { ip: "198.51.100.53" });
-  out.mailsAtNotifyAddrCap = mails.length - sent3;
-  out.acceptFromOtherAddr = await accept(await newKey(), "olha", typed, { ip: "198.51.100.54" });
-  // a pickup takes a page at a time (KV: a thousand operations a call)
-  const mashaKv = (await inviteOf(masha, "masha")).replace("#", ":");
-  await pending(masha, "masha", { ip: "198.51.100.50" });            // what the steps above left
+  sent = mails.length;
+  out.addAtNotifyAddrCap = await adder("lena", "198.51.100.53");
+  out.mailsAtNotifyAddrCap = mails.length - sent;
+  out.addFromOtherAddr = await adder("olha", "198.51.100.54");
+  // a pickup takes a page; at its cap it is refused before any read
+  const inviter = masha.pubHex;
+  const insert = limiterShard("invites").db.prepare(
+    `INSERT INTO invites (id, inviter, inviter_code, sent, expires, acceptor, acceptor_code, accepted, statement_ts, signature)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   for (let i = 0; i < 400; i++) {
-    store.set(`accepted:${mashaKv}:x${String(i).padStart(3, "0")}:AAAA-BBBB-CCCC`,
-              JSON.stringify({ invite_code: `x${i}#AAAA-BBBB-CCCC`, accepted_at: "2026-11-02T00:00:00Z" }));
+    insert.run(`00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, inviter, mashaCode, Date.now() - 2 * DAY_MS,
+               Date.now() + DAY_MS, "ee".repeat(32), `x${i}#AAAA-BBBB-CCCC`, Date.now() - DAY_MS + i, nowS(), "00".repeat(64));
   }
-  out.pages = [(await pending(masha, "masha", { ip: "198.51.100.50" })).body.accepts.length,
-               (await pending(masha, "masha", { ip: "198.51.100.50" })).body.accepts.length];
+  const page = (await pending(masha, "masha", { ip: "198.51.100.50" })).body.accepts;
+  out.page = [page.length, page[0].acceptor.invite_code, page[299].acceptor.invite_code];
   preset(`pending:key:${masha.pubHex}`, 100);
-  writes = kvState.writes;
   out.pickupAtCap = await pending(masha, "masha", { ip: "198.51.100.50" });
-  out.writesByPickupRefusal = kvState.writes - writes;
   // the day's 12th acceptance mail goes, the 13th waits for 00:00 UTC; the
   // acceptance is kept either way
-  const vera = await newKey();
-  await issue(vera);
-  await verifyEmail(vera, "vera", "vera@example.org", { ip: "198.51.100.55" });
-  const veraCode = await inviteOf(vera, "vera");
+  const wren = await newKey();
+  await issue(wren);
+  await verifyEmail(wren, "wren", "wren@example.org", { ip: "198.51.100.55" });
   preset("notify:all:", 11);
   out.notifyCeiling = [];
   for (let i = 0; i < 2; i++) {
-    const r = await accept(await newKey(), `fan${i}`, veraCode, { ip: `198.51.100.${56 + i}` });
+    await invite(wren, "wren", `fan${i}@example.net`, { ip: "198.51.100.55" });
+    const fan = await newKey();
+    await issue(fan, { ip: `198.51.100.${56 + i}` });
+    const r = await accept(fan, `fan${i}`, await inviteOf(wren, "wren"),
+                           { ip: `198.51.100.${56 + i}`, token: tokenIn(mails[mails.length - 1]) });
     out.notifyCeiling.push([r.status, r.body.notified]);
   }
+  // an expired invite is removed by the invites instance's alarm
+  const shard = limiterShard("invites");
+  out.alarmSet = shard.alarm() !== null;
+  shard.db.prepare("UPDATE invites SET expires = ? WHERE id = ?").run(Date.now() - 1, out.sent.body.invite_id);
+  await shard.obj.alarm();
+  out.expiredLeft = shard.db.prepare("SELECT count(*) AS n FROM invites WHERE id = ?").get(out.sent.body.invite_id).n;
+  out.keys = { masha: masha.pubHex, sasha: sasha.pubHex, masha_code: mashaCode,
+               sasha_code: await inviteOf(sasha, "sasha") };
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// vectors: the invite wire's test vectors, through the Worker itself
+// -------------------------------------------------------------------------
+
+async function inviteVectors() {
+  // The vectors' fixed keys, time and token (tests/p2p/vectors/invite_wire_v1.json):
+  // the Worker must take their signatures as its own texts' and answer with
+  // their id, string and codes.
+  const V = JSON.parse(readFileSync(resolve(here, "vectors/invite_wire_v1.json"), "utf-8"));
+  const out = {};
+  const T = V.ts;
+  const realNow = Date.now;
+  Date.now = () => T * 1000;
+  const masha = await keyFromSeed(V.inviter_seed), sasha = await keyFromSeed(V.acceptor_seed);
+  out.keys = { inviter: masha.pubHex, acceptor: sasha.pubHex };
+  await issue(masha); await issue(sasha);
+  await verifyEmail(masha, V.inviter.name, "masha@example.org", { ip: "198.51.100.40" });
+  await verifyEmail(sasha, V.acceptor.name, V.to, { ip: "198.51.100.41" });
+  const mashaShort = V.inviter.short_code, sashaShort = V.acceptor.short_code;
+  out.sendSig = await sign(masha, `sautium-invite-send:v1:${T}:${mashaShort}:${V.to}:${await sha256Hex(V.message)}`);
+  const real = crypto.getRandomValues.bind(crypto);
+  crypto.getRandomValues = (a) => (a.length === 16 ? (a.set(unhex(V.token)), a) : real(a));
+  let sent = mails.length;
+  out.sent = await call("POST", "/send-invite", {
+    to: V.to, invite_code: mashaShort, public_key_hex: masha.pubHex, ts: T, message: V.message,
+    signature: out.sendSig }, { ip: "198.51.100.40" });
+  crypto.getRandomValues = real;
+  out.inviteMail = mails.slice(sent);
+  const inviteId = out.sent.body.invite_id;
+  out.acceptSig = await sign(sasha, `sautium-invite-accept:v1:${T}:${inviteId}:${mashaShort}:${sashaShort}:${sasha.pubHex}`);
+  sent = mails.length;
+  out.accepted = await call("POST", "/accept-invite", {
+    my_invite_code: sashaShort, their_invite_code: mashaShort, public_key_hex: sasha.pubHex, ts: T,
+    invite_token: V.token, signature: out.acceptSig }, { ip: "198.51.100.41" });
+  out.acceptMail = mails.slice(sent);
+  out.pickupSig = await sign(masha, `sautium-invite-pickup:v1:${T}:${mashaShort}:${masha.pubHex}`);
+  out.pickup = await call("POST", "/pending-accepts", {
+    invite_code: mashaShort, public_key_hex: masha.pubHex, ts: T, signature: out.pickupSig }, { ip: "198.51.100.40" });
+  out.addSig = await sign(sasha, `sautium-invite-add:v1:${T}:${mashaShort}:${sashaShort}:${sasha.pubHex}`);
+  sent = mails.length;
+  out.added = await call("POST", "/accept-invite", {
+    my_invite_code: sashaShort, their_invite_code: mashaShort, public_key_hex: sasha.pubHex, ts: T,
+    signature: out.addSig }, { ip: "198.51.100.41" });
+  out.addMail = mails.slice(sent);
+  Date.now = realNow;
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// owners: an invite code belongs to the first key born under its digest
+// -------------------------------------------------------------------------
+
+async function inviteOwners() {
+  const out = {};
+  const owners = limiterShard("owners");
+  const digestOf = async (key) => (await inviteOf(key, "x")).split("#")[1].replace(/-/g, "");
+  // births stored before claims were recorded: more than one backfill page
+  const old = [];
+  for (let i = 0; i < 1200; i++) {
+    const pub = hex(webcrypto.getRandomValues(new Uint8Array(32)));
+    old.push(pub);
+    store.set(`born:${pub}`, JSON.stringify({ born_at: "2026-07-05T10:11:12Z", sig: "ab".repeat(64) }));
+  }
+  const early = await newKey();
+  store.set(`born:${early.pubHex}`, JSON.stringify({ v: 4, issued_at: "2026-06-01T00:00:00Z", method: "pow",
+    difficulty: 32, params_version: 1, sig_v4: "cd".repeat(64) }));
+  // a later key already claimed the early one's digest (born after claims
+  // began, before the backfill reached its elder): the elder wins
+  const usurper = "ff".repeat(32);
+  owners.db.prepare("INSERT INTO owners (digest, pubkey, issued) VALUES (?, ?, ?)")
+    .run(await digestOf(early), usurper, Date.now());
+  const check = async (key, name, email = "x@example.org") => call("GET",
+    `/check-email?invite_code=${encodeURIComponent(await inviteOf(key, name))}&email=${encodeURIComponent(email)}`
+    + `&public_key_hex=${key.pubHex}&signature=${await sign(key, `check-email:${await inviteOf(key, name)}:${email}`)}`);
+  // until every stored birth is read, no owner is answered
+  out.beforeBackfill = await check(early, "ella");
+  out.alarmAfterFirstStep = owners.alarm() !== null;
+  out.listsSoFar = kvState.lists;
+  let steps = 0;
+  while (owners.db.prepare("SELECT v FROM meta WHERE k = 'owners_backfill'").get()?.v !== "done" && steps < 10) {
+    await owners.obj.alarm();
+    steps += 1;
+  }
+  out.steps = steps;
+  out.backfilled = owners.db.prepare("SELECT count(*) AS n FROM owners").get().n;
+  out.elderHolds = owners.db.prepare("SELECT pubkey FROM owners WHERE digest = ?").get(await digestOf(early)).pubkey
+    === early.pubHex;
+  out.afterBackfill = await check(early, "ella");
+  // a key born now under a digest an elder holds is refused on every route
+  const late = await newKey();
+  owners.db.prepare("INSERT INTO owners (digest, pubkey, issued) VALUES (?, ?, ?)")
+    .run(await digestOf(late), early.pubHex, Date.parse("2026-06-01T00:00:00Z"));
+  await issue(late);
+  out.lateHolds = owners.db.prepare("SELECT pubkey FROM owners WHERE digest = ?").get(await digestOf(late)).pubkey;
+  const lateCode = await inviteOf(late, "lena");
+  out.lateRoutes = [
+    (await sendCode(late, "lena", "lena@example.org")).status,
+    (await register(late, "lena", "lena@example.org", "AAAAAA")).status,
+    (await check(late, "lena")).status,
+    (await invite(late, "lena", "z@example.net")).status,
+    (await accept(late, "lena", await inviteOf(early, "ella"))).status,
+    (await pending(late, "lena")).status,
+  ];
+  out.lateCode = lateCode;
+  // a birth claims its digest at issuance
+  const fresh = await newKey();
+  await issue(fresh);
+  out.freshHolds = owners.db.prepare("SELECT pubkey FROM owners WHERE digest = ?").get(await digestOf(fresh))?.pubkey
+    === fresh.pubHex;
+  // a stored birth the backfill could not have seen claims at its first use
+  const missed = await newKey();
+  store.set(`born:${missed.pubHex}`, JSON.stringify({ v: 4, issued_at: "2026-10-01T00:00:00Z", method: "pow",
+    difficulty: 32, params_version: 1, sig_v4: "cd".repeat(64) }));
+  out.missedFirstUse = await check(missed, "mira");
+  out.missedHolds = owners.db.prepare("SELECT issued FROM owners WHERE digest = ?").get(await digestOf(missed))?.issued
+    === Date.parse("2026-10-01T00:00:00Z");
+  // no birth, no code
+  out.unborn = await check(await newKey(), "una");
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// reserve: the share of the stamp and directory ceilings kept for nodes already known
+// -------------------------------------------------------------------------
+
+async function reserveShare() {
+  const out = {};
+  const known = await newKey(), newcomer = await newKey();
+  await issue(known, { ip: "198.51.100.140" });
+  await issue(newcomer, { ip: "198.51.100.141" });
+  // a node already known: its certificate is older than a week
+  const rec = JSON.parse(store.get(`born:${known.pubHex}`));
+  rec.issued_at = new Date(Date.now() - 8 * DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+  store.set(`born:${known.pubHex}`, JSON.stringify(rec));
+  // the newcomers' share of the stamp ceiling spent: newcomers wait, the known stamp
+  preset("stamp:new:", 37500);
+  out.stampNewcomer = (await stamp(newcomer, [root(9001)], { ip: "198.51.100.141" })).status;
+  out.stampKnown = (await stamp(known, [root(9002)], { ip: "198.51.100.140" })).status;
+  preset("stamp:all:", 50000);
+  out.stampKnownAtCeiling = (await stamp(known, [root(9003)], { ip: "198.51.100.140" })).status;
+  unset("stamp:new:"); unset("stamp:all:");
+  // the lookups' ceiling likewise: a filled lookup ceiling would stop the stamps before them
+  preset("lookup:new:", 187500);
+  out.lookupNewcomer = (await stamp(newcomer, [root(9004)], { ip: "198.51.100.141" })).status;
+  out.lookupKnown = (await stamp(known, [root(9005)], { ip: "198.51.100.140" })).status;
+  unset("lookup:new:");
+  out.newcomerAfter = (await stamp(newcomer, [root(9006)], { ip: "198.51.100.141" })).status;
+  // the directory's day
+  const ts = () => Math.floor(Date.now() / 1000);
+  const reg = async (key, ip, t = ts()) => call("POST", "/node-register", {
+    pubkey: key.pubHex, port: 20000, capabilities: ["sync"], ts: t,
+    signature: await sign(key, `sautium-directory:v1:20000:sync:${t}`),
+  }, { ip });
+  presetIn(dirDb, "directory:new:", 37500);
+  out.dirNewcomer = (await reg(newcomer, "203.0.113.141")).status;
+  out.dirKnown = (await reg(known, "203.0.113.140")).status;
+  out.newCountedForKnown = countIn(dirDb, "directory:new:") === 37500;
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// smallorder: a key anyone can sign for is no key
+// -------------------------------------------------------------------------
+
+async function smallOrder() {
+  // The identity point's encoding, and a signature every message verifies
+  // under it with a verifier that does not refuse it.
+  const identity = "01" + "00".repeat(31);
+  const trivial = "01" + "00".repeat(63);
+  const out = {};
+  out.birth = await call("POST", "/birth-certificate", { pubkey_hex: identity, signature: trivial });
+  out.signedHigh = await call("POST", "/birth-certificate",
+                              { pubkey_hex: "ec" + "ff".repeat(30) + "ff", signature: trivial });
+  out.certified = store.has(`born:${identity}`);
   return out;
 }
 
@@ -1087,6 +1386,7 @@ async function pausedWrites() {
 async function nameRetention() {
   const out = {};
   const k = await newKey();
+  await issue(k, { ip: "198.51.100.80" });
   await sendCode(k, "nora", "nora@example.org", { ip: "198.51.100.80" });
   const spent = () => JSON.stringify(counterKeys("code:").map((key) => [key, shardOf(key).db
     .prepare("SELECT n FROM counters WHERE key = ?").get(key).n]));
@@ -1306,10 +1606,8 @@ async function shardFailure() {
   };
   const useEnv = { ...env, LIMITER: broken };
   const k = await newKey();
-  return {
-    pickup: (await pending(k, "pia", { useEnv })).status,
-    birth: (await issue(k, { useEnv })).status,
-  };
+  const birth = (await issue(k, { useEnv })).status;
+  return { birth, pickup: (await pending(k, "pia", { useEnv })).status };
 }
 
 // -------------------------------------------------------------------------
@@ -1329,7 +1627,8 @@ const scenarios = {
   contract, mail, codes, accepts, stamps, store: storeFaults,
   directory: directoryLimits, ledger: ledgerWave, burst: birthBurst, paused: pausedWrites,
   names: nameRetention, mailbox: mailboxFull, shards: shardFailure, history: issuanceHistory,
-  drops: mailboxDrops, armed: armedStamps,
+  drops: mailboxDrops, armed: armedStamps, vectors: inviteVectors, owners: inviteOwners,
+  reserve: reserveShare, smallorder: smallOrder,
 };
 if (serveMode) {
   const { createServer } = await import("node:http");

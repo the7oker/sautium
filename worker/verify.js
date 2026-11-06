@@ -20,6 +20,10 @@
  *
  * All state-changing requests require Ed25519 signature verification.
  * Masha can't impersonate Alice because she can't sign with Alice's keys.
+ * An invite code (name#XXXX-XXXX-XXXX, 48 bits of the key's digest) belongs
+ * to the first key born under its digest: every invite route refuses any
+ * other key (the Limiter's "owners", filled at each birth and, once, from
+ * the births stored before it).
  *
  * Admission (Durable Object LIMITER, one SQLite instance per route): every
  * write a caller can repeat and every mail passes its route's counters there
@@ -55,11 +59,15 @@
  *   POST /register-email       — store verified email (requires code + birth cert);
  *                                the mailbox moves to this key, the previous
  *                                holder becomes the certificate's predecessor
- *   POST /send-invite          — send signed invite email from a key with a
- *                                certificate and a verified email
+ *   POST /send-invite          — mail an invite with a single-use token from a
+ *                                key with a certificate and a verified email;
+ *                                the invite is kept under the token's hash
  *   GET  /check-email          — check if email already verified for invite code
- *   POST /accept-invite        — accept an invite (stores reciprocal + notifies sender)
- *   GET  /pending-accepts      — poll for accepted invites (one-time pickup)
+ *   POST /accept-invite        — spend an invite's token (kept as accepted, the
+ *                                inviter told by mail), or, without a token,
+ *                                tell a code's owner it was added (nothing kept)
+ *   POST /pending-accepts      — the inviter's accepted invites, each with its
+ *                                acceptor's signed statement (a read)
  *   POST /birth-certificate    — issue (or return existing) identity certificate
  *   GET  /birth-certificate    — public read of an issued certificate
  *   GET  /issuance-stats       — public issuance counters + policy + birth-ledger
@@ -97,8 +105,7 @@
  * everyone's price. The global count is recorded and reported, never priced.
  */
 
-const ACCEPT_TTL_SECONDS = 30 * 24 * 3600; // 30 days — must match SENT_INVITES_TTL_DAYS on backend/desktop
-const PICKUP_PAGE = 300;                   // acceptances one pickup takes (KV: 1 000 operations a call)
+const PICKUP_PAGE = 300;                   // accepted invites one pickup returns (5 a day per key, kept up to 60 days)
 const VERIFY_CODE_TTL_MS = 15 * 60 * 1000;
 // Wrong tries that spend a pending verification code: after them even the
 // right code is refused, and only a new code (its own caps) opens another round.
@@ -127,20 +134,33 @@ const FROM_NAME = "Sautium";
 // caps in their own objects, where they count only what they store; the
 // directory's per-address cap holds sixteen keys' (DIRECTORY_PER_NETWORK ×
 // `key`), so the volunteers one network lists never spend one another's day.
+// `new` is the share of a ceiling that keys not yet known may fill — a
+// certificate issued less than KNOWN_AFTER_MS ago —, so a flood of fresh keys
+// leaves the rest of the stamp and directory ceilings to the nodes already
+// there.
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const LIMITS = {
   birth:     { addr: 50, all: 20000 },                          // new identities
-  stamp:     { key: 500, addr: 1000, all: 50000 },              // roots written: new, or re-signed
-  lookup:    { key: 2000, addr: 5000, all: 250000 },            // roots a /timestamp asks about (KV reads)
+  stamp:     { key: 500, addr: 1000, all: 50000, new: 37500 },  // roots written: new, or re-signed
+  lookup:    { key: 2000, addr: 5000, all: 250000, new: 187500 }, // roots a /timestamp asks about (KV reads)
   code:      { key: 5, to: 5, addr: 5, all: 60 },               // verification mails
   register:  { key: 10, addr: 50, all: 5000 },                  // tries; `all` = registrations written
   invite:    { key: 5, from: 5, to: 3, addr: 5, all: 24 },      // invite mails
-  accept:    { key: 20, addr: 20, all: 10000 },                 // stored acceptances
-  notify:    { key: 3, to: 3, addr: 3, all: 12 },               // acceptance mails
-  pending:   { key: 100, addr: 200, all: 20000 },               // pickups (a KV list each)
-  directory: { key: 30, addr: 480, all: 50000 },                // stored registrations (a volunteer renews hourly)
+  accept:    { key: 20, addr: 20, all: 10000 },                 // acceptances and adds by code
+  notify:    { key: 3, to: 3, addr: 3, all: 12 },               // acceptance and code-add mails
+  pending:   { key: 100, addr: 200, all: 20000 },               // pickups (one read of the invites each)
+  directory: { key: 30, addr: 480, all: 50000, new: 37500 },    // stored registrations (a volunteer renews hourly)
 };
+const KNOWN_AFTER_MS = 7 * DAY_MS;
+// An invite: open for 30 days from its mail, then kept 30 days from its
+// acceptance for its inviter's pickup. A node asks while an untaken invite
+// of its own is under twice that old.
+const INVITE_TTL_MS = 30 * DAY_MS;
+// Births the owners' backfill reads from KV in one step: a list and a read of
+// each, inside the thousand operations one invocation may make.
+const OWNER_BACKFILL_PAGE = 500;
+const BACKFILL_DONE = "done";
 // The routes that send mail. Their ceilings count the provider's day, from
 // 00:00 UTC, not 24 h from first use: two windows that each straddle a
 // midnight would otherwise let both ceilings' mail into one of its days.
@@ -330,13 +350,10 @@ function writesPaused(env) {
 }
 
 function writes(request) {
-  // Every POST and DELETE, and the pickup of acceptances (it deletes them).
-  // A legacy record upgraded while reading is stopped at the store itself
-  // (guardStore); the master's wake goes on — it is how the master drains —
-  // and only its address hint waits (handleMailboxWake).
-  const url = new URL(request.url);
-  return request.method === "POST" || request.method === "DELETE"
-    || url.pathname === "/pending-accepts";
+  // Every POST and DELETE. A legacy record upgraded while reading is stopped
+  // at the store itself (guardStore); the master's wake goes on — it is how
+  // the master drains — and only its address hint waits (handleMailboxWake).
+  return request.method === "POST" || request.method === "DELETE";
 }
 
 class StoreUnavailable extends Error {
@@ -391,8 +408,8 @@ async function route(request, env) {
   if (pathname === "/accept-invite" && method === "POST") {
     return await handleAcceptInvite(request, env);
   }
-  if (pathname === "/pending-accepts" && method === "GET") {
-    return await handlePendingAccepts(request, url, env);
+  if (pathname === "/pending-accepts" && method === "POST") {
+    return await handlePendingAccepts(request, env);
   }
   if (pathname === "/mailbox" && method === "POST") {
     return await handleMailboxPut(request, env);
@@ -560,6 +577,12 @@ async function loadBirthRecord(env, pubkey) {
   return upgraded;
 }
 
+function knownBirth(record) {
+  // A node already known: its certificate was issued KNOWN_AFTER_MS ago or
+  // more (a stored v1 record names its birth born_at).
+  return Date.now() - Date.parse(record.issued_at || record.born_at) >= KNOWN_AFTER_MS;
+}
+
 async function claimMailbox(env, emailToken, pubkey, { takeOver = false } = {}) {
   /**
    * `mailbox:{email_token}` → the pubkey that currently holds this mailbox.
@@ -624,7 +647,10 @@ async function handleBirthCertificate(request, env) {
    * byte-identical certificates — KV needs no transaction.
    *
    * The birth is in KV before the ledger records it: a write that fails
-   * leaves no ledger row for a birth that never happened.
+   * leaves no ledger row for a birth that never happened. Every issuance,
+   * the first and each repeat, then claims the key's invite code for it
+   * (the earliest-born key under a digest holds it), so a claim that failed
+   * is made again by the client's retry.
    */
   const { body, refusal: bad } = await readJson(request);
   if (bad) return bad;
@@ -681,6 +707,9 @@ async function handleBirthCertificate(request, env) {
     await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(record));
     await ledgerCall(env, "/birth", score ? { ...facts, m: mult } : facts);
   }
+  await limiterCall(env, "owners", "/owner/claim", {
+    digest: await inviteDigest(pubkey), pubkey, issued: Date.parse(record.issued_at),
+  });
 
   return json(certFromRecord(pubkey, record));
 }
@@ -1124,7 +1153,7 @@ function takeCounters(sql, now, counters) {
     const c = counters[i], row = rows[i];
     if ((row ? Number(row.n) : 0) + c.amount > c.limit) {
       const until = row ? Number(row.until) : end(c);
-      const jitter = c.key.includes(":all:") ? Math.floor(Math.random() * CEILING_JITTER_S) : 0;
+      const jitter = /:(all|new):/.test(c.key) ? Math.floor(Math.random() * CEILING_JITTER_S) : 0;
       return { ok: false, refused: c.key,
                retry_after: Math.max(1, Math.ceil((until - now) / 1000)) + jitter };
     }
@@ -1154,12 +1183,24 @@ export class Limiter {
    *   codes    — ("code") pending email verification codes (their hash) and
    *              the wrong tries each has taken; an alarm removes each when
    *              it expires.
+   *   owners   — ("owners") the key each invite code's digest belongs to:
+   *              the earliest born, whichever claims first — every birth
+   *              claims, and the births stored before claims existed are
+   *              read once from KV (the backfill, a page a step; until it is
+   *              done no owner is answered).
+   *   invites  — ("invites") each mailed invite under its id (its token's
+   *              hash: never the token, the recipient or the message), its
+   *              inviter, and once spent its acceptor's signed statement; an
+   *              alarm removes each when it expires.
    * Counter keys and names hold public keys and peppered tokens, never an
-   * address, a mailbox or a username.
+   * address, a mailbox or a username; an invite keeps its two invite codes
+   * while it lives, as an acceptance in KV did.
    */
   constructor(state, env) {
     this.state = state;
+    this.env = env;
     this.sql = state.storage.sql;
+    this.backfill = null;      // the owners' backfill step in flight, if any
     state.blockConcurrencyWhile(async () => this._init());
   }
 
@@ -1171,6 +1212,16 @@ export class Limiter {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS codes (
       invite TEXT PRIMARY KEY, email TEXT NOT NULL, hash TEXT NOT NULL,
       tries INTEGER NOT NULL, expires INTEGER NOT NULL)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS owners (
+      digest TEXT PRIMARY KEY, pubkey TEXT NOT NULL, issued INTEGER NOT NULL)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS invites (
+      id TEXT PRIMARY KEY, inviter TEXT NOT NULL, inviter_code TEXT NOT NULL,
+      sent INTEGER NOT NULL, expires INTEGER NOT NULL,
+      acceptor TEXT, acceptor_code TEXT, accepted INTEGER, statement_ts INTEGER, signature TEXT)`);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS invites_accepted ON invites (inviter, accepted)
+                   WHERE acceptor IS NOT NULL`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS invites_expires ON invites (expires)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
   }
 
   async fetch(request) {
@@ -1189,6 +1240,21 @@ export class Limiter {
       this.sql.exec("DELETE FROM codes WHERE invite = ?", body.invite);
       return Response.json({ ok: true });
     }
+    if (path === "/owner") {
+      if (!await this._ownersReady()) return Response.json({ ready: false });
+      return Response.json({ ready: true, owner: this._owner(body.digest) });
+    }
+    if (path === "/owner/claim") {
+      this._claim(body.digest, body.pubkey, body.issued);
+      return Response.json({ owner: this._owner(body.digest) });
+    }
+    if (path === "/invite/put") return Response.json(await this.putInvite(body));
+    if (path === "/invite/drop") {
+      this.sql.exec("DELETE FROM invites WHERE id = ? AND acceptor IS NULL", body.id);
+      return Response.json({ ok: true });
+    }
+    if (path === "/invite/accept") return Response.json(this.acceptInvite(body));
+    if (path === "/invite/pickup") return Response.json(this.pickup(body));
     return new Response("not found", { status: 404 });
   }
 
@@ -1217,11 +1283,121 @@ export class Limiter {
   }
 
   async alarm() {
-    // An expired code (it holds the address it was sent to) is removed when
-    // it expires, not when the next code happens to be asked for.
-    this.sql.exec("DELETE FROM codes WHERE expires <= ?", Date.now());
-    const next = this.sql.exec("SELECT min(expires) AS t FROM codes").one().t;
-    if (next !== null) await this.state.storage.setAlarm(Number(next));
+    // An expired code (it holds the address it was sent to) or invite is
+    // removed when it expires, not when the next one happens to be asked
+    // for; an owners' backfill under way takes its next step.
+    const now = Date.now();
+    this.sql.exec("DELETE FROM codes WHERE expires <= ?", now);
+    this.sql.exec("DELETE FROM invites WHERE expires <= ?", now);
+    const at = this._backfillAt();
+    if (at !== null && at !== BACKFILL_DONE) await this._backfillStep();
+    const due = [
+      this.sql.exec("SELECT min(expires) AS t FROM codes").one().t,
+      this.sql.exec("SELECT min(expires) AS t FROM invites").one().t,
+      at !== null && this._backfillAt() !== BACKFILL_DONE ? Date.now() : null,
+    ].filter((t) => t !== null).map(Number);
+    if (due.length) await this.state.storage.setAlarm(Math.min(...due));
+  }
+
+  _owner(digest) {
+    const row = this.sql.exec("SELECT pubkey FROM owners WHERE digest = ?", digest).toArray()[0];
+    return row ? row.pubkey : null;
+  }
+
+  _claim(digest, pubkey, issued) {
+    // The earliest-born key under a digest holds it, in whatever order the
+    // births and the backfill bring their claims.
+    this.sql.exec(
+      `INSERT INTO owners (digest, pubkey, issued) VALUES (?, ?, ?)
+       ON CONFLICT(digest) DO UPDATE SET pubkey = excluded.pubkey, issued = excluded.issued
+       WHERE excluded.issued < owners.issued`, digest, pubkey, issued);
+  }
+
+  _backfillAt() {
+    // null: not begun; BACKFILL_DONE; else the KV cursor of the next page
+    // ("" for the first).
+    const row = this.sql.exec("SELECT v FROM meta WHERE k = 'owners_backfill'").toArray()[0];
+    return row ? row.v : null;
+  }
+
+  async _ownersReady() {
+    // An owner is answered only once every birth stored before claims were
+    // recorded has been read: until then the earliest of a digest's keys
+    // may not have claimed yet. One step per call, the alarm doing the rest.
+    if (this._backfillAt() === BACKFILL_DONE) return true;
+    await this._backfillStep();
+    if (this._backfillAt() === BACKFILL_DONE) return true;
+    if (await this.state.storage.getAlarm() === null) await this.state.storage.setAlarm(Date.now());
+    return false;
+  }
+
+  async _backfillStep() {
+    // One at a time: a call and the alarm that meet here share the step.
+    this.backfill ||= this._backfillPage().finally(() => { this.backfill = null; });
+    await this.backfill;
+  }
+
+  async _backfillPage() {
+    const at = this._backfillAt() || "";
+    if (at === BACKFILL_DONE) return;
+    const kv = this.env.RATE_LIMITS;
+    const page = await kv.list({ prefix: "born:", limit: OWNER_BACKFILL_PAGE, ...(at ? { cursor: at } : {}) });
+    const records = await Promise.all(page.keys.map((k) => kv.get(k.name, "json")));
+    const claims = [];
+    for (let i = 0; i < page.keys.length; i++) {
+      const pubkey = page.keys[i].name.slice("born:".length);
+      const issued = records[i] ? Date.parse(records[i].issued_at || records[i].born_at) : NaN;
+      if (isValidPubkeyHex(pubkey) && Number.isFinite(issued)) {
+        claims.push([await inviteDigest(pubkey), pubkey, issued]);
+      }
+    }
+    // The claims and the cursor in one synchronous step.
+    for (const [digest, pubkey, issued] of claims) this._claim(digest, pubkey, issued);
+    this.sql.exec(
+      `INSERT INTO meta (k, v) VALUES ('owners_backfill', ?)
+       ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
+      page.list_complete ? BACKFILL_DONE : page.cursor);
+  }
+
+  async putInvite({ id, inviter, inviter_code, now }) {
+    this.sql.exec("DELETE FROM invites WHERE expires <= ?", now);
+    this.sql.exec(
+      "INSERT INTO invites (id, inviter, inviter_code, sent, expires) VALUES (?, ?, ?, ?, ?)",
+      id, inviter, inviter_code, now, now + INVITE_TTL_MS);
+    if (await this.state.storage.getAlarm() === null) {
+      await this.state.storage.setAlarm(now + INVITE_TTL_MS);
+    }
+    return { ok: true };
+  }
+
+  acceptInvite({ id, acceptor, acceptor_code, their_code, statement_ts, signature, now }) {
+    // The token's one spending, in one step: an open invite becomes this
+    // acceptor's, kept 30 days for its inviter's pickup; the same acceptor
+    // asking again finds its answer again.
+    const row = this.sql.exec(
+      "SELECT inviter, inviter_code, acceptor FROM invites WHERE id = ? AND expires > ?",
+      id, now).toArray()[0];
+    if (!row) return { ok: false, reason: "not_found" };
+    if (row.inviter === acceptor) return { ok: false, reason: "own" };
+    if (row.inviter_code !== their_code) return { ok: false, reason: "not_this_code" };
+    const answer = { ok: true, inviter: row.inviter, inviter_code: row.inviter_code };
+    if (row.acceptor !== null) {
+      return row.acceptor === acceptor ? { ...answer, again: true } : { ok: false, reason: "used" };
+    }
+    this.sql.exec(
+      `UPDATE invites SET acceptor = ?, acceptor_code = ?, accepted = ?, statement_ts = ?,
+         signature = ?, expires = ? WHERE id = ?`,
+      acceptor, acceptor_code, now, statement_ts, signature, now + INVITE_TTL_MS, id);
+    return { ...answer, again: false };
+  }
+
+  pickup({ inviter, now }) {
+    // Every accepted, unexpired invite of this inviter, oldest acceptance
+    // first. A read: the inviter's node keeps which it has taken.
+    return { accepts: this.sql.exec(
+      `SELECT id, accepted, acceptor, acceptor_code, statement_ts, signature FROM invites
+        WHERE inviter = ? AND acceptor IS NOT NULL AND expires > ?
+        ORDER BY accepted, id LIMIT ?`, inviter, now, PICKUP_PAGE).toArray() };
   }
 
   checkCode({ invite, email, hash, now }) {
@@ -1538,7 +1714,8 @@ async function handleNodeRegister(request, env) {
    * it as the LAST tier by design. One network holds at most
    * DIRECTORY_PER_NETWORK fresh entries; registrations are capped per /64
    * an hour, and per key, per address and in all a day (LIMITS.directory) —
-   * the day's counted by the directory, of the registrations it stores.
+   * the day's counted by the directory, of the registrations it stores; a
+   * key not yet known fills only the newcomers' share of the day's ceiling.
    */
   const braked = await routeBrake(env, request, "node-register");
   if (braked) return braked;
@@ -1571,7 +1748,8 @@ async function handleNodeRegister(request, env) {
   }
   const ip = clientIp(request);
   if (!ip) return json({ error: "no source address" }, 400);
-  if (!await env.RATE_LIMITS.get(`born:${key}`, "json")) {
+  const born = await env.RATE_LIMITS.get(`born:${key}`, "json");
+  if (!born) {
     return json({ error: "node has no certificate" }, 403);
   }
   const nonce = `directory:sig:${signature.toLowerCase()}`;
@@ -1587,7 +1765,7 @@ async function handleNodeRegister(request, env) {
   }
   const r = await directoryCall(env, "/register", {
     pubkey: key, host: ip, fam: ip.includes(":") ? 6 : 4, port: p,
-    caps: caps.join(","), addr: await volumeToken(env, ip), now: Date.now(),
+    caps: caps.join(","), addr: await volumeToken(env, ip), known: knownBirth(born), now: Date.now(),
   });
   return objectAnswer(r);
 }
@@ -1692,7 +1870,7 @@ export class NodeDirectory {
     return new Response("not found", { status: 404 });
   }
 
-  register({ pubkey, host, fam, port, caps, addr, now }) {
+  register({ pubkey, host, fam, port, caps, addr, known, now }) {
     if (typeof addr !== "string" || !addr) {
       return { status: 503, body: { error: "temporarily unavailable" } };   // an older Worker's call
     }
@@ -1705,7 +1883,8 @@ export class NodeDirectory {
       return { status: 429, body: { error: "this network lists enough volunteers" } };
     }
     const taken = takeCounters(this.sql, now, [
-      daily("directory", "key", pubkey), daily("directory", "addr", addr), daily("directory", "all")]);
+      daily("directory", "key", pubkey), daily("directory", "addr", addr), daily("directory", "all"),
+      ...(known === true ? [] : [daily("directory", "new")])]);
     if (!taken.ok) {
       return { status: 429, body: { error: "rate limited", retry_after: taken.retry_after } };
     }
@@ -1934,12 +2113,15 @@ async function handleTimestamp(request, env) {
   // is made. Of those, a known root costs nothing more (idempotent
   // re-submission); a record in an older format is re-signed, a write the
   // stamp caps count like a new root. The budget charges new roots only,
-  // and the ledger hears only of requests that bring one.
+  // and the ledger hears only of requests that bring one. A key not yet
+  // known fills only the newcomers' share of each ceiling.
   const ipToken = await volumeToken(env, ip);
+  const newcomer = !knownBirth(born);
   const looked = await admit(env, [
     daily("lookup", "key", pubkey, roots.length),
     daily("lookup", "addr", ipToken, roots.length),
     daily("lookup", "all", "", roots.length),
+    ...(newcomer ? [daily("lookup", "new", "", roots.length)] : []),
   ]);
   if (looked) return looked;
   const records = await Promise.all(
@@ -1980,7 +2162,8 @@ async function handleTimestamp(request, env) {
   if (written) {
     const refusal = await admit(env, [daily("stamp", "key", pubkey, written),
                                       daily("stamp", "addr", ipToken, written),
-                                      daily("stamp", "all", "", written)]);
+                                      daily("stamp", "all", "", written),
+                                      ...(newcomer ? [daily("stamp", "new", "", written)] : [])]);
     if (refusal) return refusal;
   }
   // The ledger records — and charges — only a request that passed the caps.
@@ -2029,11 +2212,62 @@ async function handleTimestamp(request, env) {
 // Email verification & invites
 // -----------------------------------------------------------------------
 
-async function inviteCaller(inviteCode, publicKeyHex, message, signature) {
+// The invite wire: one shape for the Worker and both node runtimes (MIRRORS
+// desktop/p2p/invite_wire.py; the vectors both test suites assert pin the
+// two). Codes travel in the short form a client builds (ownInviteName),
+// keys in lower-case hex, `ts` in integer seconds; no field can hold ':'.
+function sendText(ts, inviteCode, to, messageSha256) {
+  return `sautium-invite-send:v1:${ts}:${inviteCode}:${to}:${messageSha256}`;
+}
+
+function acceptText(ts, inviteId, theirCode, myCode, pubkey) {
+  return `sautium-invite-accept:v1:${ts}:${inviteId}:${theirCode}:${myCode}:${pubkey}`;
+}
+
+function addText(ts, theirCode, myCode, pubkey) {
+  return `sautium-invite-add:v1:${ts}:${theirCode}:${myCode}:${pubkey}`;
+}
+
+function pickupText(ts, inviteCode, pubkey) {
+  return `sautium-invite-pickup:v1:${ts}:${inviteCode}:${pubkey}`;
+}
+
+function mintInviteToken() {
+  // 128 random bits; their one spelling is 32 lower-case hex.
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
+}
+
+async function inviteIdOf(token) {
+  // An invite's id: the first 16 bytes of SHA-256 over its token, as a UUID
+  // — the Worker's key for the invite, the inviter's record of it and the
+  // name its acceptor signs. It gives no way back to the token.
+  const h = await sha256Hex(`sautium-invite-id:v1:${token}`);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+async function keyDigestHex(pubkey) {
+  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", hexToBytes(pubkey)))).toUpperCase();
+}
+
+async function inviteDigest(pubkey) {
+  // The 48 bits of a key's SHA-256 its invite code carries, in upper-case hex.
+  return (await keyDigestHex(pubkey)).slice(0, 12);
+}
+
+async function longInviteCode(username, pubkey) {
+  // The code a mail prints: the name and 128 bits of the key's SHA-256 in
+  // eight groups of four, so a node binds the person to the key itself.
+  // Its first three groups are the short code's.
+  return `${username}#${(await keyDigestHex(pubkey)).slice(0, 32).match(/.{4}/g).join("-")}`;
+}
+
+async function inviteCaller(env, inviteCode, publicKeyHex, message, signature) {
   // The caller of an invite-family route: its own invite code, exactly as
-  // its client builds it, and a signature over the route's message. →
-  // {pubkey, bind} (bind: the name the limiter holds the key to), or
-  // {refusal}.
+  // its client builds it, a signature over the route's message, and a key
+  // that holds the code's digest. → {pubkey, bind} (bind: the name the
+  // limiter holds the key to), or {refusal}.
   const pubkey = publicKeyHex.toLowerCase();
   const username = await ownInviteName(inviteCode, pubkey);
   if (!username) {
@@ -2042,7 +2276,28 @@ async function inviteCaller(inviteCode, publicKeyHex, message, signature) {
   if (!await verifySignature(message, signature, pubkey)) {
     return { refusal: json({ error: "invalid signature" }, 403) };
   }
+  const notOwner = await ownerRefusal(env, pubkey);
+  if (notOwner) return { refusal: notOwner };
   return { pubkey, bind: { pubkey, username } };
+}
+
+async function ownerRefusal(env, pubkey) {
+  // null when this key holds its code's digest — the earliest key born under
+  // it — else the answer. A stored birth with no claim yet (KV's listing
+  // trails its writes, so the backfill may have missed it) claims now,
+  // under its own birth date.
+  const digest = await inviteDigest(pubkey);
+  const held = await limiterCall(env, "owners", "/owner", { digest });
+  if (!held.ready) return unavailable();
+  let owner = held.owner;
+  if (owner === null) {
+    const born = await env.RATE_LIMITS.get(`born:${pubkey}`, "json");
+    if (!born) return json({ error: "no certificate for this key" }, 403);
+    owner = (await limiterCall(env, "owners", "/owner/claim", {
+      digest, pubkey, issued: Date.parse(born.issued_at || born.born_at),
+    })).owner;
+  }
+  return owner === pubkey ? null : json({ error: "invite code doesn't match public key" }, 403);
 }
 
 async function handleVerification(request, env) {
@@ -2068,7 +2323,7 @@ async function handleVerification(request, env) {
   if (!isValidEmail(to)) {
     return json({ error: "invalid email" }, 400);
   }
-  const caller = await inviteCaller(invite_code, public_key_hex,
+  const caller = await inviteCaller(env, invite_code, public_key_hex,
                                     `sendcode:${invite_code}:${to}`, signature);
   if (caller.refusal) return caller.refusal;
 
@@ -2124,7 +2379,7 @@ async function handleRegisterEmail(request, env) {
       || !birth_cert || typeof birth_cert !== "object") {
     return json({ error: "missing fields" }, 400);
   }
-  const caller = await inviteCaller(invite_code, public_key_hex,
+  const caller = await inviteCaller(env, invite_code, public_key_hex,
                                     `register:${invite_code}:${email}`, signature);
   if (caller.refusal) return caller.refusal;
   const pubkey = caller.pubkey;
@@ -2197,20 +2452,25 @@ async function handleRegisterEmail(request, env) {
 
 async function handleInvite(request, env) {
   /**
-   * Send an invite email from a key that holds a certificate issued here
-   * and a verified email for this very invite code: the mail names that
-   * address as its sender.
+   * Mail an invite from a key that holds its code (a certificate issued
+   * here) and a verified email for this very code: the mail names that
+   * address as its sender and carries the invite string — the inviter's long
+   * code and a single-use token, which lives in the mail alone. The invite
+   * is kept under the token's hash (its id) with its inviter, for 30 days;
+   * a mail that fails leaves none.
    *
-   * Body: {to, invite_code, public_key_hex, signature, message?}
-   * Signature is over: "invite:{invite_code}:to:{to}"
-   * `message`: optional plain text, at most INVITE_MESSAGE_MAX_CHARS.
+   * Body: {to, invite_code, public_key_hex, ts, message?, signature}
+   * Signature over sendText — ts within MAIL_SIG_SKEW_S, the SHA-256 of the
+   * message (of "" when there is none). `message`: optional plain text, at
+   * most INVITE_MESSAGE_MAX_CHARS.
+   * → {status: "sent", verified_sender: true, invite_id}
    */
   const braked = await routeBrake(env, request, "invite");
   if (braked) return braked;
   const { body, refusal: bad } = await readJson(request);
   if (bad) return bad;
-  const { to, invite_code, public_key_hex, signature, message: userMessage } = body;
-  if (![to, invite_code, public_key_hex, signature].every(isText)) {
+  const { to, invite_code, public_key_hex, ts, signature, message: userMessage } = body;
+  if (![to, invite_code, public_key_hex, signature].every(isText) || !Number.isSafeInteger(ts)) {
     return json({ error: "missing fields" }, 400);
   }
   if (userMessage != null && typeof userMessage !== "string") {
@@ -2222,13 +2482,14 @@ async function handleInvite(request, env) {
   if (!isValidEmail(to)) {
     return json({ error: "invalid email" }, 400);
   }
-  const caller = await inviteCaller(invite_code, public_key_hex,
-                                    `invite:${invite_code}:to:${to}`, signature);
+  if (!tsFresh(ts)) {
+    return json({ error: "stale timestamp" }, 403);
+  }
+  const caller = await inviteCaller(env, invite_code, public_key_hex,
+                                    sendText(ts, invite_code, to, await sha256Hex(userMessage || "")),
+                                    signature);
   if (caller.refusal) return caller.refusal;
 
-  if (!await env.RATE_LIMITS.get(`born:${caller.pubkey}`, "json")) {
-    return json({ error: "no certificate for this key" }, 403);
-  }
   const verified = await getVerified(env, invite_code);
   if (!verified || verified.pubkey !== caller.pubkey) {
     return json({ error: "a verified email is required to send invites" }, 403);
@@ -2243,16 +2504,23 @@ async function handleInvite(request, env) {
   ], caller.bind);
   if (refusal) return refusal;
 
+  const token = mintInviteToken();
+  const inviteId = await inviteIdOf(token);
+  const now = Date.now();
+  await limiterCall(env, "invites", "/invite/put", {
+    id: inviteId, inviter: caller.pubkey, inviter_code: invite_code, now,
+  });
   const username = caller.bind.username;
-  const html = inviteEmailHtml(username, invite_code, verified.email, userMessage);
-  const subject = `${username} invites you to Sautium`;
-
-  const result = await sendEmail(env, to, subject, html);
+  const inviteString = `${await longInviteCode(username, caller.pubkey)}#i-${token}`;
+  const html = inviteEmailHtml(username, inviteString, verified.email, userMessage,
+                               mailDate(now + INVITE_TTL_MS));
+  const result = await sendEmail(env, to, `${username} invites you to Sautium`, html);
   if (!result.ok) {
+    await limiterCall(env, "invites", "/invite/drop", { id: inviteId });
     return json({ error: "email send failed" }, 502);
   }
 
-  return json({ status: "sent", verified_sender: true });
+  return json({ status: "sent", verified_sender: true, invite_id: inviteId });
 }
 
 async function handleCheckEmail(request, url, env) {
@@ -2278,7 +2546,7 @@ async function handleCheckEmail(request, url, env) {
   if (![inviteCode, email, publicKeyHex, signature].every(isText)) {
     return json({ error: "missing fields" }, 400);
   }
-  const caller = await inviteCaller(inviteCode, publicKeyHex,
+  const caller = await inviteCaller(env, inviteCode, publicKeyHex,
                                     `check-email:${inviteCode}:${email}`, signature);
   if (caller.refusal) return caller.refusal;
   const pubkey = caller.pubkey;
@@ -2320,30 +2588,46 @@ async function handleCheckEmail(request, url, env) {
 
 async function handleAcceptInvite(request, env) {
   /**
-   * Accept an invite: store reciprocal mapping + notify sender via email.
+   * One route, two texts, and the token tells which. With `invite_token`
+   * (acceptText): the invite the token names is spent for this key in one
+   * step of the invites instance — open, or already this key's (its answer
+   * again, and no second mail); unexpired; sent under `their_invite_code`;
+   * not by the caller — and its inviter is mailed, with no address of the
+   * acceptor's. Without one (addText): an add by plain code. Nothing is
+   * kept, and the code's owner, if it has a verified address, is mailed the
+   * adder's username and the code to add back.
    *
-   * When Sasha adds Masha's invite code, Sasha's app calls this endpoint.
-   * The worker stores the acceptance and (if Masha has a verified email)
-   * sends Sasha's invite code to Masha automatically.
-   *
-   * Body: {my_invite_code, their_invite_code, public_key_hex, signature}
-   * Signature is over: "accept:{my_invite_code}:{their_invite_code}"
-   * Masha's code is stored in the form her own client builds, so her
-   * pickup finds it however Sasha typed it.
+   * Body: {my_invite_code, their_invite_code, public_key_hex, ts, invite_token?, signature}
+   * → {status: "accepted", invite_id, inviter: {invite_code, public_key_hex}, notified}
+   *   {status: "added", notified}
+   * A refused invite names its `reason` (INVITE_REFUSALS).
    */
   const braked = await routeBrake(env, request, "accept");
   if (braked) return braked;
   const { body, refusal: bad } = await readJson(request);
   if (bad) return bad;
-  const { my_invite_code, their_invite_code, public_key_hex, signature } = body;
-  if (![my_invite_code, their_invite_code, public_key_hex, signature].every(isText)) {
+  const { my_invite_code, their_invite_code, public_key_hex, ts, invite_token, signature } = body;
+  if (![my_invite_code, their_invite_code, public_key_hex, signature].every(isText)
+      || !Number.isSafeInteger(ts) || (invite_token != null && typeof invite_token !== "string")) {
     return json({ error: "missing fields" }, 400);
   }
-  const caller = await inviteCaller(my_invite_code, public_key_hex,
-                                    `accept:${my_invite_code}:${their_invite_code}`, signature);
-  if (caller.refusal) return caller.refusal;
+  if (!tsFresh(ts)) {
+    return json({ error: "stale timestamp" }, 403);
+  }
   const theirs = canonicalInviteCode(their_invite_code);
-  if (!theirs || theirs === my_invite_code) {
+  if (!theirs) {
+    return json({ error: "invalid invite code" }, 400);
+  }
+  const tokened = invite_token != null;
+  if (tokened && !/^[0-9a-f]{32}$/.test(invite_token)) return refusedInvite("bad_token");
+  const pubkey = public_key_hex.toLowerCase();
+  const inviteId = tokened ? await inviteIdOf(invite_token) : null;
+  const caller = await inviteCaller(env, my_invite_code, public_key_hex,
+                                    tokened ? acceptText(ts, inviteId, theirs, my_invite_code, pubkey)
+                                            : addText(ts, theirs, my_invite_code, pubkey),
+                                    signature);
+  if (caller.refusal) return caller.refusal;
+  if (!tokened && theirs === my_invite_code) {
     return json({ error: "invalid invite code" }, 400);
   }
 
@@ -2354,56 +2638,87 @@ async function handleAcceptInvite(request, env) {
   ], caller.bind);
   if (refusal) return refusal;
 
-  // Store acceptance in KV (TTL 30 days). The acceptor's invite code lives
-  // in the VALUE — storage keys are '#'-free (kvKey), so the key alone can't
-  // reconstruct it.
-  const acceptKey = `accepted:${kvKey(theirs)}:${kvKey(my_invite_code)}`;
-  await env.RATE_LIMITS.put(acceptKey, JSON.stringify({
-    invite_code: my_invite_code,
-    accepted_at: new Date().toISOString(),
-  }), { expirationTtl: ACCEPT_TTL_SECONDS });
-
-  // Try to notify the sender (Masha) via their verified email
-  let notified = false;
-  const sender = await getVerified(env, theirs);
-  if (sender?.email) {
-    const myUsername = caller.bind.username;
-    const mine = await getVerified(env, my_invite_code);
-    const myVerifiedEmail = mine && mine.pubkey === caller.pubkey ? mine.email : null;
-    const limited = await admit(env, [
-      daily("notify", "key", caller.pubkey),
-      daily("notify", "to", await emailToken(env, normalizeEmail(sender.email))),
-      daily("notify", "addr", await volumeToken(env, clientIp(request))),
-      daily("notify", "all"),
-    ]);
-    if (!limited) {
-      const html = acceptNotificationEmailHtml(myUsername, my_invite_code, myVerifiedEmail);
-      const result = await sendEmail(env, sender.email, `${myUsername} accepted your Sautium invite`, html);
-      notified = result.ok;
-    }
+  const username = caller.bind.username;
+  const longCode = await longInviteCode(username, caller.pubkey);
+  if (!tokened) {
+    const owner = await getVerified(env, theirs);
+    const notified = !!owner?.email && await notify(
+      env, request, caller.pubkey, owner.email, `${username} added your Sautium invite code`,
+      codeAddEmailHtml(username, longCode));
+    return json({ status: "added", notified });
   }
 
-  return json({ status: "accepted", notified });
+  const taken = await limiterCall(env, "invites", "/invite/accept", {
+    id: inviteId, acceptor: caller.pubkey, acceptor_code: my_invite_code, their_code: theirs,
+    statement_ts: ts, signature: signature.toLowerCase(), now: Date.now(),
+  });
+  if (!taken.ok) return refusedInvite(taken.reason);
+  let notified = false;
+  if (!taken.again) {
+    const inviter = await getVerified(env, theirs);
+    if (inviter?.email && inviter.pubkey === taken.inviter) {
+      notified = await notify(
+        env, request, caller.pubkey, inviter.email, `${username} accepted your Sautium invite`,
+        acceptNotificationEmailHtml(username, longCode));
+    }
+  }
+  return json({
+    status: "accepted", invite_id: inviteId,
+    inviter: { invite_code: taken.inviter_code, public_key_hex: taken.inviter }, notified,
+  });
 }
 
-async function handlePendingAccepts(request, url, env) {
+// What a refused invite answers; the node words each reason.
+const INVITE_REFUSALS = {
+  bad_token: [400, "invalid invite token"],
+  not_found: [404, "no such invite"],              // unknown, or expired
+  used: [409, "invite already used"],              // accepted by another key
+  not_this_code: [403, "the invite belongs to another code"],
+  own: [403, "your own invite"],
+};
+
+function refusedInvite(reason) {
+  const [status, error] = INVITE_REFUSALS[reason];
+  return json({ error, reason }, status);
+}
+
+async function notify(env, request, pubkey, to, subject, html) {
+  // An acceptance or code-add mail, under its own caps. → whether it went.
+  const limited = await admit(env, [
+    daily("notify", "key", pubkey),
+    daily("notify", "to", await emailToken(env, normalizeEmail(to))),
+    daily("notify", "addr", await volumeToken(env, clientIp(request))),
+    daily("notify", "all"),
+  ]);
+  if (limited) return false;
+  return (await sendEmail(env, to, subject, html)).ok;
+}
+
+async function handlePendingAccepts(request, env) {
   /**
-   * Check who accepted my invites (polling endpoint).
+   * The inviter's accepted invites, each with its acceptor's signed
+   * statement, which the inviter's node verifies again: every accepted,
+   * unexpired invite of this key, oldest acceptance first, at most
+   * PICKUP_PAGE. A read — the inviter's node keeps which it has taken, so a
+   * pickup lost on its way loses nothing.
    *
-   * GET /pending-accepts?invite_code=user%23XXXX&signature=HEX&public_key_hex=HEX
-   *
-   * Returns list of invite codes that accepted, then deletes them (one-time pickup).
+   * Body: {invite_code, public_key_hex, ts, signature}, the signature over
+   * pickupText (ts within MAIL_SIG_SKEW_S).
+   * → {accepts: [{invite_id, accepted_at, acceptor: {invite_code, public_key_hex, ts, signature}}]}
    */
   const braked = await routeBrake(env, request, "pending");
   if (braked) return braked;
-  const inviteCode = url.searchParams.get("invite_code");
-  const publicKeyHex = url.searchParams.get("public_key_hex");
-  const signature = url.searchParams.get("signature");
-  if (![inviteCode, publicKeyHex, signature].every(isText)) {
+  const { body, refusal: bad } = await readJson(request);
+  if (bad) return bad;
+  const { invite_code, public_key_hex, ts, signature } = body;
+  if (![invite_code, public_key_hex, signature].every(isText) || !Number.isSafeInteger(ts)) {
     return json({ error: "missing fields" }, 400);
   }
-  const caller = await inviteCaller(inviteCode, publicKeyHex,
-                                    `pending-accepts:${inviteCode}`, signature);
+  if (!tsFresh(ts)) {
+    return json({ error: "stale timestamp" }, 403);
+  }
+  const caller = await inviteCaller(env, invite_code, public_key_hex,
+                                    pickupText(ts, invite_code, public_key_hex.toLowerCase()), signature);
   if (caller.refusal) return caller.refusal;
   const refusal = await admit(env, [
     daily("pending", "key", caller.pubkey),
@@ -2412,24 +2727,15 @@ async function handlePendingAccepts(request, url, env) {
   ], caller.bind);
   if (refusal) return refusal;
 
-  // A page at a time: KV allows a thousand operations per invocation, and
-  // each acceptance costs a get and a delete; the rest wait for the next
-  // pickup, untouched.
-  const prefix = `accepted:${kvKey(inviteCode)}:`;
-  const listed = await env.RATE_LIMITS.list({ prefix, limit: PICKUP_PAGE });
-
-  const accepts = [];
-  for (const key of listed.keys) {
-    const record = await env.RATE_LIMITS.get(key.name, "json");
-    if (record) {
-      accepts.push({ invite_code: record.invite_code, accepted_at: record.accepted_at });
-    }
-
-    // Delete after pickup (one-time)
-    await env.RATE_LIMITS.delete(key.name);
-  }
-
-  return json({ accepts });
+  const { accepts } = await limiterCall(env, "invites", "/invite/pickup", {
+    inviter: caller.pubkey, now: Date.now(),
+  });
+  return json({ accepts: accepts.map((r) => ({
+    invite_id: r.id,
+    accepted_at: new Date(Number(r.accepted)).toISOString(),
+    acceptor: { invite_code: r.acceptor_code, public_key_hex: r.acceptor,
+                ts: Number(r.statement_ts), signature: r.signature },
+  })) });
 }
 
 // -----------------------------------------------------------------------
@@ -2442,12 +2748,34 @@ async function verifySignature(message, signatureHex, publicKeyHex) {
   );
 }
 
+// The encodings of edwards25519's eight small-order points — y = 0, 1, p-1,
+// the two of order 8, and y = p, p+1 written past the field — with the sign
+// bit masked off. A signature under such a key proves nothing (anyone can
+// make one), whatever a runtime's verifier does with them.
+const SMALL_ORDER_KEYS = new Set([
+  "0000000000000000000000000000000000000000000000000000000000000000",
+  "0100000000000000000000000000000000000000000000000000000000000000",
+  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+  "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+]);
+
+function isSmallOrderKey(publicKeyHex) {
+  const h = publicKeyHex.toLowerCase();
+  const last = (parseInt(h.slice(62), 16) & 0x7f).toString(16).padStart(2, "0");
+  return SMALL_ORDER_KEYS.has(h.slice(0, 62) + last);
+}
+
 async function verifySignatureBytes(messageBytes, signatureHex, publicKeyHex) {
   // One spelling per key and per signature — exact length, hex digits only,
   // either case — so a nonce taken over a signature's lower-case text is
-  // single-use for the signature, not for one of its spellings.
+  // single-use for the signature, not for one of its spellings; and no
+  // small-order key.
   if (typeof publicKeyHex !== "string" || typeof signatureHex !== "string"
-      || !/^[0-9a-fA-F]{64}$/.test(publicKeyHex) || !/^[0-9a-fA-F]{128}$/.test(signatureHex)) {
+      || !/^[0-9a-fA-F]{64}$/.test(publicKeyHex) || !/^[0-9a-fA-F]{128}$/.test(signatureHex)
+      || isSmallOrderKey(publicKeyHex)) {
     return false;
   }
   try {
@@ -2485,8 +2813,7 @@ async function ownInviteName(inviteCode, publicKeyHex) {
   if (!isValidPubkeyHex(publicKeyHex)) return null;
   const parts = inviteCode.split("#");
   if (parts.length !== 2 || !USERNAME_RE.test(parts[0])) return null;
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", hexToBytes(publicKeyHex)));
-  const h = bytesToHex(digest.slice(0, 6)).toUpperCase();
+  const h = await inviteDigest(publicKeyHex);
   return parts[1] === `${h.slice(0, 4)}-${h.slice(4, 8)}-${h.slice(8)}` ? parts[0] : null;
 }
 
@@ -2603,26 +2930,47 @@ function verificationEmailHtml(code, fromUsername, inviteCode) {
 </html>`;
 }
 
-function inviteEmailHtml(fromUsername, inviteCode, verifiedEmail, message) {
+// The words of the three invite mails are drafts for the owner's words
+// review; the invite string and the codes are the wire's.
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December"];
+
+function mailDate(ms) {
+  const d = new Date(ms);
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+function codeBox(text) {
+  // A code to paste. Wrapped inside its box on a narrow screen: the node's
+  // parse drops whatever whitespace a mail client adds.
+  return `<div style="background: #f0f0f0; padding: 12px 16px; border-radius: 8px; margin: 12px 0;">
+    <code style="font-size: 16px; font-weight: bold; word-break: break-all;">${escapeHtml(text)}</code>
+  </div>`;
+}
+
+const MAIL_FOOTER = `<hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+  <p style="color: #999; font-size: 11px;">
+    <a href="https://sautium.net" style="color: #666;">Sautium</a> — a self-hosted music companion for the collection you own. Free for personal use.
+  </p>`;
+
+function inviteEmailHtml(fromUsername, inviteString, verifiedEmail, message, untilDate) {
   const verifiedBadge =
     `<div style="background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
         &#9989; Verified sender: <strong>${escapeHtml(verifiedEmail)}</strong>
        </div>`;
+  const name = escapeHtml(fromUsername);
 
   return `<!DOCTYPE html>
 <html>
 <body style="font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
   <h2 style="color: #333;">You're invited to Sautium</h2>
-  <p><strong>${escapeHtml(fromUsername)}</strong> invites you to connect on Sautium.</p>
+  <p><strong>${name}</strong> invites you to connect on Sautium.</p>
   ${verifiedBadge}
   ${message ? `<blockquote style="border-left: 3px solid #ddd; padding-left: 12px; color: #555;">${escapeHtml(message)}</blockquote>` : ""}
-  <p>Their invite code:</p>
-  <div style="background: #f0f0f0; padding: 12px 16px; border-radius: 8px; margin: 12px 0;">
-    <code style="font-size: 16px; font-weight: bold;">${escapeHtml(inviteCode)}</code>
-  </div>
+  <p>To accept, paste this into Sautium → Friends → Add a friend:</p>
+  ${codeBox(inviteString)}
   <p style="font-size: 13px; color: #666;">
-    To connect: open Sautium → Friends → paste this invite code → Add.
-    Then share your invite code back so both of you can chat.
+    It works once, until ${escapeHtml(untilDate)}. Whoever uses it becomes ${name}'s friend, so keep it to yourself.
   </p>
   <h3 style="color: #333; margin-top: 24px;">What is Sautium?</h3>
   <ul style="color: #555;">
@@ -2639,41 +2987,40 @@ function inviteEmailHtml(fromUsername, inviteCode, verifiedEmail, message) {
       Download Sautium
     </a>
   </p>
-  <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-  <p style="color: #999; font-size: 11px;">
-    <a href="https://sautium.net" style="color: #666;">Sautium</a> — a self-hosted music companion for the collection you own. Free for personal use.
-  </p>
+  ${MAIL_FOOTER}
 </body>
 </html>`;
 }
 
-function acceptNotificationEmailHtml(fromUsername, inviteCode, verifiedEmail) {
-  const verifiedBadge = verifiedEmail
-    ? `<div style="background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
-        &#9989; Verified: <strong>${escapeHtml(verifiedEmail)}</strong>
-       </div>`
-    : `<div style="background: #fff3e0; border: 1px solid #ffcc80; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
-        &#9888; Unverified sender
-       </div>`;
-
+function acceptNotificationEmailHtml(fromUsername, longCode) {
+  // To the inviter: the invite it mailed was spent. The token tied the
+  // acceptance to the mailbox the inviter chose, so the mail names no
+  // address of the acceptor's.
   return `<!DOCTYPE html>
 <html>
 <body style="font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
   <h2 style="color: #333;">Invite accepted!</h2>
-  <p><strong>${escapeHtml(fromUsername)}</strong> accepted your invite and wants to connect on Sautium.</p>
-  ${verifiedBadge}
-  <p>Their invite code:</p>
-  <div style="background: #f0f0f0; padding: 12px 16px; border-radius: 8px; margin: 12px 0;">
-    <code style="font-size: 16px; font-weight: bold;">${escapeHtml(inviteCode)}</code>
+  <p><strong>${escapeHtml(fromUsername)}</strong> accepted your invite. Your Sautium adds them by itself — at the latest when you open Friends.</p>
+  <div style="background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
+    &#9989; Accepted through the invite you sent
   </div>
-  <p style="font-size: 13px; color: #666;">
-    Sautium will add them automatically next time you open the app.
-    Or paste the code manually: Friends &rarr; Add Friend.
-  </p>
-  <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-  <p style="color: #999; font-size: 11px;">
-    <a href="https://sautium.net" style="color: #666;">Sautium</a> — a self-hosted music companion for the collection you own. Free for personal use.
-  </p>
+  <p>Their code:</p>
+  ${codeBox(longCode)}
+  ${MAIL_FOOTER}
+</body>
+</html>`;
+}
+
+function codeAddEmailHtml(fromUsername, longCode) {
+  // To a code's owner: someone added the plain code. The username and the
+  // code to add back, nothing else of the adder's.
+  return `<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
+  <h2 style="color: #333;">Your invite code was added</h2>
+  <p><strong>${escapeHtml(fromUsername)}</strong> added your invite code. To connect, add theirs in Sautium → Friends → Add a friend:</p>
+  ${codeBox(longCode)}
+  ${MAIL_FOOTER}
 </body>
 </html>`;
 }

@@ -5,8 +5,8 @@ compatibility_date = "2024-01-01"
 # the owner's brake on every write route, is set there, never here.
 keep_vars = true
 
-# KV namespace: the Worker's records (certificates, stamps, verified email,
-# acceptances); its binding keeps the historic name. No limit counts here.
+# KV namespace: the Worker's records (certificates, stamps, verified email);
+# its binding keeps the historic name. No limit counts here.
 [[kv_namespaces]]
 binding = "RATE_LIMITS"
 id = "bf74d396ca6c4b1cb46ff216ff2aa585"
@@ -45,9 +45,11 @@ storage = "sqlite"
 # Admission: SQLite-backed Durable Objects, one instance per route, hold the
 # counters a write or a mail passes first (per key, per mailbox, per address,
 # the route's daily ceiling); the instance "names" the username each key
-# speaks under, "code" the pending email codes — atomic there, so a refused
-# request writes nothing to KV. The master's mailbox and the directory count
-# what they store in their own objects.
+# speaks under, "code" the pending email codes, "owners" the key each invite
+# code's digest belongs to, "invites" the invites mailed and their
+# acceptances — atomic there, so a refused request writes nothing to KV and
+# a token is spent once. The master's mailbox and the directory count what
+# they store in their own objects.
 [[durable_objects.bindings]]
 name = "LIMITER"
 class_name = "Limiter"
