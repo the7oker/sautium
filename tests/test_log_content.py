@@ -271,6 +271,7 @@ def test_verifying_an_email_logs_no_address(monkeypatch, caplog):
     monkeypatch.setattr(email_verify, "_identity_ctx", lambda username, password: {
         "invite_code": "someone#AAAA-BBBB-CCCC", "public_key_hex": "ab" * 32,
         "sign": lambda data: b"\x00" * 64})
+    monkeypatch.setattr(email_verify, "_born", lambda ctx: {"pubkey": ctx["public_key_hex"]})
     monkeypatch.setattr(email_verify, "_post_worker",
                         lambda path, payload: {"status": "sent", "verified": True})
     monkeypatch.setattr(email_verify, "_get_worker",
