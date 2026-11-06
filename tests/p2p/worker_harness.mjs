@@ -12,8 +12,8 @@
 // (sign_audio.WORKER_URL) — prints {"url", "authority_pub"} as its first line
 // and serves until killed. Its address brake on /timestamp lets N stamps
 // through (default: no limit; the scenario's 8 would turn the ninth stamp of a
-// test into a 429), and GET /__harness/calls answers how many /timestamp
-// requests reached the Worker.
+// test into a 429), GET /__harness/calls answers how many /timestamp
+// requests reached the Worker, and GET /__harness/mails the mails it sent.
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -79,7 +79,8 @@ if (armed) {
   if (swapped === shadow) throw new Error("STAMP_BUDGET_ARMED pattern not found");
 }
 const tmp = join(mkdtempSync(join(tmpdir(), "sautium-worker-")), "verify.mjs");
-writeFileSync(tmp, swapped);
+// The small-order key filter, exported for its own test.
+writeFileSync(tmp, swapped + "\nexport { isSmallOrderKey };\n");
 const workerModule = await import(pathToFileURL(tmp).href);
 const worker = workerModule.default;
 
@@ -120,18 +121,37 @@ function objectOf(Cls, db, objEnv = {}) {
   let ready;
   const obj = new Cls({ storage, blockConcurrencyWhile: (fn) => { ready = fn(); } }, objEnv);
   const stub = { fetch: (url, init) => obj.fetch(url instanceof Request ? url : new Request(url, init)) };
-  return { obj, stub, db, ready, alarm: () => alarmAt, namespace: { idFromName: (name) => name, get: () => stub } };
+  // fire(): the alarm runs as Cloudflare runs one — spent as it fires, so
+  // only a handler that sets it again leaves one; a handler that throws has
+  // it retried.
+  const fire = async () => {
+    alarmAt = null;
+    try {
+      await obj.alarm();
+    } catch (e) {
+      if (alarmAt === null) alarmAt = Date.now();
+      throw e;
+    }
+  };
+  return { obj, stub, db, ready, alarm: () => alarmAt, fire,
+           namespace: { idFromName: (name) => name, get: () => stub } };
 }
 
 // KV: a Map, every read and write counted, a switch that makes calls fail the
 // way the runtime's own KV errors do, and (when asked) KV's rule of one write
 // a second to a key.
 const store = new Map();
-const kvState = { writes: 0, reads: 0, lists: 0, fail: null, perKeyRule: false };   // fail: null | "put" | "get"
+// fail: null | "put" | "get"; failGetAfter: that many gets succeed, then they fail;
+// shortPages: a page that is not the last comes back with fewer keys than asked
+const kvState = { writes: 0, reads: 0, lists: 0, fail: null, failGetAfter: null, perKeyRule: false,
+                  shortPages: false };
 const lastWrite = new Map();
 const kv = {
   async get(k, type) {
     if (kvState.fail === "get") throw new Error("KV GET failed: 429 Too Many Requests");
+    if (kvState.failGetAfter !== null && kvState.failGetAfter-- <= 0) {
+      throw new Error("KV GET failed: 429 Too Many Requests");
+    }
     kvState.reads += 1;
     const v = store.get(k);
     if (v === undefined) return null;
@@ -156,8 +176,8 @@ const kv = {
   async list({ prefix, limit = 1000, cursor }) {
     // A page at a time, as KV lists: the cursor names where the next begins.
     const all = [...store.keys()].filter((k) => k.startsWith(prefix) && (!cursor || k > cursor)).sort();
-    const keys = all.slice(0, limit);
     const complete = all.length <= limit;
+    const keys = all.slice(0, complete || !kvState.shortPages ? limit : Math.max(1, Math.floor(limit / 3)));
     kvState.lists += 1;
     return { keys: keys.map((name) => ({ name })), list_complete: complete,
              ...(complete ? {} : { cursor: keys[keys.length - 1] }) };
@@ -795,6 +815,32 @@ async function accepts() {
   out.acceptedAgain = await accept(sasha, "sasha", mashaCode, { ip: "198.51.100.51", token });
   out.mailsByAgain = mails.length - sent;
   out.usedByAnother = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token });
+  // two keys spending one token at once: one of them (another inviter, whose
+  // day of invites is its own)
+  const nina = await newKey();
+  await issue(nina, { ip: "198.51.100.61" });
+  await verifyEmail(nina, "nina", "nina@example.org", { ip: "198.51.100.61" });
+  const ninaCode = await inviteOf(nina, "nina");
+  await invite(nina, "nina", "both@example.net", { ip: "198.51.100.61" });
+  const raced = tokenIn(mails[mails.length - 1]);
+  const [r1, r2] = [await newKey(), await newKey()];
+  await issue(r1); await issue(r2);
+  out.raced = (await Promise.all([accept(r1, "rhea", ninaCode, { ip: "198.51.100.58", token: raced }),
+                                  accept(r2, "rita", ninaCode, { ip: "198.51.100.59", token: raced })]))
+    .map((r) => r.status).sort();
+  out.racedRows = invitesTable().filter((r) => r.acceptor === r1.pubHex || r.acceptor === r2.pubHex).length;
+  // an acceptance whose mail failed is told at the acceptor's retry, once
+  await invite(nina, "nina", "late@example.net", { ip: "198.51.100.61" });
+  const lateToken = tokenIn(mails[mails.length - 1]);
+  const lark = await newKey();
+  await issue(lark);
+  mailState.down = true;
+  out.toldFirst = (await accept(lark, "lark", ninaCode, { ip: "198.51.100.60", token: lateToken })).body.notified;
+  mailState.down = false;
+  sent = mails.length;
+  out.toldRetry = (await accept(lark, "lark", ninaCode, { ip: "198.51.100.60", token: lateToken })).body.notified;
+  out.toldAgain = (await accept(lark, "lark", ninaCode, { ip: "198.51.100.60", token: lateToken })).body.notified;
+  out.mailsByRetries = mails.length - sent;
   // what a token can be refused for
   out.badToken = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: "0".repeat(31) });
   out.upperToken = await accept(pasha, "pasha", mashaCode, { ip: "198.51.100.52", token: "A".repeat(32) });
@@ -841,6 +887,17 @@ async function accepts() {
   out.addMail = mails.slice(sent);
   out.addKeptNothing = JSON.stringify(invitesTable()) === rowsBefore;
   out.addToNoMailbox = await accept(masha, "masha", await inviteOf(pasha, "pasha"), { ip: "198.51.100.50" });
+  // a verified address under a code whose digest another key holds is
+  // nobody's to mail
+  const quin = await newKey();
+  await issue(quin, { ip: "198.51.100.62" });
+  await verifyEmail(quin, "quin", "quin@example.org", { ip: "198.51.100.62" });
+  const quinDigest = (await inviteOf(quin, "quin")).split("#")[1].replace(/-/g, "");
+  limiterShard("owners").db.prepare("UPDATE owners SET pubkey = ?, issued = ? WHERE digest = ?")
+    .run("ee".repeat(32), Date.parse("2026-01-01T00:00:00Z"), quinDigest);
+  sent = mails.length;
+  out.addToAnothersRecord = await accept(sasha, "sasha", await inviteOf(quin, "quin"), { ip: "198.51.100.51" });
+  out.mailsToAnothersRecord = mails.slice(sent).filter((m) => m.to[0] === "quin@example.org").length;
   out.invalidTheirs = await accept(sasha, "sasha", "nonsense", { ip: "198.51.100.51" });
   // a mail that fails leaves no invite behind
   const idsBeforeDown = new Set(invitesTable().map((r) => r.id));
@@ -883,7 +940,10 @@ async function accepts() {
                Date.now() + DAY_MS, "ee".repeat(32), `x${i}#AAAA-BBBB-CCCC`, Date.now() - DAY_MS + i, nowS(), "00".repeat(64));
   }
   const page = (await pending(masha, "masha", { ip: "198.51.100.50" })).body.accepts;
-  out.page = [page.length, page[0].acceptor.invite_code, page[299].acceptor.invite_code];
+  const codesOf = page.map((a) => a.acceptor.invite_code);
+  out.page = { length: page.length, newestFirst: page[0].accepted_at >= page[1].accepted_at
+                                                  && page[1].accepted_at >= page[299].accepted_at,
+               oldestLeft: !codesOf.includes("x0#AAAA-BBBB-CCCC"), newestInserted: codesOf.includes("x399#AAAA-BBBB-CCCC") };
   preset(`pending:key:${masha.pubHex}`, 100);
   out.pickupAtCap = await pending(masha, "masha", { ip: "198.51.100.50" });
   // the day's 12th acceptance mail goes, the 13th waits for 00:00 UTC; the
@@ -932,13 +992,18 @@ async function inviteVectors() {
   await verifyEmail(sasha, V.acceptor.name, V.to, { ip: "198.51.100.41" });
   const mashaShort = V.inviter.short_code, sashaShort = V.acceptor.short_code;
   out.sendSig = await sign(masha, `sautium-invite-send:v1:${T}:${mashaShort}:${V.to}:${await sha256Hex(V.message)}`);
+  // (Date.now is the vectors' time; `new Date()`, which births and records
+  // use, keeps the real clock — no value checked here reads it.)
   const real = crypto.getRandomValues.bind(crypto);
   crypto.getRandomValues = (a) => (a.length === 16 ? (a.set(unhex(V.token)), a) : real(a));
   let sent = mails.length;
-  out.sent = await call("POST", "/send-invite", {
-    to: V.to, invite_code: mashaShort, public_key_hex: masha.pubHex, ts: T, message: V.message,
-    signature: out.sendSig }, { ip: "198.51.100.40" });
-  crypto.getRandomValues = real;
+  try {
+    out.sent = await call("POST", "/send-invite", {
+      to: V.to, invite_code: mashaShort, public_key_hex: masha.pubHex, ts: T, message: V.message,
+      signature: out.sendSig }, { ip: "198.51.100.40" });
+  } finally {
+    crypto.getRandomValues = real;
+  }
   out.inviteMail = mails.slice(sent);
   const inviteId = out.sent.body.invite_id;
   out.acceptSig = await sign(sasha, `sautium-invite-accept:v1:${T}:${inviteId}:${mashaShort}:${sashaShort}:${sasha.pubHex}`);
@@ -987,15 +1052,28 @@ async function inviteOwners() {
     `/check-email?invite_code=${encodeURIComponent(await inviteOf(key, name))}&email=${encodeURIComponent(email)}`
     + `&public_key_hex=${key.pubHex}&signature=${await sign(key, `check-email:${await inviteOf(key, name)}:${email}`)}`);
   // until every stored birth is read, no owner is answered
+  kvState.shortPages = true;
   out.beforeBackfill = await check(early, "ella");
   out.alarmAfterFirstStep = owners.alarm() !== null;
   out.listsSoFar = kvState.lists;
+  // a step whose reads fail part-way writes nothing, and the next one reads
+  // the same page again
+  const metaOf = () => owners.db.prepare("SELECT v FROM meta WHERE k = 'owners_backfill'").get()?.v ?? null;
+  const [rowsBefore, cursorBefore] = [owners.db.prepare("SELECT count(*) AS n FROM owners").get().n, metaOf()];
+  kvState.failGetAfter = 10;
+  out.failedStep = await owners.fire().then(() => "ran", (e) => String(e.message));
+  kvState.failGetAfter = null;
+  out.failedStepWroteNothing = owners.db.prepare("SELECT count(*) AS n FROM owners").get().n === rowsBefore
+    && metaOf() === cursorBefore;
+  // the alarm chains itself to the end: each step sets the next
   let steps = 0;
-  while (owners.db.prepare("SELECT v FROM meta WHERE k = 'owners_backfill'").get()?.v !== "done" && steps < 10) {
-    await owners.obj.alarm();
+  while (owners.alarm() !== null && steps < 20) {
+    await owners.fire();
     steps += 1;
   }
+  kvState.shortPages = false;
   out.steps = steps;
+  out.backfillDone = metaOf() === "done";
   out.backfilled = owners.db.prepare("SELECT count(*) AS n FROM owners").get().n;
   out.elderHolds = owners.db.prepare("SELECT pubkey FROM owners WHERE digest = ?").get(await digestOf(early)).pubkey
     === early.pubHex;
@@ -1008,13 +1086,13 @@ async function inviteOwners() {
   out.lateHolds = owners.db.prepare("SELECT pubkey FROM owners WHERE digest = ?").get(await digestOf(late)).pubkey;
   const lateCode = await inviteOf(late, "lena");
   out.lateRoutes = [
-    (await sendCode(late, "lena", "lena@example.org")).status,
-    (await register(late, "lena", "lena@example.org", "AAAAAA")).status,
-    (await check(late, "lena")).status,
-    (await invite(late, "lena", "z@example.net")).status,
-    (await accept(late, "lena", await inviteOf(early, "ella"))).status,
-    (await pending(late, "lena")).status,
-  ];
+    await sendCode(late, "lena", "lena@example.org"),
+    await register(late, "lena", "lena@example.org", "AAAAAA"),
+    await check(late, "lena"),
+    await invite(late, "lena", "z@example.net"),
+    await accept(late, "lena", await inviteOf(early, "ella")),
+    await pending(late, "lena"),
+  ].map((r) => [r.status, r.body]);
   out.lateCode = lateCode;
   // a birth claims its digest at issuance
   const fresh = await newKey();
@@ -1028,6 +1106,26 @@ async function inviteOwners() {
   out.missedFirstUse = await check(missed, "mira");
   out.missedHolds = owners.db.prepare("SELECT issued FROM owners WHERE digest = ?").get(await digestOf(missed))?.issued
     === Date.parse("2026-10-01T00:00:00Z");
+  // an elder whose claim never landed, its digest held meanwhile by a key
+  // born later: its first use claims, and the earlier birth holds it
+  const elder = await newKey();
+  store.set(`born:${elder.pubHex}`, JSON.stringify({ v: 4, issued_at: "2026-05-01T00:00:00Z", method: "pow",
+    difficulty: 32, params_version: 1, sig_v4: "cd".repeat(64) }));
+  owners.db.prepare("INSERT INTO owners (digest, pubkey, issued) VALUES (?, ?, ?)")
+    .run(await digestOf(elder), "dd".repeat(32), Date.parse("2026-10-30T00:00:00Z"));
+  out.elderFirstUse = await check(elder, "eden");
+  out.elderNowHolds = owners.db.prepare("SELECT pubkey FROM owners WHERE digest = ?").get(await digestOf(elder))
+    .pubkey === elder.pubHex;
+  // two born in one second: the lesser key, whichever claims first
+  const tie = Date.parse("2026-09-01T00:00:00Z");
+  owners.obj._claim("TIE000000000", "bb".repeat(32), tie);
+  owners.obj._claim("TIE000000000", "aa".repeat(32), tie);
+  owners.obj._claim("TIE000000000", "cc".repeat(32), tie);
+  out.tieHolder = owners.obj._owner("TIE000000000");
+  // a stored birth whose date says nothing is no birth
+  const undated = await newKey();
+  store.set(`born:${undated.pubHex}`, JSON.stringify({ v: 4, issued_at: "soon", method: "pow" }));
+  out.undated = await check(undated, "ugo");
   // no birth, no code
   out.unborn = await check(await newKey(), "una");
   return out;
@@ -1069,6 +1167,13 @@ async function reserveShare() {
   out.dirNewcomer = (await reg(newcomer, "203.0.113.141")).status;
   out.dirKnown = (await reg(known, "203.0.113.140")).status;
   out.newCountedForKnown = countIn(dirDb, "directory:new:") === 37500;
+  dirDb.prepare("DELETE FROM counters WHERE key = 'directory:new:'").run();
+  const older = await directory.stub.fetch("https://object/register", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pubkey: "ab".repeat(32), host: "192.0.2.88", fam: 4, port: 20000, caps: "sync",
+                           addr: "4.older", now: Date.now() }),
+  });
+  out.olderCallCountsAsNew = older.status === 200 && countIn(dirDb, "directory:new:") === 1;
   return out;
 }
 
@@ -1082,6 +1187,17 @@ async function smallOrder() {
   const identity = "01" + "00".repeat(31);
   const trivial = "01" + "00".repeat(63);
   const out = {};
+  const ys = ["0000000000000000000000000000000000000000000000000000000000000000",
+              "0100000000000000000000000000000000000000000000000000000000000000",
+              "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+              "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+              "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+              "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+              "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"];
+  const withSign = (y) => y.slice(0, 62) + (parseInt(y.slice(62), 16) | 0x80).toString(16).padStart(2, "0");
+  out.everyEncoding = ys.flatMap((y) => [y, withSign(y), y.toUpperCase()]).map(workerModule.isSmallOrderKey);
+  out.ordinaryKeys = [(await newKey()).pubHex, "02" + "00".repeat(31), "ef" + "ff".repeat(30) + "7f"]
+    .map(workerModule.isSmallOrderKey);
   out.birth = await call("POST", "/birth-certificate", { pubkey_hex: identity, signature: trivial });
   out.signedHigh = await call("POST", "/birth-certificate",
                               { pubkey_hex: "ec" + "ff".repeat(30) + "ff", signature: trivial });
@@ -1365,6 +1481,17 @@ async function pausedWrites() {
   out.code = await sendCode(k, "kim", "kim@example.org", { useEnv: paused });
   out.pickup = await pending(k, "kim", { useEnv: paused });
   out.read = await call("GET", `/birth-certificate?pubkey=${k.pubHex}`, undefined, { useEnv: paused });
+  // a read of the invite family: the owners' backfill takes no step and no
+  // stored birth claims under the brake
+  const ownersOf = () => JSON.stringify([
+    limiterShard("owners").db.prepare("SELECT * FROM owners ORDER BY digest").all(),
+    limiterShard("owners").db.prepare("SELECT * FROM meta").all()]);
+  const ownersBefore = ownersOf();
+  const kc = await inviteOf(k, "kim");
+  out.checkPaused = await call("GET", `/check-email?invite_code=${encodeURIComponent(kc)}&email=kim%40example.org`
+    + `&public_key_hex=${k.pubHex}&signature=${await sign(k, `check-email:${kc}:kim@example.org`)}`,
+                                undefined, { useEnv: paused });
+  out.ownersUntouched = ownersOf() === ownersBefore;
   out.stats = await call("GET", "/issuance-stats", undefined, { useEnv: paused });
   out.legacyRead = await call("GET", `/birth-certificate?pubkey=${legacy.pubHex}`, undefined, { useEnv: paused });
   out.writesWhilePaused = kvState.writes - writes;
@@ -1607,7 +1734,19 @@ async function shardFailure() {
   const useEnv = { ...env, LIMITER: broken };
   const k = await newKey();
   const birth = (await issue(k, { useEnv })).status;
-  return { birth, pickup: (await pending(k, "pia", { useEnv })).status };
+  // a birth does not wait on the owners' instance: its claim is made at the
+  // key's first invite route
+  const ownersDown = { idFromName: (n) => n, get: (n) => n === "owners"
+    ? { fetch: async () => { throw new Error("Durable Object is overloaded"); } }
+    : limiterShard(n).stub };
+  const k2 = await newKey();
+  const birthOwnersDown = (await issue(k2, { useEnv: { ...env, LIMITER: ownersDown } })).status;
+  const claimedAtBirth = limiterShard("owners").db
+    .prepare("SELECT count(*) AS n FROM owners WHERE pubkey = ?").get(k2.pubHex).n;
+  const c2 = await inviteOf(k2, "otto");
+  const firstUse = (await call("GET", `/check-email?invite_code=${encodeURIComponent(c2)}&email=o%40example.org`
+    + `&public_key_hex=${k2.pubHex}&signature=${await sign(k2, `check-email:${c2}:o@example.org`)}`)).status;
+  return { birth, pickup: (await pending(k, "pia", { useEnv })).status, birthOwnersDown, claimedAtBirth, firstUse };
 }
 
 // -------------------------------------------------------------------------
@@ -1637,6 +1776,11 @@ if (serveMode) {
     if (req.url === "/__harness/calls") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ timestamp: timestampCalls }));
+      return;
+    }
+    if (req.url === "/__harness/mails") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(mails));
       return;
     }
     const chunks = [];

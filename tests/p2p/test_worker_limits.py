@@ -183,6 +183,13 @@ def test_an_invites_token_is_spent_once_and_its_acceptor_hears_the_same_answer_a
         == {k: v for k, v in accepted.items() if k != "notified"}
     assert r["mailsByAgain"] == 0
     assert r["usedByAnother"]["status"] == 409 and r["usedByAnother"]["body"]["reason"] == "used"
+    assert r["raced"] == [200, 409] and r["racedRows"] == 1          # two keys at once: one of them
+
+
+def test_an_acceptance_whose_mail_failed_is_told_at_the_retry_once():
+    r = _run("accepts")
+    assert r["toldFirst"] is False and r["toldRetry"] is True and r["toldAgain"] is True
+    assert r["mailsByRetries"] == 1
 
 
 def test_a_refused_invite_names_its_reason():
@@ -223,6 +230,12 @@ def test_an_add_by_plain_code_keeps_nothing_and_mails_the_username_only():
     assert r["addToNoMailbox"]["body"] == {"status": "added", "notified": False}
 
 
+def test_an_add_mails_only_the_address_the_codes_own_key_verified():
+    r = _run("accepts")
+    assert r["addToAnothersRecord"]["body"] == {"status": "added", "notified": False}
+    assert r["mailsToAnothersRecord"] == 0
+
+
 def test_the_pickup_is_a_signed_read_of_every_accepted_invite():
     r = _run("accepts")
     [picked] = r["pickup"]["body"]["accepts"]
@@ -256,8 +269,10 @@ def test_the_acceptance_mails_one_address_sets_off_are_capped():
     assert r["addFromOtherAddr"]["body"] == {"status": "added", "notified": True}
 
 
-def test_a_pickup_returns_a_page_oldest_acceptance_first():
-    assert _run("accepts")["page"] == [300, "x0#AAAA-BBBB-CCCC", "x299#AAAA-BBBB-CCCC"]
+def test_a_pickup_returns_a_page_the_newest_acceptance_first():
+    # a page never hides a fresh acceptance behind old ones
+    assert _run("accepts")["page"] == {"length": 300, "newestFirst": True, "oldestLeft": True,
+                                       "newestInserted": True}
 
 
 def test_an_expired_invite_is_removed_by_its_alarm():
@@ -295,15 +310,32 @@ def test_the_worker_speaks_the_invite_wires_vectors():
 def test_an_invite_code_belongs_to_the_earliest_key_born_under_its_digest():
     r = _run("owners")
     assert r["lateHolds"] != r["lateCode"]                     # a later birth leaves the elder's claim
-    assert r["lateRoutes"] == [403] * 6                         # every invite route refuses the later key
+    # every invite route refuses the later key, for that reason
+    assert r["lateRoutes"] == [[403, {"error": "invite code doesn't match public key"}]] * 6
     assert r["freshHolds"] is True                              # a birth claims its digest
+    assert r["tieHolder"] == "aa" * 32                          # one second, two keys: the lesser
+
+
+def test_an_elder_whose_claim_never_landed_holds_its_code_at_its_first_use():
+    r = _run("owners")
+    assert r["elderFirstUse"]["status"] == 200 and r["elderNowHolds"] is True
+    assert r["undated"]["body"] == {"error": "no certificate for this key"}
+
+
+def test_a_birth_does_not_wait_on_the_owners_instance():
+    r = _run("shards")
+    assert r["birthOwnersDown"] == 200 and r["claimedAtBirth"] == 0
+    assert r["firstUse"] == 200                                 # claimed there
 
 
 def test_the_births_stored_before_are_read_once_and_until_then_no_owner_is_answered():
     r = _run("owners")
     assert r["beforeBackfill"]["status"] == 503
     assert r["alarmAfterFirstStep"] is True and r["listsSoFar"] == 1
-    assert r["steps"] == 2                                      # 1 201 births, pages of 500
+    # a step whose reads fail writes nothing; the alarm, retried, chains
+    # itself to the end over pages KV may hand back short
+    assert r["failedStep"].startswith("KV GET failed") and r["failedStepWroteNothing"] is True
+    assert r["steps"] >= 2 and r["backfillDone"] is True
     assert r["backfilled"] == 1201
     assert r["elderHolds"] is True                              # the earlier birth wins a later claim
     assert r["afterBackfill"]["status"] == 200
@@ -332,6 +364,7 @@ def test_the_newcomers_share_of_the_directorys_day_leaves_the_rest_to_nodes_alre
     r = _run("reserve")
     assert r["dirNewcomer"] == 429 and r["dirKnown"] == 200
     assert r["newCountedForKnown"] is True                     # a known node spends none of the share
+    assert r["olderCallCountsAsNew"] is True                   # a call that says nothing of the age
 
 
 # --- keys ----------------------------------------------------------------------
@@ -340,6 +373,8 @@ def test_a_small_order_key_gets_no_certificate():
     r = _run("smallorder")
     assert r["birth"]["status"] == 403 and r["signedHigh"]["status"] == 403
     assert r["certified"] is False
+    # every encoding of the eight points, either sign bit, any case; nothing else
+    assert r["everyEncoding"] == [True] * 21 and r["ordinaryKeys"] == [False] * 3
 
 
 # --- timestamps --------------------------------------------------------------
@@ -445,6 +480,8 @@ def test_the_owners_brake_stops_every_write_and_no_read():
         assert r[name]["body"] == {"error": "temporarily unavailable"}, name
     assert r["read"]["status"] == 200 and r["stats"]["status"] == 200
     assert r["writesWhilePaused"] == 0 and r["limiterUntouched"] is True
+    # a read of the invite family under the brake claims nothing and steps no backfill
+    assert r["checkPaused"]["status"] == 503 and r["ownersUntouched"] is True
     assert r["zeroIsOff"] == 200
     # the master still wakes and drains its mailbox; only its address hint waits
     assert r["masterWake"]["status"] == 426 and r["hintUnchanged"] is True
