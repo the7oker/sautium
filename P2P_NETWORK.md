@@ -348,15 +348,18 @@ adder's username and code, nothing else), and the owner adds back.
 other (since 2026-11-07): its single-use token, spent on the Worker when the
 recipient adds the invite string, ties the acceptance to the mailbox the
 inviter chose. The inviter's node keeps the invite's id (`sent_invites`) and
-picks its acceptances up — at the launcher's start, when Friends opens, or on
-a peer's nudge, one function (`email_verify.pick_up_acceptances`) — adding
-one only for an invite it sent and has not taken, under the acceptor's own
-signed statement, as a contact bound to the acceptor's key. The acceptor's
-contact is bound to the inviter's key the Worker answered with. The nudge
-(`/api/chat/invite-accepted`, signed as the classic handshake) only makes the
-inviter's pickup run sooner, at most one every ten minutes; it adds nobody and
-answers no identity, and an acceptor sends it once per add, at the first
-refusal of its handshake.
+picks its acceptances up — at the launcher's start, when Friends opens (once
+a minute, forty times a day at most: each pickup is a Worker request on the
+key's day of a hundred), or on a peer's nudge, one function
+(`email_verify.pick_up_acceptances`) — adding one only for an invite it sent
+and has not taken, under the acceptor's own signed statement, as a contact
+bound to the acceptor's key. The acceptor's contact is bound to the inviter's
+key the Worker answered with. The nudge (`/api/chat/invite-accepted`, signed
+as the classic handshake) only makes the inviter's pickup run sooner, and only
+when it names one of the inviter's open invites by its id — three pickups an
+invite at most; it adds nobody, answers every nudge alike and no identity, and
+an acceptor sends it once per accepted invite, at a refusal of its handshake
+over a channel the inviter's own key holds.
 
 Adding a code stores a `pending:<invite>` stub — the operator's half of the
 consent. The stub resolves on the peer's classic handshake and, since

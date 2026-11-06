@@ -1,8 +1,9 @@
 """The Web UI's calls to the Worker (backend/routers/p2p.py): the Worker sends
 invites only from an account with a verified email, so an account without one
 is told so before any request leaves the node, and the Friends screen says
-where to verify; and a refusal for volume tells the person how long to wait,
-as the Worker said it."""
+where to verify; a refusal for volume tells the person how long to wait, as
+the Worker said it; and the Friends screen's pickups keep to their share of
+the Worker's day."""
 
 import asyncio
 import re
@@ -31,10 +32,14 @@ def _account(monkeypatch, verified: bool) -> list:
         sent.append(path)
         return {"status": "sent", "verified_sender": True, "invite_id": "9e114e70-db9a-664c-1804-84e25be59859"}
 
+    async def born():
+        return True
+
     monkeypatch.setattr(p2p, "_get_identity", lambda: {
         "invite_code": "alice#ABCD-EF01-2345", "public_key_hex": "ab" * 32,
         "email": "alice@example.org", "username": "alice"})
     monkeypatch.setattr(p2p, "email_status", status)
+    monkeypatch.setattr(p2p, "_born", born)
     monkeypatch.setattr(p2p, "_sign_message", lambda message: "cd" * 64)
     monkeypatch.setattr(p2p, "_worker_post", post)
     monkeypatch.setattr(p2p, "_db_execute", lambda *a, **k: None)
@@ -113,3 +118,20 @@ def test_a_refusal_for_volume_says_how_long_to_wait(monkeypatch, retry_after, sa
             asyncio.run(request)
         assert refused.value.status_code == 429
         assert refused.value.detail == f"The verification service is busy — please try again {said}."
+
+
+def test_the_friends_screen_asks_the_worker_once_a_minute_and_forty_times_a_day(monkeypatch):
+    from collections import deque
+    clock = [1000.0]
+    monkeypatch.setattr(p2p.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(p2p, "_screen_pickups", deque())
+    assert p2p._screen_pickup() is True
+    clock[0] += 30
+    assert p2p._screen_pickup() is False                      # a screen opened again at once shows what is here
+    taken = 1
+    for _ in range(200):
+        clock[0] += 61
+        taken += p2p._screen_pickup()
+    assert taken == p2p.SCREEN_PICKUPS_PER_DAY               # the day's share, however often it opens
+    clock[0] += 86400
+    assert p2p._screen_pickup() is True                       # a day later, a share again

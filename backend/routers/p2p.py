@@ -11,7 +11,9 @@ import logging
 import re
 import ssl
 import threading
+import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -418,12 +420,15 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
     fingerprint when the string carried one. A mailed invite is spent on
     the Worker before the answer (`invite` says what came of it — the
     person reads it); an accepted one binds the contact to the inviter's
-    own key. An add without one tells the code's owner, who adds back. An
-    invite link skips the Worker: its token handshake replaces mutual add.
-    A manual re-add of the master invite is consent: it clears the removal
-    flag and re-arms the auto-contact."""
+    own key and arms its one nudge (accepted_invite_id). An add by plain
+    code, or with an invite the Worker refused, tells the code's owner, who
+    adds back; an invite the Worker did not take or answer tells nobody —
+    the same string again tries again. An invite link skips the Worker: its
+    token handshake replaces mutual add. The master's code, in any form,
+    waits for the master's own key; a manual re-add of it is consent: it
+    clears the removal flag and re-arms the auto-contact."""
     from desktop.p2p import chat_wire
-    from master_node import MASTER_INVITE_CODE, MASTER_TOKEN_ID
+    from master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX, MASTER_TOKEN_ID
 
     try:
         share = chat_wire.parse_share(req.invite_code)
@@ -436,13 +441,15 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="That is your own invite code.")
 
     source = "manual"
+    fingerprint = bytes.fromhex(share.fingerprint) if share.fingerprint else None
     if MASTER_INVITE_CODE and invite_code == MASTER_INVITE_CODE:
         source = "master"
         token_id = token_id or MASTER_TOKEN_ID or None
+        if MASTER_PUBKEY_HEX:
+            fingerprint = bytes.fromhex(chat_wire.key_fingerprint(MASTER_PUBKEY_HEX))
         _db_execute(
             "DELETE FROM user_settings WHERE key = 'p2p.master_removed'")
 
-    fingerprint = bytes.fromhex(share.fingerprint) if share.fingerprint else None
     try:
         row = _db_execute("""
             INSERT INTO friends (username, public_key_hex, invite_code,
@@ -455,7 +462,7 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
                                              friends.join_token_id),
                     key_fingerprint = COALESCE(EXCLUDED.key_fingerprint,
                                                friends.key_fingerprint)
-            RETURNING id
+            RETURNING id, upper(encode(key_fingerprint, 'hex')) AS key_fingerprint
         """, (username, f"pending:{invite_code}", invite_code, username,
               source, token_id, fingerprint))
     except Exception as e:
@@ -464,10 +471,8 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
 
     invite = None
     if share.invite_token:
-        invite = await _accept_invite(share, row["id"])
-    if not token_id and invite != "accepted":
-        # An add by plain code, or an invite that did not go through: its
-        # owner hears of it and adds back.
+        invite = await _accept_invite(share, row["id"], row["key_fingerprint"])
+    if not token_id and (share.invite_token is None or invite in _ADD_AFTER):
         asyncio.create_task(_tell_code_added(invite_code))
 
     _wake_chat_sse_clients()
@@ -475,15 +480,23 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
             "invite_code": invite_code, "token_id": token_id, "invite": invite}
 
 
-async def _accept_invite(share, friend_id: int) -> str:
+# The Worker's refusals of an invite (INVITE_REFUSALS there) after which the
+# contact is an add by plain code, and its owner is told so.
+_ADD_AFTER = ("used", "not_found", "not_this_code", "bad_token")
+
+
+async def _accept_invite(share, friend_id: int, bound: Optional[str]) -> str:
     """Spend a mailed invite's token on the Worker → what came of it, for
-    the person: "accepted" (the contact is bound to the inviter's own key),
-    a refusal's reason ("used", "not_found", "not_this_code",
-    "bad_token"), or "unreachable" (the same invite string again tries
-    again). The token is a secret until it is spent: never logged."""
+    the person: "accepted" (the contact is bound to the inviter's own key —
+    checked against `bound`, the contact's fingerprint, when it has one,
+    else the short code's 48 bits — and its nudge armed), a refusal's reason
+    (_ADD_AFTER, or "own"), "refused" (the Worker refused this node itself:
+    its clock, its key, its name), or "unreachable" (the same invite string
+    again tries again). The token is a secret until it is spent: never
+    logged."""
     from desktop.p2p import chat_wire
     identity = _get_identity()
-    if not identity:
+    if not identity or not await _born():
         return "unreachable"
     ts = int(datetime.now(timezone.utc).timestamp())
     inviteid = chat_wire.invite_id(share.invite_token)
@@ -505,21 +518,29 @@ async def _accept_invite(share, friend_id: int) -> str:
     except Exception as e:
         logger.warning(f"Accept-invite for {share.code} failed: {type(e).__name__}")
         return "unreachable"
+    if not isinstance(answer, dict):
+        answer = {}
     if resp.status_code != 200:
-        reason = answer.get("reason") if isinstance(answer, dict) else None
-        if reason in ("used", "not_found", "not_this_code", "bad_token", "own"):
+        reason = answer.get("reason")
+        if reason in _ADD_AFTER or reason == "own":
             logger.info(f"Accept-invite for {share.code} refused: {reason}")
             return reason
+        if resp.status_code == 403:
+            logger.warning(f"Accept-invite for {share.code} refused this node: {answer.get('error')}")
+            return "refused"
         logger.warning(f"Accept-invite for {share.code} answered {resp.status_code}")
         return "unreachable"
-    inviter = (answer.get("inviter") or {}).get("public_key_hex", "")
-    known = share.fingerprint or chat_wire.invite_digest(share.code)
+    inviter = answer.get("inviter")
+    inviter = inviter.get("public_key_hex", "") if isinstance(inviter, dict) else ""
+    known = bound or chat_wire.invite_digest(share.code)
     if not (isinstance(inviter, str) and re.fullmatch(r"[0-9a-f]{64}", inviter)
             and chat_wire.key_fingerprint(inviter).startswith(known)):
         logger.warning(f"Accept-invite for {share.code} answered with a key the invite does not name")
         return "unreachable"
-    _db_execute("UPDATE friends SET key_fingerprint = %s WHERE id = %s AND public_key_hex LIKE 'pending:%%'",
-                (bytes.fromhex(chat_wire.key_fingerprint(inviter)), friend_id))
+    _db_execute("UPDATE friends SET key_fingerprint = %s, accepted_invite_id = %s"
+                " WHERE id = %s AND public_key_hex LIKE 'pending:%%'",
+                (bytes.fromhex(chat_wire.key_fingerprint(inviter)), chat_wire.invite_id(share.invite_token),
+                 friend_id))
     logger.info(f"Invite from {share.code} accepted (notified={answer.get('notified')})")
     return "accepted"
 
@@ -529,7 +550,7 @@ async def _tell_code_added(their_invite_code: str) -> None:
     (an add by plain code: nothing is kept, the owner adds back)."""
     from desktop.p2p import chat_wire
     identity = _get_identity()
-    if not identity:
+    if not identity or not await _born():
         return
     ts = int(datetime.now(timezone.utc).timestamp())
     signature = _sign_message(chat_wire.add_text(
@@ -820,6 +841,8 @@ async def invite_by_email(req: InviteByEmailRequest) -> Dict[str, Any]:
         raise HTTPException(
             status_code=400,
             detail="Verify your email in Profile first — an invite goes out under your verified address.")
+    if not await _born():
+        raise HTTPException(status_code=502, detail="Birth certificate unavailable")
 
     invite_code = identity["invite_code"]
     public_key_hex = identity["public_key_hex"]
@@ -856,20 +879,46 @@ async def invite_by_email(req: InviteByEmailRequest) -> Dict[str, Any]:
     }
 
 
+# The Friends screen's pickups — a Worker request each, on our key's day of
+# 100 (the Worker's pending.key) beside the launcher's start and its nudges,
+# and a second node of the same account's: at most one a minute and
+# SCREEN_PICKUPS_PER_DAY in any 24 h. A screen past them shows what is here.
+SCREEN_PICKUP_INTERVAL_S = 60
+SCREEN_PICKUPS_PER_DAY = 40
+_screen_pickups: deque = deque()
+_screen_pickups_lock = threading.Lock()
+
+
+def _screen_pickup() -> bool:
+    """One of the Friends screen's pickups, if one is left now."""
+    now = time.monotonic()
+    with _screen_pickups_lock:
+        while _screen_pickups and _screen_pickups[0] <= now - 86400:
+            _screen_pickups.popleft()
+        if len(_screen_pickups) >= SCREEN_PICKUPS_PER_DAY or (
+                _screen_pickups and now - _screen_pickups[-1] < SCREEN_PICKUP_INTERVAL_S):
+            return False
+        _screen_pickups.append(now)
+        return True
+
+
 @router.get("/pending-accepts")
 async def pending_accepts() -> Dict[str, Any]:
     """The pickup of our accepted invites, when Friends opens
     (email_verify.pick_up_acceptances — the launcher's start and a peer's
-    nudge run the same): {added: [codes]} — the contacts it added, each
-    waiting for its handshake."""
+    nudge run the same), while an invite is open and the screen's share of
+    the Worker's day allows (_screen_pickup): {added: [codes]} — the
+    contacts it added, each waiting for its handshake."""
     from desktop.p2p import email_verify
     identity = _get_identity()
     key = _get_private_key()
-    if not identity or not key:
+    if not identity or not key or not await _born():
         return {"added": []}
 
     def pick_up():
         with _get_conn() as conn:
+            if not email_verify.has_open_invites(conn) or not _screen_pickup():
+                return []
             return email_verify.pick_up_acceptances(
                 conn, identity["invite_code"], identity["public_key_hex"], key.sign)
 
@@ -914,6 +963,13 @@ async def _get_own_birth_cert(refresh: bool = False) -> Optional[dict]:
     return None
 
 
+async def _born() -> bool:
+    """This node's key born on the Worker — its certificate held, else asked
+    for (_get_own_birth_cert): every invite route answers only a key it
+    issued a certificate to, and a rotation's new key has none until then."""
+    return await _get_own_birth_cert() is not None
+
+
 async def _worker_check_email(identity: dict) -> Optional[dict]:
     """GET /check-email for this identity's configured email: {verified,
     birth_cert?}. A returned certificate is the method:email upgrade — the
@@ -921,7 +977,7 @@ async def _worker_check_email(identity: dict) -> Optional[dict]:
     import p2p_identity
 
     email = identity.get("email")
-    if not email:
+    if not email or not await _born():
         return None
     message = f"check-email:{identity['invite_code']}:{email}"
     signature = _sign_message(message)
@@ -1026,6 +1082,8 @@ async def email_send_code() -> Dict[str, Any]:
     if not identity or not identity.get("email"):
         raise HTTPException(400, "No email configured (set P2P_EMAIL in .env)")
 
+    if not await _born():
+        raise HTTPException(502, "Birth certificate unavailable")
     email = identity["email"]
     invite_code = identity["invite_code"]
     signature = _sign_message(f"sendcode:{invite_code}:{email}")

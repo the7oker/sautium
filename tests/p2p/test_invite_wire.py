@@ -96,6 +96,22 @@ def test_an_invite_link_keeps_its_uuid_token():
     token = str(uuid.uuid4())
     share = chat_wire.parse_share(f"{V['inviter']['long_code']}#{token}")
     assert share.link_token == token and share.invite_token is None
+    assert chat_wire.parse_share(f"{V['inviter']['long_code']}#{token.upper()}").link_token == token
+
+
+def test_the_parse_drops_what_a_mail_client_wraps_a_string_with():
+    soft = "\u00ad".join(V["invite_string"][i:i + 9] for i in range(0, len(V["invite_string"]), 9))
+    for text in ("\ufeff" + V["invite_string"], V["invite_string"].replace("#i-", "#\u200bi-\u2060"),
+                 soft, V["invite_string"] + "\u200d"):
+        assert chat_wire.parse_share(text) == chat_wire.parse_share(V["invite_string"])
+
+
+@pytest.mark.parametrize("tail", ["000102030405060708090a0b0c0d0e0f",          # a token without its i-
+                                  "{12345678-1234-5678-1234-567812345678}",
+                                  "urn:uuid:12345678-1234-5678-1234-567812345678"])
+def test_an_invite_links_token_is_its_dashed_uuid_alone(tail):
+    with pytest.raises(ValueError):
+        chat_wire.parse_share(f"{V['inviter']['long_code']}#{tail}")
 
 
 @pytest.mark.parametrize("text", [
@@ -117,6 +133,14 @@ def test_a_contact_bound_to_a_fingerprint_answers_to_its_own_key_alone():
     assert not chat_wire.binds(fingerprint, V["acceptor"]["pubkey"])
     assert chat_wire.binds(None, V["acceptor"]["pubkey"])            # a short code's contact: its code decides
     assert not chat_wire.binds(fingerprint, "zz")
+
+
+def test_a_message_statement_names_its_uuid_in_the_form_rows_store():
+    at = datetime(2026, 11, 7, tzinfo=timezone.utc)
+    u = uuid.uuid4()
+    canonical = chat_wire.message_statement("ab" * 32, "cd" * 32, str(u), at, "x")
+    for spelling in (str(u).upper(), "{%s}" % u, u.hex):
+        assert chat_wire.message_statement("ab" * 32, "cd" * 32, spelling, at, "x") == canonical
 
 
 def test_a_small_order_key_verifies_nothing():
@@ -266,23 +290,24 @@ def test_the_initiator_takes_only_the_key_its_contact_is_bound_to():
 
 # --- the nudge ---------------------------------------------------------------------------
 
-def test_a_nudge_runs_the_pickup_and_answers_nothing_of_the_node(monkeypatch):
+def test_a_nudge_runs_the_pickup_only_for_an_open_invite_and_answers_every_nudge_alike(monkeypatch):
     from aiohttp import web
     from aiohttp.test_utils import TestClient as AioClient, TestServer
     from desktop.p2p import sync_server as ss
 
     ran = []
+    OPEN, SHUT = str(uuid.UUID(int=1)), str(uuid.UUID(int=2))
 
     async def pickup():
         ran.append(time.monotonic())
         return ["someone#AAAA-BBBB-CCCC"]
 
-    async def run(open_invites, nudges):
+    async def run(nudges):
         server = ss.SyncServer("postgresql://unused", account_info={
             "public_key_hex": HOST.pub, "username": HOST.name, "invite_code": HOST.invite})
         server._chat_service = _Chat([])
         server.set_pickup(pickup)
-        server._has_open_invites = lambda: open_invites
+        server._is_open_invite = lambda inviteid: inviteid == OPEN
         app = web.Application()
         app.router.add_post("/api/chat/invite-accepted", server.handle_invite_accepted)
         async with AioClient(TestServer(app)) as client:
@@ -292,12 +317,27 @@ def test_a_nudge_runs_the_pickup_and_answers_nothing_of_the_node(monkeypatch):
                 out.append((r.status, await r.json()))
             return out, server._chat_service.writes
 
-    unsigned = {"public_key_hex": FRIEND.pub, "username": FRIEND.name, "invite_code": FRIEND.invite}
-    answers, writes = asyncio.run(run(True, [unsigned, _signed(FRIEND), _signed(FRIEND)]))
+    unsigned = {"public_key_hex": FRIEND.pub, "username": FRIEND.name, "invite_code": FRIEND.invite,
+                "invite_id": OPEN}
+    naming = lambda inviteid: {**_signed(FRIEND), "invite_id": inviteid}
+    answers, writes = asyncio.run(run([unsigned, _signed(FRIEND), naming(SHUT), naming("not an id"),
+                                       naming(OPEN), naming(OPEN.upper())]))
     assert answers[0][0] == 403                                       # signed, as the handshake it follows
-    assert answers[1] == (200, {"picked_up": True}) and len(ran) == 1
-    assert answers[2][0] == 429                                       # one pickup a nudge-interval, whoever nudges
+    assert answers[1:] == [(200, {"ok": True})] * 5                   # one answer, a pickup run or not
+    assert len(ran) == 2                                              # only the open invite's, in either spelling
     assert writes == []                                               # it adds nobody itself
-    assert "public_key_hex" not in json.dumps(answers)
-    answers, _ = asyncio.run(run(False, [_signed(FRIEND)]))
-    assert answers == [(403, {"error": "no open invites"})] and len(ran) == 1
+    answers, _ = asyncio.run(run([naming(OPEN)] * (ss.NUDGE_PICKUPS_PER_INVITE + 2)))
+    assert answers == [(200, {"ok": True})] * (ss.NUDGE_PICKUPS_PER_INVITE + 2)
+    assert len(ran) == 2 + ss.NUDGE_PICKUPS_PER_INVITE                # a few pickups an invite, whoever nudges
+
+
+def test_a_contact_nudges_only_its_inviters_own_key_and_only_once_armed():
+    from desktop.p2p.p2p_manager import P2PManager
+    fingerprint, inviteid = chat_wire.key_fingerprint(FRIEND.pub), str(uuid.UUID(int=3))
+    armed = {"accepted_invite_id": inviteid, "key_fingerprint": fingerprint, "join_token_id": None}
+    assert P2PManager._nudge_invite(armed, FRIEND.pub) == inviteid
+    assert P2PManager._nudge_invite(armed, COLLIDER.pub) is None      # a stranger at its address hears nothing
+    assert P2PManager._nudge_invite(armed, None) is None
+    assert P2PManager._nudge_invite({**armed, "accepted_invite_id": None}, FRIEND.pub) is None
+    assert P2PManager._nudge_invite({**armed, "key_fingerprint": None}, FRIEND.pub) is None
+    assert P2PManager._nudge_invite({**armed, "join_token_id": str(uuid.uuid4())}, FRIEND.pub) is None

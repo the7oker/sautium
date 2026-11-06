@@ -329,6 +329,16 @@ class ChatService:
         finally:
             self._return_db(conn)
 
+    def nudged(self, friend_id: int) -> None:
+        """The nudge of a contact made by accepting a mailed invite reached
+        its inviter: it is spent."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE friends SET accepted_invite_id = NULL WHERE id = %s", (friend_id,))
+        finally:
+            self._return_db(conn)
+
     def unbind_friend(self, friend_id: int) -> None:
         """One friendship back to `pending:<invite_code>` — for a friend we
         hold no notice for; see unbind_friendships."""
@@ -355,7 +365,8 @@ class ChatService:
                            display_name, added_at, last_seen, is_blocked,
                            source::text AS source,
                            join_token_id::text AS join_token_id, favorite,
-                           upper(encode(key_fingerprint, 'hex')) AS key_fingerprint
+                           upper(encode(key_fingerprint, 'hex')) AS key_fingerprint,
+                           accepted_invite_id::text AS accepted_invite_id
                     FROM friends
                     ORDER BY display_name, username
                 """)

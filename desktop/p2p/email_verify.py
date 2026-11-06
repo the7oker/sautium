@@ -60,13 +60,6 @@ def _post_worker(path: str, payload: dict) -> Optional[dict]:
         return None
 
 
-def _sign_message(message: str) -> str:
-    """Sign a message with the node's Ed25519 key. Returns hex signature."""
-    from desktop.node_identity import sign_message
-    sig_bytes = sign_message(message.encode("utf-8"))
-    return sig_bytes.hex()
-
-
 def _get_identity() -> Optional[dict]:
     """Get account info (invite_code, public_key_hex)."""
     from desktop.node_identity import get_account_info
@@ -270,6 +263,17 @@ def has_open_invites(conn) -> bool:
         return cur.fetchone() is not None
 
 
+def is_open_invite(conn, invite_id: str) -> bool:
+    """`invite_id` is one of this node's open invites (has_open_invites)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM sent_invites
+             WHERE invite_id = %s AND taken_at IS NULL
+               AND sent_at > now() - make_interval(days => %s)
+        """, (invite_id, chat_wire.INVITE_PICKUP_DAYS))
+        return cur.fetchone() is not None
+
+
 def pick_up_acceptances(conn, invite_code: str, public_key_hex: str, sign) -> list[str]:
     """Ask the Worker for this node's accepted invites and add every one
     that holds up (chat_wire.take_acceptance), each in a transaction of its
@@ -291,8 +295,14 @@ def pick_up_acceptances(conn, invite_code: str, public_key_hex: str, sign) -> li
         return []
     added = []
     for accept in accepts[:PICKUP_PAGE]:
-        outcome = _in_transaction(conn, lambda: chat_wire.take_acceptance(
-            conn, accept, invite_code, public_key_hex))
+        # One acceptance's failure is its own: the rest of the page, and the
+        # sweep below, go on.
+        try:
+            outcome = _in_transaction(conn, lambda: chat_wire.take_acceptance(
+                conn, accept, invite_code, public_key_hex))
+        except Exception as e:
+            logger.error("Pickup: an acceptance failed — %s: %s", type(e).__name__, e)
+            continue
         if outcome == "added":
             added.append(accept["acceptor"]["invite_code"])
             logger.info("Pickup: the invite accepted by %s added", accept["acceptor"]["invite_code"])

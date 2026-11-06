@@ -16,6 +16,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from functools import partial
 from typing import Callable, Optional
@@ -89,9 +90,10 @@ TS_WINDOW = 60
 # Token friendships accepted in any hour, all tokens together — sized for an
 # announcement's newcomers, each of whom has mined its own identity proof.
 TOKEN_FRIENDS_PER_HOUR = 600
-# A peer's nudge runs our pickup, a Worker request on our key's day: at most
-# one in this many seconds, whoever nudges.
-NUDGE_PICKUP_INTERVAL = 600
+# A nudge runs our pickup, a Worker request on our key's day of them, only
+# when it names an open invite of ours — and at most this many times for one
+# invite, whoever nudges with it.
+NUDGE_PICKUPS_PER_INVITE = 3
 PROBE_COOLDOWN = 60
 PROBE_TIMEOUT = 3
 PROBE_HEALTH_CAP = 256 * 1024
@@ -146,7 +148,7 @@ class SyncServer:
         self._chat_service = None  # set via set_chat_service()
         self._on_message_cb: Optional[Callable] = None
         self._pickup: Optional[Callable] = None
-        self._nudge_pickup_at = float("-inf")
+        self._nudge_pickups: dict[str, int] = {}     # an open invite's id → the pickups its nudges ran
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
@@ -1984,10 +1986,13 @@ class SyncServer:
         pickup adds is the acceptor its own signed statement names, and the
         nudger's next classic handshake finds that contact.
 
-        Request: the classic handshake's signed body.
-        Response: {picked_up: true}; 403 when no invite of ours is open; 429
-        while the last nudge's pickup is recent (any peer can nudge, and a
-        pickup is a Worker request)."""
+        Request: the classic handshake's signed body and `invite_id`, the id
+        of the invite the nudger accepted — known to nobody but the Worker,
+        this node and whoever holds the invite's token. The pickup runs only
+        for one of this node's open invites, NUDGE_PICKUPS_PER_INVITE times
+        at most.
+        Response: {ok: true} for every nudge so signed, whether a pickup ran
+        or not: a nudge tells nobody which invites this node has open."""
 
         if not self.account_info or self._pickup is None:
             return self._json_response(
@@ -2021,23 +2026,21 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "handshake signature required"}, status=403)
 
+        try:
+            inviteid = str(uuid.UUID(str(body.get("invite_id"))))
+        except ValueError:
+            inviteid = None
         loop = asyncio.get_event_loop()
-        if not await loop.run_in_executor(None, self._has_open_invites):
-            return self._json_response(
-                request, {"error": "no open invites"}, status=403)
-        wait = self._nudge_pickup_at + NUDGE_PICKUP_INTERVAL - time.monotonic()
-        if wait > 0:
-            return self._json_response(
-                request, {"error": "picked up lately"}, status=429,
-                headers={"Retry-After": str(int(wait) + 1)})
-        self._nudge_pickup_at = time.monotonic()
-        await self._pickup()
-        return self._json_response(request, {"picked_up": True})
+        if inviteid is not None and self._nudge_pickups.get(inviteid, 0) < NUDGE_PICKUPS_PER_INVITE \
+                and await loop.run_in_executor(None, self._is_open_invite, inviteid):
+            self._nudge_pickups[inviteid] = self._nudge_pickups.get(inviteid, 0) + 1
+            await self._pickup()
+        return self._json_response(request, {"ok": True})
 
-    def _has_open_invites(self) -> bool:
+    def _is_open_invite(self, inviteid: str) -> bool:
         from desktop.p2p import email_verify
         with self._db() as conn:
-            return email_verify.has_open_invites(conn)
+            return email_verify.is_open_invite(conn, inviteid)
 
     async def _wake_backend_sse(self):
         """Tell the local backend to wake SSE clients (incoming message)."""

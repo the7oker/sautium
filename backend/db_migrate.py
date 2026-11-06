@@ -37,7 +37,10 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      new rule, and one the switch withdrew is closed.
      The slice step (`slice_authors_v1`) drops what slices of a key the
      release does not name left behind, the day a slice came to count only
-     under its author (master_node.SLICE_AUTHORS, 2026-11-03).
+     under its author (master_node.SLICE_AUTHORS, 2026-11-03). The master
+     step (`master_stub_bound_v1`) binds the support contact still waiting
+     unbound to the master's own key, the day a contact came to carry its
+     key's fingerprint (2026-11-07).
 
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
@@ -248,6 +251,24 @@ def _drop_unauthored_slices(conn) -> dict:
     return counts
 
 
+def _bind_master_stub(conn) -> int:
+    """The support contact, where it still waits for its key with none
+    named (seeded or added before contacts carried a fingerprint), bound to
+    the master's own: a key that merely shares the 48 bits of its code
+    resolves it no more."""
+    from master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX
+    if not (MASTER_INVITE_CODE and MASTER_PUBKEY_HEX):
+        return 0
+    from desktop.p2p import chat_wire
+    with conn.cursor() as cur:
+        cur.execute("UPDATE friends SET key_fingerprint = %s WHERE public_key_hex = %s AND key_fingerprint IS NULL",
+                    (bytes.fromhex(chat_wire.key_fingerprint(MASTER_PUBKEY_HEX)),
+                     f"pending:{MASTER_INVITE_CODE}"))
+        bound = cur.rowcount
+    conn.commit()
+    return bound
+
+
 def _assistant_role(conn) -> None:
     """The cluster administrator's part of the assistant's login
     (desktop/db_init.ASSISTANT_ROLE): the login itself, and large objects
@@ -308,6 +329,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "slice_authors_v1"):
             out["unauthored_slices_dropped"] = _drop_unauthored_slices(conn)
             _mark(conn, "slice_authors_v1")
+
+        if not _marked(conn, "master_stub_bound_v1"):
+            out["master_stub_bound"] = _bind_master_stub(conn)
+            _mark(conn, "master_stub_bound_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker

@@ -348,6 +348,12 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
                   AND (f.key_fingerprint IS NULL OR f.key_fingerprint
                        = substring(sha256(decode(s.public_key_hex, 'hex')) FROM 1 FOR 16))
                   AND NOT EXISTS (SELECT 1 FROM friends x WHERE x.public_key_hex = s.public_key_hex)""")
+        # A row waiting on both sides keeps the key the backup's names, when
+        # this one names none.
+        run("""UPDATE friends f SET key_fingerprint = s.key_fingerprint
+                 FROM _S_.friends s
+                WHERE s.public_key_hex = f.public_key_hex AND f.public_key_hex LIKE 'pending:%'
+                  AND f.key_fingerprint IS NULL AND s.key_fingerprint IS NOT NULL""")
         merged["friends"] = run("""
             INSERT INTO friends (username, public_key_hex, invite_code, display_name, added_at,
                                  last_seen, is_blocked, previous_public_key_hex, city, bio,

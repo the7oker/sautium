@@ -12,10 +12,13 @@ ALTER TABLE sent_invites ADD COLUMN IF NOT EXISTS taken_at TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS sent_invites_invite_id ON sent_invites (invite_id);
 
 -- friends: the first 16 bytes of the SHA-256 of the key a contact made from
--- a long code (or an accepted invite) waits for.
+-- a long code (or an accepted invite) waits for; and, on a contact made by
+-- accepting a mailed invite, that invite's id until a nudge has reached its
+-- inviter.
 ALTER TABLE friends ADD COLUMN IF NOT EXISTS key_fingerprint BYTEA;
 ALTER TABLE friends DROP CONSTRAINT IF EXISTS friends_key_fingerprint_len;
 ALTER TABLE friends ADD CONSTRAINT friends_key_fingerprint_len CHECK (octet_length(key_fingerprint) = 16);
+ALTER TABLE friends ADD COLUMN IF NOT EXISTS accepted_invite_id UUID;
 
 -- p2p_messages: a received message's sender's signature and the time it
 -- signed.

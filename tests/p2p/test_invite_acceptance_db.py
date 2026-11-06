@@ -5,16 +5,21 @@ PostgreSQL built from the migrations — skipped without a cluster:
 
 - an acceptance is added once, for an invite this node sent, under its
   acceptor's own signed statement, as a contact bound to the acceptor's key;
-  a held key, another node's invite, an unbound code, a statement for another
-  invite or node, and this node's own key add nothing; two pickups at once
-  add it once;
-- the pickup asks the Worker only while an invite is open, and deletes none;
+  a held key, a code held or awaited under another key, another node's
+  invite, an unbound code, a statement for another invite or node, a key in
+  any other form and this node's own key add nothing; two pickups at once add
+  it once;
+- the pickup asks the Worker only while an invite is open, deletes none, and
+  goes on past an acceptance that fails;
 - a contact bound to a fingerprint is resolved only by the key it names, on
   both surfaces; an unbound friendship goes back bound to the key it held;
+  the support contact waiting unbound is bound to the master's key once; a
+  contact's nudge is spent once;
 - a received message keeps its sender's signature and the time it signed; an
-  unsigned one is refused; a history import takes a line as ours only under
-  our own signature, theirs under theirs when it carries one; an export
-  gives each row back with its signature."""
+  unsigned one is refused, on both surfaces; a history import takes a line as
+  ours only under our own signature, theirs under theirs when it carries one,
+  and a key we retired still signs for us and still receives; an export gives
+  each row back with its signature."""
 
 import base64
 import sys
@@ -97,6 +102,8 @@ def test_an_acceptance_is_added_once_bound_to_its_acceptors_key(conn):
     (lambda: _acceptance(signature="00" * 64), "statement does not verify"),
     (lambda: _acceptance(who=ME), "own key"),
     (lambda: {"invite_id": INVITE}, "malformed"),
+    (lambda: _acceptance(public_key_hex="zz" * 32), "malformed"),
+    (lambda: _acceptance(public_key_hex=FRIEND.pub.upper() + "00"), "malformed"),
 ])
 def test_an_acceptance_that_does_not_hold_adds_nothing(conn, accept, why):
     assert _take(conn, accept()) == why
@@ -110,6 +117,23 @@ def test_an_acceptance_by_a_friend_already_held_takes_the_invite_and_adds_nobody
                     (FRIEND.pub, FRIEND.code))
     assert _take(conn, _acceptance()) == "held"
     assert _row(conn, "SELECT count(*) FROM friends") == (1,)
+    assert _row(conn, "SELECT taken_at IS NOT NULL FROM sent_invites") == (True,)
+
+
+@pytest.mark.parametrize("holder", ["waits for another key", "holds another key"])
+def test_an_acceptance_under_a_code_another_key_has_takes_the_invite_and_adds_nobody(conn, holder):
+    other = bytes.fromhex(chat_wire.key_fingerprint(OTHER.pub))
+    with conn.cursor() as cur:
+        if holder == "waits for another key":
+            cur.execute("INSERT INTO friends (username, public_key_hex, invite_code, key_fingerprint)"
+                        " VALUES ('friend', %s, %s, %s)", (f"pending:{FRIEND.code}", FRIEND.code, other))
+        else:
+            cur.execute("INSERT INTO friends (username, public_key_hex, invite_code) VALUES ('friend', %s, %s)",
+                        (OTHER.pub, FRIEND.code))
+    before = _row(conn, "SELECT public_key_hex, key_fingerprint FROM friends")
+    assert _take(conn, _acceptance()) == "held"
+    assert _row(conn, "SELECT count(*) FROM friends") == (1,)
+    assert _row(conn, "SELECT public_key_hex, key_fingerprint FROM friends") == before
     assert _row(conn, "SELECT taken_at IS NOT NULL FROM sent_invites") == (True,)
 
 
@@ -146,6 +170,25 @@ def test_the_pickup_asks_only_while_an_invite_is_open(conn, monkeypatch):
     with conn.cursor() as cur:
         cur.execute("UPDATE sent_invites SET taken_at = NULL, sent_at = now() - interval '61 days'")
     assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == [] and len(asked) == 1
+
+
+def test_a_pickup_goes_on_past_an_acceptance_that_fails(conn, monkeypatch):
+    breaking = str(uuid.UUID(int=79))
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO sent_invites (to_email, invite_id) VALUES ('other@example.net', %s)", (breaking,))
+        cur.execute("INSERT INTO sent_invites (to_email, invite_id, sent_at)"
+                    " VALUES ('old@example.net', %s, now() - interval '61 days')", (str(uuid.UUID(int=80)),))
+    real = chat_wire.take_acceptance
+
+    def take(c, accept, code, pub):
+        if accept["invite_id"] == breaking:
+            raise psycopg2.errors.DiskFull("could not extend file")
+        return real(c, accept, code, pub)
+    monkeypatch.setattr(chat_wire, "take_acceptance", take)
+    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {
+        "accepts": [_acceptance(who=OTHER, inviteid=breaking), _acceptance()]})
+    assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == [FRIEND.code]
+    assert _row(conn, "SELECT count(*) FROM sent_invites WHERE to_email = 'old@example.net'") == (0,)
 
 
 # --- contacts bound to a fingerprint ---------------------------------------------
@@ -194,6 +237,36 @@ def test_the_docker_service_resolves_a_bound_contact_only_by_its_key(scratch_dsn
         db_pool.close_pool()
 
 
+def test_the_support_contact_waiting_unbound_is_bound_to_the_masters_key_once(conn):
+    import db_migrate
+    from master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX
+    if not (MASTER_INVITE_CODE and MASTER_PUBKEY_HEX):
+        pytest.skip("no master pinned")
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO friends (username, public_key_hex, invite_code, source)"
+                    " VALUES ('support', %s, %s, 'master')", (f"pending:{MASTER_INVITE_CODE}", MASTER_INVITE_CODE))
+    assert db_migrate._bind_master_stub(conn) == 1
+    assert _row(conn, "SELECT encode(key_fingerprint, 'hex') FROM friends") == (
+        chat_wire.key_fingerprint(MASTER_PUBKEY_HEX).lower(),)
+    assert db_migrate._bind_master_stub(conn) == 0
+
+
+def test_a_contacts_nudge_is_spent_once(scratch_dsn, conn):
+    from desktop.p2p.p2p_manager import P2PManager
+    me = _service(scratch_dsn, ME)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO friends (username, public_key_hex, invite_code, key_fingerprint, accepted_invite_id)"
+                    " VALUES ('friend', %s, %s, %s, %s) RETURNING id",
+                    (f"pending:{FRIEND.code}", FRIEND.code, bytes.fromhex(chat_wire.key_fingerprint(FRIEND.pub)),
+                     INVITE))
+        fid = cur.fetchone()[0]
+    [friend] = me.get_friends()
+    assert P2PManager._nudge_invite(friend, FRIEND.pub) == INVITE
+    me.nudged(fid)
+    [friend] = me.get_friends()
+    assert friend["accepted_invite_id"] is None and P2PManager._nudge_invite(friend, FRIEND.pub) is None
+
+
 def test_an_unbound_friendship_waits_for_the_key_it_held(scratch_dsn, conn):
     me = _service(scratch_dsn, ME)
     fid = me.add_friend(public_key_hex=FRIEND.pub, invite_code=FRIEND.code)
@@ -220,6 +293,56 @@ def test_a_message_keeps_its_senders_signature_and_an_unsigned_one_is_refused(sc
     assert me.handle_incoming(FRIEND.pub, plain(None), sent.isoformat()) is None
     assert me.handle_incoming(FRIEND.pub, plain("ab" * 64), sent.isoformat()) is None
     assert _row(conn, "SELECT count(*) FROM p2p_messages") == (1,)
+
+
+@pytest.fixture
+def docker_db(scratch_dsn, monkeypatch):
+    import db_pool
+    from config import settings
+    from urllib.parse import urlparse
+    url = urlparse(scratch_dsn)
+    for key, value in dict(postgres_host=url.hostname, postgres_port=url.port, postgres_user=url.username,
+                           postgres_password=url.password, postgres_db=url.path.lstrip("/")).items():
+        monkeypatch.setattr(settings, key, value)
+    db_pool.close_pool()
+    yield
+    db_pool.close_pool()
+
+
+def test_the_docker_service_refuses_a_message_its_sender_did_not_sign(scratch_dsn, conn, docker_db):
+    from p2p_chat import PeerChatService
+    svc, friend = PeerChatService(bytes(ME.key), ME.pub), _service(scratch_dsn, FRIEND)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO friends (username, public_key_hex, invite_code) VALUES ('friend', %s, %s)",
+                    (FRIEND.pub, FRIEND.code))
+    sent = datetime.now(timezone.utc) - timedelta(seconds=5)
+    plain = lambda sig: friend._box(ME.pub, chat_wire.envelope("x", str(uuid.uuid4()), sent.isoformat(), sig))
+    assert svc.handle_incoming(FRIEND.pub, plain(None), sent.isoformat()) is None
+    assert svc.handle_incoming(FRIEND.pub, plain("ab" * 64), sent.isoformat()) is None
+    u = str(uuid.uuid4())
+    assert svc.handle_incoming(FRIEND.pub, friend.encrypt_envelope("hello", u, sent.isoformat(), ME.pub),
+                               sent.isoformat(), message_uuid=u)["content"] == "hello"
+    assert _row(conn, "SELECT count(*) FROM p2p_messages") == (1,)
+
+
+def test_a_key_we_retired_still_signs_for_us_and_still_receives(scratch_dsn, conn, docker_db):
+    from p2p_chat import PeerChatService
+    old = _Who("me", b"\x44" * 32)
+    me = ChatService(scratch_dsn, bytes(ME.key), ME.pub, (bytes(old.key),))
+    friend = _service(scratch_dsn, FRIEND)
+    fid = me.add_friend(public_key_hex=FRIEND.pub, invite_code=FRIEND.code)
+    at = datetime(2026, 11, 6, 12, tzinfo=timezone.utc)
+    u = str(uuid.uuid4())
+    text = "mine, under the key I retired"
+    line = {"message_uuid": u, "direction": "in", "content": text, "timestamp": at.isoformat(),
+            "sig": old.sign(chat_wire.message_statement(old.pub, FRIEND.pub, u, at, text)).hex()}
+    assert me.import_history(fid, [line])["imported"] == 1
+    # a friend who has not applied our rotation yet writes to the key we retired
+    sent = datetime.now(timezone.utc) - timedelta(seconds=5)
+    for svc in (me, PeerChatService(bytes(ME.key), ME.pub, (bytes(old.key),))):
+        u = str(uuid.uuid4())
+        box = friend.encrypt_envelope("to your old key", u, sent.isoformat(), old.pub)
+        assert svc.handle_incoming(FRIEND.pub, box, sent.isoformat(), message_uuid=u)["content"] == "to your old key"
 
 
 def test_a_history_import_takes_a_line_as_ours_only_under_our_signature(scratch_dsn, conn):

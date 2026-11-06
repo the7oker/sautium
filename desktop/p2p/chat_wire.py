@@ -216,11 +216,13 @@ def message_statement(sender: str, recipient: str, message_uuid: str, sent_at: d
     whom, which message, when and what — so a line a friend's history
     export claims as ours stands only under our own signature, and nobody
     gives a message another author, recipient, uuid, time or text. The time
-    is the instant in microseconds since the epoch, the one spelling every
-    serialisation of it shares."""
+    is the instant in microseconds since the epoch and the uuid its
+    canonical form: the one spelling every serialisation and every stored
+    row of each shares."""
     micros = (sent_at - _EPOCH) // datetime.resolution
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return f"{_MESSAGE}:{sender.lower()}:{recipient.lower()}:{message_uuid}:{micros}:{digest}".encode("utf-8")
+    return (f"{_MESSAGE}:{sender.lower()}:{recipient.lower()}:{UUID(message_uuid)}:{micros}:{digest}"
+            .encode("utf-8"))
 
 
 def envelope(text: str, message_uuid: str, ts_iso: str, sig: Optional[str]) -> bytes:
@@ -291,6 +293,11 @@ _INVITE_ID = "sautium-invite-id:v1"
 _USERNAME_RE = re.compile(r"[A-Za-z0-9_-]{3,32}")
 _HEX_RE = re.compile(r"[0-9A-F]+")
 _TOKEN_RE = re.compile(r"[0-9a-f]{32}")
+_KEY_RE = re.compile(r"[0-9a-f]{64}")
+_LINK_TOKEN_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+# What a mail client or a page may put inside a pasted string: whitespace,
+# and the soft hyphen, the zero-width characters and the byte-order mark.
+_WRAPPING_RE = re.compile(r"[\s\u00ad\u200b-\u200d\u2060\ufeff]+")
 # An open invite lives 30 days on the Worker, an accepted one 30 more for its
 # inviter's pickup: a node asks while an untaken invite of its own is younger
 # than both together.
@@ -343,12 +350,13 @@ class Share:
 def parse_share(text: str) -> Share:
     """A share string as a person pastes it: `name#fingerprint` (12 or 32
     hex, any case, dashes anywhere) and optionally `#<uuid>` (an invite
-    link) or `#i-<token>` (a mailed invite — `i`, `I` and the dash before
-    the hex are one spelling). Every whitespace character is dropped first,
-    a mail client's wrapping included. ValueError for anything else."""
+    link, in its dashed form only) or `#i-<token>` (a mailed invite — `i`,
+    `I` and the dash before the hex are one spelling). Every whitespace and
+    invisible character is dropped first, a mail client's wrapping included.
+    ValueError for anything else."""
     if not isinstance(text, str):
         raise ValueError("not a share string")
-    parts = re.sub(r"\s+", "", text).split("#")
+    parts = _WRAPPING_RE.sub("", text).split("#")
     if len(parts) not in (2, 3) or not _USERNAME_RE.fullmatch(parts[0]):
         raise ValueError("not a share string")
     fingerprint = parts[1].replace("-", "").upper()
@@ -364,6 +372,8 @@ def parse_share(text: str) -> Share:
         if not _TOKEN_RE.fullmatch(token):
             raise ValueError("not an invite token")
         return Share(code, bound, invite_token=token)
+    if not _LINK_TOKEN_RE.fullmatch(tail):
+        raise ValueError("not an invite link token")
     return Share(code, bound, link_token=str(UUID(tail)))
 
 
@@ -417,6 +427,8 @@ def take_acceptance(conn, accept: dict, own_code: str, own_pubkey: str) -> str:
         ts, sig = int(acceptor["ts"]), str(acceptor["signature"]).lower()
     except (KeyError, TypeError, ValueError, AttributeError):
         return "malformed"
+    if not _KEY_RE.fullmatch(key):
+        return "malformed"
     if key == own_pubkey.lower():
         return "own key"
     username = code.split("#", 1)[0]
@@ -435,8 +447,13 @@ def take_acceptance(conn, accept: dict, own_code: str, own_pubkey: str) -> str:
                     " RETURNING id", (inviteid,))
         if cur.fetchone() is None:
             return "taken"
-        cur.execute("SELECT 1 FROM friends WHERE public_key_hex = %s", (key,))
-        if cur.fetchone() is not None:
+        cur.execute("SELECT public_key_hex FROM friends WHERE public_key_hex = %s"
+                    " OR (invite_code = %s AND public_key_hex NOT LIKE 'pending:%%')", (key, code))
+        held = [row[0] for row in cur.fetchall()]
+        if held:
+            if key not in held:
+                logger.warning("An acceptance of an invite for %s names another key than the contact "
+                               "already held with that code — nothing added", code)
             return "held"
         fingerprint = bytes.fromhex(key_fingerprint(key))
         cur.execute("""

@@ -1890,7 +1890,10 @@ CREATE TABLE IF NOT EXISTS friends (
     -- for the key whose SHA-256 begins with these 16 bytes; NULL for one
     -- made from a short code, whose 48 bits the invite code carries alone
     -- (049, 2026-11-07).
-    key_fingerprint BYTEA CONSTRAINT friends_key_fingerprint_len CHECK (octet_length(key_fingerprint) = 16)
+    key_fingerprint BYTEA CONSTRAINT friends_key_fingerprint_len CHECK (octet_length(key_fingerprint) = 16),
+    -- A contact made by accepting a mailed invite: that invite's id, until
+    -- a nudge has reached its inviter (049).
+    accepted_invite_id UUID
 );
 
 CREATE TABLE IF NOT EXISTS p2p_messages (
