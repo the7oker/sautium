@@ -359,6 +359,7 @@ async function pending(key, name, opts = {}) {
 }
 const tokenIn = (mail) => mail.html.match(/#i-([0-9a-f]{32})</)[1];
 const invitesTable = () => limiterShard("invites").db.prepare("SELECT * FROM invites ORDER BY sent, id").all();
+const addsTable = () => limiterShard("invites").db.prepare("SELECT * FROM adds ORDER BY added, adder").all();
 async function stamp(key, roots, opts, ts = Math.floor(Date.now() / 1000)) {
   return call("POST", "/timestamp", {
     ...(roots.length === 1 ? { root: roots[0] } : { roots }),
@@ -848,6 +849,7 @@ async function accepts() {
   const notifyToBefore = new Set(counterKeys("notify:to:"));
   out.accepted = await accept(sasha, "sasha", mashaCode, { ip: "198.51.100.51", token });
   out.acceptMail = mails.slice(sent);
+  out.addsAfterAccept = addsTable().length;                  // an acceptance is no add
   const mashaNotifyTo = counterKeys("notify:to:").find((key) => !notifyToBefore.has(key));
   sent = mails.length;
   out.acceptedAgain = await accept(sasha, "sasha", mashaCode, { ip: "198.51.100.51", token });
@@ -904,14 +906,48 @@ async function accepts() {
   store.set(`accepted:${mashaCode.replace("#", ":")}:old:AAAA-BBBB-CCCC`,
             JSON.stringify({ invite_code: "old#AAAA-BBBB-CCCC", accepted_at: "2026-11-01T00:00:00Z" }));
   out.pickupAfterOldKey = await pending(masha, "masha", { ip: "198.51.100.50" });
-  // an add by plain code keeps nothing and mails the code's owner the
+  // an add by plain code spends no invite and mails the code's owner the
   // username and the code to add back
   const rowsBefore = JSON.stringify(invitesTable());
   sent = mails.length;
   const typed = mashaCode.toLowerCase().replace(/-/g, "");            // as a person might type it
   out.added = await accept(sasha, "sasha", typed, { ip: "198.51.100.51" });
   out.addMail = mails.slice(sent);
-  out.addKeptNothing = JSON.stringify(invitesTable()) === rowsBefore;
+  out.addKeptNoInvite = JSON.stringify(invitesTable()) === rowsBefore;
+  // it is kept for the code's owner under the code's digest, with the
+  // adder's statement; the owner's pickup brings it, nobody else's does,
+  // and a repeat refreshes its one row
+  out.addRows = addsTable();
+  out.pickupAfterAdd = await pending(masha, "masha", { ip: "198.51.100.50" });
+  out.pickupOfAnother = await pending(pasha, "pasha", { ip: "198.51.100.52" });
+  // a key with an invite kept asks on `pending`, one with none on `requests`
+  out.pickupCounters = {
+    pashaOnRequests: counterKeys("requests:key:").includes(`requests:key:${pasha.pubHex}`),
+    pashaOnPending: counterKeys("pending:key:").includes(`pending:key:${pasha.pubHex}`),
+    mashaOnPending: counterKeys("pending:key:").includes(`pending:key:${masha.pubHex}`),
+    mashaOnRequests: counterKeys("requests:key:").includes(`requests:key:${masha.pubHex}`),
+  };
+  // an add refused at its cap keeps nothing
+  const capped = await newKey();
+  await issue(capped, { ip: "198.51.100.63" });
+  preset(`accept:key:${capped.pubHex}`, 20);
+  out.addAtKeyCap = await accept(capped, "cappy", mashaCode, { ip: "198.51.100.63" });
+  out.addsByCapped = addsTable().filter((a) => a.adder === capped.pubHex).length;
+  // a code keeps its newest page of adds
+  const crowd = limiterShard("invites").db.prepare(
+    `INSERT INTO adds (owner, adder, adder_code, their_code, added, statement_ts, signature, expires)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  for (let i = 0; i < 300; i++) {
+    crowd.run("AAAABBBBCCCC", i.toString(16).padStart(64, "0"), `c${i}#AAAA-BBBB-CCCC`, "zed#AAAA-BBBB-CCCC",
+              Date.now() - DAY_MS + i, nowS(), "00".repeat(64), Date.now() + DAY_MS);
+  }
+  await accept(sasha, "sasha", "zed#AAAA-BBBB-CCCC", { ip: "198.51.100.51" });
+  const crowdRows = limiterShard("invites").db.prepare("SELECT adder FROM adds WHERE owner = 'AAAABBBBCCCC'").all();
+  out.crowd = { length: crowdRows.length, newestKept: crowdRows.some((r) => r.adder === sasha.pubHex),
+                oldestLeft: !crowdRows.some((r) => r.adder === "0".repeat(64)) };
+  await new Promise((r) => setTimeout(r, 5));
+  out.addedAgain = await accept(sasha, "sasha", mashaCode, { ip: "198.51.100.51" });
+  out.addRowsAgain = addsTable();
   out.addToNoMailbox = await accept(masha, "masha", await inviteOf(pasha, "pasha"), { ip: "198.51.100.50" });
   // a verified address under a code whose digest another key holds is
   // nobody's to mail
@@ -1001,6 +1037,16 @@ async function accepts() {
   shard.db.prepare("UPDATE invites SET expires = ? WHERE id = ?").run(Date.now() - 1, out.sent.body.invite_id);
   await shard.obj.alarm();
   out.expiredLeft = shard.db.prepare("SELECT count(*) AS n FROM invites WHERE id = ?").get(out.sent.body.invite_id).n;
+  // and an expired add by its alarm
+  shard.db.prepare("UPDATE adds SET expires = ? WHERE adder = ?").run(Date.now() - 1, sasha.pubHex);
+  await shard.obj.alarm();
+  out.expiredAddsLeft = shard.db.prepare("SELECT count(*) AS n FROM adds WHERE adder = ?").get(sasha.pubHex).n;
+  out.addsLeft = shard.db.prepare("SELECT count(*) AS n FROM adds").get().n;
+  // the alarm is due at the soonest add's end too
+  const soon = Date.now() + 60_000;
+  shard.db.prepare("UPDATE adds SET expires = ? WHERE adder = ?").run(soon, masha.pubHex);
+  await shard.obj.alarm();
+  out.alarmAtAdd = shard.alarm() === soon;
   out.keys = { masha: masha.pubHex, sasha: sasha.pubHex, masha_code: mashaCode,
                sasha_code: await inviteOf(sasha, "sasha") };
   return out;
@@ -1055,6 +1101,8 @@ async function inviteVectors() {
     my_invite_code: sashaShort, their_invite_code: mashaShort, public_key_hex: sasha.pubHex, ts: T,
     signature: out.addSig }, { ip: "198.51.100.41" });
   out.addMail = mails.slice(sent);
+  out.pickupAfterAdd = await call("POST", "/pending-accepts", {
+    invite_code: mashaShort, public_key_hex: masha.pubHex, ts: T, signature: out.pickupSig }, { ip: "198.51.100.40" });
   Date.now = realNow;
   return out;
 }
@@ -2009,10 +2057,19 @@ async function shardFailure() {
   const births = limiterShard("birth");
   const owed = () => births.db.prepare("SELECT count(*) AS n FROM owed").get().n;
   const out = {};
-  const useEnv = { ...env, LIMITER: failing("pending") };
+  const useEnv = { ...env, LIMITER: failing("requests") };    // a pickup by a key with no invite kept
   const k = await newKey();
   out.birth = (await issue(k, { useEnv })).status;
   out.pickup = (await pending(k, "pia", { useEnv })).status;
+  // the add's store failing (or an object still on the code before adds):
+  // the add is answered, and its owner mailed, as before adds were kept
+  const owner = await newKey(), adder = await newKey();
+  await issue(owner, { ip: "198.51.100.70" }); await issue(adder, { ip: "198.51.100.71" });
+  await verifyEmail(owner, "olena", "olena@example.org", { ip: "198.51.100.70" });
+  const sentBefore = mails.length;
+  out.addStoreDown = await accept(adder, "artem", await inviteOf(owner, "olena"),
+                                  { ip: "198.51.100.71", useEnv: { ...env, LIMITER: failing("invites", "/add/put") } });
+  out.addStoreDownMails = mails.slice(sentBefore).filter((m) => m.to[0] === "olena@example.org").length;
   // a birth never calls the owners instance: one that never answers holds
   // no birth up, and the claim comes from the birth's own instance
   const k2 = await newKey();

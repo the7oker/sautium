@@ -67,9 +67,11 @@
  *   GET  /check-email          — check if email already verified for invite code
  *   POST /accept-invite        — spend an invite's token (kept as accepted, the
  *                                inviter told by mail), or, without a token,
- *                                tell a code's owner it was added (nothing kept)
- *   POST /pending-accepts      — the inviter's accepted invites, each with its
- *                                acceptor's signed statement (a read)
+ *                                an add by plain code (kept for the code's
+ *                                owner, who is told by mail)
+ *   POST /pending-accepts      — the caller's accepted invites and the adds of
+ *                                its code, each with its signed statement (a
+ *                                read)
  *   POST /birth-certificate    — issue (or return existing) identity certificate
  *   GET  /birth-certificate    — public read of an issued certificate
  *   GET  /issuance-stats       — public issuance counters + policy + birth-ledger
@@ -107,7 +109,7 @@
  * everyone's price. The global count is recorded and reported, never priced.
  */
 
-const PICKUP_PAGE = 300;                   // accepted invites one pickup returns (5 a day per key, kept up to 60 days)
+const PICKUP_PAGE = 300;                   // accepted invites one pickup returns (5 a day per key, kept up to 60 days), and adds
 const VERIFY_CODE_TTL_MS = 15 * 60 * 1000;
 // Wrong tries that spend a pending verification code: after them even the
 // right code is refused, and only a new code (its own caps) opens another round.
@@ -151,13 +153,16 @@ const LIMITS = {
   invite:    { key: 5, from: 5, to: 3, addr: 5, all: 24 },      // invite mails
   accept:    { key: 20, addr: 20, all: 10000 },                 // acceptances and adds by code
   notify:    { key: 3, to: 3, addr: 3, all: 12 },               // acceptance and code-add mails
-  pending:   { key: 100, addr: 200, all: 20000 },               // pickups (one read of the invites each)
+  pending:   { key: 100, addr: 200, all: 20000 },               // pickups by a key with an invite kept (one read of the invites each)
+  requests:  { key: 100, addr: 200, all: 20000 },               // pickups by a key with none: its code's adds alone
   directory: { key: 30, addr: 480, all: 50000, new: 37500 },    // stored registrations (a volunteer renews hourly)
 };
 const KNOWN_AFTER_MS = 7 * DAY_MS;
 // An invite: open for 30 days from its mail, then kept 30 days from its
 // acceptance for its inviter's pickup. A node asks while an untaken invite
-// of its own is under twice that old.
+// of its own is under twice that old (a node with none still asks, for the
+// adds of its code). An add by plain code is kept as long from its latest
+// repeat, the newest PICKUP_PAGE of a code at most.
 const INVITE_TTL_MS = 30 * DAY_MS;
 // Births the owners' backfill reads from KV in one step: a list and a read of
 // each, inside the thousand operations one invocation may make.
@@ -1218,11 +1223,13 @@ export class Limiter {
    *              a page at a time.
    *   invites  — ("invites") each mailed invite under its id (its token's
    *              hash: never the token, the recipient or the message), its
-   *              inviter, and once spent its acceptor's signed statement; an
+   *              inviter, and once spent its acceptor's signed statement; and
+   *              each add by plain code under the digest of the code added
+   *              and its adder's key, with the adder's signed statement; an
    *              alarm removes each when it expires.
    * Counter keys and names hold public keys and peppered tokens, never an
-   * address, a mailbox or a username; an invite keeps its two invite codes
-   * while it lives, as an acceptance in KV did.
+   * address, a mailbox or a username; an invite, and an add, keeps its two
+   * invite codes while it lives, as an acceptance in KV did.
    */
   constructor(state, env) {
     this.state = state;
@@ -1250,6 +1257,15 @@ export class Limiter {
     this.sql.exec(`CREATE INDEX IF NOT EXISTS invites_accepted ON invites (inviter, accepted)
                    WHERE acceptor IS NOT NULL`);
     this.sql.exec("CREATE INDEX IF NOT EXISTS invites_expires ON invites (expires)");
+    // `owner` is the digest of the code added, not the code as typed: the
+    // digest's one key reads it (ownerRefusal), whatever case the adder
+    // typed the name in. One row per adder, refreshed by a repeat.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS adds (
+      owner TEXT NOT NULL, adder TEXT NOT NULL, adder_code TEXT NOT NULL, their_code TEXT NOT NULL,
+      added INTEGER NOT NULL, statement_ts INTEGER NOT NULL, signature TEXT NOT NULL,
+      expires INTEGER NOT NULL, PRIMARY KEY (owner, adder))`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS adds_owner ON adds (owner, added)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS adds_expires ON adds (expires)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
     this.sql.exec(`CREATE TABLE IF NOT EXISTS owed (
       pubkey TEXT PRIMARY KEY, digest TEXT NOT NULL, issued INTEGER NOT NULL)`);
@@ -1303,6 +1319,12 @@ export class Limiter {
       return Response.json({ ok: true });
     }
     if (path === "/invite/pickup") return Response.json(this.pickup(body));
+    if (path === "/invite/any") {
+      const row = this.sql.exec("SELECT 1 AS x FROM invites WHERE inviter = ? AND expires > ? LIMIT 1",
+                                body.inviter, body.now).toArray()[0];
+      return Response.json({ any: row !== undefined });
+    }
+    if (path === "/add/put") return Response.json(await this.putAdd(body));
     return new Response("not found", { status: 404 });
   }
 
@@ -1339,6 +1361,7 @@ export class Limiter {
     const now = Date.now();
     this.sql.exec("DELETE FROM codes WHERE expires <= ?", now);
     this.sql.exec("DELETE FROM invites WHERE expires <= ?", now);
+    this.sql.exec("DELETE FROM adds WHERE expires <= ?", now);
     const at = this._backfillAt();
     const paused = writesPaused(this.env);
     if (at !== null && at !== BACKFILL_DONE && !paused) await this._backfillStep();
@@ -1347,6 +1370,7 @@ export class Limiter {
     const due = [
       this.sql.exec("SELECT min(expires) AS t FROM codes").one().t,
       this.sql.exec("SELECT min(expires) AS t FROM invites").one().t,
+      this.sql.exec("SELECT min(expires) AS t FROM adds").one().t,
       at !== null && this._backfillAt() !== BACKFILL_DONE
         ? Date.now() + (paused ? BRAKE_RETRY_AFTER_S * 1000 : 0) : null,
       owed ? Date.now() + (handed ? 0 : OWED_RETRY_MS) : null,
@@ -1507,15 +1531,44 @@ export class Limiter {
              lease: mail ? lease : null };
   }
 
-  pickup({ inviter, now }) {
-    // Every accepted, unexpired invite of this inviter, the newest acceptance
-    // first: a page past which older ones wait never hides a fresh one, and
-    // the oldest are the ones the inviter's node took long ago. A read: that
-    // node keeps which it has taken.
-    return { accepts: this.sql.exec(
-      `SELECT id, accepted, acceptor, acceptor_code, statement_ts, signature FROM invites
-        WHERE inviter = ? AND acceptor IS NOT NULL AND expires > ?
-        ORDER BY accepted DESC, id DESC LIMIT ?`, inviter, now, PICKUP_PAGE).toArray() };
+  async putAdd({ owner, adder, adder_code, their_code, statement_ts, signature, now }) {
+    // An add by plain code, kept for the code's owner; the same adder again
+    // refreshes it with its newer statement. A code keeps its newest
+    // PICKUP_PAGE: what one pickup shows, so a flood of strangers' keys
+    // costs the owner one page, never a store that grows.
+    this.sql.exec("DELETE FROM adds WHERE expires <= ?", now);
+    this.sql.exec(
+      `INSERT INTO adds (owner, adder, adder_code, their_code, added, statement_ts, signature, expires)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(owner, adder) DO UPDATE SET adder_code = excluded.adder_code,
+         their_code = excluded.their_code, added = excluded.added, statement_ts = excluded.statement_ts,
+         signature = excluded.signature, expires = excluded.expires`,
+      owner, adder, adder_code, their_code, now, statement_ts, signature, now + INVITE_TTL_MS);
+    this.sql.exec(
+      `DELETE FROM adds WHERE owner = ? AND adder NOT IN (
+         SELECT adder FROM adds WHERE owner = ? ORDER BY added DESC, adder DESC LIMIT ?)`,
+      owner, owner, PICKUP_PAGE);
+    if (await this.state.storage.getAlarm() === null) {
+      await this.state.storage.setAlarm(now + INVITE_TTL_MS);
+    }
+    return { ok: true };
+  }
+
+  pickup({ inviter, digest, now }) {
+    // Every accepted, unexpired invite of this inviter, and every add of its
+    // code's digest, each the newest first: a page past which older ones
+    // wait never hides a fresh one, and the oldest are the ones the node
+    // took long ago. A read: that node keeps which it has taken.
+    return {
+      accepts: this.sql.exec(
+        `SELECT id, accepted, acceptor, acceptor_code, statement_ts, signature FROM invites
+          WHERE inviter = ? AND acceptor IS NOT NULL AND expires > ?
+          ORDER BY accepted DESC, id DESC LIMIT ?`, inviter, now, PICKUP_PAGE).toArray(),
+      adds: this.sql.exec(
+        `SELECT adder, adder_code, their_code, added, statement_ts, signature FROM adds
+          WHERE owner = ? AND expires > ?
+          ORDER BY added DESC, adder DESC LIMIT ?`, digest, now, PICKUP_PAGE).toArray(),
+    };
   }
 
   checkCode({ invite, email, hash, now }) {
@@ -2723,8 +2776,10 @@ async function handleAcceptInvite(request, env) {
    * recorded — the store failing, or the call cut off before it recorded —
    * keeps the right until its lease runs out (MAIL_LEASE_MS), and a retry
    * after that mails again. Without one (addText): an add by plain
-   * code. Nothing is kept, and the code's owner, if it has a verified
-   * address, is mailed the adder's username and the code to add back.
+   * code, kept under the code's digest with the adder's statement for the
+   * code's owner's pickup (a repeat refreshes it); the owner, if it has a
+   * verified address, is mailed the adder's username and the code to add
+   * back.
    *
    * Body: {my_invite_code, their_invite_code, public_key_hex, ts, invite_token?, signature}
    * → {status: "accepted", invite_id, inviter: {invite_code, public_key_hex}, notified}
@@ -2771,6 +2826,18 @@ async function handleAcceptInvite(request, env) {
   const username = caller.bind.username;
   const longCode = await longInviteCode(username, caller.pubkey);
   if (!tokened) {
+    // An add kept or not, its owner is still mailed: a store that fails (or
+    // an object still on the code before adds, within Cloudflare's update
+    // delay) loses the Add back, not the mail it had before.
+    try {
+      await limiterCall(env, "invites", "/add/put", {
+        owner: theirs.split("#")[1].replace(/-/g, ""), adder: caller.pubkey, adder_code: my_invite_code,
+        their_code: theirs, statement_ts: ts, signature: signature.toLowerCase(), now: Date.now(),
+      });
+    } catch (e) {
+      if (!(e instanceof StoreUnavailable)) throw e;
+      console.error("an add by plain code not kept:", e.cause);
+    }
     // The code's owner hears of it at the address verified by the key that
     // holds the code: a record another key left under it is nobody's.
     const owner = await getVerified(env, theirs);
@@ -2855,15 +2922,18 @@ async function notify(env, request, pubkey, to, subject, html) {
 
 async function handlePendingAccepts(request, env) {
   /**
-   * The inviter's accepted invites, each with its acceptor's signed
-   * statement, which the inviter's node verifies again: every accepted,
-   * unexpired invite of this key, the newest acceptance first, at most
-   * PICKUP_PAGE. A read — the inviter's node keeps which it has taken, so a
-   * pickup lost on its way loses nothing.
+   * The inviter's accepted invites and the adds of its code, each with its
+   * signed statement, which the node verifies again: every accepted,
+   * unexpired invite of this key, and every unexpired add under its code's
+   * digest (the key holds the digest: ownerRefusal), the newest first, at
+   * most PICKUP_PAGE of each. A read — the node keeps which it has taken,
+   * so a pickup lost on its way loses nothing.
    *
    * Body: {invite_code, public_key_hex, ts, signature}, the signature over
    * pickupText (ts within MAIL_SIG_SKEW_S).
-   * → {accepts: [{invite_id, accepted_at, acceptor: {invite_code, public_key_hex, ts, signature}}]}
+   * → {accepts: [{invite_id, accepted_at, acceptor: {invite_code, public_key_hex, ts, signature}}],
+   *    adds: [{added_at, their_code, adder: {invite_code, public_key_hex, ts, signature}}]}
+   *   — `their_code`: the caller's code as the adder signed it
    */
   const braked = await routeBrake(env, request, "pending");
   if (braked) return braked;
@@ -2879,22 +2949,35 @@ async function handlePendingAccepts(request, env) {
   const caller = await inviteCaller(env, invite_code, public_key_hex,
                                     pickupText(ts, invite_code, public_key_hex.toLowerCase()), signature);
   if (caller.refusal) return caller.refusal;
+  // A key with an invite kept asks on the `pending` counters, one with none
+  // (its code's adds alone) on `requests`: every node's Friends screen asks,
+  // and that must never spend the day an inviter's pickup needs.
+  const { any } = await limiterCall(env, "invites", "/invite/any", { inviter: caller.pubkey, now: Date.now() });
+  const route = any ? "pending" : "requests";
   const refusal = await admit(env, [
-    daily("pending", "key", caller.pubkey),
-    daily("pending", "addr", await volumeToken(env, clientIp(request))),
-    daily("pending", "all"),
+    daily(route, "key", caller.pubkey),
+    daily(route, "addr", await volumeToken(env, clientIp(request))),
+    daily(route, "all"),
   ], caller.bind);
   if (refusal) return refusal;
 
-  const { accepts } = await limiterCall(env, "invites", "/invite/pickup", {
-    inviter: caller.pubkey, now: Date.now(),
+  const { accepts, adds = [] } = await limiterCall(env, "invites", "/invite/pickup", {
+    inviter: caller.pubkey, digest: await inviteDigest(caller.pubkey), now: Date.now(),
   });
-  return json({ accepts: accepts.map((r) => ({
-    invite_id: r.id,
-    accepted_at: new Date(Number(r.accepted)).toISOString(),
-    acceptor: { invite_code: r.acceptor_code, public_key_hex: r.acceptor,
-                ts: Number(r.statement_ts), signature: r.signature },
-  })) });
+  return json({
+    accepts: accepts.map((r) => ({
+      invite_id: r.id,
+      accepted_at: new Date(Number(r.accepted)).toISOString(),
+      acceptor: { invite_code: r.acceptor_code, public_key_hex: r.acceptor,
+                  ts: Number(r.statement_ts), signature: r.signature },
+    })),
+    adds: adds.map((r) => ({
+      added_at: new Date(Number(r.added)).toISOString(),
+      their_code: r.their_code,
+      adder: { invite_code: r.adder_code, public_key_hex: r.adder,
+               ts: Number(r.statement_ts), signature: r.signature },
+    })),
+  });
 }
 
 // -----------------------------------------------------------------------
@@ -3177,7 +3260,7 @@ function codeAddEmailHtml(fromUsername, longCode) {
 <html>
 <body style="font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
   <h2 style="color: #333;">Your invite code was added</h2>
-  <p><strong>${escapeHtml(fromUsername)}</strong> added your invite code. To connect, add theirs in Sautium → Friends → Add a friend:</p>
+  <p><strong>${escapeHtml(fromUsername)}</strong> added your invite code. To connect, open Sautium → Friends and press <strong>Add back</strong> beside their name, or add their code in Friends → Add a friend:</p>
   ${codeBox(longCode)}
   ${MAIL_FOOTER}
 </body>

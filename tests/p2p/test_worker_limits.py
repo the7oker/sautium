@@ -241,15 +241,59 @@ def test_the_acceptance_mail_names_no_address_of_the_acceptors():
     assert r["keys"]["sasha_code"] + "-" in mail["html"]        # the long code: the short one and more
 
 
-def test_an_add_by_plain_code_keeps_nothing_and_mails_the_username_only():
+def test_an_add_by_plain_code_spends_no_invite_and_mails_the_username_only():
     r = _run("accepts")
     assert r["added"]["body"] == {"status": "added", "notified": True}
-    assert r["addKeptNothing"] is True
+    assert r["addKeptNoInvite"] is True
     [mail] = r["addMail"]
     assert mail["to"] == ["masha@example.org"]
     assert mail["subject"] == "sasha added your Sautium invite code"
     assert "sasha@example.net" not in mail["html"] and "@" not in mail["html"].split("<hr")[0]
     assert r["addToNoMailbox"]["body"] == {"status": "added", "notified": False}
+
+
+def test_an_add_by_plain_code_is_kept_for_the_codes_owner_with_the_adders_statement():
+    r = _run("accepts")
+    keys = r["keys"]
+    digest = keys["masha_code"].split("#")[1].replace("-", "")
+    [row] = [a for a in r["addRows"] if a["adder"] == keys["sasha"]]
+    assert row["owner"] == digest and row["adder_code"] == keys["sasha_code"]
+    assert row["their_code"] == keys["masha_code"]          # as typed, made canonical
+    assert row["expires"] - row["added"] == 30 * DAY_MS
+    [picked] = [a for a in r["pickupAfterAdd"]["body"]["adds"] if a["adder"]["public_key_hex"] == keys["sasha"]]
+    assert picked["adder"]["invite_code"] == keys["sasha_code"] and picked["their_code"] == keys["masha_code"]
+    adder = picked["adder"]
+    assert isinstance(adder["ts"], int) and len(adder["signature"]) == 128
+    from desktop.p2p import chat_wire
+    assert chat_wire.verify(keys["sasha"], chat_wire.add_text(
+        adder["ts"], picked["their_code"], keys["sasha_code"], keys["sasha"]).encode(), adder["signature"])
+    assert r["pickupAfterAdd"]["body"]["accepts"] == r["pickup"]["body"]["accepts"]   # beside the acceptances
+    assert r["pickupOfAnother"]["status"] == 200 and r["pickupOfAnother"]["body"]["adds"] == []
+    # a repeat refreshes the one row
+    assert r["addedAgain"]["status"] == 200
+    [again] = [a for a in r["addRowsAgain"] if a["adder"] == keys["sasha"] and a["owner"] == digest]
+    assert again["added"] > row["added"] and again["statement_ts"] >= row["statement_ts"]
+
+
+def test_an_expired_add_is_removed_by_its_alarm():
+    r = _run("accepts")
+    assert r["expiredAddsLeft"] == 0 and r["addsLeft"] > 0       # the other adds stay
+    assert r["alarmAtAdd"] is True
+
+
+def test_an_acceptance_and_an_add_refused_at_its_cap_keep_no_add():
+    r = _run("accepts")
+    assert r["addsAfterAccept"] == 0
+    assert r["addAtKeyCap"]["status"] == 429 and r["addsByCapped"] == 0
+
+
+def test_a_code_keeps_its_newest_page_of_adds():
+    assert _run("accepts")["crowd"] == {"length": 300, "newestKept": True, "oldestLeft": True}
+
+
+def test_a_pickup_with_no_invite_kept_spends_its_own_counters_not_the_inviters():
+    assert _run("accepts")["pickupCounters"] == {"pashaOnRequests": True, "pashaOnPending": False,
+                                                 "mashaOnPending": True, "mashaOnRequests": False}
 
 
 def test_an_add_mails_only_the_address_the_codes_own_key_verified():
@@ -328,6 +372,10 @@ def test_the_worker_speaks_the_invite_wires_vectors():
     assert r["added"]["body"] == {"status": "added", "notified": True}
     [add_mail] = r["addMail"]
     assert v["acceptor"]["long_code"] in add_mail["html"]
+    [kept] = r["pickupAfterAdd"]["body"]["adds"]
+    assert kept == {"added_at": "2025-11-13T02:13:20.000Z", "their_code": v["inviter"]["short_code"],
+                    "adder": {"invite_code": v["acceptor"]["short_code"], "public_key_hex": v["acceptor"]["pubkey"],
+                              "ts": v["ts"], "signature": v["signatures"]["add"]}}
 
 
 # --- an invite code's owner --------------------------------------------------
@@ -562,6 +610,7 @@ def test_under_the_brake_the_owner_claims_wait_and_go_on_once_it_is_lifted():
 def test_one_routes_limiter_failing_leaves_the_others_working():
     r = _run("shards")
     assert r["pickup"] == 503 and r["birth"] == 200
+    assert r["addStoreDown"]["body"] == {"status": "added", "notified": True} and r["addStoreDownMails"] == 1
 
 
 def test_a_full_master_mailbox_refuses_and_drops_nothing():
