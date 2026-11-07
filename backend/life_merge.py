@@ -354,6 +354,11 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
                  FROM _S_.friends s
                 WHERE s.public_key_hex = f.public_key_hex AND f.public_key_hex LIKE 'pending:%'
                   AND f.key_fingerprint IS NULL AND s.key_fingerprint IS NOT NULL""")
+        run("""UPDATE friends f SET accepted_invite_id = s.accepted_invite_id
+                 FROM _S_.friends s
+                WHERE s.public_key_hex = f.public_key_hex AND f.public_key_hex LIKE 'pending:%'
+                  AND f.accepted_invite_id IS NULL AND s.accepted_invite_id IS NOT NULL
+                  AND f.key_fingerprint = s.key_fingerprint""")
         merged["friends"] = run("""
             INSERT INTO friends (username, public_key_hex, invite_code, display_name, added_at,
                                  last_seen, is_blocked, previous_public_key_hex, city, bio,

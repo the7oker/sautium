@@ -360,10 +360,12 @@ key the Worker answered with. The nudge (`/api/chat/invite-accepted`, signed
 as the classic handshake) only makes the inviter's pickup run sooner, and only
 when it names one of the inviter's open invites by its id — three pickups an
 invite for each run of the launcher, nudges at once included; it adds nobody,
-answers every nudge alike and no identity. An acceptor sends it at a refusal
-of its handshake over a channel the inviter's own key holds, at most once in
-ten minutes, until an answer other than a busy one spends it (a Docker
-inviter has no nudge route: it picks up when its Friends screen opens).
+answers every signed nudge alike, its pickup's failure included, and names no
+identity. An acceptor sends it at a refusal of its handshake, to every address
+the inviter's own key holds in one pass, in at most one pass in ten minutes for
+each run of its launcher, until an answer other than a busy one spends it (a
+Docker inviter has no nudge route: it picks up when its Friends screen
+opens).
 
 Adding a code stores a `pending:<invite>` stub — the operator's half of the
 consent. The stub resolves on the peer's classic handshake and, since

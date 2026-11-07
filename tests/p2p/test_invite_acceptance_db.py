@@ -172,7 +172,7 @@ def test_the_pickup_asks_only_while_an_invite_is_open(conn, monkeypatch):
     assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == [] and len(asked) == 1
 
 
-def test_a_pickup_goes_on_past_an_acceptance_that_fails(conn, monkeypatch):
+def test_a_pickup_goes_on_past_an_acceptance_that_fails(conn, monkeypatch, caplog):
     breaking = str(uuid.UUID(int=79))
     with conn.cursor() as cur:
         cur.execute("INSERT INTO sent_invites (to_email, invite_id) VALUES ('other@example.net', %s)", (breaking,))
@@ -189,15 +189,29 @@ def test_a_pickup_goes_on_past_an_acceptance_that_fails(conn, monkeypatch):
         "accepts": [_acceptance(who=OTHER, inviteid=breaking), _acceptance()]})
     assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == [FRIEND.code]
     assert _row(conn, "SELECT count(*) FROM sent_invites WHERE to_email = 'old@example.net'") == (0,)
+    assert any(r.exc_info and "acceptance failed" in r.getMessage() for r in caplog.records)
 
 
-def test_a_pickup_stops_at_a_connection_that_is_gone(conn, monkeypatch):
+def test_a_pickup_stops_only_at_a_connection_that_is_gone(scratch_dsn, conn, monkeypatch):
+    # a serialization failure on a connection still open: that acceptance alone
+    def conflict(c, accept, code, pub):
+        raise psycopg2.errors.SerializationFailure("could not serialize access")
+    monkeypatch.setattr(chat_wire, "take_acceptance", conflict)
+    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {"accepts": [_acceptance()]})
+    assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == []
+    # the connection itself gone: the pickup ends there
+    lost = psycopg2.connect(scratch_dsn)
+    lost.autocommit = True                     # as every caller's: no transaction left holding a lock
+
     def gone(c, accept, code, pub):
+        c.close()
         raise psycopg2.OperationalError("server closed the connection unexpectedly")
     monkeypatch.setattr(chat_wire, "take_acceptance", gone)
-    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {"accepts": [_acceptance()]})
-    with pytest.raises(psycopg2.OperationalError):
-        email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign)
+    try:
+        with pytest.raises(psycopg2.Error):
+            email_verify.pick_up_acceptances(lost, ME.code, ME.pub, ME.sign)
+    finally:
+        lost.close()
 
 
 def test_an_open_invite_is_one_this_node_sent_has_not_taken_and_is_young(conn):

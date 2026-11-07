@@ -302,8 +302,10 @@ _KEY_RE = re.compile(r"[0-9a-f]{64}")
 # What a mail client or a page may put inside a pasted string beside the
 # code's own characters: whitespace, the format characters (the soft hyphen,
 # the zero-width ones, the bidirectional marks a right-to-left client wraps
-# a run in, the byte-order mark) and combining marks.
-_WRAPPING_CATEGORIES = frozenset({"Cf", "Mn", "Me"})
+# a run in, the byte-order mark) and the grapheme joiner. Any other mark
+# stays, and refuses the string: a name is ASCII.
+_WRAPPING_CATEGORY = "Cf"
+_GRAPHEME_JOINER = "\u034f"
 # An open invite lives 30 days on the Worker, an accepted one 30 more for its
 # inviter's pickup: a node asks while an untaken invite of its own is younger
 # than both together.
@@ -357,13 +359,13 @@ def parse_share(text: str) -> Share:
     """A share string as a person pastes it: `name#fingerprint` (12 or 32
     hex, any case, dashes anywhere) and optionally `#<uuid>` (an invite
     link, in its dashed form only) or `#i-<token>` (a mailed invite — `i`,
-    `I` and the dash before the hex are one spelling). Every whitespace,
-    format and combining character is dropped first (_WRAPPING_CATEGORIES),
-    a mail client's wrapping included. ValueError for anything else."""
+    `I` and the dash before the hex are one spelling). Every whitespace and
+    format character, and the grapheme joiner, are dropped first, a mail
+    client's wrapping included. ValueError for anything else."""
     if not isinstance(text, str):
         raise ValueError("not a share string")
-    parts = "".join(ch for ch in text if not ch.isspace()
-                    and unicodedata.category(ch) not in _WRAPPING_CATEGORIES).split("#")
+    parts = "".join(ch for ch in text if not ch.isspace() and ch != _GRAPHEME_JOINER
+                    and unicodedata.category(ch) != _WRAPPING_CATEGORY).split("#")
     if len(parts) not in (2, 3) or not _USERNAME_RE.fullmatch(parts[0]):
         raise ValueError("not a share string")
     fingerprint = parts[1].replace("-", "").upper()

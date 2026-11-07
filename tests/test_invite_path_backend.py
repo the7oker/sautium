@@ -296,23 +296,26 @@ def _count_pickups(monkeypatch) -> list:
 def test_the_friends_screen_asks_only_with_an_invite_open_a_born_key_and_its_share_left(nodes, monkeypatch):
     asked = _count_pickups(monkeypatch)
     monkeypatch.setattr(p2p, "SCREEN_PICKUP_INTERVAL_S", 60)
+    births = SimpleNamespace(asked=0, born=True)
+
+    async def born():
+        births.asked += 1
+        return births.born
+    monkeypatch.setattr(p2p, "_born", born)
     nodes.be(MASHA)
-    assert _run(p2p.pending_accepts()) == {"added": []} and asked == []      # no invite open: no share spent
+    assert _run(p2p.pending_accepts()) == {"added": []} and asked == []
+    assert births.asked == 0 and len(p2p._screen_pickups) == 0      # no invite open: no birth asked, no share spent
     with psycopg2.connect(nodes.dsn) as c, c.cursor() as cur:
         cur.execute("INSERT INTO sent_invites (to_email, invite_id) VALUES ('nina@example.net', %s)",
                     (str(uuid.UUID(int=91)),))
-
-    async def unborn():
-        return False
-    monkeypatch.setattr(p2p, "_born", unborn)
+    births.born = False
     assert _run(p2p.pending_accepts()) == {"added": []} and asked == []      # a key not born asks nothing
-
-    async def born():
-        return True
-    monkeypatch.setattr(p2p, "_born", born)
+    births.born = True
     monkeypatch.setattr(p2p, "_screen_pickups", deque())
     assert _run(p2p.pending_accepts()) == {"added": []} and asked == ["/pending-accepts"]
+    before = births.asked
     assert _run(p2p.pending_accepts()) == {"added": []} and asked == ["/pending-accepts"]   # within its minute
+    assert births.asked == before                                       # past its share, no birth asked either
 
 
 def test_an_invite_is_held_to_the_key_its_contact_already_waits_for(nodes):

@@ -2039,7 +2039,12 @@ class SyncServer:
         if inviteid is not None and under_cap() \
                 and await loop.run_in_executor(None, self._is_open_invite, inviteid) and under_cap():
             self._nudge_pickups[inviteid] = self._nudge_pickups.get(inviteid, 0) + 1
-            await self._pickup()
+            try:
+                await self._pickup()
+            except Exception:
+                # The pickup's own failure is this node's, for its log: the
+                # nudge is answered as every other is.
+                logger.exception("A nudge's pickup failed")
         return self._json_response(request, {"ok": True})
 
     def _is_open_invite(self, inviteid: str) -> bool:

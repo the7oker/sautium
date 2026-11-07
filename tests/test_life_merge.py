@@ -407,8 +407,8 @@ def test_sent_invites_merge_by_their_id_and_a_bound_contact_keeps_its_key(clones
          (T0, str(inv1), T0, str(inv2))),
         ("INSERT INTO friends (username, public_key_hex, invite_code, key_fingerprint) "
          "VALUES ('inv5', 'pending:inv5', 'inv5', %s), ('inv7', 'pending:inv7', 'inv7', %s),"
-         " ('inv8', 'pending:inv8', 'inv8', NULL), ('inv9', 'pending:inv9', 'inv9', %s)",
-         (fp(f5), fp(f7), fp(f9))),
+         " ('inv8', 'pending:inv8', 'inv8', NULL), ('inv9', 'pending:inv9', 'inv9', %s),"
+         " ('inv11', 'pending:inv11', 'inv11', %s)", (fp(f5), fp(f7), fp(f9), fp(f10))),
     ])
     _exec(b, [
         ("INSERT INTO sent_invites (to_email, sent_at, invite_id, taken_at) VALUES ('p@b.c', %s, %s, %s)",
@@ -418,7 +418,8 @@ def test_sent_invites_merge_by_their_id_and_a_bound_contact_keeps_its_key(clones
         ("INSERT INTO friends (username, public_key_hex, invite_code, key_fingerprint) "
          "VALUES ('inv8', 'pending:inv8', 'inv8', %s), ('inv9', 'pending:inv9', 'inv9', %s)", (fp(f8), fp(f10))),
         ("INSERT INTO friends (username, public_key_hex, invite_code, key_fingerprint, accepted_invite_id) "
-         "VALUES ('inv10', 'pending:inv10', 'inv10', %s, %s)", (fp(f10), str(uuid.UUID(int=54)))),
+         "VALUES ('inv10', 'pending:inv10', 'inv10', %s, %s), ('inv11', 'pending:inv11', 'inv11', %s, %s)",
+         (fp(f10), str(uuid.UUID(int=54)), fp(f10), str(uuid.UUID(int=55)))),
         ("INSERT INTO p2p_messages (friend_id, direction, content, timestamp, message_uuid, sender_sig, sent_at) "
          "SELECT id, 'in', 'signed', %s, %s, %s, %s FROM friends WHERE public_key_hex = %s",
          (T0, str(m5), b"\x01" * 64, T0 - timedelta(seconds=3), f7)),
@@ -437,6 +438,8 @@ def test_sent_invites_merge_by_their_id_and_a_bound_contact_keeps_its_key(clones
     assert bytes(bound) == fp(f9)                                      # bound on both sides: this node's
     assert _rows(a, "SELECT accepted_invite_id::text FROM friends WHERE invite_code = 'inv10'") == [
         (str(uuid.UUID(int=54)),)]                                     # a contact's nudge comes with it
+    assert _rows(a, "SELECT accepted_invite_id::text FROM friends WHERE invite_code = 'inv11'") == [
+        (str(uuid.UUID(int=55)),)]                                     # waiting on both sides for one key, too
     [(sig, sent_at)] = _rows(a, "SELECT sender_sig, sent_at FROM p2p_messages WHERE message_uuid = %s", (str(m5),))
     assert (bytes(sig), sent_at) == (b"\x01" * 64, T0 - timedelta(seconds=3))
     back = _merge(_backup(a, tmp_path / "a2"), b)

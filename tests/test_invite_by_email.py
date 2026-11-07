@@ -170,29 +170,53 @@ def test_an_accepts_answer_of_another_shape_is_no_answer(monkeypatch, body):
     assert _accept(monkeypatch, 200, body) == "unreachable"
 
 
-def test_a_refusal_of_this_node_names_the_clock_only_when_the_clock_is_off(monkeypatch):
+@pytest.mark.parametrize("worker_minus_node_s, outcome", [
+    (3600, "clock"), (-3600, "clock"),                                  # this node behind, or ahead
+    (310, "clock"), (-310, "clock"), (290, "refused"), (-290, "refused"), (0, "refused")])
+def test_a_refusal_of_this_node_names_the_clock_only_past_the_workers_five_minutes(monkeypatch, worker_minus_node_s,
+                                                                                outcome):
     from email.utils import format_datetime
     from datetime import datetime, timedelta, timezone
-    now = datetime.now(timezone.utc)
-    off = format_datetime(now + timedelta(hours=1), usegmt=True)
-    near = format_datetime(now + timedelta(seconds=20), usegmt=True)
-    assert _accept(monkeypatch, 403, {"error": "stale timestamp"}, off) == "clock"
-    assert _accept(monkeypatch, 403, {"error": "invite code doesn't match public key"}, near) == "refused"
+    at = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=worker_minus_node_s), usegmt=True)
+    assert _accept(monkeypatch, 403, {"error": "stale timestamp"}, at) == outcome
+
+
+def test_a_refusal_of_this_node_without_a_date_is_no_word_on_the_clock(monkeypatch):
     assert _accept(monkeypatch, 403, {"error": "no certificate for this key"}) == "refused"
+    assert _accept(monkeypatch, 403, {"error": "no certificate for this key"}, "soon") == "refused"
     assert _accept(monkeypatch, 404, {"reason": "not_found", "error": "no such invite"}) == "not_found"
 
 
-def test_a_key_is_born_when_its_certificate_is_held_and_a_busy_worker_is_a_no(monkeypatch):
-    from fastapi import HTTPException as Busy
+async def _busy_cert():
+    raise HTTPException(429, "The verification service is busy — please try again in a minute.")
 
+
+def test_a_key_is_born_when_its_certificate_is_held_and_a_busy_worker_says_so_where_a_person_waits(monkeypatch):
     async def held():
         return {"pubkey": "ab" * 32}
 
     async def none():
         return None
-
-    async def busy():
-        raise Busy(429, "The verification service is busy — please try again in a minute.")
-    for cert, born in ((held, True), (none, False), (busy, False)):
+    for cert, born in ((held, True), (none, False)):
         monkeypatch.setattr(p2p, "_get_own_birth_cert", cert)
-        assert asyncio.run(p2p._born()) is born
+        assert asyncio.run(p2p._born()) is born and asyncio.run(p2p._born_quietly()) is born
+    monkeypatch.setattr(p2p, "_get_own_birth_cert", _busy_cert)
+    with pytest.raises(HTTPException) as busy:
+        asyncio.run(p2p._born())
+    assert busy.value.status_code == 429
+    assert asyncio.run(p2p._born_quietly()) is False                  # no person waiting: a no, in the log
+
+
+def test_a_busy_worker_is_busy_to_the_person_and_no_answer_to_a_background_call(monkeypatch):
+    from desktop.p2p import chat_wire
+    monkeypatch.setattr(p2p, "_get_own_birth_cert", _busy_cert)
+    monkeypatch.setattr(p2p, "_get_identity", lambda: {
+        "invite_code": "alice#ABCD-EF01-2345", "public_key_hex": "ab" * 32,
+        "email": "alice@example.org", "username": "alice"})
+    for route in (p2p.email_send_code(), p2p._worker_check_email(p2p._get_identity())):
+        with pytest.raises(HTTPException) as busy:
+            asyncio.run(route)
+        assert busy.value.status_code == 429
+    share = chat_wire.parse_share("bob#1234-5678-9ABC#i-" + "0" * 32)
+    assert asyncio.run(p2p._accept_invite(share, 1, None)) == "unreachable"
+    assert asyncio.run(p2p._tell_code_added("bob#1234-5678-9ABC")) is None

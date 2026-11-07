@@ -516,7 +516,7 @@ async def _accept_invite(share, friend_id: int, bound: Optional[str]) -> str:
     secret until it is spent: never logged."""
     from desktop.p2p import chat_wire
     identity = _get_identity()
-    if not identity or not await _born():
+    if not identity or not await _born_quietly():
         return "unreachable"
     ts = int(datetime.now(timezone.utc).timestamp())
     inviteid = chat_wire.invite_id(share.invite_token)
@@ -570,7 +570,7 @@ async def _tell_code_added(their_invite_code: str) -> None:
     (an add by plain code: nothing is kept, the owner adds back)."""
     from desktop.p2p import chat_wire
     identity = _get_identity()
-    if not identity or not await _born():
+    if not identity or not await _born_quietly():
         return
     ts = int(datetime.now(timezone.utc).timestamp())
     signature = _sign_message(chat_wire.add_text(
@@ -940,7 +940,7 @@ async def pending_accepts() -> Dict[str, Any]:
         with _get_conn() as conn:
             return email_verify.has_open_invites(conn)
 
-    if not await asyncio.to_thread(open_invites) or not _screen_pickup() or not await _born():
+    if not await asyncio.to_thread(open_invites) or not _screen_pickup() or not await _born_quietly():
         return {"added": []}
 
     def pick_up():
@@ -993,12 +993,18 @@ async def _born() -> bool:
     """This node's key born on the Worker — its certificate held, else asked
     for (_get_own_birth_cert): every invite route answers only a key it
     issued a certificate to, and a rotation's new key has none until then.
-    A Worker too busy to answer is a no, for the route to say as it would
-    any other failure."""
+    A Worker too busy to answer raises its 429 (_busy), as every route's
+    own call does; a caller with no person waiting catches it."""
+    return await _get_own_birth_cert() is not None
+
+
+async def _born_quietly() -> bool:
+    """_born for a caller with no person waiting on a busy Worker: a no,
+    told in the log."""
     try:
-        return await _get_own_birth_cert() is not None
+        return await _born()
     except HTTPException as e:
-        logger.warning(f"Birth certificate not asked for: {e.detail}")
+        logger.warning(f"Birth certificate refused for now: {e.detail}")
         return False
 
 
