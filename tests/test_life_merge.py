@@ -447,6 +447,38 @@ def test_sent_invites_merge_by_their_id_and_a_bound_contact_keeps_its_key(clones
     assert _rows(b, "SELECT taken_at IS NOT NULL FROM sent_invites WHERE invite_id = %s", (str(inv1),)) == [(True,)]
 
 
+def test_requests_merge_by_their_code_dismissed_on_either_side_and_one_a_contact_holds_is_answered(clones, tmp_path):
+    """Requests waiting for Add back, by the adder's code: the later add's
+    time; dismissed on either side is dismissed; the later answer holds; one
+    under a code another key's request holds keeps this node's; one a
+    contact on the merged side holds is answered; a second merge adds
+    nothing."""
+    a, b = clones["a"], clones["b"]
+    k1, k2, k3, k4, k5, k6 = "c1" * 32, "c2" * 32, "c3" * 32, "c4" * 32, "c5" * 32, "c6" * 32
+    insert = ("INSERT INTO friend_requests (invite_code, public_key_hex, username, requested_at, ignored_at,"
+              " answered_at) VALUES (%s, %s, %s, %s, %s, %s)")
+    hour = timedelta(hours=1)
+    _exec(a, [(insert, ("rq1", k1, "rq1", T0, None, None)), (insert, ("rq2", k2, "rq2", T0, T0, None)),
+              (insert, ("rq5", k5, "rq5", T0, None, None)), (insert, ("rq6", k6, "rq6", T0 + hour, None, None))])
+    _exec(b, [(insert, ("rq1", k1, "rq1", T0 + hour, T0 + 2 * hour, None)),
+              (insert, ("rq2", k2, "rq2", T0 - hour, None, None)),
+              (insert, ("rq3", k3, "rq3", T0, None, None)), (insert, ("rq4", k4, "rq4", T0, None, None)),
+              (insert, ("rq5", k3, "rq5", T0 + hour, T0 + hour, None)),
+              (insert, ("rq6", k6, "rq6", T0, None, T0)), _friend(k4, "rq4")])
+    got = _merge(_backup(b, tmp_path / "b3"), a)
+    assert got["merged"]["requests"] == 2                              # rq3 and rq4 were not here
+    query = ("SELECT invite_code, public_key_hex, requested_at, ignored_at IS NOT NULL, answered_at"
+             " FROM friend_requests WHERE invite_code LIKE 'rq%'")
+    rows = {r[0]: r[1:] for r in _rows(a, query)}
+    assert rows == {"rq1": (k1, T0 + hour, True, None), "rq2": (k2, T0, True, None), "rq3": (k3, T0, False, None),
+                    "rq4": (k4, T0, False, T0),                        # answered by the merged contact
+                    "rq5": (k5, T0, False, None),                      # another key's: this node's kept
+                    "rq6": (k6, T0 + hour, False, T0)}                 # a later add than the answer: waiting
+    again = _merge(_backup(b, tmp_path / "b4"), a)
+    assert again["merged"]["requests"] == 0
+    assert {r[0]: r[1:] for r in _rows(a, query)} == rows
+
+
 def _witness(subject, channel="probe", seen=T0, *, signed=False):
     return ("""INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v, issued_at, method,
                                        difficulty, params_version, channel, seen_at, author_pubkey, signature)

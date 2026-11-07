@@ -276,7 +276,7 @@ current tab stack (changes hash).
 |--------|------|----------|
 | **Home** | `#home` | Four horizontal-scroll shelves in this order: Favourite artists · Recommendations · New in my collection (hidden while the node owns nothing) · Listening history (the queues this node played and, since 2026-09-24, cards generated from the imported Last.fm history; hidden while empty). No "See all": a shelf pages along its own row. |
 | **Discovery** | `#discovery` | Search bar (default visible), advanced filters (collapsed), below: horizontal-scroll shuffle mosaic (infinite, random albums from library) |
-| **Friends** | `#friends` | Identity card (invite code), add-by-code form, email-invite form, friends list. (Chat is a pushed detail per-friend.) |
+| **Friends** | `#friends` | Identity card (invite code), add-by-code form, email-invite form, "Added you" (whoever added our code by plain code: Add back, or dismiss; since 2026-11-07), friends list. (Chat is a pushed detail per-friend.) |
 | **More** | — (a drawer, not a route) | Bottom-up sheet listing HQPlayer · Audio output · Profile · Library · Streaming library · Offline databases · AI assistant · Sync & P2P |
 
 ### Pushed detail screens (within a tab stack)
@@ -583,8 +583,8 @@ lives under the More tab and serves three purposes:
 Top to bottom:
 
 - **Identity card** — avatar (circular), display name (editable,
-  friendly form, distinct from @login), `@login + invite code` (mono
-  blue), city (optional, editable), bio (3-line max, editable inline).
+  friendly form, distinct from @login), the long invite code with a
+  Copy button (mono blue; the short code is shown nowhere since 2026-11-07), city (optional, editable), bio (3-line max, editable inline).
 - **Account** — email + verification badge (✓ / ⚠), change password,
   Last.fm connect (there is no disconnect), scrobbling toggle (enabled only when
   Last.fm is connected), and — when connected — the imported listening

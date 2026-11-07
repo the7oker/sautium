@@ -9,6 +9,7 @@ sentiment are normalised tables that the research worker populates;
 this router just stitches them together for the UI.
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -603,6 +604,7 @@ def delete_gear(gear_id: str) -> Dict[str, Any]:
 
 @router.get("/by-pubkey/{pubkey_prefix}")
 def get_peer_profile(pubkey_prefix: str) -> Dict[str, Any]:
+    from desktop.p2p import chat_wire
     if not pubkey_prefix or len(pubkey_prefix) < 8:
         raise HTTPException(status_code=400, detail="pubkey_prefix too short")
 
@@ -630,6 +632,11 @@ def get_peer_profile(pubkey_prefix: str) -> Dict[str, Any]:
         "bio":              friend["bio"],
         "avatar_cover_id":  friend["avatar_cover_id"],
         "invite_code":      friend["invite_code"],
+        # The code to pass on: the long form, bound to this friend's key
+        # (a contact still waiting for its key has none to show), under the
+        # name its code carries — a rotation renames the code, not `username`.
+        "share_code":       chat_wire.long_code(friend["invite_code"].split("#", 1)[0], friend["public_key_hex"])
+                            if re.fullmatch(r"[0-9a-f]{64}", friend["public_key_hex"]) else None,
         "added_at":         friend["added_at"],
         "last_seen":        friend["last_seen"],
         # Phase 2: peer audio chain via sync + match indicator computed here.

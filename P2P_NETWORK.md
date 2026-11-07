@@ -332,28 +332,38 @@ Cloudflare Worker (`sautium-verify.sautium.workers.dev`) + Resend:
 - Each invite email carries a single-use token, which the Worker keeps only
   as its hash (the same Worker code): `/accept-invite` spends it once, and the
   inviter's node reads its accepted invites, each with its acceptor's signed
-  statement, with a signed `/pending-accepts`. An add by plain code keeps
-  nothing there: the code's owner is mailed the adder's username and adds
-  back
+  statement, with a signed `/pending-accepts`. An add by plain code is kept
+  there for 30 days under the digest of the code added, with the adder's
+  signed statement, and the same read brings it to the code's owner; the
+  owner is also mailed the adder's username (the Worker code of 2026-11-07,
+  B-58, in force from its deploy)
 
 ### Mutual invite exchange (anti-impersonation)
 
 A leaked invite code does not create a friendship on its own — **both** sides
 must add each other's invite code. The handshake only completes on
 seen_by_both. Without it, one leaked code would produce a fake friendship.
-An add by plain code tells the code's owner through the Worker's mail (the
-adder's username and code, nothing else), and the owner adds back.
+An add by plain code tells the code's owner through the Worker: its mail (the
+adder's username and code, nothing else), and the add itself, which the
+owner's pickup keeps as a request (`friend_requests`, apart from `friends`:
+no right reads it) under the adder's own signed statement. Friends shows it
+as "<name> added your code" with **Add back** — one click makes the contact,
+bound to the key the statement verified under, with no Worker call; the
+adder's own contact completes the handshake. A request the owner dismisses
+stays hidden; one a contact of the owner's answers already (an add of that
+code, waiting, made or blocked) is never kept. Who may become a friend does
+not change: a code add makes no contact until its owner adds back.
 
 **A mailed invite** is the one way one side's add makes the contact on the
 other (the nodes and the Worker of 2026-11-07, in force from the Worker's
 deploy): its single-use token, spent on the Worker when the
 recipient adds the invite string, ties the acceptance to the mailbox the
 inviter chose. The inviter's node keeps the invite's id (`sent_invites`) and
-picks its acceptances up — at the launcher's start, when Friends opens (once
-a minute and forty times a day at most for each run of the backend: each
-pickup is a Worker request on the key's day of a hundred), or on a peer's
-nudge, one function
-(`email_verify.pick_up_acceptances`) — adding one only for an invite it sent
+picks its acceptances up, with the adds of its code — at the launcher's start,
+when Friends opens (once a minute and forty times a day at most for each run
+of the backend, an invite open or not: each pickup is a Worker request on the
+key's day of a hundred), or on a peer's nudge, one function
+(`email_verify.pick_up`) — adding one only for an invite it sent
 and has not taken, under the acceptor's own signed statement, as a contact
 bound to the acceptor's key. The acceptor's contact is bound to the inviter's
 key the Worker answered with. The nudge (`/api/chat/invite-accepted`, signed
@@ -372,7 +382,7 @@ consent. The stub resolves on the peer's classic handshake and, since
 2026-09-04, on ANY request that peer makes to us (wake-stream, probe,
 history, message, forward, diag — `friend_for_key` in both chat services):
 the fingerprint the contact was made with — 128 bits of the key from a long
-code or an accepted invite, the 48 of a short code — names the key that may
+code, an accepted invite or an Add back, the 48 of a short code — names the key that may
 claim the stub, so a request from that key carries what the handshake would. That is
 what repairs a friendship deleted and re-added on one side only — the other
 side still holds us resolved and never handshakes again, and a node that

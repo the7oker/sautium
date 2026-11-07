@@ -429,14 +429,23 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
     invite link skips the Worker: its token handshake replaces mutual add.
     The master's code, in any form, waits for the master's own key; a manual
     re-add of it is consent: it clears the removal flag and re-arms the
-    auto-contact."""
+    auto-contact. A request from that code (its owner added ours first) is
+    answered by the add."""
     from desktop.p2p import chat_wire
-    from master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX, MASTER_TOKEN_ID
 
     try:
         share = chat_wire.parse_share(req.invite_code)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid invite code")
+    return await _add_share(share, tell=True)
+
+
+async def _add_share(share, *, tell: bool) -> Dict[str, Any]:
+    """The add of a parsed share string: add_friend's, and Add back's —
+    `tell` False there, the adder having added our code already."""
+    from desktop.p2p import chat_wire
+    from master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX, MASTER_TOKEN_ID
+
     invite_code, token_id = share.code, share.link_token
     username = invite_code.split("#")[0]
     identity = _get_identity()
@@ -453,38 +462,53 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
         _db_execute(
             "DELETE FROM user_settings WHERE key = 'p2p.master_removed'")
 
-    try:
-        row = _db_execute("""
-            INSERT INTO friends (username, public_key_hex, invite_code,
-                                 display_name, source, join_token_id, key_fingerprint)
-            VALUES (%s, %s, %s, %s, %s::friend_source, %s, %s)
-            ON CONFLICT (public_key_hex) DO UPDATE
-                SET invite_code = EXCLUDED.invite_code,
-                    username = EXCLUDED.username,
-                    join_token_id = COALESCE(EXCLUDED.join_token_id,
-                                             friends.join_token_id),
-                    key_fingerprint = COALESCE(EXCLUDED.key_fingerprint,
-                                               friends.key_fingerprint),
-                    accepted_invite_id = CASE
-                        WHEN EXCLUDED.key_fingerprint IS DISTINCT FROM friends.key_fingerprint
-                             AND EXCLUDED.key_fingerprint IS NOT NULL THEN NULL
-                        ELSE friends.accepted_invite_id END
-            RETURNING id, upper(encode(key_fingerprint, 'hex')) AS key_fingerprint
-        """, (username, f"pending:{invite_code}", invite_code, username,
-              source, token_id, fingerprint))
-    except Exception as e:
-        logger.error(f"Failed to add friend: {e}")
-        raise HTTPException(status_code=500, detail="Failed to add friend")
+    row = _wait_for(username, invite_code, source, token_id, fingerprint)
 
     invite = None
     if share.invite_token:
         invite = await _accept_invite(share, row["id"], row["key_fingerprint"])
-    if not token_id and (share.invite_token is None or invite in _ADD_AFTER):
+    if tell and not token_id and (share.invite_token is None or invite in _ADD_AFTER):
         asyncio.create_task(_tell_code_added(invite_code))
 
     _wake_chat_sse_clients()
     return {"id": row["id"], "username": username,
             "invite_code": invite_code, "token_id": token_id, "invite": invite}
+
+
+def _wait_for(username: str, invite_code: str, source: str, token_id: Optional[str],
+              fingerprint: Optional[bytes]) -> dict:
+    """The contact an add makes — waiting for its handshake under its code,
+    bound to `fingerprint` when there is one — and the request from that
+    code answered (an add is the person's yes, over a dismissal before), in
+    one statement → {id, key_fingerprint}."""
+    try:
+        return _db_execute("""
+            WITH contact AS (
+                INSERT INTO friends (username, public_key_hex, invite_code,
+                                     display_name, source, join_token_id, key_fingerprint)
+                VALUES (%s, %s, %s, %s, %s::friend_source, %s, %s)
+                ON CONFLICT (public_key_hex) DO UPDATE
+                    SET invite_code = EXCLUDED.invite_code,
+                        username = EXCLUDED.username,
+                        join_token_id = COALESCE(EXCLUDED.join_token_id,
+                                                 friends.join_token_id),
+                        key_fingerprint = COALESCE(EXCLUDED.key_fingerprint,
+                                                   friends.key_fingerprint),
+                        accepted_invite_id = CASE
+                            WHEN EXCLUDED.key_fingerprint IS DISTINCT FROM friends.key_fingerprint
+                                 AND EXCLUDED.key_fingerprint IS NOT NULL THEN NULL
+                            ELSE friends.accepted_invite_id END
+                RETURNING id, upper(encode(key_fingerprint, 'hex')) AS key_fingerprint
+            ), answered AS (
+                UPDATE friend_requests SET answered_at = requested_at, ignored_at = NULL
+                 WHERE lower(invite_code) = lower(%s)
+            )
+            SELECT * FROM contact
+        """, (username, f"pending:{invite_code}", invite_code, username,
+              source, token_id, fingerprint, invite_code))
+    except Exception as e:
+        logger.error(f"Failed to add friend: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add friend")
 
 
 # The Worker's refusals of an invite (INVITE_REFUSALS there) after which the
@@ -566,8 +590,9 @@ async def _accept_invite(share, friend_id: int, bound: Optional[str]) -> str:
 
 
 async def _tell_code_added(their_invite_code: str) -> None:
-    """Tell a code's owner, through the Worker's mail, that we added it
-    (an add by plain code: nothing is kept, the owner adds back)."""
+    """Tell a code's owner, through the Worker, that we added it (an add by
+    plain code): the Worker keeps the add for the owner's pickup, which
+    offers Add back in Friends, and mails the owner."""
     from desktop.p2p import chat_wire
     identity = _get_identity()
     if not identity or not await _born_quietly():
@@ -925,33 +950,98 @@ def _screen_pickup() -> bool:
 
 @router.get("/pending-accepts")
 async def pending_accepts() -> Dict[str, Any]:
-    """The pickup of our accepted invites, when Friends opens
-    (email_verify.pick_up_acceptances — the launcher's start and a peer's
-    nudge run the same), while an invite is open and the screen's share of
-    the Worker's day allows (_screen_pickup): {added: [codes]} — the
-    contacts it added, each waiting for its handshake."""
+    """The pickup of our accepted invites and of the adds of our code, when
+    Friends opens (email_verify.pick_up — the launcher's start and a peer's
+    nudge run the same), while the screen's share of the Worker's day
+    allows (_screen_pickup): {added: [codes], requested: [codes]} — the
+    contacts it added, each waiting for its handshake, and the new requests
+    waiting for Add back."""
     from desktop.p2p import email_verify
+    nothing = {"added": [], "requested": []}
     identity = _get_identity()
     key = _get_private_key()
-    if not identity or not key:
-        return {"added": []}
-
-    def open_invites():
-        with _get_conn() as conn:
-            return email_verify.has_open_invites(conn)
-
-    if not await asyncio.to_thread(open_invites) or not _screen_pickup() or not await _born_quietly():
-        return {"added": []}
+    if not identity or not key or not _screen_pickup() or not await _born_quietly():
+        return nothing
 
     def pick_up():
         with _get_conn() as conn:
-            return email_verify.pick_up_acceptances(
+            return email_verify.pick_up(
                 conn, identity["invite_code"], identity["public_key_hex"], key.sign)
 
-    added = await asyncio.to_thread(pick_up)
-    if added:
+    picked = await asyncio.to_thread(pick_up)
+    if picked["added"] or picked["requested"]:
         _wake_chat_sse_clients()
-    return {"added": [{"invite_code": code} for code in added]}
+    return {what: [{"invite_code": code} for code in codes] for what, codes in picked.items()}
+
+
+# Requests shown at once: the Worker's page is 300, and a person answers a
+# handful.
+FRIEND_REQUESTS_SHOWN = 100
+
+
+# A request Friends shows: waiting (neither dismissed nor answered by its
+# latest add), and no contact of ours under its code or key, nor one whose
+# key it was before a rotation.
+_REQUEST_WAITING = """
+    r.ignored_at IS NULL AND (r.answered_at IS NULL OR r.answered_at < r.requested_at)
+    AND NOT EXISTS (SELECT 1 FROM friends f
+                     WHERE f.public_key_hex = r.public_key_hex
+                        OR f.previous_public_key_hex = r.public_key_hex
+                        OR lower(f.invite_code) = lower(r.invite_code))
+"""
+
+
+@router.get("/friend-requests")
+async def list_friend_requests() -> Dict[str, Any]:
+    """Whoever added our code by plain code and waits for Add back, the
+    latest first, each with its long code — a username is anybody's to
+    choose, the code tells keys apart — and whether a contact of ours goes
+    by that name already."""
+    from desktop.p2p import chat_wire
+    rows = _db_query(f"""
+        SELECT r.id, r.username, r.invite_code, r.public_key_hex, r.requested_at,
+               EXISTS (SELECT 1 FROM friends f
+                        WHERE lower(f.username) = lower(r.username)
+                           OR lower(f.display_name) = lower(r.username)) AS name_taken
+          FROM friend_requests r
+         WHERE {_REQUEST_WAITING}
+         ORDER BY r.requested_at DESC, r.id DESC
+         LIMIT %s
+    """, (FRIEND_REQUESTS_SHOWN,))
+    return {"items": [{
+        "id": r["id"], "username": r["username"], "invite_code": r["invite_code"],
+        "share_code": chat_wire.long_code(r["username"], r["public_key_hex"]),
+        "name_taken": r["name_taken"], "requested_at": r["requested_at"].isoformat(),
+    } for r in rows]}
+
+
+@router.post("/friend-requests/{request_id}/add")
+async def add_back(request_id: int) -> Dict[str, Any]:
+    """Add back whoever added our code: the add of its code, bound to the
+    key its signed statement verified under, waiting for its handshake like
+    any add — the adder's own contact completes it. No Worker call: the
+    adder added this code already. The request is answered. Only a request
+    Friends shows: a screen gone stale meanwhile (a contact made since) adds
+    no second contact."""
+    from desktop.p2p import chat_wire
+    req = _db_query_one(f"SELECT r.invite_code, r.public_key_hex FROM friend_requests r"
+                        f" WHERE r.id = %s AND {_REQUEST_WAITING}", (request_id,))
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return await _add_share(chat_wire.Share(req["invite_code"], chat_wire.key_fingerprint(req["public_key_hex"])),
+                            tell=False)
+
+
+@router.post("/friend-requests/{request_id}/dismiss")
+async def dismiss_friend_request(request_id: int) -> Dict[str, Any]:
+    """Hide a request; a later pickup of the same adder keeps it hidden. An
+    add of that code by hand still makes the contact (and answers it)."""
+    row = _db_execute("UPDATE friend_requests SET ignored_at = now()"
+                      " WHERE id = %s AND ignored_at IS NULL RETURNING id", (request_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found")
+    _wake_chat_sse_clients()
+    return {"ok": True}
 
 
 # -- Email verification -------------------------------------------------------

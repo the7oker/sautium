@@ -30,7 +30,7 @@ from tests.conftest import PG  # noqa: E402
 PRIVATE = {
     "_schema_migrations", "analysis_sources", "chat_messages", "chat_sessions", "covers",
     "diag_events", "diag_warrants", "external_api_cooldown",
-    "friend_grant_rights", "friend_grants", "friend_rights", "friends",
+    "friend_grant_rights", "friend_grants", "friend_requests", "friend_rights", "friends",
     "invite_token_rights", "invite_tokens", "lastfm_import", "lb_slice_blobs",
     "lb_slice_fetches", "lb_slice_requests", "mb_slice_blobs", "mb_slice_fetches",
     "p2p_action_costs", "p2p_contact_events", "p2p_dht_state", "p2p_gate_pool",

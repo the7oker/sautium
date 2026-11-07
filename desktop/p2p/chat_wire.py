@@ -3,8 +3,8 @@ definition for both peer surfaces (the launcher: sync_server, chat_service,
 p2p_manager; Docker: backend/routers/peer_chat, backend/p2p_chat), which
 import it. The invite wire lives here too: what is pasted into Add, the four
 texts the Worker's invite routes take (worker/verify.js speaks the same
-shape; tests/p2p/vectors/invite_wire_v1.json pins the two), and what an
-inviter's node does with an acceptance its pickup brings.
+shape; tests/p2p/vectors/invite_wire_v1.json pins the two), and what a
+node does with an acceptance, or an add of its code, that its pickup brings.
 
 Every statement starts with its own context string, so a signature made for
 one can never be read as another, nor as any request, receipt or seal of
@@ -307,8 +307,8 @@ _KEY_RE = re.compile(r"[0-9a-f]{64}")
 _WRAPPING_CATEGORY = "Cf"
 _GRAPHEME_JOINER = "\u034f"
 # An open invite lives 30 days on the Worker, an accepted one 30 more for its
-# inviter's pickup: a node asks while an untaken invite of its own is younger
-# than both together.
+# inviter's pickup: a nudge starts a pickup only for an untaken invite of its
+# own younger than both together.
 INVITE_PICKUP_DAYS = 60
 
 
@@ -478,3 +478,75 @@ def take_acceptance(conn, accept: dict, own_code: str, own_pubkey: str) -> str:
                            "already made with that code — the contact is left as it was", code)
             return "held"
     return "added"
+
+
+def take_add(conn, add: dict, own_code: str, own_pubkey: str) -> str:
+    """One add of this node's code by plain code that a pickup brought →
+    what came of it: "requested" (kept for the person's Add back: new, or a
+    repeat later than the add a contact of ours answered), "renewed" (the
+    request was waiting already), "dismissed" (the person dismissed that
+    code's request: it stays so), "answered" (the add a contact of ours
+    answered: the Worker keeps it 30 days), "held" (a contact of ours holds
+    that code or key now — waiting, made or blocked: a mutual add needs no
+    request, a blocked contact stays blocked — and the request, if any, is
+    answered), "a key a contact retired" (the key a friend rotated away
+    from speaks for nobody), or why it was skipped. All must hold: the
+    adder's statement verifies under the adder's key, for this node's code;
+    the adder's code binds the key; the key is not this node's own. Nothing
+    here makes a contact or gives a right: friend_requests is read by
+    Friends alone."""
+    try:
+        adder = add["adder"]
+        key = str(adder["public_key_hex"]).lower()
+        code = str(adder["invite_code"])
+        their = str(add["their_code"])
+        ts, sig = int(adder["ts"]), str(adder["signature"]).lower()
+        added_at = datetime.fromisoformat(str(add["added_at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return "malformed"
+    if not _KEY_RE.fullmatch(key) or added_at.tzinfo is None:
+        return "malformed"
+    if key == own_pubkey.lower():
+        return "own key"
+    username = code.split("#", 1)[0]
+    if not _USERNAME_RE.fullmatch(username) or code != f"{username}#{_groups(key_digest(key))}":
+        return "code does not bind the key"
+    # The Worker keeps a name as the adder typed it; the digest is the code.
+    if their.lower() != own_code.lower():
+        return "not this node's code"
+    if not verify(key, add_text(ts, their, code, key).encode("utf-8"), sig):
+        return "statement does not verify"
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT EXISTS (SELECT 1 FROM friends WHERE public_key_hex = %(key)s
+                                                    OR lower(invite_code) = lower(%(code)s)),
+                   EXISTS (SELECT 1 FROM friends WHERE previous_public_key_hex = %(key)s)
+                   OR EXISTS (SELECT 1 FROM pending_key_rotations WHERE old_public_key_hex = %(key)s)
+        """, {"key": key, "code": code})
+        held, retired = cur.fetchone()
+        if held:
+            cur.execute("UPDATE friend_requests SET requested_at = GREATEST(requested_at, %s),"
+                        " answered_at = GREATEST(requested_at, %s) WHERE invite_code = %s AND public_key_hex = %s",
+                        (added_at, added_at, code, key))
+            return "held"
+        if retired:
+            return "a key a contact retired"
+        cur.execute("SELECT public_key_hex, ignored_at IS NOT NULL, answered_at FROM friend_requests"
+                    " WHERE invite_code = %s", (code,))
+        row = cur.fetchone()
+        if row is None:
+            cur.execute("""
+                INSERT INTO friend_requests (invite_code, public_key_hex, username, requested_at)
+                VALUES (%s, %s, %s, %s) ON CONFLICT (invite_code) DO NOTHING RETURNING id
+            """, (code, key, username, added_at))
+            return "requested" if cur.fetchone() is not None else "renewed"
+        held_key, dismissed, answered_at = row
+        if held_key != key:
+            return "another key's request holds that code"
+        cur.execute("UPDATE friend_requests SET requested_at = GREATEST(requested_at, %s) WHERE invite_code = %s",
+                    (added_at, code))
+        if dismissed:
+            return "dismissed"
+        if answered_at is None:
+            return "renewed"
+        return "requested" if added_at > answered_at else "answered"

@@ -55,7 +55,7 @@ LIFE_TABLES = (
     "listening_history", "demo_plays", "listening_sessions", "session_tracks",
     "invite_tokens", "sent_invites",
     "friends", "friend_rights", "friend_grants", "friend_grant_rights", "p2p_messages",
-    "chat_sessions", "chat_messages",
+    "friend_requests", "chat_sessions", "chat_messages",
     "gear_brands", "gear_models", "user_gear", "gear_pair_notes", "user_profile",
     "p2p_identities", "p2p_node_bans", "p2p_witness", "user_settings",
 )
@@ -378,6 +378,26 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
             ON CONFLICT DO NOTHING""")
         run("""UPDATE friends f SET is_blocked = TRUE FROM _S_.friends s
                 WHERE s.public_key_hex = f.public_key_hex AND s.is_blocked AND NOT f.is_blocked""")
+        # --- requests waiting for Add back, by the adder's code: the later
+        # add's time, dismissed on either side is dismissed, the later answer
+        # holds; one under a code another key's request holds keeps this
+        # node's; one a contact on the merged side holds is answered.
+        merged["requests"] = run("""
+            INSERT INTO friend_requests (invite_code, public_key_hex, username, requested_at, ignored_at,
+                                         answered_at)
+            SELECT s.invite_code, s.public_key_hex, s.username, s.requested_at, s.ignored_at, s.answered_at
+              FROM _S_.friend_requests s
+            ON CONFLICT (invite_code) DO NOTHING""")
+        run("""UPDATE friend_requests r
+                  SET requested_at = GREATEST(r.requested_at, s.requested_at),
+                      ignored_at = COALESCE(r.ignored_at, s.ignored_at),
+                      answered_at = GREATEST(r.answered_at, s.answered_at)
+                 FROM _S_.friend_requests s
+                WHERE s.invite_code = r.invite_code AND s.public_key_hex = r.public_key_hex""")
+        run("""UPDATE friend_requests r SET answered_at = r.requested_at
+                WHERE r.answered_at IS DISTINCT FROM r.requested_at
+                  AND EXISTS (SELECT 1 FROM friends f WHERE f.public_key_hex = r.public_key_hex
+                                 OR lower(f.invite_code) = lower(r.invite_code))""")
         merged["rights"] = run("""
             INSERT INTO friend_rights (friend_id, p2p_right)
             SELECT f.id, r.p2p_right

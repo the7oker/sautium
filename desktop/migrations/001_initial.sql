@@ -1886,8 +1886,8 @@ CREATE TABLE IF NOT EXISTS friends (
     -- friend accepts a rotation notice. NULL = unknown (a row from before
     -- the column) — the notice chain is walked until one is accepted.
     bound_identity VARCHAR(128),
-    -- A contact made from a long code, or from an accepted invite, waits
-    -- for the key whose SHA-256 begins with these 16 bytes; NULL for one
+    -- A contact made from a long code, an accepted invite or an Add back
+    -- waits for the key whose SHA-256 begins with these 16 bytes; NULL for one
     -- made from a short code, whose 48 bits the invite code carries alone
     -- (049, 2026-11-07).
     key_fingerprint BYTEA CONSTRAINT friends_key_fingerprint_len CHECK (octet_length(key_fingerprint) = 16),
@@ -1939,6 +1939,23 @@ CREATE TABLE IF NOT EXISTS sent_invites (
     taken_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sent_invites_invite_id ON sent_invites (invite_id);
+
+-- An add of this node's code by plain code that a pickup brought, waiting
+-- for the person's "Add back": the adder's short code, the key its signed
+-- statement verified under, when it added last (`requested_at`), when the
+-- person dismissed it, and the add a contact of ours answered
+-- (`answered_at`: the Worker keeps an add 30 days, so an answered row stays,
+-- and only a later repeat opens it again). Not a contact: no right reads
+-- this table (050, 2026-11-07).
+CREATE TABLE IF NOT EXISTS friend_requests (
+    id SERIAL PRIMARY KEY,
+    invite_code VARCHAR(96) NOT NULL UNIQUE,
+    public_key_hex VARCHAR(128) NOT NULL,
+    username VARCHAR(64) NOT NULL,
+    requested_at TIMESTAMPTZ NOT NULL,
+    ignored_at TIMESTAMPTZ,
+    answered_at TIMESTAMPTZ
+);
 
 CREATE INDEX IF NOT EXISTS idx_friends_invite_code ON friends(invite_code);
 CREATE INDEX IF NOT EXISTS idx_friends_username ON friends(username);

@@ -10,7 +10,8 @@ Uses the Cloudflare Worker as a trusted CA:
   can cite identity age.
 - Invite: the Web UI's route (backend/routers/p2p.py) signs the request;
   the Worker mails a single-use token under the verified badge. The
-  inviter's pickup (pick_up_acceptances) adds whoever accepted.
+  inviter's pickup (pick_up) adds whoever accepted, and brings every add of
+  the code by plain code for the person's Add back.
 - Every route is a key's own code's, and the Worker answers only a key it
   issued a certificate to: the wizard asks for it before its first request.
 
@@ -53,7 +54,8 @@ def _post_worker(path: str, payload: dict) -> Optional[dict]:
         return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        logger.error(f"Worker {path} failed ({e.code}): {body}")
+        # A busy Worker is an anomaly the next try recovers from, not a failure.
+        (logger.warning if e.code == 429 else logger.error)(f"Worker {path} failed ({e.code}): {body}")
         return None
     except Exception as e:
         logger.error(f"Worker {path} failed: {e}")
@@ -242,29 +244,18 @@ def register_verified_email(
 
 
 # -------------------------------------------------------------------
-# The inviter's pickup (one function, three triggers: the Friends screen on
-# either runtime, the launcher's start, a peer's nudge)
+# The pickup (one function, three triggers: the Friends screen on either
+# runtime, the launcher's start, a peer's nudge)
 # -------------------------------------------------------------------
 
-# Accepted invites one pickup takes (the Worker's page).
+# Accepted invites, and adds, one pickup takes (the Worker's page of each).
 PICKUP_PAGE = 300
 
 
-def has_open_invites(conn) -> bool:
-    """An invite this node mailed whose acceptance it has not taken, young
-    enough for the Worker to still hold it (chat_wire.INVITE_PICKUP_DAYS)."""
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT 1 FROM sent_invites
-             WHERE invite_id IS NOT NULL AND taken_at IS NULL
-               AND sent_at > now() - make_interval(days => %s)
-             LIMIT 1
-        """, (chat_wire.INVITE_PICKUP_DAYS,))
-        return cur.fetchone() is not None
-
-
 def is_open_invite(conn, invite_id: str) -> bool:
-    """`invite_id` is one of this node's open invites (has_open_invites)."""
+    """`invite_id` is one of this node's invites, mailed, its acceptance not
+    taken yet, and young enough for the Worker to still hold it
+    (chat_wire.INVITE_PICKUP_DAYS)."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT 1 FROM sent_invites
@@ -274,15 +265,16 @@ def is_open_invite(conn, invite_id: str) -> bool:
         return cur.fetchone() is not None
 
 
-def pick_up_acceptances(conn, invite_code: str, public_key_hex: str, sign) -> list[str]:
-    """Ask the Worker for this node's accepted invites and add every one
-    that holds up (chat_wire.take_acceptance), each in a transaction of its
-    own → the codes of the contacts added. Only while an invite is open;
-    the Worker deletes nothing, so a node of the same account, a restore or
-    a pickup lost on its way loses nothing. `sign(bytes) -> bytes` is this
-    node's key; `conn` a connection the caller holds."""
-    if not has_open_invites(conn):
-        return []
+def pick_up(conn, invite_code: str, public_key_hex: str, sign) -> dict:
+    """Ask the Worker for this node's accepted invites and the adds of its
+    code. Every acceptance that holds up adds its acceptor
+    (chat_wire.take_acceptance) and every add that holds up waits for the
+    person's Add back (chat_wire.take_add), each in a transaction of its
+    own → {"added": [codes of the contacts added], "requested": [codes of
+    the new requests]}. The Worker deletes nothing, so a node of the same
+    account, a restore or a pickup lost on its way loses nothing.
+    `sign(bytes) -> bytes` is this node's key; `conn` a connection the
+    caller holds."""
     ts = int(time.time())
     result = _post_worker("/pending-accepts", {
         "invite_code": invite_code,
@@ -290,30 +282,49 @@ def pick_up_acceptances(conn, invite_code: str, public_key_hex: str, sign) -> li
         "ts": ts,
         "signature": sign(chat_wire.pickup_text(ts, invite_code, public_key_hex).encode("utf-8")).hex(),
     })
-    accepts = result.get("accepts") if isinstance(result, dict) else None
-    if not isinstance(accepts, list):
-        return []
-    added = []
-    for accept in accepts[:PICKUP_PAGE]:
-        # One acceptance's failure is its own: the rest of the page, and the
-        # sweep below, go on — but not past a connection that is gone.
-        try:
-            outcome = _in_transaction(conn, lambda: chat_wire.take_acceptance(
-                conn, accept, invite_code, public_key_hex))
-        except Exception:
-            if conn.closed:
-                raise
-            logger.exception("Pickup: an acceptance failed")
-            continue
+    if not isinstance(result, dict):
+        return {"added": [], "requested": []}
+    accepts, adds = result.get("accepts"), result.get("adds")
+    added, requested = [], []
+    for accept in accepts[:PICKUP_PAGE] if isinstance(accepts, list) else ():
+        outcome = _take(conn, "an acceptance", lambda: chat_wire.take_acceptance(
+            conn, accept, invite_code, public_key_hex))
         if outcome == "added":
             added.append(accept["acceptor"]["invite_code"])
             logger.info("Pickup: the invite accepted by %s added", accept["acceptor"]["invite_code"])
-        elif outcome not in ("taken", "held", "not an invite of this node"):
+        elif outcome not in (None, "taken", "held", "not an invite of this node"):
             logger.warning("Pickup: an acceptance skipped — %s", outcome)
+    # An old Worker answers no adds: nothing to take, as before it kept them.
+    for add in adds[:PICKUP_PAGE] if isinstance(adds, list) else ():
+        outcome = _take(conn, "an add", lambda: chat_wire.take_add(conn, add, invite_code, public_key_hex))
+        if outcome == "requested":
+            requested.append(add["adder"]["invite_code"])
+            logger.info("Pickup: %s added this node's code — waiting for Add back", add["adder"]["invite_code"])
+        elif outcome in ("own key", "not this node's code"):
+            # our own key under another name, or a code typed with our digest
+            # under a name that is not ours: nobody's request, every pickup
+            # for 30 days
+            logger.debug("Pickup: an add skipped — %s", outcome)
+        elif outcome not in (None, "renewed", "dismissed", "answered", "held"):
+            logger.warning("Pickup: an add skipped — %s", outcome)
     with conn.cursor() as cur:
         cur.execute("DELETE FROM sent_invites WHERE sent_at < now() - make_interval(days => %s)",
                     (chat_wire.INVITE_PICKUP_DAYS,))
-    return added
+    return {"added": added, "requested": requested}
+
+
+def _take(conn, what: str, step) -> Optional[str]:
+    """One entry of a pickup's page in a transaction of its own → its
+    outcome, or None when it failed: its failure is its own, and the rest of
+    the page, and the sweep after it, go on — but not past a connection
+    that is gone."""
+    try:
+        return _in_transaction(conn, step)
+    except Exception:
+        if conn.closed:
+            raise
+        logger.exception("Pickup: %s failed", what)
+        return None
 
 
 def _in_transaction(conn, step):

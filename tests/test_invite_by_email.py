@@ -2,8 +2,9 @@
 invites only from an account with a verified email, so an account without one
 is told so before any request leaves the node, and the Friends screen says
 where to verify; a refusal for volume tells the person how long to wait, as
-the Worker said it; and the Friends screen's pickups keep to their share of
-the Worker's day."""
+the Worker said it; the Friends screen's pickups keep to their share of
+the Worker's day; a request waits there for one click, Add back; and a
+profile's header shows the long code to copy, never the short tail."""
 
 import asyncio
 import re
@@ -220,3 +221,52 @@ def test_a_busy_worker_is_busy_to_the_person_and_no_answer_to_a_background_call(
     share = chat_wire.parse_share("bob#1234-5678-9ABC#i-" + "0" * 32)
     assert asyncio.run(p2p._accept_invite(share, 1, None)) == "unreachable"
     assert asyncio.run(p2p._tell_code_added("bob#1234-5678-9ABC")) is None
+
+
+_SHELL = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
+
+
+def _function(name: str) -> str:
+    return re.search(rf"\n  function {name}\(.*?\) \{{\n.*?\n  \}}\n", _SHELL, re.S).group(0)
+
+
+def _node(body: str) -> str:
+    stubs = r"""
+const escapeHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const escapeProfileHtml = escapeHtml;
+const avatarPlaceholder = name => ({ bg: '#123', initials: String(name).slice(0, 1).toUpperCase() });
+const SVG_COPY = '<svg data-copy-icon></svg>';
+"""
+    return subprocess.run([shutil.which("node"), "-e", "'use strict';" + stubs + body],
+                          capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_request_row_offers_add_back_and_dismiss_under_the_adders_name():
+    code = "sasha#FBE3-7BA9-57CE-0123-4567-89AB-CDEF-0011"
+    out = _node(_function("renderRequestRow")
+                + f"process.stdout.write(renderRequestRow({{id: 7, username: 'sa<sha', share_code: {code!r}}}));"
+                + f"process.stdout.write(renderRequestRow({{id: 8, username: 'x', share_code: 'y', name_taken: true}}));")
+    first, second = out.split('data-request-id="8"')
+    assert 'data-request-id="7"' in first and "sa&lt;sha" in first and "sa<sha" not in first
+    assert re.search(r"<button[^>]*data-request-add>Add back</button>", first)
+    assert "data-request-dismiss" in first and "data-menu" not in first   # no chat, no contact menu
+    assert "friend-row" not in out           # the friends list's in-place patch counts its own rows alone
+    assert code in first                     # the key, not only a name anybody may choose
+    assert "a friend of yours has this name" in second and "a friend of yours has this name" not in first
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_profiles_header_shows_the_long_code_with_its_copy_button():
+    code = "masha#FBE3-7BA9-57CE-0123-4567-89AB-CDEF-0011"
+    out = _node(_function("identityCodeHTML") + f"process.stdout.write(identityCodeHTML({code!r}));")
+    assert f'<span class="invite">{code}</span>' in out
+    assert re.search(r"<button[^>]*data-copy-code>\s*<svg data-copy-icon></svg></button>", out)
+
+
+def test_no_screen_shows_the_short_tail_of_an_invite_code():
+    # a code's tail cut off and shown ("· FBE3-7BA9-57CE"): gone; both
+    # profile headers render the long share code instead
+    assert ".split('#').pop()" not in _SHELL
+    assert _SHELL.count("identityCodeHTML(shareCode)") == 2
+    assert "(account && account.share_code)" in _SHELL and "profile.share_code" in _SHELL

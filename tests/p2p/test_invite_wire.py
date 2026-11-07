@@ -135,6 +135,32 @@ def test_the_parse_refuses_anything_else(text):
 
 # --- the fingerprint ---------------------------------------------------------------
 
+def _add(signer=ACCEPTOR, code=None, their=None, ts=None, **adder):
+    """An add of the inviter's code by plain code, as a pickup brings it."""
+    code = code or V["acceptor"]["short_code"]
+    their = their or V["inviter"]["short_code"]
+    ts = V["ts"] if ts is None else ts
+    statement = chat_wire.add_text(ts, their, code, _pub(signer))
+    return {"added_at": "2025-11-13T02:13:20.000Z", "their_code": their,
+            "adder": {"invite_code": code, "public_key_hex": _pub(signer), "ts": ts,
+                      "signature": signer.sign(statement.encode()).signature.hex(), **adder}}
+
+
+@pytest.mark.parametrize("add, why", [
+    (lambda: _add(signer=INVITER, code=V["inviter"]["short_code"]), "own key"),
+    (lambda: _add(code=V["inviter"]["short_code"]), "code does not bind the key"),
+    (lambda: _add(their="other#AAAA-BBBB-CCCC"), "not this node's code"),
+    (lambda: _add(signature="00" * 64), "statement does not verify"),
+    (lambda: {**_add(), "their_code": V["inviter"]["short_code"].upper()}, "statement does not verify"),
+    (lambda: _add(public_key_hex="zz" * 32), "malformed"),
+    (lambda: {**_add(), "added_at": "2025-11-13T02:13:20"}, "malformed"),     # a time with no zone
+    (lambda: {"adder": {}}, "malformed"),
+])
+def test_an_add_that_does_not_hold_is_refused_before_the_database(add, why):
+    # conn=None: a refusal never reaches it
+    assert chat_wire.take_add(None, add(), V["inviter"]["short_code"], V["inviter"]["pubkey"]) == why
+
+
 def test_a_contact_bound_to_a_fingerprint_answers_to_its_own_key_alone():
     fingerprint = chat_wire.key_fingerprint(V["inviter"]["pubkey"])
     assert chat_wire.binds(fingerprint, V["inviter"]["pubkey"])
@@ -417,6 +443,19 @@ def _manager():
     m = P2PManager.__new__(P2PManager)
     m._pickup_lock, m._pickup_waiting, m._nudged_at = asyncio.Lock(), None, {}
     return m
+
+
+def test_the_launchers_pickup_asks_nothing_for_a_key_with_no_certificate(monkeypatch):
+    # an add may come with no invite open, so the start asks at every start —
+    # but only a key the Worker issued a certificate to, which it answers
+    from desktop.p2p import birth_cert, email_verify
+    monkeypatch.setattr(node_identity, "get_account_info", lambda: {
+        "public_key_hex": _pub(INVITER), "username": "masha", "invite_code": V["inviter"]["short_code"]})
+    monkeypatch.setattr(birth_cert, "load_certificate", lambda: None)
+    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: pytest.fail("asked the Worker"))
+    m = _manager()
+    m.db_dsn = "postgresql://nobody@127.0.0.1:9/none"       # never reached
+    assert m._pick_up_blocking() == []
 
 
 def test_pickups_asked_for_at_once_join_the_one_waiting_for_its_turn():

@@ -3644,6 +3644,27 @@ a.am-kind { text-decoration: none; }
   border-bottom: 1px solid var(--color-divider);
   cursor: pointer;
 }
+.request-row {
+  display: grid;
+  grid-template-columns: calc(40 * var(--px)) 1fr auto calc(44 * var(--px));
+  gap: calc(8 * var(--px));
+  align-items: center;
+  min-height: calc(60 * var(--px));
+  padding: calc(10 * var(--px)) calc(14 * var(--px));
+  border-bottom: 1px solid var(--color-divider);
+}
+.request-row:last-child { border-bottom: none; }
+.request-row .request-code {
+  font-family: var(--font-mono);
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-dim);
+  word-break: break-all;
+}
+.request-row .request-add {
+  height: calc(32 * var(--px));
+  padding: 0 calc(12 * var(--px));
+  font-size: calc(13 * var(--px));
+}
 .friend-menu-btn {
   width: calc(28 * var(--px));
   height: calc(36 * var(--px));
@@ -5222,6 +5243,17 @@ a.am-kind { text-decoration: none; }
 }
 .identity-handles .handle { color: var(--color-text-muted); margin-right: calc(6 * var(--px)); }
 .identity-handles .invite { color: var(--color-blue); }
+.identity-code {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--px));
+}
+.identity-code .invite { word-break: break-all; min-width: 0; }
+.identity-code .copy-btn {
+  width: calc(30 * var(--px));
+  height: calc(30 * var(--px));
+}
 .identity-city {
   font-size: calc(13 * var(--px));
   color: var(--color-text-muted);

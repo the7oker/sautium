@@ -479,7 +479,8 @@ below bind with or without it.
    binding plus, on the token/grant/wake/probe paths, an Ed25519
    signature over a **timestamp-bound** message (±60 s, mirroring the
    HMAC window). The peer surface may write ONLY to P2P domain tables
-   (friends, p2p_messages, invite-token tables) behind that gating —
+   (friends, p2p_messages, invite-token tables, and — through a nudge's pickup —
+   friend_requests) behind that gating —
    it must never gain a route that reveals a secret or configuration.
    `/api/diag/*` (support diagnostics, `backend/routers/peer_diag.py`)
    follows the same rule: per-request Ed25519 via `verify_request`,

@@ -1,7 +1,8 @@
-"""The inviter's side of an invite and the contacts it leaves
-(desktop/p2p/chat_wire.take_acceptance, email_verify.pick_up_acceptances,
-the chat services' bound contacts and signed messages), on a real
-PostgreSQL built from the migrations — skipped without a cluster:
+"""The inviter's side of an invite, the code owner's side of an add, and the
+contacts they leave (desktop/p2p/chat_wire.take_acceptance and take_add,
+email_verify.pick_up, the chat services' bound contacts and signed
+messages), on a real PostgreSQL built from the migrations — skipped without
+a cluster:
 
 - an acceptance is added once, for an invite this node sent, under its
   acceptor's own signed statement, as a contact bound to the acceptor's key;
@@ -9,8 +10,14 @@ PostgreSQL built from the migrations — skipped without a cluster:
   invite, an unbound code, a statement for another invite or node, a key in
   any other form and this node's own key add nothing; two pickups at once add
   it once;
-- the pickup asks the Worker only while an invite is open, deletes none, and
-  goes on past an acceptance that fails;
+- the pickup asks the Worker whether or not an invite is open, deletes none,
+  and goes on past an acceptance, or an add, that fails;
+- an add of this node's code is kept once as a request bound to its adder's
+  key, under the adder's own signed statement, and makes no contact; one a
+  contact of ours answers already (waiting, made or blocked) keeps nothing;
+  a dismissed one stays dismissed; one a contact answered stays answered
+  until a later repeat; a key a friend rotated away from keeps nothing; an
+  old Worker's answer, with no adds, keeps nothing;
 - a contact bound to a fingerprint is resolved only by the key it names, on
   both surfaces; an unbound friendship goes back bound to the key it held;
   the support contact waiting unbound is bound to the master's key once; a
@@ -22,6 +29,7 @@ PostgreSQL built from the migrations — skipped without a cluster:
   each row back with its signature."""
 
 import base64
+import logging
 import sys
 import threading
 import uuid
@@ -62,7 +70,7 @@ def conn(scratch_dsn):
     c = psycopg2.connect(scratch_dsn)
     c.autocommit = True
     with c.cursor() as cur:
-        cur.execute("TRUNCATE friends, sent_invites CASCADE")
+        cur.execute("TRUNCATE friends, sent_invites, friend_requests CASCADE")
         cur.execute("INSERT INTO sent_invites (to_email, invite_id) VALUES ('friend@example.net', %s)", (INVITE,))
     yield c
     c.close()
@@ -156,20 +164,17 @@ def test_two_pickups_at_once_add_an_acceptance_once(scratch_dsn, conn):
     assert _row(conn, "SELECT count(*) FROM friends") == (1,)
 
 
-def test_the_pickup_asks_only_while_an_invite_is_open(conn, monkeypatch):
+def test_the_pickup_asks_with_no_invite_open_and_takes_an_acceptance_once(conn, monkeypatch):
     asked = []
     monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: asked.append((path, body)) or {
-        "accepts": [_acceptance()]})
-    assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == [FRIEND.code]
+        "accepts": [_acceptance()], "adds": []})
+    assert email_verify.pick_up(conn, ME.code, ME.pub, ME.sign) == {"added": [FRIEND.code], "requested": []}
     [(path, body)] = asked
     assert path == "/pending-accepts"
     assert chat_wire.verify(ME.pub, chat_wire.pickup_text(body["ts"], ME.code, ME.pub).encode(), body["signature"])
-    # taken: nothing open, no request
-    assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == []
-    assert len(asked) == 1
-    with conn.cursor() as cur:
-        cur.execute("UPDATE sent_invites SET taken_at = NULL, sent_at = now() - interval '61 days'")
-    assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == [] and len(asked) == 1
+    # taken, nothing open: an add may still come, so it asks — and adds nobody again
+    assert email_verify.pick_up(conn, ME.code, ME.pub, ME.sign) == {"added": [], "requested": []}
+    assert len(asked) == 2
 
 
 def test_a_pickup_goes_on_past_an_acceptance_that_fails(conn, monkeypatch, caplog):
@@ -187,7 +192,7 @@ def test_a_pickup_goes_on_past_an_acceptance_that_fails(conn, monkeypatch, caplo
     monkeypatch.setattr(chat_wire, "take_acceptance", take)
     monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {
         "accepts": [_acceptance(who=OTHER, inviteid=breaking), _acceptance()]})
-    assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == [FRIEND.code]
+    assert email_verify.pick_up(conn, ME.code, ME.pub, ME.sign)["added"] == [FRIEND.code]
     assert _row(conn, "SELECT count(*) FROM sent_invites WHERE to_email = 'old@example.net'") == (0,)
     assert any(r.exc_info and "acceptance failed" in r.getMessage() for r in caplog.records)
 
@@ -198,7 +203,7 @@ def test_a_pickup_stops_only_at_a_connection_that_is_gone(scratch_dsn, conn, mon
         raise psycopg2.errors.SerializationFailure("could not serialize access")
     monkeypatch.setattr(chat_wire, "take_acceptance", conflict)
     monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {"accepts": [_acceptance()]})
-    assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == []
+    assert email_verify.pick_up(conn, ME.code, ME.pub, ME.sign)["added"] == []
     # the connection itself gone: the pickup ends there
     lost = psycopg2.connect(scratch_dsn)
     lost.autocommit = True                     # as every caller's: no transaction left holding a lock
@@ -209,9 +214,123 @@ def test_a_pickup_stops_only_at_a_connection_that_is_gone(scratch_dsn, conn, mon
     monkeypatch.setattr(chat_wire, "take_acceptance", gone)
     try:
         with pytest.raises(psycopg2.Error):
-            email_verify.pick_up_acceptances(lost, ME.code, ME.pub, ME.sign)
+            email_verify.pick_up(lost, ME.code, ME.pub, ME.sign)
     finally:
         lost.close()
+
+
+# --- an add of this node's code by plain code ----------------------------------
+
+def _add(who=FRIEND, for_code=ME.code, ts=1763000000, added_at="2026-11-07T00:00:00.000Z", **over):
+    statement = chat_wire.add_text(ts, for_code, who.code, who.pub)
+    return {"added_at": added_at, "their_code": for_code,
+            "adder": {"invite_code": who.code, "public_key_hex": who.pub, "ts": ts,
+                      "signature": who.sign(statement.encode()).hex(), **over}}
+
+
+def _take_add(conn, add):
+    return email_verify._in_transaction(conn, lambda: chat_wire.take_add(conn, add, ME.code, ME.pub))
+
+
+def test_an_add_is_kept_once_as_a_request_bound_to_its_adders_key_and_makes_no_contact(conn):
+    assert _take_add(conn, _add()) == "requested"
+    assert _row(conn, "SELECT invite_code, public_key_hex, username, requested_at, ignored_at FROM friend_requests") \
+        == (FRIEND.code, FRIEND.pub, "friend", datetime(2026, 11, 7, tzinfo=timezone.utc), None)
+    assert _row(conn, "SELECT count(*) FROM friends") == (0,)
+    # the same adder again, later: one row, its time advanced; an older answer never moves it back
+    assert _take_add(conn, _add(ts=1763000500, added_at="2026-11-08T00:00:00.000Z")) == "renewed"
+    assert _take_add(conn, _add()) == "renewed"
+    assert _row(conn, "SELECT count(*), max(requested_at) FROM friend_requests") == (
+        1, datetime(2026, 11, 8, tzinfo=timezone.utc))
+
+
+def test_an_add_under_the_name_in_another_case_is_this_nodes_code(conn):
+    typed = ME.code.upper().split("#")[0] + "#" + ME.code.split("#")[1]
+    assert _take_add(conn, _add(for_code=typed)) == "requested"
+
+
+@pytest.mark.parametrize("holder", ["waits", "made", "blocked", "waits under the name in another case"])
+def test_an_add_a_contact_of_ours_answers_already_keeps_nothing(conn, holder):
+    with conn.cursor() as cur:
+        if holder == "made" or holder == "blocked":
+            cur.execute("INSERT INTO friends (username, public_key_hex, invite_code, is_blocked)"
+                        " VALUES ('friend', %s, %s, %s)", (FRIEND.pub, FRIEND.code, holder == "blocked"))
+        else:
+            code = FRIEND.code if holder == "waits" else FRIEND.code.upper()
+            cur.execute("INSERT INTO friends (username, public_key_hex, invite_code) VALUES ('friend', %s, %s)",
+                        (f"pending:{code}", code))
+    assert _take_add(conn, _add()) == "held"
+    assert _row(conn, "SELECT count(*) FROM friend_requests") == (0,)
+    assert _row(conn, "SELECT count(*) FROM friends") == (1,)
+
+
+def test_an_answered_add_stays_answered_until_a_later_repeat(conn):
+    assert _take_add(conn, _add()) == "requested"
+    with conn.cursor() as cur:            # a contact of ours under that code (an Add back, a hand add)
+        cur.execute("INSERT INTO friends (username, public_key_hex, invite_code) VALUES ('friend', %s, %s)"
+                    " RETURNING id", (f"pending:{FRIEND.code}", FRIEND.code))
+        [fid] = cur.fetchone()
+    assert _take_add(conn, _add()) == "held"
+    assert _row(conn, "SELECT answered_at = requested_at FROM friend_requests") == (True,)
+    with conn.cursor() as cur:            # the contact deleted: the add the Worker still keeps comes back
+        cur.execute("DELETE FROM friends WHERE id = %s", (fid,))
+    assert _take_add(conn, _add()) == "answered"
+    assert _take_add(conn, _add(ts=1763000500, added_at="2026-11-08T00:00:00.000Z")) == "requested"
+
+
+@pytest.mark.parametrize("where", ["a friend's previous key", "a rotation not applied yet"])
+def test_an_add_under_a_key_a_friend_rotated_away_from_keeps_nothing(conn, where):
+    new = _Who("friend", b"\x45" * 32)
+    with conn.cursor() as cur:
+        if where == "a friend's previous key":
+            cur.execute("INSERT INTO friends (username, public_key_hex, invite_code, previous_public_key_hex)"
+                        " VALUES ('friend', %s, %s, %s)", (new.pub, "friend2#AAAA-BBBB-CCCC", FRIEND.pub))
+        else:
+            cur.execute("INSERT INTO friends (username, public_key_hex, invite_code) VALUES ('f', %s, %s)"
+                        " RETURNING id", (new.pub, "friend2#AAAA-BBBB-CCCC"))
+            [fid] = cur.fetchone()
+            cur.execute("INSERT INTO pending_key_rotations (friend_id, old_public_key_hex, new_public_key_hex,"
+                        " new_invite_code, rotation_message, signature) VALUES (%s, %s, %s, %s, '\\x00', '\\x00')",
+                        (fid, FRIEND.pub, "ab" * 32, "friend3#AAAA-BBBB-CCCC"))
+    assert _take_add(conn, _add()) == "a key a contact retired"
+    assert _row(conn, "SELECT count(*) FROM friend_requests") == (0,)
+
+
+def test_a_dismissed_request_stays_dismissed(conn):
+    assert _take_add(conn, _add()) == "requested"
+    with conn.cursor() as cur:
+        cur.execute("UPDATE friend_requests SET ignored_at = now()")
+    assert _take_add(conn, _add(ts=1763000500, added_at="2026-11-08T00:00:00.000Z")) == "dismissed"
+    assert _row(conn, "SELECT ignored_at IS NOT NULL FROM friend_requests") == (True,)
+
+
+def test_a_request_under_a_code_another_key_holds_is_left_as_it_is(conn):
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO friend_requests (invite_code, public_key_hex, username, requested_at)"
+                    " VALUES (%s, %s, 'friend', now())", (FRIEND.code, OTHER.pub))
+    assert _take_add(conn, _add()) == "another key's request holds that code"
+    assert _row(conn, "SELECT public_key_hex FROM friend_requests") == (OTHER.pub,)
+
+
+def test_the_pickup_keeps_the_adds_of_this_nodes_code_and_goes_on_past_one_that_fails(conn, monkeypatch, caplog):
+    real = chat_wire.take_add
+
+    def take(c, add, code, pub):
+        if add["adder"]["public_key_hex"] == OTHER.pub:
+            raise psycopg2.errors.CheckViolation("a row that breaks a check")
+        return real(c, add, code, pub)
+    monkeypatch.setattr(chat_wire, "take_add", take)
+    caplog.set_level(logging.DEBUG, logger="desktop.p2p.email_verify")
+    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {
+        "accepts": [], "adds": [_add(who=OTHER), _add(), _add(for_code=OTHER.code)]})
+    assert email_verify.pick_up(conn, ME.code, ME.pub, ME.sign) == {"added": [], "requested": [FRIEND.code]}
+    assert _row(conn, "SELECT invite_code FROM friend_requests") == (FRIEND.code,)
+    assert any(r.exc_info and "an add failed" in r.getMessage() for r in caplog.records)
+    assert any(r.levelno == logging.DEBUG and "an add skipped — not this node's code" in r.getMessage()
+               for r in caplog.records)
+    # an old Worker answers no adds: nothing kept, nothing fails
+    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {"accepts": []})
+    assert email_verify.pick_up(conn, ME.code, ME.pub, ME.sign) == {"added": [], "requested": []}
 
 
 def test_an_open_invite_is_one_this_node_sent_has_not_taken_and_is_young(conn):

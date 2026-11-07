@@ -5,10 +5,14 @@ inviter's invite mailed with its string and kept under its id; the string
 pasted into Add on the acceptor's node, spent, and the contact bound to the
 inviter's own key and armed with its one nudge; the inviter's pickup adding
 the acceptor as a contact bound to the acceptor's key, once; the same string
-again refused as used and kept as an add by code; a plain code's add keeping
-nothing on the Worker and mailing its owner the username only; an invite the
-Worker refuses this node for, or does not answer, telling nobody; the
-master's code waiting for the master's own key in any form.
+again refused as used and kept as an add by code; a plain code's add kept on
+the Worker for its owner, mailed to the owner by the username only, picked up
+with no invite open as a request that is no contact, and added back in one
+click as a contact bound to the adder's key, with no Worker call; a dismissed
+request staying hidden, and a hand add of its code answering it; an invite
+the Worker refuses this node for, or does not answer, telling nobody; the
+master's code waiting for the master's own key in any form; a friend's
+profile showing the friend's long code.
 
 The two nodes share this module's database: each side's rows are under the
 other side's code. Skipped without a cluster or without node."""
@@ -110,7 +114,7 @@ def nodes(worker, scratch_dsn, monkeypatch):
     monkeypatch.setattr(p2p, "_screen_pickups", deque())
     monkeypatch.setattr(p2p, "SCREEN_PICKUP_INTERVAL_S", 0)
     with psycopg2.connect(scratch_dsn) as c, c.cursor() as cur:
-        cur.execute("TRUNCATE friends, sent_invites CASCADE")
+        cur.execute("TRUNCATE friends, sent_invites, friend_requests CASCADE")
     for n in (MASHA, SASHA, PASHA):
         assert _post(worker, "/birth-certificate", {
             "pubkey_hex": n.pub, "signature": n.sign(f"birth:{n.pub}".encode()).hex()})["pubkey"] == n.pub
@@ -175,12 +179,12 @@ def test_an_invite_mailed_spent_picked_up_and_bound_on_both_sides(nodes):
     assert stub == (f"pending:{MASHA.code}", chat_wire.key_fingerprint(MASHA.pub).lower(), invite_id)
 
     nodes.be(MASHA)
-    assert _run(p2p.pending_accepts()) == {"added": [{"invite_code": SASHA.code}]}
+    assert _run(p2p.pending_accepts())["added"] == [{"invite_code": SASHA.code}]
     stub = _row(nodes.dsn, "SELECT public_key_hex, encode(key_fingerprint, 'hex') FROM friends"
                            " WHERE invite_code = %s", SASHA.code)
     assert stub == (f"pending:{SASHA.code}", chat_wire.key_fingerprint(SASHA.pub).lower())
     assert _row(nodes.dsn, "SELECT taken_at IS NOT NULL FROM sent_invites") == (True,)
-    assert _run(p2p.pending_accepts()) == {"added": []}             # taken once
+    assert _run(p2p.pending_accepts())["added"] == []               # taken once
 
     # The same string again, by another: used — and kept as an add by code,
     # which tells the inviter by its username alone.
@@ -193,22 +197,86 @@ def test_an_invite_mailed_spent_picked_up_and_bound_on_both_sides(nodes):
     assert "pasha@example.org" not in told[0]["html"]
 
 
-def test_an_add_by_plain_code_keeps_nothing_and_adds_nobody_on_the_other_side(nodes, monkeypatch):
-    nodes.be(MASHA)                    # an invite of masha's open, so her pickup asks the Worker
-    assert _run(p2p.invite_by_email(p2p.InviteByEmailRequest(to_email="kasia@example.net")))["status"] == "sent"
+def _requested(picked, who) -> bool:
+    """`who`'s add among a pickup's new requests (the module's Worker keeps
+    every earlier test's adds too)."""
+    return {"invite_code": who.code} in picked["requested"]
+
+
+def test_an_add_by_plain_code_waits_for_add_back_and_one_click_makes_the_contact(nodes, monkeypatch):
     nodes.be(SASHA)
     sent = len(_mails(nodes.url))
     added = _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))
     assert added["invite"] is None
     told = [m for m in _mails(nodes.url)[sent:] if m["to"] == ["masha@example.org"]]
     assert [m["subject"] for m in told] == ["sasha added your Sautium invite code"]
-    assert "sasha@example.org" not in told[0]["html"]
-    asked, real = [], email_verify._post_worker
-    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: asked.append(path) or real(path, body))
-    nodes.be(MASHA)
-    assert _run(p2p.pending_accepts()) == {"added": []}
-    assert asked == ["/pending-accepts"]
+    assert "sasha@example.org" not in told[0]["html"] and "Add back" in told[0]["html"]
+    asked = _count_pickups(monkeypatch)
+    nodes.be(MASHA)                    # no invite of masha's open: her pickup asks all the same
+    picked = _run(p2p.pending_accepts())
+    assert picked["added"] == [] and _requested(picked, SASHA) and asked == ["/pending-accepts"]
+    # a request is no contact
     assert _row(nodes.dsn, "SELECT count(*) FROM friends WHERE invite_code = %s", SASHA.code) == (0,)
+    [req] = [r for r in _run(p2p.list_friend_requests())["items"] if r["invite_code"] == SASHA.code]
+    assert req["username"] == "sasha"
+    assert not _requested(_run(p2p.pending_accepts()), SASHA)        # kept once
+    # Add back: the contact, bound to the key sasha's statement verified under; no Worker call
+    told_back, sent = _told(monkeypatch), len(_mails(nodes.url))
+    assert _run(p2p.add_back(req["id"]))["invite_code"] == SASHA.code
+    assert told_back == [] and len(_mails(nodes.url)) == sent and asked == ["/pending-accepts"] * 2
+    assert _row(nodes.dsn, "SELECT public_key_hex, encode(key_fingerprint, 'hex') FROM friends WHERE invite_code = %s",
+                SASHA.code) == (f"pending:{SASHA.code}", chat_wire.key_fingerprint(SASHA.pub).lower())
+    assert _row(nodes.dsn, "SELECT answered_at = requested_at FROM friend_requests WHERE invite_code = %s",
+                SASHA.code) == (True,)                       # the add the contact answers, kept as answered
+    assert all(r["invite_code"] != SASHA.code for r in _run(p2p.list_friend_requests())["items"])
+    # the contact answers sasha's add from now on: a pickup keeps no request again
+    assert not _requested(_run(p2p.pending_accepts()), SASHA)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as gone:
+        _run(p2p.add_back(req["id"]))
+    assert gone.value.status_code == 404
+    # the contact deleted: the add the Worker still keeps is the one answered — no request
+    [fid] = _row(nodes.dsn, "SELECT id FROM friends WHERE invite_code = %s", SASHA.code)
+    _run(p2p.delete_friend(fid))
+    assert not _requested(_run(p2p.pending_accepts()), SASHA)
+    assert all(r["invite_code"] != SASHA.code for r in _run(p2p.list_friend_requests())["items"])
+    # sasha adds again, later: a new request
+    nodes.be(SASHA)
+    time.sleep(0.01)
+    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))
+    nodes.be(MASHA)
+    assert _requested(_run(p2p.pending_accepts()), SASHA)
+    [again] = [r for r in _run(p2p.list_friend_requests())["items"] if r["invite_code"] == SASHA.code]
+    assert again["share_code"] == chat_wire.long_code("sasha", SASHA.pub) and again["name_taken"] is False
+
+
+def test_a_dismissed_request_stays_hidden_and_a_hand_add_of_its_code_answers_it(nodes, monkeypatch):
+    _told(monkeypatch)
+    nodes.be(PASHA)
+    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))
+    nodes.be(MASHA)
+    assert _requested(_run(p2p.pending_accepts()), PASHA)
+    [req] = [r for r in _run(p2p.list_friend_requests())["items"] if r["invite_code"] == PASHA.code]
+    assert _run(p2p.dismiss_friend_request(req["id"])) == {"ok": True}
+    assert all(r["invite_code"] != PASHA.code for r in _run(p2p.list_friend_requests())["items"])
+    assert not _requested(_run(p2p.pending_accepts()), PASHA)        # dismissed stays dismissed
+    assert _row(nodes.dsn, "SELECT ignored_at IS NOT NULL FROM friend_requests WHERE invite_code = %s",
+                PASHA.code) == (True,)
+    # masha adds pasha's code by hand: the contact, and the request answered (her yes over the dismissal)
+    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=chat_wire.long_code("pasha", PASHA.pub))))
+    assert _row(nodes.dsn, "SELECT ignored_at, answered_at = requested_at FROM friend_requests"
+                           " WHERE invite_code = %s", PASHA.code) == (None, True)
+    assert _row(nodes.dsn, "SELECT public_key_hex FROM friends WHERE invite_code = %s", PASHA.code) == (
+        f"pending:{PASHA.code}",)
+
+
+def test_a_friends_profile_shows_the_friends_long_code_and_a_waiting_contact_none(nodes):
+    from routers import profile
+    with psycopg2.connect(nodes.dsn) as c, c.cursor() as cur:
+        cur.execute("INSERT INTO friends (username, public_key_hex, invite_code) VALUES ('masha', %s, %s),"
+                    " ('pasha', %s, %s)", (MASHA.pub, MASHA.code, f"pending:{PASHA.code}", PASHA.code))
+    assert profile.get_peer_profile(MASHA.pub[:16])["share_code"] == chat_wire.long_code("masha", MASHA.pub)
+    assert profile.get_peer_profile("pending:")["share_code"] is None
 
 
 def _mailed_invite(nodes, to):
@@ -293,28 +361,23 @@ def _count_pickups(monkeypatch) -> list:
     return asked
 
 
-def test_the_friends_screen_asks_only_with_an_invite_open_a_born_key_and_its_share_left(nodes, monkeypatch):
+def test_the_friends_screen_asks_with_no_invite_open_but_only_with_a_born_key_and_its_share_left(nodes, monkeypatch):
     asked = _count_pickups(monkeypatch)
     monkeypatch.setattr(p2p, "SCREEN_PICKUP_INTERVAL_S", 60)
-    births = SimpleNamespace(asked=0, born=True)
+    births = SimpleNamespace(asked=0, born=False)
 
     async def born():
         births.asked += 1
         return births.born
     monkeypatch.setattr(p2p, "_born", born)
     nodes.be(MASHA)
-    assert _run(p2p.pending_accepts()) == {"added": []} and asked == []
-    assert births.asked == 0 and len(p2p._screen_pickups) == 0      # no invite open: no birth asked, no share spent
-    with psycopg2.connect(nodes.dsn) as c, c.cursor() as cur:
-        cur.execute("INSERT INTO sent_invites (to_email, invite_id) VALUES ('nina@example.net', %s)",
-                    (str(uuid.UUID(int=91)),))
-    births.born = False
-    assert _run(p2p.pending_accepts()) == {"added": []} and asked == []      # a key not born asks nothing
+    nothing = {"added": [], "requested": []}
+    assert _run(p2p.pending_accepts()) == nothing and asked == []       # a key not born asks nothing
     births.born = True
     monkeypatch.setattr(p2p, "_screen_pickups", deque())
-    assert _run(p2p.pending_accepts()) == {"added": []} and asked == ["/pending-accepts"]
+    assert _run(p2p.pending_accepts())["added"] == [] and asked == ["/pending-accepts"]   # no invite open: asked
     before = births.asked
-    assert _run(p2p.pending_accepts()) == {"added": []} and asked == ["/pending-accepts"]   # within its minute
+    assert _run(p2p.pending_accepts()) == nothing and asked == ["/pending-accepts"]   # within its minute
     assert births.asked == before                                       # past its share, no birth asked either
 
 

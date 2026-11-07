@@ -2460,10 +2460,10 @@ class P2PManager:
             await asyncio.sleep(RETRY_UNKNOWN if retry_soon else 6 * 3600)
 
     async def _poll_pending_accepts(self):
-        """The start's pickup: the acceptances of our invites that came
-        while this node was off (email_verify.pick_up_acceptances — the
-        same function the Friends screen and a peer's nudge run). Later
-        ones come with Friends opening, or a nudge."""
+        """The start's pickup: the acceptances of our invites, and the adds
+        of our code, that came while this node was off (email_verify.pick_up
+        — the same function the Friends screen and a peer's nudge run).
+        Later ones come with Friends opening, or a nudge."""
         await asyncio.sleep(10)  # initial delay for network setup
         try:
             if await self._pick_up():
@@ -2491,21 +2491,22 @@ class P2PManager:
 
     def _pick_up_blocking(self) -> list:
         from desktop.node_identity import get_account_info, sign_message
-        from desktop.p2p import email_verify
+        from desktop.p2p import birth_cert, email_verify
         account = get_account_info()
-        if not account:
+        # The Worker answers only a key it issued a certificate to.
+        if not account or birth_cert.load_certificate() is None:
             return []
         import psycopg2
         conn = psycopg2.connect(self.db_dsn)
         conn.autocommit = True
         try:
-            added = email_verify.pick_up_acceptances(
+            picked = email_verify.pick_up(
                 conn, account["invite_code"], account["public_key_hex"], sign_message)
         finally:
             conn.close()
-        if added and self._sync_server:
+        if (picked["added"] or picked["requested"]) and self._sync_server:
             asyncio.run_coroutine_threadsafe(self._sync_server._wake_backend_sse(), self._loop)
-        return added
+        return picked["added"]
 
     def _resolve_soon(self) -> None:
         if self._resolve_nudge is not None and self._loop and not self._loop.is_closed():

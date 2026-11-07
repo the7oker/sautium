@@ -7444,6 +7444,29 @@
       </div>`;
   }
 
+  // Someone who added our code by plain code, waiting for Add back
+  // (/api/p2p/friend-requests). Not a contact: no chat, no menu, not a
+  // .friend-row (the list's in-place patch counts those). A username is
+  // anybody's to choose: the long code tells keys apart, and a name a
+  // contact of ours goes by already is said so.
+  function renderRequestRow(req) {
+    const ph = avatarPlaceholder(req.username);
+    return `
+      <div class="request-row" data-request-id="${Number(req.id) || 0}">
+        <div class="avatar friend-avatar" style="background: ${ph.bg};">${
+          escapeHtml(ph.initials)}</div>
+        <div class="friend-meta">
+          <div class="friend-name">${escapeHtml(req.username)}</div>
+          <div class="friend-status">${req.name_taken
+            ? 'added your code · a friend of yours has this name' : 'added your code'}</div>
+          <div class="request-code">${escapeHtml(req.share_code)}</div>
+        </div>
+        <button class="btn btn-primary request-add" type="button" data-request-add>Add back</button>
+        <button class="friend-menu-btn" type="button" data-request-dismiss
+                aria-label="dismiss">✕</button>
+      </div>`;
+  }
+
   // The Friends screen's steady hint. The Worker sends an invite only under
   // a verified address, so an account without one is told where to verify.
   function friendsInviteHint(status) {
@@ -7518,6 +7541,11 @@
         Add by invite code or by email.
       </div>
 
+      <div id="friendRequests" hidden>
+        <div class="group-label">Added you</div>
+        <div class="friends-list" id="friendRequestsList"></div>
+      </div>
+
       <div class="group-label">Friends</div>
       <input class="text-field friends-search" type="search"
              autocomplete="off" placeholder="Search friends" name="fsearch">
@@ -7580,6 +7608,7 @@
     const onChat = () => {
       if (!document.contains(listEl)) return detach();
       refreshFriends(true);
+      refreshRequests();
     };
     const onRoute = () => {
       if (!document.contains(listEl)) detach();
@@ -7641,7 +7670,7 @@
           // so a message arriving mid-session lifts exactly one row and
           // must not cost the whole list a repaint. Deeper Show-more
           // pages keep their last-rendered state until re-mount.
-          const onScreen = [...screen.querySelectorAll('.friend-row')];
+          const onScreen = [...listEl.querySelectorAll('.friend-row')];
           const nodeById = new Map(
             onScreen.map(r => [Number(r.dataset.friendId), r]));
           const sameSet = onScreen.length === rows.length &&
@@ -7710,7 +7739,56 @@
     screen.querySelector('[data-action="manage-tokens"]')
       .addEventListener('click', () => openInviteTokensSheet());
 
+    // Requests: repainted only when what the server answers changed — the
+    // chat stream also fires on every presence bump.
+    const reqWrap = screen.querySelector('#friendRequests');
+    const reqList = screen.querySelector('#friendRequestsList');
+    let reqShown = '';
+    async function refreshRequests() {
+      const fresh = claimFresh('friends.requests');
+      try {
+        const resp = await fetch('/api/p2p/friend-requests');
+        if (!resp.ok) return;
+        const {items} = await resp.json();
+        if (!fresh()) return;
+        const json = JSON.stringify(items);
+        if (json === reqShown) return;
+        reqShown = json;
+        reqList.innerHTML = items.map(renderRequestRow).join('');
+        reqWrap.hidden = items.length === 0;
+      } catch (err) {
+        console.warn('friend requests load failed', err);
+      }
+    }
+    reqList.addEventListener('click', e => {
+      const row = e.target.closest('.request-row');
+      const add = e.target.closest('[data-request-add]');
+      if (!row || !(add || e.target.closest('[data-request-dismiss]'))) return;
+      const name = row.querySelector('.friend-name').textContent;
+      // The whole list waits: the repaint after a tap moves the next
+      // request under the finger, and a double-tap is one tap.
+      onceInFlight(reqList, async () => {
+        try {
+          const resp = await fetch(
+            `/api/p2p/friend-requests/${Number(row.dataset.requestId)}/${add ? 'add' : 'dismiss'}`,
+            {method: 'POST'});
+          if (!resp.ok) {
+            showHint(add ? 'Could not add back.' : 'Could not dismiss.', true);
+            return;
+          }
+          if (add) {
+            showHint(`${name} added back. You can chat once ${name}'s Sautium answers.`, true);
+            refreshFriends();
+          }
+        } catch (_) {
+          showHint(add ? 'Could not add back.' : 'Could not dismiss.', true);
+        }
+        await refreshRequests();
+      });
+    });
+
     refreshFriends();
+    refreshRequests();
 
     // Pick up the acceptances of our email invites: the Worker keeps
     // each accepted invite, with its acceptor's signed statement, for 30
@@ -7725,6 +7803,9 @@
       .then(data => {
         if (data && Array.isArray(data.added) && data.added.length > 0) {
           refreshFriends();
+        }
+        if (data && Array.isArray(data.requested) && data.requested.length > 0) {
+          refreshRequests();
         }
       })
       .catch(() => {});
@@ -11124,6 +11205,27 @@
     if (parseHash().startsWith(hashPrefix)) window.scrollTo(0, y);
   }
 
+  // A profile header's code: the long share code, with its Copy button
+  // (wireIdentityCopy).
+  function identityCodeHTML(code) {
+    return `
+      <div class="identity-handles identity-code">
+        <span class="invite">${escapeProfileHtml(code)}</span>
+        <button class="copy-btn" type="button" aria-label="copy invite code"
+                data-copy-code>${SVG_COPY}</button>
+      </div>`;
+  }
+
+  function wireIdentityCopy(root) {
+    const btn = root.querySelector('[data-copy-code]');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      if (await copyText(btn.previousElementSibling.textContent)) {
+        notices.toast({ kind: 'info', key: 'profile.code', title: 'Invite code copied' });
+      }
+    });
+  }
+
   async function renderProfile(root) {
     let profile = null, account = null, config = null, scrobbling = null;
     // emailStatus stays null at first paint — fetched in background
@@ -11159,9 +11261,9 @@
       : username.trim()
         ? username.trim().charAt(0).toUpperCase()
         : '—';
-    const inviteTail = (account && account.invite_code)
-      ? '· ' + account.invite_code.split('#').pop()
-      : '';
+    // The long code (128 bits of the key) is the one to share; the short
+    // one is never shown, though a contact made from it still works.
+    const shareCode = (account && account.share_code) || '';
 
     const gear = profile.gear || [];
     const byCategory = {};
@@ -11214,10 +11316,9 @@
           <input type="file" id="avatarFile" accept="image/*" hidden>
           <div>
             <h2 class="identity-name">${display ? escapeProfileHtml(display) : '<span style="color:var(--color-text-dim);">Set your name</span>'}</h2>
-            ${(username || inviteTail) ? `
+            ${shareCode ? identityCodeHTML(shareCode) : username ? `
               <div class="identity-handles">
                 <span class="handle">${escapeProfileHtml(username)}</span>
-                ${inviteTail ? `<span class="invite">${escapeProfileHtml(inviteTail)}</span>` : ''}
               </div>
             ` : ''}
           </div>
@@ -11311,6 +11412,7 @@
 
     _loadHwBlock(root);
     _loadLfmHistoryBlock(root);
+    wireIdentityCopy(root);
 
     root.querySelector('[data-back]').addEventListener('click', () => {
       goBack('home');
@@ -12994,7 +13096,7 @@
     const display = profile.display_name || profile.username || '—';
     const initials = display.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase() || '—';
     const handle = profile.username || '';
-    const inviteTail = profile.invite_code ? '· ' + profile.invite_code.split('#').pop() : '';
+    const shareCode = profile.share_code || '';
 
     root.innerHTML = `
       <section class="screen screen-profile">
@@ -13012,10 +13114,9 @@
           </div>
           <div>
             <h2 class="identity-name">${escapeProfileHtml(display)}</h2>
-            ${(handle || inviteTail) ? `
+            ${shareCode ? identityCodeHTML(shareCode) : handle ? `
               <div class="identity-handles">
                 <span class="handle">${escapeProfileHtml(handle)}</span>
-                ${inviteTail ? `<span class="invite">${escapeProfileHtml(inviteTail)}</span>` : ''}
               </div>` : ''}
           </div>
           ${(profile.city || profile.country) ? `<div class="identity-city">${PROFILE_ICONS.pin}${escapeProfileHtml([profile.city, countryName(profile.country)].filter(Boolean).join(', '))}</div>` : ''}
@@ -13031,6 +13132,7 @@
       </section>
     `;
 
+    wireIdentityCopy(root);
     root.querySelector('[data-back]').addEventListener('click', () => {
       goBack('friends');
     });
