@@ -925,7 +925,8 @@ async def invite_by_email(req: InviteByEmailRequest) -> Dict[str, Any]:
 
 
 # The Friends screen's pickups — a Worker request each, on our key's day of
-# 100 (the Worker's pending.key) beside the launcher's start and its nudges,
+# 100 (the Worker's pending.key with an invite of ours kept, requests.key
+# with none) beside the launcher's start and its nudges,
 # and a second node of the same account's: at most one a minute and
 # SCREEN_PICKUPS_PER_DAY in any 24 h of this run of the backend (a restart
 # begins a new share). A screen past them shows what is here.

@@ -14,7 +14,7 @@ a cluster:
   and goes on past an acceptance, or an add, that fails;
 - an add of this node's code is kept once as a request bound to its adder's
   key, under the adder's own signed statement, and makes no contact; one a
-  contact of ours answers already (waiting, made or blocked) keeps nothing;
+  contact of ours holds (waiting, made or blocked) is kept answered;
   a dismissed one stays dismissed; one a contact answered stays answered
   until a later repeat; a key a friend rotated away from keeps nothing; an
   old Worker's answer, with no adds, keeps nothing;
@@ -250,7 +250,7 @@ def test_an_add_under_the_name_in_another_case_is_this_nodes_code(conn):
 
 
 @pytest.mark.parametrize("holder", ["waits", "made", "blocked", "waits under the name in another case"])
-def test_an_add_a_contact_of_ours_answers_already_keeps_nothing(conn, holder):
+def test_an_add_a_contact_of_ours_holds_is_kept_answered_and_the_contact_deleted_asks_nothing(conn, holder):
     with conn.cursor() as cur:
         if holder == "made" or holder == "blocked":
             cur.execute("INSERT INTO friends (username, public_key_hex, invite_code, is_blocked)"
@@ -260,8 +260,13 @@ def test_an_add_a_contact_of_ours_answers_already_keeps_nothing(conn, holder):
             cur.execute("INSERT INTO friends (username, public_key_hex, invite_code) VALUES ('friend', %s, %s)",
                         (f"pending:{code}", code))
     assert _take_add(conn, _add()) == "held"
-    assert _row(conn, "SELECT count(*) FROM friend_requests") == (0,)
+    assert _row(conn, "SELECT invite_code, public_key_hex, answered_at = requested_at FROM friend_requests") == (
+        FRIEND.code, FRIEND.pub, True)
     assert _row(conn, "SELECT count(*) FROM friends") == (1,)
+    with conn.cursor() as cur:            # the contact deleted within the Worker's 30 days: the same add asks nothing
+        cur.execute("DELETE FROM friends")
+    assert _take_add(conn, _add()) == "answered"
+    assert _take_add(conn, _add(ts=1763000500, added_at="2026-11-08T00:00:00.000Z")) == "requested"
 
 
 def test_an_answered_add_stays_answered_until_a_later_repeat(conn):
@@ -276,6 +281,19 @@ def test_an_answered_add_stays_answered_until_a_later_repeat(conn):
         cur.execute("DELETE FROM friends WHERE id = %s", (fid,))
     assert _take_add(conn, _add()) == "answered"
     assert _take_add(conn, _add(ts=1763000500, added_at="2026-11-08T00:00:00.000Z")) == "requested"
+    # open again, it is told once: the next pickups renew it
+    assert _take_add(conn, _add(ts=1763000500, added_at="2026-11-08T00:00:00.000Z")) == "renewed"
+    assert _take_add(conn, _add(ts=1763000600, added_at="2026-11-09T00:00:00.000Z")) == "renewed"
+
+
+def test_a_held_add_leaves_another_keys_request_under_that_code_as_it_is(conn):
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO friend_requests (invite_code, public_key_hex, username, requested_at)"
+                    " VALUES (%s, %s, 'friend', '2026-11-01T00:00:00Z')", (FRIEND.code, OTHER.pub))
+        cur.execute("INSERT INTO friends (username, public_key_hex, invite_code) VALUES ('friend', %s, %s)",
+                    (FRIEND.pub, FRIEND.code))
+    assert _take_add(conn, _add()) == "held"
+    assert _row(conn, "SELECT public_key_hex, answered_at FROM friend_requests") == (OTHER.pub, None)
 
 
 @pytest.mark.parametrize("where", ["a friend's previous key", "a rotation not applied yet"])

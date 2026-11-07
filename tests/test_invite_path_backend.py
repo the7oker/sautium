@@ -221,6 +221,7 @@ def test_an_add_by_plain_code_waits_for_add_back_and_one_click_makes_the_contact
     assert req["username"] == "sasha"
     assert not _requested(_run(p2p.pending_accepts()), SASHA)        # kept once
     # Add back: the contact, bound to the key sasha's statement verified under; no Worker call
+    tell = p2p._tell_code_added
     told_back, sent = _told(monkeypatch), len(_mails(nodes.url))
     assert _run(p2p.add_back(req["id"]))["invite_code"] == SASHA.code
     assert told_back == [] and len(_mails(nodes.url)) == sent and asked == ["/pending-accepts"] * 2
@@ -241,6 +242,7 @@ def test_an_add_by_plain_code_waits_for_add_back_and_one_click_makes_the_contact
     assert not _requested(_run(p2p.pending_accepts()), SASHA)
     assert all(r["invite_code"] != SASHA.code for r in _run(p2p.list_friend_requests())["items"])
     # sasha adds again, later: a new request
+    monkeypatch.setattr(p2p, "_tell_code_added", tell)
     nodes.be(SASHA)
     time.sleep(0.01)
     _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))
@@ -251,7 +253,6 @@ def test_an_add_by_plain_code_waits_for_add_back_and_one_click_makes_the_contact
 
 
 def test_a_dismissed_request_stays_hidden_and_a_hand_add_of_its_code_answers_it(nodes, monkeypatch):
-    _told(monkeypatch)
     nodes.be(PASHA)
     _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))
     nodes.be(MASHA)
@@ -263,6 +264,7 @@ def test_a_dismissed_request_stays_hidden_and_a_hand_add_of_its_code_answers_it(
     assert _row(nodes.dsn, "SELECT ignored_at IS NOT NULL FROM friend_requests WHERE invite_code = %s",
                 PASHA.code) == (True,)
     # masha adds pasha's code by hand: the contact, and the request answered (her yes over the dismissal)
+    _told(monkeypatch)
     _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=chat_wire.long_code("pasha", PASHA.pub))))
     assert _row(nodes.dsn, "SELECT ignored_at, answered_at = requested_at FROM friend_requests"
                            " WHERE invite_code = %s", PASHA.code) == (None, True)

@@ -7,6 +7,7 @@ the Worker's day; a request waits there for one click, Add back; and a
 profile's header shows the long code to copy, never the short tail."""
 
 import asyncio
+import json
 import re
 import shutil
 import subprocess
@@ -254,6 +255,26 @@ def test_a_request_row_offers_add_back_and_dismiss_under_the_adders_name():
     assert "friend-row" not in out           # the friends list's in-place patch counts its own rows alone
     assert code in first                     # the key, not only a name anybody may choose
     assert "a friend of yours has this name" in second and "a friend of yours has this name" not in first
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_request_acted_on_stays_where_it_stood_with_no_buttons():
+    # a double-tap's second tap lands where the first one acted: no button
+    # there, and no other request moved into its place
+    out = _node(_function("renderRequestRow") + _function("requestRows") + """
+      const items = [{id: 3, username: 'c', share_code: 'c#x', requested_at: '2026-11-07T12:00:00Z'},
+                     {id: 1, username: 'a', share_code: 'a#x', requested_at: '2026-11-07T10:00:00Z'}];
+      const acted = new Map([[2, {req: {id: 2, username: 'b', share_code: 'b#x',
+                                         requested_at: '2026-11-07T11:00:00Z'}, done: 'Added back'}]]);
+      const rows = requestRows(items, acted);
+      process.stdout.write(JSON.stringify({order: rows.map(r => r.req.id),
+                                           html: rows.map(r => renderRequestRow(r.req, r.done))}));""")
+    got = json.loads(out)
+    assert got["order"] == [3, 2, 1]
+    done = got["html"][1]
+    assert "Added back" in done and "is-done" in done
+    assert "data-request-add" not in done and "data-request-dismiss" not in done
+    assert "data-request-add" in got["html"][0] and "data-request-add" in got["html"][2]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

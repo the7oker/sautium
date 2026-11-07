@@ -7448,23 +7448,36 @@
   // (/api/p2p/friend-requests). Not a contact: no chat, no menu, not a
   // .friend-row (the list's in-place patch counts those). A username is
   // anybody's to choose: the long code tells keys apart, and a name a
-  // contact of ours goes by already is said so.
-  function renderRequestRow(req) {
+  // contact of ours goes by already is said so. `done` ("Added back",
+  // "Dismissed"): a request acted on, kept in its place with no buttons.
+  function renderRequestRow(req, done = '') {
     const ph = avatarPlaceholder(req.username);
+    const status = done || (req.name_taken
+      ? 'added your code · a friend of yours has this name' : 'added your code');
     return `
-      <div class="request-row" data-request-id="${Number(req.id) || 0}">
+      <div class="request-row${done ? ' is-done' : ''}" data-request-id="${Number(req.id) || 0}">
         <div class="avatar friend-avatar" style="background: ${ph.bg};">${
           escapeHtml(ph.initials)}</div>
         <div class="friend-meta">
           <div class="friend-name">${escapeHtml(req.username)}</div>
-          <div class="friend-status">${req.name_taken
-            ? 'added your code · a friend of yours has this name' : 'added your code'}</div>
+          <div class="friend-status">${escapeHtml(status)}</div>
           <div class="request-code">${escapeHtml(req.share_code)}</div>
-        </div>
+        </div>${done ? '' : `
         <button class="btn btn-primary request-add" type="button" data-request-add>Add back</button>
         <button class="friend-menu-btn" type="button" data-request-dismiss
-                aria-label="dismiss">✕</button>
+                aria-label="dismiss">✕</button>`}
       </div>`;
+  }
+
+  // What the requests list shows: the server's waiting requests and the
+  // ones acted on this screen, each a done row where it stood (the
+  // server's order, latest first), so no repaint moves a request under
+  // the finger of a second tap.
+  function requestRows(items, acted) {
+    const rows = items.filter(r => !acted.has(r.id)).map(req => ({req, done: ''}))
+      .concat([...acted.values()]);
+    return rows.sort((a, b) => (Date.parse(b.req.requested_at) - Date.parse(a.req.requested_at))
+                                || (b.req.id - a.req.id));
   }
 
   // The Friends screen's steady hint. The Worker sends an invite only under
@@ -7739,11 +7752,21 @@
     screen.querySelector('[data-action="manage-tokens"]')
       .addEventListener('click', () => openInviteTokensSheet());
 
-    // Requests: repainted only when what the server answers changed — the
-    // chat stream also fires on every presence bump.
+    // Requests: repainted only when what the list shows changed — the chat
+    // stream also fires on every presence bump. A request acted on stays,
+    // done, for the screen's life (requestRows).
     const reqWrap = screen.querySelector('#friendRequests');
     const reqList = screen.querySelector('#friendRequestsList');
-    let reqShown = '';
+    const acted = new Map();          // request id → {req, done}
+    let reqItems = [], reqShown = '';
+    function paintRequests() {
+      const rows = requestRows(reqItems, acted);
+      const json = JSON.stringify(rows);
+      if (json === reqShown) return;
+      reqShown = json;
+      reqList.innerHTML = rows.map(r => renderRequestRow(r.req, r.done)).join('');
+      reqWrap.hidden = rows.length === 0;
+    }
     async function refreshRequests() {
       const fresh = claimFresh('friends.requests');
       try {
@@ -7751,11 +7774,8 @@
         if (!resp.ok) return;
         const {items} = await resp.json();
         if (!fresh()) return;
-        const json = JSON.stringify(items);
-        if (json === reqShown) return;
-        reqShown = json;
-        reqList.innerHTML = items.map(renderRequestRow).join('');
-        reqWrap.hidden = items.length === 0;
+        reqItems = items;
+        paintRequests();
       } catch (err) {
         console.warn('friend requests load failed', err);
       }
@@ -7764,18 +7784,22 @@
       const row = e.target.closest('.request-row');
       const add = e.target.closest('[data-request-add]');
       if (!row || !(add || e.target.closest('[data-request-dismiss]'))) return;
-      const name = row.querySelector('.friend-name').textContent;
-      // The whole list waits: the repaint after a tap moves the next
-      // request under the finger, and a double-tap is one tap.
+      const id = Number(row.dataset.requestId);
+      const req = reqItems.find(r => r.id === id);
+      if (!req || acted.has(id)) return;
+      const name = req.username;
+      // One request at a time; the one acted on becomes its done row in
+      // place, so a second tap lands on no button.
       onceInFlight(reqList, async () => {
         try {
-          const resp = await fetch(
-            `/api/p2p/friend-requests/${Number(row.dataset.requestId)}/${add ? 'add' : 'dismiss'}`,
-            {method: 'POST'});
+          const resp = await fetch(`/api/p2p/friend-requests/${id}/${add ? 'add' : 'dismiss'}`,
+                                   {method: 'POST'});
           if (!resp.ok) {
             showHint(add ? 'Could not add back.' : 'Could not dismiss.', true);
             return;
           }
+          acted.set(id, {req, done: add ? 'Added back' : 'Dismissed'});
+          paintRequests();
           if (add) {
             showHint(`${name} added back. You can chat once ${name}'s Sautium answers.`, true);
             refreshFriends();
@@ -7783,7 +7807,6 @@
         } catch (_) {
           showHint(add ? 'Could not add back.' : 'Could not dismiss.', true);
         }
-        await refreshRequests();
       });
     });
 

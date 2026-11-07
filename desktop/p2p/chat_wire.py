@@ -488,8 +488,8 @@ def take_add(conn, add: dict, own_code: str, own_pubkey: str) -> str:
     code's request: it stays so), "answered" (the add a contact of ours
     answered: the Worker keeps it 30 days), "held" (a contact of ours holds
     that code or key now — waiting, made or blocked: a mutual add needs no
-    request, a blocked contact stays blocked — and the request, if any, is
-    answered), "a key a contact retired" (the key a friend rotated away
+    request, a blocked contact stays blocked — and the add is kept as
+    answered, so the contact deleted, the same add asks nothing), "a key a contact retired" (the key a friend rotated away
     from speaks for nobody), or why it was skipped. All must hold: the
     adder's statement verifies under the adder's key, for this node's code;
     the adder's code binds the key; the key is not this node's own. Nothing
@@ -525,13 +525,20 @@ def take_add(conn, add: dict, own_code: str, own_pubkey: str) -> str:
         """, {"key": key, "code": code})
         held, retired = cur.fetchone()
         if held:
-            cur.execute("UPDATE friend_requests SET requested_at = GREATEST(requested_at, %s),"
-                        " answered_at = GREATEST(requested_at, %s) WHERE invite_code = %s AND public_key_hex = %s",
-                        (added_at, added_at, code, key))
+            # Kept as answered, not dropped: the Worker keeps the add 30 days,
+            # and the contact deleted, a pickup would show it as new again.
+            cur.execute("""
+                INSERT INTO friend_requests (invite_code, public_key_hex, username, requested_at, answered_at)
+                VALUES (%(code)s, %(key)s, %(name)s, %(at)s, %(at)s)
+                ON CONFLICT (invite_code) DO UPDATE
+                   SET requested_at = GREATEST(friend_requests.requested_at, EXCLUDED.requested_at),
+                       answered_at = GREATEST(friend_requests.requested_at, EXCLUDED.requested_at)
+                 WHERE friend_requests.public_key_hex = EXCLUDED.public_key_hex
+            """, {"code": code, "key": key, "name": username, "at": added_at})
             return "held"
         if retired:
             return "a key a contact retired"
-        cur.execute("SELECT public_key_hex, ignored_at IS NOT NULL, answered_at FROM friend_requests"
+        cur.execute("SELECT public_key_hex, ignored_at IS NOT NULL, answered_at, requested_at FROM friend_requests"
                     " WHERE invite_code = %s", (code,))
         row = cur.fetchone()
         if row is None:
@@ -540,13 +547,13 @@ def take_add(conn, add: dict, own_code: str, own_pubkey: str) -> str:
                 VALUES (%s, %s, %s, %s) ON CONFLICT (invite_code) DO NOTHING RETURNING id
             """, (code, key, username, added_at))
             return "requested" if cur.fetchone() is not None else "renewed"
-        held_key, dismissed, answered_at = row
+        held_key, dismissed, answered_at, requested_at = row
         if held_key != key:
             return "another key's request holds that code"
         cur.execute("UPDATE friend_requests SET requested_at = GREATEST(requested_at, %s) WHERE invite_code = %s",
                     (added_at, code))
         if dismissed:
             return "dismissed"
-        if answered_at is None:
-            return "renewed"
+        if answered_at is None or requested_at > answered_at:
+            return "renewed"                       # waiting already: told once
         return "requested" if added_at > answered_at else "answered"

@@ -300,10 +300,10 @@ def pick_up(conn, invite_code: str, public_key_hex: str, sign) -> dict:
         if outcome == "requested":
             requested.append(add["adder"]["invite_code"])
             logger.info("Pickup: %s added this node's code — waiting for Add back", add["adder"]["invite_code"])
-        elif outcome in ("own key", "not this node's code"):
-            # our own key under another name, or a code typed with our digest
-            # under a name that is not ours: nobody's request, every pickup
-            # for 30 days
+        elif outcome in ("own key", "not this node's code", "a key a contact retired"):
+            # our own key under another name, a code typed with our digest
+            # under a name that is not ours, or a friend's add from before
+            # its rotation: nobody's request, every pickup for 30 days
             logger.debug("Pickup: an add skipped — %s", outcome)
         elif outcome not in (None, "renewed", "dismissed", "answered", "held"):
             logger.warning("Pickup: an add skipped — %s", outcome)
