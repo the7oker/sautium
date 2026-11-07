@@ -611,6 +611,7 @@ def test_one_routes_limiter_failing_leaves_the_others_working():
     r = _run("shards")
     assert r["pickup"] == 503 and r["birth"] == 200
     assert r["addStoreDown"]["body"] == {"status": "added", "notified": True} and r["addStoreDownMails"] == 1
+    assert r["anyStoreDown"]["status"] == 200 and r["anyStoreDown"]["body"]["adds"] == []
 
 
 def test_a_full_master_mailbox_refuses_and_drops_nothing():

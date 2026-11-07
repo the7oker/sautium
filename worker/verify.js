@@ -2951,8 +2951,16 @@ async function handlePendingAccepts(request, env) {
   if (caller.refusal) return caller.refusal;
   // A key with an invite kept asks on the `pending` counters, one with none
   // (its code's adds alone) on `requests`: every node's Friends screen asks,
-  // and that must never spend the day an inviter's pickup needs.
-  const { any } = await limiterCall(env, "invites", "/invite/any", { inviter: caller.pubkey, now: Date.now() });
+  // and that must never spend the day an inviter's pickup needs. An object
+  // that cannot say (still on the code before adds, within Cloudflare's
+  // update delay) counts the pickup as before adds: on `pending`.
+  let any = true;
+  try {
+    ({ any } = await limiterCall(env, "invites", "/invite/any", { inviter: caller.pubkey, now: Date.now() }));
+  } catch (e) {
+    if (!(e instanceof StoreUnavailable)) throw e;
+    console.error("a pickup's open invites not read:", e.cause);
+  }
   const route = any ? "pending" : "requests";
   const refusal = await admit(env, [
     daily(route, "key", caller.pubkey),

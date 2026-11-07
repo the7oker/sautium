@@ -2070,6 +2070,12 @@ async function shardFailure() {
   out.addStoreDown = await accept(adder, "artem", await inviteOf(owner, "olena"),
                                   { ip: "198.51.100.71", useEnv: { ...env, LIMITER: failing("invites", "/add/put") } });
   out.addStoreDownMails = mails.slice(sentBefore).filter((m) => m.to[0] === "olena@example.org").length;
+  // an object that cannot say whether the key keeps an invite: the pickup
+  // goes on, on the counters it had before adds
+  const asker = await newKey();
+  await issue(asker, { ip: "198.51.100.72" });
+  out.anyStoreDown = await pending(asker, "pola", { ip: "198.51.100.72",
+                                                 useEnv: { ...env, LIMITER: failing("invites", "/invite/any") } });
   // a birth never calls the owners instance: one that never answers holds
   // no birth up, and the claim comes from the birth's own instance
   const k2 = await newKey();
