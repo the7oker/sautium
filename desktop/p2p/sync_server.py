@@ -2030,9 +2030,14 @@ class SyncServer:
             inviteid = str(uuid.UUID(str(body.get("invite_id"))))
         except ValueError:
             inviteid = None
+        def under_cap() -> bool:
+            return self._nudge_pickups.get(inviteid, 0) < NUDGE_PICKUPS_PER_INVITE
+
         loop = asyncio.get_event_loop()
-        if inviteid is not None and self._nudge_pickups.get(inviteid, 0) < NUDGE_PICKUPS_PER_INVITE \
-                and await loop.run_in_executor(None, self._is_open_invite, inviteid):
+        # The count is checked again after the database's answer, and taken
+        # with no await between: nudges at once share the invite's three.
+        if inviteid is not None and under_cap() \
+                and await loop.run_in_executor(None, self._is_open_invite, inviteid) and under_cap():
             self._nudge_pickups[inviteid] = self._nudge_pickups.get(inviteid, 0) + 1
             await self._pickup()
         return self._json_response(request, {"ok": True})

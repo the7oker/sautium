@@ -7468,8 +7468,10 @@
         return 'That is your own invite.';
       case 'unreachable':
         return `${name} is added, but the invite service did not answer. Add the same invite again later.`;
+      case 'clock':
+        return `${name} is added, but the invite service refused the request: this computer's clock is off. Set it right, then add the same invite again.`;
       case 'refused':
-        return `${name} is added, but the invite service refused the request. Check this computer's clock, then add the same invite again.`;
+        return `${name} is added, but the invite service refused this Sautium's request. Add the same invite again later; if it keeps happening, ask ${name} for a new invite.`;
       default:   // not_found, bad_token: gone from the Worker
         return `This invite has expired. ${name} is added by code: ask them to add yours, or to send a new invite.`;
     }

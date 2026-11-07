@@ -15,6 +15,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -420,13 +421,15 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
     fingerprint when the string carried one. A mailed invite is spent on
     the Worker before the answer (`invite` says what came of it — the
     person reads it); an accepted one binds the contact to the inviter's
-    own key and arms its one nudge (accepted_invite_id). An add by plain
-    code, or with an invite the Worker refused, tells the code's owner, who
-    adds back; an invite the Worker did not take or answer tells nobody —
-    the same string again tries again. An invite link skips the Worker: its
-    token handshake replaces mutual add. The master's code, in any form,
-    waits for the master's own key; a manual re-add of it is consent: it
-    clears the removal flag and re-arms the auto-contact."""
+    own key and arms its nudge (accepted_invite_id). An add by plain code,
+    or with an invite the Worker turned down (used, expired, another code's
+    — _ADD_AFTER), tells the code's owner, who adds back; one the Worker
+    refused this node for, or did not answer, tells nobody — the same string
+    again tries again. A new fingerprint drops the arm of the one before. An
+    invite link skips the Worker: its token handshake replaces mutual add.
+    The master's code, in any form, waits for the master's own key; a manual
+    re-add of it is consent: it clears the removal flag and re-arms the
+    auto-contact."""
     from desktop.p2p import chat_wire
     from master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX, MASTER_TOKEN_ID
 
@@ -461,7 +464,11 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
                     join_token_id = COALESCE(EXCLUDED.join_token_id,
                                              friends.join_token_id),
                     key_fingerprint = COALESCE(EXCLUDED.key_fingerprint,
-                                               friends.key_fingerprint)
+                                               friends.key_fingerprint),
+                    accepted_invite_id = CASE
+                        WHEN EXCLUDED.key_fingerprint IS DISTINCT FROM friends.key_fingerprint
+                             AND EXCLUDED.key_fingerprint IS NOT NULL THEN NULL
+                        ELSE friends.accepted_invite_id END
             RETURNING id, upper(encode(key_fingerprint, 'hex')) AS key_fingerprint
         """, (username, f"pending:{invite_code}", invite_code, username,
               source, token_id, fingerprint))
@@ -483,6 +490,18 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
 # The Worker's refusals of an invite (INVITE_REFUSALS there) after which the
 # contact is an add by plain code, and its owner is told so.
 _ADD_AFTER = ("used", "not_found", "not_this_code", "bad_token")
+# The Worker's window for a signed time (tsFresh there).
+_WORKER_TS_WINDOW_S = 300
+
+
+def _clock_off(resp, ts: int) -> bool:
+    """This node's clock farther from the Worker's than the Worker takes a
+    signed time from — read off its answer's Date."""
+    try:
+        theirs = parsedate_to_datetime(resp.headers.get("date", "")).timestamp()
+    except (TypeError, ValueError):
+        return False
+    return abs(theirs - ts) > _WORKER_TS_WINDOW_S
 
 
 async def _accept_invite(share, friend_id: int, bound: Optional[str]) -> str:
@@ -490,10 +509,11 @@ async def _accept_invite(share, friend_id: int, bound: Optional[str]) -> str:
     the person: "accepted" (the contact is bound to the inviter's own key —
     checked against `bound`, the contact's fingerprint, when it has one,
     else the short code's 48 bits — and its nudge armed), a refusal's reason
-    (_ADD_AFTER, or "own"), "refused" (the Worker refused this node itself:
-    its clock, its key, its name), or "unreachable" (the same invite string
-    again tries again). The token is a secret until it is spent: never
-    logged."""
+    (_ADD_AFTER, or "own"), "clock" (the Worker refused this node's time:
+    its answer's Date is more than the Worker's five minutes away),
+    "refused" (the Worker refused this node itself: its key, its name), or
+    "unreachable" (the same invite string again tries again). The token is a
+    secret until it is spent: never logged."""
     from desktop.p2p import chat_wire
     identity = _get_identity()
     if not identity or not await _born():
@@ -527,7 +547,7 @@ async def _accept_invite(share, friend_id: int, bound: Optional[str]) -> str:
             return reason
         if resp.status_code == 403:
             logger.warning(f"Accept-invite for {share.code} refused this node: {answer.get('error')}")
-            return "refused"
+            return "clock" if _clock_off(resp, ts) else "refused"
         logger.warning(f"Accept-invite for {share.code} answered {resp.status_code}")
         return "unreachable"
     inviter = answer.get("inviter")
@@ -882,7 +902,8 @@ async def invite_by_email(req: InviteByEmailRequest) -> Dict[str, Any]:
 # The Friends screen's pickups — a Worker request each, on our key's day of
 # 100 (the Worker's pending.key) beside the launcher's start and its nudges,
 # and a second node of the same account's: at most one a minute and
-# SCREEN_PICKUPS_PER_DAY in any 24 h. A screen past them shows what is here.
+# SCREEN_PICKUPS_PER_DAY in any 24 h of this run of the backend (a restart
+# begins a new share). A screen past them shows what is here.
 SCREEN_PICKUP_INTERVAL_S = 60
 SCREEN_PICKUPS_PER_DAY = 40
 _screen_pickups: deque = deque()
@@ -912,13 +933,18 @@ async def pending_accepts() -> Dict[str, Any]:
     from desktop.p2p import email_verify
     identity = _get_identity()
     key = _get_private_key()
-    if not identity or not key or not await _born():
+    if not identity or not key:
+        return {"added": []}
+
+    def open_invites():
+        with _get_conn() as conn:
+            return email_verify.has_open_invites(conn)
+
+    if not await asyncio.to_thread(open_invites) or not _screen_pickup() or not await _born():
         return {"added": []}
 
     def pick_up():
         with _get_conn() as conn:
-            if not email_verify.has_open_invites(conn) or not _screen_pickup():
-                return []
             return email_verify.pick_up_acceptances(
                 conn, identity["invite_code"], identity["public_key_hex"], key.sign)
 
@@ -966,8 +992,14 @@ async def _get_own_birth_cert(refresh: bool = False) -> Optional[dict]:
 async def _born() -> bool:
     """This node's key born on the Worker — its certificate held, else asked
     for (_get_own_birth_cert): every invite route answers only a key it
-    issued a certificate to, and a rotation's new key has none until then."""
-    return await _get_own_birth_cert() is not None
+    issued a certificate to, and a rotation's new key has none until then.
+    A Worker too busy to answer is a no, for the route to say as it would
+    any other failure."""
+    try:
+        return await _get_own_birth_cert() is not None
+    except HTTPException as e:
+        logger.warning(f"Birth certificate not asked for: {e.detail}")
+        return False
 
 
 async def _worker_check_email(identity: dict) -> Optional[dict]:

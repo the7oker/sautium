@@ -49,6 +49,9 @@ logger = logging.getLogger(__name__)
 # fields. Each request's session already bounds its time.
 PEER_ANSWER_CAP = 8 * wire.MiB
 PEER_HEALTH_CAP = 256 * wire.KiB
+# A contact made by accepting a mailed invite nudges its inviter at a refusal
+# of its handshake at most once in this long while the answers are busy ones.
+NUDGE_RETRY_S = 600
 
 
 def replied_friends(notes) -> set:
@@ -101,8 +104,14 @@ class P2PManager:
         self._resolve_friends_task: Optional[asyncio.Task] = None
         self._pending_accepts_task: Optional[asyncio.Task] = None
         # One pickup at a time (_pick_up); created on the loop at start,
-        # before the sync server can take a nudge.
+        # before the sync server can take a nudge. `_pickup_waiting`: the
+        # pickup waiting for its turn, which a later request joins.
         self._pickup_lock: Optional[asyncio.Lock] = None
+        self._pickup_waiting: Optional[asyncio.Task] = None
+        # A contact's last nudge (monotonic), by friend id: a refused
+        # handshake nudges at most once in NUDGE_RETRY_S while busy answers
+        # keep the nudge armed.
+        self._nudged_at: dict[int, float] = {}
         self._lan_discovery_task: Optional[asyncio.Task] = None
         self._db_listen_task: Optional[asyncio.Task] = None
         self._sync_request_task: Optional[asyncio.Task] = None
@@ -1495,17 +1504,11 @@ class P2PManager:
                                         f"Handshake for {invite} refused by "
                                         f"{ip}:{port}: {err}")
                                     continue
-                                nudge = self._nudge_invite(friend, pinned_pubkey(channel_ctx))
-                                if nudge:
-                                    if await self._try_nudge(
-                                            ip, port, invite,
-                                            {**chat_wire.sign_handshake(
-                                                sign_message, handshake_data, invite),
-                                             "invite_id": nudge},
-                                            session):
-                                        self._chat_service.nudged(friend["id"])
-                                        self._resolve_soon()
-                                        break
+                                if await self._nudge_refused(
+                                        friend, ip, port, invite,
+                                        chat_wire.sign_handshake(sign_message, handshake_data, invite),
+                                        session, pinned_pubkey(channel_ctx)):
+                                    break
                 except Exception as e:
                     logger.debug(
                         f"Handshake to {ip}:{port} for {invite} "
@@ -1517,15 +1520,36 @@ class P2PManager:
     @staticmethod
     def _nudge_invite(friend: dict, pinned: Optional[str]) -> Optional[str]:
         """The invite a refused handshake's nudge names: a contact made by
-        accepting a mailed invite nudges its inviter once, armed by the
-        acceptance itself (accepted_invite_id), and only over a channel the
-        inviter's own key holds — the nudge names the invite. None when
-        there is nothing to nudge with, or nobody to nudge here."""
+        accepting a mailed invite nudges its inviter, armed by the acceptance
+        itself (accepted_invite_id) until an answer spends it
+        (_nudge_refused), and only over a channel the inviter's own key holds
+        — the nudge names the invite. None when there is nothing to nudge
+        with, or nobody to nudge here."""
         accepted, bound = friend.get("accepted_invite_id"), friend.get("key_fingerprint")
         if accepted and bound and not friend.get("join_token_id") and pinned \
                 and chat_wire.binds(bound, pinned):
             return accepted
         return None
+
+    async def _nudge_refused(self, friend: dict, ip: str, port: int, invite: str, signed: dict,
+                             session, pinned: Optional[str]) -> bool:
+        """After the inviter refused our handshake: the contact's nudge
+        (_nudge_invite), at most once in NUDGE_RETRY_S. Any answer but a busy
+        one spends it — a Docker inviter has no nudge route and picks up at
+        its own Friends screen — and True means the inviter took it: its
+        pickup ran, our handshake goes again at once."""
+        nudge = self._nudge_invite(friend, pinned)
+        now = time.monotonic()
+        if not nudge or now - self._nudged_at.get(friend["id"], float("-inf")) < NUDGE_RETRY_S:
+            return False
+        self._nudged_at[friend["id"]] = now
+        status = await self._try_nudge(ip, port, invite, {**signed, "invite_id": nudge}, session)
+        if status is not None and status != 429 and status < 500:
+            self._chat_service.nudged(friend["id"])
+        if status == 200:
+            self._resolve_soon()
+            return True
+        return False
 
     async def _try_nudge(
         self,
@@ -1534,11 +1558,10 @@ class P2PManager:
         invite: str,
         handshake_data: dict,
         session,
-    ) -> bool:
-        """Nudge the inviter whose handshake refused us after we accepted
-        its invite: its pickup adds us. True when it took the nudge (it
-        answers every nudge alike — nothing of the peer's comes back in
-        it); anything else leaves the nudge for the next refusal."""
+    ) -> Optional[int]:
+        """POST the nudge → the inviter's status (it answers every nudge it
+        takes alike — nothing of the peer's comes back in it), None when it
+        did not answer."""
         url = f"https://{fmt_addr(ip, port)}/api/chat/invite-accepted"
         try:
             import aiohttp
@@ -1546,10 +1569,10 @@ class P2PManager:
                 url, json=handshake_data,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
-                return resp.status == 200
+                return resp.status
         except Exception as e:
             logger.debug(f"Nudge to {ip}:{port} for {invite} failed: {e}")
-        return False
+        return None
 
     # ------------------------------------------------------------------
     # Master contact, relay wake stream, reachability
@@ -2437,9 +2460,21 @@ class P2PManager:
 
     async def _pick_up(self) -> list:
         """One pickup at a time on this node (the start, a nudge): the
-        contacts it added."""
-        async with self._pickup_lock:
-            return await asyncio.get_running_loop().run_in_executor(None, self._pick_up_blocking)
+        contacts it added. A request that comes while one waits for its turn
+        joins that one — it begins after the request came all the same — so
+        nudges at once cost one pickup, not one each."""
+        if self._pickup_waiting is None:
+            self._pickup_waiting = asyncio.ensure_future(self._pickup_turn())
+        return await asyncio.shield(self._pickup_waiting)
+
+    async def _pickup_turn(self) -> list:
+        try:
+            async with self._pickup_lock:
+                self._pickup_waiting = None        # a request from now on waits for the next turn
+                return await asyncio.get_running_loop().run_in_executor(None, self._pick_up_blocking)
+        finally:
+            if self._pickup_waiting is asyncio.current_task():   # cancelled while it waited
+                self._pickup_waiting = None
 
     def _pick_up_blocking(self) -> list:
         from desktop.node_identity import get_account_info, sign_message

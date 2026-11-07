@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -58,6 +59,7 @@ class _Node:
 
 
 MASHA, SASHA, PASHA = _Node("masha", b"\x31" * 32), _Node("sasha", b"\x32" * 32), _Node("pasha", b"\x33" * 32)
+_VERIFIED: set = set()
 
 
 @pytest.fixture(scope="module")
@@ -112,17 +114,18 @@ def nodes(worker, scratch_dsn, monkeypatch):
     for n in (MASHA, SASHA, PASHA):
         assert _post(worker, "/birth-certificate", {
             "pubkey_hex": n.pub, "signature": n.sign(f"birth:{n.pub}".encode()).hex()})["pubkey"] == n.pub
-    email = "masha@example.org"
-    assert _post(worker, "/send-verification", {
-        "to": email, "invite_code": MASHA.code, "public_key_hex": MASHA.pub,
-        "signature": MASHA.sign(f"sendcode:{MASHA.code}:{email}".encode()).hex()})["status"] == "sent"
-    code = re.search(r'monospace;">([A-Z0-9]{6})<', _mails(worker)[-1]["html"]).group(1)
-    cert = json.loads(urllib.request.urlopen(f"{worker}/birth-certificate?pubkey={MASHA.pub}").read())
-    registered = _post(worker, "/register-email", {
-        "invite_code": MASHA.code, "email": email, "public_key_hex": MASHA.pub, "code": code,
-        "signature": MASHA.sign(f"register:{MASHA.code}:{email}".encode()).hex(), "birth_cert": cert})
-    if registered.get("status") != "registered":     # already, from an earlier test of the module
-        assert registered.get("status") in (None, 403), registered
+    if worker not in _VERIFIED:       # once a module: the Worker's day of codes, all from one address
+        email = "masha@example.org"
+        assert _post(worker, "/send-verification", {
+            "to": email, "invite_code": MASHA.code, "public_key_hex": MASHA.pub,
+            "signature": MASHA.sign(f"sendcode:{MASHA.code}:{email}".encode()).hex()})["status"] == "sent"
+        code = re.search(r'monospace;">([A-Z0-9]{6})<', _mails(worker)[-1]["html"]).group(1)
+        cert = json.loads(urllib.request.urlopen(f"{worker}/birth-certificate?pubkey={MASHA.pub}").read())
+        assert _post(worker, "/register-email", {
+            "invite_code": MASHA.code, "email": email, "public_key_hex": MASHA.pub, "code": code,
+            "signature": MASHA.sign(f"register:{MASHA.code}:{email}".encode()).hex(),
+            "birth_cert": cert})["status"] == "registered"
+        _VERIFIED.add(worker)
 
     def be(n):
         class Key:
@@ -230,7 +233,7 @@ def test_an_invite_the_worker_refuses_this_node_for_or_never_answers_tells_nobod
         def now(cls, tz=None):
             return datetime.now(tz) - timedelta(hours=1)
     monkeypatch.setattr(p2p, "datetime", Late)
-    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=string)))["invite"] == "refused"
+    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=string)))["invite"] == "clock"
     monkeypatch.setattr(p2p, "datetime", datetime)
     monkeypatch.setattr(p2p, "VERIFY_WORKER_URL", "http://127.0.0.1:9")     # nobody answers there
     assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=string)))["invite"] == "unreachable"
@@ -246,9 +249,95 @@ def test_the_masters_code_waits_for_the_masters_own_key_in_any_form(nodes):
     if not (MASTER_INVITE_CODE and MASTER_PUBKEY_HEX):
         pytest.skip("no master pinned")
     nodes.be(SASHA)
-    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASTER_INVITE_CODE)))
-    assert _row(nodes.dsn, "SELECT encode(key_fingerprint, 'hex') FROM friends WHERE invite_code = %s",
-                MASTER_INVITE_CODE) == (chat_wire.key_fingerprint(MASTER_PUBKEY_HEX).lower(),)
+    name = MASTER_INVITE_CODE.split("#")[0]
+    for form in (MASTER_INVITE_CODE, chat_wire.long_code(name, MASTER_PUBKEY_HEX), _another(name, MASTER_PUBKEY_HEX)):
+        _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=form)))
+        assert _row(nodes.dsn, "SELECT encode(key_fingerprint, 'hex') FROM friends WHERE invite_code = %s",
+                    MASTER_INVITE_CODE) == (chat_wire.key_fingerprint(MASTER_PUBKEY_HEX).lower(),), form
+
+
+def _another(name, pubkey):
+    """A long code with this key's 48 bits and another key's 128."""
+    real = chat_wire.long_code(name, pubkey)
+    return real[:-4] + ("0000" if not real.endswith("0000") else "1111")
+
+
+def _told(monkeypatch) -> list:
+    told = []
+
+    async def tell(code):
+        told.append(code)
+    monkeypatch.setattr(p2p, "_tell_code_added", tell)
+    return told
+
+
+def test_an_invite_the_worker_does_not_know_is_an_add_by_code_and_a_node_not_born_asks_nothing(nodes, monkeypatch):
+    told = _told(monkeypatch)
+    nodes.be(SASHA)
+    unknown = f"{chat_wire.long_code('masha', MASHA.pub)}#i-{'5a' * 16}"
+    state = SimpleNamespace(born=False)
+
+    async def born():
+        return state.born
+    monkeypatch.setattr(p2p, "_born", born)
+    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=unknown)))["invite"] == "unreachable"
+    assert told == []                                       # a key not born asks nothing, tells nobody
+    state.born = True
+    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=unknown)))["invite"] == "not_found"
+    assert told == [MASHA.code]
+
+
+def _count_pickups(monkeypatch) -> list:
+    asked, real = [], email_verify._post_worker
+    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: asked.append(path) or real(path, body))
+    return asked
+
+
+def test_the_friends_screen_asks_only_with_an_invite_open_a_born_key_and_its_share_left(nodes, monkeypatch):
+    asked = _count_pickups(monkeypatch)
+    monkeypatch.setattr(p2p, "SCREEN_PICKUP_INTERVAL_S", 60)
+    nodes.be(MASHA)
+    assert _run(p2p.pending_accepts()) == {"added": []} and asked == []      # no invite open: no share spent
+    with psycopg2.connect(nodes.dsn) as c, c.cursor() as cur:
+        cur.execute("INSERT INTO sent_invites (to_email, invite_id) VALUES ('nina@example.net', %s)",
+                    (str(uuid.UUID(int=91)),))
+
+    async def unborn():
+        return False
+    monkeypatch.setattr(p2p, "_born", unborn)
+    assert _run(p2p.pending_accepts()) == {"added": []} and asked == []      # a key not born asks nothing
+
+    async def born():
+        return True
+    monkeypatch.setattr(p2p, "_born", born)
+    monkeypatch.setattr(p2p, "_screen_pickups", deque())
+    assert _run(p2p.pending_accepts()) == {"added": []} and asked == ["/pending-accepts"]
+    assert _run(p2p.pending_accepts()) == {"added": []} and asked == ["/pending-accepts"]   # within its minute
+
+
+def test_an_invite_is_held_to_the_key_its_contact_already_waits_for(nodes):
+    string = _mailed_invite(nodes, "oleh@example.net")
+    nodes.be(SASHA)
+    # a long code under masha's short code that names another key: the contact waits for that one
+    other = _another("masha", MASHA.pub)
+    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=other)))
+    bound = _row(nodes.dsn, "SELECT key_fingerprint FROM friends WHERE invite_code = %s", MASHA.code)
+    short = MASHA.code + "#i-" + string.rsplit("#i-", 1)[1]             # the invite, its code in the short form
+    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=short)))["invite"] == "unreachable"
+    assert _row(nodes.dsn, "SELECT key_fingerprint FROM friends WHERE invite_code = %s", MASHA.code) == bound
+
+
+def test_a_new_fingerprint_drops_the_nudge_of_the_one_before(nodes):
+    nodes.be(SASHA)
+    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=chat_wire.long_code("masha", MASHA.pub))))
+    with psycopg2.connect(nodes.dsn) as c, c.cursor() as cur:
+        cur.execute("UPDATE friends SET accepted_invite_id = %s WHERE invite_code = %s",
+                    (str(uuid.UUID(int=92)), MASHA.code))
+    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))             # no fingerprint: kept
+    assert _row(nodes.dsn, "SELECT accepted_invite_id::text FROM friends WHERE invite_code = %s",
+                MASHA.code) == (str(uuid.UUID(int=92)),)
+    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=_another("masha", MASHA.pub))))   # another key's: dropped
+    assert _row(nodes.dsn, "SELECT accepted_invite_id FROM friends WHERE invite_code = %s", MASHA.code) == (None,)
 
 
 def test_ones_own_invite_is_refused_before_any_request(nodes):

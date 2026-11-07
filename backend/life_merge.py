@@ -358,13 +358,14 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
             INSERT INTO friends (username, public_key_hex, invite_code, display_name, added_at,
                                  last_seen, is_blocked, previous_public_key_hex, city, bio,
                                  avatar_cover_id, source, source_token_id, join_token_id,
-                                 favorite, last_activity_at, bound_identity, key_fingerprint)
+                                 favorite, last_activity_at, bound_identity, key_fingerprint,
+                                 accepted_invite_id)
             SELECT s.username, s.public_key_hex, s.invite_code, s.display_name, s.added_at,
                    s.last_seen, s.is_blocked, s.previous_public_key_hex, s.city, s.bio,
                    (SELECT c.id FROM covers c WHERE c.id = s.avatar_cover_id), s.source,
                    (SELECT t.id FROM invite_tokens t WHERE t.id = s.source_token_id),
                    s.join_token_id, s.favorite, s.last_activity_at, s.bound_identity,
-                   s.key_fingerprint
+                   s.key_fingerprint, s.accepted_invite_id
               FROM _S_.friends s
              WHERE NOT EXISTS (SELECT 1 FROM friends f
                                 WHERE f.previous_public_key_hex = s.public_key_hex

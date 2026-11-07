@@ -182,13 +182,33 @@ def test_a_pickup_goes_on_past_an_acceptance_that_fails(conn, monkeypatch):
 
     def take(c, accept, code, pub):
         if accept["invite_id"] == breaking:
-            raise psycopg2.errors.DiskFull("could not extend file")
+            raise psycopg2.errors.CheckViolation("a row that breaks a check")
         return real(c, accept, code, pub)
     monkeypatch.setattr(chat_wire, "take_acceptance", take)
     monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {
         "accepts": [_acceptance(who=OTHER, inviteid=breaking), _acceptance()]})
     assert email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign) == [FRIEND.code]
     assert _row(conn, "SELECT count(*) FROM sent_invites WHERE to_email = 'old@example.net'") == (0,)
+
+
+def test_a_pickup_stops_at_a_connection_that_is_gone(conn, monkeypatch):
+    def gone(c, accept, code, pub):
+        raise psycopg2.OperationalError("server closed the connection unexpectedly")
+    monkeypatch.setattr(chat_wire, "take_acceptance", gone)
+    monkeypatch.setattr(email_verify, "_post_worker", lambda path, body: {"accepts": [_acceptance()]})
+    with pytest.raises(psycopg2.OperationalError):
+        email_verify.pick_up_acceptances(conn, ME.code, ME.pub, ME.sign)
+
+
+def test_an_open_invite_is_one_this_node_sent_has_not_taken_and_is_young(conn):
+    assert email_verify.is_open_invite(conn, INVITE) is True
+    assert email_verify.is_open_invite(conn, str(uuid.UUID(int=81))) is False
+    with conn.cursor() as cur:
+        cur.execute("UPDATE sent_invites SET taken_at = now()")
+    assert email_verify.is_open_invite(conn, INVITE) is False
+    with conn.cursor() as cur:
+        cur.execute("UPDATE sent_invites SET taken_at = NULL, sent_at = now() - interval '61 days'")
+    assert email_verify.is_open_invite(conn, INVITE) is False
 
 
 # --- contacts bound to a fingerprint ---------------------------------------------

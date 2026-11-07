@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+import psycopg2
+
 from desktop.p2p import chat_wire
 
 logger = logging.getLogger(__name__)
@@ -296,12 +298,14 @@ def pick_up_acceptances(conn, invite_code: str, public_key_hex: str, sign) -> li
     added = []
     for accept in accepts[:PICKUP_PAGE]:
         # One acceptance's failure is its own: the rest of the page, and the
-        # sweep below, go on.
+        # sweep below, go on — but not past a connection that is gone.
         try:
             outcome = _in_transaction(conn, lambda: chat_wire.take_acceptance(
                 conn, accept, invite_code, public_key_hex))
-        except Exception as e:
-            logger.error("Pickup: an acceptance failed — %s: %s", type(e).__name__, e)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            raise
+        except Exception:
+            logger.exception("Pickup: an acceptance failed")
             continue
         if outcome == "added":
             added.append(accept["acceptor"]["invite_code"])

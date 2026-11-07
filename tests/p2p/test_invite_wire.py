@@ -100,10 +100,12 @@ def test_an_invite_link_keeps_its_uuid_token():
 
 
 def test_the_parse_drops_what_a_mail_client_wraps_a_string_with():
-    soft = "\u00ad".join(V["invite_string"][i:i + 9] for i in range(0, len(V["invite_string"]), 9))
-    for text in ("\ufeff" + V["invite_string"], V["invite_string"].replace("#i-", "#\u200bi-\u2060"),
-                 soft, V["invite_string"] + "\u200d"):
-        assert chat_wire.parse_share(text) == chat_wire.parse_share(V["invite_string"])
+    s = V["invite_string"]
+    soft = "\u00ad".join(s[i:i + 9] for i in range(0, len(s), 9))
+    for text in ("\ufeff" + s, s.replace("#i-", "#\u200bi-\u2060"), soft, s + "\u200d",
+                 "\u200e" + s + "\u200f", "\u202a" + s + "\u202c", "\u2066" + s + "\u2069",   # right-to-left clients
+                 "\u061c" + s, s.replace("-", "\u034f-"), s.replace("#i", "#\u2061i"), s + "\u180e"):
+        assert chat_wire.parse_share(text) == chat_wire.parse_share(s)
 
 
 @pytest.mark.parametrize("tail", ["000102030405060708090a0b0c0d0e0f",          # a token without its i-
@@ -133,6 +135,16 @@ def test_a_contact_bound_to_a_fingerprint_answers_to_its_own_key_alone():
     assert not chat_wire.binds(fingerprint, V["acceptor"]["pubkey"])
     assert chat_wire.binds(None, V["acceptor"]["pubkey"])            # a short code's contact: its code decides
     assert not chat_wire.binds(fingerprint, "zz")
+
+
+def test_a_box_names_its_uuid_in_the_dashed_form_the_database_reads():
+    at = "2026-11-07T00:00:00+00:00"
+    box = lambda u: json.dumps({"v": chat_wire.ENVELOPE_VERSION, "uuid": u, "ts": at, "text": "x", "sig": None}).encode()
+    u = uuid.uuid4()
+    assert chat_wire.open_envelope(box(str(u).upper()))["uuid"] == str(u)
+    for spelling in ("urn:uuid:" + str(u), "{%s}" % u, u.hex):
+        with pytest.raises(ValueError):
+            chat_wire.open_envelope(box(spelling))
 
 
 def test_a_message_statement_names_its_uuid_in_the_form_rows_store():
@@ -329,6 +341,90 @@ def test_a_nudge_runs_the_pickup_only_for_an_open_invite_and_answers_every_nudge
     answers, _ = asyncio.run(run([naming(OPEN)] * (ss.NUDGE_PICKUPS_PER_INVITE + 2)))
     assert answers == [(200, {"ok": True})] * (ss.NUDGE_PICKUPS_PER_INVITE + 2)
     assert len(ran) == 2 + ss.NUDGE_PICKUPS_PER_INVITE                # a few pickups an invite, whoever nudges
+
+
+def test_nudges_at_once_share_their_invites_three_pickups():
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient as AioClient, TestServer
+    from desktop.p2p import sync_server as ss
+    OPEN, ran = str(uuid.UUID(int=4)), []
+
+    async def pickup():
+        ran.append(1)
+        await asyncio.sleep(0.01)
+        return []
+
+    def slow_open(inviteid):              # the database's answer takes a while
+        time.sleep(0.01)
+        return inviteid == OPEN
+
+    async def run():
+        server = ss.SyncServer("postgresql://unused", account_info={
+            "public_key_hex": HOST.pub, "username": HOST.name, "invite_code": HOST.invite})
+        server._chat_service = _Chat([])
+        server.set_pickup(pickup)
+        server._is_open_invite = slow_open
+        app = web.Application()
+        app.router.add_post("/api/chat/invite-accepted", server.handle_invite_accepted)
+        async with AioClient(TestServer(app)) as client:
+            body = {**_signed(FRIEND), "invite_id": OPEN}
+            answers = await asyncio.gather(*[client.post("/api/chat/invite-accepted", json=body) for _ in range(20)])
+            return [a.status for a in answers]
+    assert asyncio.run(run()) == [200] * 20
+    assert len(ran) == ss.NUDGE_PICKUPS_PER_INVITE
+
+
+def _manager():
+    from desktop.p2p.p2p_manager import P2PManager
+    m = P2PManager.__new__(P2PManager)
+    m._pickup_lock, m._pickup_waiting, m._nudged_at = asyncio.Lock(), None, {}
+    return m
+
+
+def test_pickups_asked_for_at_once_join_the_one_waiting_for_its_turn():
+    runs = []
+
+    def blocking():
+        time.sleep(0.05)
+        runs.append(1)
+        return ["someone#AAAA-BBBB-CCCC"]
+
+    async def run():
+        m = _manager()
+        m._pick_up_blocking = blocking
+        m._pickup_lock = asyncio.Lock()
+        return await asyncio.gather(*[m._pick_up() for _ in range(10)])
+    assert asyncio.run(run()) == [["someone#AAAA-BBBB-CCCC"]] * 10
+    assert len(runs) <= 2                     # one running, one that every later request joined
+
+
+@pytest.mark.parametrize("status, spent, resolves", [
+    (200, True, True), (404, True, False), (403, True, False),       # a Docker inviter: no nudge route
+    (429, False, False), (503, False, False), (None, False, False)])  # busy, or no answer: armed still
+def test_a_refused_handshake_nudges_once_in_a_while_and_an_answer_spends_it(status, spent, resolves):
+    from desktop.p2p import p2p_manager as pm
+    inviteid = str(uuid.UUID(int=5))
+    friend = {"id": 7, "accepted_invite_id": inviteid, "key_fingerprint": chat_wire.key_fingerprint(FRIEND.pub),
+              "join_token_id": None}
+    sent, spents, resolved = [], [], []
+
+    async def run():
+        m = _manager()
+        m._chat_service = SimpleNamespace(nudged=lambda fid: spents.append(fid))
+        m._resolve_soon = lambda: resolved.append(1)
+
+        async def answer(ip, port, invite, body, session):
+            sent.append(body["invite_id"])
+            return status
+        m._try_nudge = answer
+        first = await m._nudge_refused(friend, "192.0.2.1", 1, FRIEND.invite, {"ts": 1}, None, FRIEND.pub)
+        again = await m._nudge_refused(friend, "192.0.2.1", 1, FRIEND.invite, {"ts": 2}, None, FRIEND.pub)
+        return first, again
+    first, again = asyncio.run(run())
+    assert first is resolves and again is False
+    assert sent == [inviteid]                                         # once in NUDGE_RETRY_S
+    assert spents == ([7] if spent else []) and resolved == ([1] if resolves else [])
+    assert pm.NUDGE_RETRY_S >= 60
 
 
 def test_a_contact_nudges_only_its_inviters_own_key_and_only_once_armed():
