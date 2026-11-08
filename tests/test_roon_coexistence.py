@@ -94,6 +94,18 @@ class FakeRoon:
     def pause(self) -> None:
         self._send("<Pause/>")
 
+    def start_before_its_play(self) -> str:
+        """Roon's start up to its Play: Stop, PlaylistClear and the add of
+        its stream (its Play follows once its Core has the stream ready)."""
+        self.n += 1
+        uri = f"http://127.0.0.1:30000/{self.n:032x}/stream.raw"
+        self._send("<Stop/>", "<PlaylistClear/>", f'<PlaylistAdd uri="{uri}" queued="0" clear="0"/>')
+        return uri
+
+    def play_again(self) -> None:
+        """Roon's Play sent again on an entry HQPlayer refused: 4–5 a second
+        until its zone is stopped (ROON-COEX §10.1, A8: 200 Plays in 53 s)."""
+        self._send("<Play/>")
 
     def resume(self) -> None:
         self._send("<Play/>")
@@ -964,6 +976,43 @@ def test_the_takeover_rule_case_by_case(fake, case, spot):
     held = b._spot_at()
     assert held == spot
 
+@pytest.mark.parametrize("case, spot", [
+    ("edited_after_the_take_moved", (2, 30)),    # Roon's Play refused again and again: the take moved, nothing plays
+    ("edited_before_the_take_moved", None),      # its Clear and Add read before its Play: no start yet — held, waiting
+    ("edited_after_our_stop", None),             # a Stop of ours after the reading ended the listen
+    ("edited_in_the_last_seconds", None),        # read in its last seconds: HQPlayer's own advance, near enough
+    ("edited_hqp5_no_take", (2, 30)),            # HQPlayer 5 names no take: the edit is the verdict
+])
+def test_f7_an_edit_under_the_listen_judges_it_whatever_hqplayer_plays_of_it(fake, case, spot):
+    """F7 (ROON-COEX §10.2, A8): another controller took HQPlayer from the
+    node's listen and HQPlayer refused its start — stopped on its entry, the
+    take moving at every Play it sent again. The tick whose playlist the
+    canary read as not the node's (`edited`) judges the listen as the first
+    tick of the other controller's entry does: the spot at the listen's slot
+    and second; and while nothing of ours plays the tracker holds that
+    listen (_listen_held)."""
+    q = CanonicalQueue()
+    q.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in (1, 2, 3)])
+    b = hb.HqpBackend(emit=lambda *_: None, queue=q)
+    serial = None if case == "edited_hqp5_no_take" else 5
+    position = 297.0 if case == "edited_in_the_last_seconds" else 30.0
+    b._note_listen(_st(PlaybackState.PLAYING, 2, position, uri="file:///E:/Music/A/02.flac", serial=serial),
+                   (2, q.item_at(2), False), position, 1.0, 0.0)
+    if case == "edited_after_our_stop":
+        b._stopped_at = 1.5
+    later = None if serial is None else (5 if case == "edited_before_the_take_moved" else 47)
+    stopped = _st(PlaybackState.STOPPED, 1, 0.0, uri="http://127.0.0.1:30000/1/stream.raw", serial=later)
+    b._note_listen(stopped, (0, None, False), 0.0, 2.0, 1.0, edited=True)
+    assert b._spot_at() == spot
+    held = b._listen_held(stopped, b._playing(stopped) or (0, None, False))
+    assert held is (spot is not None or case == "edited_before_the_take_moved")
+    # HQPlayer playing an entry of ours again ends the hold
+    b._note_listen(_st(PlaybackState.PLAYING, 3, 1.0, uri="file:///E:/Music/A/03.flac", serial=48),
+                   (3, q.item_at(3), False), 1.0, 3.0, 2.0)
+    playing = _st(PlaybackState.PLAYING, 3, 2.0, uri="file:///E:/Music/A/03.flac", serial=48)
+    assert not b._listen_held(playing, (3, q.item_at(3), False))
+
+
 # -- the renderer: Roon past UPnP -------------------------------------------------
 
 @pytest.fixture(params=["stopped", "playing"])
@@ -1480,6 +1529,45 @@ def test_f6_a_takeover_then_another_track_closes_the_held_listen_at_its_own_seco
         roon.close()
 
 
+def test_f7_a_takeover_whose_start_hqplayer_refuses_leaves_the_spot_and_holds_the_listen(fake, listens,
+                                                                                          monkeypatch):
+    """F7 (ROON-COEX §10.2, A8): Roon takes HQPlayer from the node's listen
+    with a track its output family refuses — HQPlayer stops at once, Roon
+    sends Play again and again, nothing of its plays. The spot is the
+    node's all the same: Now Playing names slot 2 stopped at its second, the
+    node sends nothing and writes no listen; then its Play takes HQPlayer
+    back there and the listen goes on as one."""
+    writes, lastfm = listens
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        at = mgr._latest_status.get("position")
+        n = _mark(fake, roon)
+        roon.play_track()
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        _wait(lambda: mgr._latest_status.get("resume") is not None, timeout=10)
+        st = mgr._latest_status
+        _observed("F7", at=at, node_commands=_node_commands(fake, n, roon), rows=len(_rows(writes)),
+                  status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume")})
+        assert (st["state"], st["track_index"], st["resume"]["index"]) == ("stopped", 2, 2)
+        assert abs(st["resume"]["position"] - at) <= 2
+        assert _node_commands(fake, n, roon) == []
+        assert _rows(writes) == [] and tracker._play_session is not None
+        fake.refuse_play.clear()
+        _takes_back(fake, mgr, b, roon, "F7", interrupted_at=(2, at))
+        assert b.stop()
+        _wait(lambda: _rows(writes), timeout=10)
+        assert [p["tid"] for p in _rows(writes)] == [_slot_track(b, 2)]
+        assert lastfm.count("update_now_playing") == 1
+    finally:
+        b.shutdown()
+        roon.close()
+
+
 def test_f6_on_a_renderer_a_takeover_taken_back_is_one_listen(tmp_path, proxy, renderers, manager, heard,
                                                               quality):
     """F6 on a renderer: another controller's URI takes it from the node's
@@ -1505,3 +1593,33 @@ def test_f6_on_a_renderer_a_takeover_taken_back_is_one_listen(tmp_path, proxy, r
     _observed("F6-renderer", listened=listened, lastfm=lastfm)
     assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"]
     assert lastfm.count(("update_now_playing", "Track 1")) == 1
+
+
+@pytest.mark.xfail(strict=True, reason="ROON-COEX §6.1 P1, for the design session: a reconnect inside Roon's cycle "
+                                       "reads its playlist as a restart and takes the queue afresh over it")
+def test_p1_a_reconnect_inside_roons_cycle_sends_its_playlist_nothing(fake, listens, monkeypatch):
+    """P1 (the heavy A1's question, ROON-COEX §6.1): Roon's start stands
+    between its add and its Play while HQPlayer answers nothing past the
+    node's client timeout (a heavy engine's Stop). The node reconnects and
+    reads a stopped HQPlayer holding Roon's stream: that is another
+    controller's playlist, not a restart — the node sends it nothing, and
+    Roon's Play plays Roon's stream (option (a))."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        n = _mark(fake, roon)
+        uri = roon.start_before_its_play()
+        fake.silence(6.0)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=30)
+        roon.play_again()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
+        _observed("P1", node_commands=_node_commands(fake, n, roon), playlist=fake.playlist[:3],
+                  hqplayer=(fake.state, fake.track))
+        assert _node_commands(fake, n, roon) == []
+        assert fake.playlist == [uri] and fake.state == PLAYING
+    finally:
+        b.shutdown()
+        roon.close()
