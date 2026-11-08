@@ -721,7 +721,7 @@ class World:
             self.removed_heads[uri] = head
 
     def dsp(self) -> None:
-        hb.change_dsp(self.rng.choice([{"filter": 57, "filter1x": 57}, {"shaper": 2},
+        hb.change_dsp(self.rng.choice([{"filter": "f57", "filter1x": "f57"}, {"shaper": "s2"},
                                        {"filter": 12, "filter1x": 12, "shaper": 3}]))
 
     def switch(self) -> None:
@@ -736,7 +736,7 @@ class World:
         changed while it does: what is left of the change is not sent."""
         self.build("SetFilter")
         try:
-            hb.change_dsp({"filter": 12, "filter1x": 12, "shaper": 3})
+            hb.change_dsp({"filter": "f12", "filter1x": "f12", "shaper": "s3"})
         finally:
             time.sleep(self.rng.uniform(0.0, 0.4))
             self.switch()
@@ -1475,7 +1475,7 @@ def test_the_rest_waits_until_hqplayer_answered_a_build_it_did_not_finish(
         _lost_for_good(world)
         link = world.mgr.active._link
         fake.build("SetFilter", 1.5, answer="last")
-        threading.Thread(target=lambda: hb.change_dsp({"filter": 57, "filter1x": 57}),
+        threading.Thread(target=lambda: hb.change_dsp({"filter": "f57", "filter1x": "f57"}),
                          daemon=True).start()
         assert _wait(lambda: (link.build.state or {}).get("unfinished"), timeout=5)
         fake.service["Status"] = 0.15           # heard a little after the silence
@@ -1542,7 +1542,7 @@ def test_a_link_closed_while_hqplayer_built_is_nobodys(fake, fake_b, listens, mo
         a = world.mgr.active._link
         world.settings_router.put_output_prefs(world.settings_router.OutputPrefs(type="browser"))
         fake.build("SetFilter", 1.5, answer="last")
-        threading.Thread(target=lambda: hb.change_dsp({"filter": 57, "filter1x": 57}),
+        threading.Thread(target=lambda: hb.change_dsp({"filter": "f57", "filter1x": "f57"}),
                          daemon=True).start()
         assert _wait(lambda: a.build.building() is not None, timeout=3)
         world.pick(fake_b)

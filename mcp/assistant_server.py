@@ -1165,7 +1165,7 @@ def hqplayer_set_filter(filter_name: str) -> str:
         # watched there — with both slots, as the HQPlayer screen sends it: a
         # 44.1/48 kHz source plays through the 1x slot
         outcome = _backend_post("/api/hqplayer/config",
-                                {"filter": match["index"], "filter1x": match["index"]})
+                                {"filter": match["name"], "filter1x": match["name"]})
         desc = match.get("description", "")
         return aq.hqp_change_text(outcome, f"the filter {match['name']}",
                                   f"Filter set to: {match['name']}" + (f" — {desc}" if desc else ""))
@@ -1189,7 +1189,7 @@ def hqplayer_set_shaper(shaper_name: str) -> str:
                                   key=lambda s: s["name"])
         if match is None:
             return said
-        outcome = _backend_post("/api/hqplayer/config", {"shaper": match["index"]})
+        outcome = _backend_post("/api/hqplayer/config", {"shaper": match["name"]})
         return aq.hqp_change_text(outcome, f"the dither/shaper {match['name']}",
                                   f"Dither/shaper set to: {match['name']}")
     except Exception as e:

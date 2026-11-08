@@ -1340,8 +1340,10 @@ class HQPlayerClient:
                 "mode": int(response.get("mode", 0)),
                 "filter": int(response.get("filter", 0)),
                 "filter1x": int(response.get("filter1x", -1)),
-                # The Nx slot SetFilter's `value` sets; `filter` read as the
-                # 1x slot while a 44.1 kHz source played (Desktop 6.2.3)
+                # The Nx slot SetFilter's `value` sets, reported at once after
+                # its answer; `filter` is the filter the engine runs — the 1x
+                # slot while a 44.1 kHz source plays (Desktop 6.2.3) — and
+                # moves to a pick only once the engine swapped to it (6.3.1)
                 "filterNx": int(response.get("filterNx", response.get("filter", 0))),
                 "shaper": int(response.get("shaper", 0)),
                 "rate": int(response.get("rate", 0)),

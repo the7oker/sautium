@@ -79,8 +79,11 @@ def change_dsp(knobs: Dict[str, Any]) -> Dict[str, Any]:
     the same connection until HQPlayer answers: a build ends there —
     HQPlayer answers a Set* before it builds and falls silent on the command
     after it, or holds the Set*'s own answer — and the next knob goes only
-    then. A refused knob is reported in HQPlayer's words and the rest still
-    go; a held Status HQPlayer did not answer — a build it did not finish, a
+    then. A filter (`filter`, `filter1x`) and a shaper are given by name and
+    sent as the index HQPlayer's list gives that name right before its Set*
+    (_DspChange._knob): a name it does not list now is refused in words and
+    nothing is sent for it. A refused knob is reported in HQPlayer's words
+    and the rest still go; a held Status HQPlayer did not answer — a build it did not finish, a
     connection that broke — an output lent meanwhile, and a newer intent that
     supersedes the rest of the change (another DSP change, a switch away:
     SUPERSEDED_BY) end the change there, the knobs after it reported as not
@@ -98,6 +101,10 @@ def change_dsp(knobs: Dict[str, Any]) -> Dict[str, Any]:
     while it answers nothing past a short silence."""
     return _DspChange(hqp_link.selected(),
                       {k: v for k, v in knobs.items() if v is not None}).answer()
+
+
+# The knobs a change names, with the list each name is read from
+_NAMED = {"filter": ("filters", "get_filters"), "shaper": ("shapers", "get_shapers")}
 
 
 class _DspChange:
@@ -155,11 +162,15 @@ class _DspChange:
                 hqp = link.client
                 self.spot = self._spot_of(hqp.get_status())
                 try:
-                    for knob, taken, refusal in hqp.set_knobs(self.knobs):
-                        if taken is None:
-                            self.failed[knob] = refusal
-                        else:
-                            self.applied.update(taken)
+                    for knob in DSP_KNOBS:
+                        one = self._knob(hqp, knob)
+                        if one is None:
+                            continue
+                        for knob, taken, refusal in hqp.set_knobs(one):
+                            if taken is None:
+                                self.failed[knob] = refusal
+                            else:
+                                self.applied.update(taken)
                         status = hqp.get_status(wait=hqp_link.BUILD_LIMIT_S, watched=True)
                         why = (UNFINISHED if status is None and hqp.timed_out
                                else f"HQPlayer did not answer ({hqp.refusal()})" if status is None
@@ -190,6 +201,36 @@ class _DspChange:
             backend._rate_event("state", "again")   # the held rate check reads the new setting
         if self.spot is not None and status is not None and status.state == PlaybackState.STOPPED:
             self._resume(*self.spot)
+
+    def _knob(self, hqp: HQPlayerClient, knob: str) -> Optional[Dict[str, Any]]:
+        """The Set* `knob` asks for, its value as HQPlayer takes it — or None
+        when the change does not name it, or names what HQPlayer does not
+        list now (recorded in `failed`). A filter (with its 1x slot) and a
+        shaper are named, and their index is HQPlayer's list read here, in
+        the change's own sequence, after the knobs before them: an index is
+        a place in the list of the mode HQPlayer is in, and the list moves —
+        PCM and SDM number the same filter differently, and HQPlayer 6.2's
+        aclean filters moved 21 others by three. An index the screen read
+        when it was drawn named another filter by the time it was sent."""
+        if knob not in self.knobs:
+            return None
+        names = _NAMED.get(knob)
+        if names is None:
+            return {knob: self.knobs[knob]}
+        rows = getattr(hqp, names[1])()
+        if rows is None:
+            self.failed[knob] = f"HQPlayer did not list its {names[0]} ({hqp.refusal()})"
+            return None
+        index = {r["name"]: r["index"] for r in rows}
+        one = {}
+        for k in (knob, "filter1x") if knob == "filter" else (knob,):
+            if k not in self.knobs:
+                continue
+            if self.knobs[k] not in index:
+                self.failed[knob] = f"HQPlayer does not list {self.knobs[k]} now"
+                return None
+            one[k] = index[self.knobs[k]]
+        return one
 
     def _spot_of(self, status) -> Optional[tuple]:
         """What HQPlayer plays as the change begins, read in its command

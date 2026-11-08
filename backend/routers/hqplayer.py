@@ -74,9 +74,13 @@ def _save_favorites(favs: List[str]) -> None:
 # -- Request models -----------------------------------------------------------
 
 class ConfigRequest(BaseModel):
-    filter: Optional[int] = None        # filter index from get_filters()
-    filter1x: Optional[int] = None      # PCM 1x filter; paired with `filter`
-    shaper: Optional[int] = None
+    # A filter and a shaper by the name HQPlayer lists them under: the DSP
+    # change sends the index its list gives the name at that moment
+    # (hqp_backend._DspChange._knob) — an index read when the screen was
+    # drawn may name another filter by the time it is sent
+    filter: Optional[str] = Field(None, max_length=128)
+    filter1x: Optional[str] = Field(None, max_length=128)     # the 1x slot; paired with `filter`
+    shaper: Optional[str] = Field(None, max_length=128)
     mode: Optional[int] = None
     rate: Optional[int] = None
     matrix_profile: Optional[str] = None

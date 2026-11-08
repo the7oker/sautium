@@ -459,7 +459,7 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
         # Both slots, as the HQPlayer screen sends it: a 44.1/48 kHz source
         # plays through the 1x slot
         from playback.hqp_backend import change_dsp
-        outcome = change_dsp({"filter": match["index"], "filter1x": match["index"]})
+        outcome = change_dsp({"filter": match["name"], "filter1x": match["name"]})
         desc = match.get("description", "")
         return aq.hqp_change_text(outcome, f"the filter {match['name']}",
                                   f"Filter set to: {match['name']}" + (f" — {desc}" if desc else ""))
@@ -476,7 +476,7 @@ def _h_hqplayer_set_shaper(shaper_name: str) -> str:
         if match is None:
             return said
         from playback.hqp_backend import change_dsp
-        outcome = change_dsp({"shaper": match["index"]})
+        outcome = change_dsp({"shaper": match["name"]})
         return aq.hqp_change_text(outcome, f"the dither/shaper {match['name']}",
                                   f"Dither/shaper set to: {match['name']}")
     except Exception as e:

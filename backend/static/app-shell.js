@@ -8785,6 +8785,22 @@
     return r ? fmtRateLabel(r.rate) : '—';
   }
 
+  // The filter HQPlayer is set to, by its own State: the Nx slot a pick sets
+  // (`filterNx`). State's `filter` is the one its engine runs, and it moves
+  // to a pick only once the engine has swapped to it — half a second after
+  // the answer in PCM on Desktop 6.3.1, past the rebuild in SDM — so the
+  // screen's read right after a pick named the old filter, and the person
+  // picked again: a second build, heard (B-60).
+  function hqpFilterSet(st, filters) {
+    return (filters || []).find(f => f.index === st.filterNx) || null;
+  }
+
+  // A pick of the filter both slots hold already changes nothing: sent, it
+  // would only make HQPlayer build the same filter again.
+  function hqpFilterHeld(st, row) {
+    return row.index === st.filterNx && st.filter1x === st.filterNx;
+  }
+
   function filterNameFromIndex(idx, filters) {
     if (!filters) return '—';
     const f = filters.find(x => x.index === idx);
@@ -9611,8 +9627,8 @@
       const st = s.state || {};
       const modeName = modeNameFromState(st, s.modes);
       const rateName = rateNameFromState(st, s.rates);
-      const filterName = filterNameFromIndex(st.filter, s.filters);
-      const activeFilter = (s.filters || []).find(f => f.index === st.filter);
+      const activeFilter = hqpFilterSet(st, s.filters);
+      const filterName = activeFilter ? activeFilter.name : '—';
       // The Filter row's facts: none for a filter HQPlayer does not describe
       // (HQPlayer 5) while the node holds no atlas
       const activeFacts = activeFilter ? hqpFactsHtml(activeFilter.facts, { twin: false }) : '';
@@ -9733,8 +9749,8 @@
         rate: { title: 'Rate', current: st.rate, list: 'rates',
                 options: (s.rates || []).map(r => ({ id: r.index, label: r.rate ? fmtRateLabel(r.rate) : 'Auto',
                                                      meta: r.rate ? hqpHeadroomMark((hr.rates || {})[String(r.rate)]) : '' })) },
-        shaper: { title: shaperLabel, current: st.shaper, list: 'shapers',
-                  options: (s.shapers || []).map(sh => ({ id: sh.index, label: sh.name,
+        shaper: { title: shaperLabel, current: shaperName, list: 'shapers',
+                  options: (s.shapers || []).map(sh => ({ id: sh.name, label: sh.name,
                                                           meta: hqpHeadroomMark((hr.shapers || {})[sh.name]) })) },
         matrix_profile: { title: 'Matrix profile', current: matrixActive, list: 'matrix_profiles',
                           options: profiles.map(p => ({ id: p, label: p })) },
@@ -9906,7 +9922,7 @@
             // HQPlayer would build the same setting anew
             if (chosen.index === st.shaper) return;
             serialized('hqp.config', async () => {
-              await postHqpConfig({shaper: chosen.index});
+              await postHqpConfig({shaper: chosen.name});
               await load();
             });
           });
@@ -9919,7 +9935,8 @@
           const picked = await openSettingsPicker({ title: k.title, options: k.options, currentId: k.current });
           if (picked == null || picked === String(k.current)) return;
           const payload = {};
-          payload[knob] = (knob === 'matrix_profile') ? picked : parseInt(picked, 10);
+          // A shaper by name, as a filter: its index is read when it is sent
+          payload[knob] = (knob === 'matrix_profile' || knob === 'shaper') ? picked : parseInt(picked, 10);
           serialized('hqp.config', async () => {
             await postHqpConfig(payload);
             // Reload to reconcile (server-side change may cascade —
@@ -9933,9 +9950,9 @@
         btn.addEventListener('click', () => {
           const name = btn.dataset.fav;
           const filt = (s.filters || []).find(f => f.name === name);
-          if (!filt) return;
+          if (!filt || hqpFilterHeld(st, filt)) return;
           serialized('hqp.config', async () => {
-            await postHqpConfig({filter: filt.index, filter1x: filt.index});
+            await postHqpConfig({filter: name, filter1x: name});
             await load();
           });
         });
@@ -9993,10 +10010,13 @@
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', (e) => {
         if (e.detail > 1) return;        // the second click of a double-click
-        openHqpSheet(s, 'filter', (chosen) => serialized('hqp.config', async () => {
-          await postHqpConfig({filter: chosen.index, filter1x: chosen.index});
-          await load();
-        }));
+        openHqpSheet(s, 'filter', (chosen) => {
+          if (hqpFilterHeld(st, chosen)) return;
+          serialized('hqp.config', async () => {
+            await postHqpConfig({filter: chosen.name, filter1x: chosen.name});
+            await load();
+          });
+        });
       });
 
       const benchActions = {
@@ -10066,7 +10086,7 @@
     const entries = (filter ? state.filters : state.shapers) || [];
     const favs = new Set(filter ? state.favorite_filters || [] : []);
     const st = state.state || {};
-    const currentIdx = (filter ? st.filter : st.shaper) ?? -1;
+    const currentIdx = (filter ? st.filterNx : st.shaper) ?? -1;
     const measured = (state.headroom && state.headroom[filter ? 'filters' : 'shapers']) || {};
     const head = (state.atlas && state.atlas[filter ? 'filters' : 'modulators']) || [];
     const family = filter ? filterFamily : modulatorFamily;

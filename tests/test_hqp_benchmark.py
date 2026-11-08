@@ -1273,7 +1273,8 @@ def test_a_put_back_owed_gives_way_to_the_owners_newer_change(run, monkeypatch, 
     assert run.q("SELECT finished_at IS NULL FROM hqp_benchmark_runs") == [(True,)]
     fake.come_back()                    # the run's last selection, its lowered volume
     assert _wait(lambda: (mgr.active.poke(), asked.is_set())[1], 20)
-    out = hb.change_dsp({"filter": 0, "filter1x": 0, "shaper": 1})    # the owner's
+    out = hb.change_dsp({"filter": "poly-sinc-gauss-long", "filter1x": "poly-sinc-gauss-long",
+                         "shaper": "ASDM7EC-super"})    # the owner's
     assert out["ok"], out
     owners = fake.settings()
     go.set()                                         # the put-back may go now
@@ -1361,7 +1362,7 @@ def test_a_put_back_a_person_superseded_leaves_one_notice_of_what_the_run_left(r
     keeps while HQPlayer is in SDM included."""
     fake, mgr = run.fake, run.mgr
     run_id = _owed_pcm_run(run)
-    out = hb.change_dsp({"filter": 1, "filter1x": 1})          # the owner's, first
+    out = hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})          # the owner's, first
     assert out["ok"], out
     bench.recover(run.endpoint_id, hl.selected())               # HQPlayer answers
     assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL, left_at IS NOT NULL "
@@ -1382,7 +1383,7 @@ def test_a_put_back_a_person_superseded_leaves_one_notice_of_what_the_run_left(r
     # PCM keeps the run's rate and shaper — HQPlayer keeps one selection per mode
     elsewhere = {"what": "elsewhere", "mode": "PCM", "knobs": ["rate", "shaper"]}
     assert _wait(lambda: notice() == {"elsewhere": elsewhere}, 10), notice()
-    assert hb.change_dsp({"mode": 1, "rate": 2, "shaper": 1})["ok"]     # theirs in PCM again...
+    assert hb.change_dsp({"mode": 1, "rate": 2, "shaper": "LNS15"})["ok"]     # theirs in PCM again...
     assert _wait(lambda: set(notice()) == {"mode"}, 10), notice()
     assert hb.change_dsp({"mode": 2})["ok"]                     # ...and SDM
     assert _wait(lambda: (mgr.active.poke(), run.q(
@@ -1459,7 +1460,7 @@ def test_a_new_run_ends_the_notice_of_one_left_to_the_owner(run):
     HQPlayer holds as theirs."""
     mgr = run.mgr
     run_id = _owed_pcm_run(run)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]       # the owner's, first
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]       # the owner's, first
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: (mgr.active.poke(), _run_left())[1] is not None, 10)
     bench.start(fixed_volume_ok=True)                   # their volume is the range's bottom now
@@ -1694,7 +1695,7 @@ def test_a_dsp_change_leaves_an_owed_put_back_to_the_owner_for_good(run, monkeyp
     answering puts nothing back over their change."""
     fake = run.fake
     run_id = _owed_pcm_run(run)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]     # the owner's
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]     # the owner's
     assert _closed_as_left(run, run_id)
     monkeypatch.setattr(bench, "_owed", {})                 # a restart
     _fresh_links()
@@ -1715,7 +1716,7 @@ def test_a_dsp_change_the_database_cannot_record_goes_all_the_same(run, monkeypa
     def refusing(sql, params=None):
         raise psycopg2.OperationalError("the database is away")
     monkeypatch.setattr(bench, "db_query", refusing)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]
     monkeypatch.setattr(bench, "db_query", read)
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: _closed_as_left(run, run_id))
@@ -1799,7 +1800,7 @@ def test_a_notice_write_the_database_refuses_costs_the_notice_never_the_poll(run
     import psycopg2
     fake, mgr = run.fake, run.mgr
     run_id = _owed_pcm_run(run)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: (mgr.active.poke(), _run_left())[1] is not None, 10)
     write = bench.db_execute
@@ -1834,7 +1835,7 @@ def test_a_left_run_the_database_did_not_give_is_asked_again(run, monkeypatch):
     never taken for "none" for the life of the process."""
     import psycopg2
     run_id = _owed_pcm_run(run)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: _closed_as_left(run, run_id))
     monkeypatch.setattr(bench, "_left", {})                 # not read yet
@@ -1854,7 +1855,7 @@ def test_a_run_that_never_opened_its_row_leaves_the_notice_standing(run, monkeyp
     and the notice stands."""
     mgr = run.mgr
     run_id = _owed_pcm_run(run)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: (mgr.active.poke(), _run_left())[1] is not None, 10)
 
@@ -1876,7 +1877,7 @@ def test_the_notice_of_a_run_left_stands_on_its_row(run, monkeypatch):
     back, to be toasted again."""
     fake, mgr = run.fake, run.mgr
     run_id = _owed_pcm_run(run)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == _LEFT_IN_PCM, 10)
     since = _run_left()["since"]
@@ -2005,7 +2006,7 @@ def test_a_notify_the_database_refuses_costs_the_notice_never_the_poll(run, monk
         return register(silent=silent)
     monkeypatch.setattr(mgr.active, "_register_failure", counting)
     run_id = _owed_pcm_run(run)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: _closed_as_left(run, run_id))
     assert _wait(lambda: (mgr.active.poke(), refused.is_set())[1], 10)
@@ -2027,7 +2028,7 @@ def test_a_list_hqplayer_did_not_give_is_read_again(run, monkeypatch):
         return dispatch(cmd, attrs)
     monkeypatch.setattr(fake, "_dispatch", rates_refused)
     run_id = _owed_pcm_run(run)
-    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    assert hb.change_dsp({"filter": "sinc-L", "filter1x": "sinc-L"})["ok"]
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: _closed_as_left(run, run_id))
     assert _wait(lambda: (mgr.active.poke(), _run_left_items().get("rate"))[1]
@@ -2119,7 +2120,7 @@ def test_a_put_back_that_went_is_never_recorded_as_left(run, monkeypatch):
     assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0)
     out = {}
     changing = threading.Thread(target=lambda: out.update(hb.change_dsp(
-        {"filter": 1, "filter1x": 1})))                 # the owner's, after it
+        {"filter": "sinc-L", "filter1x": "sinc-L"})))                 # the owner's, after it
     changing.start()
     lock = hl.selected().lock
     assert _wait(lambda: len(lock._waiting) > 0 or asked.is_set(), 5)

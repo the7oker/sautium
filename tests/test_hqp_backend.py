@@ -49,6 +49,8 @@ _QUESTIONS = frozenset({"Status", "State", "GetInfo", "PlaylistGet", "VolumeRang
                         "GetFilters", "GetShapers", "GetRates", "MatrixListProfiles",
                         "MatrixGetProfile"})
 _ATTR_RE = re.compile(r'([\w:]+)="([^"]*)"')
+# The lists the fake gives by default: f0…f79 and s0…s79, each at its index
+_NAMED_LISTS = {"GetFilters": ("FiltersItem", "f"), "GetShapers": ("ShapersItem", "s")}
 
 
 class _ReusableServer(socketserver.ThreadingTCPServer):
@@ -133,6 +135,17 @@ class FakeHqp:
         # it names none (hqplayerd's log: `song='Roon' uri=''`, 2024-11-24).
         # Guessed for Desktop 6.1.1 until a live run records it.
         self.raw_streams = "uri"
+        # Its filter list when set (GetFilters): names in HQPlayer's order,
+        # each at the index of its place — a list that moves when names are
+        # inserted. And the selection State reports with it: the slots
+        # SetFilter sets, reported at once (filterNx, filter1x), and
+        # `filter`, the one its engine runs, which follows the Nx slot only
+        # `swap_s` after the answer or the build's end (Desktop 6.3.1, the
+        # lab trace of 2026-11-08: B-60)
+        self.filter_names = None
+        self.slots = {"nx": 0, "x1": 0, "running": 0}
+        self.swap_s = 0.5
+        self._swap = None
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -286,6 +299,8 @@ class FakeHqp:
 
     def silence(self, seconds: float) -> None:
         self._silent_until = time.monotonic() + seconds
+        if self._swap is not None:      # its engine swaps once the build is done
+            self._swap = (max(self._swap[0], self._silent_until + self.swap_s), self._swap[1])
         now = time.time()
         self.silences.append((now, now + seconds))
 
@@ -340,6 +355,23 @@ class FakeHqp:
             uri = uri.replace("[", "%5B").replace("]", "%5D")
         return escape(uri, {'"': "&quot;"})
 
+    def _selection(self, cmd: str, attrs: dict) -> str:
+        """GetFilters, SetFilter and State over `filter_names`. Under the lock."""
+        if cmd == "GetFilters":
+            return "<GetFilters>" + "".join(
+                f'<FiltersItem index="{i}" name="{escape(n)}" value="{100 + i}" arg="0"/>'
+                for i, n in enumerate(self.filter_names)) + "</GetFilters>"
+        if cmd == "SetFilter":
+            nx = int(attrs["value"])
+            self.slots.update(nx=nx, x1=int(attrs.get("value1x", nx)))
+            self._swap = (time.monotonic() + self.swap_s, nx)
+            return '<SetFilter result="OK"/>'
+        if self._swap is not None and time.monotonic() >= self._swap[0]:
+            self.slots["running"], self._swap = self._swap[1], None
+        sl = self.slots
+        return (f'<State mode="1" filter="{sl["running"]}" filter1x="{sl["x1"]}" filterNx="{sl["nx"]}" '
+                f'shaper="0" rate="0" volume="-3"/>')
+
     def _end_of_track(self) -> None:
         """The entry it plays ran out: its own Next — track_serial one more,
         stopped on no entry (track 0) for `advance_polls` status reads, then
@@ -387,6 +419,14 @@ class FakeHqp:
             self.commands.append((cmd, attrs))
             if cmd in self.replies:
                 return self.replies[cmd]
+            if self.filter_names is not None and cmd in ("GetFilters", "SetFilter", "State"):
+                return self._selection(cmd, attrs)
+            if cmd in _NAMED_LISTS:
+                # Every index a test sends, named: a DSP change names the
+                # filter and the shaper, and sends the index listed for it
+                item, prefix = _NAMED_LISTS[cmd]
+                return (f"<{cmd}>" + "".join(f'<{item} index="{i}" name="{prefix}{i}" value="{i}" arg="0"/>'
+                                             for i in range(80)) + f"</{cmd}>")
             if cmd == "Status":
                 opening = self.state == int(PlaybackState.PLAYING) and self.opening > 0
                 if self._cuda is not None:
@@ -3511,7 +3551,7 @@ def test_a_dsp_changes_resume_hqplayer_refuses_at_once_is_under_way_no_more_from
     with fake._lock:
         serial = fake.track_serial
     fake.refuse_play.add("A/01.flac")
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     assert _wait(lambda: any(c == "SelectTrack" for c, _ in fake.commands) and fake.track_serial > serial
                  and fake.state == int(PlaybackState.STOPPED), 10.0)
     att = b._attempt
@@ -3623,7 +3663,7 @@ def test_a_dsp_change_during_the_start_ends_it_and_its_build_says_no_start(fake,
     assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
     fake.build("SetFilter", 2.0)                        # answered, then silent (6.2.4)
     n = len(starting)
-    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
     assert _wait(lambda: mgr._latest_status.get("building") is not None, 5.0)
     assert _wait(lambda: "building" not in mgr._latest_status, 10.0)
     during = [s for s, x in zip(starting[n:], buildings[n:]) if x is not None]
@@ -4771,6 +4811,7 @@ def test_the_hqplayer_screen_is_told_which_lists_hqplayer_did_not_give(fake, mon
     monkeypatch.setattr(hqp_router, "_load_favorites", lambda: [])
     fake.replies["GetModes"] = ('<GetModes><ModesItem index="0" name="[source]" value="-1"/>'
                                 '</GetModes>')
+    fake.replies["GetFilters"] = '<GetFilters result="OK"/>'
     fake.replies["GetShapers"] = '<GetShapers result="Error"/>'
     fake.replies["MatrixListProfiles"] = None
     s = hqp_router.get_state()
@@ -5116,7 +5157,7 @@ def test_a_queue_hqplayer_cannot_play_in_part_is_said_once_while_a_track_that_ca
     # an Any filter through the screen's change: gone at the next tick
     fake.replies["State"] = _RATE_PCM[0].replace('filter="5" filter1x="5" filterNx="5"',
                                                  'filter="8" filter1x="8" filterNx="8"')
-    hb.change_dsp({"filter": 8, "filter1x": 8})
+    hb.change_dsp({"filter": "demo-gauss-x", "filter1x": "demo-gauss-x"})
     assert _wait(lambda: b.rate_notice() is None, 5.0)
 
 
@@ -5212,7 +5253,7 @@ def test_a_list_hqplayer_refuses_is_asked_again_only_after_an_event_that_can_cha
     fake.replies["State"] = _RATE_PCM[0].replace('filter="5" filter1x="5" filterNx="5"',
                                                  'filter="8" filter1x="8" filterNx="8"')
     mark = len(fake.arrivals)
-    hb.change_dsp({"filter": 8, "filter1x": 8})
+    hb.change_dsp({"filter": "demo-gauss-x", "filter1x": "demo-gauss-x"})
     assert _wait(lambda: rates(mark) == 1, 8.0)
     assert _wait(lambda: not b._rate_refused and b._rate_check is not None and not b._rate_check.groups, 5.0)
 
@@ -5305,7 +5346,7 @@ def test_a_card_while_hqplayer_builds_or_is_lent_is_busy(fake, output, monkeypat
     mgr, b = output
     hqp_router = _atlas_screen(monkeypatch, fake, tmp_path)
     fake.build("SetFilter", 2.0)
-    assert hb.change_dsp({"filter": 5, "filter1x": 5})["building"] is not None
+    assert hb.change_dsp({"filter": "demo-sinc-a", "filter1x": "demo-sinc-a"})["building"] is not None
     with pytest.raises(HTTPException) as e:
         hqp_router.get_facts("filter", "demo-sinc-a")
     assert e.value.status_code == 409 and "building the filter" in e.value.detail
@@ -6303,7 +6344,7 @@ def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_i
     buildings = _seen(mgr, "building")
     fake.build("SetFilter", 2.0)                     # answered, then silent (6.2.4)
     t0 = time.monotonic()
-    out = hb.change_dsp({"filter": 57, "filter1x": 57})
+    out = hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     assert time.monotonic() - t0 < 1.5               # at once, not after the build
     assert out["building"] is not None and out["ok"] is None
     assert out["applied"] == {"filter": 57, "filter1x": 57} and out["pending"] == []
@@ -6325,7 +6366,7 @@ def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_i
 def test_a_change_silent_itself_resumes_the_spot_when_hqplayer_comes_back_stopped(fake, output):
     mgr, b = output
     fake.build("SetFilter", 2.0, answer="last", stops=True)     # 6.2.3 on Windows
-    out = hb.change_dsp({"filter": 57, "filter1x": 57})
+    out = hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     assert out["building"] is not None
     assert out["applied"] == {} and out["pending"] == ["filter"]
 
@@ -6350,7 +6391,7 @@ def test_a_change_over_another_controllers_entry_resumes_nothing_of_ours(fake, o
         fake.track, fake.position = len(fake.playlist), 30.0
     assert _wait(lambda: mgr._latest_status.get("source") == "external")
     fake.build("SetFilter", 1.0, answer="last", stops=True)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     assert _wait(lambda: _link().build.last_change is not None, timeout=5)
     time.sleep(0.5)                                  # what a resume would send
     assert not [c for c, _ in fake.commands if c in ("SelectTrack", "Seek", "Play")]
@@ -6368,16 +6409,106 @@ def test_a_change_on_a_playlist_that_is_no_mirror_resumes_the_queues_track(fake,
     assert _wait(lambda: mgr._latest_status.get("track_index") == 2)
     b.lose_mirror("HQPlayer took 0 of 1 appended tracks", by="refusal")
     fake.build("SetFilter", 1.0, answer="last", stops=True)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     assert _wait(lambda: fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3)]
                  and fake.state == int(PlaybackState.PLAYING) and fake.track == 2, timeout=10)
     assert _wait(lambda: mgr._latest_status.get("track_id") == "track-2")
 
 
+def test_a_filter_picked_on_a_screen_drawn_before_the_list_moved_is_the_one_built(fake, output, monkeypatch):
+    """B-60: the screen draws its list, then HQPlayer's list moves — another
+    mode, a build that inserted filters (6.2's aclean, 21 filters moved by
+    three). The pick names the filter: the change reads the list right
+    before its SetFilter and sends the index it lists the name at then —
+    the filter the person picked, built once."""
+    hqp_router = _screen(monkeypatch)
+    fake.filter_names = ["poly-sinc-gauss-long", "poly-sinc-ext2", "sinc-M", "sinc-MGa"]
+    drawn = {f["name"]: f["index"] for f in hqp_router.get_state()["filters"]}
+    assert drawn["sinc-M"] == 2
+    with fake._lock:
+        fake.filter_names[1:1] = ["poly-sinc-aclean-gauss", "poly-sinc-aclean-ext2", "poly-sinc-aclean-xtr"]
+    out = hqp_router.set_config(hqp_router.ConfigRequest(filter="sinc-M", filter1x="sinc-M"))
+    assert out["ok"] and out["applied"] == {"filter": 5, "filter1x": 5}
+    assert [a for c, a in fake.commands if c == "SetFilter"] == [{"value": "5", "value1x": "5"}]
+
+
+def test_a_filter_hqplayer_no_longer_lists_is_refused_in_words_and_nothing_is_sent(fake, output, monkeypatch):
+    hqp_router = _screen(monkeypatch)
+    fake.filter_names = ["poly-sinc-gauss-long", "sinc-M"]
+    out = hqp_router.set_config(hqp_router.ConfigRequest(filter="closed-form-16M", filter1x="closed-form-16M",
+                                                         shaper="s2"))
+    assert out["ok"] is False and out["failed"] == {"filter": "HQPlayer does not list closed-form-16M now"}
+    assert out["applied"] == {"shaper": 2}           # the rest still goes
+    assert "SetFilter" not in [c for c, _ in fake.commands]
+
+
+def test_a_filter_named_with_a_mode_is_found_in_that_modes_list(fake, output, monkeypatch):
+    """The mode goes first and decides the list: the filter's name is read
+    in the list HQPlayer gives once the mode is set, not in the one before."""
+    fake.filter_names = ["sinc-M", "poly-sinc-gauss-long"]
+    real = fake._dispatch
+
+    def dispatch(cmd, attrs):
+        if cmd == "SetMode":
+            with fake._lock:
+                fake.filter_names = ["poly-sinc-gauss-long", "poly-sinc-ext2", "sinc-M"]   # SDM numbers it so
+        return real(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", dispatch)
+    out = hb.change_dsp({"mode": 2, "filter": "sinc-M", "filter1x": "sinc-M"})
+    assert out["ok"] and out["applied"] == {"mode": 2, "filter": 2, "filter1x": 2}
+    assert [a for c, a in fake.commands if c == "SetFilter"] == [{"value": "2", "value1x": "2"}]
+
+
+def test_one_pick_through_a_slow_build_is_one_build_and_the_screen_names_it_from_hqplayers_report(
+        fake, output, monkeypatch):
+    """B-60's trace (Desktop 6.3.1, 2026-11-08): HQPlayer reports the slots
+    a SetFilter set at once, while State's `filter` — the one its engine
+    runs — follows only once the engine has swapped. The pick goes once
+    through its build; the screen's read after it names the slots, and the
+    filter set is the one picked, never the one still running."""
+    hqp_router = _screen(monkeypatch)
+    fake.filter_names = ["poly-sinc-gauss-long", "poly-sinc-ext2", "sinc-M"]
+    fake.swap_s = 2.0
+    fake.build("SetFilter", 1.5)
+    out = hqp_router.set_config(hqp_router.ConfigRequest(filter="sinc-M", filter1x="sinc-M"))
+    assert out["building"] is not None and out["applied"] == {"filter": 2, "filter1x": 2}
+    assert hqp_router.get_state().get("building") is not None    # the screen keeps what it had
+    assert _wait(lambda: _link().build.state is None)
+    st = hqp_router.get_state()["state"]
+    assert (st["filterNx"], st["filter1x"], st["filter"]) == (2, 2, 0)   # set; the engine not swapped yet
+    assert [c for c, _ in fake.commands].count("SetFilter") == 1
+    assert _wait(lambda: hqp_router.get_state()["state"]["filter"] == 2, timeout=6)
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None, reason="node not installed")
+def test_the_screen_names_the_filter_hqplayer_reports_set_and_sends_nothing_for_it_again():
+    """B-60, app-shell.js as written: the State read right after a pick
+    (Desktop 6.3.1, the lab's trace) — `filter` still the one the engine
+    ran, the slots the new one. The Filter row names the slots; a pick of
+    what both slots hold sends nothing, a pick that differs in the 1x slot
+    does."""
+    import shutil
+    import subprocess
+    src = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
+    fns = "".join(re.search(rf"\n  function {name}\(st, \w+\) {{\n.*?\n  }}\n", src, re.S).group(0)
+                  for name in ("hqpFilterSet", "hqpFilterHeld"))
+    rows = [{"index": 45, "name": "poly-sinc-aclean-gauss"}, {"index": 46, "name": "poly-sinc-aclean-ext2"}]
+    after_pick = {"filter": 45, "filter1x": 46, "filterNx": 46}
+    one_slot = {"filter": 46, "filter1x": 45, "filterNx": 46}
+    script = fns + (f"const rows = {json.dumps(rows)};"
+                    f"console.log(JSON.stringify([hqpFilterSet({json.dumps(after_pick)}, rows).name,"
+                    f" hqpFilterHeld({json.dumps(after_pick)}, rows[1]),"
+                    f" hqpFilterHeld({json.dumps(after_pick)}, rows[0]),"
+                    f" hqpFilterHeld({json.dumps(one_slot)}, rows[1]),"
+                    f" hqpFilterSet({{filterNx: 7}}, rows)]));")
+    out = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(out.stdout) == ["poly-sinc-aclean-ext2", True, False, False, None]
+
+
 def test_the_knobs_after_a_build_follow_it_in_order(fake, output):
     mgr, b = output
     fake.build("SetFilter", 1.5)
-    out = hb.change_dsp({"shaper": 2, "filter": 57, "filter1x": 57})
+    out = hb.change_dsp({"shaper": "s2", "filter": "f57", "filter1x": "f57"})
     assert out["building"] is not None and out["pending"] == ["shaper"]
     assert _wait(lambda: _link().build.last_change is not None)
     sent = [c for c, _ in fake.commands if c in ("SetFilter", "SetShaping", "Status")]
@@ -6389,7 +6520,7 @@ def test_the_knobs_after_a_build_follow_it_in_order(fake, output):
 
 def test_a_knob_refused_outright_is_reported_in_hqplayers_words(fake, output):
     fake.replies["SetShaping"] = '<SetShaping result="Error">Modulator needs 512x rate</SetShaping>'
-    out = hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 30})
+    out = hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s30"})
     assert out["building"] is None and out["ok"] is False
     assert out["applied"] == {"filter": 57, "filter1x": 57}
     assert out["failed"] == {"shaper": "Modulator needs 512x rate"}
@@ -6399,9 +6530,9 @@ def test_a_change_while_another_builds_is_refused(fake, output):
     from fastapi import HTTPException
     from routers import hqplayer as hqp_router
     fake.build("SetFilter", 2.0)
-    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
     with pytest.raises(HTTPException) as e:
-        hqp_router.set_config(hqp_router.ConfigRequest(shaper=2))
+        hqp_router.set_config(hqp_router.ConfigRequest(shaper="s2"))
     assert e.value.status_code == 409 and "building the filter" in e.value.detail
     with pytest.raises(HTTPException) as e:
         hqp_router.nudge_volume(hqp_router.VolumeRequest(delta=1))
@@ -6421,7 +6552,7 @@ def test_a_dsp_change_while_the_output_is_lent_is_busy_not_unreachable(fake, out
         with mgr.hold("benchmark", "The HQPlayer benchmark is running"):
             n = len(fake.commands)
             with pytest.raises(HTTPException) as e:
-                hqp_router.set_config(hqp_router.ConfigRequest(shaper=2))
+                hqp_router.set_config(hqp_router.ConfigRequest(shaper="s2"))
             assert fake.commands[n:] == []
         assert e.value.status_code == 409 and "benchmark is running" in e.value.detail
     finally:
@@ -6445,7 +6576,7 @@ def test_past_the_limit_a_silent_hqplayer_is_an_unfinished_build_and_a_gone_one_
     states = _seen(mgr, "state")
     buildings = _seen(mgr, "building")
     fake.build("SetFilter", 60.0)
-    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
     # Asked again and again past the limit, silent each time — misses past
     # the threshold that are the build's, never "disconnected"
     assert _wait(lambda: sum(1 for x in buildings if x and x.get("unfinished")) >= 3, timeout=15)
@@ -6600,7 +6731,7 @@ def test_an_output_switch_during_a_build_is_at_once_and_stops_hqplayer_once_it_i
     mgr, b = output
     monkeypatch.setattr(settings_router, "_read", lambda key: {"output.type": "browser"}.get(key))
     fake.build("SetFilter", 3.0)
-    began = hb.change_dsp({"filter": 57, "filter1x": 57})["building"]["since"]
+    began = hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"]["since"]
     t0 = time.monotonic()
     mgr.activate(None)                               # the switch away, as the picker makes it
     assert time.monotonic() - t0 < 1.5
@@ -6616,7 +6747,7 @@ def test_hqplayer_picked_again_before_its_build_ends_plays_on_unstopped(fake, ou
     mgr, b = output
     monkeypatch.setattr(settings_router, "_read", lambda key: {"output.type": "hqplayer"}.get(key))
     fake.build("SetFilter", 3.0)
-    began = hb.change_dsp({"filter": 57, "filter1x": 57})["building"]["since"]
+    began = hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"]["since"]
     mgr.activate(None)
     mgr.activate("hqplayer")                         # back before the build ends
     live = mgr.active
@@ -6643,7 +6774,7 @@ def test_a_session_queued_while_hqplayer_builds_is_refused_as_busy(fake, output,
     monkeypatch.setattr(queue_mod, "items_for_owned_rows",
                         lambda rows: [_item("E:/Music/B/09.flac", 9)])
     fake.build("SetFilter", 2.0)
-    began = hb.change_dsp({"filter": 57, "filter1x": 57})["building"]["since"]
+    began = hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"]["since"]
     with pytest.raises(HTTPException) as e:
         player_router.queue_session(player_router.QueueSessionRequest(session_id="s"))
     assert e.value.status_code == 409 and "building the filter" in e.value.detail
@@ -6665,7 +6796,7 @@ def test_the_convolver_goes_by_the_dsp_path_and_never_into_a_builds_silence(
     i = sent.index("SetConvolution")
     assert fake.commands[i] == ("SetConvolution", {"value": "1"}) and sent[i + 1] == "Status"
     fake.build("SetFilter", 2.0)
-    began = hb.change_dsp({"filter": 57, "filter1x": 57})["building"]["since"]
+    began = hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"]["since"]
     assert definitions._h_hqplayer_set_convolution(False).startswith(
         "Error: HQPlayer is building the filter")
     with pytest.raises(HTTPException) as e:
@@ -6691,7 +6822,7 @@ def test_a_filler_waits_out_a_build_and_adds_once_it_is_done(fake, output, monke
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
     fake.build("SetFilter", 2.0)
-    began = hb.change_dsp({"filter": 57, "filter1x": 57})["building"]["since"]
+    began = hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"]["since"]
     assert player_router._filler_append(_item("E:/Music/B/09.flac", 9), mgr.queue.generation)
     assert time.time() >= began + 1.0                # it waited
     assert fake.playlist[-1] == "file:///E:/Music/B/09.flac" and len(mgr.queue) == 4
@@ -6713,7 +6844,7 @@ def test_a_filler_whose_build_does_not_end_with_an_answer_loses_nothing(fake, ou
     monkeypatch.setattr(hl.BuildWatch, "wait_out",
                         lambda self, until: (waiting.set(), wait_out(self, until))[1])
     fake.build("SetFilter", 4.0 if ending == "unfinished" else 60.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     album = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
     t = threading.Thread(target=lambda: player_router._owned_filler(album, mgr.queue.generation),
                          daemon=True)
@@ -6745,7 +6876,7 @@ def test_a_radio_start_while_hqplayer_builds_is_busy_and_splits_no_history(fake,
     monkeypatch.setattr(player_router.sessions, "rotate_session",
                         lambda *a, **k: rotated.append(k))
     fake.build("SetFilter", 2.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     with pytest.raises(HTTPException) as e:
         player_router.radio_start(player_router.RadioStartRequest(
             track_uuid="0b8f1a2e-1d2c-5e3f-9a4b-5c6d7e8f9a0b"))
@@ -6757,7 +6888,7 @@ def test_a_radio_start_while_hqplayer_builds_is_busy_and_splits_no_history(fake,
 def test_a_rebind_during_a_build_is_followed_once_hqplayer_answers(fake, output):
     mgr, b = output                                  # playing slot 1 of 3
     fake.build("SetFilter", 2.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     _move(mgr, 3, "E:/Music/B/03.flac", 30)
     t0 = time.monotonic()
     b.queue_changed("rebind")                        # as rebind_files does, under the queue lock
@@ -6777,7 +6908,7 @@ def test_a_restart_during_a_build_is_hqplayer_back_with_its_mirror_lost(fake, ou
     monkeypatch.setattr(hl, "CIRCUIT_COOLDOWN_S", 0.0)
     buildings = _seen(mgr, "building")
     fake.build("SetFilter", 60.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     fake.restart()                                   # the held answer's connection breaks
     assert _wait(lambda: b.mirror_losses >= 1, timeout=12.0), "the restart never lost the mirror"
     assert "came back with a different playlist" in caplog.text
@@ -6792,7 +6923,7 @@ def test_hqplayer_gone_during_a_build_is_disconnected_not_an_unfinished_build(fa
     _quick_polls(monkeypatch)
     states, buildings = _seen(mgr, "state"), _seen(mgr, "building")
     fake.build("SetFilter", 60.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     fake.close()
     assert _wait(lambda: "disconnected" in states, timeout=15)
     assert not any(x and x.get("unfinished") for x in buildings)
@@ -6878,7 +7009,7 @@ def test_a_play_refused_while_hqplayer_builds_keeps_the_spot(fake, listens, monk
                                 order=[items[2], items[1], items[0]],
                                 position=150, resume=False))
     fake.build("SetFilter", 2.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     with pytest.raises(hl.Building):
         b.play()
     assert _wait(lambda: _link().build.state is None)
@@ -6979,7 +7110,7 @@ def test_a_dsp_changes_outcome_is_not_carried_past_its_attachment(fake, output):
     mgr, b = output
     fake.replies["SetShaping"] = '<SetShaping result="Error">Modulator needs 512x rate</SetShaping>'
     fake.build("SetFilter", 1.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 30})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s30"})
     assert _wait(lambda: _link().build.last_change is not None)
     assert _link().build.last_change["failed"] == {"shaper": "Modulator needs 512x rate"}
     b.shutdown()
@@ -6992,7 +7123,7 @@ def test_a_build_begun_while_a_takeover_waits_is_not_waited_out(fake, output, mo
     # The poller's own read, if one is out, is short: the command lock is what is timed
     _quick_polls(monkeypatch)
     fake.build("SetShaping", 6.0)                    # the second knob's build
-    t = threading.Thread(target=lambda: hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 2}),
+    t = threading.Thread(target=lambda: hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s2"}),
                          daemon=True)
     t.start()
     assert _wait(lambda: any(c == "SetFilter" for _, c in fake.arrivals))
@@ -7020,7 +7151,7 @@ def test_picking_the_building_hqplayer_again_keeps_its_build_watched(fake, outpu
     monkeypatch.setattr(settings_router, "_write", lambda key, value: saved.__setitem__(key, value))
     monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
     fake.build("SetFilter", 3.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     t0 = time.monotonic()
     settings_router.put_output_prefs(settings_router.OutputPrefs(
         type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake.port}))
@@ -7050,7 +7181,7 @@ def test_the_knobs_after_a_build_hqplayer_does_not_finish_are_not_sent(fake, out
     mgr, b = output
     _limit(monkeypatch, 1.0)
     fake.build("SetFilter", 3.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 2})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s2"})
     assert _wait(lambda: _link().build.last_change is not None)
     assert _link().build.last_change["failed"] == {
         "shaper": "not sent: HQPlayer did not finish building the filter — restart HQPlayer"}
@@ -7085,7 +7216,7 @@ def test_a_status_that_cannot_be_said_during_a_build_does_not_stop_the_poller(fa
         said(state)
     monkeypatch.setattr(b, "_emit_building", once)
     fake.build("SetFilter", 1.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     assert _wait(lambda: failed)
     assert _wait(lambda: _link().build.state is None)
     n = len(fake.commands)
@@ -7189,7 +7320,7 @@ def test_what_was_made_for_one_hqplayer_never_reaches_the_next(fake, fake_b, out
     settings_router = _picker(monkeypatch, fake)
     link_a = _link()
     fake.build("SetFilter", 1.5, answer="last", stops=not plays_on)
-    hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 2})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s2"})
     picked = time.time()
     _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
     live = mgr.active
@@ -7230,7 +7361,7 @@ def _build_after_the_commit(monkeypatch, b, seconds):
     def commit(kind, *, play=False):
         changed(kind, play=play)
         if kind == "replace":
-            fake_build_once.append(hb.change_dsp({"filter": 57, "filter1x": 57}))
+            fake_build_once.append(hb.change_dsp({"filter": "f57", "filter1x": "f57"}))
     fake_build_once: list = []
     monkeypatch.setattr(b, "queue_changed", commit)
     return fake_build_once
@@ -7279,7 +7410,7 @@ def test_waiting_out_a_build_holds_neither_the_command_lock_nor_the_queue_lock(f
         return wait_out(self, until)
     monkeypatch.setattr(hl.BuildWatch, "wait_out", recorded)
     fake.build("SetFilter", 2.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     t = threading.Thread(target=lambda: player_router._filler_append(
         _item("E:/Music/B/09.flac", 9), mgr.queue.generation), daemon=True)
     t.start()
@@ -7313,7 +7444,7 @@ def test_the_node_stop_lets_go_of_everything_within_two_seconds(fake, output, mo
         page.want(True)
         page.until(lambda m: m.get("state") == "open")
         fake.build("SetFilter", 60.0, answer="last")
-        hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 2})
+        hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s2"})
         filler = threading.Thread(target=lambda: player_router._filler_append(
             _item("E:/Music/B/09.flac", 9), mgr.queue.generation), daemon=True)
         filler.start()
@@ -7472,7 +7603,7 @@ def test_a_stop_owed_since_a_switch_away_is_superseded_by_picking_hqplayer_again
     mgr, b = output
     settings_router = _picker(monkeypatch, fake)
     fake.build("SetFilter", 1.0)
-    began = hb.change_dsp({"filter": 57, "filter1x": 57})["building"]["since"]
+    began = hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"]["since"]
     _pick(settings_router, type="browser")
     assert _wait(lambda: any(t.name == "hqp-late-stop" for t in threading.enumerate()))
     let_go = browser_backend.BrowserBackend.shutdown
@@ -7593,7 +7724,7 @@ def test_past_the_limit_a_silent_hqplayer_is_asked_less_and_less(fake, output, m
                         else min(0.5 * 2 ** min(failures, 4), 15.0))
     _limit(monkeypatch, 0.5)
     fake.build("SetFilter", 60.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     assert _wait(lambda: (_link().build.state or {}).get("unfinished"), timeout=5)
     t0 = time.time()
     time.sleep(6.0)
@@ -7621,7 +7752,7 @@ def test_the_play_gate_says_busy_or_offline_in_the_words_for_each(fake, output, 
     else:
         _limit(monkeypatch, 0.6 if how == "unfinished" else 30.0)
         fake.build("SetFilter", 20.0)
-        hb.change_dsp({"filter": 57, "filter1x": 57})
+        hb.change_dsp({"filter": "f57", "filter1x": "f57"})
         if how == "unfinished":
             assert _wait(lambda: (_link().build.state or {}).get("unfinished"), timeout=5)
     with pytest.raises(HTTPException) as e:
@@ -7638,7 +7769,7 @@ def test_a_dsp_changes_outcome_is_its_attachments_and_its_id_is_never_repeated(f
     mgr, b = output
     fake.replies["SetShaping"] = '<SetShaping result="Error">Modulator needs 512x rate</SetShaping>'
     fake.build("SetFilter", 0.8)
-    hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 30})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s30"})
     assert _wait(lambda: (mgr._latest_status.get("dsp_change") or {}).get("failed"))
     first = mgr._latest_status["dsp_change"]["id"]
     _fresh_links()                                   # a restart: every link made afresh
@@ -7648,7 +7779,7 @@ def test_a_dsp_changes_outcome_is_its_attachments_and_its_id_is_never_repeated(f
         assert _wait(lambda: "dsp_change" not in mgr._latest_status
                      and mgr._latest_status.get("state") == "playing")
         fake.build("SetFilter", 0.8)
-        hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 30})
+        hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s30"})
         assert _wait(lambda: (mgr._latest_status.get("dsp_change") or {}).get("id")
                      not in (None, first))
     finally:
@@ -7691,7 +7822,7 @@ def test_a_filler_waiting_on_one_hqplayer_when_another_is_picked_lands_on_the_ne
     monkeypatch.setattr(hl.BuildWatch, "wait_out",
                         lambda self, until: (waiting.set(), wait_out(self, until))[1])
     fake.build("SetFilter", 3.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     album = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
     t = threading.Thread(target=lambda: player_router._owned_filler(album, mgr.queue.generation),
                          daemon=True)
@@ -7726,7 +7857,7 @@ def test_the_node_stop_ends_a_filler_at_once(fake, output, monkeypatch):
     monkeypatch.setattr(hl.BuildWatch, "wait_out",
                         lambda self, until: (waiting.set(), wait_out(self, until))[1])
     fake.build("SetFilter", 30.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     album = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
     done = threading.Event()
     t = threading.Thread(target=lambda: (player_router._owned_filler(album, mgr.queue.generation),
@@ -7827,14 +7958,14 @@ def test_a_play_the_output_refuses_leaves_history_as_it_was(fake, play_route, mo
     mgr, b, play, rotations = play_route
     if refusal == "the gate":
         fake.build("SetFilter", 2.0)
-        hb.change_dsp({"filter": 57, "filter1x": 57})
+        hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     elif refusal == "the mirror":
         reachable = b.reachable
 
         def then_a_build(waiting=None):
             ok = reachable()
             fake.build("SetFilter", 2.0)
-            hb.change_dsp({"filter": 57, "filter1x": 57})
+            hb.change_dsp({"filter": "f57", "filter1x": "f57"})
             return ok
         monkeypatch.setattr(b, "reachable", then_a_build)
     else:
@@ -7889,7 +8020,7 @@ def test_the_radio_rotates_history_under_the_command_hold_before_the_clear(fake,
         fake.replies["PlaylistClear"] = '<PlaylistClear result="Error">busy</PlaylistClear>'
     if case == "busy":
         fake.build("SetFilter", 3.0, answer="last")
-        threading.Thread(target=lambda: hb.change_dsp({"filter": 57, "filter1x": 57}),
+        threading.Thread(target=lambda: hb.change_dsp({"filter": "f57", "filter1x": "f57"}),
                          daemon=True).start()
         assert _wait(lambda: _link().build.silent() is not None, timeout=3)
     fake.commands.clear()
@@ -7944,7 +8075,7 @@ def test_the_mcp_assistant_reads_hqplayer_through_the_backend_and_keeps_no_conne
     assert "Active filter index: 57 (sinc-MGa)" in server.hqplayer_get_dsp_state()
     assert "Room" in server.hqplayer_list_matrix_profiles()
     assert set(asked) == {"/api/hqplayer/state", "/api/player/status"}
-    assert posted == [("/api/hqplayer/config", {"filter": 57, "filter1x": 57})]
+    assert posted == [("/api/hqplayer/config", {"filter": "sinc-MGa", "filter1x": "sinc-MGa"})]
     assert fake.arrivals == []
 
 
@@ -7966,7 +8097,7 @@ def test_the_assistants_gates_quote_the_links_own_line(fake, output, monkeypatch
     if how == "unfinished":
         _limit(monkeypatch, 0.6)
         fake.build("SetFilter", 3.0)
-        hb.change_dsp({"filter": 57, "filter1x": 57})
+        hb.change_dsp({"filter": "f57", "filter1x": "f57"})
         assert _wait(lambda: (_link().build.silent() or {}).get("unfinished"), timeout=5)
         line = hl.UNFINISHED
     else:
@@ -7999,7 +8130,7 @@ def test_hqplayer_picked_again_during_a_build_says_what_it_is_with_its_first_ans
     itself (GetInfo) comes with the poller's first answer after it."""
     mgr, b = output
     fake.build("SetFilter", 1.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     b.shutdown()
     again = _attach(mgr)
     try:
@@ -8186,7 +8317,7 @@ def test_a_change_of_three_knobs_goes_whole_through_a_build_after_the_first(fake
     """The Status change_dsp holds between its knobs is the build's watch, never a silence that ends the sequence — a change
     of three knobs whose first sets off a build sends all three."""
     fake.build("SetRate", 1.0)                           # the first knob in DSP_KNOBS' order
-    out = hb.change_dsp({"rate": 3, "filter": 57, "filter1x": 57, "shaper": 2})
+    out = hb.change_dsp({"rate": 3, "filter": "f57", "filter1x": "f57", "shaper": "s2"})
     assert out["building"] is not None
     assert _wait(lambda: _link().build.last_change is not None)
     assert [c for c, _ in fake.commands if c.startswith("Set")] == ["SetRate", "SetFilter",
@@ -8231,7 +8362,7 @@ def test_a_set_whose_next_item_is_superseded_leaves_its_silence_to_the_links_sta
         if what == "out" and command == "SetFilter":
             link.accept("dsp")                           # the rest of this change goes
     fake.on_wire = superseding
-    out = hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 2})
+    out = hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s2"})
     assert out["failed"]["shaper"] == "not sent: a newer DSP change came first", out
     assert _wait(lambda: link.build.state is not None, timeout=3)
     after = [c for _, c in fake.arrivals]
@@ -8665,7 +8796,7 @@ def test_the_switch_away_stop_judges_what_hqplayer_was_given(fake, output, monke
     mgr, b = output
     _away(monkeypatch, fake)
     fake.build("SetFilter", 1.5, answer="last")
-    threading.Thread(target=lambda: hb.change_dsp({"filter": 57, "filter1x": 57}),
+    threading.Thread(target=lambda: hb.change_dsp({"filter": "f57", "filter1x": "f57"}),
                      daemon=True).start()
     assert _wait(lambda: _link().build.state is not None, timeout=3)
     n = len(fake.arrivals)
@@ -8771,7 +8902,7 @@ def test_re_picking_the_hqplayer_driven_lets_its_dsp_change_finish(fake, output,
     mgr, b = output
     settings_router = _picker(monkeypatch, fake)
     fake.build("SetFilter", 1.5)                     # answered, then silent
-    hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 2})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s2"})
     _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake.port})
     assert _wait(lambda: any(c == "SetShaping" for c, _ in fake.commands), timeout=8)
     assert mgr.active is b
@@ -9561,7 +9692,7 @@ def test_a_switch_away_cancels_the_knobs_a_build_held_back(fake, output, monkeyp
     mgr, b = output
     _away(monkeypatch, fake)
     fake.build("SetFilter", 1.5)
-    hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 2})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s2"})
     mgr.activate(None)
     mgr.activate("browser")
     time.sleep(2.5)
@@ -10069,7 +10200,7 @@ def test_the_node_stop_closes_no_socket_a_request_reads(fake, monkeypatch):
     _limit(monkeypatch, 30.0)
     link = _link()
     fake.build("SetFilter", 30.0, answer="last")
-    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
     change = next(t for t in threading.enumerate() if t.name == "hqp-dsp-change")
     held = link.client.socket
     made = _closes(monkeypatch)
@@ -10925,7 +11056,7 @@ def test_a_start_given_up_because_a_newer_word_came_is_superseded_not_unreachabl
         att = b._attempt
         mgr.queue.reorder(plan.order)
     fake.build("SetFilter", 2.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})    # someone else's build, before the start
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})    # someone else's build, before the start
     b.queue_start()                                  # meets it: waits in the background
     assert _wait(lambda: any(t.name == "hqp-start" for t in threading.enumerate()), timeout=3)
     _link().accept("transport")                      # a newer word
@@ -10944,11 +11075,11 @@ def test_a_newer_dsp_change_supersedes_a_resume_that_became_a_press(fake, output
     fake.service["PlaylistAdd"] = 0.4
     fake.build("SetFilter", 1.0, answer="last", stops=True)
     fake.commands.clear()
-    hb.change_dsp({"filter": 57, "filter1x": 57})    # stops HQPlayer for good
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})    # stops HQPlayer for good
     assert _wait(lambda: any(c == "PlaylistAdd" and a.get("clear") == "1"
                              for c, a in fake.commands), timeout=10)   # its resume: the press
     assert "resumed playback after a DSP change" not in caplog.text
-    out = hb.change_dsp({"shaper": 2})               # a newer change, while the press rebuilds
+    out = hb.change_dsp({"shaper": "s2"})               # a newer change, while the press rebuilds
     assert out["ok"], out
     n = len(fake.commands)
     _settled()
@@ -10989,7 +11120,7 @@ def test_a_dsp_change_behind_a_replaces_adds_leaves_the_new_queue_playing(fake, 
     mgr._latest_status = {**mgr._latest_status, "state": "playing", "track_index": 1,
                           "position": 42}
     fake.build("SetFilter", 1.0)
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     t.join(10)
     assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
                  and fake.playlist[fake.track - 1] == "file:///E:/Music/B/01.flac", timeout=8)
@@ -11077,7 +11208,7 @@ def test_an_address_set_back_to_a_building_hqplayer_supersedes_its_owed_stop(
     mgr, b = output
     settings_router = _picker(monkeypatch, fake)
     fake.build("SetFilter", 1.5)
-    began = hb.change_dsp({"filter": 57, "filter1x": 57})["building"]["since"]
+    began = hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"]["since"]
     _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
     assert mgr.active is not b and mgr.active.link.port == fake_b.port
     let_go = HqpBackend.shutdown
@@ -12148,7 +12279,7 @@ def test_a_resume_after_a_new_queue_overtook_a_pending_press_goes_in_place(
                      and mgr._latest_status.get("state") == "playing")
         fake.build("SetFilter", 1.0, answer="last", stops=True)
         n = len(fake.commands)
-        hb.change_dsp({"filter": 57, "filter1x": 57})
+        hb.change_dsp({"filter": "f57", "filter1x": "f57"})
         assert _wait(lambda: any(c == "SelectTrack" for c, _ in fake.commands[n:]), timeout=10)
         assert _wait(lambda: fake.state == int(PlaybackState.PLAYING))
         assert fake.playlist[fake.track - 1] == "file:///E:/Music/B/01.flac"
@@ -12538,7 +12669,7 @@ def test_a_queue_edit_refused_while_hqplayer_builds_supersedes_nothing(fake, out
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
     fake.build("SetFilter", 2.0, answer="last", stops=True)
-    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
     asked = {"radio": lambda: mgr.clear_for_radio(lambda: None),
              "new order": lambda: player_router.reorder(
                  player_router.ReorderRequest(order=["track-2", "track-1", "track-3"])),
@@ -12690,7 +12821,7 @@ def test_a_word_held_during_the_radios_clear_answers_for_itself(fake, output, mo
                  and "PlaylistClear" in [c for _, c in fake.arrivals[came:]], timeout=5)
     assert b.pause()
     if busy == "building":
-        threading.Thread(target=lambda: hb.change_dsp({"filter": 57}), daemon=True).start()
+        threading.Thread(target=lambda: hb.change_dsp({"filter": "f57"}), daemon=True).start()
     started.join(10)
     fake.service.pop("PlaylistClear", None)
     assert "error" not in out, out
@@ -12942,7 +13073,7 @@ def test_a_pause_held_by_a_new_queue_the_lock_refuses_still_pauses(fake, output)
     playing on."""
     mgr, b = output
     fake.build("SetFilter", 1.5, answer="last")
-    changing = threading.Thread(target=lambda: hb.change_dsp({"filter": 57, "filter1x": 57}),
+    changing = threading.Thread(target=lambda: hb.change_dsp({"filter": "f57", "filter1x": "f57"}),
                                 daemon=True)
     changing.start()
     assert _wait(lambda: any(c == "SetFilter" for _, c in fake.arrivals), timeout=3)
@@ -13289,7 +13420,7 @@ def test_a_new_order_hqplayer_is_too_busy_for_is_news_not_a_fault(fake, output, 
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
     fake.build("SetFilter", 2.0, answer="last")
-    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
     with pytest.raises(HTTPException) as refused:
         player_router.reorder(player_router.ReorderRequest(
             order=["track-2", "track-1", "track-3"]))
@@ -13469,7 +13600,7 @@ def test_a_held_seek_that_meets_a_build_after_its_pause_went_goes_after_it(fake,
     fake.service["Pause"] = 0.5                 # the held Pause, carried out, answered slowly
     assert _wait(lambda: "Pause" in [c for _, c in fake.arrivals[came:]], timeout=10)
     fake.build("SetFilter", 2.0)                # a DSP change made right then builds
-    answer = hb.change_dsp({"filter": 57, "filter1x": 57})
+    answer = hb.change_dsp({"filter": "f57", "filter1x": "f57"})
     reordering.join(10)
     assert answer.get("building"), answer
     assert _wait(lambda: ("Seek", {"position": "30"}) in fake.commands[n:], timeout=8), (
@@ -13483,7 +13614,7 @@ def test_a_pause_the_lock_refuses_during_a_build_leaves_the_changes_resume(fake,
     and the change's resume goes once the build is done."""
     mgr, b = output
     fake.build("SetFilter", 2.0, answer="last", stops=True)
-    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
     n = len(fake.commands)
     with pytest.raises(hl.Building):
         b.pause()
@@ -13507,7 +13638,7 @@ def test_a_pause_held_by_the_radios_clear_outlives_a_dsp_changes_resume(fake, ou
                  and "PlaylistClear" in [c for _, c in fake.arrivals[came:]], timeout=5)
     n = len(fake.commands)
     assert b.pause()
-    changing = threading.Thread(target=lambda: hb.change_dsp({"filter": 57}), daemon=True)
+    changing = threading.Thread(target=lambda: hb.change_dsp({"filter": "f57"}), daemon=True)
     changing.start()
     radio.join(10)
     changing.join(10)

@@ -220,10 +220,18 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
   mode decides which lists the indices after it point into); returns what was
   applied and each refusal in HQPlayer's words — the benchmark's. `POST
   /api/hqplayer/config` sends the same knobs in the same order through
-  `hqp_backend.change_dsp`, which waits out each knob's build (below)
+  `hqp_backend.change_dsp`, which waits out each knob's build (below); it
+  takes a filter and a shaper by name and sends the index HQPlayer's list
+  gives that name right before the Set* (since 2026-11-08, B-60: an index is
+  a place in the current mode's list, and the list moves between modes and
+  builds)
 - `get_state()` - the selection as indices into the current mode's lists, plus
-  `filterNx` (the Nx slot `SetFilter value` sets — `filter` read as the 1x
-  slot while a 44.1 kHz source played), `filter1x`, `adaptive`,
+  `filterNx` (the Nx slot `SetFilter value` sets) and `filter1x` (its 1x
+  slot), both reported at once after the SetFilter's answer; `filter` is the
+  filter the engine RUNS — the 1x slot while a 44.1 kHz source plays — and
+  moves to a pick only once the engine has swapped to it (half a second
+  after the answer in PCM on Desktop 6.3.1, measured 2026-11-08), so what is
+  set is read from the slots, never from `filter`; `adaptive`,
   `matrix_profile`, `volume`, and since 2026-10-11 `filter_20k`,
   `filter_junk`, `random`, `repeat` (`None` from a build that does not report
   them); no mute flag. HQPlayer keeps one selection per mode (its `settings.xml`
