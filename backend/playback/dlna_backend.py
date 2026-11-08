@@ -554,6 +554,10 @@ class DlnaBackend(PlayerBackend):
         # what it plays is said at slot 0, and nothing it does moves the
         # queue — until a load of ours (_taken_by_another)
         self._external = False
+        # Its takeover cut the node's own listen: the play tracker holds that
+        # listen — a takeover is a pause for it (ROON-COEX F6) — until a load
+        # of ours, the take-back or another slot
+        self._cut = False
         self._position = 0.0
         # Wall-clock position estimate for renderers that don't report RelTime
         # (KANN on VBR Opus): position at the last baseline + elapsed since.
@@ -1061,6 +1065,8 @@ class DlnaBackend(PlayerBackend):
             if self._resume is not None:
                 state, position = "stopped", self._resume
                 extra["resume"] = {"index": self._index, "position": self._resume}
+                if self._cut:
+                    extra["taken"] = True       # the play tracker holds the cut listen
             else:
                 position, length, index = 0.0, 0.0, 0
         elif state is None and self._current_url is None and self._resume is not None:
@@ -1386,8 +1392,10 @@ class DlnaBackend(PlayerBackend):
     def _taken_by_another(self) -> None:
         """Another controller took the renderer: it names a URI that is
         neither ours nor the armed next — none this attachment handed it
-        (_handed). Its playback is external, at slot 0: the listen ends at
-        its own seconds, the clock running on no further; the load is let
+        (_handed). Its playback is external, at slot 0: the listen counts
+        its own seconds, the clock running on no further — held, as a pause
+        holds it, where this takeover cut it (ROON-COEX F6: `_cut`), ended
+        by another slot's load; the load is let
         go — nothing of ours current or armed, no start or Seek owed; and
         nothing the renderer does from here is a track end or an advance
         (_handle_state_change). Nothing is sent to it: the next play intent
@@ -1409,6 +1417,7 @@ class DlnaBackend(PlayerBackend):
             self._index, self._resume = slot, parked[1]
         elif self._said in ("playing", "paused"):
             self._resume = self._position
+            self._cut = True
         self._held_item = self._queue.item_at(self._index)
         self._external = True
         self._current_url = self._next_url = None
@@ -2230,7 +2239,7 @@ class DlnaBackend(PlayerBackend):
                               CurrentURIMetaData=await self._transport_meta(url, item, mime))
         self._current_url = url
         self._resume = self._held_item = None
-        self._external = False      # ours again; a hand-over refused raised above, theirs still
+        self._external = self._cut = False      # ours again; a hand-over refused raised above, theirs still
         if play:
             await self._avt_retry("Play", Speed="1")
             # The clock starts at the offset (0 for a fresh track), or at the

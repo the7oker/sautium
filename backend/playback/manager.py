@@ -983,7 +983,8 @@ class PlaybackManager:
         tracker.track_play_event(new_data["state"], s.position, s.length, item,
                                  external=s.extra.get("source") == "external",
                                  holds=bool(s.extra.get("resume")),
-                                 corrected=bool(s.extra.get("corrected")))
+                                 corrected=bool(s.extra.get("corrected")),
+                                 taken=bool(s.extra.get("taken")))
         self._maintain_preview_window(idx, s.extra.get("start_slot"))
         self._subs.maintain(idx)
 

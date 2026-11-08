@@ -1198,6 +1198,11 @@ class HqpBackend(PlayerBackend):
         # between, cut the listen there (_note_listen). The poller's alone
         self._listen: Optional[tuple] = None
         self._stopped_at = 0.0
+        # The queue item whose listen another controller cut (_note_listen):
+        # the play tracker holds that listen — a takeover is a pause for it
+        # (ROON-COEX F6) — until HQPlayer plays or pauses an entry of ours
+        # again, or the item leaves the queue (_listen_held). The poller's alone
+        self._cut: Optional[QueueItem] = None
         # Whether the last tick that gave a verdict found HQPlayer playing or
         # pausing an entry not ours — another controller holding it — whatever
         # the status presents meanwhile, and when that tick was asked for: the
@@ -3022,10 +3027,13 @@ class HqpBackend(PlayerBackend):
         controller then took an idle HQPlayer: no spot, and Play starts as
         from a stop. Ticks between that find neither — the other controller's
         Stop on our entry, its cleared playlist — leave the listen as it was.
-        Called on the poller."""
+        The verdict marks the cut listen's item (`_cut`): the play tracker
+        holds that listen, as a pause holds it, until HQPlayer plays or
+        pauses an entry of ours again (_listen_held). Called on the poller."""
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
-        if busy and playing[0] and playing[1] is not None and not playing[2]:
-            if self._readings(status.uri):
+        if busy and playing[1] is not None and not playing[2]:
+            self._cut = None                # HQPlayer reads an entry of ours again
+            if playing[0] and self._readings(status.uri):
                 near_end = status.length > 0 and status.position >= status.length - diag.ADVANCE_END_S
                 self._listen = (playing[1], position, status.track_serial, read_at, near_end)
             return
@@ -3045,8 +3053,27 @@ class HqpBackend(PlayerBackend):
         if slot is None:
             return
         self._set_spot(item, int(second))
+        self._cut = item
         logger.info("another controller took HQPlayer at slot %d, %d s — Play takes it back there",
                     slot, int(second))
+
+    def _listen_held(self, status, playing: tuple) -> bool:
+        """Whether this tick holds the node's own listen for the play tracker
+        (ROON-COEX F6: a takeover is a pause for the listen). HQPlayer plays
+        or pauses no entry of ours, and either another controller cut the
+        listen and its item is still the queue's (_cut), or the listen's last
+        reading is followed only by ticks between — the other controller's
+        Stop on our entry, its playlist cleared or not yet played — with no
+        Stop of the node's since and not in its last seconds: the verdict on
+        it is still to come (_note_listen)."""
+        if (status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
+                and playing[1] is not None and not playing[2]):
+            return False
+        cut = self._cut
+        if cut is not None and self._queue.index_of(cut) is not None:
+            return True
+        listen = self._listen
+        return listen is not None and not listen[4] and self._stopped_at <= listen[3]
 
     def _taken_over(self, playing: tuple) -> None:
         """A start that waits for its stream (_park) when another controller
@@ -3259,6 +3286,8 @@ class HqpBackend(PlayerBackend):
                  **{k: getattr(status, k) for k in STATUS_READINGS}}
         if foreign:
             extra["source"] = "external"
+        if self._listen_held(status, playing):
+            extra["taken"] = True           # the play tracker holds the cut listen (_listen_held)
         if item is None or not _http_served(item):
             extra.update(artist=status.artist, album=status.album,
                          song=status.song)

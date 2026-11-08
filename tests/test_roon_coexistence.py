@@ -94,6 +94,7 @@ class FakeRoon:
     def pause(self) -> None:
         self._send("<Pause/>")
 
+
     def resume(self) -> None:
         self._send("<Play/>")
 
@@ -162,8 +163,9 @@ def test_a1_roon_starts_while_the_node_plays(fake, roon, listens, monkeypatch):
     """A1. Designed: external from the first Status that reads Roon's entry
     (C1 Z31: an entry not ours read in step is judged at that answer); no
     command of the node's (transport only on a person's intent); the node's
-    own listen ends at its own seconds and Roon's playback is never a listen
-    (the own-window rule); the queue as it was. Roon cut the node's listen:
+    own listen is held at its own seconds — a takeover is a pause for it
+    (F6) — and Roon's playback is never a listen (the own-window rule); the
+    queue as it was. Roon cut the node's listen:
     Now Playing keeps naming that track, stopped at the second of the node's
     last own reading — the spot a Play takes HQPlayer back at — saying
     another app took HQPlayer (external)."""
@@ -184,7 +186,8 @@ def test_a1_roon_starts_while_the_node_plays(fake, roon, listens, monkeypatch):
                   queue_kept=mgr.queue.snapshot() == items)
         assert ticks is not None and ticks <= 1, f"external after {ticks} Status reads"
         assert _node_commands(fake, n, roon) == []
-        assert [r["tid"] for r in rows] == ["track-2"] and rows[0]["dur"] <= at + 1 and not rows[0]["comp"]
+        held = tracker._play_session
+        assert rows == [] and held is not None and held.track_id == "track-2" and held.max_position <= at + 1
         assert lastfm == ["update_now_playing"]
         assert mgr.queue.snapshot() == items
         assert (st["state"], st["track_index"], st["track_id"], st["source"]) == (
@@ -231,7 +234,8 @@ def test_roon_starting_during_a_queue_edit_under_a_status_that_names_no_uri_is_n
                   rows=[(r["tid"], r["dur"]) for r in rows], lastfm=lastfm[n_lastfm:],
                   status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume")})
         assert during.get("track_index") != 1 and lastfm[n_lastfm:] == []
-        assert [r["tid"] for r in rows] == ["track-2"] and rows[0]["dur"] <= at + 1
+        held = tracker._play_session
+        assert rows == [] and held is not None and held.track_id == "track-2" and held.max_position <= at + 1
         assert st["source"] == "external" and st["resume"]["index"] == 2
         assert int(at) <= st["resume"]["position"] <= int(at) + 1
     finally:
@@ -343,7 +347,8 @@ def test_a4_roon_stopped_then_a_play_in_the_node(fake, roon, listens, monkeypatc
         _observed("A4-stopped", mode=fake.raw_streams, rows=len(_rows(writes)), lastfm=lastfm,
                   session=tracker._play_session is not None,
                   status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume")})
-        assert st["state"] == "stopped" and tracker._play_session is None
+        # A takeover is a pause for the listen (F6): held through Roon's stop, nothing written
+        assert st["state"] == "stopped" and tracker._play_session is not None and _rows(writes) == []
         assert (st["track_index"], st.get("source"), st["resume"]["index"]) == (2, None, 2)
         _takes_back(fake, mgr, b, roon, "A4", roon_state="stopped", interrupted_at=(2, at))
     finally:
@@ -842,7 +847,7 @@ def test_roon_starting_while_hqplayer_answers_no_playlist_read_is_no_listen_of_o
         _wait(lambda: mgr._latest_status.get("source") == "external", 10)
         rows = _rows(writes)
         assert during.get("track_index") != 1 and lastfm[n_lastfm:] == []
-        assert [r["tid"] for r in rows] == ["track-2"]
+        assert rows == [] and tracker._play_session is not None and tracker._play_session.track_id == "track-2"
         assert mgr._latest_status.get("source") == "external"
     finally:
         b.shutdown()
@@ -1077,13 +1082,15 @@ def test_b_a_stale_uri_of_ours_after_our_own_load_is_no_other_controller(tmp_pat
     assert _sent(r, mark) == [] and n.backend._current_url == ours[0]
 
 
-def test_b1_the_listen_ends_at_its_own_seconds_and_the_other_controllers_track_is_none_of_ours(
+def test_b1_the_listen_counts_its_own_seconds_and_the_other_controllers_track_is_none_of_ours(
         tmp_path, proxy, renderers, manager, heard, quality, taken):
-    """B1 through the manager and the play tracker: the node's listen ends at
-    its own seconds, written once under half its track; what the other
-    controller plays on is no listen of ours — its seconds never run our
-    slot's clock past the scrobble's floor (F4: the node scrobbled a track
-    that did not sound)."""
+    """B1 through the manager and the play tracker: the node's listen counts
+    its own seconds alone; what the other controller plays on is no listen
+    of ours — its seconds never run our slot's clock past the scrobble's
+    floor (F4: the node scrobbled a track that did not sound). A URI of the
+    other controller's is a takeover, a pause for the listen (F6): held,
+    nothing written; the transport stopped on our URI by no word of ours ends
+    it, written once under half its track."""
     listened, lastfm = heard
     r = renderers()
     _on_renderer(manager, r, [track(tmp_path, 1, seconds=60.0), track(tmp_path, 2, seconds=60.0)])
@@ -1096,7 +1103,10 @@ def test_b1_the_listen_ends_at_its_own_seconds_and_the_other_controllers_track_i
     _observed("B1-listen", taken=taken, listened=listened, lastfm=lastfm, node_sent=_sent(r, mark),
               status={k_: manager.latest_status.get(k_) for k_ in ("state", "track_index", "source")})
     assert lastfm == [("update_now_playing", "Track 1")]
-    assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"] and listened[0][1] < 50
+    if taken == "playing":
+        assert listened == []
+    else:
+        assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"] and listened[0][1] < 50
     assert _sent(r, mark) == []
 
 
@@ -1409,3 +1419,89 @@ def test_b_a_take_back_that_waits_survives_the_other_apps_own_next_track(tmp_pat
     n.backend.slot_ready(1)
     wait_for(lambda: r.state == "PLAYING" and r.uri.endswith("/preview/stream1") and n.last.state == "playing",
              timeout=10, what="slot 1 loaded and playing")
+
+
+# -- F6 and F7: a takeover is a pause for the listen, and the spot is the node's ----------------------------
+
+def _slot_track(b, slot: int) -> str:
+    return b._queue.item_at(slot).track_id
+
+
+def test_f6_a_takeover_taken_back_at_its_spot_is_one_listen(fake, roon, listens, monkeypatch):
+    """F6 (ROON-COEX §10.2, §10.4; the design session's answer of 2026-11-02
+    night: a takeover is a pause for the tracker). Roon's takeover and its
+    stop hold the node's listen of slot 2 — nothing written, none of Roon's
+    seconds counted; the node's Play takes HQPlayer back at the spot and the
+    same listen goes on: one history row, its seconds the node's own, one
+    now-playing."""
+    writes, lastfm = listens
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        at, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        spot = mgr._latest_status.get("resume")
+        roon.stop()
+        mark = len(fake.commands)
+        _wait(lambda: fake.state == int(PlaybackState.STOPPED) and _statuses(fake, mark) >= 3, timeout=10)
+        assert _rows(writes) == [] and tracker._play_session is not None, "the takeover is a pause: held"
+        _takes_back(fake, mgr, b, roon, "F6", interrupted_at=(2, at))
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4 and (mgr._latest_status.get("position") or 0) >= spot["position"] + 3,
+              timeout=10)
+        assert b.stop()
+        _wait(lambda: _rows(writes), timeout=10)
+        rows = _rows(writes)
+        _observed("F6", mode=fake.raw_streams, spot=spot, lastfm=lastfm,
+                  rows=[(p["tid"], p["dur"], p["comp"], p["skip"]) for p in rows])
+        assert [p["tid"] for p in rows] == [_slot_track(b, 2)]
+        assert rows[0]["dur"] >= spot["position"] + 2
+        assert lastfm.count("update_now_playing") == 1
+    finally:
+        b.shutdown()
+
+
+def test_f6_a_takeover_then_another_track_closes_the_held_listen_at_its_own_seconds(fake, listens, monkeypatch):
+    """F6: the person starts another track instead of taking the cut listen
+    back — the held listen closes at its own seconds (the spot's), and the
+    new track opens its own."""
+    writes, lastfm = listens
+    mgr, b, roon, spot = _roon_holds_the_spot(fake, monkeypatch)
+    try:
+        assert _rows(writes) == [] and tracker._play_session is not None
+        assert b.select(3, "track-3")
+        _wait(lambda: fake.state == PLAYING and fake.track == 3 and _rows(writes), timeout=15)
+        rows = _rows(writes)
+        _observed("F6-another", spot=spot, lastfm=lastfm, rows=[(p["tid"], p["dur"]) for p in rows])
+        assert [p["tid"] for p in rows] == [_slot_track(b, 2)]
+        assert abs(rows[0]["dur"] - spot["position"]) <= 1.5
+        assert lastfm.count("update_now_playing") == 2
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_f6_on_a_renderer_a_takeover_taken_back_is_one_listen(tmp_path, proxy, renderers, manager, heard,
+                                                              quality):
+    """F6 on a renderer: another controller's URI takes it from the node's
+    listen of slot 1 (D5) — held, nothing written while it plays on; the
+    node's Play loads our URI at the spot and the same listen goes on: one
+    row, one now-playing."""
+    listened, lastfm = heard
+    r = renderers()
+    _on_renderer(manager, r, [track(tmp_path, 1, seconds=60.0), track(tmp_path, 2, seconds=60.0)])
+    _playing_at(manager, r, 1)
+    assert manager.backend().seek(25)
+    _playing_at(manager, r, 26)
+    r.taken_by_another("playing")
+    wait_for(lambda: manager.latest_status.get("source") == "external", timeout=5, what="external")
+    time.sleep(2.5)
+    assert listened == [], "held: a takeover is a pause"
+    assert manager.backend().play()
+    wait_for(lambda: r.state == "PLAYING" and "raat://" not in r.uri
+             and manager.latest_status.get("state") == "playing", timeout=10, what="taken back")
+    _playing_at(manager, r, 30)
+    assert manager.backend().stop()
+    wait_for(lambda: listened, timeout=10, what="the listen written")
+    _observed("F6-renderer", listened=listened, lastfm=lastfm)
+    assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"]
+    assert lastfm.count(("update_now_playing", "Track 1")) == 1

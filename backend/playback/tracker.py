@@ -245,7 +245,7 @@ def _save_play_session(s: "_PlaySession") -> None:
 
 def track_play_event(state_name: str, position: float, length: float,
                      item, *, external: bool = False, holds: bool = False,
-                     corrected: bool = False) -> None:
+                     corrected: bool = False, taken: bool = False) -> None:
     """Advance listening-history / scrobble state from one status tick. Mirrors
     the retired daemon's _handle_event, but resolves identity from the
     canonical queue item (source-agnostic) — so phantom previews are tracked
@@ -270,9 +270,18 @@ def track_play_event(state_name: str, position: float, length: float,
     on from the switch's second; corrected under 5 s, the next play would
     have counted as a second listen). An output switch carries the listen over
     (carry_listen); `holds`: the output holds the slot's spot, stopped
-    there, and its play press resumes it."""
+    there, and its play press resumes it. `taken`: another controller took
+    the output from this listen — or stopped it under the listen, the
+    output's verdict on it still to come — and the output holds where it was
+    cut: a takeover is a pause for the listen (ROON-COEX F6). It is held as
+    it was, none of the other controller's seconds counted; taken back at its
+    spot the same listen goes on — one history row, one scrobble at the
+    usual line, no second now-playing — and another track started instead
+    ends it at its own seconds."""
     global _play_session, _carried
 
+    if taken and _play_session is not None and (external or state_name != "playing"):
+        return
     if external:
         # HQPlayer's playlist edited in its own window, another controller:
         # nothing of this is a listen, and carrying the open one on would
