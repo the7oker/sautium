@@ -4452,6 +4452,12 @@ class HqpBackend(PlayerBackend):
         self._unpark()                      # a start that waits for its stream ends
         if self._halt("Pause"):
             return True
+        if self._taken():
+            # Another controller plays through HQPlayer: its playback is not
+            # the node's to pause (ROON-COEX L11) — nothing is sent, the spot
+            # its takeover left stays, Play takes HQPlayer back there
+            self.poke()
+            return True
         ok = self._command("Pause", lambda h: h.pause())
         self.poke()
         return ok
@@ -4460,6 +4466,15 @@ class HqpBackend(PlayerBackend):
         park = self._parked_now()
         self._unpark()
         if self._halt("Stop"):
+            return True
+        if self._taken():
+            # Another controller plays through HQPlayer: its playback is not
+            # the node's to stop (ROON-COEX L11) — nothing is sent; the spot
+            # its takeover left stays, and a start that waited for its stream
+            # meanwhile leaves its own, as a Stop does
+            if park is not None and self._queue.index_of(park.item) is not None:
+                self._set_spot(park.item, park.second)
+            self.poke()
             return True
         ok = self._command("Stop", lambda h: h.stop())
         if ok and park is not None and self._queue.index_of(park.item) is not None:
@@ -4576,6 +4591,16 @@ class HqpBackend(PlayerBackend):
             return self.select(self._queue.index_of(target), target.track_id)
         held, spot = self._spot, self._spot_at()
         last = self._last_tick
+        cut = self._cut
+        if spot is not None and cut is not None and held is not None and held[0] is cut:
+            # The spot another controller's takeover left: a press that starts
+            # playback takes HQPlayer back (ROON-COEX L11) — the slot beside
+            # it, from its start, as a tap there (at either end it stays)
+            target = self._queue.item_at(layout.held(spot[0] + by, by))
+            if target is None:
+                self.poke()
+                return True
+            return self.select(self._queue.index_of(target), target.track_id)
         if spot is not None and last is not None and last.state == "stopped":
             target = self._queue.item_at(layout.held(spot[0] + by, by))
             if target is not None:

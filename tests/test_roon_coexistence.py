@@ -550,19 +550,26 @@ def test_a_seek_while_roon_holds_an_idle_hqplayer_is_refused(fake, listens, monk
         roon.close()
 
 
-def test_next_and_previous_at_the_spot_roons_takeover_left_only_move_it(fake, listens, monkeypatch):
-    """Next and Previous at the spot Roon's takeover left only move it — no
-    command, no sound — as at any stopped spot; with no spot they send
-    nothing, said in words: HQPlayer's own Next would move Roon's playlist,
-    and the queue has no place to count from."""
+@pytest.mark.parametrize("press, slot", [("next", 3), ("previous", 1)])
+def test_l11_next_and_previous_at_the_spot_roons_takeover_left_take_hqplayer_back_at_their_slot(
+        fake, listens, monkeypatch, press, slot):
+    """L11 (ROON-COEX-DESIGN, the addendum of 2026-11-01 evening: one rule) —
+    a press that starts playback takes the output back at its slot: Next and
+    Previous at the spot Roon's takeover left start the slot beside it, from
+    its start, the queue taken afresh — never HQPlayer's own Next in Roon's
+    playlist."""
     mgr, b, roon, spot = _roon_holds_the_spot(fake, monkeypatch)
     try:
         n = _mark(fake, roon)
-        assert b.next()
-        assert _wait(lambda: mgr._latest_status.get("resume") == {"index": 3, "position": 0})
-        assert b.previous() and b.previous()
-        assert _wait(lambda: mgr._latest_status.get("resume") == {"index": 1, "position": 0})
-        assert _node_commands(fake, n, roon) == [] and fake.playlist[0].endswith("/stream.raw")
+        assert getattr(b, press)()
+        _wait(lambda: fake.playlist == MIRROR and fake.state == PLAYING and fake.track == slot, timeout=15)
+        st = mgr._latest_status
+        _observed("L11-" + press, node_commands=_node_commands(fake, n, roon), hqplayer=(fake.state, fake.track),
+                  status={k_: st.get(k_) for k_ in ("state", "track_index", "source")})
+        assert fake.playlist == MIRROR and fake.track == slot
+        assert not any(c in ("Next", "Previous") for c, _ in fake.commands[n[0]:])
+        assert not any(c == "Seek" for c, _ in fake.commands[n[0]:])
+        assert st.get("source") != "external"
     finally:
         b.shutdown()
         roon.close()
@@ -579,18 +586,20 @@ def test_next_or_previous_while_roon_holds_an_idle_hqplayer_is_refused(fake, lis
         roon.close()
 
 
-def test_a_tap_or_a_stop_while_roon_holds_hqplayer(fake, listens, monkeypatch):
-    """A Stop while Roon holds HQPlayer goes to what plays — the person's
-    word — and the spot its takeover left stays; a tap then takes HQPlayer
-    back at the tapped track, from its start: the queue afresh."""
+@pytest.mark.parametrize("press", ["stop", "pause"])
+def test_a_tap_or_a_stop_while_roon_holds_hqplayer(fake, listens, monkeypatch, press):
+    """L11: a Stop or a Pause while Roon holds HQPlayer sends the other app
+    nothing — Roon's stream plays on — and the spot its takeover left stays;
+    a tap then takes HQPlayer back at the tapped track, from its start: the
+    queue afresh."""
     mgr, b, roon, spot = _roon_holds_the_spot(fake, monkeypatch)
     try:
         n = _mark(fake, roon)
-        assert b.stop()
-        assert _wait(lambda: fake.state == int(PlaybackState.STOPPED))
+        assert getattr(b, press)()
         k = len(fake.commands)
-        _wait(lambda: _statuses(fake, k) >= 2)
-        assert _node_commands(fake, n, roon) == ["Stop"] and mgr._latest_status.get("resume") == spot
+        _wait(lambda: _statuses(fake, k) >= 3)
+        assert fake.state == PLAYING and fake.playlist[0].endswith("/stream.raw"), "Roon's stream plays on"
+        assert _node_commands(fake, n, roon) == [] and mgr._latest_status.get("resume") == spot
         m = len(fake.commands)
         assert b.select(3, "track-3")
         _wait(lambda: fake.playlist == MIRROR and fake.state == PLAYING and fake.track == 3, timeout=15)
@@ -1275,18 +1284,19 @@ def test_b_a_replace_without_play_while_another_controller_holds_the_renderer_se
 def test_b_a_seek_or_a_stop_while_another_controller_holds_the_renderer(tmp_path, proxy, renderers, nodes,
                                                                         quality):
     """While another controller holds the renderer, a Seek moves the spot
-    its takeover left — nothing sent — and a Stop goes to what it plays but
-    leaves the spot, as on HQPlayer. With no spot (the node had stopped) a
-    Seek is refused in words: nothing of ours to seek in."""
+    its takeover left, and a Stop or a Pause sends it nothing (L11): its
+    playback goes on, the spot stays, as on HQPlayer. With no spot (the node
+    had stopped) a Seek is refused in words: nothing of ours to seek in."""
     r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
     r.taken_by_another("playing")
     wait_for(lambda: n.last.extra.get("resume") is not None, timeout=5, what="the spot")
     mark = len(r.calls)
     assert n.backend.seek(20)
     assert n.last.extra.get("resume") == {"index": 1, "position": 20.0} and _sent(r, mark) == []
-    assert n.backend.stop()
-    wait_for(lambda: r.state == "STOPPED", timeout=5, what="the other controller's playback stopped")
-    assert _sent(r, mark) == ["Stop"] and n.last.extra.get("resume") == {"index": 1, "position": 20.0}
+    assert n.backend.stop() and n.backend.pause()
+    time.sleep(1.0)
+    assert r.state == "PLAYING" and "raat://" in r.uri, "the other controller's playback goes on"
+    assert _sent(r, mark) == [] and n.last.extra.get("resume") == {"index": 1, "position": 20.0}
     # Taken from the node's own Stop: no spot, and a Seek is refused
     r2, n2 = _renderer_plays_slot_1(tmp_path, renderers, nodes)
     assert n2.backend.stop()
@@ -1623,3 +1633,32 @@ def test_p1_a_reconnect_inside_roons_cycle_sends_its_playlist_nothing(fake, list
     finally:
         b.shutdown()
         roon.close()
+
+
+@pytest.mark.parametrize("press, slot", [("next", 2), ("previous", 1)])
+def test_l11_on_a_renderer_next_and_previous_at_the_takeovers_spot_load_their_slot(tmp_path, proxy, renderers, nodes,
+                                                                                   quality, press, slot):
+    """L11 on a renderer: Next and Previous at the spot another controller's
+    takeover left load their slot and play it — the renderer taken back."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("resume") is not None, timeout=5, what="the spot")
+    assert getattr(n.backend, press)()
+    wait_for(lambda: r.state == "PLAYING" and "raat://" not in r.uri and n.last.state == "playing"
+             and n.last.queue_index == slot, timeout=10, what=f"slot {slot} playing")
+    assert n.last.extra.get("source") != "external"
+
+
+def test_l11_on_a_renderer_next_or_previous_with_no_spot_is_refused_in_words(tmp_path, proxy, renderers, nodes,
+                                                                            quality):
+    """L11, as on HQPlayer: another controller took a renderer the node had
+    stopped — no listen cut, no slot of ours to count from — so Next and
+    Previous are refused in words and nothing is sent; Play takes it back."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    assert n.backend.stop()
+    wait_for(lambda: n.last.state == "stopped" and r.state == "STOPPED", timeout=5, what="stopped")
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    mark = len(r.calls)
+    assert not n.backend.next() and not n.backend.previous()
+    assert "another app is playing through" in n.backend.refusal() and _sent(r, mark) == []

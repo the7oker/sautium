@@ -2535,6 +2535,12 @@ class DlnaBackend(PlayerBackend):
 
     def pause(self) -> bool:
         async def _p():
+            if self._external and not self._loading:
+                # Another controller holds the renderer: its playback is not
+                # the node's to pause (ROON-COEX L11) — nothing is sent, the
+                # spot its takeover left stays
+                self._emit_now()
+                return
             if self._parked is not None:
                 # A wait for a slot's stream ends: paused at its second, the
                 # play press starts it there — and only what the renderer
@@ -2561,6 +2567,13 @@ class DlnaBackend(PlayerBackend):
             # controller holds it the Stop is of its playback: the spot its
             # takeover left stays, as on HQPlayer
             self._seek_on_start = self._parked = self._seek_due = None
+            if self._external and not self._loading:
+                # Another controller holds the renderer: its playback is not
+                # the node's to stop (ROON-COEX L11) — nothing is sent, the
+                # spot its takeover left stays
+                self._said = "stopped"
+                self._emit_now("stopped")
+                return
             if not self._external:
                 self._resume = None
             self._said = "stopped"
@@ -2569,10 +2582,23 @@ class DlnaBackend(PlayerBackend):
         return self._call(_s())
 
     def next(self) -> bool:
+        if self._held_with_no_spot():
+            return False
         return self._call_async(self._load_and_play(self._index + 1))
 
     def previous(self) -> bool:
+        if self._held_with_no_spot():
+            return False
         return self._call_async(self._load_and_play(max(1, self._index - 1)))
+
+    def _held_with_no_spot(self) -> bool:
+        """Another controller holds the renderer and no listen of ours was cut
+        — no slot of ours to count from (ROON-COEX L11, as on HQPlayer): said,
+        nothing sent; Play takes it back."""
+        if self._external and self._resume is None and self._parked is None:
+            self._local.refusal = f"another app is playing through {self.label} — Play takes it back"
+            return True
+        return False
 
     def select(self, index: int, track_id: Optional[str] = None) -> bool:
         if self._queue.item_at(index) is None:
