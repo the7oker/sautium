@@ -2,14 +2,17 @@
 the matrix that fakes can show, asserted as the design has them.
 
 Roon is HQPlayer's other controller on a control connection of its own
-(FakeRoon). A person's start in Roon is Stop, PlaylistClear, a PlaylistAdd
-of a new raw stream from its Core and Play — as HQPlayer's own logs under
-Roon show (2016–2025); at a natural transition the same without the Stop —
-and no metadata. How Desktop
-6.1.1's Status names that entry is guessed both ways (FakeHqp.raw_streams)
-until the live run's A7 records it. On a renderer Roon goes past UPnP (RAAT):
-what the renderer's AVTransport says then is guessed both ways too
-(FakeRenderer.taken_by_another) until B1 records it live.
+(FakeRoon), as phase 1 recorded it (ROON-COEX §10.2, §10.4): a person's start
+in Roon is Stop, PlaylistClear, a PlaylistAdd of a new raw stream from its
+Core and Play, with no metadata; Next, a seek and a resume are a whole new
+cycle with a new stream; across a format change a natural transition is the
+same without the Stop; a pause is Pause, then Stop 5 s later, its zone still
+"paused"; a stop is Stop. How Desktop's Status names that entry is kept
+both ways (FakeHqp.raw_streams): the URI, as 6.1.1 and 6.2.0 name it, and a
+bare answer. On a renderer Roon goes past UPnP (RAAT): the KANN said our URI
+paused at its second (B1, FakeRenderer.taken_by_another "paused"); a
+renderer another UPnP controller loads names its URI ("playing"), and one
+that stops on ours ("stopped") is kept as a guess.
 
 Each scenario prints one OBSERVED line — what the node did — for the record.
 A take that moved by no command of the node's is read against the playlist
@@ -56,26 +59,38 @@ def _observed(scenario: str, **what) -> None:
     print("OBSERVED", scenario, json.dumps(what, default=str, sort_keys=True))
 
 
+# Roon's Stop after its Pause, recorded live (ROON-COEX §10.2 A3: 16:40:40 → 16:40:45)
+PAUSE_STOP_S = 5.0
+
+
 class FakeRoon:
     """Roon driving HQPlayer on a control connection of its own: per track a
-    new raw stream from its Core, handed as HQPlayer's logs under Roon show
-    it. Its zone's volume is Fixed (the trial sheet): no SetVolume."""
+    new raw stream from its Core, handed as phase 1 recorded it. Its zone's
+    volume is Fixed (the trial sheet): no SetVolume."""
 
     def __init__(self, port: int):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=5)
         self.n = 0
         self.sent: list[str] = []
+        self._lock = threading.Lock()
+        self._stop_due: threading.Timer | None = None
 
     def _send(self, *commands: str) -> None:
-        for c in commands:
-            self.sock.sendall(c.encode())
-            answer = b""
-            while not answer.endswith(b"\n"):
-                chunk = self.sock.recv(65536)
-                if not chunk:
-                    raise ConnectionError("HQPlayer closed Roon's control connection")
-                answer += chunk
-            self.sent.append(re.match(r"<(\w+)", c).group(1))
+        with self._lock:
+            for c in commands:
+                self.sock.sendall(c.encode())
+                answer = b""
+                while not answer.endswith(b"\n"):
+                    chunk = self.sock.recv(65536)
+                    if not chunk:
+                        raise ConnectionError("HQPlayer closed Roon's control connection")
+                    answer += chunk
+                self.sent.append(re.match(r"<(\w+)", c).group(1))
+
+    def _cancel_stop(self) -> None:
+        if self._stop_due is not None:
+            self._stop_due.cancel()
+            self._stop_due = None
 
     def play_track(self) -> str:
         self.n += 1
@@ -91,8 +106,13 @@ class FakeRoon:
         self._send("<PlaylistClear/>", f'<PlaylistAdd uri="{uri}" queued="0" clear="0"/>', "<Play/>")
         return uri
 
-    def pause(self) -> None:
+    def pause(self, stop_after: float = PAUSE_STOP_S) -> None:
+        """Roon's pause: Pause, then Stop `stop_after` seconds later, its zone
+        still "paused" (recorded: 5 s)."""
         self._send("<Pause/>")
+        self._stop_due = threading.Timer(stop_after, self._send, args=("<Stop/>",))
+        self._stop_due.daemon = True
+        self._stop_due.start()
 
     def start_before_its_play(self) -> str:
         """Roon's start up to its Play: Stop, PlaylistClear and the add of
@@ -107,14 +127,19 @@ class FakeRoon:
         until its zone is stopped (ROON-COEX §10.1, A8: 200 Plays in 53 s)."""
         self._send("<Play/>")
 
-    def resume(self) -> None:
-        self._send("<Play/>")
+    def resume(self) -> str:
+        """Roon's resume: a whole new cycle with a new stream, from the second
+        it paused at (recorded); its pause's Stop goes no more."""
+        self._cancel_stop()
+        return self.play_track()
 
     def stop(self) -> None:
-        # A person's stop in Roon: Pause, then Stop (HQPlayer's author, 2024-12-11)
-        self._send("<Pause/>", "<Stop/>")
+        """Roon's stop: Stop (recorded)."""
+        self._cancel_stop()
+        self._send("<Stop/>")
 
     def close(self) -> None:
+        self._cancel_stop()
         self.sock.close()
 
 
@@ -321,8 +346,10 @@ def test_a2_a_play_in_the_node_while_roon_plays_takes_hqplayer_back(fake, roon, 
 
 
 def test_a3_roon_paused_then_a_play_in_the_node(fake, roon, listens, monkeypatch):
-    """A3. Roon pauses its track: the node stays silent, Now Playing at the
-    spot Roon's takeover left, external still; a Play in the node takes
+    """A3. Roon pauses its track — Pause, then Stop 5 s later, as recorded:
+    the node stays silent, Now Playing at the spot Roon's takeover left,
+    external while HQPlayer pauses Roon's entry, and once Roon's Stop came no
+    `source` (a stopped HQPlayer names no entry); a Play in the node takes
     HQPlayer back there as in A2 — never resumes Roon's stream."""
     writes, lastfm = listens
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
@@ -332,12 +359,19 @@ def test_a3_roon_paused_then_a_play_in_the_node(fake, roon, listens, monkeypatch
         roon.pause()
         mark = len(fake.commands)
         _wait(lambda: fake.state == int(PlaybackState.PAUSED) and _statuses(fake, mark) >= 3, timeout=10)
+        paused = dict(mgr._latest_status)
+        _wait(lambda: fake.state == int(PlaybackState.STOPPED), timeout=10)
+        mark = len(fake.commands)
+        _wait(lambda: _statuses(fake, mark) >= 3, timeout=10)
         st = mgr._latest_status
         _observed("A3-paused", mode=fake.raw_streams, rows=len(_rows(writes)), lastfm=lastfm,
-                  status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume")})
-        assert (st["state"], st["track_index"], st["source"], st["resume"]["index"]) == (
+                  paused={k_: paused.get(k_) for k_ in ("state", "track_index", "source", "resume")},
+                  stopped={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume")})
+        assert (paused["state"], paused["track_index"], paused["source"], paused["resume"]["index"]) == (
             "stopped", 2, "external", 2)
-        _takes_back(fake, mgr, b, roon, "A3", roon_state="paused", interrupted_at=(2, at))
+        assert (st["state"], st["track_index"], st.get("source"), st["resume"]["index"]) == ("stopped", 2, None, 2)
+        assert _rows(writes) == [] and tracker._play_session is not None
+        _takes_back(fake, mgr, b, roon, "A3", roon_state="paused, then stopped", interrupted_at=(2, at))
     finally:
         b.shutdown()
 
@@ -370,9 +404,9 @@ def test_a4_roon_stopped_then_a_play_in_the_node(fake, roon, listens, monkeypatc
 def test_the_spot_roons_takeover_left_holds_until_a_play_in_the_node(fake, roon, listens, monkeypatch):
     """Roon's takeover cut the node's listen of slot 2: the spot holds while
     Roon plays on — its stream ended, its next track started (no Stop),
-    paused, played again — Now Playing naming slot 2 at that second the whole
-    time, the node sending nothing; then a Play in the node takes HQPlayer
-    back there."""
+    paused, resumed (a new cycle with a new stream, before its pause's Stop)
+    — Now Playing naming slot 2 at that second the whole time, the node
+    sending nothing; then a Play in the node takes HQPlayer back there."""
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
     try:
         at, _, ticks = _roon_takes_over(fake, mgr, roon)
@@ -1048,8 +1082,12 @@ def test_f7_an_edit_is_an_entry_the_node_never_gave_and_on_hqplayer5_newer_than_
 
 # -- the renderer: Roon past UPnP -------------------------------------------------
 
-@pytest.fixture(params=["stopped", "playing"])
+@pytest.fixture(params=["paused", "playing", "stopped"])
 def taken(request):
+    """How the renderer's AVTransport says another controller took it: the
+    KANN under Roon's RAAT recorded ("paused": our URI paused at its second,
+    ROON-COEX §10.3 B1), another UPnP controller's URI ("playing"), our URI
+    stopped (a guess)."""
     return request.param
 
 
@@ -1185,10 +1223,10 @@ def test_b1_the_listen_counts_its_own_seconds_and_the_other_controllers_track_is
     _observed("B1-listen", taken=taken, listened=listened, lastfm=lastfm, node_sent=_sent(r, mark),
               status={k_: manager.latest_status.get(k_) for k_ in ("state", "track_index", "source")})
     assert lastfm == [("update_now_playing", "Track 1")]
-    if taken == "playing":
-        assert listened == []
-    else:
+    if taken == "stopped":
         assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"] and listened[0][1] < 50
+    else:
+        assert listened == []           # held: a takeover's (F6), or a pause of our own track's (the KANN's word)
     assert _sent(r, mark) == []
 
 

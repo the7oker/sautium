@@ -579,12 +579,16 @@ class FakeRenderer:
 
     def taken_by_another(self, how: str) -> None:
         """Another controller takes the device past UPnP — Roon over RAAT on
-        a player that is a Roon endpoint too — and its AVTransport says so in
-        one of two ways, guessed until a live run records it: "stopped", the
-        transport stopped on our URI, its position frozen there; "playing",
-        playing a URI of the other controller's, its position running from
-        0. Our NextURI is gone either way. Evented as any change."""
-        if how == "stopped":
+        a player that is a Roon endpoint too — and its AVTransport says so:
+        "paused", our URI paused at its second, as the KANN said under RAAT
+        (ROON-COEX §10.3 B1); "stopped", the transport stopped on our URI,
+        its position frozen there (a guess); "playing", playing a URI of the
+        other controller's, its position running from 0 (another UPnP
+        controller's load). Our NextURI is gone each way. Evented as any
+        change."""
+        if how == "paused":
+            self._base, self._t0, self.state = self.position(), None, "PAUSED_PLAYBACK"
+        elif how == "stopped":
             self._base, self._t0, self.state = self.position(), None, "STOPPED"
         else:
             self.uri, self.meta = "raat://another-controller/stream", ""
