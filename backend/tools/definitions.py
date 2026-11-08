@@ -559,6 +559,10 @@ def _h_hqplayer_get_dsp_state() -> str:
             filter_line += f" ({active_filter['name']})"
             if active_filter.get("description"):
                 filter_line += f" — {active_filter['description']}"
+        if filters is not None and state["filter1x"] not in (-1, state["filterNx"]):
+            # Set apart in HQPlayer's own window: a 44.1/48 kHz source plays the 1x slot
+            one_x = next((f["name"] for f in filters if f["index"] == state["filter1x"]), "?")
+            filter_line += f"; 1x slot (44.1/48 kHz sources): {state['filter1x']} ({one_x})"
         lines = ["Current DSP state:"]
         lines.append(f"  Convolution: {'ON' if state['convolution'] else 'OFF'}")
         lines.append(f"  Matrix profile: '{state['matrix_profile']}'" if state['matrix_profile'] else "  Matrix profile: (none)")

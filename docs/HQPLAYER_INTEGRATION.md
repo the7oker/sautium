@@ -233,7 +233,9 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
   filter the engine RUNS — the 1x slot while a 44.1 kHz source plays — and
   moves to a pick only once the engine has swapped to it (half a second
   after the answer in PCM on Desktop 6.3.1, measured 2026-11-08), so what is
-  set is read from the slots, never from `filter`; `adaptive`,
+  set is read from the slots, never from `filter`; `slots_reported` (whether
+  HQPlayer gave the slots: without them, HQPlayer 5, `filterNx` is a copy of
+  the running `filter`); `adaptive`,
   `matrix_profile`, `volume`, and since 2026-10-11 `filter_20k`,
   `filter_junk`, `random`, `repeat` (`None` from a build that does not report
   them); no mute flag. HQPlayer keeps one selection per mode (its `settings.xml`
