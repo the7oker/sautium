@@ -1396,7 +1396,9 @@ def test_b_a_renderer_lost_or_refusing_our_load_while_another_controller_holds_i
     """While another controller holds the renderer: lost — it stops
     answering — it keeps the spot the takeover left, and makes none from the
     other controller's state; a load of ours it refuses leaves it the other
-    controller's, the status external with the refusal said."""
+    controller's, the status external with the refusal said. A Stop or a
+    Pause meanwhile sends it nothing (L11), so nothing finds it lost then:
+    the next Play does, and the spot is still the takeover's."""
     r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
     r.taken_by_another("playing")
     wait_for(lambda: (n.last.extra.get("resume") or {}).get("index") == 1, timeout=5, what="the spot")
@@ -1406,8 +1408,11 @@ def test_b_a_renderer_lost_or_refusing_our_load_while_another_controller_holds_i
     wait_for(lambda: n.backend._error is not None and n.last.state != "loading", timeout=10, what="the refusal")
     assert n.last.extra.get("source") == "external" and n.last.extra.get("resume") == spot
     r.stop_answering()
-    assert not n.backend.stop()
-    wait_for(lambda: n.backend._gone, timeout=10, what="lost")
+    mark = len(r.calls)
+    assert n.backend.stop()
+    assert "Stop" not in _sent(r, mark) and n.last.extra.get("resume") == spot
+    n.backend.play()
+    wait_for(lambda: n.backend._gone, timeout=20, what="lost at the next Play")
     assert n.last.state == "stopped" and n.last.extra.get("resume") == spot
     r.answer_again()
     r2, n2 = _renderer_plays_slot_1(tmp_path, renderers, nodes)
@@ -1416,9 +1421,13 @@ def test_b_a_renderer_lost_or_refusing_our_load_while_another_controller_holds_i
     r2.taken_by_another("playing")
     wait_for(lambda: n2.last.extra.get("source") == "external", timeout=5, what="external")
     r2.stop_answering()
-    assert not n2.backend.pause()
-    wait_for(lambda: n2.backend._gone, timeout=10, what="lost")
-    assert n2.last.state == "stopped" and n2.last.extra.get("resume") is None
+    mark2 = len(r2.calls)
+    assert n2.backend.pause()
+    assert "Pause" not in _sent(r2, mark2)
+    n2.backend.play()
+    wait_for(lambda: n2.backend._gone, timeout=20, what="lost at the next Play")
+    # no spot made from the other controller's state: none, or the node's own start's, at the top
+    assert n2.last.state == "stopped" and (n2.last.extra.get("resume") or {}).get("position", 0) == 0
     r2.answer_again()
 
 
