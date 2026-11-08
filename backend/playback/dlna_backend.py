@@ -554,10 +554,17 @@ class DlnaBackend(PlayerBackend):
         # what it plays is said at slot 0, and nothing it does moves the
         # queue — until a load of ours (_taken_by_another)
         self._external = False
-        # Its takeover cut the node's own listen: the play tracker holds that
-        # listen — a takeover is a pause for it (ROON-COEX F6) — until a load
-        # of ours, the take-back or another slot
-        self._cut = False
+        # The queue item whose listen its takeover cut: the play tracker
+        # holds that listen — a takeover is a pause for it (ROON-COEX F6) —
+        # until a load of ours hands the renderer our URI, or the item leaves
+        # the queue
+        self._cut: Optional[QueueItem] = None
+        # Stops and Pauses said while another controller holds the renderer,
+        # counted: one said after a take-back load of ours was asked ends it
+        # before our URI is handed over (_load_seq) — the spot its takeover
+        # left, as that load found it (_held_load), stays where it was
+        self._halts = 0
+        self._held_load: Optional[tuple[int, float, float]] = None
         self._position = 0.0
         # Wall-clock position estimate for renderers that don't report RelTime
         # (KANN on VBR Opus): position at the last baseline + elapsed since.
@@ -1055,22 +1062,24 @@ class DlnaBackend(PlayerBackend):
                 extra["resume"] = {"index": self._index, "position": self._resume}
         elif state is None and self._parked is not None:
             state = "loading"         # a play waiting on its slot's stream
-        elif self._external and not self._loading:
+        elif self._external and not (self._loading and state == "loading"):
             # Another controller holds the renderer: what it plays is none of
             # the queue's — slot 0, in the renderer's own state; or, where it
             # cut the node's own listen, that spot: its slot, stopped at its
             # second, Play loads it there. A load of ours under way says its
-            # own slot
+            # own slot, and what it says of nothing handed over (the queue's
+            # end) is that spot still
             extra["source"] = "external"
             if self._resume is not None:
                 state, position = "stopped", self._resume
                 extra["resume"] = {"index": self._index, "position": self._resume}
-                if self._cut:
-                    extra["taken"] = True       # the play tracker holds the cut listen
             else:
                 position, length, index = 0.0, 0.0, 0
         elif state is None and self._current_url is None and self._resume is not None:
             state = "paused"          # a spot carried over, nothing of it loaded yet
+        if (not self._gone and self._external and self._cut is not None
+                and self._queue.index_of(self._cut) is not None):
+            extra["taken"] = True       # the play tracker holds the cut listen
         state = state or self._state_name()
         self._said = state
         if self._corrected:
@@ -1394,8 +1403,8 @@ class DlnaBackend(PlayerBackend):
         neither ours nor the armed next — none this attachment handed it
         (_handed). Its playback is external, at slot 0: the listen counts
         its own seconds, the clock running on no further — held, as a pause
-        holds it, where this takeover cut it (ROON-COEX F6: `_cut`), ended
-        by another slot's load; the load is let
+        holds it, where this takeover cut it (ROON-COEX F6: `_cut`), until a
+        load of ours hands the renderer our URI; the load is let
         go — nothing of ours current or armed, no start or Seek owed; and
         nothing the renderer does from here is a track end or an advance
         (_handle_state_change). Nothing is sent to it: the next play intent
@@ -1417,7 +1426,7 @@ class DlnaBackend(PlayerBackend):
             self._index, self._resume = slot, parked[1]
         elif self._said in ("playing", "paused"):
             self._resume = self._position
-            self._cut = True
+            self._cut = self._queue.item_at(self._index)
         self._held_item = self._queue.item_at(self._index)
         self._external = True
         self._current_url = self._next_url = None
@@ -2030,20 +2039,25 @@ class DlnaBackend(PlayerBackend):
         # reloads from there, any other is sought once it plays. While
         # another controller holds the renderer the slot is adopted for the
         # load's own "loading" only: a hand-over the renderer refuses leaves
-        # the spot its takeover left where it was.
+        # the spot its takeover left where it was, and so does a Stop or a
+        # Pause said after this load was asked (stop, pause: `_halts`, read
+        # as it is asked — one queued behind another load ends too).
+        halts = self._halts
         async with self._load_lock:
             self._loading = True
             held = (self._index, self._position, self._length) if self._external else None
+            self._held_load = held
             try:
                 return await self._load_seq(index, play=play, ss=ss,
                                             url_override=url_override,
-                                            start_at=start_at)
+                                            start_at=start_at, halts=halts)
             except Exception:
                 if held is not None and self._external:
                     self._index, self._position, self._length = held
                 raise
             finally:
                 self._loading = False
+                self._held_load = None
 
     def _unplayable_reason(self, first: int, skipped: int) -> str:
         """Why slots ``first`` .. ``first + skipped - 1`` had nothing this
@@ -2111,11 +2125,17 @@ class DlnaBackend(PlayerBackend):
 
     async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0,
                         url_override: Optional[str] = None,
-                        start_at: float = 0.0) -> bool:
+                        start_at: float = 0.0, halts: int) -> bool:
         # Slots with nothing to serve are walked past in a loop, not by
         # recursion: with the library's drive unmounted every owned slot is
         # one, and a queue past ~1000 of them overran the recursion limit.
-        # A seek (ss, url_override) belongs to the first slot only.
+        # A seek (ss, url_override) belongs to the first slot only. A Stop or
+        # a Pause said under another controller since the load was asked
+        # (`halts`) ends it wherever it waits, before our URI is handed over:
+        # stop and pause have said the spot, and the renderer is the other
+        # controller's still.
+        if self._halts != halts:
+            return True
         first = index
         self._parked = None
         while True:
@@ -2150,9 +2170,14 @@ class DlnaBackend(PlayerBackend):
                 self._current_url = self._next_url = None
                 self._awaiting_play = False
                 # The second it starts at stays the slot's: a Play or a seek
-                # meanwhile keeps or moves it
-                self._resume = start_at if start_at > 0 else None
+                # meanwhile keeps or moves it — and, while another controller
+                # holds the renderer, is the spot a Stop or a Pause leaves
+                # (its track and second, as on HQPlayer), at 0 s too
+                self._resume = start_at if start_at > 0 or self._external else None
+                if self._external:
+                    self._held_item = item
                 self._parked = (item, start_at)
+                self._held_load = None      # a wait, no load: its spot is its own
                 self._park_uris = frozenset(u for u in (getattr(self._dmr, "current_track_uri", None),
                                                         getattr(self._dmr, "av_transport_uri", None)) if u)
                 self._park_under_another = (self._state_name() in ("playing", "paused")
@@ -2207,6 +2232,8 @@ class DlnaBackend(PlayerBackend):
             if self._preload_task is not None:
                 self._preload_task.cancel()   # its "next" is not this load's next
             mime = await self._serve_ready(item, url, front=True)
+            if self._halts != halts:
+                return True
             if mime is not None:
                 break
             index, ss, url_override, start_at = index + 1, 0.0, None, 0.0
@@ -2234,12 +2261,23 @@ class DlnaBackend(PlayerBackend):
         # an action is missing from it (the Phase-2 Pause lesson). A gated
         # SetAVTransportURI/Play here meant next/prev committed the new
         # index while the renderer kept playing the old track.
+        meta = await self._transport_meta(url, item, mime)
+        if self._halts != halts:
+            return True
+        # The hand-over goes: a Stop or a Pause from here leaves our load
+        # where it lands, not the spot before it
+        self._held_load = None
         self._handed.add(url)
-        await self._avt_retry("SetAVTransportURI", CurrentURI=url,
-                              CurrentURIMetaData=await self._transport_meta(url, item, mime))
+        await self._avt_retry("SetAVTransportURI", CurrentURI=url, CurrentURIMetaData=meta)
         self._current_url = url
         self._resume = self._held_item = None
-        self._external = self._cut = False      # ours again; a hand-over refused raised above, theirs still
+        # Ours again; a hand-over refused raised above, theirs still
+        self._external, self._cut = False, None
+        if self._halts != halts:
+            # Said while the hand-over was on its way: ours, loaded and not
+            # started — stopped there, nothing more sent
+            self._emit_now("stopped")
+            return True
         if play:
             await self._avt_retry("Play", Speed="1")
             # The clock starts at the offset (0 for a fresh track), or at the
@@ -2535,11 +2573,13 @@ class DlnaBackend(PlayerBackend):
 
     def pause(self) -> bool:
         async def _p():
-            if self._external and not self._loading:
+            if self._external:
                 # Another controller holds the renderer: its playback is not
                 # the node's to pause (ROON-COEX L11) — nothing is sent, the
-                # spot its takeover left stays
-                self._emit_now()
+                # spot its takeover left stays, and a take-back of ours on
+                # its way ends before our URI is handed over: one waiting for
+                # its stream leaves its own spot, its slot and second (_park)
+                self._halt_take_back()
                 return
             if self._parked is not None:
                 # A wait for a slot's stream ends: paused at its second, the
@@ -2554,6 +2594,20 @@ class DlnaBackend(PlayerBackend):
             self._emit_now("paused")
         return self._call(_p())
 
+    def _halt_take_back(self) -> None:
+        """A Stop or a Pause while another controller holds the renderer:
+        nothing is sent — its playback is not the node's (ROON-COEX L11) —
+        and a take-back of ours asked before it ends (_load_seq: `_halts`),
+        the spot standing as it did — a wait for its stream's, a load's that
+        has not handed our URI over — said at once in the renderer's own
+        state. Runs on the dlna-loop."""
+        self._halts += 1
+        self._parked = self._seek_on_start = self._seek_due = None
+        held = self._held_load
+        if held is not None:
+            self._index, self._position, self._length = held
+        self._emit_now(self._state_name())
+
     def stop(self) -> bool:
         async def _s():
             self._stop_poll()
@@ -2564,18 +2618,13 @@ class DlnaBackend(PlayerBackend):
             # one the renderer refuses never reads as a stop of the listen.
             # No retry: a slow refusal and its retry could outlast the
             # command's window, read as the renderer gone. While another
-            # controller holds it the Stop is of its playback: the spot its
-            # takeover left stays, as on HQPlayer
-            self._seek_on_start = self._parked = self._seek_due = None
-            if self._external and not self._loading:
-                # Another controller holds the renderer: its playback is not
-                # the node's to stop (ROON-COEX L11) — nothing is sent, the
-                # spot its takeover left stays
-                self._said = "stopped"
-                self._emit_now("stopped")
+            # controller holds it the Stop is of its playback, never sent: the
+            # spot its takeover left stays, as on HQPlayer (_halt_take_back)
+            if self._external:
+                self._halt_take_back()
                 return
-            if not self._external:
-                self._resume = None
+            self._seek_on_start = self._parked = self._seek_due = None
+            self._resume = None
             self._said = "stopped"
             await self._avt("Stop")
             self._emit_now("stopped")
@@ -2584,6 +2633,10 @@ class DlnaBackend(PlayerBackend):
     def next(self) -> bool:
         if self._held_with_no_spot():
             return False
+        if self._external and self._queue.item_at(self._index + 1) is None:
+            # The queue's end: the spot — or the take-back waiting for its
+            # stream — stays, as on HQPlayer
+            return True
         return self._call_async(self._load_and_play(self._index + 1))
 
     def previous(self) -> bool:

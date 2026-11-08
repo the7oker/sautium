@@ -1013,13 +1013,37 @@ def test_f7_an_edit_under_the_listen_judges_it_whatever_hqplayer_plays_of_it(fak
     stopped = _st(PlaybackState.STOPPED, 1, 0.0, uri="http://127.0.0.1:30000/1/stream.raw", serial=later)
     b._note_listen(stopped, (0, None, False), 0.0, 2.0, 1.0, edited=True)
     assert b._spot_at() == spot
-    held = b._listen_held(stopped, b._playing(stopped) or (0, None, False))
+    held = b._listen_held(stopped, b._playing(stopped) or (0, None, False), 2.0)
     assert held is (spot is not None or case == "edited_before_the_take_moved")
     # HQPlayer playing an entry of ours again ends the hold
     b._note_listen(_st(PlaybackState.PLAYING, 3, 1.0, uri="file:///E:/Music/A/03.flac", serial=48),
                    (3, q.item_at(3), False), 1.0, 3.0, 2.0)
     playing = _st(PlaybackState.PLAYING, 3, 2.0, uri="file:///E:/Music/A/03.flac", serial=48)
-    assert not b._listen_held(playing, (3, q.item_at(3), False))
+    assert not b._listen_held(playing, (3, q.item_at(3), False), 3.0)
+
+
+def test_f7_an_edit_is_an_entry_the_node_never_gave_and_on_hqplayer5_newer_than_the_listen(fake):
+    """F7's edit (`_edited`) is another controller's entry in HQPlayer's
+    playlist — never the node's own tail (an entry it handed, then removed
+    from the queue, playing out before the queue's slots). Where HQPlayer
+    names no take (HQPlayer 5), an edit judges only a listen read while the
+    playlist was the queue's mirror: an entry already there then is no
+    newer word than the listen."""
+    q = CanonicalQueue()
+    q.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in (1, 2, 3)])
+    b = hb.HqpBackend(emit=lambda *_: None, queue=q)
+    stopped = _st(PlaybackState.STOPPED, 2, 0.0, uri="file:///E:/Music/A/02.flac", serial=None)
+    b._given = {"file:///E:/Music/X/removed.flac"}
+    b._mirror = "tail"
+    tail = [{"uri": "file:///E:/Music/X/removed.flac"}, {"uri": "file:///E:/Music/A/02.flac"},
+            {"uri": "file:///E:/Music/A/03.flac"}]
+    assert b._judge_mirror(tail, stopped, expect=b._mirror_moves) and not b._edited
+    roons = [{"uri": "http://127.0.0.1:30000/1/stream.raw"}]
+    assert b._judge_mirror(roons, stopped, expect=b._mirror_moves) and b._edited
+    b._note_listen(_st(PlaybackState.PLAYING, 2, 30.0, uri="file:///E:/Music/A/02.flac", serial=None),
+                   (2, q.item_at(2), False), 30.0, 1.0, 0.0)
+    assert not b._note_listen(stopped, (0, None, False), 0.0, 2.0, 1.0, edited=True)
+    assert b._spot_at() is None and b._cut is None
 
 
 # -- the renderer: Roon past UPnP -------------------------------------------------
@@ -1570,10 +1594,24 @@ def test_f7_a_takeover_whose_start_hqplayer_refuses_leaves_the_spot_and_holds_th
             time.sleep(0.15)
         _wait(lambda: mgr._latest_status.get("resume") is not None, timeout=10)
         st = mgr._latest_status
+        spot = st["resume"]
         _observed("F7", at=at, node_commands=_node_commands(fake, n, roon), rows=len(_rows(writes)),
                   status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume")})
         assert (st["state"], st["track_index"], st["resume"]["index"]) == ("stopped", 2, 2)
         assert abs(st["resume"]["position"] - at) <= 2
+        assert _node_commands(fake, n, roon) == []
+        assert _rows(writes) == [] and tracker._play_session is not None
+        # The rest of A8's cycle under the verdict — more Plays, Roon's stop,
+        # its clear: the spot and the held listen stand through it
+        for _ in range(4):
+            roon.play_again()
+            time.sleep(0.15)
+        roon.stop()
+        roon._send("<PlaylistClear/>")
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=10)
+        st = mgr._latest_status
+        assert (st["state"], st["track_index"], st.get("resume")) == ("stopped", 2, spot)
         assert _node_commands(fake, n, roon) == []
         assert _rows(writes) == [] and tracker._play_session is not None
         fake.refuse_play.clear()
@@ -1582,6 +1620,180 @@ def test_f7_a_takeover_whose_start_hqplayer_refuses_leaves_the_spot_and_holds_th
         _wait(lambda: _rows(writes), timeout=10)
         assert [p["tid"] for p in _rows(writes)] == [_slot_track(b, 2)]
         assert lastfm.count("update_now_playing") == 1
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_f6_roons_stop_before_its_play_holds_the_listen_until_its_play_cuts_it_there(fake, roon, listens,
+                                                                                    monkeypatch):
+    """F6 before the verdict (ROON-COEX §6.1 P4): Roon's Stop, its clear and
+    its add, read before its Play — a stop of our entry the node did not
+    send — hold the node's listen of slot 2, nothing written; Roon's Play
+    then cuts it at its second, and the node's Play takes HQPlayer back
+    there: one history row, one now-playing."""
+    writes, lastfm = listens
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        at = mgr._latest_status.get("position")
+        roon.start_before_its_play()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=10)
+        held = (_rows(writes), tracker._play_session is not None, mgr._latest_status.get("state"))
+        roon.play_again()
+        _wait(lambda: mgr._latest_status.get("resume") is not None, timeout=10)
+        spot = mgr._latest_status["resume"]
+        _observed("F6-before-its-play", mode=fake.raw_streams, at=at, held=held, spot=spot)
+        assert held == ([], True, "stopped")
+        assert spot["index"] == 2 and abs(spot["position"] - at) <= 2
+        assert _rows(writes) == [] and tracker._play_session is not None
+        _takes_back(fake, mgr, b, roon, "F6-before-its-play", interrupted_at=(2, at))
+        assert b.stop()
+        _wait(lambda: _rows(writes), timeout=10)
+        assert [p["tid"] for p in _rows(writes)] == [_slot_track(b, 2)]
+        assert lastfm.count("update_now_playing") == 1
+    finally:
+        b.shutdown()
+
+
+def test_f6_a_start_of_the_nodes_own_hqplayer_refuses_ends_the_listen_before_it(fake, listens, monkeypatch):
+    """A tap of the node's own on a slot whose rate HQPlayer refuses — it
+    stops there at once: that tap ended the listen of the slot before, no
+    one cut it — written at once, never held for a verdict."""
+    writes, lastfm = listens
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        fake.refuse_play.add("A/03.flac")
+        assert b.select(3, "track-3")
+        _wait(lambda: fake.state == int(PlaybackState.STOPPED) and fake.track == 3, timeout=10)
+        k = len(fake.commands)
+        _wait(lambda: _rows(writes) or _statuses(fake, k) >= 6, timeout=20)
+        assert [p["tid"] for p in _rows(writes)] == ["track-2"] and tracker._play_session is None
+    finally:
+        b.shutdown()
+
+
+def test_f6_the_queues_last_slot_played_to_its_end_writes_its_listen_at_once(fake, listens, monkeypatch):
+    """HQPlayer plays the queue's last slot to its end and stops by itself:
+    the listen is over — written at once, never held as a stop the node did
+    not send."""
+    from playback import manager as manager_mod
+    writes, lastfm = listens
+    mgr = _album(3)
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    b = _attach(mgr)
+    try:
+        assert b.select(3)
+        assert _wait(lambda: mgr._latest_status.get("track_index") == 3
+                     and tracker._play_session is not None and tracker._play_session.max_position >= 3)
+        with fake._lock:
+            fake.length = int(fake.position) + 3            # it ends three reads from now
+        _wait(lambda: fake.state == int(PlaybackState.STOPPED), timeout=10)
+        k = len(fake.commands)
+        _wait(lambda: _rows(writes) or _statuses(fake, k) >= 3, timeout=10)
+        assert [p["tid"] for p in _rows(writes)] == ["track-3"] and tracker._play_session is None
+    finally:
+        b.shutdown()
+
+
+def test_f6_the_cut_listens_track_leaving_the_queue_ends_the_hold_at_its_own_seconds(fake, listens, monkeypatch):
+    """Roon holds HQPlayer where it cut the node's listen of slot 2; the
+    person removes that track from the queue: the spot goes with it, and so
+    does the hold — the listen is written at its own seconds."""
+    writes, lastfm = listens
+    mgr, b, roon, spot = _roon_holds_the_spot(fake, monkeypatch)
+    try:
+        assert _rows(writes) == [] and tracker._play_session is not None
+        assert mgr.remove(2, "track-2") is True
+        _wait(lambda: _rows(writes), timeout=10)
+        rows = _rows(writes)
+        assert [p["tid"] for p in rows] == ["track-2"] and abs(rows[0]["dur"] - spot["position"]) <= 1.5
+        assert tracker._play_session is None and mgr._latest_status.get("resume") is None
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_roons_stop_on_the_last_slot_before_its_play_is_no_end_of_the_queue(fake, listens, monkeypatch):
+    """The node plays the queue's last slot; Roon's Stop, its clear and its
+    add are read before its Play: the listen is held for the verdict to come
+    — no end of the queue, the session not archived."""
+    from playback import manager as manager_mod
+    from playback import sessions
+    closed = []
+    monkeypatch.setattr(sessions, "close_active_session", lambda queue: closed.append(len(queue)))
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr = _album(3)
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    b = _attach(mgr)
+    try:
+        assert b.select(3)
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                     and mgr._latest_status.get("track_index") == 3
+                     and (mgr._latest_status.get("position") or 0) >= 3)
+        roon.start_before_its_play()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=10)
+        assert mgr._latest_status.get("state") == "stopped" and closed == []
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_l11_a_stop_while_a_take_back_waits_under_roon_keeps_its_spot_and_next_takes_hqplayer_back(
+        fake, monkeypatch):
+    """Roon holds HQPlayer; the person taps slot 3, whose bytes are away (the
+    take-back waits), and presses Stop: nothing is sent, the waiting start's
+    track and second are the spot, as a Stop leaves them. Next there is a
+    press that starts playback under another controller (ROON-COEX L11): it
+    takes HQPlayer back at the slot after — never a spot moved in silence."""
+    mgr, b, prov, toks, roon = _roon_holds_streams(fake, monkeypatch)
+    try:
+        prov.go.clear()
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading")
+        n = _mark(fake, roon)
+        assert b.stop()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2)
+        stopped = dict(mgr._latest_status)
+        assert _node_commands(fake, n, roon) == [] and fake.state == PLAYING
+        assert (stopped["state"], stopped.get("resume")) == ("stopped", {"index": 3, "position": 0})
+        assert b.next()
+        prov.go.set()
+        _wait(lambda: fake.state == PLAYING and fake.track == 4
+              and not any(u.endswith("/stream.raw") for u in fake.playlist), timeout=15)
+        st = mgr._latest_status
+        _observed("L11-stop-then-next", stopped=stopped.get("resume"), hqplayer=(fake.state, fake.track),
+                  status=(st.get("state"), st.get("track_index"), st.get("source")))
+        assert fake.track == 4 and st.get("source") != "external"
+    finally:
+        prov.go.set()
+        b.shutdown()
+        roon.close()
+
+
+def test_next_previous_or_a_seek_once_roon_stopped_an_hqplayer_it_took_idle_is_refused(fake, listens,
+                                                                                      monkeypatch):
+    """Roon took an idle HQPlayer — no spot — and stopped: its playlist
+    rests in HQPlayer with nothing of ours to count from. Next, Previous and
+    a Seek are refused in words and nothing is sent, as while it plays
+    (ROON-COEX L11) — never HQPlayer's own, which moves Roon's playlist."""
+    mgr, b, roon = _roon_holds_an_idle_hqplayer(fake, monkeypatch)
+    try:
+        roon.stop()
+        k = len(fake.commands)
+        _wait(lambda: fake.state == int(PlaybackState.STOPPED) and _statuses(fake, k) >= 3, timeout=10)
+        n = _mark(fake, roon)
+        refused = (b.next(), b.previous(), b.seek(30))
+        words = b.refusal()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2)
+        _observed("L11-roon-stopped-idle", refused=refused, mirror=b._mirror,
+                  node_commands=_node_commands(fake, n, roon))
+        assert refused == (False, False, False) and "another app is playing through" in words
+        assert _node_commands(fake, n, roon) == [] and fake.playlist[0].endswith("/stream.raw")
     finally:
         b.shutdown()
         roon.close()
@@ -1671,3 +1883,123 @@ def test_l11_on_a_renderer_next_or_previous_with_no_spot_is_refused_in_words(tmp
     mark = len(r.calls)
     assert not n.backend.next() and not n.backend.previous()
     assert "another app is playing through" in n.backend.refusal() and _sent(r, mark) == []
+
+
+def test_b_a_pause_while_a_take_back_waits_for_its_stream_ends_the_wait_and_sends_nothing(tmp_path, proxy,
+                                                                                         renderers, nodes, quality):
+    """Another controller holds the renderer, the spot standing; the person
+    taps slot 2, whose stream is on its way (the take-back waits), then
+    presses Pause: the wait ends — nothing is sent, the waiting slot and its
+    second the spot — and the stream's landing loads nothing."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("resume") is not None, timeout=5, what="the spot")
+    waiting = n.queue.item_at(2)
+    waiting.play = {"kind": "pending"}
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 2, what="the take-back waiting")
+    mark = len(r.calls)
+    assert n.backend.pause()
+    st = n.last
+    waiting.play = streamed(proxy, 2, cover_url="").source
+    n.backend.slot_ready(2)
+    time.sleep(1.5)
+    _observed("B-pause-waiting-take-back", status=(st.state, st.queue_index, st.extra.get("resume")),
+              node_sent=_sent(r, mark), renderer=r.uri[-24:])
+    assert _sent(r, mark) == [] and "raat://" in r.uri
+    assert (st.state, st.queue_index, st.extra.get("source"), st.extra.get("resume")) == (
+        "stopped", 2, "external", {"index": 2, "position": 0.0})
+
+
+def test_b_next_at_the_last_slot_under_another_controller_keeps_the_held_listen(tmp_path, proxy, renderers,
+                                                                                manager, heard, quality):
+    """A renderer: the node plays the last slot past its scrobble line;
+    another controller takes it, the listen held. Next has no slot after
+    it: the spot stays and nothing is sent — the held listen goes on, and
+    the take-back at the spot is the same listen: one row, one now-playing,
+    one scrobble."""
+    listened, lastfm = heard
+    r = renderers()
+    _on_renderer(manager, r, [track(tmp_path, 1, seconds=60.0), track(tmp_path, 2, seconds=60.0)])
+    _playing_at(manager, r, 1)
+    assert manager.backend().select(2)
+    wait_for(lambda: manager.latest_status.get("state") == "playing"
+             and manager.latest_status.get("track_index") == 2, timeout=10, what="slot 2")
+    assert manager.backend().seek(33)
+    _playing_at(manager, r, 34)
+    r.taken_by_another("playing")
+    wait_for(lambda: manager.latest_status.get("source") == "external", timeout=5, what="external")
+    spot = manager.latest_status.get("resume")
+    t2 = "00000000-0000-0000-0000-000000000002"
+    mark = len(r.calls)
+    assert manager.backend().next()
+    time.sleep(1.5)
+    assert _sent(r, mark) == [] and manager.latest_status.get("resume") == spot
+    assert [t for t, _ in listened if t == t2] == []
+    assert manager.backend().play()
+    wait_for(lambda: r.state == "PLAYING" and "raat://" not in r.uri
+             and manager.latest_status.get("state") == "playing", timeout=10, what="taken back")
+    _playing_at(manager, r, 38)
+    assert manager.backend().stop()
+    wait_for(lambda: any(t == t2 for t, _ in listened), timeout=10, what="the listen written")
+    _observed("B-next-at-the-end", spot=spot, listened=listened, lastfm=lastfm)
+    assert [t for t, _ in listened if t == t2] == [t2]
+    assert lastfm.count(("update_now_playing", "Track 2")) == 1
+    assert lastfm.count(("scrobble", "Track 2")) == 1
+
+
+@pytest.mark.parametrize("word", ["stop", "pause"])
+def test_b_a_stop_or_a_pause_during_the_take_back_load_ends_it_and_sends_the_renderer_nothing(
+        tmp_path, proxy, renderers, nodes, quality, monkeypatch, word):
+    """Another controller holds the renderer, the spot standing; the person
+    presses Play — the take-back loads, its stream still being readied —
+    then Stop or Pause before our URI is handed over: the load ends there,
+    nothing sent, the renderer the other controller's still, the spot and
+    the held listen as they were."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("taken") and n.last.extra.get("resume") is not None, timeout=5,
+             what="the spot")
+    spot = n.last.extra["resume"]
+    gate = threading.Event()
+    ready = n.backend._serve_ready
+
+    async def slow(item, url, *, front):
+        await asyncio.get_running_loop().run_in_executor(None, gate.wait, 10)
+        return await ready(item, url, front=front)
+    monkeypatch.setattr(n.backend, "_serve_ready", slow)
+    mark = len(r.calls)
+    assert n.backend.play()
+    wait_for(lambda: n.last.state == "loading", timeout=5, what="the take-back loading")
+    loading = n.last
+    assert getattr(n.backend, word)()
+    said = n.last
+    gate.set()
+    time.sleep(1.5)
+    _observed("B-word-during-take-back", word=word, node_sent=_sent(r, mark), renderer=r.uri[-24:],
+              statuses=[(s_.state, s_.extra.get("source"), s_.extra.get("resume"), s_.extra.get("taken"))
+                        for s_ in (loading, said, n.last)])
+    assert loading.extra.get("taken") and _sent(r, mark) == [] and "raat://" in r.uri
+    for st in (said, n.last):
+        assert (st.state, st.extra.get("source"), st.extra.get("resume"), st.extra.get("taken")) == (
+            "stopped", "external", spot, True)
+
+
+def test_b_a_takeover_of_the_stopped_renderer_after_a_take_back_holds_nothing(tmp_path, proxy, renderers,
+                                                                              nodes, quality):
+    """The take-back hands the renderer our URI: the cut listen is ours
+    again, the hold over. The node stops; another controller takes the
+    stopped renderer: no listen was cut — no spot, nothing held."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("taken"), timeout=5, what="the hold")
+    assert n.backend.play()
+    wait_for(lambda: r.state == "PLAYING" and "raat://" not in r.uri and n.last.state == "playing",
+             timeout=10, what="taken back")
+    assert not n.last.extra.get("taken")
+    assert n.backend.stop()
+    wait_for(lambda: n.last.state == "stopped" and r.state == "STOPPED", timeout=5, what="stopped")
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    time.sleep(0.5)
+    assert n.last.extra.get("resume") is None and not n.last.extra.get("taken")

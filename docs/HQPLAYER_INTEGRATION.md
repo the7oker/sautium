@@ -613,15 +613,28 @@ comes after the control port answers again — so neither can end the wait.
   that cuts the node's own listen leaves a spot too (since 2026-11-01): the
   first tick that reads its entry, playing or paused, after one that read
   the node's own — named by what its entry is, not by its place alone — the
-  take moved once since, no Stop of the node's after it, sets the spot at
-  that slot and the second of the node's last own reading. Now Playing keeps
-  that track, stopped there and external ("Another app took HQPlayer — Play
-  takes it back at …"), and Play takes HQPlayer back at it; a Seek moves it,
-  nothing sent, and Next and Previous move it as at any stopped spot. A
-  listen a Stop of ours, or HQPlayer moving on by itself, ended first was
-  cut by no one, nor one read in its last seconds (HQPlayer's own advance,
-  or near enough): another controller took an idle HQPlayer, no spot is set,
-  and while it holds HQPlayer a Seek, Next or Previous is refused in words —
+  take moved once since and the listen not ended by then, sets the spot at
+  that slot and the second of the node's last own reading. So does a tick
+  whose playlist holds an entry the node never gave HQPlayer, the take moved
+  since, whatever HQPlayer plays or refuses of it (since 2026-11-09,
+  ROON-COEX F7: Roon's stream at a rate the output family refuses, its Play
+  sent again and again — nothing of it ever plays; before, no spot was
+  left); where HQPlayer names no take (HQPlayer 5), only for a listen read
+  while the playlist was the queue's mirror. Now Playing keeps that track,
+  stopped there and external ("Another app took HQPlayer — Play takes it
+  back at …"), and Play takes HQPlayer back at it; a Seek moves it, nothing
+  sent. Next and Previous there — and at any spot while another controller
+  holds HQPlayer — start the slot beside it, from its start, as a tap there
+  (since 2026-11-09, ROON-COEX L11: a press that starts playback takes the
+  output back; at either end of the queue the spot stays); Pause and Stop
+  while another controller plays through HQPlayer send it nothing, the spot
+  standing, and a start that waited for its stream leaves its own. A listen
+  ended first — by a Stop, a start, a Seek or a clear of the node's, or by
+  HQPlayer moving on by itself — was cut by no one, nor one read in its last
+  seconds or long enough ago to have played them (HQPlayer's own advance,
+  or near enough): another controller took an idle HQPlayer, no spot is
+  set, and while it holds HQPlayer — or its playlist rests there with
+  nothing of ours read — a Seek, Next or Previous is refused in words:
   nothing of the queue's to move, and HQPlayer's own would move that
   controller's stream. A start that waited for its stream (below) when
   another controller took HQPlayer is over — that controller's word is newer
@@ -1128,10 +1141,21 @@ the two looks cannot make an index name another track. An entry that is not in
 the queue (a file played from HQPlayer's own GUI, another controller) is
 external playback (slot 0) from its first tick: no listen, no Last.fm call, no
 DSP sample, the benchmark holds back, and the listen that was open ends there —
-cut by another controller, it leaves its spot, which the status names instead
-(the spot, above; on a DLNA renderer the same spot, which Play loads there and a Seek
-moves — though Next and Previous there load and play their slot, as on a renderer
-they always do — since 2026-11-01).
+unless another controller cut it: it leaves its spot, which the status names
+instead (the spot, above; on a DLNA renderer the same spot, which Play loads there
+and a Seek moves, since 2026-11-01), and the play tracker holds that listen as a
+pause holds it (`taken`, since 2026-11-09, ROON-COEX F6), none of the other
+controller's seconds counted, until the output plays an entry of ours again. Taken
+back at the spot, the same listen goes on: one history row, one scrobble at the
+usual line, no second now-playing. Another track started instead ends it at its
+own seconds, and so does its track leaving the queue. The hold begins already at
+the other controller's Stop on our playing entry, before the tick that judges it:
+a stop the node did not send, its entry still queued, the listen not ended by then
+(above). A stop nothing explains holds it so until the node's next word, as a pause
+does: the person's Stop in HQPlayer's own window, HQPlayer's own on an error, an
+entry of no known length played out. On a renderer the hold ends once a load of
+ours hands it our URI, and while another controller holds the renderer a Stop or a
+Pause sends it nothing and ends a take-back of ours still on its way.
 Three ticks give no verdict and are not emitted. One is the tick on which
 HQPlayer opens an entry: PLAYING at track 0 and length 0, with the URI already
 named; a listen opened there froze a length of 0. Another is an entry the

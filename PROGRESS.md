@@ -1575,8 +1575,9 @@ implementation details live in the code, DB and git history.
   manager, marks that stretch, and both the per-tick check and the canary
   give no verdict while it lasts (the canary could read a playlist halfway
   through a mirror as drift). External playback ends the open listen
-  (`track_play_event(external=)`); only a stale index without that flag
-  still carries it. The live test caught what the index had hidden: the
+  (`track_play_event(external=)`) — since 2026-11-09 unless another
+  controller cut it there, held then as a pause (`taken`, ROON-COEX F6);
+  only a stale index without that flag still carries it. The live test caught what the index had hidden: the
   first PLAYING tick after a Play from stopped says track 0 and length 0
   while it already names the entry, so the listen opened there froze a
   length of 0 and a fully heard track was saved as a 0 % skip (corrected by
