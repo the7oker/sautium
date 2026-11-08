@@ -975,6 +975,10 @@ class PlaybackManager:
         # dlna_backend): told once per id, while its load plays
         if s.extra.get("seek_missed"):
             new_data["seek_missed"] = s.extra["seek_missed"]
+        # A renderer that paused our track by no word of the node's — its own
+        # remote, a controller past UPnP: said as the renderer's pause
+        if s.extra.get("paused_on_device"):
+            new_data["paused_on_device"] = True
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the

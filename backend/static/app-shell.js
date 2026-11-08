@@ -1351,6 +1351,8 @@
       // paused one whose playlist was taken afresh is left stopped: never
       // "paused"). Another app on the output (`source` external): the track
       // its takeover cut, at the second Play takes the output back at. A
+      // renderer that paused our track by no word of the node's (its own
+      // remote, a controller past UPnP): its pause, not Sautium's. A
       // renderer being attached again where it answers now (`connecting`,
       // its name): said while it lasts, so a press waiting on it is seen.
       const b = data.building, r = data.resume;
@@ -1362,6 +1364,7 @@
         : data.source === 'external'
           ? (r ? `Another app took ${out} — Play takes it back at ${fmtDuration(r.position)}`
             : `Another app is playing through ${out} — Play takes it back`)
+        : data.paused_on_device && data.state === 'paused' ? `Paused on ${out}`
         : r && r.position > 0 && data.state === 'stopped'
           ? `Stopped at ${fmtDuration(r.position)} — Play resumes here` : '';
       this.hqpTag.hidden = !tag;

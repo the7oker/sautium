@@ -2041,3 +2041,34 @@ def test_b_a_takeover_of_the_stopped_renderer_after_a_take_back_holds_nothing(tm
     wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
     time.sleep(0.5)
     assert n.last.extra.get("resume") is None and not n.last.extra.get("taken")
+
+
+def test_b_the_kanns_pause_under_raat_is_said_as_the_renderers(tmp_path, proxy, renderers, manager, heard, quality):
+    """The KANN under Roon's RAAT says our URI paused at its second (B1): the
+    node cannot see RAAT and keeps "paused", the renderer's word — said as
+    the renderer's (`paused_on_device`: "Paused on ‹renderer›"), so the
+    person knows it was not Sautium, and sending it nothing; the node's own
+    Pause is said plainly. Play resumes our track: the same listen."""
+    listened, lastfm = heard
+    r = renderers()
+    _on_renderer(manager, r, [track(tmp_path, 1, seconds=60.0), track(tmp_path, 2, seconds=60.0)])
+    _playing_at(manager, r, 1)
+    assert manager.backend().pause()
+    wait_for(lambda: manager.latest_status.get("state") == "paused" and r.state == "PAUSED_PLAYBACK",
+             timeout=5, what="our pause")
+    ours = dict(manager.latest_status)
+    assert manager.backend().play()
+    _playing_at(manager, r, 3)
+    mark = len(r.calls)
+    r.taken_by_another("paused")
+    wait_for(lambda: manager.latest_status.get("state") == "paused", timeout=5, what="the renderer's pause")
+    theirs = dict(manager.latest_status)
+    assert manager.backend().play()
+    wait_for(lambda: r.state == "PLAYING" and manager.latest_status.get("state") == "playing", timeout=10,
+             what="resumed")
+    _observed("B-paused-on-device", ours=ours.get("paused_on_device"), theirs=theirs.get("paused_on_device"),
+              node_sent=_sent(r, mark), listened=listened)
+    assert not ours.get("paused_on_device") and theirs.get("paused_on_device") is True
+    assert theirs.get("source") is None and _sent(r, mark) == ["Play"]
+    assert not manager.latest_status.get("paused_on_device") and listened == []
+    assert lastfm.count(("update_now_playing", "Track 1")) == 1

@@ -565,6 +565,11 @@ class DlnaBackend(PlayerBackend):
         # left, as that load found it (_held_load), stays where it was
         self._halts = 0
         self._held_load: Optional[tuple[int, float, float]] = None
+        # The node paused our track itself, and the renderer has not played
+        # since: a pause by no word of the node's — the renderer's own remote,
+        # a controller past UPnP (the KANN under Roon's RAAT says our URI
+        # paused) — is said as the renderer's (`paused_on_device`)
+        self._paused_by_node = False
         self._position = 0.0
         # Wall-clock position estimate for renderers that don't report RelTime
         # (KANN on VBR Opus): position at the last baseline + elapsed since.
@@ -1081,6 +1086,14 @@ class DlnaBackend(PlayerBackend):
                 and self._queue.index_of(self._cut) is not None):
             extra["taken"] = True       # the play tracker holds the cut listen
         state = state or self._state_name()
+        if state == "playing":
+            self._paused_by_node = False
+        elif (state == "paused" and not self._paused_by_node and self._current_url is not None
+              and not self._external and not self._gone):
+            # The node cannot see RAAT: the renderer's own word, "paused",
+            # stays — said as the renderer's, so the person knows it was not
+            # Sautium (ROON-COEX, the design session's answer to §10.3 B1)
+            extra["paused_on_device"] = True
         self._said = state
         if self._corrected:
             extra["corrected"], self._corrected = True, False
@@ -2587,9 +2600,11 @@ class DlnaBackend(PlayerBackend):
                 # still plays (the track tapped away from) is paused
                 self._parked = None
                 if self._state_name() == "playing":
+                    self._paused_by_node = True
                     await self._avt("Pause")
                 self._emit_now("paused")
                 return
+            self._paused_by_node = True
             await self._avt("Pause")
             self._emit_now("paused")
         return self._call(_p())

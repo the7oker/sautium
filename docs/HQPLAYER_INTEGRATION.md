@@ -1195,7 +1195,11 @@ of the node's own, named for a tick after its own load, stays its own. A play wa
 its slot's stream ends at such a takeover — a URI the renderer moved to after the wait
 began, other than its track's or its transport's as the wait began, read in an event or
 asked of it at the stream's landing: what it held before the person's word is none, and a
-take-back asked while another app played on it outlasts that app's own next track.
+take-back asked while another app played on it outlasts that app's own next track. A
+controller past UPnP may leave no URI of its own to read: the KANN under Roon's RAAT says
+our URI paused at its second (ROON-COEX, 2026-11-02), and the node keeps the renderer's
+word — paused, its Play resuming our track — said as the renderer's when the node sent no
+Pause ("Paused on ‹renderer›", since 2026-11-09): its own remote, or another app.
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last
