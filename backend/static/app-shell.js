@@ -8795,12 +8795,6 @@
     return (filters || []).find(f => f.index === st.filterNx) || null;
   }
 
-  // A pick of the filter both slots hold already changes nothing: sent, it
-  // would only make HQPlayer build the same filter again.
-  function hqpFilterHeld(st, row) {
-    return row.index === st.filterNx && st.filter1x === st.filterNx;
-  }
-
   function filterNameFromIndex(idx, filters) {
     if (!filters) return '—';
     const f = filters.find(x => x.index === idx);
@@ -9950,7 +9944,7 @@
         btn.addEventListener('click', () => {
           const name = btn.dataset.fav;
           const filt = (s.filters || []).find(f => f.name === name);
-          if (!filt || hqpFilterHeld(st, filt)) return;
+          if (!filt) return;
           serialized('hqp.config', async () => {
             await postHqpConfig({filter: name, filter1x: name});
             await load();
@@ -10010,13 +10004,12 @@
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', (e) => {
         if (e.detail > 1) return;        // the second click of a double-click
-        openHqpSheet(s, 'filter', (chosen) => {
-          if (hqpFilterHeld(st, chosen)) return;
-          serialized('hqp.config', async () => {
-            await postHqpConfig({filter: chosen.name, filter1x: chosen.name});
-            await load();
-          });
-        });
+        // A pick of the filter both slots hold sends no SetFilter: the DSP
+        // change finds it held (hqp_backend._DspChange._knob)
+        openHqpSheet(s, 'filter', (chosen) => serialized('hqp.config', async () => {
+          await postHqpConfig({filter: chosen.name, filter1x: chosen.name});
+          await load();
+        }));
       });
 
       const benchActions = {

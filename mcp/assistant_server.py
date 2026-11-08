@@ -1282,7 +1282,7 @@ def hqplayer_set_matrix_profile(profile_name: str) -> str:
 def hqplayer_get_dsp_state() -> str:
     """Get current HQPlayer DSP processing state.
 
-    Returns active filter index, shaper index, mode, convolution on/off,
+    Returns the filter index set, shaper index, mode, convolution on/off,
     and current matrix profile. Complements hqplayer_get_settings which lists
     available options.
     """
@@ -1294,9 +1294,11 @@ def hqplayer_get_dsp_state() -> str:
 
         filters = read.get("filters")
         active_filter = None if filters is None else next(
-            (f for f in filters if f["index"] == state["filter"]), None
+            (f for f in filters if f["index"] == state["filterNx"]), None
         )
-        filter_line = f"  Active filter index: {state['filter']}"
+        # The filter HQPlayer reports set (its Nx slot); State's `filter` is
+        # the one its engine still runs for a moment after a change
+        filter_line = f"  Filter index: {state['filterNx']}"
         if filters is None:
             filter_line += (" (its name unknown: HQPlayer did not list its filters — "
                             f"{(read.get('refused') or {}).get('filters', '')})")

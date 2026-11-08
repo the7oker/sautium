@@ -722,7 +722,7 @@ class World:
 
     def dsp(self) -> None:
         hb.change_dsp(self.rng.choice([{"filter": "f57", "filter1x": "f57"}, {"shaper": "s2"},
-                                       {"filter": 12, "filter1x": 12, "shaper": 3}]))
+                                       {"filter": "f12", "filter1x": "f12", "shaper": "s3"}]))
 
     def switch(self) -> None:
         r = self.rng.random()

@@ -6469,7 +6469,7 @@ def test_one_pick_through_a_slow_build_is_one_build_and_the_screen_names_it_from
     hqp_router = _screen(monkeypatch)
     fake.filter_names = ["poly-sinc-gauss-long", "poly-sinc-ext2", "sinc-M"]
     fake.swap_s = 2.0
-    fake.build("SetFilter", 1.5)
+    fake.build("SetFilter", 2.0)
     out = hqp_router.set_config(hqp_router.ConfigRequest(filter="sinc-M", filter1x="sinc-M"))
     assert out["building"] is not None and out["applied"] == {"filter": 2, "filter1x": 2}
     assert hqp_router.get_state().get("building") is not None    # the screen keeps what it had
@@ -6481,28 +6481,53 @@ def test_one_pick_through_a_slow_build_is_one_build_and_the_screen_names_it_from
 
 
 @pytest.mark.skipif(__import__("shutil").which("node") is None, reason="node not installed")
-def test_the_screen_names_the_filter_hqplayer_reports_set_and_sends_nothing_for_it_again():
+def test_the_screen_names_the_filter_hqplayer_reports_set():
     """B-60, app-shell.js as written: the State read right after a pick
     (Desktop 6.3.1, the lab's trace) — `filter` still the one the engine
-    ran, the slots the new one. The Filter row names the slots; a pick of
-    what both slots hold sends nothing, a pick that differs in the 1x slot
-    does."""
+    ran, the slots the new one. The Filter row, the sheet's current row and
+    the favourites' current chip name the slots, and nothing on the screen
+    names a filter by State's `filter`."""
     import shutil
     import subprocess
     src = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
-    fns = "".join(re.search(rf"\n  function {name}\(st, \w+\) {{\n.*?\n  }}\n", src, re.S).group(0)
-                  for name in ("hqpFilterSet", "hqpFilterHeld"))
+    fn = re.search(r"\n  function hqpFilterSet\(st, filters\) \{\n.*?\n  \}\n", src, re.S).group(0)
     rows = [{"index": 45, "name": "poly-sinc-aclean-gauss"}, {"index": 46, "name": "poly-sinc-aclean-ext2"}]
     after_pick = {"filter": 45, "filter1x": 46, "filterNx": 46}
-    one_slot = {"filter": 46, "filter1x": 45, "filterNx": 46}
-    script = fns + (f"const rows = {json.dumps(rows)};"
-                    f"console.log(JSON.stringify([hqpFilterSet({json.dumps(after_pick)}, rows).name,"
-                    f" hqpFilterHeld({json.dumps(after_pick)}, rows[1]),"
-                    f" hqpFilterHeld({json.dumps(after_pick)}, rows[0]),"
-                    f" hqpFilterHeld({json.dumps(one_slot)}, rows[1]),"
-                    f" hqpFilterSet({{filterNx: 7}}, rows)]));")
+    script = fn + (f"const rows = {json.dumps(rows)};"
+                   f"console.log(JSON.stringify([hqpFilterSet({json.dumps(after_pick)}, rows).name,"
+                   f" hqpFilterSet({{filterNx: 7}}, rows)]));")
     out = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=True)
-    assert json.loads(out.stdout) == ["poly-sinc-aclean-ext2", True, False, False, None]
+    assert json.loads(out.stdout) == ["poly-sinc-aclean-ext2", None]
+    assert "const activeFilter = hqpFilterSet(st, s.filters);" in src
+    assert "(filter ? st.filterNx : st.shaper)" in src
+    assert not re.search(r"\bst\.filter\b(?!Nx|1x)", src)
+
+
+def test_a_pick_of_the_filter_both_slots_hold_sends_no_setfilter(fake, output, monkeypatch):
+    """One pick, one build: the filter HQPlayer reports set in both slots,
+    picked again (a second tap, a double tap queued behind the first, the
+    assistant asked for what is set), is taken as it stands — HQPlayer would
+    build the same filter again. A pick that differs in the 1x slot goes."""
+    hqp_router = _screen(monkeypatch)
+    fake.filter_names = ["poly-sinc-gauss-long", "poly-sinc-ext2", "sinc-M"]
+    with fake._lock:
+        fake.slots.update(nx=2, x1=2, running=2)
+    out = hqp_router.set_config(hqp_router.ConfigRequest(filter="sinc-M", filter1x="sinc-M"))
+    assert out["ok"] and out["applied"] == {"filter": 2, "filter1x": 2}
+    assert "SetFilter" not in [c for c, _ in fake.commands]
+    with fake._lock:
+        fake.slots.update(x1=0)
+    hqp_router.set_config(hqp_router.ConfigRequest(filter="sinc-M", filter1x="sinc-M"))
+    assert [a for c, a in fake.commands if c == "SetFilter"] == [{"value": "2", "value1x": "2"}]
+
+
+def test_hqplayer_5s_state_without_its_slots_never_holds_a_pick_back(fake, output, monkeypatch):
+    """A State with no filterNx (HQPlayer 5): its `filter` may be the filter
+    running, not the one set — a pick that matches it still goes."""
+    fake.replies["GetFilters"] = '<GetFilters><FiltersItem index="3" name="sinc-M" value="3" arg="0"/></GetFilters>'
+    fake.replies["State"] = '<State mode="1" filter="3" filter1x="3" shaper="0" volume="-3"/>'
+    assert hb.change_dsp({"filter": "sinc-M", "filter1x": "sinc-M"})["ok"]
+    assert [a for c, a in fake.commands if c == "SetFilter"] == [{"value": "3", "value1x": "3"}]
 
 
 def test_the_knobs_after_a_build_follow_it_in_order(fake, output):
@@ -8050,8 +8075,8 @@ def test_the_mcp_assistant_reads_hqplayer_through_the_backend_and_keeps_no_conne
     assert not hasattr(server, "HQPlayerClient") and not hasattr(server, "_hqp_endpoint")
     state = {"connected": True, "info": {"product": "Signalyst HQPlayer Fake", "version": "6",
                                          "engine": "6.2.4"},
-             "state": {"filter": 57, "shaper": 2, "mode": 1, "rate": 3, "convolution": False,
-                       "matrix_profile": "", "invert": False},
+             "state": {"filter": 3, "filterNx": 57, "filter1x": 57, "shaper": 2, "mode": 1, "rate": 3,
+                       "convolution": False, "matrix_profile": "", "invert": False},
              "filters": [{"index": 57, "name": "sinc-MGa", "description": ""}],
              "shapers": [{"index": 2, "name": "NS9"}], "modes": [{"index": 1, "name": "PCM"}],
              "rates": None, "matrix_profiles": ["Room"],
@@ -8072,7 +8097,7 @@ def test_the_mcp_assistant_reads_hqplayer_through_the_backend_and_keeps_no_conne
     assert "Sample rates (2):\n  [0] Auto\n  [1] DSD256" in server.hqplayer_get_settings()
     assert server.hqplayer_set_filter("sinc-MGa").startswith("Filter set to: sinc-MGa")
     assert "Track: Artist - Song 1" in server.hqplayer_get_status()
-    assert "Active filter index: 57 (sinc-MGa)" in server.hqplayer_get_dsp_state()
+    assert "Filter index: 57 (sinc-MGa)" in server.hqplayer_get_dsp_state()     # set, not still running
     assert "Room" in server.hqplayer_list_matrix_profiles()
     assert set(asked) == {"/api/hqplayer/state", "/api/player/status"}
     assert posted == [("/api/hqplayer/config", {"filter": "sinc-MGa", "filter1x": "sinc-MGa"})]

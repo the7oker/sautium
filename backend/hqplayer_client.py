@@ -1345,6 +1345,9 @@ class HQPlayerClient:
                 # slot while a 44.1 kHz source plays (Desktop 6.2.3) — and
                 # moves to a pick only once the engine swapped to it (6.3.1)
                 "filterNx": int(response.get("filterNx", response.get("filter", 0))),
+                # Whether HQPlayer reported the slots itself: without them
+                # (HQPlayer 5) `filterNx` above is the running filter
+                "slots_reported": response.get("filterNx") is not None,
                 "shaper": int(response.get("shaper", 0)),
                 "rate": int(response.get("rate", 0)),
                 "active_mode": int(response.get("active_mode", 0)),

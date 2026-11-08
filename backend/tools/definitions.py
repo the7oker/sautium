@@ -548,9 +548,11 @@ def _h_hqplayer_get_dsp_state() -> str:
         if not state:
             return "Could not get DSP state."
         active_filter = None if filters is None else next(
-            (f for f in filters if f["index"] == state["filter"]), None
+            (f for f in filters if f["index"] == state["filterNx"]), None
         )
-        filter_line = f"  Active filter index: {state['filter']}"
+        # The filter HQPlayer reports set (its Nx slot); State's `filter` is
+        # the one its engine still runs for a moment after a change
+        filter_line = f"  Filter index: {state['filterNx']}"
         if filters is None:
             filter_line += f" (its name unknown: HQPlayer did not list its filters — {refusal})"
         elif active_filter:

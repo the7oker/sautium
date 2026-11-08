@@ -224,7 +224,9 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
   takes a filter and a shaper by name and sends the index HQPlayer's list
   gives that name right before the Set* (since 2026-11-08, B-60: an index is
   a place in the current mode's list, and the list moves between modes and
-  builds)
+  builds); a filter both slots already hold (State's `filterNx` and
+  `filter1x`, as HQPlayer reports them) is taken as it stands, no SetFilter
+  sent — HQPlayer would only build it again
 - `get_state()` - the selection as indices into the current mode's lists, plus
   `filterNx` (the Nx slot `SetFilter value` sets) and `filter1x` (its 1x
   slot), both reported at once after the SetFilter's answer; `filter` is the

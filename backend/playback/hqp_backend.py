@@ -107,6 +107,10 @@ def change_dsp(knobs: Dict[str, Any]) -> Dict[str, Any]:
 _NAMED = {"filter": ("filters", "get_filters"), "shaper": ("shapers", "get_shapers")}
 
 
+class _Unanswered(Exception):
+    """A question a DSP change asks between its knobs went unanswered."""
+
+
 class _DspChange:
     """change_dsp's run: a thread of its own, so the caller can be answered
     the moment a build begins (BuildWatch.waking)."""
@@ -163,7 +167,11 @@ class _DspChange:
                 self.spot = self._spot_of(hqp.get_status())
                 try:
                     for knob in DSP_KNOBS:
-                        one = self._knob(hqp, knob)
+                        try:
+                            one = self._knob(hqp, knob)
+                        except _Unanswered as e:
+                            self._not_sent(str(e))
+                            break
                         if one is None:
                             continue
                         for knob, taken, refusal in hqp.set_knobs(one):
@@ -204,20 +212,26 @@ class _DspChange:
 
     def _knob(self, hqp: HQPlayerClient, knob: str) -> Optional[Dict[str, Any]]:
         """The Set* `knob` asks for, its value as HQPlayer takes it — or None
-        when the change does not name it, or names what HQPlayer does not
-        list now (recorded in `failed`). A filter (with its 1x slot) and a
-        shaper are named, and their index is HQPlayer's list read here, in
-        the change's own sequence, after the knobs before them: an index is
-        a place in the list of the mode HQPlayer is in, and the list moves —
-        PCM and SDM number the same filter differently, and HQPlayer 6.2's
-        aclean filters moved 21 others by three. An index the screen read
-        when it was drawn named another filter by the time it was sent."""
+        when the change does not name it, names what HQPlayer does not list
+        now (recorded in `failed`), or names the filter both slots hold
+        already (recorded in `applied`: sent, it would only make HQPlayer
+        build the same filter again — B-60's second tap). A filter (with its
+        1x slot) and a shaper are named, and their index is HQPlayer's list
+        read here, in the change's own sequence, after the knobs before them:
+        an index is a place in the list of the mode HQPlayer is in, and the
+        list moves — PCM and SDM number the same filter differently, and
+        HQPlayer 6.2's aclean filters moved 21 others by three. An index the
+        screen read when it was drawn named another filter by the time it
+        was sent. Raises _Unanswered when HQPlayer answered no list or State
+        here: the change ends as at a held Status it did not answer."""
         if knob not in self.knobs:
             return None
         names = _NAMED.get(knob)
         if names is None:
             return {knob: self.knobs[knob]}
         rows = getattr(hqp, names[1])()
+        if rows is None and not hqp.answered:
+            raise _Unanswered(f"HQPlayer did not answer ({hqp.refusal()})")
         if rows is None:
             self.failed[knob] = f"HQPlayer did not list its {names[0]} ({hqp.refusal()})"
             return None
@@ -230,6 +244,16 @@ class _DspChange:
                 self.failed[knob] = f"HQPlayer does not list {self.knobs[k]} now"
                 return None
             one[k] = index[self.knobs[k]]
+        if knob == "filter":
+            # The slots as HQPlayer reports them set — never State's `filter`,
+            # the one its engine still runs for a moment after a pick
+            state = hqp.get_state()
+            if state is None and not hqp.answered:
+                raise _Unanswered(f"HQPlayer did not answer ({hqp.refusal()})")
+            if (state is not None and state["slots_reported"] and one["filter"] == state["filterNx"]
+                    and one.get("filter1x", state["filter1x"]) == state["filter1x"]):
+                self.applied.update(one)
+                return None
         return one
 
     def _spot_of(self, status) -> Optional[tuple]:
