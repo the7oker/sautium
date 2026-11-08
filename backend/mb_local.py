@@ -1,18 +1,18 @@
-"""Local MusicBrainz resolver — the offline twin of ``musicbrainz.py``.
+"""MusicBrainz queries over the local ``mb_*`` tables — the canon's catalogue.
 
-Backed by the ``mb_*`` dump tables (see ``mb_dump_load.py``), it exposes the
-exact same surface as the API client (``search_artist`` /
-``fetch_album_release_groups`` / ``cooldown_active`` / ``MBRateLimited``) so
-``mb_audit`` and ``mb_canonicalize`` run against it unchanged — but with no
-rate limit, no cooldown, no IP-ban risk. ``mb_backend`` picks this module when
-the dump is loaded.
+The tables hold either a full dump (``mb_dump_load.py``) or the slices other
+nodes signed (``desktop/mb_slice_client.py``); ``mb_backend`` exports these
+functions with ``LOCAL_DUMP``, whether any rows are here at all. The canon's
+name and content matching reads them; on a node whose rows came from slices,
+what it then does irreversibly is re-checked on MusicBrainz's own answers
+(``canon/confirm.py``).
 
 Matching is trigram-based against both ``mb_artist.name`` and
 ``mb_artist_alias.name`` (the alias table is what bridges diacritics /
 transliterations / abbreviations to the canonical entity, since the project's
-``normalize`` keeps diacritics). The score is rescaled to the API's 0..100
-convention — an exact normalized-name match is forced to 100 — so the existing
-confidence gates (``_SCORE_OK``) need no retuning.
+``normalize`` keeps diacritics). The score is rescaled to 0..100 — an exact
+normalized-name match is forced to 100 — the scale the canon's confidence
+gates (``canon.match._CAND_SCORE``) read.
 """
 
 import logging
@@ -29,18 +29,10 @@ _ARTIST_TYPE = {1: "Person", 2: "Group", 3: "Other", 4: "Character",
                 5: "Orchestra", 6: "Choir"}
 
 
-class MBRateLimited(Exception):
-    """Interface parity with the API client — never raised locally."""
-
-
-def cooldown_active() -> bool:
-    return False
-
-
 def search_artist(name: str, limit: int = 5) -> List[dict]:
     """Resolve a name to canonical MB artists via trigram match on names +
     aliases. Returns ``[{mbid, name, score, type, country, disambiguation},
-    …]`` best-first, mirroring ``musicbrainz.search_artist``.
+    …]`` best-first.
 
     The score is ``round(100 * best_trgm_similarity)`` over the artist's own
     name and all its aliases, forced to 100 on an exact normalized-name match.
@@ -162,8 +154,7 @@ def fetch_album_release_groups(mbid: str) -> List[dict]:
     every release under the group. A dirty owned tag often matches a regional/
     alternate RELEASE title, not the RG's canonical name (e.g. owned
     "I Am What I Am" is a release of the RG "I Am Gloria Gaynor") — without this
-    those albums never overlap-verify. The MB API can't supply it cheaply, so it
-    returns an empty list there.
+    those albums never overlap-verify.
     """
     rows = db_query("""
         SELECT rg.gid::text AS rg_mbid, rg.name AS title, pt.name AS primary_type,
@@ -217,8 +208,7 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     it: ``[{name, gid, credited_as, join}, …]`` in credit order, ``name`` the
     artist's canonical MB name (``credited_as`` when the member's artist row
     is not in a partial slice). The first member is the recording's primary
-    by the catalog's own account, whatever phrase follows it. Local-only
-    (the MB API can't page tracklists of every release cheaply).
+    by the catalog's own account, whatever phrase follows it.
     """
     rows = db_query("""
         SELECT r.gid::text AS release_mbid, r.name AS release_name, r.status,

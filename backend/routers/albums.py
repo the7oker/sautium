@@ -15,7 +15,10 @@ second roundtrip, and ``selected_variant_id`` names the variant the
 tracklist actually came from — null when the default drew on several.
 """
 
+import re
+import time
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -69,7 +72,14 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
     tables themselves: a dump node whose loader has not added them yet must
     not read its own gap as "not on Bandcamp". On a slice node every
     provenance row postdates migration 016, i.e. names a v3 slice that
-    carried the url subtree."""
+    carried the url subtree.
+
+    A person pays through this link. On a node whose MB rows came from
+    slices the slice only proposes the page: MusicBrainz is asked — the
+    page waits a moment for it — whether it lists that page for a release
+    it files under this group, or that shop for an artist it credits on
+    this group (_confirmed_buy), and a page it does not list for this
+    album is never opened: the search stands in (unknown)."""
     row = db_query_one("""
         WITH rg AS (
             SELECT id, artist_credit
@@ -95,7 +105,7 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
                    CASE WHEN u.url ~* '/album/' THEN 0
                         WHEN u.url ~* '/track/' THEN 1
                         ELSE 2 END AS kind,
-                   rd.first_date
+                   rd.first_date, r.gid::text AS release_gid
             FROM rg
             JOIN mb_release r ON r.release_group = rg.id
             JOIN mb_l_release_url l ON l.entity0 = r.id
@@ -105,17 +115,25 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
         ),
         artist_pages AS (
             SELECT regexp_replace(u.url, '^https?://([^/]+).*$', 'https://\\1') || '/music' AS url,
-                   acn.position
+                   acn.position, ma.gid::text AS artist_gid
             FROM rg
             JOIN mb_artist_credit_name acn ON acn.artist_credit = rg.artist_credit
+            JOIN mb_artist ma ON ma.id = acn.artist
             JOIN mb_l_artist_url l ON l.entity0 = acn.artist
             JOIN mb_url u ON u.id = l.entity1
             WHERE u.url ~* %(shop)s
+        ),
+        album_pick AS (
+            SELECT url, release_gid FROM release_pages
+            ORDER BY kind, first_date NULLS LAST, url LIMIT 1
+        ),
+        artist_pick AS (
+            SELECT url, artist_gid FROM artist_pages ORDER BY position, url LIMIT 1
         )
-        SELECT (SELECT url FROM release_pages
-                ORDER BY kind, first_date NULLS LAST, url LIMIT 1) AS album_url,
-               (SELECT url FROM artist_pages
-                ORDER BY position, url LIMIT 1) AS artist_url,
+        SELECT (SELECT url FROM album_pick) AS album_url,
+               (SELECT release_gid FROM album_pick) AS album_release,
+               (SELECT url FROM artist_pick) AS artist_url,
+               (SELECT artist_gid FROM artist_pick) AS artist_gid,
                EXISTS (SELECT 1 FROM rg) AS rg_known,
                ((EXISTS (SELECT 1 FROM user_settings
                          WHERE key = 'musicbrainz.db_version')
@@ -123,12 +141,79 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
                 OR EXISTS (SELECT 1 FROM mb_slice_fetches f
                            WHERE f.name_key = lower(btrim(%(name)s)))) AS covered
     """, {"rg": rg_mbid, "name": artist_name, "shop": BANDCAMP_PAGE})
+    from canon import confirm
+    if (row["album_url"] or row["artist_url"]) and confirm.required():
+        return _confirmed_buy(row, rg_mbid)
     if row["album_url"]:
         return {"state": "album", "url": row["album_url"]}
     if row["artist_url"]:
         return {"state": "artist", "url": row["artist_url"]}
     if row["covered"] and row["rg_known"]:
         return {"state": "absent", "url": None}
+    return {"state": "unknown", "url": None}
+
+
+# How long an album page waits for MusicBrainz's answer about its Buy page
+# (the person's own act goes first in the queue, one request a second).
+_BUY_CHECK_S = 2.5
+
+
+def _same_page(url: str) -> str:
+    return re.sub(r"^http://", "https://", (url or "").strip(), flags=re.IGNORECASE).rstrip("/").lower()
+
+
+def _shop(url: str) -> str:
+    return (urlsplit(url or "").hostname or "").lower()
+
+
+def _confirmed_buy(row: dict, rg_mbid: str) -> dict:
+    """The slice's Buy page, opened only when MusicBrainz lists it for this
+    album: the album page among the links of a release MusicBrainz files
+    under this album's group, the shop among the links of an artist
+    MusicBrainz credits on this group. A slice can hang any real release, or
+    put any real artist at the head of the group's credit; MusicBrainz's own
+    links for that release or artist prove nothing about this album.
+    Anything MusicBrainz has not answered in time, or does not list, falls
+    back to the search."""
+    import mb_answers
+    from canon import confirm
+    deadline = time.monotonic() + _BUY_CHECK_S
+
+    def settled(decide) -> bool:
+        # Re-decided as answers arrive, within the one wait: a release names
+        # its group only once answered, so the group may be asked after it.
+        while True:
+            asks = mb_answers.Asks(None, None, mb_answers.PRIORITY_PERSON)
+            verdict = decide(asks)
+            left = deadline - time.monotonic()
+            if verdict is not confirm.WAIT or left <= 0 or not mb_answers.ask_now(
+                    sorted(asks.missing), mb_answers.PRIORITY_PERSON, timeout=left):
+                return bool(verdict)
+
+    def album_page(asks):
+        rel = confirm.release(row["album_release"], asks)
+        if rel is confirm.WAIT:
+            return confirm.WAIT
+        if not rel.known or _same_page(row["album_url"]) not in {
+                _same_page(u) for u in rel.data["urls"]}:
+            return False
+        return confirm.same("release_group", rg_mbid, rel.data["release_group"], asks)
+
+    def artist_shop(asks):
+        # Both asked in one round; the group is already answered when the
+        # release above was MusicBrainz's release of it.
+        art = confirm.artist(row["artist_gid"], asks)
+        group = confirm.release_group(rg_mbid, asks)
+        if art is confirm.WAIT or group is confirm.WAIT:
+            return confirm.WAIT
+        return (art.known and group.known
+                and _shop(row["artist_url"]) in {_shop(u) for u in art.data["urls"]}
+                and confirm.credited(group.data["credit"], [art.mbid]))
+
+    if row["album_url"] and settled(album_page):
+        return {"state": "album", "url": row["album_url"]}
+    if row["artist_url"] and settled(artist_shop):
+        return {"state": "artist", "url": row["artist_url"]}
     return {"state": "unknown", "url": None}
 
 

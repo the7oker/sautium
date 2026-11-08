@@ -28,8 +28,10 @@ from sqlalchemy import text as _sql
 
 import mb_backend as mb
 from database import SessionLocal
-from db_pool import db_execute, db_query, get_conn
+from db_pool import db_execute, db_query, db_query_one, get_conn
 from discography import release_match_key, title_residual
+import mb_answers
+from canon import confirm
 from canon.match import _candidates, _exact_mbids, match_whole_gids, _name_exact_gids
 from canon.identity import _update_album_uuid, _update_track_uuid, recanonicalize_album_variants, recanonicalize_artist
 from canon.split import normalize_compound_artist
@@ -285,7 +287,7 @@ rel_total AS (   -- true track count of just the candidate releases (the other h
 valid AS (   -- candidates passing the FULL bidirectional gate BEFORE ranking, so the name tie-break
              -- picks the best-named VALID release and a high-name-sim near-miss that fails the gate
              -- can't shadow a real lower-named match (which would wrongly NULL the album).
-    SELECT rc.album_id, rc.rg_mbid, rc.owned_cov, rc.total, rt.n AS rel_total,
+    SELECT rc.album_id, rc.rg_mbid, rc.rel_id, rc.owned_cov, rc.total, rt.n AS rel_total,
            GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) AS namesim, rc.is_comp
     FROM rel_cov rc
     JOIN rel_total rt ON rt.rel_id = rc.rel_id
@@ -297,11 +299,14 @@ valid AS (   -- candidates passing the FULL bidirectional gate BEFORE ranking, s
       AND (NOT rc.is_comp                                         -- a comp ALSO needs the name (fuzzy tracklists
            OR GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) >= {_RG_NAME_MIN})  -- overlap studio albums by content
 )
-SELECT album_id, rg_mbid FROM (   -- among content-valid releases, the one whose RG NAME is most like the
-                                  -- owned title (tie-break, never a gate: a regional retitle with a lone
+SELECT album_id, rg_mbid,          -- among content-valid releases, the one whose RG NAME is most like the
+       (SELECT r.gid::text FROM mb_release r WHERE r.id = x.rel_id) AS rel_mbid
+FROM (                            -- owned title (tie-break, never a gate: a regional retitle with a lone
                                   -- match still wins on content; two sibling comps split by name). Then
                                   -- most covered, closest in size (rejects supersets / medleys), studio.
-    SELECT album_id, rg_mbid,
+                                  -- rel_mbid: the release that covered the album, the evidence a node
+                                  -- without the dump re-checks on MusicBrainz's answer (canon.confirm).
+    SELECT album_id, rg_mbid, rel_id,
            row_number() OVER (PARTITION BY album_id
                ORDER BY namesim DESC, owned_cov DESC, abs(rel_total - total), is_comp) AS rn
     FROM valid
@@ -466,11 +471,23 @@ def _group(rows):
     return by_album
 
 
+def _unrefuted(artist_id, mbids: list) -> list:
+    """The candidates MusicBrainz's answers never refuted for this artist: a
+    refuted one would only stamp its slice's pointers on the files again, and
+    those then stand as evidence against the artist's true binding."""
+    if not mbids:
+        return mbids
+    refuted = {r["m"] for r in db_query(
+        "SELECT mbid::text AS m FROM mb_refuted_bindings WHERE artist_id = %(a)s::uuid",
+        {"a": str(artist_id)})}
+    return [m for m in mbids if m not in refuted]
+
+
 def resolve_artist(artist_id, name: str) -> dict:
     """Read-only cascaded recording-centric resolve. Materialises the candidate
     recordings once (TEMP _recs), then each cascade pass re-matches only the
     unverified residue with looser parameters; the pass that verifies wins."""
-    cands = _candidates(name)
+    cands = _unrefuted(artist_id, _candidates(name))
     owned = _owned_counts(artist_id)
 
     resolved: dict = {}
@@ -514,9 +531,9 @@ def resolve_artist(artist_id, name: str) -> dict:
                         [(aid, release_match_key(owned[aid][0])) for aid in resolved])
                     cur.execute("SET pg_trgm.similarity_threshold = %s", (_RG_SIM,))
                     cur.execute(_RG_SQL, {"artist": str(artist_id), "albums": list(resolved)})
-                    rg = {r["album_id"]: r["rg_mbid"] for r in cur.fetchall()}
+                    rg = {r["album_id"]: (r["rg_mbid"], r["rel_mbid"]) for r in cur.fetchall()}
                     for aid, r in resolved.items():
-                        r["rg"] = rg.get(aid)
+                        r["rg"], r["rel"] = rg.get(aid, (None, None))
             finally:
                 cur.execute("RESET pg_trgm.similarity_threshold")  # don't leak to the pool
                 cur.execute("DROP TABLE IF EXISTS _recs")
@@ -529,6 +546,7 @@ def resolve_artist(artist_id, name: str) -> dict:
             "album_id": aid, "title": title, "ntracks": ntr,
             "matched": r["matched"] if r else 0,
             "rg_mbid": r["rg"] if r else None,
+            "release_mbid": r["rel"] if r else None,
             "artist_mbid": max(r["amb"], key=r["amb"].get) if (r and r["amb"]) else None,
             "recordings": r["recs"] if r else {},
             "verified": bool(r), "pass": r["pass"] if r else None,
@@ -547,6 +565,7 @@ def apply_artist(artist_id, name: str, plan: dict = None) -> dict:
     rename to MB-canonical). No rename/merge in this pass."""
     plan = plan or resolve_artist(artist_id, name)
     aid = str(artist_id)
+    checked = confirm.required()
     st = {"albums": 0, "album_artists": 0, "files": 0, "artist_mbids": 0, "track_mbids": 0}
     with get_conn() as conn:
         conn.autocommit = False
@@ -563,10 +582,26 @@ def apply_artist(artist_id, name: str, plan: dict = None) -> dict:
                                  a["album_id"]))
                     if a["rg_mbid"]:
                         st["albums"] += cur.rowcount
+                    if a["release_mbid"] and checked:
+                        # The release that covered the album: kept on every copy
+                        # of it that names no release of this group yet — the
+                        # evidence a node without the dump re-checks.
+                        cur.execute("""UPDATE album_variants av SET release_mbid = %(rel)s
+                                       WHERE av.album_id = %(al)s
+                                         AND (av.release_mbid IS NULL OR NOT EXISTS (
+                                             SELECT 1 FROM mb_release r
+                                               JOIN mb_release_group g ON g.id = r.release_group
+                                              WHERE r.gid = av.release_mbid AND g.gid = %(rg)s))""",
+                                    {"rel": a["release_mbid"], "al": a["album_id"],
+                                     "rg": a["rg_mbid"]})
                     if a["artist_mbid"]:
+                        # A pair MusicBrainz's answers refuted stays unattributed
+                        # (canon.confirm.withdraw), as artist_mbids' trigger keeps it.
                         cur.execute("UPDATE album_artists SET mbid=%s WHERE album_id=%s "
-                                    "AND artist_id=%s AND role='primary'",
-                                    (a["artist_mbid"], a["album_id"], aid))
+                                    "AND artist_id=%s AND role='primary' "
+                                    "AND NOT EXISTS (SELECT 1 FROM mb_refuted_bindings r "
+                                    "WHERE r.artist_id = %s::uuid AND r.mbid = %s::uuid)",
+                                    (a["artist_mbid"], a["album_id"], aid, aid, a["artist_mbid"]))
                         st["album_artists"] += cur.rowcount
                     for tid, rec in a["recordings"].items():
                         for table in ("media_files", "hqp_library_files"):
@@ -600,7 +635,7 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
     single lone match counts only when it is an EXACT title hit (a lone fuzzy hit
     proves nothing). Materializes artist_mbids + media_files.recording_mbid +
     track_mbids for the dominant artist's tracks; albums/RG don't apply here."""
-    cand_mbids = _candidates(name)
+    cand_mbids = _unrefuted(artist_id, _candidates(name))
     st = {"total": 0, "matched": 0, "artist_mbid": None, "files": 0}
     if not cand_mbids:
         return st
@@ -632,6 +667,13 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
                 ok = (dom is not None
                       and len(dom_hits) * 10 >= 6 * len(hits)        # >=60% dominance
                       and (len(dom_hits) > 1 or dom_hits[0]["exact"]))
+                if ok and confirm.required():
+                    verdict, target = _trackonly_verdict(aid, name, dom, dom_hits)
+                    ok = verdict is True
+                    if verdict is confirm.WAIT:
+                        st["waiting"] = True
+                    elif ok:
+                        dom = target
                 if ok:
                     st["artist_mbid"] = dom
                     # Stamp files FIRST (before any rename/merge): recording_mbid
@@ -661,8 +703,9 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
     # Resistance"), plain INSERT silently no-ops and the artist stays orphaned. So
     # converge onto the MB-canonical name: rename (or merge into the holder, which
     # recanonicalize does when the canonical UUID exists) and re-point the mbid.
-    canonical = db_query("SELECT name FROM mb_artist WHERE gid = %(g)s",
-                         {"g": st["artist_mbid"]})[0]["name"]
+    canonical = (confirm.mb_name(st["artist_mbid"]) if confirm.required() else
+                 db_query("SELECT name FROM mb_artist WHERE gid = %(g)s",
+                          {"g": st["artist_mbid"]})[0]["name"])
     db = SessionLocal()
     try:
         canon_id = aid
@@ -683,6 +726,43 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
     return st
 
 
+def _trackonly_verdict(artist_id: str, name: str, dom: str, hits: list) -> tuple:
+    """The track-only plan re-made on MusicBrainz's answers: the dominant MBID
+    is an artist MusicBrainz names `name` by (refuted, and remembered, when it
+    does not), and enough of the hits — two, or the one exact hit the plan
+    stood on — are its recordings, titled and timed like the owned files.
+    Returns (verdict, the MBID to bind: a merged one's target)."""
+    if confirm.refuted(artist_id, dom):
+        return False, None
+    asks = mb_answers.Asks("owned_artist", artist_id, mb_answers.PRIORITY_OWNED)
+    a = confirm.artist(dom, asks)
+    if a is confirm.WAIT:
+        asks.flush()
+        return confirm.WAIT, None
+    if not a.known or not confirm.name_premise(name, a.data):
+        confirm.withdraw(artist_id, dom)
+        return False, None
+    need = 1 if len(hits) == 1 else 2
+    mbids = {dom, a.mbid}
+    confirmed = pending = 0
+    for h in sorted(hits, key=lambda h: (not h["exact"], h["track_id"])):
+        if confirmed + pending >= need:
+            break
+        rec = confirm.recording(h["rec_mbid"], asks)
+        if rec is confirm.WAIT:
+            pending += 1
+        elif rec.known and confirm.recording_premise(h["track_id"], rec.data, mbids):
+            confirmed += 1
+    if confirmed >= need:
+        return True, a.mbid
+    if pending:
+        asks.flush()
+        return confirm.WAIT, None
+    # Recordings MusicBrainz does not bear out void the slice's evidence, not
+    # the artist: nothing is bound, and nothing is remembered against it.
+    return False, None
+
+
 def bind_owned_recordings(artist_id: str) -> None:
     """track_mbids from the recordings stamped on an artist's owned files —
     one track per recording, as the table holds it: two tracks that carry
@@ -699,25 +779,41 @@ def bind_owned_recordings(artist_id: str) -> None:
     """ + _LOCAL_BINDING_WINS, {"a": artist_id})
 
 
-def merge_collisions(dry_run: bool = True) -> list:
+def merge_collisions(dry_run: bool = True, waiting: set = None, artist_ids: list = None) -> list:
     """APPLY increment 2 — merge-on-collision. Sautium artists that resolved to the
     SAME MBID are un-merged name-variants (diacritics/typos/articles/sort-order/
     transliteration/homoglyph — content-proven the same artist). For each colliding
     MBID, recanonicalize every involved artist onto the MB-canonical name (merging
     tracks/albums, preserving history) and re-point all their MBIDs to the survivor.
     dry_run=True returns the plan without mutating. Returns
-    [{mbid, canonical, artists:[names]}]."""
+    [{mbid, canonical, artists:[names]}].
+
+    On a node without the dump the merge is re-made on MusicBrainz's answers
+    (_confirmed_collision): only the involved artists whose binding holds merge,
+    under MusicBrainz's name — a merged MBID's under its target's — the others'
+    bindings are withdrawn, and a collision waits while an answer is missing.
+    `artist_ids` limits it to the collisions those artists are in."""
+    checked = confirm.required()
     db = SessionLocal()
     plan = []
+    scope = ("""AND (am.artist_id::text = ANY(:ids) OR EXISTS (
+                    SELECT 1 FROM album_artists aa2 WHERE aa2.mbid = am.mbid
+                       AND aa2.role = 'primary' AND aa2.artist_id::text = ANY(:ids)))"""
+             if artist_ids is not None else "")
     try:
-        cols = db.execute(_sql("""
-            SELECT DISTINCT am.mbid::text AS mbid, mba.name AS canonical
+        cols = db.execute(_sql(f"""
+            SELECT DISTINCT am.mbid::text AS mbid, {'NULL' if checked else 'mba.name'} AS canonical
             FROM artist_mbids am
-            JOIN mb_artist mba ON mba.gid = am.mbid
+            {'' if checked else 'JOIN mb_artist mba ON mba.gid = am.mbid'}
             WHERE EXISTS (SELECT 1 FROM album_artists aa
                 WHERE aa.mbid = am.mbid AND aa.role = 'primary'
                   AND aa.artist_id != am.artist_id)
-        """)).fetchall()
+              {scope}
+        """), {"ids": [str(a) for a in artist_ids or ()]}).fetchall()
+        # One transaction per collision: each is judged on what is committed —
+        # its verdicts read, and its withdrawals write, through other
+        # connections — before it writes anything itself.
+        db.rollback()
         for mbid, canonical in cols:
             inv = db.execute(_sql("""
                 SELECT ar.id::text, ar.name FROM artists ar WHERE ar.id IN (
@@ -726,9 +822,28 @@ def merge_collisions(dry_run: bool = True) -> list:
                     SELECT artist_id FROM album_artists WHERE mbid = :m AND role = 'primary'
                 )
             """), {"m": mbid}).fetchall()
+            if checked:
+                # MusicBrainz merged `mbid` into an MBID another local artist
+                # holds: that artist is judged with the others, for the
+                # merge would take the MBID from it.
+                fwd = mb_answers.answer("artist", mbid)
+                if fwd is not None and fwd.known and fwd.target != mbid:
+                    holder = db.execute(_sql("""
+                        SELECT ar.id::text, ar.name FROM artists ar
+                          JOIN artist_mbids am ON am.artist_id = ar.id
+                         WHERE am.mbid = CAST(:t AS uuid)"""), {"t": fwd.target}).fetchone()
+                    if holder and holder[0] not in {r[0] for r in inv}:
+                        inv = list(inv) + [tuple(holder)]
+                inv, canonical, target = _confirmed_collision(mbid, inv, waiting, dry_run)
+                if canonical is None:
+                    db.rollback()
+                    continue
+            else:
+                target = mbid
             ids = [r[0] for r in inv]
             plan.append({"mbid": mbid, "canonical": canonical, "artists": [r[1] for r in inv]})
             if dry_run or len(ids) < 2:
+                db.rollback()
                 continue
             # preserve every involved artist's MBIDs (namesake MBIDs survive the merge)
             keep = [r[0] for r in db.execute(_sql(
@@ -737,18 +852,57 @@ def merge_collisions(dry_run: bool = True) -> list:
             for aid in ids:
                 recanonicalize_artist(db, aid, canonical)
             canon_id = str(artist_uuid(canonical))
-            for m in set(keep) | {mbid}:
+            for m in (set(keep) | {target}) - ({mbid} if target != mbid else set()):
                 db.execute(_sql("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
                                 "VALUES (:m, :a, 'overlap_verified') "
                                 "ON CONFLICT (mbid) DO UPDATE SET artist_id = :a"),
                            {"m": m, "a": canon_id})
-        db.commit() if not dry_run else db.rollback()
+            db.commit()
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
     return plan
+
+
+def _confirmed_collision(mbid: str, involved: list, waiting: set = None,
+                         dry_run: bool = False) -> tuple:
+    """(the involved artists whose binding to `mbid` holds on MusicBrainz's
+    answers, MusicBrainz's name for the merge, the MBID to keep: a merged one's
+    target). The name is None when the collision waits for an answer, or for
+    a decision of an involved artist that waits: a merge re-keys the artist,
+    and the answers it waits on are keyed by its id. An artist with nothing
+    owned to weigh (UNPROVEN) keeps its binding and stays out of the merge."""
+    if any(_decisions_wait(aid, waiting) for aid, _ in involved):
+        return involved, None, None
+    verdicts = {}
+    for aid, name in involved:
+        asks = mb_answers.Asks("owned_artist", aid, mb_answers.PRIORITY_OWNED)
+        verdicts[aid] = confirm.binding(aid, name, mbid, asks, need_content=True)
+        asks.flush()
+    if any(v is confirm.WAIT for v in verdicts.values()):
+        if waiting is not None:
+            waiting.update(aid for aid, _ in involved)
+        return involved, None, None
+    if not dry_run:
+        for aid, v in verdicts.items():
+            if v is False:
+                confirm.withdraw(aid, mbid)
+    holders = [(aid, name) for aid, name in involved if verdicts[aid] is True]
+    a = mb_answers.answer("artist", mbid)
+    target = a.target if a is not None and a.known else None
+    if not holders or target is None:
+        return holders, None, None
+    return holders, confirm.mb_name(target), target
+
+
+def _decisions_wait(artist_id: str, waiting: set = None) -> bool:
+    """A decision of the artist waits for MusicBrainz's answers — in this
+    pass, or queued before it. Its identity must not change meanwhile: the
+    waiters are keyed by its id, and a renamed or merged artist would never
+    be woken by them."""
+    return (waiting is not None and artist_id in waiting) or mb_answers.waiting("owned_artist", artist_id)
 
 
 # Edition-grouping knobs.
@@ -1088,7 +1242,8 @@ def _same_edition_twin(db, album_id: str, rg: str, bare_id: str, variants: list)
     return None
 
 
-def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache: dict) -> None:
+def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache: dict,
+                          waiting: set = None) -> None:
     """Resolve one owned album into editions and (unless dry_run) apply the split.
 
     A single-edition rg'd album just adopts the RG name (the old rename). A
@@ -1096,9 +1251,16 @@ def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache:
     A scattered NULL-rg album attaches to its cluster's RG when its content (or
     base title) proves membership. Each non-primary edition is named from its
     matched MB release; the primary (the bare-named release) keeps the RG name.
+
+    On a node without the dump every one of those is re-made on MusicBrainz's
+    answers first (_confirmed_group, _confirmed_edition): the album's tracks
+    must match a release MusicBrainz files under the group, credited to the
+    album's artist, and the titles written are MusicBrainz's. A premise that
+    fails changes nothing; one waiting for an answer leaves the album as it is
+    and its artist in `waiting`.
     """
     arow = db.execute(_sql("""
-        SELECT a.musicbrainz_id::text, a.title, ar.name
+        SELECT a.musicbrainz_id::text, a.title, ar.name, ar.id::text
         FROM albums a
         JOIN album_artists aa ON aa.album_id = a.id AND aa.role = 'primary'
         JOIN artists ar ON ar.id = aa.artist_id
@@ -1107,7 +1269,7 @@ def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache:
     """), {"a": album_id}).fetchone()
     if not arow:
         return  # no primary artist → album UUID isn't recomputable; leave as-is
-    rg, atitle, artist_name = arow
+    rg, atitle, artist_name, artist_id = arow
     attaching = rg is None
     if attaching:
         rg = _cluster_rg(album_id)
@@ -1122,6 +1284,14 @@ def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache:
     variants = _variant_fingerprints(album_id)
     if not variants:
         return
+    asks = None
+    if confirm.required():
+        asks = mb_answers.Asks("owned_artist", artist_id, mb_answers.PRIORITY_OWNED)
+        group = _confirmed_group(album_id, rg, artist_id, variants, rel_cache, asks)
+        if group is confirm.WAIT or group is False:
+            _album_waits(asks, artist_id, waiting, st)
+            return
+        rg_target, rg_name = group
     editions = _group_editions(variants)   # release-independent (recs / titles / disc)
     multi = len(editions) > 1
     rg_base = release_match_key(rg_name)
@@ -1130,6 +1300,17 @@ def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache:
     # becomes that album's variant — and the keeper is resolved afresh.
     if not multi and not attaching:
         twin = _same_edition_twin(db, album_id, rg, bare_id, variants)
+        if twin and asks is not None:
+            other = twin[0] if twin[1] == album_id else twin[1]
+            other_artist = db.execute(_sql("""
+                SELECT aa.artist_id::text FROM album_artists aa
+                 WHERE aa.album_id = :a AND aa.role = 'primary' ORDER BY aa.artist_id LIMIT 1
+            """), {"a": other}).scalar() or artist_id
+            held = _confirmed_group(other, rg, other_artist, _variant_fingerprints(other),
+                                    rel_cache, asks)
+            if held is confirm.WAIT or held is False:
+                _album_waits(asks, artist_id, waiting, st)
+                return
         if twin:
             loser, keeper = twin
             st["merged"] += 1
@@ -1142,7 +1323,7 @@ def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache:
             # nothing on a variant of the album it folded into.
             db.execute(_sql("UPDATE album_variants SET edition = NULL "
                             "WHERE album_id = :k AND edition ~ '^Alt( \\d+)?$'"), {"k": keeper})
-            _split_album_editions(db, keeper, dry_run, st, rel_cache)
+            _split_album_editions(db, keeper, dry_run, st, rel_cache, waiting)
             return
     # A row needs an edition qualifier when it is NOT the plain standard album:
     # attaching (cluster-borrowed RG), a multi-edition split, OR a lone row whose
@@ -1158,6 +1339,11 @@ def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache:
         for v in variants:
             rel, score = _best_release(v, releases)
             v["rel"] = rel if score >= _EDITION_MATCH_MIN else None
+            if v["rel"] and asks is not None:
+                v["rel"] = _confirmed_edition(v, v["rel"]["release_mbid"], rg_target, asks)
+        if asks is not None and asks.waiting:
+            _album_waits(asks, artist_id, waiting, st)
+            return
 
     plan = []   # (canon_title, qualifier, variant_ids, release_mbid)
     used: set = set()
@@ -1220,7 +1406,96 @@ def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache:
         recanonicalize_album_variants(db, album_id, vids, canon, qualifier)
 
 
-def apply_editions(dry_run: bool = True, artist_ids: list = None) -> dict:
+def _album_waits(asks, artist_id: str, waiting: set, st: dict) -> None:
+    """An album whose premise is not confirmed: asked for when answers are
+    missing (its artist then waits), counted when MusicBrainz refuted it."""
+    if asks.waiting:
+        asks.flush()
+        if waiting is not None:
+            waiting.add(artist_id)
+    else:
+        st["unconfirmed"] = st.get("unconfirmed", 0) + 1
+
+
+def _confirmed_group(album_id: str, rg: str, artist_id: str, variants: list,
+                     rel_cache: dict, asks) -> object:
+    """(the group's MBID, its title) as MusicBrainz answers them, when the
+    album is MusicBrainz's release of that group: the release that covered it
+    (or, without one on record, the slice's best match among the group's
+    releases) is filed under the group — or under the group a merge made of it —
+    credited to the album's artist, and the album's tracks match its tracklist
+    (canon.confirm.release_premise). "The album's artist" is only a binding
+    MusicBrainz's answers confirm (canon.confirm.binding): the slice's own
+    binding is what is being checked. False when MusicBrainz's answers say
+    otherwise, WAIT while they are missing — all of them asked in one round."""
+    held = db_query_one("SELECT name FROM artists WHERE id = %(a)s::uuid", {"a": artist_id})
+    mbids = [r["m"] for r in db_query("""
+        SELECT DISTINCT mbid::text AS m FROM (
+            SELECT mbid FROM album_artists WHERE album_id = %(al)s::uuid AND role = 'primary'
+                                              AND mbid IS NOT NULL
+            UNION SELECT mbid FROM artist_mbids WHERE artist_id = %(ar)s::uuid) x""",
+                                      {"al": album_id, "ar": artist_id})]
+    if held is None or not mbids or not variants:
+        return False
+    verdicts = {}
+    for m in mbids:
+        # A settled verdict is the artist's for the whole pass; a waiting one
+        # is asked again so each album's asks name what it waits on.
+        key = ("binding", artist_id, m)
+        verdict = rel_cache.get(key, confirm.WAIT)
+        if verdict is confirm.WAIT:
+            verdict = confirm.binding(artist_id, held["name"], m, asks)
+            if verdict is not confirm.WAIT:
+                rel_cache[key] = verdict
+        verdicts[m] = verdict
+    row = db_query("""SELECT release_mbid::text AS r FROM album_variants
+                       WHERE album_id = %(a)s::uuid AND release_mbid IS NOT NULL
+                       ORDER BY id LIMIT 1""", {"a": album_id})
+    rel_mbid = row[0]["r"] if row else None
+    if rel_mbid is None:
+        whole = {"recs": set().union(*[v["recs"] for v in variants]),
+                 "titles": set().union(*[v["titles"] for v in variants]),
+                 "ntracks": sum(v["ntracks"] for v in variants)}
+        best, score = _best_release(whole, _prep_releases(rg, rel_cache))
+        rel_mbid = best["release_mbid"] if best and score >= _EDITION_MATCH_MIN else None
+    rel = confirm.release(rel_mbid, asks) if rel_mbid else False
+    if rel is confirm.WAIT or any(v is confirm.WAIT for v in verdicts.values()):
+        return confirm.WAIT
+    bound = [m for m, v in verdicts.items() if v is True]
+    if rel is False or not bound:
+        return False
+    group = rel.data.get("group") if rel.known else None
+    if not group:
+        return False
+    same = confirm.same("release_group", rg, group["mbid"], asks)
+    if same is confirm.WAIT:
+        return confirm.WAIT
+    if not same or not confirm.release_premise(album_id, artist_id, bound, rel.data):
+        return False
+    return group["mbid"], group["title"]
+
+
+def _confirmed_edition(v: dict, release_mbid: str, group_mbid: str, asks) -> object:
+    """The release a variant was matched to, as MusicBrainz answers it — its
+    own MBID and title — when MusicBrainz files it under the album's group and
+    the variant's tracklist matches MusicBrainz's (recordings where the variant
+    is well stamped, else titles). None otherwise, and while the answer is
+    missing (the ask is then noted in `asks`)."""
+    rel = confirm.release(release_mbid, asks)
+    if rel is confirm.WAIT or not rel.known:
+        return None
+    if (rel.data.get("group") or {}).get("mbid") != group_mbid:
+        return None
+    tracks = rel.data["tracks"]
+    score = (_jaccard(v["recs"], {t["recording"] for t in tracks if t["recording"]})
+             if _well_stamped(v) else
+             _jaccard(v["titles"], {_title_key(t["title"]) for t in tracks if t["title"]}))
+    if score < _EDITION_MATCH_MIN:
+        return None
+    return {"name": rel.data["title"], "release_mbid": rel.mbid}
+
+
+def apply_editions(dry_run: bool = True, artist_ids: list = None, waiting: set = None) -> dict:
     """APPLY increment 2b — resolve owned albums into editions.
 
     Supersedes the flat rename-to-RG: differing-tracklist variants wrongly
@@ -1250,7 +1525,7 @@ def apply_editions(dry_run: bool = True, artist_ids: list = None) -> dict:
         album_ids = [r[0] for r in db.execute(_sql(sql), params).fetchall()]
         for album_id in album_ids:
             try:
-                _split_album_editions(db, album_id, dry_run, st, rel_cache)
+                _split_album_editions(db, album_id, dry_run, st, rel_cache, waiting)
                 db.commit() if not dry_run else db.rollback()
             except Exception as e:
                 db.rollback()
@@ -1473,7 +1748,8 @@ def distill_album_coverage(limit: int = None, dry_run: bool = True) -> dict:
     return st
 
 
-def rename_to_canonical(artist_ids: list = None, dry_run: bool = False) -> dict:
+def rename_to_canonical(artist_ids: list = None, dry_run: bool = False,
+                        waiting: set = None) -> dict:
     """Rename every single-MBID artist to its MB-canonical name (`mb_artist.name`).
 
     This is what makes MB convergence hold across nodes. `apply_artist` assigns the
@@ -1499,18 +1775,25 @@ def rename_to_canonical(artist_ids: list = None, dry_run: bool = False) -> dict:
             return out
         scope = "AND a.id::text = ANY(:ids)"
         params["ids"] = list(artist_ids)
+    checked = confirm.required()
     try:
+        # A node without the dump renames to MusicBrainz's answer, not to the
+        # slice's row: every single-MBID artist in scope is a candidate, its
+        # name compared once the answer is here (_confirmed_renames).
         rows = db.execute(_sql(f"""
-            SELECT a.id::text, a.name, mba.name AS canonical
+            SELECT a.id::text, a.name, {'NULL' if checked else 'mba.name'} AS canonical,
+                   am.mbid::text
             FROM artists a
             JOIN artist_mbids am ON am.artist_id = a.id
-            JOIN mb_artist mba ON mba.gid = am.mbid
-            WHERE a.name <> mba.name
+            {'' if checked else 'JOIN mb_artist mba ON mba.gid = am.mbid'}
+            WHERE {'TRUE' if checked else 'a.name <> mba.name'}
               AND am.confidence <> 'name_exact'   -- name-only evidence never renames
               AND (SELECT count(*) FROM artist_mbids x WHERE x.artist_id = a.id) = 1
               {scope}
         """), params).fetchall()
-        for aid, cur, canonical in rows:
+        if checked:
+            rows = _confirmed_renames(rows, waiting, dry_run)
+        for aid, cur, canonical, _mbid in rows:
             # Skip case/normalize-only differences ("SATeN" -> "Saten"): normalize()
             # already collapses them to the same UUID, so there's nothing to converge
             # and recanonicalize would no-op anyway.
@@ -1542,6 +1825,53 @@ def rename_to_canonical(artist_ids: list = None, dry_run: bool = False) -> dict:
     return out
 
 
+def _confirmed_renames(rows: list, waiting: set = None, dry_run: bool = False) -> list:
+    """The rename worklist re-made on MusicBrainz's answers: an artist is
+    renamed only when its binding holds (canon.confirm.binding — the name and
+    the owned content, which must be there to weigh), to MusicBrainz's current
+    name; a merged MBID's binding follows its target. A refuted binding is
+    withdrawn; an artist whose answers are not here yet waits, and one with
+    another decision waiting keeps its name until that decision is made."""
+    out = []
+    for aid, cur, _slice_name, mbid in rows:
+        if _decisions_wait(aid, waiting):
+            continue
+        asks = mb_answers.Asks("owned_artist", aid, mb_answers.PRIORITY_OWNED)
+        verdict = confirm.binding(aid, cur, mbid, asks, need_content=True)
+        if verdict is confirm.WAIT:
+            asks.flush()
+            if waiting is not None:
+                waiting.add(aid)
+            continue
+        if verdict is confirm.UNPROVEN:
+            continue
+        if not verdict:
+            if not dry_run:
+                confirm.withdraw(aid, mbid)
+            continue
+        a = mb_answers.answer("artist", mbid)
+        if a.target != mbid and not dry_run:
+            _follow_merged(aid, mbid, a.target)
+        canonical = confirm.mb_name(a.target)
+        if canonical and canonical != cur:
+            out.append((aid, cur, canonical, a.target))
+    return out
+
+
+def _follow_merged(artist_id: str, mbid: str, target: str) -> None:
+    """MusicBrainz merged `mbid` into `target`: the local binding follows the
+    target, unless another local artist holds it already (then the two are a
+    collision for merge_collisions to judge)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE artist_mbids SET mbid = %(t)s::uuid
+                        WHERE artist_id = %(a)s::uuid AND mbid = %(m)s::uuid
+                          AND NOT EXISTS (SELECT 1 FROM artist_mbids x WHERE x.mbid = %(t)s::uuid)""",
+                    {"a": artist_id, "m": mbid, "t": target})
+        cur.execute("""UPDATE album_artists SET mbid = %(t)s::uuid
+                        WHERE artist_id = %(a)s::uuid AND mbid = %(m)s::uuid""",
+                    {"a": artist_id, "m": mbid, "t": target})
+
+
 def _collab_members(artist_id, name: str, plan: dict) -> list:
     """The MB-deterministic 'split this collaboration' signal, or [].
 
@@ -1571,6 +1901,9 @@ def _collab_members(artist_id, name: str, plan: dict) -> list:
             ORDER BY count(*) DESC LIMIT 1
         """, {"recs": recs})
         if top and top[0]["n"] >= 2:
+            if confirm.required():
+                tracks = {r: t for alb in plan["albums"] for t, r in alb["recordings"].items()}
+                return _confirmed_credit_members(artist_id, name, top[0]["cid"], tracks)
             return [(m["name"], m["mbid"]) for m in db_query("""
                 SELECT mba.name AS name, mba.gid::text AS mbid
                 FROM mb_artist_credit_name acn JOIN mb_artist mba ON mba.id = acn.artist
@@ -1601,16 +1934,96 @@ def _collab_members(artist_id, name: str, plan: dict) -> list:
         return []
     members = []
     for p in parts:
-        gids = {r["gid"] for r in db_query("""
+        gids = sorted({r["gid"] for r in db_query("""
             SELECT a.gid::text AS gid FROM mb_artist a WHERE lower(a.name) = lower(%(p)s)
             UNION
             SELECT a.gid::text FROM mb_artist a
             JOIN mb_artist_alias al ON al.artist = a.id WHERE lower(al.name) = lower(%(p)s)
-        """, {"p": p})}
+        """, {"p": p})})
         if not gids:
             return []   # any unknown part → don't split on name evidence
-        members.append((p, gids.pop() if len(gids) == 1 else None))
-    return members
+        members.append((p, gids))
+    if confirm.required():
+        return _confirmed_name_members(artist_id, members)
+    return [(p, gids[0] if len(gids) == 1 else None) for p, gids in members]
+
+
+def _confirmed_credit_members(artist_id, name: str, credit_id: int, tracks: dict) -> list:
+    """The content path re-made on MusicBrainz's answers: the recordings that
+    carry the slice's dominant credit, asked one by one (up to the three the
+    gate needs), must be MusicBrainz's recordings of the owned tracks; the
+    members are then MusicBrainz's own credit — no split when that credit is
+    one artist, nor when it is not the owned compound `name` (a credit the
+    slice hung on the owned titles says nothing about who this artist is).
+    WAIT while a recording is not answered."""
+    rows = db_query("""
+        SELECT rec.gid::text AS rec FROM mb_recording rec
+         WHERE rec.gid = ANY(%(r)s::uuid[]) AND rec.artist_credit = %(c)s
+         ORDER BY rec.gid LIMIT 3""", {"r": list(tracks), "c": credit_id})
+    asks = mb_answers.Asks("owned_artist", str(artist_id), mb_answers.PRIORITY_OWNED)
+    members = None
+    for r in rows:
+        rec = confirm.recording(r["rec"], asks)
+        if rec is confirm.WAIT or not rec.known:
+            continue
+        credit = rec.data["credit"]
+        if not confirm.recording_premise(tracks[r["rec"]], rec.data, [c["artist"] for c in credit]):
+            continue
+        if len(credit) < 2 or not confirm.credit_premise(name, credit):
+            return []
+        mine = [(c["name"], c["artist"]) for c in credit]
+        if members is not None and [m for _, m in mine] != [m for _, m in members]:
+            return []
+        members = mine
+    if asks.waiting:
+        asks.flush()
+        return confirm.WAIT
+    return members or []
+
+
+# A part with more namesakes than this is not told apart on a node without
+# the dump: no split, rather than that many questions for a name.
+_NAMESAKES_ASKED = 5
+
+
+def _confirmed_name_members(artist_id, members: list) -> list:
+    """The name path re-made on MusicBrainz's answers: each part is exactly
+    one artist MusicBrainz names by that part — its namesakes in the slice
+    asked, a part MusicBrainz leaves ambiguous splits nothing (on a node
+    without the dump an unconfirmed part would skip every check below) — and
+    no two parts are members of one group (nor one a member of another): a
+    band's members are its lineup, not a collaboration. That the whole is no
+    MusicBrainz artist stays the slice's word: an MBID proves presence, never
+    absence."""
+    asks = mb_answers.Asks("owned_artist", str(artist_id), mb_answers.PRIORITY_OWNED)
+    found = []
+    for part, gids in members:
+        if len(gids) > _NAMESAKES_ASKED:
+            return []
+        named = {}
+        for gid in gids:
+            a = confirm.artist(gid, asks)
+            if a is not confirm.WAIT and a.known and confirm.part_premise(part, a.data):
+                named[a.mbid] = a.data
+        found.append((part, named))
+    if asks.waiting:
+        asks.flush()
+        return confirm.WAIT
+    if any(len(named) != 1 for _, named in found):
+        return []
+    groups: dict = {}
+    for _part, named in found:
+        (mbid, data), = named.items()
+        groups[mbid] = ({g for m, g in data["members"] if m == mbid}
+                        | ({mbid} if any(g == mbid for _, g in data["members"]) else set()))
+    if len(groups) < len(found):
+        return []   # two parts are one artist
+    seen: set = set()
+    for gid, in_groups in groups.items():
+        if in_groups & seen or in_groups & set(groups) - {gid}:
+            return []
+        seen |= in_groups
+    return [(part, next(iter(named))) for part, named in found]
 
 
 def _split_collab(artist_id, name: str, members: list) -> tuple:
@@ -1682,6 +2095,9 @@ def split_collaborations(dry_run: bool = False) -> dict:
 
 
 _VA_GID = "89ad4ac3-39f7-470e-963a-56509c546377"   # MB's special-purpose Various Artists
+# Its name is MusicBrainz's constant, never a slice's row: the entity is
+# special-purpose, and its name has not changed since MusicBrainz began.
+_VA_NAME = "Various Artists"
 _VA_NAMES = ["various artists", "various", "va", "various artist"]
 
 
@@ -1691,10 +2107,7 @@ def _canonicalize_va() -> int:
     canonical name. Deterministic; converges the 'Various'/'Various Artists'
     track-UUID fork across nodes. Per-track attribution of comp tracks to their
     real artists is a separate (timing) layer."""
-    row = db_query("SELECT name FROM mb_artist WHERE gid = %(g)s", {"g": _VA_GID})
-    if not row:
-        return 0
-    canonical = row[0]["name"]
+    canonical = _VA_NAME
     canon_id = str(artist_uuid(canonical))
     rows = db_query("""
         SELECT id::text AS id FROM artists
@@ -1723,7 +2136,7 @@ def _canonicalize_va() -> int:
     return len(rows)
 
 
-def assign_name_exact(artist_ids: list) -> int:
+def assign_name_exact(artist_ids: list, waiting: set = None) -> int:
     """Slowest tier, runs LAST on the residue the content layers left mbid-less:
     when the name resolves to exactly ONE MB entity by identity-preserving spelling
     (exact name/alias, MB punctuation, or unaccent fold — _name_exact_gids), assign
@@ -1733,14 +2146,35 @@ def assign_name_exact(artist_ids: list) -> int:
     collision (or an accent-collapse onto two entities) is skipped, not guessed."""
     if not artist_ids:
         return 0
-    rows = db_query("""
+    rows = db_query(f"""
         SELECT a.id::text AS id, a.name FROM artists a
         WHERE a.id::text = ANY(%(ids)s)
           AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
-    """, {"ids": list(artist_ids)})
+          AND NOT {mb_answers.WAITING_SQL.format(subject='owned_artist', key='a.id::text')}
+    """, {"ids": [a for a in artist_ids if a not in (waiting or ())]})
     n = 0
+    checked = confirm.required()
     for r in rows:
         gids = _name_exact_gids(r["name"])
+        if len(gids) == 1 and checked:
+            # The name premise re-run on MusicBrainz's strings; that no other
+            # namesake exists is not something an MBID can prove.
+            asks = mb_answers.Asks("owned_artist", r["id"], mb_answers.PRIORITY_OWNED)
+            a = confirm.artist(gids[0], asks)
+            if a is confirm.WAIT:
+                asks.flush()
+                if waiting is not None:
+                    waiting.add(r["id"])
+                continue
+            if not a.known or not confirm.name_premise(r["name"], a.data):
+                confirm.withdraw(r["id"], gids[0])
+                continue
+            if not confirm.exact_premise(r["name"], a.data):
+                # This tier's own spelling rule fails where the owned tiers'
+                # would not: nothing is bound, and nothing is held against
+                # the pair (a content tier may still confirm it).
+                continue
+            gids = [a.mbid]
         if len(gids) == 1:
             ins = db_query(
                 "INSERT INTO artist_mbids (mbid, artist_id, confidence) "
@@ -1777,7 +2211,7 @@ def promote_name_exact() -> dict:
             return {"promoted": cur.rowcount}
 
 
-def canonicalize_pending(limit: int = None) -> dict:
+def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=()) -> dict:
     """Incremental canon stage — the post-scan / post-import entry point. For every OWNED
     artist whose content is newer than its last canon (the `artists.last_mb_sync` watermark
     vs `owned_files.created_at` — a file here or one the HQPlayer holds): resolve + materialize (apply_artist) + scoped rename/edition-
@@ -1786,7 +2220,11 @@ def canonicalize_pending(limit: int = None) -> dict:
     MB-OPTIONAL — a NO-OP without the local dump (sync/enrich proceed on tier-3 deterministic
     names; MB never blocks). Idempotent: bumps last_mb_sync so a stable re-scan is free, and a
     crash mid-run leaves un-bumped artists to retry. Album renames are reversible (raw_title)
-    and local (albums are not synced), so this auto-applies without a review gate."""
+    and local (albums are not synced), so this auto-applies without a review gate.
+
+    `artist_ids` scopes the pass to those artists (the ones MusicBrainz's
+    answers just woke); `woken` adds such artists to a whole pass. Every
+    other condition still holds."""
     if not mb.LOCAL_DUMP:
         mb.refresh()   # the dump may have been loaded since this process started
         if not mb.LOCAL_DUMP:
@@ -1796,22 +2234,31 @@ def canonicalize_pending(limit: int = None) -> dict:
 
     # Track-owned, not album-owned: an artist whose only presence is a track or
     # two on someone else's compilation has no album_artists row at all, yet is
-    # exactly who the track-centric layer exists for.
-    pending = db_query("""
+    # exactly who the track-centric layer exists for. An artist whose decisions
+    # wait for MusicBrainz's answers is left out until they wake it.
+    # A woken artist is taken whatever its watermark: the answers it waited on
+    # just came, whoever queued them (a pass, a CLI run, a crash before the
+    # unstamp).
+    watermark = "(ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync)"
+    due = ("ar.id::text = ANY(%(ids)s)" if artist_ids is not None
+           else f"({watermark} OR ar.id::text = ANY(%(ids)s))")
+    pending = db_query(f"""
         SELECT ar.id::text AS id, ar.name
         FROM artists ar
         WHERE EXISTS (
             SELECT 1 FROM track_artists ta
             JOIN owned_files mf ON mf.track_id = ta.track_id
-            WHERE ta.artist_id = ar.id AND ta.role = 'primary'
-              AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
+            WHERE ta.artist_id = ar.id AND ta.role = 'primary' AND {due})
+          AND NOT {mb_answers.WAITING_SQL.format(subject='owned_artist', key='ar.id::text')}
         ORDER BY ar.last_mb_sync NULLS FIRST, ar.name
         LIMIT %(lim)s
-    """, {"lim": limit or 1_000_000})
+    """, {"lim": limit or 1_000_000,
+          "ids": [str(a) for a in (artist_ids if artist_ids is not None else woken) or ()]})
 
     st = {"pending": len(pending), "artists": 0, "track_only": 0, "split": 0,
           "va": va, "errors": 0}
     done = []
+    waiting: set = set()
     # Worklist (not a flat for): a collaboration is split into its members, and the
     # primary member is re-queued so its albums resolve under the now-split identity.
     worklist = [(a["id"], a["name"]) for a in pending]
@@ -1824,6 +2271,9 @@ def canonicalize_pending(limit: int = None) -> dict:
         try:
             plan = resolve_artist(aid, aname)
             members = _collab_members(aid, aname, plan)
+            if members is confirm.WAIT:
+                waiting.add(aid)
+                continue
             if members:
                 primary = _split_collab(aid, aname, members)   # → (id, name) of pos-0
                 st["split"] += 1
@@ -1831,8 +2281,9 @@ def canonicalize_pending(limit: int = None) -> dict:
                 continue
             if plan["albums"]:
                 apply_artist(aid, aname, plan)   # materialize (reuses the resolve, atomic)
+            elif canonicalize_trackonly(aid, aname).get("waiting"):   # track-centric layer
+                waiting.add(aid)
             else:
-                canonicalize_trackonly(aid, aname)   # track-centric layer (no owned albums)
                 st["track_only"] += 1
             done.append(aid)
             st["artists"] += 1
@@ -1840,17 +2291,24 @@ def canonicalize_pending(limit: int = None) -> dict:
             st["errors"] += 1
             logger.error("canon failed for %r: %s", aname, e)
     if done:
-        apply_editions(dry_run=False, artist_ids=done)   # scoped edition split + RG rename
+        apply_editions(dry_run=False, artist_ids=done, waiting=waiting)   # scoped edition split + RG rename
         fold_credit_duplicates(dry_run=False, artist_ids=done)   # one track read from two copies
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
         # collision survivors (they simply re-canon next scan — idempotent, cheap)
         db_execute("UPDATE artists SET last_mb_sync = now() WHERE id::text = ANY(%(ids)s)",
                    {"ids": done})
-        merge_collisions(dry_run=False)   # cross-artist MBID collisions (a near-instant no-op at 0)
+        # cross-artist MBID collisions (a near-instant no-op at 0); a woken run
+        # judges only the collisions its artists are in
+        merge_collisions(dry_run=False, waiting=waiting, artist_ids=artist_ids)
         # name → MB-canonical for the matched single-MBID artists (re-stamps via
         # recanonicalize), so the artist/track UUIDs are a pure function of the MBID
         # and converge across nodes regardless of how the source tags were spelled.
-        st["renamed"] = rename_to_canonical(artist_ids=done)["renamed"]
+        st["renamed"] = rename_to_canonical(artist_ids=done, waiting=waiting)["renamed"]
         # slowest tier last — only the residue the content layers left mbid-less
-        st["name_exact"] = assign_name_exact(done)
+        st["name_exact"] = assign_name_exact(done, waiting=waiting)
+    # A decision that waits for MusicBrainz's answers leaves its artist's
+    # watermark unstamped: the answers' arrival wakes the canon, which takes
+    # the artist again.
+    confirm.unstamp(waiting)
+    st["waiting"] = len(waiting)
     return st

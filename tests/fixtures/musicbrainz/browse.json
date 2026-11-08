@@ -1,0 +1,126 @@
+{
+ "asked": "875071b4-0d93-4c3d-abb7-eaf0c0169879",
+ "release-group-count": 11,
+ "release-groups": [
+  {
+   "artist-credit": [
+    {
+     "artist": {
+      "country": "US",
+      "disambiguation": "",
+      "id": "65562bdc-d4b9-4c7e-a6ee-559cdec5cbb5",
+      "name": "OneZeroCypher",
+      "sort-name": "OneZeroCypher",
+      "type": null,
+      "type-id": null
+     },
+     "joinphrase": " vs. ",
+     "name": "OneZeroCypher"
+    },
+    {
+     "artist": {
+      "country": "US",
+      "disambiguation": "",
+      "id": "875071b4-0d93-4c3d-abb7-eaf0c0169879",
+      "name": "Project Overdose",
+      "sort-name": "Project Overdose",
+      "type": "Group",
+      "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+     },
+     "joinphrase": "",
+     "name": "Project Overdose"
+    }
+   ],
+   "disambiguation": "",
+   "first-release-date": "2022-10-31",
+   "id": "482e48b3-3407-4227-8c43-7ac8c53d29c2",
+   "primary-type": "Single",
+   "primary-type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+   "secondary-type-ids": [
+    "0c60f497-ff81-3818-befd-abfc84a4858b"
+   ],
+   "secondary-types": [
+    "Remix"
+   ],
+   "title": "Intro to Nothing (instru-Mental mix)"
+  },
+  {
+   "artist-credit": [
+    {
+     "artist": {
+      "country": "US",
+      "disambiguation": "",
+      "id": "875071b4-0d93-4c3d-abb7-eaf0c0169879",
+      "name": "Project Overdose",
+      "sort-name": "Project Overdose",
+      "type": "Group",
+      "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+     },
+     "joinphrase": "",
+     "name": "Project Overdose"
+    }
+   ],
+   "disambiguation": "",
+   "first-release-date": "2021-07-22",
+   "id": "03e27bfa-1d68-47c9-9f69-6962c51315e9",
+   "primary-type": "Album",
+   "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+   "secondary-type-ids": [],
+   "secondary-types": [],
+   "title": "Conspiracy B"
+  },
+  {
+   "artist-credit": [
+    {
+     "artist": {
+      "country": "US",
+      "disambiguation": "",
+      "id": "875071b4-0d93-4c3d-abb7-eaf0c0169879",
+      "name": "Project Overdose",
+      "sort-name": "Project Overdose",
+      "type": "Group",
+      "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+     },
+     "joinphrase": "",
+     "name": "Project Overdose"
+    }
+   ],
+   "disambiguation": "",
+   "first-release-date": "2021-05-22",
+   "id": "1b502d06-bc0e-4c82-a622-6b62f37cc4fe",
+   "primary-type": "Album",
+   "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+   "secondary-type-ids": [],
+   "secondary-types": [],
+   "title": "Ministry of Propaganda"
+  },
+  {
+   "artist-credit": [
+    {
+     "artist": {
+      "country": "US",
+      "disambiguation": "",
+      "id": "875071b4-0d93-4c3d-abb7-eaf0c0169879",
+      "name": "Project Overdose",
+      "sort-name": "Project Overdose",
+      "type": "Group",
+      "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+     },
+     "joinphrase": "",
+     "name": "Project Overdose"
+    }
+   ],
+   "disambiguation": "",
+   "first-release-date": "2021-07-12",
+   "id": "2cb55138-7c90-459c-b58a-dd3beb349463",
+   "primary-type": "EP",
+   "primary-type-id": "6d0c5bf6-7a33-3420-a519-44fc63eedebf",
+   "secondary-type-ids": [],
+   "secondary-types": [],
+   "title": "Disavow"
+  }
+ ],
+ "unofficial_only": [
+  "482e48b3-3407-4227-8c43-7ac8c53d29c2"
+ ]
+}

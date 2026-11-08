@@ -1,0 +1,438 @@
+{
+ "asked": "e8b09026-1342-432a-8979-286591f9f40f",
+ "body": {
+  "artist-credit": [
+   {
+    "artist": {
+     "country": "NL",
+     "disambiguation": "",
+     "id": "477b8c0c-c5fc-4ad2-b5b2-191f0bf2a9df",
+     "name": "Armin van Buuren",
+     "sort-name": "Buuren, Armin van",
+     "type": "Person",
+     "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+    },
+    "joinphrase": "",
+    "name": "Armin van Buuren"
+   }
+  ],
+  "asin": null,
+  "barcode": "",
+  "cover-art-archive": {
+   "artwork": false,
+   "back": false,
+   "count": 0,
+   "darkened": false,
+   "front": false
+  },
+  "disambiguation": "",
+  "id": "b9505894-b52b-4eb8-b96c-825d2a00bc52",
+  "media": [
+   {
+    "format": "Digital Media",
+    "format-id": "907a28d9-b3b2-3ef6-89a8-7b18d91d4794",
+    "id": "aea7b73d-f9c6-327c-86e7-6e2b42293323",
+    "position": 1,
+    "title": "",
+    "track-count": 8,
+    "track-offset": 0,
+    "tracks": [
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "NL",
+         "disambiguation": "Dutch DJ and record producer",
+         "id": "9f1560de-9a9d-482b-afa0-99938e688330",
+         "name": "Ummet Ozcan",
+         "sort-name": "Ozcan, Ummet",
+         "type": "Person",
+         "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+        },
+        "joinphrase": "",
+        "name": "Ummet Ozcan"
+       }
+      ],
+      "id": "e0af41af-6b81-35dd-89c4-ca95f6ad7d56",
+      "length": null,
+      "number": "1",
+      "position": 1,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "NL",
+          "disambiguation": "Dutch DJ and record producer",
+          "id": "9f1560de-9a9d-482b-afa0-99938e688330",
+          "name": "Ummet Ozcan",
+          "sort-name": "Ozcan, Ummet",
+          "type": "Person",
+          "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+         },
+         "joinphrase": "",
+         "name": "Ummet Ozcan"
+        }
+       ],
+       "disambiguation": "",
+       "id": "cced0f84-ee69-4e8a-886d-b03003481a25",
+       "length": null,
+       "title": "Ummet Ozcan",
+       "video": false
+      },
+      "title": "Ummet Ozcan"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "MT",
+         "disambiguation": "",
+         "id": "90a13444-0707-47d1-bd1d-0423b1b2ccf8",
+         "name": "Tenishia",
+         "sort-name": "Tenishia",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Tenishia"
+       }
+      ],
+      "id": "b5d0ec87-a813-42da-a6e8-eab213c40d2e",
+      "length": null,
+      "number": "2",
+      "position": 2,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "MT",
+          "disambiguation": "",
+          "id": "90a13444-0707-47d1-bd1d-0423b1b2ccf8",
+          "name": "Tenishia",
+          "sort-name": "Tenishia",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Tenishia"
+        }
+       ],
+       "disambiguation": "",
+       "id": "1bd132f1-e448-4025-ba56-ae7d900dbc6c",
+       "length": null,
+       "title": "Tenishia",
+       "video": false
+      },
+      "title": "Tenishia"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "NO",
+         "disambiguation": "",
+         "id": "f7ba60af-39d6-4d9e-ba25-a7c47c417143",
+         "name": "Ørjan Nilsen",
+         "sort-name": "Nilsen, Ørjan",
+         "type": "Person",
+         "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+        },
+        "joinphrase": "",
+        "name": "Ørjan Nilsen"
+       }
+      ],
+      "id": "4d6a63c0-7380-4e74-9cdc-ea5b09ddbfce",
+      "length": null,
+      "number": "3",
+      "position": 3,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "NO",
+          "disambiguation": "",
+          "id": "f7ba60af-39d6-4d9e-ba25-a7c47c417143",
+          "name": "Ørjan Nilsen",
+          "sort-name": "Nilsen, Ørjan",
+          "type": "Person",
+          "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+         },
+         "joinphrase": "",
+         "name": "Ørjan Nilsen"
+        }
+       ],
+       "disambiguation": "",
+       "id": "34f653a0-8b0b-4016-88bc-74643011aee0",
+       "length": null,
+       "title": "Ørjan Nilsen",
+       "video": false
+      },
+      "title": "Ørjan Nilsen"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CA",
+         "disambiguation": "",
+         "id": "9b0996d8-ce15-4e37-834c-b6c43cb8bf14",
+         "name": "Max Graham",
+         "sort-name": "Graham, Max",
+         "type": "Person",
+         "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+        },
+        "joinphrase": "",
+        "name": "Max Graham"
+       }
+      ],
+      "id": "cae67b6a-058b-4a61-ba5f-1dd23176bfa1",
+      "length": null,
+      "number": "4",
+      "position": 4,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CA",
+          "disambiguation": "",
+          "id": "9b0996d8-ce15-4e37-834c-b6c43cb8bf14",
+          "name": "Max Graham",
+          "sort-name": "Graham, Max",
+          "type": "Person",
+          "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+         },
+         "joinphrase": "",
+         "name": "Max Graham"
+        }
+       ],
+       "disambiguation": "",
+       "id": "8b8f4826-c8d7-4876-b6bc-295e2d558462",
+       "length": null,
+       "title": "Max Graham",
+       "video": false
+      },
+      "title": "Max Graham"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "GB",
+         "disambiguation": "UK born DJ, now based in NL.",
+         "id": "f338cde2-7cc4-49e0-83e4-a0ac1a3b6d46",
+         "name": "Ben Gold",
+         "sort-name": "Gold, Ben",
+         "type": "Person",
+         "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+        },
+        "joinphrase": "",
+        "name": "Ben Gold"
+       }
+      ],
+      "id": "ab01708c-85e1-4960-960c-bd4c5c715217",
+      "length": null,
+      "number": "5",
+      "position": 5,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "GB",
+          "disambiguation": "UK born DJ, now based in NL.",
+          "id": "f338cde2-7cc4-49e0-83e4-a0ac1a3b6d46",
+          "name": "Ben Gold",
+          "sort-name": "Gold, Ben",
+          "type": "Person",
+          "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+         },
+         "joinphrase": "",
+         "name": "Ben Gold"
+        }
+       ],
+       "disambiguation": "",
+       "id": "ca91b17a-b44e-467b-9d40-4db2b8c850b3",
+       "length": null,
+       "title": "Ben Gold",
+       "video": false
+      },
+      "title": "Ben Gold"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "NL",
+         "disambiguation": "Dutch trance duo Ronald Hagen & Pascal Minnaard",
+         "id": "ea3b707a-7616-487f-a7d7-81ac947fd146",
+         "name": "Signum",
+         "sort-name": "Signum",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Signum"
+       }
+      ],
+      "id": "9fdd1042-be1b-4f65-99d7-a4dea9e13d20",
+      "length": null,
+      "number": "6",
+      "position": 6,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "NL",
+          "disambiguation": "Dutch trance duo Ronald Hagen & Pascal Minnaard",
+          "id": "ea3b707a-7616-487f-a7d7-81ac947fd146",
+          "name": "Signum",
+          "sort-name": "Signum",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Signum"
+        }
+       ],
+       "disambiguation": "",
+       "id": "c0f4720a-60c4-40d1-b093-8a2b23cc18cf",
+       "length": null,
+       "title": "Signum",
+       "video": false
+      },
+      "title": "Signum"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "US",
+         "disambiguation": "",
+         "id": "75ae9a0a-c78a-4c4a-aee5-9854aaa720b7",
+         "name": "Robert Nickson",
+         "sort-name": "Nickson, Robert",
+         "type": "Person",
+         "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+        },
+        "joinphrase": "",
+        "name": "Robert Nickson"
+       }
+      ],
+      "id": "57f863b9-5793-4092-b657-80dae63054dd",
+      "length": null,
+      "number": "7",
+      "position": 7,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "US",
+          "disambiguation": "",
+          "id": "75ae9a0a-c78a-4c4a-aee5-9854aaa720b7",
+          "name": "Robert Nickson",
+          "sort-name": "Nickson, Robert",
+          "type": "Person",
+          "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+         },
+         "joinphrase": "",
+         "name": "Robert Nickson"
+        }
+       ],
+       "disambiguation": "",
+       "id": "c40d420e-3c52-44df-bb57-1d835cd061b7",
+       "length": null,
+       "title": "Robert Nickson",
+       "video": false
+      },
+      "title": "Robert Nickson"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": null,
+         "disambiguation": "",
+         "id": "868f35a8-bb99-48a4-b6a7-2047f9bd10a5",
+         "name": "Claudia Cazacu",
+         "sort-name": "Cazacu, Claudia",
+         "type": "Person",
+         "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+        },
+        "joinphrase": "",
+        "name": "Claudia Cazacu"
+       }
+      ],
+      "id": "2c03a774-32b6-46ed-8d50-d2104d4c1e83",
+      "length": null,
+      "number": "8",
+      "position": 8,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": null,
+          "disambiguation": "",
+          "id": "868f35a8-bb99-48a4-b6a7-2047f9bd10a5",
+          "name": "Claudia Cazacu",
+          "sort-name": "Cazacu, Claudia",
+          "type": "Person",
+          "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+         },
+         "joinphrase": "",
+         "name": "Claudia Cazacu"
+        }
+       ],
+       "disambiguation": "",
+       "id": "4a3b95d7-f347-432f-a048-bbee4420a756",
+       "length": null,
+       "title": "Claudia Cazacu",
+       "video": false
+      },
+      "title": "Claudia Cazacu"
+     }
+    ]
+   }
+  ],
+  "packaging": "None",
+  "packaging-id": "119eba76-b343-3e02-a292-f0f00644bb9b",
+  "quality": "normal",
+  "relations": [],
+  "release-group": {
+   "artist-credit": [
+    {
+     "artist": {
+      "country": "NL",
+      "disambiguation": "",
+      "id": "477b8c0c-c5fc-4ad2-b5b2-191f0bf2a9df",
+      "name": "Armin van Buuren",
+      "sort-name": "Buuren, Armin van",
+      "type": "Person",
+      "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+     },
+     "joinphrase": "",
+     "name": "Armin van Buuren"
+    }
+   ],
+   "disambiguation": "",
+   "first-release-date": "",
+   "id": "df61e907-1e26-4426-b66a-40fe87bf7242",
+   "primary-type": "Broadcast",
+   "primary-type-id": "3b2e49e1-2875-37b8-9fa9-1f7cf3f49900",
+   "secondary-type-ids": [
+    "0d47f47a-3fe5-3d69-ac9d-d566c23968bf",
+    "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0"
+   ],
+   "secondary-types": [
+    "DJ-mix",
+    "Live"
+   ],
+   "title": "2011-04-09: A State of Trance #500, \"A State of Orange\": Brabanthallen, ’s-Hertogenbosch, Noord-Brabant, Netherlands"
+  },
+  "status": "Bootleg",
+  "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+  "text-representation": {
+   "language": "eng",
+   "script": "Latn"
+  },
+  "title": "2011-04-09: A State of Trance #500, \"A State of Orange\": Brabanthallen, ’s-Hertogenbosch, Noord-Brabant, Netherlands"
+ }
+}

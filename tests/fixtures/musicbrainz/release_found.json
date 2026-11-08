@@ -1,0 +1,777 @@
+{
+ "asked": "867a1d0e-1286-4986-bda0-210dce0b15ca",
+ "body": {
+  "artist-credit": [
+   {
+    "artist": {
+     "country": "CO",
+     "disambiguation": "",
+     "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+     "name": "Doctor Krápula",
+     "sort-name": "Doctor Krápula",
+     "type": "Group",
+     "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+    },
+    "joinphrase": "",
+    "name": "Doctor Krápula"
+   }
+  ],
+  "asin": null,
+  "barcode": "7707025001304",
+  "country": "CO",
+  "cover-art-archive": {
+   "artwork": false,
+   "back": false,
+   "count": 0,
+   "darkened": false,
+   "front": false
+  },
+  "date": "2007-07-07",
+  "disambiguation": "",
+  "id": "867a1d0e-1286-4986-bda0-210dce0b15ca",
+  "media": [
+   {
+    "format": "CD",
+    "format-id": "9712d52a-4509-3d4b-a1a2-67c88c643e31",
+    "id": "89bb6356-2e4b-3c21-9f7d-8f78423e766d",
+    "position": 1,
+    "title": "",
+    "track-count": 15,
+    "track-offset": 0,
+    "tracks": [
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "d2ecf750-a2a0-3c74-94e4-17e9882dcdba",
+      "length": 169866,
+      "number": "1",
+      "position": 1,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "994fa76a-c498-4189-b321-f930598f532b",
+       "length": 169973,
+       "title": "El pibe de mi barrio",
+       "video": false
+      },
+      "title": "El pibe de mi barrio"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "574580a1-d60d-3b3f-b844-e4dc2cf72674",
+      "length": 218813,
+      "number": "2",
+      "position": 2,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "36ada1a3-6d16-4027-b504-1a1f6ac60936",
+       "length": 217506,
+       "title": "La fuerza del amor",
+       "video": false
+      },
+      "title": "La fuerza del amor"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "bd914429-2919-39bb-8f26-ff370a910809",
+      "length": 166853,
+      "number": "3",
+      "position": 3,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "946367ba-5d4d-4763-a49a-74a3b1456452",
+       "length": 165000,
+       "title": "El paraguas",
+       "video": false
+      },
+      "title": "El paraguas"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "2e346e2d-befe-31c1-879e-34a597cfe525",
+      "length": 166493,
+      "number": "4",
+      "position": 4,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "d3d2d835-24fb-4551-84a0-0b80c791da48",
+       "length": 164000,
+       "title": "Para todos todo",
+       "video": false
+      },
+      "title": "Para todos todo"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "46af5a23-8cdf-3710-8b2c-f79b3eca5d33",
+      "length": 190226,
+      "number": "5",
+      "position": 5,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "4313b59e-f4a8-4af5-9946-8456a7725402",
+       "length": 188000,
+       "title": "Uy que vaina",
+       "video": false
+      },
+      "title": "Uy que vaina"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "91183aca-1a5a-3786-a0de-f0f0903693d3",
+      "length": 233573,
+      "number": "6",
+      "position": 6,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2003",
+       "id": "9549adb1-b1ad-4d91-9178-c15cc4920e1a",
+       "length": 231666,
+       "title": "1143 tomates contigo",
+       "video": false
+      },
+      "title": "1143 tomates contigo"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "61314b90-4bde-3422-8d71-51a1c032f6ee",
+      "length": 168173,
+      "number": "7",
+      "position": 7,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "7e0852fe-a574-4045-8f50-7bc84592df7c",
+       "length": 166000,
+       "title": "El butaco",
+       "video": false
+      },
+      "title": "El butaco"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "c0643b88-07b6-37b5-8f9f-7e83a2324124",
+      "length": 154520,
+      "number": "8",
+      "position": 8,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "4a55a201-5d84-4de7-b80c-1f0a07df68e9",
+       "length": 153000,
+       "title": "No me trates tan mal",
+       "video": false
+      },
+      "title": "No me trates tan mal"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "60e6c9a6-3311-35be-85d6-9a7e88210300",
+      "length": 161653,
+      "number": "9",
+      "position": 9,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2003",
+       "id": "eb39cd96-a843-4eaa-823f-3ca421d3e66a",
+       "length": 159733,
+       "title": "Que tristeza ni que 8/4",
+       "video": false
+      },
+      "title": "Que tristeza ni que 8/4"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "2295fec9-304f-381c-9dc9-3947c6cf8592",
+      "length": 253173,
+      "number": "10",
+      "position": 10,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "10ac164a-5e49-40d2-a2d3-8e23f229729f",
+       "length": 251000,
+       "title": "Semilla en ti",
+       "video": false
+      },
+      "title": "Semilla en ti"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "2c1f154f-aabe-3e1e-9de4-d7afa143e4c3",
+      "length": 113440,
+      "number": "11",
+      "position": 11,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "c111be37-a4ef-428d-9944-2a2d3b88a9dd",
+       "length": 111000,
+       "title": "Traicionera",
+       "video": false
+      },
+      "title": "Traicionera"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "40aeaff4-3e11-31d1-9322-9b169dd0d0b2",
+      "length": 404333,
+      "number": "12",
+      "position": 12,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2007-07-07",
+       "id": "68340c2c-2dfd-48f8-bafa-b1595ecbc528",
+       "length": 404333,
+       "title": "Bombea",
+       "video": false
+      },
+      "title": "Bombea"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "8118711b-69b5-374d-b7ad-319104d1cb24",
+      "length": 147186,
+      "number": "13",
+      "position": 13,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2003",
+       "id": "f21421fc-fb95-466b-a03b-733e64ed4073",
+       "length": 145280,
+       "title": "La verdadera lucha",
+       "video": false
+      },
+      "title": "La verdadera lucha"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "b5ecd160-8b8c-33e4-a5de-e3761bff8616",
+      "length": 220573,
+      "number": "14",
+      "position": 14,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2005",
+       "id": "093c9119-35a9-46e9-b9b7-04591323cde8",
+       "length": 219000,
+       "title": "I Am Gonna Go",
+       "video": false
+      },
+      "title": "I´m gonna go"
+     },
+     {
+      "artist-credit": [
+       {
+        "artist": {
+         "country": "CO",
+         "disambiguation": "",
+         "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+         "name": "Doctor Krápula",
+         "sort-name": "Doctor Krápula",
+         "type": "Group",
+         "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": "",
+        "name": "Doctor Krápula"
+       }
+      ],
+      "id": "b16a6a31-7b7c-3651-ae00-c5a05847c771",
+      "length": 189213,
+      "number": "15",
+      "position": 15,
+      "recording": {
+       "artist-credit": [
+        {
+         "artist": {
+          "country": "CO",
+          "disambiguation": "",
+          "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+          "name": "Doctor Krápula",
+          "sort-name": "Doctor Krápula",
+          "type": "Group",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+         },
+         "joinphrase": "",
+         "name": "Doctor Krápula"
+        }
+       ],
+       "disambiguation": "",
+       "first-release-date": "2003",
+       "id": "280561dc-f29d-4ae0-8050-fcf9155d912f",
+       "length": 189213,
+       "title": "Me bebí tu recuerdo",
+       "video": false
+      },
+      "title": "Me bebí tu recuerdo"
+     }
+    ]
+   }
+  ],
+  "packaging": null,
+  "packaging-id": null,
+  "quality": "normal",
+  "relations": [],
+  "release-events": [
+   {
+    "area": {
+     "disambiguation": "",
+     "id": "02b60d8d-7164-339d-868d-22d147d9f74a",
+     "iso-3166-1-codes": [
+      "CO"
+     ],
+     "name": "Colombia",
+     "sort-name": "Colombia",
+     "type": null,
+     "type-id": null
+    },
+    "date": "2007-07-07"
+   }
+  ],
+  "release-group": {
+   "artist-credit": [
+    {
+     "artist": {
+      "country": "CO",
+      "disambiguation": "",
+      "id": "07f0253f-3347-41ae-9dfd-08d37d66f607",
+      "name": "Doctor Krápula",
+      "sort-name": "Doctor Krápula",
+      "type": "Group",
+      "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+     },
+     "joinphrase": "",
+     "name": "Doctor Krápula"
+    }
+   ],
+   "disambiguation": "",
+   "first-release-date": "2007-07-07",
+   "id": "f4fbab7a-c096-356c-8f82-0714287b0355",
+   "primary-type": "Album",
+   "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+   "secondary-type-ids": [
+    "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+   ],
+   "secondary-types": [
+    "Compilation"
+   ],
+   "title": "Éxitos: Serie original"
+  },
+  "status": "Official",
+  "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+  "text-representation": {
+   "language": "spa",
+   "script": "Latn"
+  },
+  "title": "Éxitos: Serie original"
+ }
+}

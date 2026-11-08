@@ -723,9 +723,11 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
         # signed slice by NAME before minting (same contract the Web UI's
         # mintMbTile uses) — without it a peer-found artist dies with 404
         # unknown_artist.
+        # asked_name: what the person asked for — a node without the dump
+        # mints the top result only when MusicBrainz knows it by that name.
         minted = _backend_post("/api/discovery/mb-mint",
                                {"artist_gid": best["gid"], "rg_gid": rg_gid,
-                                "artist_name": best["name"]},
+                                "artist_name": best["name"], "asked_name": artist_name},
                                timeout=180.0)
         out["artist_id"] = minted.get("artist_id")
         if rg_gid:

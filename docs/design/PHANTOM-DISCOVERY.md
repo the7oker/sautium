@@ -351,8 +351,8 @@ Deezer-era phantom rows purged), discography now derives from
   the fetch is per artist credit).
 - **Own-check is two-channel:** release-group MBID equality
   (`albums.musicbrainz_id`, exact) + `release_match_key` title fallback,
-  including MB *release* (regional/variant) titles — the same channel
-  `mb_audit` overlap-verifies through.
+  including MB *release* (regional/variant) titles — a dirty owned tag
+  often matches a regional release title rather than the group's name.
 - **Sync is a reconcile, not an append:** upsert newly-missing groups,
   unlink rows that stopped being missing (ripped since / MB reclassified
   / revoked canonization), GC unlinked phantoms, clear a stale external
@@ -473,12 +473,15 @@ canonical artist identity*. Two things break that:
 The alias table of the first cut (`artist_aliases`, 2026-06-02) was
 replaced a week later by the MBID model (2026-06-09): `artist_mbids`, 1:N —
 one name-derived artist can map to several MusicBrainz entities — with the
-MB-canonical name kept per MBID. The read-only audit is
-`backend/mb_audit.py`; the background pass is the `backend/canon/` package
-(2026-06-18), which replaced `normalize_artists.py`. Nothing of it is
-synced as rows: a node without the dump receives MB slices and derives the
-same identities from them (D6), which is what "one node's MB resolution
-spares every other node the lookup" became.
+MB-canonical name kept per MBID. The background pass is the `backend/canon/`
+package (2026-06-18), which replaced `normalize_artists.py`; the read-only
+audit that preceded it (`mb_audit`, with `mb_apply` and `mb_canonicalize`)
+had no caller left and was removed on 2026-11-07. Nothing of it is synced as
+rows: a node without the dump receives MB slices and derives the same
+identities from them (D6), which is what "one node's MB resolution spares
+every other node the lookup" became. Since 2026-11-07 such a node re-makes
+every merge, rename and mint a slice nominates on MusicBrainz's own answers,
+asked by MBID (`backend/canon/confirm.py`, `backend/mb_answers.py`).
 
 ## Risks
 

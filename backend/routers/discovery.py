@@ -348,7 +348,8 @@ def mb_mint(body: dict = Body(...)):
     if not artist_gid:
         raise HTTPException(status_code=422, detail="artist_gid required")
     out = mb_discovery.mint(artist_gid, body.get("rg_gid"),
-                            artist_name=str(body.get("artist_name") or "") or None)
+                            artist_name=str(body.get("artist_name") or "") or None,
+                            asked_name=str(body.get("asked_name") or "") or None)
     if out["status"] == "unknown_artist":
         raise HTTPException(status_code=404, detail="artist not in the dump")
     if out["status"] == "rate_limited":

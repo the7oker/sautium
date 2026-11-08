@@ -1,0 +1,26 @@
+{
+ "asked": "70a56a78-63b9-4615-9efc-0bfba66afa51",
+ "body": {
+  "artist-credit": [
+   {
+    "artist": {
+     "country": null,
+     "disambiguation": "Dubstep",
+     "id": "6786d9b6-6aa5-443f-a763-9c301515f382",
+     "name": "MUERTE",
+     "sort-name": "MUERTE",
+     "type": "Person",
+     "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+    },
+    "joinphrase": "",
+    "name": "MUERTE"
+   }
+  ],
+  "disambiguation": "",
+  "first-release-date": "2022-02-18",
+  "id": "70a56a78-63b9-4615-9efc-0bfba66afa51",
+  "length": 250285,
+  "title": "SOUL DEALER",
+  "video": false
+ }
+}

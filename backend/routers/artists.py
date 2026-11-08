@@ -13,6 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+import mb_answers
 from db_pool import db_execute, db_query, db_query_one
 from discography import (ALBUM_SORT_EXPR, fetch_new_albums, phantom_sort,
                          sync_artist_discography)
@@ -685,7 +686,8 @@ def sync_discography(artist_id: str,
     if not _is_discography_stale(row["last_album_sync"]):
         return {"new_albums": _shelf(), "new_albums_sort": shelf_sort, "synced": False}
 
-    result = sync_artist_discography(artist_id, row["name"])
+    # The person opened the page: their own act, asked first.
+    result = sync_artist_discography(artist_id, row["name"], priority=mb_answers.PRIORITY_PERSON)
     if result.get("new"):
         # New phantom albums are new gaps — ask the launcher's P2P sync now
         # rather than at the interval (no listener on a Docker node: harmless).

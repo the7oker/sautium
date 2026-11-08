@@ -1,0 +1,47 @@
+{
+ "asked": "3e48139f-f858-4569-b7c3-be3bb1508fc6",
+ "body": {
+  "aliases": [],
+  "area": {
+   "disambiguation": "",
+   "id": "ae0110b6-13d4-4998-9116-5b926287aa23",
+   "iso-3166-2-codes": [
+    "US-CA"
+   ],
+   "name": "California",
+   "sort-name": "California",
+   "type": null,
+   "type-id": null
+  },
+  "begin-area": {
+   "disambiguation": "",
+   "id": "ae0110b6-13d4-4998-9116-5b926287aa23",
+   "iso-3166-2-codes": [
+    "US-CA"
+   ],
+   "name": "California",
+   "sort-name": "California",
+   "type": null,
+   "type-id": null
+  },
+  "country": "US",
+  "disambiguation": "edm/pop artist",
+  "end-area": null,
+  "gender": "Male",
+  "gender-id": "36d3d30a-839d-3eda-8cb3-29be4384e4a9",
+  "genres": [],
+  "id": "3e48139f-f858-4569-b7c3-be3bb1508fc6",
+  "ipis": [],
+  "isnis": [],
+  "life-span": {
+   "begin": null,
+   "end": null,
+   "ended": false
+  },
+  "name": "Nichodon",
+  "relations": [],
+  "sort-name": "Nichodon",
+  "type": "Person",
+  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+ }
+}

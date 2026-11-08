@@ -36,9 +36,12 @@ pipeline runs — remote is a thin acquisition layer, not a parallel one.
 import logging
 import threading
 import time
+import unicodedata
 from typing import Optional
 
+import mb_answers
 from db_pool import db_execute, db_query, db_query_one
+from uuid_utils import normalize
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +173,12 @@ def remote_search(q: str, limit: int = 10) -> dict:
     return {"status": "no_peers"}
 
 from caa import CAA_FRONT_URL as _CAA_FRONT_URL
+
+# A click on a node without the dump waits this long for MusicBrainz to
+# answer for the artist (the person's ask goes first in the queue, one a
+# second); past it the person is told to try again shortly.
+_CONFIRM_WAIT_S = 15.0
+_CONFIRM_RETRY_S = 30
 
 _ARTIST_SQL = """
 WITH cand AS (
@@ -310,10 +319,13 @@ def _fetch_remote_slice(artist_name: str) -> dict:
     identity = peer_identity(app_settings)
     retry_after = None
     for url in ordered:
-        client = MBSliceClient(BackendAPIClient(url, peer=identity),
-                               db_dsn=app_settings.database_url,
-                               source_node=url)
+        api = BackendAPIClient(url, peer=identity)
+        client = MBSliceClient(api, db_dsn=app_settings.database_url, source_node=url)
         try:
+            # The channel's key, which /health learns and pins, is who passed
+            # the slice on (the import records it beside the author's).
+            if api.get_health() is None:
+                continue
             stats = client.run([artist_name])
             if stats.get("error"):
                 if "retry_after" in stats:
@@ -337,8 +349,25 @@ def _fetch_remote_slice(artist_name: str) -> dict:
     return {"ok": False, "retry_after": retry_after}
 
 
+def _folded(name: str) -> str:
+    """A name as identities fold it (uuid_utils.normalize: case, apostrophes,
+    punctuation), and unaccented: how a person types an artist MusicBrainz
+    writes with marks — "Bjork" for Björk, "Guns N Roses" for Guns N' Roses."""
+    return normalize("".join(c for c in unicodedata.normalize("NFD", name or "")
+                             if not unicodedata.combining(c)))
+
+
+def _names_artist(name: str, data: dict) -> bool:
+    """`name` — the result clicked, or the name the assistant was asked for —
+    is MusicBrainz's name for the artist `data` or one of its aliases, both
+    folded alike."""
+    key = _folded(name)
+    return bool(key) and any(_folded(s) == key for s in
+                             [data["name"]] + [a["name"] for a in data["aliases"]] if s)
+
+
 def mint(artist_gid: str, rg_gid: Optional[str] = None,
-         artist_name: Optional[str] = None) -> dict:
+         artist_name: Optional[str] = None, asked_name: Optional[str] = None) -> dict:
     """Materialize an MB artist as phantom entities and return local ids
     for navigation.
 
@@ -352,7 +381,13 @@ def mint(artist_gid: str, rg_gid: Optional[str] = None,
     On a dump-less node the clicked artist's rows are acquired first via
     the P2P slice protocol (artist_name is the slice key — the protocol
     speaks names, and its closed-world answer delivers every namesake, so
-    the clicked gid lands with them)."""
+    the clicked gid lands with them). The search result and the slice are
+    then only a nomination: MusicBrainz is asked for the gid (the person
+    waits a few seconds), and the artist is minted only when MusicBrainz
+    knows it under the name the person clicked — `asked_name`, the name the
+    assistant was asked for, when it minted a search's top result — or one
+    of its aliases (case, accents and punctuation aside), under
+    MusicBrainz's own name; a merged gid mints its target."""
     row = db_query_one(
         "SELECT name FROM mb_artist WHERE gid = %(g)s::uuid", {"g": artist_gid})
     if not row and artist_name and remote_sources():
@@ -366,6 +401,16 @@ def mint(artist_gid: str, rg_gid: Optional[str] = None,
     if not row:
         return {"status": "unknown_artist"}
     name = row["name"]
+    from canon import confirm
+    if confirm.required():
+        if not mb_answers.ask_now([("artist", artist_gid)], mb_answers.PRIORITY_PERSON,
+                                  timeout=_CONFIRM_WAIT_S):
+            return {"status": "rate_limited", "retry_after": _CONFIRM_RETRY_S}
+        answer = mb_answers.answer("artist", artist_gid)
+        data = mb_answers.artist(answer.target) if answer.known else None
+        if data is None or not _names_artist(asked_name or artist_name or name, data):
+            return {"status": "unknown_artist"}
+        artist_gid, name = answer.target, data["name"]
 
     link = db_query_one(
         "SELECT artist_id::text AS aid FROM artist_mbids WHERE mbid = %(g)s::uuid",
@@ -388,7 +433,7 @@ def mint(artist_gid: str, rg_gid: Optional[str] = None,
         logger.info(f"MB mint: linked {name} ({artist_gid}) -> {artist_id}")
 
     from discography import sync_artist_discography
-    stats = sync_artist_discography(artist_id, name)
+    stats = sync_artist_discography(artist_id, name, priority=mb_answers.PRIORITY_PERSON)
 
     out = {"status": stats.get("status", "success"),
            "artist_id": artist_id,

@@ -1,0 +1,41 @@
+{
+ "asked": "1d01f5ca-2f57-3cc6-815c-93edda6c8064",
+ "body": {
+  "artist-credit": [
+   {
+    "artist": {
+     "country": "GB",
+     "disambiguation": "British trance group/AuRORA",
+     "id": "923e649b-21d3-4b45-b109-50e4978002b6",
+     "name": "Aurora",
+     "sort-name": "Aurora",
+     "type": "Group",
+     "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+    },
+    "joinphrase": " feat. ",
+    "name": "Aurora"
+   },
+   {
+    "artist": {
+     "country": "IE",
+     "disambiguation": "",
+     "id": "3e14df66-2c92-447e-9c61-75edad9fa244",
+     "name": "Naimee Coleman",
+     "sort-name": "Coleman, Naimee",
+     "type": "Person",
+     "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+    },
+    "joinphrase": "",
+    "name": "Naimee Coleman"
+   }
+  ],
+  "disambiguation": "",
+  "first-release-date": "2000-06",
+  "id": "e62cb979-5960-37e2-a4e9-1640f1713edf",
+  "primary-type": "Single",
+  "primary-type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+  "secondary-type-ids": [],
+  "secondary-types": [],
+  "title": "Ordinary World"
+ }
+}

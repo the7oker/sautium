@@ -186,7 +186,7 @@ _db_wake = threading.Event()
 
 def wake_db_steps(reason: str = "") -> None:
     """Run the DB-only steps at the next pass, and start that pass now."""
-    logger.info(f"Background enrichment DB-steps wake: {reason or 'requested'}")
+    logger.debug(f"Background enrichment DB-steps wake: {reason or 'requested'}")
     _db_wake.set()
     _pass_wake.set()
 
@@ -405,9 +405,10 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
     priority order: listened artists first, then artists similar to them,
     then the rest — relevant shelves refresh first after a dump reload
     un-stamps everyone. With the MB dump loaded this is pure local-DB
-    work — no network, no cooldowns; `rate_limited` only fires on
-    dump-less nodes (MB HTTP API) and ends the batch early, `mb_loading`
-    while a dump reload holds the advisory lock.
+    work; `mb_loading` (a dump reload holds the advisory lock) ends the
+    batch early. On a node with slices an artist's sync may wait for
+    MusicBrainz's answers (`waiting`): the batch goes on, and the answers'
+    arrival wakes the DB steps for it (main._register_mb_wakers).
     """
     from discography import stale_canonized_artists, sync_artist_discography
 
@@ -418,8 +419,9 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
     # of artists in minutes; at 50 per interval their shelves took hours.
     stats = {"processed": 0, "new_albums": 0, "errors": 0}
 
-    # Dump-less nodes hit the MB HTTP API — skip the whole step while it's
-    # cooling down (no-op on dump nodes, which never arm the cooldown).
+    # A node with slices confirms each shelf with MusicBrainz, which answers
+    # nothing while its cooldown holds — the step waits it out whole. A dump
+    # node never asks, so never arms it.
     if cooling_down('musicbrainz'):
         stats["retry_soon"] = True
         return stats
@@ -436,8 +438,8 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
         stats["processed"] += 1
         try:
             result = sync_artist_discography(row["id"], row["name"])
-            if result.get("status") in ("rate_limited", "mb_loading"):
-                logger.info(f"Background discography: {result['status']} — ending batch")
+            if result.get("status") == "mb_loading":
+                logger.info("Background discography: a dump load holds the tables — ending batch")
                 stats["retry_soon"] = True
                 break
             stats["new_albums"] += result.get("new", 0)

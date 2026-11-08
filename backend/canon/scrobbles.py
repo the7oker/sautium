@@ -378,11 +378,13 @@ def _candidates(credit: str) -> List[str]:
     """, {"g": gids})]
 
 
-def _title_matches(gids: List[str], forms: List[str]) -> Dict[str, Set[str]]:
-    """gid → the keys of track/recording names credited to it that are among
-    `forms` — matched in SQL over the artist's credited catalogue, so a
-    prolific artist's names never leave the database."""
-    out: Dict[str, Set[str]] = defaultdict(set)
+def _title_matches(gids: List[str], forms: List[str]) -> Dict[str, Dict[str, str]]:
+    """gid → {key: a recording that carries it} for the track/recording names
+    credited to it that are among `forms` — matched in SQL over the artist's
+    credited catalogue, so a prolific artist's names never leave the
+    database. The recording is what a node without the dump asks MusicBrainz
+    about before the match counts (_confirmed_decision)."""
+    out: Dict[str, Dict[str, str]] = defaultdict(dict)
     if not gids or not forms:
         return out
     t_key, r_key = _TITLE_KEY_SQL.format(x="t.name"), _TITLE_KEY_SQL.format(x="r.name")
@@ -390,30 +392,46 @@ def _title_matches(gids: List[str], forms: List[str]) -> Dict[str, Set[str]]:
         WITH cand AS (SELECT id, gid FROM mb_artist WHERE gid = ANY(%(g)s::uuid[])),
              cred AS (SELECT DISTINCT c.gid, acn.artist_credit
                         FROM cand c JOIN mb_artist_credit_name acn ON acn.artist = c.id)
-        SELECT cr.gid::text AS gid, {t_key} AS n
-          FROM cred cr JOIN mb_track t ON t.artist_credit = cr.artist_credit
-         WHERE {t_key} = ANY(%(f)s)
-        UNION
-        SELECT cr.gid::text, {r_key}
-          FROM cred cr JOIN mb_recording r ON r.artist_credit = cr.artist_credit
-         WHERE {r_key} = ANY(%(f)s)
+        SELECT gid, n, min(rec) AS rec FROM (
+            SELECT cr.gid::text AS gid, {t_key} AS n, rec.gid::text AS rec
+              FROM cred cr JOIN mb_track t ON t.artist_credit = cr.artist_credit
+              JOIN mb_recording rec ON rec.id = t.recording
+             WHERE {t_key} = ANY(%(f)s)
+            UNION ALL
+            SELECT cr.gid::text, {r_key}, r.gid::text
+              FROM cred cr JOIN mb_recording r ON r.artist_credit = cr.artist_credit
+             WHERE {r_key} = ANY(%(f)s)
+        ) x GROUP BY gid, n
     """, {"g": gids, "f": forms}):
-        out[r["gid"]].add(r["n"])
+        out[r["gid"]][r["n"]] = r["rec"]
     return out
 
 
-def decide(e: Row, gids: List[str], anchored: Set[str]) -> Optional[str]:
-    """The candidate the evidence names, or None. A candidate needs a score —
-    heard titles plus heard albums found in its catalogue — of at least
-    min(3, max(1, ⌈10 % of the evidence⌉)), and the top score must be unique:
-    a tie is broken only by this node's own anchoring of one of them, then by
-    Last.fm's artist MBID; otherwise the name waits."""
+def _need(e: Row) -> int:
+    """The score a decision needs: min(3, max(1, ⌈10 % of the evidence⌉))."""
+    return min(3, max(1, math.ceil(0.1 * (len(e["titles"]) + len(e["albums"])))))
+
+
+def _scored(e: Row, gids: List[str]) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Set[str]],
+                                             Dict[str, int]]:
+    """(the matched title keys and their recordings, the album keys, the score)
+    per candidate."""
     from canon.match import release_title_keys
     matched = _title_matches(gids, list(e["forms"]))
     albums = release_title_keys(gids) if e["albums"] else {}
     scores = {g: len({e["forms"][n] for n in matched.get(g, ())})
               + len(e["albums"] & albums.get(g, set())) for g in gids}
-    need = min(3, max(1, math.ceil(0.1 * (len(e["titles"]) + len(e["albums"])))))
+    return matched, albums, scores
+
+
+def decide(e: Row, gids: List[str], anchored: Set[str], scored=None) -> Optional[str]:
+    """The candidate the evidence names, or None. A candidate needs a score —
+    heard titles plus heard albums found in its catalogue — of at least
+    min(3, max(1, ⌈10 % of the evidence⌉)), and the top score must be unique:
+    a tie is broken only by this node's own anchoring of one of them, then by
+    Last.fm's artist MBID; otherwise the name waits."""
+    _matched, _albums, scores = scored or _scored(e, gids)
+    need = _need(e)
     top = max(scores.values(), default=0)
     if top < need:
         return None
@@ -425,16 +443,85 @@ def decide(e: Row, gids: List[str], anchored: Set[str]) -> Optional[str]:
     return best[0] if len(best) == 1 else None
 
 
+def _mb_keys(titles: Iterable[str]) -> Dict[str, str]:
+    """title → its compare key (_TITLE_KEY_SQL), for MusicBrainz's own titles."""
+    wanted = sorted({t for t in titles if t})
+    if not wanted:
+        return {}
+    return {r["v"]: r["k"] for r in db_query(
+        f"SELECT v, {_TITLE_KEY_SQL.format(x='v')} AS k FROM unnest(CAST(%(v)s AS text[])) v",
+        {"v": wanted})}
+
+
+def _confirmed_decision(e: Row, gid: str, scored, asks) -> Tuple[Optional[bool], Optional[str]]:
+    """The slice's decision for `gid` re-made on MusicBrainz's answers: the
+    artist is one MusicBrainz knows and names by the heard credit's head, as
+    the candidates were drawn (canon.confirm.phantom_premise), and its
+    recordings that matched the heard titles are credited to it under one of
+    the heard forms; the heard albums
+    count when MusicBrainz's own groups of the artist carry them. Only what the
+    decision still lacks is asked — a recording at a time, as many as its need.
+    Returns (verdict, the MBID to anchor: a merged one's target); the verdict
+    is WAIT while an answer it needs is missing."""
+    import mb_answers
+    from canon import confirm
+    from discography import release_match_key
+    matched, albums, _scores = scored
+    need = _need(e)
+    a = confirm.artist(gid, asks)
+    if a is confirm.WAIT:
+        # Asked in the same round: the recordings the decision would need first.
+        for _key, rec in sorted(matched.get(gid, {}).items())[:need]:
+            ans = mb_answers.answer("recording", rec)
+            if ans is None or not ans.fresh:
+                asks.need("recording", rec)
+        return confirm.WAIT, None
+    if not a.known or not confirm.phantom_premise(_head(e["credits"].most_common(1)[0][0]), a.data):
+        return False, None
+    mbids = {gid, a.mbid}
+    answered, unanswered = [], []
+    for _key, rec in sorted(matched.get(gid, {}).items()):
+        ans = mb_answers.answer("recording", rec)
+        if ans is None or not ans.fresh:
+            unanswered.append(rec)
+            continue
+        data = mb_answers.recording(ans.target) if ans.known else None
+        if data and confirm.credited(data["credit"], mbids):
+            answered.append(data["title"])
+    keys = _mb_keys(answered)
+    heard = {e["forms"][keys[t]] for t in answered if keys.get(t) in e["forms"]}
+    album_score = 0
+    if e["albums"] & albums.get(gid, set()):
+        ans = mb_answers.answer("artist_release_groups", gid)
+        if ans is not None and ans.fresh:
+            groups = mb_answers.artist_release_groups(ans.target) if ans.known else []
+            album_score = len(e["albums"] & {release_match_key(g["title"]) for g in groups})
+        elif len(heard) < need:
+            asks.need("artist_release_groups", gid)
+    if len(heard) + album_score >= need:
+        return True, a.mbid
+    for rec in unanswered[:need - len(heard) - album_score]:
+        asks.need("recording", rec)
+    return (confirm.WAIT if asks.waiting else False), None
+
+
 def _anchor(gid: str) -> Optional[str]:
     """The local artist an MB gid belongs to: this node's existing decision,
     else the artist row of MusicBrainz's own name (born canonical) — unless
     that row already stands for another MB entity. Two namesakes on one row
-    would pour both discographies onto it; the name waits instead."""
+    would pour both discographies onto it; the name waits instead. A node
+    without the dump names the row from MusicBrainz's answer, never from a
+    slice's row."""
+    from canon import confirm
     row = db_query_one("SELECT artist_id::text AS id FROM artist_mbids WHERE mbid = %(g)s::uuid",
                        {"g": gid})
     if row:
         return row["id"]
-    mb = db_query_one("SELECT name FROM mb_artist WHERE gid = %(g)s::uuid", {"g": gid})
+    if confirm.required():
+        name = confirm.mb_name(gid)
+        mb = {"name": name} if name else None
+    else:
+        mb = db_query_one("SELECT name FROM mb_artist WHERE gid = %(g)s::uuid", {"g": gid})
     if not mb:
         return None
     if db_query_one("SELECT 1 AS x FROM artist_mbids WHERE artist_id = %(a)s::uuid",
@@ -456,19 +543,24 @@ def resolve_names(limit: int = _RESOLVE_PER_PASS, *, create: bool = True) -> Row
     MB data at all. With `create` off (the phantom layer switched off) only a
     gid this node already anchors is taken. Returns counts, the artists
     resolved, and whether names are left for another pass."""
-    from canon import algo_canon
+    import mb_answers
+    from canon import algo_canon, confirm
     from discography import _MB_SOURCE_COVERS_SQL
     stats: Row = {"decided": 0, "resolved": 0, "not_in_mb": 0, "undecided": 0}
+    checked = confirm.required()
+    # A name that waits for MusicBrainz's answers is due again when they wake it.
     due = [r["name_key"] for r in db_query(f"""
         SELECT n.name_key
           FROM pending_scrobble_artists n JOIN pending_scrobbles p USING (name_key)
          WHERE n.artist_id IS NULL
            AND {_B_DUE_SQL}
            AND ({_MB_SOURCE_COVERS_SQL.format(name='n.name_key')})
+           AND NOT {mb_answers.WAITING_SQL.format(subject='scrobble_name', key='n.name_key')}
          GROUP BY n.name_key
          ORDER BY count(*) DESC, n.name_key
          LIMIT %(lim)s""", {"lim": limit})]
     resolved: Dict[str, str] = {}
+    waiting: Set[str] = set()
     evidence = _evidence(due) if due else {}
     for nk in due:
         e = evidence.get(nk)
@@ -491,21 +583,31 @@ def resolve_names(limit: int = _RESOLVE_PER_PASS, *, create: bool = True) -> Row
                 {"g": gids})}
             if not create:
                 gids = [g for g in gids if g in anchored]
-            gid = decide(e, gids, anchored) if gids else None
+            scored = _scored(e, gids) if gids else None
+            gid = decide(e, gids, anchored, scored) if gids else None
+            if gid and checked:
+                asks = mb_answers.Asks("scrobble_name", nk, mb_answers.PRIORITY_LISTENING)
+                verdict, gid = _confirmed_decision(e, gid, scored, asks)
+                if verdict is confirm.WAIT:
+                    asks.flush()
+                    waiting.add(nk)
+                    continue
             artist_id = _anchor(gid) if gid else None
         if artist_id is None:
             stats["undecided"] += 1
             continue
         resolved[nk] = artist_id
         stats["resolved"] += 1
-    due = due[:stats["decided"]]
+    if checked:
+        stats["waiting"] = len(waiting)
+    due = [nk for nk in due[:stats["decided"]] if nk not in waiting]
     if due:
         db_execute("""UPDATE pending_scrobble_artists
                          SET checked_at = now(),
                              artist_id = COALESCE((CAST(%(r)s AS jsonb) ->> name_key)::uuid, artist_id)
                        WHERE name_key = ANY(%(n)s)""", {"n": due, "r": json.dumps(resolved)})
     stats["artists"] = sorted(set(resolved.values()))
-    stats["drain"] = len(due) >= limit
+    stats["drain"] = len(due) + len(waiting) >= limit
     return stats
 
 
@@ -528,8 +630,10 @@ def mint_resolved(limit: int = _MINT_PER_PASS) -> Row:
          GROUP BY a.id, a.name
          ORDER BY count(*) DESC, a.name
          LIMIT %(lim)s""", {"lim": limit})
+    import mb_answers
     for r in rows:
-        status = sync_artist_discography(r["id"], r["name"])["status"]
+        status = sync_artist_discography(r["id"], r["name"],
+                                         priority=mb_answers.PRIORITY_LISTENING)["status"]
         stats["statuses"][status] += 1
         if status == "success":
             stats["artists"].append(r["id"])
@@ -617,6 +721,66 @@ def _pick(row: Row, forms: List[str], names: List[Row], local: Dict[str, List[st
     return None, (names[ranked[0][3]] if ranked else None)
 
 
+def _answered_recordings(recordings: Iterable[str]) -> Dict[str, Optional[Row]]:
+    """recording gid → MusicBrainz's fresh answer for it ({"target", "data",
+    "key"} — data None when MusicBrainz does not know it), for those answered
+    already: a lookup of its own, or a release lookup that carried it. Asks
+    nothing."""
+    import mb_answers
+    out: Dict[str, Optional[Row]] = {}
+    for rec in sorted(set(recordings)):
+        ans = mb_answers.answer("recording", rec)
+        if ans is None or not ans.fresh:
+            continue
+        data = mb_answers.recording(ans.target) if ans.known else None
+        out[rec] = {"target": ans.target, "data": data}
+    keys = _mb_keys(v["data"]["title"] for v in out.values() if v["data"])
+    for v in out.values():
+        v["key"] = keys.get(v["data"]["title"]) if v["data"] else None
+    return out
+
+
+def _pick_confirmed(row: Row, forms: List[str], names: List[Row], local: Dict[str, List[str]],
+                    lengths: Dict[str, Row], answers: Dict[str, Row], artist_name: str,
+                    mbids: Set[str]) -> Tuple[Optional[str], Optional[Row], Optional[str]]:
+    """_pick re-made on MusicBrainz's answers: in the same order, a recording
+    counts only when MusicBrainz credits it to the artist under one of the
+    scrobble's forms; a local track bound to it counts only when it is
+    MusicBrainz's recording by title and length (a binding a peer or a slice
+    wrote names no more than that), and its own track is named by
+    MusicBrainz's title. Returns (track id, the answer a recording track would
+    be minted from, the recording to ask about first — the scrobble then
+    waits for it)."""
+    ranked = []
+    for i, n in enumerate(names):
+        if row["track_mbid"] and n["track_gid"] == row["track_mbid"]:
+            rank = -1
+        elif n["n"] in forms:
+            rank = forms.index(n["n"])
+        else:
+            continue
+        ranked.append((rank, not n["head"], n["recording"], i))
+    ranked.sort()
+    from canon import confirm
+    first = None
+    for _, _, rec, _ in ranked:
+        info = answers.get(rec)
+        if info is None:
+            return None, None, rec
+        data = info["data"]
+        if data is None or info["key"] not in forms or not confirm.credited(data["credit"], mbids):
+            continue
+        first = first or data
+        own = str(track_uuid(data["title"], artist_name))
+        for track_id in local.get(rec, []) + local.get(info["target"], []) + [own]:
+            entry = lengths.get(track_id)
+            if not (entry and _seconds(entry, row["album"])):
+                continue
+            if track_id == own or confirm.recording_premise(track_id, data, mbids):
+                return track_id, None, None
+    return None, first, None
+
+
 def _mint_recording_tracks(cur, tracks: Dict[str, str], artist_id: str) -> int:
     """The canonical tracks of listened recordings no album here carries
     (track id → MB's name), primary to the resolved artist; returns how many
@@ -645,8 +809,15 @@ def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
     knows its length: the listen is placed on the song, the album it came
     from is never minted for it (the discography keeps to studio albums and
     EPs). A guest spot, or a recording without a length, waits."""
+    import mb_answers
+    from canon import confirm
     stats: Row = {"bound": 0, "tracks_minted": 0, "not_in_catalogue": 0, "not_minted": 0,
                   "newest": None}
+    checked = confirm.required()
+    if checked:
+        stats["waiting"] = 0
+    # A name whose scrobbles wait for MusicBrainz's answers is due again when
+    # they wake it.
     artists = db_query(f"""
         SELECT n.artist_id::text AS artist_id, a.name, array_agg(DISTINCT n.name_key) AS names,
                (SELECT array_agg(am.mbid::text) FROM artist_mbids am
@@ -655,21 +826,59 @@ def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
           JOIN artists a ON a.id = n.artist_id
          WHERE EXISTS (SELECT 1 FROM pending_scrobbles p WHERE p.name_key = n.name_key)
            AND ({_D_DUE_SQL} OR n.artist_id = ANY(CAST(%(x)s AS uuid[])))
+           AND NOT {mb_answers.WAITING_SQL.format(subject='scrobble_name', key='n.name_key')}
          GROUP BY n.artist_id, a.name""", {"x": sorted(set(extra_artists))})
     for art in artists:
         if not art["gids"]:
             continue
+        mbids = set(art["gids"])
+        if checked:
+            for gid in art["gids"]:
+                ans = mb_answers.answer("artist", gid)
+                if ans is not None and ans.known:
+                    mbids.add(ans.target)
+        asks: Dict[str, mb_answers.Asks] = {}
         for cur, rows in _chunks(art["names"]):
             keys = _title_keys(r["title"] for r in rows)
             forms = sorted({f for ks in keys.values() for f in ks})
             hints = sorted({r["track_mbid"] for r in rows if r["track_mbid"]})
             names = _catalogue(art["gids"], forms, hints)
             local = _local_tracks(cur, sorted({n["recording"] for n in names}))
-            fallback = {n["recording"]: str(track_uuid(n["name"], art["name"])) for n in names}
-            lengths = _track_lengths(cur, [t for ts in local.values() for t in ts]
-                                     + list(fallback.values()))
+            if checked:
+                answers = _answered_recordings(n["recording"] for n in names)
+                own = [str(track_uuid(v["data"]["title"], art["name"]))
+                       for v in answers.values() if v["data"]]
+                local.update(_local_tracks(cur, sorted({v["target"] for v in answers.values()
+                                                        if v["target"]})))
+                lengths = _track_lengths(cur, [t for ts in local.values() for t in ts] + own)
+            else:
+                fallback = {n["recording"]: str(track_uuid(n["name"], art["name"])) for n in names}
+                lengths = _track_lengths(cur, [t for ts in local.values() for t in ts]
+                                         + list(fallback.values()))
             binds, recording_tracks = [], {}
             for r in rows:
+                if checked:
+                    track_id, mb, ask = _pick_confirmed(r, keys[r["title"]], names, local, lengths,
+                                                        answers, art["name"], mbids)
+                    if ask:
+                        asks.setdefault(r["name_key"], mb_answers.Asks(
+                            "scrobble_name", r["name_key"], mb_answers.PRIORITY_LISTENING)
+                        ).need("recording", ask)
+                        stats["waiting"] += 1
+                    elif track_id:
+                        entry = lengths[track_id]
+                        binds.append({**r, "track_id": track_id,
+                                      "seconds": _seconds(entry, r["album"]),
+                                      "media_file_id": entry["media_file_id"]})
+                    elif mb and confirm.heads(mb["credit"], mbids) and mb["length_ms"]:
+                        # The recording's own track, born under MusicBrainz's title.
+                        track_id = str(track_uuid(mb["title"], art["name"]))
+                        recording_tracks[track_id] = mb["title"]
+                        binds.append({**r, "track_id": track_id, "seconds": mb["length_ms"] / 1000,
+                                      "media_file_id": None})
+                    else:
+                        stats["not_minted" if mb else "not_in_catalogue"] += 1
+                    continue
                 track_id, best = _pick(r, keys[r["title"]], names, local, fallback, lengths)
                 if track_id:
                     entry = lengths[track_id]
@@ -689,8 +898,18 @@ def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
             written = _commit_binds(cur, binds)
             stats["bound"] += len(written)
             stats["newest"] = max([t for t in (*written, stats["newest"]) if t], default=None)
-        db_execute("UPDATE pending_scrobble_artists SET checked_at = now() WHERE name_key = ANY(%(n)s)",
-                   {"n": art["names"]})
+        for a in asks.values():
+            a.flush()
+        # A name that now waits has its attempt unstamped (as an artist's
+        # watermark is, canon.confirm.unstamp): when its answers wake it, the
+        # pass takes it again — its artist is no longer one the pass names.
+        if asks:
+            db_execute("UPDATE pending_scrobble_artists SET checked_at = NULL "
+                       "WHERE name_key = ANY(%(n)s)", {"n": sorted(asks)})
+        tried = [nk for nk in art["names"] if nk not in asks]
+        if tried:
+            db_execute("UPDATE pending_scrobble_artists SET checked_at = now() WHERE name_key = ANY(%(n)s)",
+                       {"n": tried})
     return stats
 
 

@@ -100,9 +100,13 @@ def _probe_variants(name: str) -> list:
 def _candidates(name: str) -> list:
     """Candidate mbids for content verification: the primary search (exact-first
     + trgm fuzzy) plus exact hits of the probe variants."""
+    from canon import confirm
     cands = mb.search_artist(name, limit=8)
     strong = [c["mbid"] for c in cands if (c.get("score") or 0) >= _CAND_SCORE]
-    if not strong and cands:
+    if not strong and cands and not confirm.required():
+        # The top candidate whatever its score, content alone deciding. Not on
+        # a node without the dump: no name of MusicBrainz's would confirm it
+        # (canon.confirm.name_premise), so the binding could only be refuted.
         strong = [cands[0]["mbid"]]
     seen = set(strong)
     for v in _probe_variants(name):

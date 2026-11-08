@@ -23,9 +23,13 @@ Two callers share `sync_artist_discography`:
   - the fetch-on-view endpoint (daily gate on `artists.last_album_sync`).
 
 Both go through `db_pool` (own connection per call) so neither needs to
-thread a session in. With the dump loaded this is pure local-DB work —
-no network, no cooldowns; dump-less nodes fall back to the MB HTTP API
-via `mb_backend` and surface its rate limit as `status="rate_limited"`.
+thread a session in. With the dump loaded this is pure local-DB work. On
+a node whose `mb_*` rows came from other nodes' slices the slice only
+nominates: the groups minted are those MusicBrainz's own browse of the
+artist lists, under its titles, each with the tracklist of a release it
+files under the group (canon.confirm, backend/mb_answers.py) — a decision
+whose answers are not here yet waits, unstamped, until they wake it. A
+node with neither the dump nor a slice has no source and mints nothing.
 
 The own-check is two-channel: precise release-group MBID equality
 (`albums.musicbrainz_id`, set by canonicalization for most owned albums)
@@ -44,7 +48,8 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional
 
-import mb_backend as mb  # module-attr access only — refresh() rebinds the source
+import mb_answers
+import mb_backend as mb  # module-attr access only — refresh() re-reads LOCAL_DUMP
 from psycopg2.extras import execute_values
 
 from db_pool import db_execute, db_query, db_query_one, get_conn
@@ -219,8 +224,8 @@ def _mb_load_in_progress() -> bool:
 # world per name). A replica's mb_* is otherwise a patchwork of other
 # artists' slices: an unfetched artist reads as an empty release-group list,
 # which the reconcile would take for "nothing missing" and strip the shelf,
-# and the stamp would then park the artist for a month. HTTP-API nodes
-# (no local tables) answer for every artist and never consult this.
+# and the stamp would then park the artist for a month. A node with no mb_*
+# rows at all has no source for anyone.
 _MB_SOURCE_COVERS_SQL = """
     EXISTS (SELECT 1 FROM user_settings WHERE key = 'musicbrainz.db_version')
     OR EXISTS (SELECT 1 FROM mb_slice_fetches f
@@ -230,7 +235,7 @@ _MB_SOURCE_COVERS_SQL = """
 
 def _mb_source_covers(artist_name: str) -> bool:
     if not mb.LOCAL_DUMP:
-        return True
+        return False
     return db_query_one(
         "SELECT 1 AS x WHERE " + _MB_SOURCE_COVERS_SQL.format(name="%(name)s"),
         {"name": artist_name},
@@ -411,19 +416,71 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     tie-break; an album whose modal shape has no fully timed edition is not
     minted at all (see _fully_timed).
     """
+    order = _pick_order(releases)
+    return order[0] if order and _fully_timed(order[0]) else None
+
+
+def _pick_order(releases: List[dict]) -> List[dict]:
+    """The releases of a group in _pick_canonical_release's order: official
+    ones only when there are any, the modal tracklist shape first, then the
+    pick's tie-breaks — the order a node without the dump asks MusicBrainz to
+    confirm them in (_confirmed_release)."""
     pool = [r for r in releases if r.get("tracks")]
     if not pool:
-        return None
+        return []
     official = [r for r in pool if r.get("status") == _MB_RELEASE_STATUS_OFFICIAL]
     pool = official or pool
     votes = Counter(len(r["tracks"]) for r in pool)
     top = max(votes.values())
-    best = min((r for r in pool if votes[len(r["tracks"])] == top),
-               key=lambda r: (not _fully_timed(r),
-                              r.get("language") != _MB_LANGUAGE_ENGLISH,
-                              _script_tier(r), _unnamed_tracks(r),
-                              _release_date_key(r), len(r["tracks"]), r["release_mbid"]))
-    return best if _fully_timed(best) else None
+    return sorted(pool, key=lambda r: (votes[len(r["tracks"])] != top,
+                                       not _fully_timed(r),
+                                       r.get("language") != _MB_LANGUAGE_ENGLISH,
+                                       _script_tier(r), _unnamed_tracks(r),
+                                       _release_date_key(r), len(r["tracks"]), r["release_mbid"]))
+
+
+# Releases of a group a node without the dump asks MusicBrainz about for one
+# phantom tracklist, in the pick's order, before it declines the album.
+_CONFIRM_CANDIDATES = 3
+
+
+def _answer_track(t: dict) -> dict:
+    """A track of MusicBrainz's release answer in mb_local's tracklist shape."""
+    credit = t["credit"]
+    return {"title": t["title"] or "", "length_ms": t["length_ms"],
+            "recording_mbid": t["recording"], "disc": t["disc"], "position": t["position"],
+            "credit": "".join(c["credited_as"] + c["join"] for c in credit),
+            "credit_artist_mbid": credit[0]["artist"] if len(credit) == 1 else None,
+            "credit_names": [{"name": c["name"], "gid": c["artist"],
+                              "credited_as": c["credited_as"], "join": c["join"]}
+                             for c in credit]}
+
+
+def _confirmed_release(rg_mbid: str, asks) -> object:
+    """A phantom album's tracklist on a node without the dump: the slice's
+    candidates in the pick's order, each asked of MusicBrainz in turn, and the
+    first that MusicBrainz files under this group (or under the group a merge
+    made of it) with every slot timed is the one taken — its tracklist as
+    MusicBrainz answers it, never the slice's. A slice that steers the pick to
+    another real release of the group steers it to a real edition. None when no
+    candidate holds; WAIT while an answer is missing (noted in `asks`)."""
+    from canon import confirm
+    for rel in _pick_order(mb.fetch_release_tracklists(rg_mbid))[:_CONFIRM_CANDIDATES]:
+        ans = confirm.release(rel["release_mbid"], asks)
+        if ans is confirm.WAIT:
+            return confirm.WAIT
+        if not ans.known:
+            continue
+        same = confirm.same("release_group", rg_mbid,
+                            (ans.data.get("group") or {}).get("mbid"), asks)
+        if same is confirm.WAIT:
+            return confirm.WAIT
+        if not same:
+            continue
+        tracks = [_answer_track(t) for t in ans.data["tracks"]]
+        if tracks and all(t["length_ms"] for t in tracks):
+            return {"release_mbid": ans.mbid, "name": ans.data["title"], "tracks": tracks}
+    return None
 
 
 def _fully_timed(release: dict) -> bool:
@@ -503,7 +560,7 @@ def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> 
 
 
 def _persist_phantom_tracklist(album_id: str, artist_id: str,
-                               artist_name: str, rg_mbid: str) -> int:
+                               artist_name: str, rg_mbid: str, asks=None) -> Optional[int]:
     """Persist the canonical MB tracklist of one phantom album as
     tracks + track_artists + album_tracks rows — deliberately NO files
     (owned_files is the owned/phantom discriminator; a later rip, or a
@@ -538,15 +595,35 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     the picked release does not name are removed — the tracklist is the
     pick's, exactly; a track left with no slot keeps its row if it carries
     analysis (delete_orphan_tracks spares it). Returns slots written.
+
+    On a node without the dump the tracklist is MusicBrainz's answer for the
+    release the slice's pick nominates (_confirmed_release): its titles, its
+    lengths, its credits. None while that answer is missing — queued in
+    `asks`, or in this call's own when the caller keeps none.
     """
     from transliterate import latinize
-    releases = mb.fetch_release_tracklists(rg_mbid)
-    best = _pick_canonical_release(releases)
-    if not best:
-        if releases:
-            logger.info("phantom %s (%s): no fully timed release of the album's "
-                        "tracklist shape — not minting", album_id, rg_mbid)
-        return 0
+    from canon import confirm
+    if confirm.required():
+        own = asks is None
+        if own:
+            asks = mb_answers.Asks("discography", artist_id, mb_answers.PRIORITY_DISCOVERY)
+        best = _confirmed_release(rg_mbid, asks)
+        if own:
+            asks.flush()
+        if best is confirm.WAIT:
+            return None
+        if best is None:
+            logger.info("phantom %s (%s): MusicBrainz confirms no fully timed release "
+                        "the slice names for the group — not minting", album_id, rg_mbid)
+            return 0
+    else:
+        releases = mb.fetch_release_tracklists(rg_mbid)
+        best = _pick_canonical_release(releases)
+        if not best:
+            if releases:
+                logger.info("phantom %s (%s): no fully timed release of the album's "
+                            "tracklist shape — not minting", album_id, rg_mbid)
+            return 0
 
     # The album's artists by MB gid and by normalized name. A credit head that
     # IS one of them uses THAT artist's row — not the row of whichever
@@ -696,7 +773,7 @@ def remint_tracklists(artist_name: Optional[str] = None,
         {f"LIMIT {int(limit)}" if limit else ""}
     """, {"name": artist_name, "ids": list(album_ids or [])})
     totals = {"albums": len(rows), "processed": 0, "slots": 0, "errors": 0,
-              "declined": 0, "retired": 0}
+              "declined": 0, "retired": 0, "waiting": 0}
     logger.info(f"remint_tracklists: {len(rows)} phantom albums"
                 f"{' of ' + artist_name if artist_name else ''}")
     declined: List[str] = []
@@ -704,9 +781,13 @@ def remint_tracklists(artist_name: Optional[str] = None,
         try:
             slots = _persist_phantom_tracklist(
                 row["album_id"], row["artist_id"], row["artist_name"], row["rg_mbid"])
-            totals["slots"] += slots
-            if not slots:
+            if slots is None:
+                # MusicBrainz's answer for its release is queued: the album
+                # stays as it is, re-derived by the next run.
+                totals["waiting"] += 1
+            elif not slots:
                 declined.append(row["album_id"])
+            totals["slots"] += slots or 0
         except Exception as e:
             totals["errors"] += 1
             logger.error(f"remint failed for album {row['album_id']} "
@@ -896,7 +977,84 @@ def prune_phantom_layer(cancel_flag=None, progress_cb=None) -> Dict[str, Any]:
     return stats
 
 
-def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
+def _not_canonized(artist_id: str, stats: dict) -> dict:
+    """No shelf. Self-heal a revoked canonization — phantom rows minted under
+    a former MBID must not linger."""
+    if db_query_one("""
+        SELECT 1 FROM album_artists aa
+        WHERE aa.artist_id = %(id)s::uuid
+          AND NOT EXISTS (SELECT 1 FROM album_variants av
+                          WHERE av.album_id = aa.album_id)
+        LIMIT 1
+    """, {"id": artist_id}):
+        _reconcile_phantoms(artist_id, [])
+    stats["status"] = "not_canonized"
+    return stats
+
+
+def _first_year(date: Optional[str]) -> Optional[int]:
+    return int(date[:4]) if date and len(date) >= 4 and date[:4].isdigit() else None
+
+
+def _confirmed_groups(artist_id: str, artist_name: str, mbids: List[str],
+                      asks) -> Optional[Dict[str, tuple]]:
+    """The candidate groups of a node without the dump, from MusicBrainz's
+    answers: for each binding that holds (canon.confirm.binding — a refuted one
+    is withdrawn, an unproven one mints nothing), every group MusicBrainz's
+    browse credits to the artist, of
+    the shelf's types, under its own title and first-release year. The slice
+    lends only what can veto a mint — its titles for the group and its
+    releases (_is_owned). None while an answer is missing (noted in `asks`);
+    confirm.UNPROVEN when no binding holds and one is unproven — nothing may
+    rest on it, a reconcile that would empty the shelf included."""
+    from canon import confirm
+    held, unproven = [], False
+    for mbid in mbids:
+        verdict = confirm.binding(artist_id, artist_name, mbid, asks)
+        if verdict is confirm.WAIT:
+            continue
+        if verdict is confirm.UNPROVEN:
+            unproven = True
+            continue
+        if not verdict:
+            confirm.withdraw(artist_id, mbid)
+            continue
+        held.append((mbid, mb_answers.answer("artist", mbid).target))
+    if asks.waiting:
+        return None
+    if not held and unproven:
+        return confirm.UNPROVEN
+    candidates: Dict[str, tuple] = {}
+    for mbid, target in held:
+        groups = confirm.release_groups(target, asks)
+        if groups is confirm.WAIT:
+            continue
+        vetoes = {r["rg_mbid"]: [r["title"], *r["release_titles"]]
+                  for r in mb.fetch_album_release_groups(mbid)}
+        for g in groups:
+            if g["primary_type"] not in _ALLOWED_PRIMARY or not g["title"]:
+                continue
+            if set(g["secondary_types"]) & _DISQUALIFYING_SECONDARY:
+                continue
+            candidates.setdefault(g["mbid"], ({
+                "rg_mbid": g["mbid"], "title": g["title"][:500],
+                "primary_type": g["primary_type"], "secondary_types": g["secondary_types"],
+                "release_titles": [t for t in vetoes.get(g["mbid"], []) if t],
+                "first_year": _first_year(g["first_release_date"]),
+            }, mbid))
+    return None if asks.waiting else candidates
+
+
+def _has_tracklist(rg_mbid: str) -> bool:
+    return db_query_one("""
+        SELECT 1 AS x FROM albums al
+        WHERE al.musicbrainz_id = %(rg)s::uuid
+          AND EXISTS (SELECT 1 FROM album_tracks t WHERE t.album_id = al.id)
+        LIMIT 1""", {"rg": rg_mbid}) is not None
+
+
+def sync_artist_discography(artist_id, artist_name: str,
+                            priority: int = mb_answers.PRIORITY_DISCOVERY) -> Dict[str, int]:
     """Derive `artist_name`'s missing albums from the MB dump and reconcile
     the phantom rows. Canonized artists only; idempotent; stamps
     `last_album_sync`.
@@ -904,10 +1062,13 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
     Returns a stats dict: ``{status, found, new, skipped_owned}``.
     `status` is success / not_canonized (no `artist_mbids` row — gate, not
     stamped) / mb_loading (dump reload in flight — skipped, not stamped) /
-    no_source (slice replica without this artist's MB facts yet — skipped,
-    not stamped; see _mb_source_covers) / rate_limited (dump-less nodes on
-    the MB HTTP API).
+    no_source (no MB facts for this artist here yet: a slice replica before
+    its slice, or a node with neither dump nor slices — skipped, not
+    stamped; see _mb_source_covers) / waiting (a node without the dump:
+    MusicBrainz's answers the shelf rests on are asked at `priority` and not
+    here yet — not stamped, their arrival wakes the background DB steps).
     """
+    from canon import confirm
     artist_id = str(artist_id)
     stats = {"status": "success", "found": 0, "new": 0, "skipped_owned": 0,
              "tracks": 0}
@@ -922,18 +1083,7 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
 
     mbids = _artist_mbids(artist_id)
     if not mbids:
-        # Not canonized (yet): no shelf. Self-heal a revoked canonization —
-        # phantom rows minted under a former MBID must not linger.
-        if db_query_one("""
-            SELECT 1 FROM album_artists aa
-            WHERE aa.artist_id = %(id)s::uuid
-              AND NOT EXISTS (SELECT 1 FROM album_variants av
-                              WHERE av.album_id = aa.album_id)
-            LIMIT 1
-        """, {"id": artist_id}):
-            _reconcile_phantoms(artist_id, [])
-        stats["status"] = "not_canonized"
-        return stats
+        return _not_canonized(artist_id, stats)
 
     if _mb_load_in_progress():
         # Dump reload in flight — candidates would come from TRUNCATEd
@@ -948,8 +1098,26 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
         stats["status"] = "no_source"
         return stats
 
-    try:
-        candidates: Dict[str, tuple] = {}
+    asks = None
+    if confirm.required():
+        asks = mb_answers.Asks("discography", artist_id, priority)
+        candidates = _confirmed_groups(artist_id, artist_name, mbids, asks)
+        if candidates is None:
+            asks.flush()
+            stats["status"] = "waiting"
+            return stats
+        if candidates is confirm.UNPROVEN:
+            # The shelf stays as it is: nothing minted, nothing reconciled
+            # away. Stamped all the same, so the batch moves on (an unstamped
+            # artist would head every batch); the artist page's daily fetch
+            # and the staleness re-check it.
+            _stamp_sync(artist_id)
+            stats["status"] = "unproven"
+            return stats
+        if not _artist_mbids(artist_id):
+            return _not_canonized(artist_id, stats)
+    else:
+        candidates = {}
         for mbid in mbids:
             for rg in mb.fetch_album_release_groups(mbid):
                 if rg["primary_type"] not in _ALLOWED_PRIMARY:
@@ -962,10 +1130,6 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
                 # stored value (albums.title is VARCHAR(500))
                 rg["title"] = rg["title"][:500]
                 candidates.setdefault(rg["rg_mbid"], (rg, mbid))
-    except mb.MBRateLimited:
-        logger.warning(f"MB API rate-limited on discography for {artist_name}")
-        stats["status"] = "rate_limited"
-        return stats
 
     owned = db_query("""
         SELECT DISTINCT al.title, al.musicbrainz_id::text AS rg_mbid
@@ -984,8 +1148,7 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
         if release_match_key(rg["title"]) in owned_keys:
             return True
         # A dirty owned tag often matches a regional/alternate RELEASE
-        # title, not the RG's canonical name (same channel mb_audit
-        # overlap-verifies through).
+        # title, not the RG's canonical name.
         return any(release_match_key(rt) in owned_keys
                    for rt in rg["release_titles"])
 
@@ -998,6 +1161,7 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
 
     # Cross-artist ownership: a collaboration album owned through the other
     # member's credit carries the same rg MBID on its owned row.
+    held_elsewhere = []
     if missing:
         rows = db_query("""
             SELECT musicbrainz_id::text AS rg_mbid
@@ -1007,11 +1171,18 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
         """, {"rgs": list(missing.keys())})
         for r in rows:
             missing.pop(r["rg_mbid"], None)
+            held_elsewhere.append(r["rg_mbid"])
             stats["skipped_owned"] += 1
 
     stats["found"] = len(missing)
     phantoms: List[tuple] = []  # (album_id, rg_mbid)
     for rg, mbid in missing.values():
+        if asks is not None and not _has_tracklist(rg["rg_mbid"]):
+            # Minted only with a tracklist MusicBrainz confirms, so the
+            # reconcile's "no tracklist" rule never unlinks it in between.
+            confirmed = _confirmed_release(rg["rg_mbid"], asks)
+            if confirmed is confirm.WAIT or confirmed is None:
+                continue
         album_id, inserted = _upsert_phantom_album(artist_id, artist_name, rg, mbid)
         if inserted:
             stats["new"] += 1
@@ -1028,15 +1199,25 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
         for album_id, rg_mbid in phantoms:
             if album_id not in have:
                 stats["tracks"] += _persist_phantom_tracklist(
-                    album_id, artist_id, artist_name, rg_mbid)
+                    album_id, artist_id, artist_name, rg_mbid, asks) or 0
         # Genres for the freshly-minted shelf (release_group_tag) — so a new
         # phantom album carries genres at creation, not only after a dump
         # reload runs the full refresh_album_mb_genres sweep.
         from canon.genres import materialize_album_genres
         materialize_album_genres([a for a, _ in phantoms])
 
-    _reconcile_phantoms(artist_id, list(missing.keys()))
-    _stamp_sync(artist_id)
+    # The missing set is the complete answer, groups whose tracklist still
+    # waits included: their links stay while their answers come. On a node
+    # without the dump another artist's album names its group on a slice's
+    # word alone: it keeps this shelf from minting the group, never unlinks
+    # this artist's phantom album of it.
+    _reconcile_phantoms(artist_id, list(missing.keys())
+                        + (held_elsewhere if asks is not None else []))
+    if asks is not None and asks.waiting:
+        asks.flush()
+        stats["status"] = "waiting"
+    else:
+        _stamp_sync(artist_id)
     if stats["tracks"]:
         # New slots can place imported scrobbles waiting for this artist.
         from canon import scrobbles
@@ -1150,12 +1331,14 @@ def stale_canonized_artists(limit: Optional[int] = None,
     Within a tier: oldest data first. Shared by the background step and
     the CLI backfill — one source of truth for the priority.
 
-    On a local-dump node an artist whose MB facts are not here yet (a slice
-    replica, see _mb_source_covers) is left out rather than returned: the
-    sync would answer no_source without stamping, so it would sit at the
-    head of every batch and starve the artists that can be shelved.
+    An artist whose MB facts are not here yet (a slice replica, see
+    _mb_source_covers; any artist on a node with no mb_* rows) is left out
+    rather than returned: the sync would answer no_source without stamping,
+    so it would sit at the head of every batch and starve the artists that
+    can be shelved. So is one whose sync waits for MusicBrainz's answers:
+    their arrival wakes the step for it.
     """
-    covered = "TRUE" if not mb.LOCAL_DUMP else \
+    covered = "FALSE" if not mb.LOCAL_DUMP else \
         "(" + _MB_SOURCE_COVERS_SQL.format(name="a.name") + ")"
     sql = f"""
         WITH listened AS (
@@ -1188,6 +1371,7 @@ def stale_canonized_artists(limit: Optional[int] = None,
           AND (a.last_album_sync IS NULL
                OR a.last_album_sync < now() - make_interval(days => %(days)s))
           AND {covered}
+          AND NOT {mb_answers.WAITING_SQL.format(subject='discography', key='a.id::text')}
         ORDER BY tier,
           a.last_album_sync ASC NULLS FIRST,
           a.name
@@ -1202,18 +1386,20 @@ def stale_canonized_artists(limit: Optional[int] = None,
 def run_backfill(limit: Optional[int] = None, stale_days: int = 30) -> Dict[str, int]:
     """One-shot sweep: reconcile every canonized artist whose new-album data
     is missing or older than `stale_days`, listened-first. Pure local-DB
-    work with the dump loaded. Returns aggregate stats."""
+    work with the dump loaded; on a node with slices, what waits for
+    MusicBrainz's answers is counted and queued. Returns aggregate stats."""
     rows = stale_canonized_artists(limit=limit, stale_days=stale_days)
 
     totals = {"processed": 0, "found": 0, "new": 0, "skipped_owned": 0,
-              "rate_limited": 0}
+              "waiting": 0}
     for row in rows:
         result = sync_artist_discography(row["id"], row["name"])
         totals["processed"] += 1
-        if result["status"] in ("rate_limited", "mb_loading"):
-            totals["rate_limited"] += 1
-            logger.warning(f"Backfill: {result['status']} — stopping early")
+        if result["status"] == "mb_loading":
+            logger.warning("Backfill: a dump load holds the tables — stopping early")
             break
+        if result["status"] == "waiting":
+            totals["waiting"] += 1
         totals["found"] += result["found"]
         totals["new"] += result["new"]
         totals["skipped_owned"] += result["skipped_owned"]
@@ -1256,7 +1442,7 @@ def backfill_tracklists(limit: Optional[int] = None) -> Dict[str, int]:
     for row in rows:
         try:
             totals["tracks"] += _persist_phantom_tracklist(
-                row["album_id"], row["artist_id"], row["artist_name"], row["rg_mbid"])
+                row["album_id"], row["artist_id"], row["artist_name"], row["rg_mbid"]) or 0
         except Exception as e:
             # per-album isolation (enrichment convention): one pathological
             # tracklist must not kill the remaining tens of thousands

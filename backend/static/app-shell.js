@@ -11695,6 +11695,12 @@
       title: 'Artist photos paused',
       text: `Deezer rate-limited${noticeStrikes(n)} — photos resume ${fmtUntil(n.until)}.`,
     }),
+    // Armed only on a node without the MusicBrainz database, whose canon
+    // re-makes other nodes' slices on MusicBrainz's answers (backend/mb_answers.py).
+    'cooldown.musicbrainz': n => ({
+      title: 'Recognising music waits for MusicBrainz',
+      text: `Renames, merges and new albums from other nodes' slices resume when it answers${noticeStrikes(n)} — asked again ${fmtUntil(n.until)}.`,
+    }),
     'mb_slice.deferred': n => {
       const d = n.data || {};
       const capped = d.pending_capped && d.unserved === d.pending;

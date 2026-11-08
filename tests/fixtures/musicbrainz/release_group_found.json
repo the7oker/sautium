@@ -1,0 +1,28 @@
+{
+ "asked": "cfa9221f-715d-4404-919e-e5602d6c7575",
+ "body": {
+  "artist-credit": [
+   {
+    "artist": {
+     "country": null,
+     "disambiguation": "",
+     "id": "89b1d4c2-42c4-4373-bdc7-5da3476ac91e",
+     "name": "Lu Castro",
+     "sort-name": "Lu Castro",
+     "type": null,
+     "type-id": null
+    },
+    "joinphrase": "",
+    "name": "Lu Castro"
+   }
+  ],
+  "disambiguation": "",
+  "first-release-date": "2020-09-20",
+  "id": "cfa9221f-715d-4404-919e-e5602d6c7575",
+  "primary-type": "Album",
+  "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+  "secondary-type-ids": [],
+  "secondary-types": [],
+  "title": "Urban"
+ }
+}

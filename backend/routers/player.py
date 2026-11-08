@@ -2509,11 +2509,39 @@ def _mix_quality(n_lossless: int, n_lossy: int) -> Optional[str]:
 
 def _artist_alts(name: str) -> tuple:
     """MB-canonical alternates (name + aliases) for a credited artist name, for
-    provider resolve retries. Empty without the local MB dump (optional layer)."""
+    provider resolve retries. Empty without the local MB dump (optional layer).
+
+    The alternates steer which stream a phantom slot accepts, and that
+    stream's analysis is then signed: on a node whose MB rows came from
+    slices they are MusicBrainz's own answer for the one MBID the local
+    artist of that name is bound to — never a slice's aliases — and nothing
+    for a name no single binding covers."""
     import mb_backend as mb
+    from canon import confirm
     if not name or not mb.LOCAL_DUMP:
         return ()
-    return tuple(mb.artist_alt_names(name))
+    if not confirm.required():
+        return tuple(mb.artist_alt_names(name))
+    return _answered_alts(name)
+
+
+def _answered_alts(name: str, limit: int = 3) -> tuple:
+    import mb_answers
+    from uuid_utils import artist_uuid
+    rows = _db_query("SELECT mbid::text AS mbid FROM artist_mbids WHERE artist_id = %(a)s::uuid",
+                     {"a": str(artist_uuid(name))})
+    if len(rows) != 1:
+        return ()
+    answer = mb_answers.answer("artist", rows[0]["mbid"])
+    data = mb_answers.artist(answer.target) if answer and answer.known and answer.fresh else None
+    if data is None:
+        return ()
+    own = name.strip().lower()
+    out: list = []
+    for cand in [data["name"]] + [a["name"] for a in data["aliases"]]:
+        if cand and cand.lower() != own and cand not in out:
+            out.append(cand)
+    return tuple(out[:limit])
 
 
 def _credit_alts(credit: str, album_artists: tuple = ()) -> tuple:
@@ -2567,18 +2595,31 @@ def _album_performers(album_ids: list) -> dict:
     name gates nothing here; the performers do. Empty for albums whose credit
     names only the artist — the ordinary case, where nothing changes."""
     import mb_backend as mb
+    from canon import confirm
     if not album_ids or not mb.LOCAL_DUMP:
         return {}
-    rows = _db_query("""
-        SELECT a.id::text AS album_id, acn.position,
-               COALESCE(ma.name, acn.name) AS artist, acn.join_phrase
-        FROM albums a
-        JOIN mb_release_group rg ON rg.gid = a.musicbrainz_id
-        JOIN mb_artist_credit_name acn ON acn.artist_credit = rg.artist_credit
-        LEFT JOIN mb_artist ma ON ma.id = acn.artist
-        WHERE a.id = ANY(CAST(%(ids)s AS uuid[]))
-        ORDER BY a.id, acn.position
-    """, {"ids": album_ids})
+    if confirm.required():
+        # A node with slices reads the group's credit as MusicBrainz answered
+        # it (the discography's browse fetched it), never a slice's.
+        rows = _db_query("""
+            SELECT a.id::text AS album_id, c.position, c.artist_name AS artist,
+                   c.join_phrase
+            FROM albums a
+            JOIN mbws_credits c ON c.owner_kind = 'release_group' AND c.owner = a.musicbrainz_id
+            WHERE a.id = ANY(CAST(%(ids)s AS uuid[]))
+            ORDER BY a.id, c.position
+        """, {"ids": album_ids})
+    else:
+        rows = _db_query("""
+            SELECT a.id::text AS album_id, acn.position,
+                   COALESCE(ma.name, acn.name) AS artist, acn.join_phrase
+            FROM albums a
+            JOIN mb_release_group rg ON rg.gid = a.musicbrainz_id
+            JOIN mb_artist_credit_name acn ON acn.artist_credit = rg.artist_credit
+            LEFT JOIN mb_artist ma ON ma.id = acn.artist
+            WHERE a.id = ANY(CAST(%(ids)s AS uuid[]))
+            ORDER BY a.id, acn.position
+        """, {"ids": album_ids})
     members: dict = {}
     for r in rows:
         members.setdefault(r["album_id"], []).append(r)
@@ -2602,31 +2643,58 @@ def _album_barcodes(album_ids: list) -> dict:
     Digital Media release, barcode for barcode). Empty without the local MB
     dump (optional layer), or for an album MB never barcoded."""
     import mb_backend as mb
+    from canon import confirm
     if not album_ids or not mb.LOCAL_DUMP:
         return {}
-    rows = _db_query("""
-        WITH ours AS (
-            SELECT a.id AS album_id, rg.id AS rg_id,
-                   (SELECT count(*) FROM album_tracks x WHERE x.album_id = a.id) AS n
-            FROM albums a JOIN mb_release_group rg ON rg.gid = a.musicbrainz_id
-            WHERE a.id = ANY(CAST(%(ids)s AS uuid[]))
-        ), editions AS (
-            SELECT o.album_id, o.n, r.id AS release_id, r.barcode,
-                   bool_or(f.name = 'Digital Media') AS digital,
-                   sum(m.track_count) AS tracks
-            FROM ours o
-            JOIN mb_release r ON r.release_group = o.rg_id
-            JOIN mb_medium m ON m.release = r.id
-            LEFT JOIN mb_medium_format f ON f.id = m.format
-            WHERE r.barcode IS NOT NULL AND r.barcode <> ''
-            GROUP BY o.album_id, o.n, r.id, r.barcode
-        )
-        SELECT album_id::text AS album_id, barcode,
-               bool_or(digital) AS digital, min(release_id) AS first_id
-        FROM editions WHERE tracks = n
-        GROUP BY album_id, barcode
-        ORDER BY album_id, digital DESC, first_id
-    """, {"ids": album_ids})
+    if confirm.required():
+        # A node with slices names only editions MusicBrainz answered for (the
+        # releases the tracklist mint asked about), never a slice's barcodes.
+        rows = _db_query("""
+            WITH ours AS (
+                SELECT a.id AS album_id, a.musicbrainz_id AS rg,
+                       (SELECT count(*) FROM album_tracks x WHERE x.album_id = a.id) AS n
+                FROM albums a
+                WHERE a.id = ANY(CAST(%(ids)s AS uuid[])) AND a.musicbrainz_id IS NOT NULL
+            ), editions AS (
+                SELECT o.album_id, o.n, r.mbid::text AS release_id, r.barcode,
+                       bool_or(t.media_format = 'Digital Media') AS digital,
+                       count(*) AS tracks
+                FROM ours o
+                JOIN mbws_releases r ON r.release_group = o.rg
+                JOIN mbws_tracks t ON t.release = r.mbid
+                WHERE r.barcode IS NOT NULL AND r.barcode <> ''
+                GROUP BY o.album_id, o.n, r.mbid, r.barcode
+            )
+            SELECT album_id::text AS album_id, barcode,
+                   bool_or(digital) AS digital, min(release_id) AS first_id
+            FROM editions WHERE tracks = n
+            GROUP BY album_id, barcode
+            ORDER BY album_id, digital DESC, first_id
+        """, {"ids": album_ids})
+    else:
+        rows = _db_query("""
+            WITH ours AS (
+                SELECT a.id AS album_id, rg.id AS rg_id,
+                       (SELECT count(*) FROM album_tracks x WHERE x.album_id = a.id) AS n
+                FROM albums a JOIN mb_release_group rg ON rg.gid = a.musicbrainz_id
+                WHERE a.id = ANY(CAST(%(ids)s AS uuid[]))
+            ), editions AS (
+                SELECT o.album_id, o.n, r.id AS release_id, r.barcode,
+                       bool_or(f.name = 'Digital Media') AS digital,
+                       sum(m.track_count) AS tracks
+                FROM ours o
+                JOIN mb_release r ON r.release_group = o.rg_id
+                JOIN mb_medium m ON m.release = r.id
+                LEFT JOIN mb_medium_format f ON f.id = m.format
+                WHERE r.barcode IS NOT NULL AND r.barcode <> ''
+                GROUP BY o.album_id, o.n, r.id, r.barcode
+            )
+            SELECT album_id::text AS album_id, barcode,
+                   bool_or(digital) AS digital, min(release_id) AS first_id
+            FROM editions WHERE tracks = n
+            GROUP BY album_id, barcode
+            ORDER BY album_id, digital DESC, first_id
+        """, {"ids": album_ids})
     out: dict = {}
     for r in rows:
         codes = out.setdefault(r["album_id"], [])

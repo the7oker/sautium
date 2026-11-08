@@ -20,7 +20,9 @@ Sonnet ≈ Opus; Haiku makes confident path-confusion errors — both fully caug
 
 Writes confidence='ai' (lowest tier, re-verifiable) and reuses the content-canon
 rename/merge machinery, so a resolved artist gets the canonical UUID like any
-other tier. Model is chosen by canon policy (best canon-approved the active
+other tier. On a node whose MB rows came from other nodes' slices
+(canon/confirm.py) the model is shown MusicBrainz's own answers for the
+candidates, never the slice's rows, and the name written is MusicBrainz's. Model is chosen by canon policy (best canon-approved the active
 provider offers), decoupled from the chat model picker.
 """
 import json
@@ -33,6 +35,7 @@ from anyascii import anyascii
 import claude_code
 from config import settings
 from database import SessionLocal
+import mb_answers
 from db_pool import db_query
 from sqlalchemy import text as _sql
 from uuid_utils import artist_uuid
@@ -49,6 +52,11 @@ _STOP = {"the", "a", "an", "and", "of", "his", "her", "with", "de", "la",
          "los", "las", "le", "les", "und", "feat", "ft"}
 _BATCH = 12   # artists per AI call
 _ASK_TIMEOUT_SECONDS = 150
+# A node without the dump shows the model MusicBrainz's own answers for the
+# candidates: at most this many per artist are asked, and a batch waits at most
+# this long for them (answers that come later serve the next run).
+_CONFIRM_CANDIDATES = 8
+_CONFIRM_TIMEOUT_SECONDS = 300
 
 
 # ─── name-correspondence guard (the model-tier-robustness layer) ──────────
@@ -104,6 +112,9 @@ def _residue(limit, since=None):
         WHERE EXISTS (SELECT 1 FROM track_artists ta JOIN media_files mf ON mf.track_id=ta.track_id
                       WHERE ta.artist_id=a.id AND ta.role='primary')
           AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id=a.id)
+          -- A decision of the artist that waits for MusicBrainz's answers is
+          -- keyed by its id: the AI's rename or merge waits for it too.
+          AND NOT {mb_answers.WAITING_SQL.format(subject='owned_artist', key='a.id::text')}
           {new_only}
         ORDER BY trk DESC, a.name
         {lim}
@@ -201,22 +212,85 @@ def _ask(prompt, model, provider):
 
 # ─── decision → gid (constrained), then the two guards ────────────────────
 
-def _resolve_choice(pick, cands):
+def _proposed(pick) -> str:
+    pick = (pick or "").strip()
+    return pick.split(":", 1)[1].strip() if pick.upper().startswith("PROPOSE:") else ""
+
+
+def _proposal_gid(nm: str):
+    """(gid, name) of the single MB entity a PROPOSE name resolves to (exact or
+    unaccent), else (None, None)."""
+    rows = db_query(
+        "SELECT gid::text AS gid, name FROM mb_artist WHERE lower(name)=lower(%(n)s) "
+        "UNION SELECT gid::text, name FROM mb_artist WHERE f_unaccent(name)=f_unaccent(%(n)s)",
+        {"n": nm})
+    return (rows[0]["gid"], rows[0]["name"]) if len(rows) == 1 else (None, None)
+
+
+def _resolve_choice(pick, cands, proposals=None):
     """A pick string → (gid, mb_name) of a REAL MB entity, or (None, None).
     A GID must be one of the offered candidates; a PROPOSE name must resolve to a
-    single MB entity (exact or unaccent). Anything else (incl. SKIP) → none."""
+    single MB entity (exact or unaccent). Anything else (incl. SKIP) → none.
+    `proposals`: on a node without the dump, the PROPOSE names already
+    re-resolved on MusicBrainz's answers (_confirmed_proposals)."""
     pick = (pick or "").strip()
     if pick.upper() == "SKIP" or not pick:
         return None, None
     if pick.upper().startswith("PROPOSE:"):
-        nm = pick.split(":", 1)[1].strip()
-        rows = db_query(
-            "SELECT gid::text AS gid, name FROM mb_artist WHERE lower(name)=lower(%(n)s) "
-            "UNION SELECT gid::text, name FROM mb_artist WHERE f_unaccent(name)=f_unaccent(%(n)s)",
-            {"n": nm})
-        return (rows[0]["gid"], rows[0]["name"]) if len(rows) == 1 else (None, None)
+        nm = _proposed(pick)
+        if proposals is not None:
+            return proposals.get(nm, (None, None))
+        return _proposal_gid(nm)
     by_gid = {c["gid"]: c["name"] for c in cands}
     return (pick, by_gid[pick]) if pick in by_gid else (None, None)
+
+
+def _confirmed_batch(batch: list) -> list:
+    """A batch's candidates as MusicBrainz answers them: each artist's slice
+    namesakes (the first _CONFIRM_CANDIDATES) asked at once, then offered under
+    MusicBrainz's MBID — a merged one's target —, name and disambiguation; a
+    candidate MusicBrainz does not know, or that is not answered within
+    _CONFIRM_TIMEOUT_SECONDS, is not offered, and an artist left with none is
+    out of the batch."""
+    import mb_answers
+    items = [("artist", c["gid"]) for it in batch for c in it["cands"][:_CONFIRM_CANDIDATES]]
+    mb_answers.ask_now(items, mb_answers.PRIORITY_OWNED, timeout=_CONFIRM_TIMEOUT_SECONDS)
+    out = []
+    for it in batch:
+        offered = {}
+        for c in it["cands"][:_CONFIRM_CANDIDATES]:
+            ans = mb_answers.answer("artist", c["gid"])
+            if ans is None or not ans.fresh or not ans.known:
+                continue
+            data = mb_answers.artist(ans.target)
+            if data is not None:
+                offered[ans.target] = {"gid": ans.target, "name": data["name"],
+                                       "comment": data["disambiguation"] or ""}
+        if offered:
+            out.append({**it, "cands": sorted(offered.values(), key=lambda c: (c["name"], c["gid"]))})
+    return out
+
+
+def _confirmed_proposals(decisions: list) -> dict:
+    """PROPOSE name → (gid, MusicBrainz's name) when the slice resolves the name
+    to one artist, MusicBrainz knows it (a merged one: its target) and carries
+    the proposed name as its name or an alias."""
+    import mb_answers
+    from canon import confirm
+    names = sorted({_proposed(d.get("pick")) for d in decisions} - {""})
+    gids = {nm: _proposal_gid(nm)[0] for nm in names}
+    asked = [("artist", g) for g in gids.values() if g]
+    if asked:
+        mb_answers.ask_now(asked, mb_answers.PRIORITY_OWNED, timeout=_CONFIRM_TIMEOUT_SECONDS)
+    out = {}
+    for nm, gid in gids.items():
+        ans = mb_answers.answer("artist", gid) if gid else None
+        if ans is None or not ans.fresh or not ans.known:
+            continue
+        data = mb_answers.artist(ans.target)
+        if data is not None and confirm.name_equals(nm, data):
+            out[nm] = (ans.target, data["name"])
+    return out
 
 
 def _apply(artist_id, mb_name, gid):
@@ -257,7 +331,8 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
         yield {"event": "done", "skipped": "no local MB dump", "canonized": 0}
         return
     model = _pick_model(provider)
-    from canon import _dump_lock_held, ai_mutations, ai_should_yield
+    from canon import _dump_lock_held, ai_mutations, ai_should_yield, confirm
+    checked = confirm.required()
     # Gather the residue + context under the dump lock (it reads mb_artist) — skip if
     # a dump load currently holds it.
     with _dump_lock_held() as _got:
@@ -289,6 +364,16 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                    "stopped": "Claude Code is signed out", **st}
             return
         batch = enriched[s:s + _BATCH]
+        if checked:
+            # Before the model sees anything: MusicBrainz's own answers for the
+            # candidates (lock-free — the asking waits on MusicBrainz's pace).
+            offered = _confirmed_batch(batch)
+            st["skipped"] += len(batch) - len(offered)
+            st["processed"] += len(batch) - len(offered)
+            batch = offered
+            if not batch:
+                yield {"event": "batch", **st, "items": []}
+                continue
         by_n = {it["n"]: it for it in batch}
         items = []
         try:
@@ -297,6 +382,7 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
             st["errors"] += 1
             logger.error("ai_canon batch %d failed: %s", s // _BATCH, e)
             decisions = []
+        proposals = _confirmed_proposals(decisions) if checked else None
         # DB reads+writes for this batch under the mutex (vs algorithmic) + the dump
         # lock (vs the loader's TRUNCATE); held for ms, never across the LLM call.
         with ai_mutations() as _ok:
@@ -310,7 +396,7 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                 it = by_n.get(d.get("n"))
                 if not it:
                     continue
-                gid, mb_name = _resolve_choice(d.get("pick"), it["cands"])
+                gid, mb_name = _resolve_choice(d.get("pick"), it["cands"], proposals)
                 if not gid:
                     st["skipped"] += 1
                     continue
@@ -318,6 +404,12 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                     st["guard_rejected"] += 1
                     items.append({"from": it["name"], "to": mb_name, "verdict": "guard-rejected",
                                   "conf": d.get("conf"), "why": d.get("why")})
+                    continue
+                if not dry_run and mb_answers.waiting("owned_artist", it["id"]):
+                    # The algorithmic canon queued a decision of the artist
+                    # while the model was asked: keyed by its id, it would wake
+                    # nothing after a rename.
+                    st["skipped"] += 1
                     continue
                 if not dry_run:
                     try:
