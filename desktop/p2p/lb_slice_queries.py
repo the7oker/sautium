@@ -72,7 +72,14 @@ _builds = BuildBudget(BUILD_CONCURRENCY, BUILDS_PER_MINUTE)
 # or MB-slice signature. Widening the payload later means bumping this AND
 # wiping every node's ledgers — a signed hole closes an MBID for good.
 RECEIPT_CONTEXT = b"sautium-lb-slice-v1:"
-PROTOCOL_VERSION = 1
+# The format of the signed bytes — what every kept blob and every dump node's
+# cache carries; it did not change with the protocol.
+BLOB_FORMAT = 1
+# v2 (2026-11-07): any dump holder may author slices — an entry carries its
+# author's birth certificate (author_cert, and author_proof for `pow`) beside
+# the v1 bytes, and a node passes a blob on only once its own check ran
+# (desktop/p2p/slice_checks.py).
+PROTOCOL_VERSION = 2
 
 
 class DumpBusy(Exception):
@@ -85,9 +92,11 @@ _VERSION_RE = re.compile(r"^\d{8}-\d{6}$")
 
 
 def plausible_version(value) -> bool:
-    """A version in the dump's own format and no later than a day ahead: the
-    newest version decides what every node asks again, and one that sorts
-    after every real one would never be superseded."""
+    """A version in the dump's own format and no later than a day ahead — the
+    bound while MetaBrainz's own listing has not been read yet
+    (desktop/p2p/published.py): the newest version decides what every node
+    asks again, and one that sorts after every real one would never be
+    superseded."""
     if not isinstance(value, str) or not _VERSION_RE.match(value):
         return False
     try:
@@ -119,7 +128,7 @@ def slice_blob(artist_mbid: str, one: dict) -> bytes:
     VERBATIM (gzipped) by recipients — re-serving hands back these exact
     bytes."""
     core = {
-        "v": PROTOCOL_VERSION,
+        "v": BLOB_FORMAT,
         "artist_mbid": mbid_key(artist_mbid),
         "dump_version": one["dump_version"],
         "artist": one.get("artist"),
@@ -208,32 +217,46 @@ def cached_slice(conn, mbid: str) -> Optional[dict]:
 
 
 def store_slice_blob(conn, mbid: str, dump_version: str, author_pubkey: str,
-                     sig: str, blob_gz: bytes, cap: bool = True) -> bool:
+                     sig: str, blob_gz: bytes, cap: bool = True,
+                     relay: Optional[str] = None) -> bool:
     """Upsert one verified blob, forward only by dump version. `cap=True` is
     the replica posture (skip oversized); a dump node stores its own
-    regardless — that is the cache."""
+    regardless — that is the cache, `relay` None. Another blob in its place
+    is checked anew before it passes on, its pending check's draw gone; the
+    same bytes again keep their verdict."""
     if cap and len(blob_gz) > RESERVE_BLOB_MAX_GZ:
         return False
     with conn.cursor() as cur:
+        cur.execute("""DELETE FROM slice_check_plans p
+                        WHERE p.family = 'lb' AND p.key = %s
+                          AND NOT EXISTS (SELECT 1 FROM lb_slice_blobs b
+                                           WHERE b.artist_mbid = %s AND b.blob_gz = %s)""",
+                    (mbid, mbid, blob_gz))
         cur.execute("""
             INSERT INTO lb_slice_blobs
-                   (artist_mbid, dump_version, author_pubkey, sig, blob_gz)
-            VALUES (%s, %s, %s, %s, %s)
+                   (artist_mbid, dump_version, author_pubkey, sig, blob_gz, relay)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (artist_mbid) DO UPDATE SET
                 dump_version = EXCLUDED.dump_version,
                 author_pubkey = EXCLUDED.author_pubkey,
                 sig = EXCLUDED.sig,
                 blob_gz = EXCLUDED.blob_gz,
-                created_at = now()
+                relay = EXCLUDED.relay,
+                checked_at = CASE WHEN lb_slice_blobs.blob_gz = EXCLUDED.blob_gz
+                                  THEN lb_slice_blobs.checked_at END,
+                suspect = lb_slice_blobs.blob_gz = EXCLUDED.blob_gz AND lb_slice_blobs.suspect,
+                created_at = CASE WHEN lb_slice_blobs.blob_gz = EXCLUDED.blob_gz
+                                  THEN lb_slice_blobs.created_at ELSE now() END
             WHERE EXCLUDED.dump_version >= lb_slice_blobs.dump_version""",
-            (mbid, dump_version, author_pubkey, sig, blob_gz))
+            (mbid, dump_version, author_pubkey, sig, blob_gz, relay))
     return True
 
 
-def count_slice_blobs(conn) -> int:
-    with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM lb_slice_blobs")
-        return int(cur.fetchone()[0])
+def count_slice_blobs(conn, own_pubkey: Optional[str] = None) -> int:
+    """What /health advertises: the blobs this node may pass on, checked or
+    not yet (desktop/p2p/slice_checks.checkable_count)."""
+    from desktop.p2p import slice_checks
+    return slice_checks.checkable_count(conn, "lb", own_pubkey)
 
 
 def max_blob_version(conn) -> Optional[str]:
@@ -247,17 +270,21 @@ def max_blob_version(conn) -> Optional[str]:
 
 def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
                  sign_fn=None, author_pubkey: str = "",
-                 requester: Optional[str] = "") -> dict:
-    """The shared v1 server body for both surfaces.
+                 requester: Optional[str] = "", own_cert: Optional[tuple] = None,
+                 own_pubkey: Optional[str] = None) -> dict:
+    """The shared v2 server body for both surfaces.
 
     Per MBID: a cached blob answers when it is at least ``min_version`` AND
     not older than this node's own dump (a dump node never re-serves a cache
-    its loader has superseded); a dump node computes+signs+caches otherwise
-    (`sign_fn` present, a local dump at least ``min_version``), within the
-    build budget `requester` (its address) has a share of; everything else
-    lands in `missing` — the requester takes misses to the next candidate.
-    The response entry carries the ORIGINAL author's pubkey+sig, which on a
-    replica is not this node's identity — and that is the point."""
+    its loader has superseded), and — another author's — once this node
+    checked it (desktop/p2p/slice_checks.servable; not checked lately, it is
+    `missing` this time and its check queued); a dump node computes+signs+
+    caches otherwise (`sign_fn` present, a local dump at least
+    ``min_version``), within the build budget `requester` (its address) has a
+    share of; everything else lands in `missing` — the requester takes misses
+    to the next candidate. The entry carries the ORIGINAL author's pubkey,
+    signature and certificate (`own_cert` for this node's own build)."""
+    from desktop.p2p import slice_checks, slice_trust
     if not isinstance(artist_mbids, list) or not artist_mbids \
             or len(artist_mbids) > MAX_MBIDS_PER_REQUEST:
         raise ValueError(f"artist_mbids must be a list of 1..{MAX_MBIDS_PER_REQUEST}")
@@ -270,12 +297,23 @@ def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
     local = local_dump_available(conn)
     can_build = (sign_fn is not None and local is not None
                  and (min_version is None or local >= min_version))
+    own = (own_pubkey or author_pubkey or "").lower() or None
     slices, missing = {}, []
     for asked, key in zip(artist_mbids, keys):
         entry = cached_slice(conn, key)
         if entry is not None and ((min_version is not None and entry["dump_version"] < min_version)
                                   or (local is not None and entry["dump_version"] < local)):
             entry = None
+        cert = None
+        if entry is not None and entry["author_pubkey"].lower() == own:
+            cert = own_cert
+        elif entry is not None:
+            ok = slice_checks.servable(conn, "lb", key, own)
+            if ok is None:
+                slice_checks.request_check(conn, "lb", key)
+            cert = slice_trust.author_certificate(conn, entry["author_pubkey"]) if ok else None
+            if not cert:
+                entry = None
         if entry is None and can_build and _builds.admit(requester):
             one = None
             try:
@@ -289,7 +327,8 @@ def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
                 store_slice_blob(conn, key, local, author_pubkey, sig, blob_gz, cap=False)
             entry = {"dump_version": local, "author_pubkey": author_pubkey,
                      "sig": sig, "blob_gz": blob_gz}
-        if entry is None:
+            cert = own_cert
+        if entry is None or not cert:
             missing.append(asked)
             continue
         slices[asked] = {
@@ -297,6 +336,8 @@ def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
             "author_pubkey": entry["author_pubkey"],
             "sig": entry["sig"],
             "blob_gz": base64.b64encode(entry["blob_gz"]).decode("ascii"),
+            "author_cert": cert[0],
+            "author_proof": cert[1],
         }
     return {"v": PROTOCOL_VERSION, "slices": slices, "missing": missing}
 
@@ -306,37 +347,42 @@ def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 def verify_slice_entry(artist_mbid: str, entry: dict,
-                       min_version: Optional[str] = None) -> Optional[Tuple[dict, bytes]]:
-    """Full per-artist verification on the receiving side: the author is one
-    the release names (master_node.SLICE_AUTHORS) → gunzip → hash → author
-    signature → the blob's own version (its format, no later than a day
-    ahead), artist and protocol match what was asked. Returns (core,
-    blob_gz) or None. Every hop runs exactly this, against the ORIGINAL
+                       min_version: Optional[str] = None,
+                       published: Optional[str] = None) -> Optional[Tuple[dict, bytes, dict, Optional[dict]]]:
+    """Full per-artist verification on the receiving side: the author's birth
+    certificate is the authority's and names the author (a `pow` one with its
+    proof bound to it) → gunzip → hash → author signature → the blob's own
+    version (its format, and no later than the newest MetaBrainz published —
+    `published`, or a day ahead before the listing was read), artist and
+    protocol match what was asked. Returns (core, blob_gz, certificate,
+    proof) or None. Every hop runs exactly this, against the ORIGINAL
     author's key. Anything malformed on the wire is a rejection, never an
     exception — the peer is untrusted."""
     from desktop.node_identity import verify_signature
-    from desktop.p2p import wire
-    from desktop.p2p.master_node import SLICE_AUTHORS
+    from desktop.p2p import slice_trust, wire
     try:
         author = entry.get("author_pubkey")
-        if not isinstance(author, str) or author.lower() not in SLICE_AUTHORS:
-            return None                       # no dump holder the release names
+        if not isinstance(author, str) or len(author) != 64:
+            return None
+        certified = slice_trust.entry_certificate(entry, author)
+        if certified is None:
+            return None
         blob_gz = base64.b64decode(entry.get("blob_gz") or "")
         blob = wire.gunzip(blob_gz, BLOB_RAW_MAX)
         sig = entry.get("sig") or ""
         if not verify_signature(receipt_message_for(blob), bytes.fromhex(sig), author):
             return None
         core = wire.loads(blob)
-        if not isinstance(core, dict) or core.get("v") != PROTOCOL_VERSION:
+        if not isinstance(core, dict) or core.get("v") != BLOB_FORMAT:
             return None
         if core.get("artist_mbid") != mbid_key(artist_mbid):
             return None
         version = core.get("dump_version")
-        if not plausible_version(version):
+        if not plausible_version(version) or (published is not None and version > published):
             return None
         if min_version is not None and version < min_version:
             return None
-        return core, blob_gz
+        return core, blob_gz, certified[0], certified[1]
     except (ValueError, TypeError, KeyError, OSError, EOFError):
         return None
 
@@ -384,25 +430,32 @@ def pending_slice_mbids(conn, limit: int = 200,
         return [(r[0], r[1]) for r in cur.fetchall()]
 
 
-def _count(value) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+def _count(value, bound: int = 2 ** 31) -> bool:
+    """A count its column holds (lb_recording / lb_artist: listens BIGINT,
+    listeners INTEGER)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < bound
 
 
 def _row_of(row, mbid: str) -> bool:
     """[recording mbid, listens, listeners, credited artist mbids] crediting
-    `mbid`."""
+    `mbid` — every MBID of it one, so nothing of it reaches a cast that would
+    raise."""
     return (isinstance(row, list) and len(row) == 4 and mbid_key(row[0]) is not None
-            and _count(row[1]) and _count(row[2]) and isinstance(row[3], list)
+            and _count(row[1], 2 ** 63) and _count(row[2]) and isinstance(row[3], list)
+            and all(mbid_key(x) is not None for x in row[3])
             and mbid in {mbid_key(x) for x in row[3]})
 
 
 def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict,
-                 source_node: str, source_addr: Optional[str]) -> int:
+                 source_node: str, source_addr: Optional[str],
+                 relay: Optional[str] = None) -> int:
     """A verified slice into the local tables, in the caller's transaction:
     the rows (forward-only by dump version — a recording credited to two
     artists arrives from two slices, in any order), the ledger row, the
-    re-serve blob, and the on-demand request it answers. Returns the number
-    of recordings carried."""
+    subject index, the re-serve blob, and the on-demand request it answers.
+    `relay` is the key the source's TLS channel proved. Returns the number of
+    recordings carried."""
+    from desktop.p2p import slice_trust
     from psycopg2.extras import execute_values
     mbid = mbid_key(artist_mbid)
     version = core["dump_version"]
@@ -421,11 +474,12 @@ def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict
                     artist_mbids = EXCLUDED.artist_mbids,
                     dump_version = EXCLUDED.dump_version
                 WHERE EXCLUDED.dump_version >= lb_recording.dump_version""",
-                [(r[0], int(r[1]), int(r[2]), [str(x) for x in (r[3] or [])], version)
+                [(mbid_key(r[0]), r[1], r[2], [mbid_key(x) for x in r[3]], version)
                  for r in recordings],
                 template="(%s::uuid, %s, %s, %s::uuid[], %s)", page_size=500)
         artist = core.get("artist")
-        if not (isinstance(artist, list) and len(artist) == 2 and all(map(_count, artist))):
+        if not (isinstance(artist, list) and len(artist) == 2
+                and _count(artist[0], 2 ** 63) and _count(artist[1])):
             artist = None
         if artist:
             cur.execute("""
@@ -437,11 +491,14 @@ def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict
                     dump_version = EXCLUDED.dump_version
                 WHERE EXCLUDED.dump_version >= lb_artist.dump_version""",
                 (mbid, int(artist[0]), int(artist[1]), version))
+        author = (entry.get("author_pubkey") or "").lower()
+        relay = (relay or author).lower()
+        payload = hashlib.sha256(blob_gz).hexdigest()
         cur.execute("""
             INSERT INTO lb_slice_fetches
                    (artist_mbid, dump_version, recordings, source_node, source_pubkey,
-                    receipt, payload_sha256, source_addr)
-            VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s::uuid)
+                    receipt, payload_sha256, source_addr, relay)
+            VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s::uuid, %s)
             ON CONFLICT (artist_mbid) DO UPDATE SET
                 dump_version   = EXCLUDED.dump_version,
                 recordings     = EXCLUDED.recordings,
@@ -450,14 +507,16 @@ def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict
                 receipt        = EXCLUDED.receipt,
                 payload_sha256 = EXCLUDED.payload_sha256,
                 source_addr    = EXCLUDED.source_addr,
+                relay          = EXCLUDED.relay,
                 fetched_at     = now()
             WHERE EXCLUDED.dump_version >= lb_slice_fetches.dump_version""",
-            (mbid, version, len(recordings), source_node, entry.get("author_pubkey"),
-             entry.get("sig"), hashlib.sha256(blob_gz).hexdigest(), source_addr))
+            (mbid, version, len(recordings), source_node, author,
+             entry.get("sig"), payload, source_addr, relay))
         cur.execute("""
             DELETE FROM lb_slice_requests r
              USING artist_mbids am
              WHERE am.artist_id = r.artist_id AND am.mbid = %s::uuid""", (mbid,))
-    store_slice_blob(conn, mbid, version, entry.get("author_pubkey") or "",
-                     entry.get("sig") or "", blob_gz, cap=True)
+    slice_trust.index(conn, "lb", mbid, author, relay, source_addr, payload, version, [mbid], [])
+    store_slice_blob(conn, mbid, version, author, entry.get("sig") or "", blob_gz, cap=True,
+                     relay=relay)
     return len(recordings)

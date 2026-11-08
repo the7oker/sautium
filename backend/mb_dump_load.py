@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+from contextlib import contextmanager
 from typing import Callable, Dict, Optional
 
 from desktop.p2p.mb_slice_queries import BANDCAMP_PAGE
@@ -58,8 +59,6 @@ TABLES_GB = 21.0
 MARGIN_GB = 2.0
 
 _MIRROR = "https://data.metabrainz.org/pub/musicbrainz/data/fullexport"
-_MB_WS = "https://musicbrainz.org/ws/2"   # genre vocabulary — not in the dump archives
-_MB_UA = "Sautium/1.0 ( https://sautium.net )"
 
 # mb_* table -> dump member basename (under mbdump/ in the tarball).
 TABLES = [
@@ -358,13 +357,15 @@ def _saved_ddl_path(archive: str) -> str:
 
 def stream_load(archive: str, version: str,
                 progress_cb: ProgressCb = _noop,
-                tables: Optional[list] = None) -> Dict[str, int]:
+                tables: Optional[list] = None, locked: bool = False) -> Dict[str, int]:
     """Decompress ``{archive}.tar.bz2`` of ``version`` once and pipe each
     member belonging to that archive straight into ``COPY`` — no extracted
     files, indexes dropped for the COPY and rebuilt per table. ``tables``
     narrows the pass to a subset of the archive's (table, member) pairs — how
     tables added to TABLES after a dump landed are loaded without redoing the
-    rest. Returns ``{table: load_order}``."""
+    rest. ``locked``: the caller holds MB_LOAD_LOCK_KEY already (a full load,
+    `_load_lock`), so this pass takes it no second time. Returns
+    ``{table: load_order}``."""
     from db_pool import get_conn
     path = _dump_path(archive, version)
     if not os.path.exists(path):
@@ -397,7 +398,8 @@ def stream_load(archive: str, version: str,
                 _ensure_schema(cur, tables)
                 # Session-level lock on a POOLED connection — must be
                 # released explicitly (finally below), not on conn close.
-                cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+                if not locked:
+                    cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
             try:
                 ddl = collect_index_ddl(conn, [t for t, _ in tables], _saved_ddl_path(archive))
                 cum_w = 0.0  # byte-weighted progress accumulated over completed tables
@@ -517,6 +519,30 @@ def stream_load(archive: str, version: str,
 
 # ── orchestrator ─────────────────────────────────────────────────────────────
 
+@contextmanager
+def _load_lock():
+    """MB_LOAD_LOCK_KEY held exclusive from the first COPY of a full load
+    until its completion marker is written — `hold()` takes it, the block's
+    end releases it. A rebuild of the slice catalogue that waited on the lock
+    then finds the marker and leaves the dump alone (desktop/p2p/
+    slice_rebuild.rebuild), instead of truncating it between the COPY and
+    the marker."""
+    from db_pool import get_conn
+    with get_conn() as conn:
+        conn.autocommit = True
+        held = []
+
+        def hold() -> None:
+            if not held:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+                held.append(True)
+        try:
+            yield hold
+        finally:
+            unlock_all(conn)
+
+
 def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> Dict:
     """Full update: pick newest version, download if needed, stream-load, stamp
     the VERSION marker. Returns ``{version, loaded, skipped_download}``."""
@@ -557,9 +583,38 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
         return {"version": version, "loaded": True, "up_to_date": False,
                 "added": missing}
 
+    with _load_lock() as hold:
+        _full_load(version, progress_cb, hold)
+    # What the node learned while it asked MusicBrainz no longer binds a node
+    # that holds its database: a pairing its answers refuted is the dump's to
+    # judge now, and a cooldown on asking it would only keep the "waits for
+    # MusicBrainz" notice up on a node that never asks.
+    import api_cooldown
+    import musicbrainz
+    from desktop.p2p import mb_asks
+    from db_pool import db_execute
+    db_execute("DELETE FROM mb_refuted_bindings")
+    api_cooldown.clear(musicbrainz.COOLDOWN_SOURCE)
+    # The answers' consumer finds it no longer asks: it empties its queue and
+    # wakes what waited, now rather than at its next wake.
+    db_execute(f"NOTIFY {mb_asks.CHANNEL}")
+    # The marker ends the "looking for a catalog node" notice
+    # (routers/settings._notices_state): wake the channel that shows it.
+    db_execute("NOTIFY sautium_notices")
+    # Wake the mb-capability listener: the Discovery chip flips to the
+    # enabled 'local' state the moment the full load lands.
+    db_execute("NOTIFY sautium_mb_sources")
+    progress_cb({"phase": "done", "version": version})
+    return {"version": version, "loaded": True, "up_to_date": False}
+
+
+def _full_load(version: str, progress_cb: ProgressCb, hold: Callable[[], None]) -> None:
+    """Every archive of `version` loaded, the post-load refreshes, and the
+    completion marker — under the load lock from the first COPY on."""
     for archive in _archives():
         path = download(version, archive, progress_cb)  # resumes this version's partial
-        stream_load(archive, version, progress_cb)
+        hold()
+        stream_load(archive, version, progress_cb, locked=True)
         # Reclaim the archive — the data now lives in the DB, and a future
         # update re-downloads the (newer) version anyway.
         try:
@@ -601,14 +656,6 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
         "('musicbrainz.db_version', %s::jsonb) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         (_json.dumps(version),))
-    # The marker ends the "looking for a catalog node" notice
-    # (routers/settings._notices_state): wake the channel that shows it.
-    db_execute("NOTIFY sautium_notices")
-    # Wake the mb-capability listener: the Discovery chip flips to the
-    # enabled 'local' state the moment the full load lands.
-    db_execute("NOTIFY sautium_mb_sources")
-    progress_cb({"phase": "done", "version": version})
-    return {"version": version, "loaded": True, "up_to_date": False}
 
 
 def load_genre_list(progress_cb: ProgressCb = _noop) -> int:
@@ -616,15 +663,12 @@ def load_genre_list(progress_cb: ProgressCb = _noop) -> int:
     (ws/2/genre/all). Genres aren't in the streamed dump archives (they live in
     the 7 GB core, not worth re-fetching for a ~2k-row static list). Names only —
     that's all the genre filter needs (tag.name ∈ genre.name). Idempotent."""
-    import httpx
+    import musicbrainz
     from psycopg2.extras import execute_values
     from db_pool import get_conn
-    r = httpx.get(f"{_MB_WS}/genre/all?fmt=txt", headers={"User-Agent": _MB_UA},
-                  timeout=120.0, follow_redirects=True)
-    r.raise_for_status()
-    names = sorted({ln.strip() for ln in r.text.splitlines() if ln.strip()})
-    if not names:
-        raise RuntimeError("MB genre list came back empty")
+    # Through the one client: its pace, its User-Agent and its failure kinds,
+    # beside every other question this node asks MusicBrainz.
+    names = musicbrainz.genre_names()
     with get_conn() as conn:
         conn.autocommit = True
         with conn.cursor() as cur:

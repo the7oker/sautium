@@ -181,7 +181,7 @@ identity exceeds the payoff of the fakes it can push before it burns.**
 | Class | Examples | Verifier | Defense |
 |---|---|---|---|
 | Verifiable by recompute | CLAP embeddings, audio features, BPM, duration | Any node owning the same material | Recompute ladder (below) |
-| Verifiable by authority | MBIDs, canonical names, aliases, album existence | Local MB dump / owned-album overlap | Hint + local re-verify; never peer-driven merges |
+| Verifiable by authority | MBIDs, canonical names, aliases, album existence | Local MB dump, or MusicBrainz's own answers by MBID on a node without it (since 2026-11-07) / owned-album overlap | Hint + local re-verify; never peer-driven merges |
 | Subjective | similar-artist opinions, tags, curatorial notes | none (no ground truth) | Trust-based: friends-only, reputation, local flags — the Last.fm-fetched ones never travel since 2026-09-19 (below) |
 | Self-reported | play stats | none | Trust-based; low blast radius, provenance-labeled — Last.fm track stats never travelled after 2026-09-19 and were replaced by ListenBrainz slices on 2026-09-20 |
 
@@ -203,8 +203,9 @@ not allow redistributing its answers. Their tables carry no seal columns
 name. For Last.fm the open question above is closed: nothing of it is
 signed, because nothing of it travels. `track_stats` itself was dropped on
 2026-09-20 (migration 020): listening statistics come from the ListenBrainz
-dump (CC0) and travel as per-artist slices under the dump node's signature
-— an authority-class record, P2P_NETWORK.md § "LB slices".
+dump (CC0) and travel as per-artist slices under their author's signature —
+any dump holder's since 2026-11-07, its certificate beside it — an
+authority-class record, P2P_NETWORK.md § "LB slices".
 
 The **public/friends flag** is data-class-aware: public mode accepts only
 verifiable (and verified) classes; subjective data stays friends-only.

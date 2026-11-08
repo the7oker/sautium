@@ -84,14 +84,15 @@ AWAITS_THE_PERSON = ("(w.scopes && ARRAY[" + ", ".join(f"'{s}'" for s in CONTENT
 # ---------------------------------------------------------------------------
 
 def record(conn, kind: str, detail: Optional[dict] = None,
-           ts: Optional[str] = None) -> Optional[int]:
+           ts: Optional[str] = None, commit: bool = True) -> Optional[int]:
     """One event row, or none while diagnostics are off: nothing is recorded
     for support then, so switching back on sends nothing from that time. A
     spooled event (`ts`) older than the switch's last change is dropped too —
     whether the switch was on at its moment is not known. The detail is kept
     scrubbed (diag_protocol.scrub_detail): no email, address or path is
     stored for support, whatever a writer put in an error. The insert trigger
-    NOTIFYs sautium_diag."""
+    NOTIFYs sautium_diag. `commit=False` leaves the row in the caller's open
+    transaction, to stand or fall with what it reports."""
     clean = scrub_detail(json.loads(json.dumps(detail or {}, default=str)))
     with conn.cursor() as cur:
         cur.execute(f"""
@@ -101,7 +102,8 @@ def record(conn, kind: str, detail: Optional[dict] = None,
             RETURNING id
         """, {"ts": ts or None, "kind": kind, "detail": json.dumps(clean)})
         row = cur.fetchone()
-    _commit(conn)
+    if commit:
+        _commit(conn)
     return row[0] if row else None
 
 

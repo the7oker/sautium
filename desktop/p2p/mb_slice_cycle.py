@@ -51,7 +51,7 @@ from desktop.api_client import PEER_SESSION_S, BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import mb_slice_queries
 from desktop.p2p.lb_slice_cycle import (clear_status, load_bans, notify, publish_status,
-                                        read_interval)
+                                        published_newest, read_interval)
 from desktop.p2p.slice_sources import SourceFinder
 from desktop.p2p.sync_walk import DeadAddresses, write_settings
 
@@ -88,6 +88,26 @@ def pending_names(dsn: str, limit: int) -> list:
     conn = _connect(dsn)
     try:
         return mb_slice_queries.pending_slice_names(conn, limit=limit)
+    finally:
+        conn.close()
+
+
+def reopened_authors(dsn: str, names: list) -> dict:
+    """name → the author whose answer closed it last, for names re-opened: a
+    signed zero-match a month old, or an answer that counts for nothing (its
+    blob lost a clash, or a rebuild left it out — `void`). They are asked of
+    another author's source first: a forger asked first could otherwise keep
+    a name unknown by re-signing its absence, or hold it with a blob that
+    loses every time."""
+    conn = _connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT name_key, lower(btrim(source_pubkey)) FROM mb_slice_fetches
+                            WHERE (matched_ids = 0 OR void) AND name_key = ANY(%s)""",
+                        ([mb_slice_queries.name_key(n) for n in names],))
+            by_key = dict(cur.fetchall())
+        return {n: by_key[mb_slice_queries.name_key(n)] for n in names
+                if mb_slice_queries.name_key(n) in by_key}
     finally:
         conn.close()
 
@@ -305,6 +325,7 @@ class MbSliceCycle:
         # Source discovery runs BEFORE the pending-names early return: it also
         # persists mb.search_sources for the backend's remote MB search, which
         # a dump-less node needs even when canon has no work (2026-08-10).
+        await loop.run_in_executor(None, published_newest, self.db_dsn, "mb")
         peers = await self.find_sources()
         pending = await loop.run_in_executor(None, pending_names, self.db_dsn, PENDING_PER_CYCLE)
         if not pending:
@@ -317,6 +338,7 @@ class MbSliceCycle:
             return {}
 
         names = [name for name, _ in pending]
+        reopened = await loop.run_in_executor(None, reopened_authors, self.db_dsn, names)
         batch_size = mb_slice_queries.MAX_NAMES_PER_REQUEST
         logger.info(f"MB slice: {len(names)} pending names, {len(peers)} source(s) (replicas first)")
         total = {"names": 0, "matched": 0, "rows_inserted": 0}
@@ -324,21 +346,34 @@ class MbSliceCycle:
         last_client = None
         remaining = list(names)
         reasons: set[str] = set()
-        for api, node in peers:
+        for n, (api, node) in enumerate(peers):
             if not remaining:
                 break
+            # A re-opened name goes to another author's source while one is
+            # left to ask, and the author that closed it is asked last: its
+            # answer is no answer before then, from whichever source it comes
+            # (a replica re-serving it included).
+            last = n == len(peers) - 1
+            held_back = [x for x in remaining
+                         if not last and reopened.get(x) == str(node).lower()]
+            asked = [x for x in remaining if x not in held_back]
+            avoid = {} if last else {x: reopened[x] for x in asked if x in reopened}
             api.session_deadline = time.monotonic() + PEER_SESSION_S
             client = MBSliceClient(api, db_dsn=self.db_dsn, source_node=node)
-            leftovers: list[str] = []
+            leftovers: list[str] = list(held_back)
             waited = False
-            for i in range(0, len(remaining), batch_size):
-                batch = remaining[i:i + batch_size]
+            for i in range(0, len(asked), batch_size):
+                batch = asked[i:i + batch_size]
                 if time.monotonic() >= api.session_deadline:
                     # The source's session is over, not failed: the rest
                     # stays pending for the next source or cycle.
-                    leftovers.extend(remaining[i:])
+                    leftovers.extend(asked[i:])
                     break
-                stats = await loop.run_in_executor(None, client.run, batch)
+                stats = await self._isolated(client, node, batch, avoid)
+                if stats is None:
+                    reasons.add("error")
+                    leftovers.extend(asked[i:])
+                    break
                 if "retry_after" in stats and not waited:
                     # The peer's per-IP window is full — usually our own sync
                     # walk just spent it. Wait that out ONCE per source and
@@ -348,20 +383,34 @@ class MbSliceCycle:
                     waited = True
                     await asyncio.sleep(wait)
                     if time.monotonic() >= api.session_deadline:
-                        leftovers.extend(remaining[i:])
+                        leftovers.extend(asked[i:])
                         break
-                    stats = await loop.run_in_executor(None, client.run, batch)
+                    stats = await self._isolated(client, node, batch, avoid)
+                    if stats is None:
+                        reasons.add("error")
+                        leftovers.extend(asked[i:])
+                        break
                 if "error" in stats and time.monotonic() >= api.session_deadline:
                     # The session ended under this batch, not the source.
-                    leftovers.extend(remaining[i:])
+                    leftovers.extend(asked[i:])
                     break
                 if "error" in stats:
                     leftovers.extend(batch)
+                    if stats.get("refused"):
+                        # What the peer says this node did: the evidence in the
+                        # node's log (its kind went to support in _isolated);
+                        # the peer is asked no more.
+                        logger.warning("MB slice: %s refuses this node's requests: %s",
+                                       node[:16], stats["refused"])
+                        reasons.add("error")
+                        self._sources.drop(node)
+                        leftovers.extend(asked[i + batch_size:])
+                        break
                     if "retry_after" in stats:
                         # Still limited after the wait: every further batch
                         # on this source would 429 too.
                         reasons.add("rate_limited")
-                        leftovers.extend(remaining[i + batch_size:])
+                        leftovers.extend(asked[i + batch_size:])
                         break
                     reasons.add("error")
                     self._sources.drop(node)
@@ -393,6 +442,26 @@ class MbSliceCycle:
                 and any(tier <= _DRAIN_TIER for _, tier in pending)):
             self.request("drain")
         return total
+
+    async def _isolated(self, client: MBSliceClient, node: str, batch: list,
+                        avoid: dict) -> Optional[dict]:
+        """`client.run`, or None when it raised: one source's answer must not
+        end the run for the others — the source is skipped for the rest of it."""
+        loop = asyncio.get_event_loop()
+        try:
+            stats = await loop.run_in_executor(None, client.run, batch, avoid)
+            if stats.get("refused") and self._diag_record:
+                # What the peer says this node did, as MBSliceClient validated
+                # it: its kind for support (slice_trust.refusal_report).
+                from desktop.p2p.slice_trust import refusal_report
+                await loop.run_in_executor(None, self._diag_record, "mb_slice.refused",
+                                           refusal_report(stats["refused"]))
+            return stats
+        except Exception as e:
+            logger.warning("MB slice: source %s failed (%s) — skipped this run", str(node)[:16], e,
+                           exc_info=True)
+            self._sources.drop(node)
+            return None
 
     async def _publish(self, *, pending: int, served: int, unserved: int, reason: str,
                        sources: int) -> None:

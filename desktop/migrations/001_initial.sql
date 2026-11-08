@@ -2902,7 +2902,11 @@ CREATE TABLE IF NOT EXISTS mb_release_group_tag (
     last_updated  TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_mb_artist_gid            ON mb_artist(gid);
+-- One row per MBID. A slice's artist or group row under an MBID another row
+-- holds under another id is a clash, as is a row whose id another row holds
+-- under another MBID: none of the slice's rows land until MusicBrainz's answers
+-- settle it (desktop/mb_slice_client.py).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mb_artist_gid         ON mb_artist(gid);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_name_trgm      ON mb_artist     USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_trgm  ON mb_artist     USING gin (lower(sort_name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_artist   ON mb_artist_alias(artist);
@@ -2923,7 +2927,7 @@ CREATE INDEX IF NOT EXISTS idx_mb_acn_artist            ON mb_artist_credit_name
 CREATE INDEX IF NOT EXISTS idx_mb_rg_credit             ON mb_release_group(artist_credit);
 -- A release group is looked up by its gid from the album row: every album a
 -- discography mint materializes reads its releases' tracklists that way.
-CREATE INDEX IF NOT EXISTS idx_mb_rg_gid                ON mb_release_group(gid);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mb_release_group_gid  ON mb_release_group(gid);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_type               ON mb_release_group(type);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_name_trgm          ON mb_release_group USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_release_rg            ON mb_release(release_group);
@@ -2969,7 +2973,11 @@ CREATE TABLE IF NOT EXISTS mb_slice_fetches (
     receipt        TEXT,                       -- hex signature over payload_sha256
     payload_sha256 TEXT,
     source_addr    UUID,                       -- uuid5(NS, 'node_addr:{host}') — pseudonymized, ban correlation
-    fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    relay          CHAR(64),                   -- the node that passed it, by the key its TLS channel proved
+    -- The answer counts for nothing (its blob lost a clash, or a rebuild left
+    -- it out): the name is asked again, of another author first.
+    void           BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- Local ban list for P2P slice sources. Ban anchor is the PUBKEY (proven by
@@ -3423,10 +3431,24 @@ CREATE TABLE IF NOT EXISTS mb_slice_blobs (
     -- On a dump node, the key of what its own build covers (the matched
     -- artist ids, mb_slice_queries.match_key): one subtree is built per
     -- match set and a few spellings kept. NULL for a blob a replica keeps.
-    match_key     TEXT
+    match_key     TEXT,
+    -- The node that passed it here (its channel's key; the author's for its
+    -- own answer, NULL for this node's own build), when this node last
+    -- checked it against MusicBrainz before passing it on, whether a check
+    -- found a suspected fabrication in it, and whether one of its rows clashes
+    -- with a row held under another MBID (desktop/p2p/slice_checks.py).
+    relay         CHAR(64),
+    checked_at    TIMESTAMPTZ,
+    suspect       BOOLEAN NOT NULL DEFAULT FALSE,
+    contested     BOOLEAN NOT NULL DEFAULT FALSE,
+    -- The blob's hash, and the MBIDs of its artist, group, release and
+    -- recording rows: which kept blob carries a row a clash proved false.
+    payload_sha256 CHAR(64),
+    mbids         UUID[] NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_mb_slice_blobs_match
     ON mb_slice_blobs (match_key, dump_version) WHERE match_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mb_slice_blobs_mbids ON mb_slice_blobs USING gin (mbids);
 
 -- ListenBrainz listening statistics (CC0, the listenbrainz.org statistics
 -- dump — backend/lb_dump_load.py). Per recording: SUM/COUNT over every LB
@@ -3467,7 +3489,8 @@ CREATE TABLE IF NOT EXISTS lb_slice_fetches (
     receipt        TEXT,
     payload_sha256 TEXT,
     source_addr    UUID,
-    fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    relay          CHAR(64)
 );
 
 -- Verified per-artist blobs kept verbatim with the ORIGINAL dump node's
@@ -3479,7 +3502,10 @@ CREATE TABLE IF NOT EXISTS lb_slice_blobs (
     author_pubkey CHAR(64) NOT NULL,
     sig           CHAR(128) NOT NULL,
     blob_gz       BYTEA NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    relay         CHAR(64),                 -- as mb_slice_blobs
+    checked_at    TIMESTAMPTZ,
+    suspect       BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- The on-demand lane: an artist page opened on a slice node. The row is the
@@ -3500,6 +3526,326 @@ END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_artist_mbids_lb_pending ON artist_mbids;
 CREATE TRIGGER trg_artist_mbids_lb_pending AFTER INSERT ON artist_mbids
     FOR EACH STATEMENT EXECUTE FUNCTION notify_lb_pending();
+
+-- MusicBrainz's own answers (backend/mb_answers.py), on a node that has
+-- catalogue slices and no MusicBrainz database. Any node's signed slice may
+-- nominate what the canon merges, renames or mints; MusicBrainz decides: the
+-- entities involved are asked of its web service by MBID — never by name —
+-- and the decision is re-made on these rows (backend/canon/confirm.py). Kept
+-- normalized by MBID and reused for 30 days. `unknown` is a definitive 404
+-- only (a timeout or a 5xx is no answer); `forwarded` names the entity a
+-- merged MBID now leads to, whose rows are stored under its own MBID.
+-- mbws_queue is what is still to ask, mbws_waiters the subjects that wait on
+-- each answer: one consumer thread asks at MusicBrainz's pace and wakes them.
+DO $$ BEGIN
+    CREATE TYPE mbws_kind AS ENUM ('artist', 'release_group', 'release', 'recording',
+                                   'artist_release_groups');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE mbws_status AS ENUM ('found', 'forwarded', 'unknown');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE mbws_credit_owner AS ENUM ('release_group', 'release', 'track', 'recording');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE mbws_subject AS ENUM ('owned_artist', 'discography', 'phantom', 'credit_head',
+                                      'scrobble_name', 'slice_check');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS mbws_answers (
+    kind        mbws_kind   NOT NULL,
+    mbid        UUID        NOT NULL,
+    status      mbws_status NOT NULL,
+    target      UUID,
+    answered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (kind, mbid)
+);
+
+CREATE TABLE IF NOT EXISTS mbws_artists (
+    mbid           UUID PRIMARY KEY,
+    name           TEXT NOT NULL,
+    sort_name      TEXT,
+    disambiguation TEXT,
+    type           TEXT,
+    area           TEXT
+);
+CREATE TABLE IF NOT EXISTS mbws_artist_aliases (
+    artist    UUID     NOT NULL REFERENCES mbws_artists(mbid) ON DELETE CASCADE,
+    ord       SMALLINT NOT NULL,
+    name      TEXT     NOT NULL,
+    sort_name TEXT,
+    locale    TEXT,
+    PRIMARY KEY (artist, ord)
+);
+CREATE TABLE IF NOT EXISTS mbws_artist_genres (
+    artist UUID    NOT NULL REFERENCES mbws_artists(mbid) ON DELETE CASCADE,
+    genre  TEXT    NOT NULL,
+    count  INTEGER NOT NULL,
+    PRIMARY KEY (artist, genre)
+);
+CREATE TABLE IF NOT EXISTS mbws_artist_members (
+    artist      UUID NOT NULL REFERENCES mbws_artists(mbid) ON DELETE CASCADE,
+    group_mbid  UUID NOT NULL,
+    member_mbid UUID NOT NULL,
+    PRIMARY KEY (artist, group_mbid, member_mbid)
+);
+CREATE TABLE IF NOT EXISTS mbws_artist_urls (
+    artist UUID NOT NULL REFERENCES mbws_artists(mbid) ON DELETE CASCADE,
+    url    TEXT NOT NULL,
+    PRIMARY KEY (artist, url)
+);
+
+CREATE TABLE IF NOT EXISTS mbws_release_groups (
+    mbid               UUID PRIMARY KEY,
+    title              TEXT NOT NULL,
+    primary_type       TEXT,
+    first_release_date TEXT
+);
+CREATE TABLE IF NOT EXISTS mbws_release_group_types (
+    release_group  UUID NOT NULL REFERENCES mbws_release_groups(mbid) ON DELETE CASCADE,
+    secondary_type TEXT NOT NULL,
+    PRIMARY KEY (release_group, secondary_type)
+);
+-- browsed_at: the start of the browse that listed the group; the browse's
+-- last page removes what an earlier one listed and it did not.
+CREATE TABLE IF NOT EXISTS mbws_artist_release_groups (
+    artist        UUID        NOT NULL,
+    release_group UUID        NOT NULL,
+    browsed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (artist, release_group)
+);
+
+CREATE TABLE IF NOT EXISTS mbws_releases (
+    mbid          UUID PRIMARY KEY,
+    title         TEXT NOT NULL,
+    status        TEXT,
+    barcode       TEXT,
+    release_group UUID,
+    date          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mbws_releases_group ON mbws_releases (release_group);
+CREATE TABLE IF NOT EXISTS mbws_release_urls (
+    release UUID NOT NULL REFERENCES mbws_releases(mbid) ON DELETE CASCADE,
+    url     TEXT NOT NULL,
+    PRIMARY KEY (release, url)
+);
+CREATE TABLE IF NOT EXISTS mbws_tracks (
+    release      UUID     NOT NULL REFERENCES mbws_releases(mbid) ON DELETE CASCADE,
+    disc         SMALLINT NOT NULL,
+    position     SMALLINT NOT NULL,
+    mbid         UUID,
+    title        TEXT     NOT NULL,
+    length_ms    INTEGER,
+    recording    UUID,
+    media_format TEXT,
+    PRIMARY KEY (release, disc, position)
+);
+CREATE INDEX IF NOT EXISTS idx_mbws_tracks_recording ON mbws_tracks (recording);
+
+CREATE TABLE IF NOT EXISTS mbws_recordings (
+    mbid      UUID PRIMARY KEY,
+    title     TEXT NOT NULL,
+    length_ms INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS mbws_credits (
+    owner_kind  mbws_credit_owner NOT NULL,
+    owner       UUID     NOT NULL,
+    position    SMALLINT NOT NULL,
+    artist      UUID     NOT NULL,
+    artist_name TEXT     NOT NULL,
+    credited_as TEXT     NOT NULL,
+    join_phrase TEXT     NOT NULL DEFAULT '',
+    PRIMARY KEY (owner_kind, owner, position)
+);
+CREATE INDEX IF NOT EXISTS idx_mbws_credits_artist ON mbws_credits (artist);
+
+-- attempts, not_before: an item whose own request failed is asked again
+-- only after not_before, while the rest of the queue goes on. browse_*: how
+-- far a browse of an artist's groups got (the artist it is for, when it
+-- began, the next page's offset), so a page is a step and a failure resumes.
+CREATE TABLE IF NOT EXISTS mbws_queue (
+    kind           mbws_kind   NOT NULL,
+    mbid           UUID        NOT NULL,
+    priority       SMALLINT    NOT NULL,
+    author         TEXT,
+    queued_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    attempts       SMALLINT    NOT NULL DEFAULT 0,
+    not_before     TIMESTAMPTZ,
+    browse_target  UUID,
+    browse_started TIMESTAMPTZ,
+    browse_offset  INTEGER     NOT NULL DEFAULT 0,
+    PRIMARY KEY (kind, mbid)
+);
+CREATE INDEX IF NOT EXISTS idx_mbws_queue_order ON mbws_queue (priority, queued_at);
+CREATE TABLE IF NOT EXISTS mbws_waiters (
+    kind        mbws_kind    NOT NULL,
+    mbid        UUID         NOT NULL,
+    subject     mbws_subject NOT NULL,
+    subject_key TEXT         NOT NULL,
+    PRIMARY KEY (kind, mbid, subject, subject_key),
+    FOREIGN KEY (kind, mbid) REFERENCES mbws_queue (kind, mbid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_mbws_waiters_subject ON mbws_waiters (subject, subject_key);
+
+-- A binding MusicBrainz's answers refuted — the MBID does not name what the
+-- local artist is — is withdrawn and remembered here, so that a slice still
+-- carrying the old claim cannot bind the pair again (every tier writes
+-- artist_mbids; the trigger is the one place that refuses it).
+CREATE TABLE IF NOT EXISTS mb_refuted_bindings (
+    artist_id  UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    mbid       UUID NOT NULL,
+    refuted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (artist_id, mbid)
+);
+
+CREATE OR REPLACE FUNCTION artist_mbids_refuted() RETURNS trigger AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM mb_refuted_bindings r
+                WHERE r.artist_id = NEW.artist_id AND r.mbid = NEW.mbid) THEN
+        RETURN NULL;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DO $$ BEGIN CREATE TRIGGER artist_mbids_refuted_trg
+    BEFORE INSERT OR UPDATE OF mbid, artist_id ON artist_mbids
+    FOR EACH ROW EXECUTE FUNCTION artist_mbids_refuted();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Catalogue slices from any author: what each kept slice carried and who
+-- passed it on (slice_index — appended at every import, never overwritten:
+-- a fact is attributed only through it), what MusicBrainz's answers proved
+-- about a slice (slice_evidence: P1 a dump version from the future, P2 rows
+-- outside its own subtree, S1–S2 suspected fabrications — one row per event),
+-- how many facts each author and relay had checked a day (slice_tally: the
+-- rates' denominators), and the penalties of the slice lanes alone
+-- (slice_penalties: a convicted author, a quarantined relay — kept apart from
+-- p2p_node_bans, which every lane's admission reads). A blob passes on only
+-- once its check ran (mb_slice_blobs.checked_at, suspect, contested).
+DO $$ BEGIN
+    CREATE TYPE slice_family AS ENUM ('mb', 'lb');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE slice_evidence_kind AS ENUM ('P1', 'P2', 'S1', 'S2');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE slice_entity AS ENUM ('dump_version', 'subtree', 'artist', 'release_group',
+                                      'release', 'recording');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE slice_party AS ENUM ('author', 'relay');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS slice_index (
+    id              BIGSERIAL PRIMARY KEY,
+    family          slice_family NOT NULL,
+    key             TEXT         NOT NULL,
+    author          CHAR(64)     NOT NULL,
+    relay           CHAR(64)     NOT NULL,
+    relay_addr      UUID,
+    payload_sha256  CHAR(64)     NOT NULL,
+    dump_version    TEXT         NOT NULL,
+    subject_artists UUID[]       NOT NULL DEFAULT '{}',
+    subject_groups  UUID[]       NOT NULL DEFAULT '{}',
+    imported_at     TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_slice_index_key ON slice_index (family, key);
+CREATE INDEX IF NOT EXISTS idx_slice_index_author ON slice_index (author);
+CREATE INDEX IF NOT EXISTS idx_slice_index_relay ON slice_index (relay);
+CREATE INDEX IF NOT EXISTS idx_slice_index_payload ON slice_index (payload_sha256);
+CREATE INDEX IF NOT EXISTS idx_slice_index_artists ON slice_index USING gin (subject_artists);
+CREATE INDEX IF NOT EXISTS idx_slice_index_groups ON slice_index USING gin (subject_groups);
+
+CREATE TABLE IF NOT EXISTS slice_evidence (
+    id             BIGSERIAL PRIMARY KEY,
+    family         slice_family        NOT NULL,
+    key            TEXT                NOT NULL,
+    author         CHAR(64)            NOT NULL,
+    relay          CHAR(64)            NOT NULL,
+    kind           slice_evidence_kind NOT NULL,
+    entity         slice_entity        NOT NULL,
+    mbid           UUID,
+    dump_version   TEXT                NOT NULL,
+    payload_sha256 CHAR(64)            NOT NULL,
+    seen_at        TIMESTAMPTZ         NOT NULL DEFAULT now(),
+    -- Found through one of the blob's subject artists when it has no more
+    -- than the check draws (slice_checks.SUBJECTS_PER_CHECK): any node's
+    -- check of the blob saw it, the node that passed the blob on included.
+    covered        BOOLEAN             NOT NULL DEFAULT FALSE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_slice_evidence_event
+    ON slice_evidence (payload_sha256, kind, entity, mbid) NULLS NOT DISTINCT;
+CREATE INDEX IF NOT EXISTS idx_slice_evidence_author ON slice_evidence (author, seen_at);
+CREATE INDEX IF NOT EXISTS idx_slice_evidence_relay ON slice_evidence (relay, seen_at);
+
+CREATE TABLE IF NOT EXISTS slice_tally (
+    day    DATE         NOT NULL,
+    party  slice_party  NOT NULL,
+    pubkey CHAR(64)     NOT NULL,
+    family slice_family NOT NULL,
+    facts  INTEGER      NOT NULL DEFAULT 0,
+    events INTEGER      NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, party, pubkey, family)
+);
+
+CREATE TABLE IF NOT EXISTS slice_penalties (
+    pubkey      CHAR(64)    PRIMARY KEY,
+    party       slice_party NOT NULL,
+    email_token TEXT,
+    evidence    BIGINT      REFERENCES slice_evidence(id) ON DELETE SET NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_slice_penalties_token ON slice_penalties (email_token)
+    WHERE email_token IS NOT NULL;
+-- What a pending check of a kept blob drew at random (slice_checks.py), so
+-- that its verdict reads exactly the facts it asked MusicBrainz about.
+CREATE TABLE IF NOT EXISTS slice_check_plans (
+    family     slice_family NOT NULL,
+    key        TEXT         NOT NULL,
+    subjects   UUID[]       NOT NULL DEFAULT '{}',
+    releases   UUID[]       NOT NULL DEFAULT '{}',
+    recordings UUID[]       NOT NULL DEFAULT '{}',
+    planned_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (family, key)
+);
+-- A kept blob one of whose artist, group, release or recording rows
+-- contradicts the row held here under its id (another MBID), or whose artist
+-- or group row carries an MBID held here under another id: none of its rows
+-- land until MusicBrainz's answers settle it. Keyed by the
+-- blob's payload: a later blob of the name is judged on its own rows.
+-- Settles nothing else: MusicBrainz never reuses a row id, so in the other
+-- tables the held row stays and the rest of a blob lands.
+DO $$ BEGIN
+    CREATE TYPE mb_slice_table AS ENUM ('mb_artist', 'mb_release_group', 'mb_release', 'mb_recording');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE TABLE IF NOT EXISTS slice_clashes (
+    family         slice_family   NOT NULL,
+    key            TEXT           NOT NULL,
+    payload_sha256 CHAR(64)       NOT NULL,
+    entity         mb_slice_table NOT NULL,
+    incoming       UUID           NOT NULL,
+    held           UUID           NOT NULL,
+    -- One MBID under two ids (incoming = held): the two rows' names, which
+    -- MusicBrainz's answer for the MBID tells apart.
+    incoming_name  TEXT,
+    held_name      TEXT,
+    noted_at       TIMESTAMPTZ    NOT NULL DEFAULT now(),
+    PRIMARY KEY (family, key, payload_sha256, entity, incoming, held)
+);
+-- A winning author's clash wins a day: past a few, its blob loses instead
+-- (desktop/p2p/slice_checks.CLASH_WINS_A_DAY).
+CREATE TABLE IF NOT EXISTS slice_clash_wins (
+    day    DATE     NOT NULL,
+    author CHAR(64) NOT NULL,
+    wins   INTEGER  NOT NULL,
+    PRIMARY KEY (day, author)
+);
+CREATE TABLE IF NOT EXISTS slice_burned_mailboxes (
+    email_token TEXT        PRIMARY KEY,
+    burned_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 
 -- Carry v4: the offer round speaks recording MBIDs — the carrier matches
 -- them against its phantom tracklist layer (3.5M rows) per offer.

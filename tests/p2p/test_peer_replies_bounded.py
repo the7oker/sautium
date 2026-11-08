@@ -20,12 +20,14 @@ import zlib
 from types import SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from desktop import api_client
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import bloom, lb_slice_queries, mb_slice_queries, peer_auth, sync_walk, wire
 from desktop.p2p.bloom import BloomFilter
 from desktop.p2p.sync_walk import SyncWalk
+from tests.slice_certs import certificate, certified, trust
 
 
 class _Peer(http.server.BaseHTTPRequestHandler):
@@ -222,32 +224,41 @@ def test_a_filter_outside_its_bounds_is_refused(over):
 
 # -- slice blobs ----------------------------------------------------------------
 
-def _entry(raw: bytes) -> dict:
-    return {"author_pubkey": "ab" * 32, "sig": "00" * 64,
-            "blob_gz": base64.b64encode(gzip.compress(raw)).decode()}
+SLICE_AUTHOR = Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+
+
+def _entry(raw: bytes, gz=gzip.compress) -> dict:
+    """A certified author's entry: what refuses it is its blob, not its author."""
+    return certified({"author_pubkey": SLICE_AUTHOR, "sig": "00" * 64,
+                      "blob_gz": base64.b64encode(gz(raw)).decode()}, certificate(SLICE_AUTHOR))
 
 
 def test_an_mb_blob_that_inflates_past_its_bound_is_refused_before_its_signature(monkeypatch):
-    monkeypatch.setattr(mb_slice_queries, "BLOB_RAW_MAX", 1024)
+    trust(monkeypatch)
     called = []
     monkeypatch.setattr("desktop.node_identity.verify_signature",
-                        lambda *a: called.append(a) or True)
-    assert mb_slice_queries.verify_slice_entry("x", _entry(b"{" + b" " * 4096 + b"}")) is None
-    assert not called
+                        lambda *a: called.append(a) or False)
+    raw = b"{" + b" " * 4096 + b"}"
+    assert mb_slice_queries.verify_slice_entry("x", _entry(raw)) is None
+    assert len(called) == 1                          # within its bound, its signature is checked
+    monkeypatch.setattr(mb_slice_queries, "BLOB_RAW_MAX", 1024)
+    assert mb_slice_queries.verify_slice_entry("x", _entry(raw)) is None
+    assert len(called) == 1
 
 
 def test_an_lb_blob_that_is_corrupt_or_too_large_is_refused_not_raised(monkeypatch):
-    corrupt = {"author_pubkey": "ab" * 32, "sig": "00" * 64,
-               "blob_gz": base64.b64encode(b"\x1f\x8b\x08\x00" + b"\xff" * 64).decode()}
-    assert lb_slice_queries.verify_slice_entry(
-        "00000000-0000-0000-0000-000000000000", corrupt) is None
-    monkeypatch.setattr(lb_slice_queries, "BLOB_RAW_MAX", 1024)
+    trust(monkeypatch)
+    mbid = "00000000-0000-0000-0000-000000000000"
     called = []
     monkeypatch.setattr("desktop.node_identity.verify_signature",
-                        lambda *a: called.append(a) or True)
-    assert lb_slice_queries.verify_slice_entry(
-        "00000000-0000-0000-0000-000000000000", _entry(b" " * 4096)) is None
-    assert not called
+                        lambda *a: called.append(a) or False)
+    corrupt = _entry(b"", gz=lambda _: b"\x1f\x8b\x08\x00" + b"\xff" * 64)
+    assert lb_slice_queries.verify_slice_entry(mbid, corrupt) is None
+    assert lb_slice_queries.verify_slice_entry(mbid, _entry(b" " * 4096)) is None
+    assert len(called) == 1                          # only the blob that inflated reached its signature
+    monkeypatch.setattr(lb_slice_queries, "BLOB_RAW_MAX", 1024)
+    assert lb_slice_queries.verify_slice_entry(mbid, _entry(b" " * 4096)) is None
+    assert len(called) == 1
 
 
 # -- wire -----------------------------------------------------------------------
@@ -373,7 +384,7 @@ def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
         def __init__(self, api, db_dsn, source_node):
             pass
 
-        def run(self, batch):
+        def run(self, batch, avoid=None):
             asked.append(batch)
             return {"error": "no response"}
 
@@ -382,7 +393,9 @@ def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
 
     cycle._publish, cycle.find_sources = publish, sources
     monkeypatch.setattr(cycle_mod, "local_dump_available", lambda dsn: False)
+    monkeypatch.setattr(cycle_mod, "published_newest", lambda dsn, family: None)
     monkeypatch.setattr(cycle_mod, "pending_names", lambda dsn, n: [("A", 1), ("B", 1)])
+    monkeypatch.setattr(cycle_mod, "reopened_authors", lambda dsn, names: {})
     monkeypatch.setattr(cycle_mod, "PEER_SESSION_S", 0)
     monkeypatch.setattr(cycle_mod, "MBSliceClient", _Client)
     asyncio.run(cycle.run())
@@ -390,7 +403,8 @@ def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
     assert published[-1]["unserved"] == 2
     # A batch under way when the session ends fails by the session's end.
     monkeypatch.setattr(cycle_mod, "PEER_SESSION_S", 0.2)
-    _Client.run = lambda self, batch: (asked.append(batch), time.sleep(0.3), {"error": "no response"})[2]
+    _Client.run = lambda self, batch, avoid=None: (asked.append(batch), time.sleep(0.3),
+                                                   {"error": "no response"})[2]
     asyncio.run(cycle.run())
     assert asked == [["A", "B"]] and dropped == []
     assert published[-1]["unserved"] == 2

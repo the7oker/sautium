@@ -456,6 +456,15 @@ async def lifespan(app: FastAPI):
     import lastfm_history
     lastfm_history.resume()
 
+    # A node with catalogue slices and no MusicBrainz database re-makes its
+    # canon's irreversible decisions on MusicBrainz's own answers: one consumer
+    # asks for them at MusicBrainz's pace and wakes what waited (mb_answers).
+    _register_mb_wakers()
+    import mb_answers
+    mb_answers.start()
+    _start_slice_rebuilder()
+    _start_slice_checker()
+
     # The install-time AI pick (the wizard's via backend.env, compose's
     # DEFAULT_PROVIDER) becomes the user_settings row at the first boot
     # without one; from then on the row is the pick every reader sees.
@@ -1560,10 +1569,155 @@ async def normalize_artists_endpoint(
 
 _canon_trigger_lock = threading.Lock()
 _canon_trigger_running = False
+# What the runs to come must cover: a whole pass (a slice import, the
+# endpoint) or the subjects MusicBrainz's answers woke. A trigger that lands
+# during a run is taken by the next one — the run started before what it
+# brought.
+_canon_wanted = {"full": False, "owned": set(), "phantom": set()}
+
+
+def _register_mb_wakers() -> None:
+    """What each kind of subject waiting on MusicBrainz's answers runs when
+    its last answer arrives (mb_answers.on_ready)."""
+    import background_enrichment
+    import mb_answers
+    from canon import scrobbles
+    mb_answers.on_ready("owned_artist", lambda keys: _start_canon_trigger(owned=keys))
+    mb_answers.on_ready("phantom", lambda keys: _start_canon_trigger(phantom=keys))
+    mb_answers.on_ready("credit_head",
+                        lambda _keys: background_enrichment.wake_db_steps("MusicBrainz answers"))
+    mb_answers.on_ready("discography",
+                        lambda _keys: background_enrichment.wake_db_steps("MusicBrainz answers"))
+    mb_answers.on_ready("scrobble_name", lambda keys: scrobbles.wake(names=keys))
+    mb_answers.on_ready("slice_check", _evaluate_slice_checks)
+
+
+_slice_checks_due: set = set()
+_slice_checks_lock = threading.Lock()
+_slice_checks_wake = threading.Event()
+# A check that failed is tried again after these seconds, doubling to the cap.
+_SLICE_CHECK_RETRY_S = 30
+_SLICE_CHECK_RETRY_CAP_S = 1800
+# The checks whose answers are all here (no waiter left): those a restart
+# cut off from their wake.
+_SLICE_CHECKS_SWEEP_SQL = """
+    SELECT DISTINCT x.family::text || ':' || x.key AS k FROM (
+        SELECT family, key FROM slice_check_plans
+        UNION SELECT family, key FROM slice_clashes) x
+     WHERE NOT EXISTS (SELECT 1 FROM mbws_waiters w
+                        WHERE w.subject = 'slice_check'
+                          AND w.subject_key = x.family::text || ':' || x.key)"""
+
+
+def _evaluate_slice_checks(keys: list) -> None:
+    """The checks of kept slices whose answers are in, handed to the slice
+    checker (_start_slice_checker) — never judged on the answers' consumer
+    thread, which a verdict waiting for a rebuild would park."""
+    with _slice_checks_lock:
+        _slice_checks_due.update(keys)
+    _slice_checks_wake.set()
+
+
+def _start_slice_checker() -> None:
+    """Each check's verdict, its evidence and the judgment of its author and
+    source (desktop/p2p/slice_checks.evaluate), on a thread of its own: woken
+    by the answers, a key whose check failed tried again after a growing
+    delay — the deadline of a known failure, not a poll —, and at start every
+    check whose answers came while the node was down."""
+    from db_pool import db_query, get_conn
+    from desktop.p2p import slice_checks
+
+    def run() -> None:
+        failed: Dict[str, tuple] = {}      # key → (delay, when it is due)
+        try:
+            _evaluate_slice_checks([r["k"] for r in db_query(_SLICE_CHECKS_SWEEP_SQL)])
+        except Exception:
+            logger.exception("slice checks: the start's sweep failed — the waiting checks "
+                             "run at their next answer")
+        while True:
+            with _slice_checks_lock:
+                keys = set(_slice_checks_due)
+                _slice_checks_due.clear()
+            now = time.monotonic()
+            keys |= {k for k, (_, due) in failed.items() if due <= now}
+            for key in sorted(keys):
+                family, name = slice_checks.parse_subject_key(key)
+                try:
+                    with get_conn() as conn:
+                        slice_checks.evaluate(conn, family, name)
+                    failed.pop(key, None)
+                except Exception:
+                    delay = min(_SLICE_CHECK_RETRY_CAP_S,
+                                failed[key][0] * 2 if key in failed else _SLICE_CHECK_RETRY_S)
+                    failed[key] = (delay, time.monotonic() + delay)
+                    logger.warning("slice check of %s failed — tried again in %d s", key[:80],
+                                   delay, exc_info=True)
+            with _slice_checks_lock:
+                if _slice_checks_due:
+                    continue
+            due = min((d for _, d in failed.values()), default=None)
+            _slice_checks_wake.wait(None if due is None else max(0.0, due - time.monotonic()))
+            _slice_checks_wake.clear()
+
+    threading.Thread(target=run, daemon=True, name="slice-checks").start()
+
+
+# A failed rebuild is tried again after these seconds, doubling to the cap:
+# the deadline of a known failure (a deadlock, a full disk), not a poll.
+_REBUILD_RETRY_S = 30
+_REBUILD_RETRY_CAP_S = 1800
+
+
+def _start_slice_rebuilder() -> None:
+    """The slice catalogue rebuilt when a drop or a settled clash asked for
+    it (desktop/p2p/slice_rebuild.run_pending): one rebuild at a time, on a
+    thread of its own — never the MusicBrainz answers' consumer —, woken by
+    NOTIFY and on every (re)connect, so a request a restart cut short runs at
+    start; one that failed runs again after a growing delay. A rebuild that
+    changed the catalogue hands it to the canon."""
+    from db_pool import Listener, get_conn
+    from desktop.p2p import slice_rebuild
+    wake = threading.Event()
+
+    def run() -> None:
+        retry = None
+        while True:
+            wake.wait(retry)
+            wake.clear()
+            try:
+                with get_conn() as conn:
+                    done = slice_rebuild.run_pending(conn)
+            except Exception:
+                retry = min(_REBUILD_RETRY_CAP_S, retry * 2 if retry else _REBUILD_RETRY_S)
+                logger.warning("slice catalogue rebuild failed — tried again in %d s, or on the "
+                               "next request", retry, exc_info=True)
+                continue
+            retry = None
+            if done:
+                _start_canon_trigger()
+
+    threading.Thread(target=run, daemon=True, name="slice-rebuild").start()
+    Listener("slice-rebuild-listen", (slice_rebuild.CHANNEL,),
+             on_notify=lambda _n: wake.set(), on_connect=wake.set).start()
 
 
 def _canon_trigger_worker():
     global _canon_trigger_running
+    while True:
+        with _canon_trigger_lock:
+            full = _canon_wanted["full"]
+            owned, phantom = sorted(_canon_wanted["owned"]), sorted(_canon_wanted["phantom"])
+            if not (full or owned or phantom):
+                _canon_trigger_running = False
+                return
+            _canon_wanted.update(full=False, owned=set(), phantom=set())
+        _canon_run(full, owned, phantom)
+
+
+def _canon_run(full: bool, owned: list, phantom: list) -> None:
+    """One canon run: the whole pass, or only the owned artists and the
+    similar-artist stubs whose answers just came (`owned`, `phantom`) — a
+    woken subject re-decides itself, not the library."""
     try:
         # Re-evaluate the MB data source: the caller (P2P slice import) may have
         # just inserted the FIRST mb_artist rows into a dump-less node.
@@ -1573,9 +1727,12 @@ def _canon_trigger_worker():
             logger.info("Canonicalize trigger: no local MB data — skipped")
             return
         # Phantom disambiguation joins through the curated genre vocabulary,
-        # which slices never carry (it comes from the MB web API, not the dump).
+        # which slices never carry (it comes from the MB web API, not the dump):
+        # asked on a whole pass only, and not while MusicBrainz is cooling down.
         from db_pool import db_query
-        if not db_query("SELECT 1 FROM mb_genre LIMIT 1"):
+        import musicbrainz
+        if (full and not musicbrainz.cooldown_active()
+                and not db_query("SELECT 1 FROM mb_genre LIMIT 1")):
             import mb_dump_load
             try:
                 mb_dump_load.load_genre_list()
@@ -1587,8 +1744,10 @@ def _canon_trigger_worker():
                                    distill_album_coverage)
         canon = {}
         with algo_canon() as _ok:
-            if _ok:
-                canon = canonicalize_pending()
+            if _ok and full:
+                # The artists a wake named ride along whatever their watermark:
+                # a CLI's or a crashed pass's waiters left them stamped.
+                canon = canonicalize_pending(woken=owned)
                 canon["album_residue_bound"] = (
                     distill_album_residue().get("bound", 0)
                     + distill_album_coverage().get("bound", 0))
@@ -1596,6 +1755,11 @@ def _canon_trigger_worker():
                 # are consumed here — their only other chance is the slow
                 # background distill loop.
                 canon["phantom"] = canonize_phantom_similars(dry_run=False)
+            elif _ok:
+                if owned:
+                    canon = canonicalize_pending(artist_ids=owned)
+                if phantom:
+                    canon["phantom"] = canonize_phantom_similars(dry_run=False, artist_ids=phantom)
         logger.info(f"Triggered canon: {canon}")
         # Freshly canonized artists have discographies to reconcile, and
         # that reconcile is what mints the phantom albums the P2P sync then
@@ -1603,23 +1767,27 @@ def _canon_trigger_worker():
         if canon.get("artists") or (canon.get("phantom") or {}).get("canonized"):
             import background_enrichment
             background_enrichment.wake_db_steps("canon")
-        # The slices that triggered this are MB data for imported Last.fm
-        # names still waiting.
-        from canon import scrobbles
-        scrobbles.wake(names=())
+        if full:
+            # The slices that triggered this are MB data for imported Last.fm
+            # names still waiting.
+            from canon import scrobbles
+            scrobbles.wake(names=())
     except Exception:
         logger.exception("canonicalize trigger worker crashed")
-    finally:
-        with _canon_trigger_lock:
-            _canon_trigger_running = False
 
 
-def _start_canon_trigger() -> bool:
+def _start_canon_trigger(owned: Optional[list] = None, phantom: Optional[list] = None) -> bool:
     """Start the canon trigger worker unless one runs (single flight) —
-    the MB slice cycle's after-import hook on this surface, and the
-    endpoint below for the launcher's."""
+    the MB slice cycle's after-import hook on this surface, the endpoint
+    below for the launcher's (a whole pass), and MusicBrainz's answers for
+    the owned artists and stubs that waited on them (a run of those alone).
+    A trigger during a run is taken by the run after it."""
     global _canon_trigger_running
     with _canon_trigger_lock:
+        if owned is None and phantom is None:
+            _canon_wanted["full"] = True
+        _canon_wanted["owned"].update(owned or ())
+        _canon_wanted["phantom"].update(phantom or ())
         if _canon_trigger_running:
             return False
         _canon_trigger_running = True

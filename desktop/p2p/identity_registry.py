@@ -22,7 +22,10 @@ memory guard, `HashingError` = "busy, retry", a per-address failure
 backstop (a forged proof is a once-per-lifetime event for an honest peer,
 so five failures an hour from one place is a WAF-grade signal). A proof
 that verifies marks the identity `verified` for good; a proof that does not
-is deterministic evidence: `failed` + `p2p_node_bans`.
+is deterministic evidence: `failed` + `p2p_node_bans`. A proof another node
+relays beside an author's catalogue slice is that node's word, not the
+author's: it verifies the author, or its slice is dropped — never evidence,
+never stored (`verify_relayed`).
 
 Registry rules for a pubkey we already know: the authority anchor
 `issued_at` must match (idempotent issuance — anything else is an anomaly
@@ -58,7 +61,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional
 
 from desktop.p2p import identity_pow, identity_proof
 
@@ -230,6 +233,10 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
     subnet_id = subnet_uuid(addr)
     proof_nonce = proof["nonce"] if identity_proof.proof_binds(proof, cert) else None
     email_status = "verified" if cert["method"] == "email" else "unverified"
+    # A pow certificate's email fields are empty, as "" or as null alike (the
+    # signed payload reads both as ""): stored as NULL, never as an enum value.
+    token, klass, domain, predecessor = (cert.get(f) or None for f in (
+        "email_token", "email_class", "email_domain_token", "predecessor"))
     existing = get(conn, pubkey)
     with conn.cursor() as cur:
         if existing is None:
@@ -241,9 +248,8 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         CASE WHEN %s = 'verified' THEN now() END, %s, %s, %s, %s, %s)
             """, (pubkey, cert["v"], cert["method"], issued_at, cert["difficulty"],
-                  cert["params_version"], cert.get("email_token"), cert.get("email_class"),
-                  cert.get("email_domain_token"), cert["issuer"], cert["sig"], proof_nonce,
-                  email_status, email_status, addr_id, addr_id, cert.get("predecessor"),
+                  cert["params_version"], token, klass, domain, cert["issuer"], cert["sig"],
+                  proof_nonce, email_status, email_status, addr_id, addr_id, predecessor,
                   subnet_id, subnet_id))
             _evict_if_over_cap(cur)
             _succeed(cur, pubkey, cert)
@@ -275,7 +281,9 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
                    SET cert_v = %s, method = %s, difficulty = %s, params_version = %s,
                        email_token = %s, email_class = %s, email_domain_token = %s,
                        issuer = %s, cert_sig = %s, predecessor = COALESCE(%s, predecessor),
-                       proof_nonce = COALESCE(%s, proof_nonce),
+                       -- the nonce a verification proved stays: the work was done
+                       proof_nonce = CASE WHEN status = 'verified' THEN proof_nonce
+                                          ELSE COALESCE(%s, proof_nonce) END,
                        status = CASE WHEN %s AND status <> 'failed' THEN 'verified'::p2p_identity_status
                                      ELSE status END,
                        verified_at = CASE WHEN %s AND status <> 'failed' AND verified_at IS NULL
@@ -285,9 +293,8 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
                        last_subnet = COALESCE(%s, last_subnet)
                  WHERE pubkey = %s
             """, (cert["v"], cert["method"], cert["difficulty"], cert["params_version"],
-                  cert.get("email_token"), cert.get("email_class"), cert.get("email_domain_token"),
-                  cert["issuer"], cert["sig"], cert.get("predecessor"), proof_nonce, upgrade, upgrade,
-                  addr_id, subnet_id, pubkey))
+                  token, klass, domain, cert["issuer"], cert["sig"], predecessor, proof_nonce,
+                  upgrade, upgrade, addr_id, subnet_id, pubkey))
             _succeed(cur, pubkey, cert)
     conn.commit()
     row = get(conn, pubkey)
@@ -382,6 +389,72 @@ def _ban(cur, pubkey: str, addr: Optional[str], reason: str) -> None:
         """, (reason,))
 
 
+# One memory-hard evaluation at a time in a process, whichever path asks for
+# it: the async gate below (identity-gated requests) and `verify_relayed` (an
+# author of catalogue slices, on a thread of the slice cycle). Two at once
+# would hold 4 GiB beside a resident ML stack. Taken without waiting on
+# either path, so no thread is ever parked on it.
+_EVALUATION = threading.Semaphore(1)
+
+# Relayed proofs that did not verify, by (key, nonce): evaluated once in a
+# process, however often a node forwards them again.
+_REJECTED: set = set()
+_REJECTED_MAX = 4096
+# When a key's relayed proofs failed in the last day: at most _RELAYED_PER_DAY
+# distinct nonces of one key are evaluated a day — a node that sends fifty fake
+# proofs costs three 2 GiB evaluations, never fifty, and the true proof an
+# honest relay brings the same day is still among them.
+_RELAYED_FAILED: Dict[str, List[float]] = {}
+_RELAYED_PER_DAY = 3
+_RELAYED_DAY_S = 86400.0
+
+
+def verify_relayed(conn, cert: dict, proof: Optional[dict]) -> str:
+    """A `pow` author's proof that came with one of its slices from another
+    node — that node's word, not the author's. Evaluated on this thread when
+    the node can afford it now (another evaluation running, or too little
+    memory, leaves it 'unverified' for a later try); a proof that verifies is
+    kept as the author's own verification keeps it ('verified'); one that does
+    not is no evidence against the author — nothing is recorded, the slice
+    carrying it is dropped ('failed'), that nonce is never evaluated again, and
+    after _RELAYED_PER_DAY failed nonces of the key in a day no other is
+    evaluated that day ('unverified': kept, not passed on). Never called for a
+    verified author."""
+    if not identity_proof.proof_binds(proof, cert):
+        return "unverified"
+    seen = (cert["pubkey"].lower(), proof["nonce"])
+    if seen in _REJECTED:
+        return "failed"
+    now = time.monotonic()
+    recent = [t for t in _RELAYED_FAILED.get(seen[0], ()) if now - t < _RELAYED_DAY_S]
+    if len(recent) >= _RELAYED_PER_DAY:
+        return "unverified"
+    if not _EVALUATION.acquire(blocking=False):
+        return "unverified"
+    try:
+        avail = identity_pow.mem_available_kib()
+        if avail is not None and avail < identity_proof.MEM_GUARD_KIB:
+            return "unverified"
+        try:
+            ok = identity_proof.verify_proof(proof, cert)
+        except identity_pow.HashingError:
+            return "unverified"
+    finally:
+        _EVALUATION.release()
+    if ok:
+        mark_verified(conn, cert["pubkey"].lower(), proof["nonce"])
+        return "verified"
+    if len(_REJECTED) >= _REJECTED_MAX:
+        _REJECTED.clear()
+    _REJECTED.add(seen)
+    if len(_RELAYED_FAILED) >= _REJECTED_MAX:
+        _RELAYED_FAILED.clear()
+    _RELAYED_FAILED[seen[0]] = recent + [time.monotonic()]
+    logger.warning("a relayed proof of identity %s did not verify — its slice dropped",
+                   cert["pubkey"][:8])
+    return "failed"
+
+
 @dataclass(frozen=True)
 class Admission:
     status: str                    # verified | invalid | proof_required | failed | banned | busy | rate_limited
@@ -405,7 +478,9 @@ class IdentityGate:
         self._verify_certificate = verify_certificate
         self._mem_available_kib = mem_available_kib
         self._mem_guard_kib = mem_guard_kib
-        self._sem = asyncio.Semaphore(1)
+        # Requests waiting for the evaluator wait on the event loop, holding
+        # no thread; one that is cancelled holds nothing.
+        self._queue = asyncio.Semaphore(1)
         self._fails: dict = {}
         self._fails_lock = threading.Lock()
 
@@ -463,19 +538,26 @@ class IdentityGate:
         if meter is not None and meter.headroom < load_meter.VERIFY_MIN_HEADROOM:
             return Admission("busy", "node at its ceiling", RETRY_BUSY_SECONDS)   # the ceiling wins
         try:
-            await asyncio.wait_for(self._sem.acquire(), VERIFY_WAIT_SECONDS)
+            await asyncio.wait_for(self._queue.acquire(), VERIFY_WAIT_SECONDS)
         except asyncio.TimeoutError:
             return Admission("busy", "verifier busy", RETRY_BUSY_SECONDS)
         try:
-            avail = self._mem_available_kib()
-            if avail is not None and avail < self._mem_guard_kib:
-                return Admission("busy", "verifier short of memory", RETRY_BUSY_SECONDS)
+            # The process-wide permit is shared with the slice cycle's thread
+            # (verify_relayed), which never waits for it either.
+            if not _EVALUATION.acquire(blocking=False):
+                return Admission("busy", "verifier busy", RETRY_BUSY_SECONDS)
             try:
-                ok = await asyncio.to_thread(identity_proof.verify_proof, proof, cert)
-            except identity_pow.HashingError:
-                return Admission("busy", "verifier could not allocate", RETRY_BUSY_SECONDS)
+                avail = self._mem_available_kib()
+                if avail is not None and avail < self._mem_guard_kib:
+                    return Admission("busy", "verifier short of memory", RETRY_BUSY_SECONDS)
+                try:
+                    ok = await asyncio.to_thread(identity_proof.verify_proof, proof, cert)
+                except identity_pow.HashingError:
+                    return Admission("busy", "verifier could not allocate", RETRY_BUSY_SECONDS)
+            finally:
+                _EVALUATION.release()
         finally:
-            self._sem.release()
+            self._queue.release()
 
         if ok:
             await asyncio.to_thread(self._db, lambda c: mark_verified(c, pubkey, proof["nonce"]))

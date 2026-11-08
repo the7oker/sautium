@@ -147,8 +147,17 @@ See:
   `logger.error` for actual failures. Don't log stack traces at `info`.
 - **Rate-limit external APIs.** Last.fm: one pace per process for every
   request (`lastfm.lastfm_network`, 0.34 s ≈ 3 req/s, since 2026-09-24) —
-  never a sleep in a caller's loop. Query translation: ASCII queries bypass
-  MT entirely.
+  never a sleep in a caller's loop. MusicBrainz's web service: lookups by
+  MBID only, one pace per process (`musicbrainz.MIN_INTERVAL`, 1.05 s),
+  through the one queue's consumer (`mb_answers`), and only on a node without
+  the dump (since 2026-11-07): a 503 or 429 is a short jittered pause, a
+  failed connection or an answer that is not MusicBrainz's arms the persistent
+  cooldown, and an error tied to one entity backs that item off alone
+  (`mbws_queue.attempts`/`not_before`). The one other request is the genre vocabulary
+  (`mb_dump_load.load_genre_list` → `musicbrainz.genre_names`, `ws/2/genre/all`
+  at the same pace, which the dump archives do not carry): once per dump load,
+  and on a slice-fed node while it has none. Query translation: ASCII queries
+  bypass MT entirely.
 
 ---
 
@@ -633,7 +642,9 @@ toast takes no pointer events and never blocks the user (see
 | `docs/design/reference/claude-design-bundle/` | Claude Design handoff bundle — visual-intent reference |
 | `backend/master_node.py` | Shipped master identity pins (mirrored in desktop/p2p/) |
 | `backend/invite_tokens.py` | Invite tokens + signed grants (mirrored in desktop/p2p/) |
-| `desktop/mb_slice_client.py` | Slice requester — per-name verification against the ORIGINAL dump node's key |
+| `desktop/mb_slice_client.py` | Slice requester — per-name verification against the original author's key and certificate, its own subtree only, clashes (an id under another MBID, an artist's or group's MBID under another id) held back and asked about one at a time, every import indexed with its author and the node that passed it |
+| `backend/musicbrainz.py` + `backend/mb_answers.py` + `backend/canon/confirm.py` | MusicBrainz's web service by MBID only (one pace, the persistent cooldown, the project's User-Agent), its answers kept by MBID with the queue that asks for them, and the premises every irreversible canon decision of a node without the dump is re-made on |
+| `desktop/p2p/slice_trust.py` + `slice_checks.py` + `slice_rebuild.py` | Slices from any certified author: the subject index, proven and suspected falsifications, the penalties of the slice lanes, the check before passing a slice on, the drop in the verdict's transaction, and the rebuild of the catalogue rows a backend worker runs on request |
 | `backend/lb_dump_load.py` + `backend/dump_common.py` + `backend/dump_job.py` | The ListenBrainz statistics loader (stream the archive once, COPY two members into staging, `GROUP BY` into `lb_recording`/`lb_artist`, swap), the download/checksum/index mechanics both loaders share, and the one background-job runner both dump families use (queued one at a time) |
 | `desktop/p2p/lb_slice_queries.py` + `desktop/p2p/lb_slice_cycle.py` | The LB slice protocol (per-artist-MBID signed blobs, versioned serve/verify/import, the pending tiers) and the requester cycle shared by the launcher's P2PManager and the Docker backend (sources through `slice_sources.py`, `min_version`, the on-demand lane) |
 | `backend/assistant_queries.py` | Catalog queries + result formatting SHARED by both assistant tool surfaces (MCP + `backend/tools/definitions.py`) — one copy, so neither drifts owned-only |

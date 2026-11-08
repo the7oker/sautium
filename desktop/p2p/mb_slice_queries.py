@@ -211,11 +211,16 @@ class DumpBusy(Exception):
 # for good on the requester — so a v3 requester must not verify one.
 # Migration 016 empties every node's blob cache and provenance log.
 RECEIPT_CONTEXT = b"sautium-mb-slice-v3:"
-PROTOCOL_VERSION = 3
+# v4 (2026-11-07): any dump holder may author slices, so an entry carries its
+# author's birth certificate (author_cert, and author_proof for `pow`); the
+# signed bytes are v3's. A node passes a blob on only once its own check
+# against MusicBrainz ran (desktop/p2p/slice_checks.py).
+PROTOCOL_VERSION = 4
 
 
 def name_key(name: str) -> str:
-    """The per-name identity key — mirrors the mb_slice_fetches key."""
+    """The per-name identity key of a slice: its blob, its ledger row
+    (mb_slice_fetches), its index rows and clashes are all keyed by it."""
     return (name or "").strip().lower()
 
 
@@ -796,13 +801,28 @@ def pending_slice_names(conn, limit: int = 200) -> list:
               AND p.name !~ '[[:cntrl:]]'
               AND lower(btrim(p.name)) !~ '^\\[.*\\]$'
               AND lower(btrim(p.name)) <> 'various artists'
+              -- a signed zero-match closes a name for 30 days, then it is asked
+              -- again — of another author's source where one answers; a void
+              -- answer (its blob lost a clash, a rebuild left it out) closes
+              -- nothing
               AND NOT EXISTS (SELECT 1 FROM mb_slice_fetches f
-                              WHERE f.name_key = lower(btrim(p.name)))
+                              WHERE f.name_key = lower(btrim(p.name)) AND NOT f.void
+                                AND (f.matched_ids > 0 OR f.fetched_at > now() - interval '30 days'))
             GROUP BY p.name
             ORDER BY MIN(p.tier), MAX(p.weight) DESC NULLS LAST, p.name
             LIMIT %(lim)s
         """, {"lim": limit, "name_max": NAME_MAX_CHARS})
-        return [(r[0], r[1]) for r in cur.fetchall()]
+        rows = cur.fetchall()
+        # The ledger is keyed by name_key, which SQL's lower(btrim()) matches
+        # for every name but a few (a non-breaking space, a dotted capital I):
+        # those are told by the key itself, or they would be asked every cycle.
+        keys = {r[0]: name_key(r[0]) for r in rows}
+        cur.execute("""SELECT name_key FROM mb_slice_fetches
+                        WHERE name_key = ANY(%s) AND NOT void
+                          AND (matched_ids > 0 OR fetched_at > now() - interval '30 days')""",
+                    (sorted(set(keys.values())),))
+        closed = {r[0] for r in cur.fetchall()}
+        return [(r[0], r[1]) for r in rows if keys[r[0]] not in closed]
 
 
 # ---------------------------------------------------------------------------
@@ -837,25 +857,54 @@ def cached_slice(conn, nk: str):
 
 def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
                      sig: str, blob_gz: bytes, cap: bool = True,
-                     match: Optional[str] = None) -> bool:
-    """Upsert one verified blob. `cap=True` is the replica posture (skip
-    oversized); a dump node stores its own regardless — that is the cache,
-    each blob under the `match` key of what it covers."""
-    if cap and len(blob_gz) > RESERVE_BLOB_MAX_GZ:
-        return False
+                     match: Optional[str] = None, relay: Optional[str] = None,
+                     contested: bool = False, mbids=()) -> bool:
+    """Upsert one verified blob, with its payload's hash and the MBIDs of its
+    artist, group, release and recording rows (`mbids`, which a settled clash
+    finds its carriers by). `cap=True` is the replica posture: a blob too
+    large to keep is not stored, and the name's older blob goes with it — the
+    kept blobs always say what the ledger says. A dump node stores its own
+    regardless — that is the cache, each blob under the `match` key of what
+    it covers, `relay` None. Another blob in its place is checked anew before
+    it passes on, and what waited on the one it replaces — its clashes, its
+    check's draw — goes with it; the same bytes again keep their verdict and
+    their arrival."""
+    payload = hashlib.sha256(blob_gz).hexdigest()
     with conn.cursor() as cur:
+        cur.execute("""DELETE FROM slice_check_plans p
+                        WHERE p.family = 'mb' AND p.key = %(k)s
+                          AND NOT EXISTS (SELECT 1 FROM mb_slice_blobs b
+                                           WHERE b.name_key = %(k)s AND b.payload_sha256 = %(p)s)""",
+                    {"k": nk, "p": payload})
+        cur.execute("DELETE FROM slice_clashes WHERE family = 'mb' AND key = %s AND payload_sha256 <> %s",
+                    (nk, payload))
+        if cap and len(blob_gz) > RESERVE_BLOB_MAX_GZ:
+            cur.execute("DELETE FROM mb_slice_blobs WHERE name_key = %s", (nk,))
+            cur.execute("DELETE FROM slice_clashes WHERE family = 'mb' AND key = %s", (nk,))
+            return False
         cur.execute("""
             INSERT INTO mb_slice_blobs
-                   (name_key, dump_version, author_pubkey, sig, blob_gz, match_key)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                   (name_key, dump_version, author_pubkey, sig, blob_gz, match_key, relay,
+                    contested, payload_sha256, mbids)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid[])
             ON CONFLICT (name_key) DO UPDATE SET
                 dump_version = EXCLUDED.dump_version,
                 author_pubkey = EXCLUDED.author_pubkey,
                 sig = EXCLUDED.sig,
                 blob_gz = EXCLUDED.blob_gz,
                 match_key = EXCLUDED.match_key,
-                created_at = now()""",
-            (nk, dump_version, author_pubkey, sig, blob_gz, match))
+                relay = EXCLUDED.relay,
+                contested = EXCLUDED.contested,
+                mbids = EXCLUDED.mbids,
+                checked_at = CASE WHEN mb_slice_blobs.payload_sha256 = EXCLUDED.payload_sha256
+                                  THEN mb_slice_blobs.checked_at END,
+                suspect = coalesce(mb_slice_blobs.payload_sha256 = EXCLUDED.payload_sha256, FALSE)
+                          AND mb_slice_blobs.suspect,
+                created_at = CASE WHEN mb_slice_blobs.payload_sha256 = EXCLUDED.payload_sha256
+                                  THEN mb_slice_blobs.created_at ELSE now() END,
+                payload_sha256 = EXCLUDED.payload_sha256""",
+            (nk, dump_version, author_pubkey, sig, blob_gz, match, relay, contested, payload,
+             list(mbids)))
     return True
 
 
@@ -911,25 +960,33 @@ def _build(conn, name: str, version: str, sign_fn, author_pubkey: str,
         _builds.done(requester, counted=bool(ids))
 
 
-def count_slice_blobs(conn) -> int:
-    with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM mb_slice_blobs")
-        return int(cur.fetchone()[0])
+def count_slice_blobs(conn, own_pubkey: Optional[str] = None) -> int:
+    """What /health advertises: the blobs this node may pass on, checked or
+    not yet (desktop/p2p/slice_checks.checkable_count) — a node holding only
+    unchecked ones must still be asked, or it would never check them."""
+    from desktop.p2p import slice_checks
+    return slice_checks.checkable_count(conn, "mb", own_pubkey)
 
 
 def serve_slices(conn, names: list, sign_fn=None,
-                 author_pubkey: str = "", requester: Optional[str] = "") -> dict:
-    """The shared v3 server body for both surfaces.
+                 author_pubkey: str = "", requester: Optional[str] = "",
+                 own_cert: Optional[tuple] = None, own_pubkey: Optional[str] = None) -> dict:
+    """The shared v4 server body for both surfaces.
 
-    Per name: cached blob wins (dump node's cache and replica's inventory
-    are the same table); a dump node computes+signs+caches on a miss
-    (`sign_fn` present AND a local dump exists), within the build budget
-    `requester` (its address) has a share of; everything else lands in
-    `missing` — the requester takes misses to the next candidate, and so
-    are a name_key asked twice and what ANSWER_MAX_BYTES cuts. The response
-    entry carries the ORIGINAL author's pubkey+sig, which on a replica is
-    not this node's identity — and that is the point."""
+    Per name: a dump node answers from its own build — cached, or computed,
+    signed and cached on a miss (`sign_fn` present AND a local dump exists),
+    within the build budget `requester` (its address) has a share of. Any
+    other kept blob answers only once this node checked it against
+    MusicBrainz (desktop/p2p/slice_checks.servable); a blob not checked
+    lately is `missing` this time and its check is queued. Everything else
+    lands in `missing` too — the requester takes misses to the next
+    candidate, and so are a name_key asked twice and what ANSWER_MAX_BYTES
+    cuts. The entry carries the ORIGINAL author's pubkey, signature and
+    certificate (`own_cert` — (certificate, proof) — for this node's own
+    build; for a relayed blob, the author's as this node recorded it)."""
     import base64
+
+    from desktop.p2p import slice_checks, slice_trust
 
     if not isinstance(names, list) or not names \
             or len(names) > MAX_NAMES_PER_REQUEST:
@@ -939,6 +996,7 @@ def serve_slices(conn, names: list, sign_fn=None,
 
     version = (dump_version_file() or "") if (
         sign_fn is not None and local_dump_available(conn)) else None
+    own = (own_pubkey or author_pubkey or "").lower() or None
     slices, missing, answered, size = {}, [], set(), 0
     for name in names:
         nk = name_key(name)
@@ -947,12 +1005,25 @@ def serve_slices(conn, names: list, sign_fn=None,
             continue
         answered.add(nk)
         entry = cached_slice(conn, nk)
-        if version is not None and (entry is None or entry["dump_version"] != version):
-            # A miss, or a blob cut from an earlier dump: built from this
-            # one when the budget allows — a stale blob still beats none.
-            entry = _build(conn, name, version, sign_fn, author_pubkey,
-                           requester, replace=entry is not None) or entry
+        if version is not None and (entry is None or entry["dump_version"] != version
+                                    or entry["author_pubkey"].lower() != own):
+            # A miss, a blob cut from an earlier dump or another author's: built
+            # from this one when the budget allows — a stale own blob still
+            # beats none.
+            built = _build(conn, name, version, sign_fn, author_pubkey,
+                           requester, replace=entry is not None)
+            entry = built or (entry if entry and entry["author_pubkey"].lower() == own else None)
         if entry is None:
+            missing.append(name)
+            continue
+        if entry["author_pubkey"].lower() == own:
+            cert = own_cert
+        else:
+            ok = slice_checks.servable(conn, "mb", nk, own)
+            if ok is None:
+                slice_checks.request_check(conn, "mb", nk)
+            cert = slice_trust.author_certificate(conn, entry["author_pubkey"]) if ok else None
+        if not cert:
             missing.append(name)
             continue
         blob_b64 = base64.b64encode(entry["blob_gz"]).decode("ascii")
@@ -966,25 +1037,31 @@ def serve_slices(conn, names: list, sign_fn=None,
             "author_pubkey": entry["author_pubkey"],
             "sig": entry["sig"],
             "blob_gz": blob_b64,
+            "author_cert": cert[0],
+            "author_proof": cert[1],
         }
     return {"v": PROTOCOL_VERSION, "slices": slices, "missing": missing}
 
 
 def verify_slice_entry(name: str, entry: dict):
-    """Full per-name verification on the receiving side: the author is one
-    the release names (master_node.SLICE_AUTHORS) → gunzip → hash → author
-    signature → the blob's own name_key matches the asked name. Returns
-    (core_dict, blob_gz_bytes) or None. Every hop runs exactly this, against
-    the ORIGINAL author's key."""
+    """Full per-name verification on the receiving side: the author's birth
+    certificate is the authority's and names the author (a `pow` one with its
+    proof bound to it) → gunzip → hash → author signature → the blob's own
+    name_key matches the asked name. Returns (core_dict, blob_gz_bytes,
+    certificate, proof) or None. Every hop runs exactly this, against the
+    ORIGINAL author's key; what the author is worth here (its penalties, its
+    proof's evaluation) is the importer's, on its database."""
     import base64
 
     from desktop.node_identity import verify_signature
-    from desktop.p2p import wire
-    from desktop.p2p.master_node import SLICE_AUTHORS
+    from desktop.p2p import slice_trust, wire
     try:
         author = entry.get("author_pubkey")
-        if not isinstance(author, str) or author.lower() not in SLICE_AUTHORS:
-            return None                       # no dump holder the release names
+        if not isinstance(author, str) or len(author) != 64:
+            return None
+        certified = slice_trust.entry_certificate(entry, author)
+        if certified is None:
+            return None
         blob_gz = base64.b64decode(entry.get("blob_gz") or "")
         blob = wire.gunzip(blob_gz, BLOB_RAW_MAX)
         sig = entry.get("sig") or ""
@@ -994,6 +1071,6 @@ def verify_slice_entry(name: str, entry: dict):
         core = wire.loads(blob)
         if not isinstance(core, dict) or core.get("name_key") != name_key(name):
             return None
-        return core, blob_gz
+        return core, blob_gz, certified[0], certified[1]
     except Exception:
         return None

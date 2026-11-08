@@ -1,7 +1,8 @@
 """The per-artist ListenBrainz slice blob (desktop/p2p/lb_slice_queries):
 canonical bytes, the receipt context, and what the receiving side rejects —
-another artist's blob, a flipped byte, a foreign protocol version, and a
-version older than the requester's floor."""
+another artist's blob, a flipped byte, a foreign protocol version, a version
+older than the requester's floor and one later than the newest MetaBrainz
+has published. A verified entry comes back with its author's certificate."""
 
 import base64
 import gzip
@@ -11,18 +12,19 @@ import json
 import pytest
 
 from desktop.p2p import lb_slice_queries as q
+from tests.slice_certs import certificate, certified, trust
 
 ed25519 = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
 
 KEY = ed25519.Ed25519PrivateKey.generate()
 PUB = KEY.public_key().public_bytes_raw().hex()
+CERT = certificate(PUB)
 
 
 @pytest.fixture(autouse=True)
-def _author(monkeypatch):
-    """The test key is the slice author the release names."""
-    from desktop.p2p import master_node
-    monkeypatch.setattr(master_node, "SLICE_AUTHORS", (PUB,))
+def _authority(monkeypatch):
+    trust(monkeypatch)
+
 
 ARTIST = "0b0c25f4-f31c-46a5-a4fb-ccbf53d663bd"
 OTHER = "8e4f0f9a-1c0b-4b1e-9b0a-0b0c25f4f31c"
@@ -46,12 +48,13 @@ def _slice(version=VERSION, recordings=None):
 def _entry(mbid, one, context=q.RECEIPT_CONTEXT):
     blob = q.slice_blob(mbid, one)
     sig = KEY.sign(context + hashlib.sha256(blob).digest()).hex()
-    return {"dump_version": one["dump_version"], "author_pubkey": PUB, "sig": sig,
-            "blob_gz": base64.b64encode(gzip.compress(blob)).decode("ascii")}
+    return certified({"dump_version": one["dump_version"], "author_pubkey": PUB, "sig": sig,
+                      "blob_gz": base64.b64encode(gzip.compress(blob)).decode("ascii")}, CERT)
 
 
 def test_the_family_is_separate_from_mb_slices():
-    assert q.PROTOCOL_VERSION == 1
+    assert q.PROTOCOL_VERSION == 2
+    assert q.BLOB_FORMAT == 1
     assert q.RECEIPT_CONTEXT == b"sautium-lb-slice-v1:"
     assert q.LB_LOAD_LOCK_KEY != 0x6D626C64      # never the MB loader's lock
     assert q.DB_VERSION_KEY == "listenbrainz.db_version"
@@ -67,8 +70,9 @@ def test_mbid_key_canonicalises_and_rejects_non_uuids():
 def test_a_blob_round_trips_with_its_version_inside():
     out = q.verify_slice_entry(ARTIST, _entry(ARTIST, _slice()))
     assert out is not None
-    core, blob_gz = out
-    assert core["v"] == 1
+    core, blob_gz, cert, proof = out
+    assert (cert, proof) == (CERT, None)
+    assert core["v"] == q.BLOB_FORMAT
     assert core["artist_mbid"] == ARTIST
     assert core["dump_version"] == VERSION
     assert core["artist"] == [1200, 340]
@@ -100,9 +104,15 @@ def test_a_version_below_the_floor_is_rejected():
     assert q.verify_slice_entry(ARTIST, entry, min_version="20260901-000002") is not None
 
 
+def test_a_version_past_the_newest_published_is_rejected():
+    entry = _entry(ARTIST, _slice())
+    assert q.verify_slice_entry(ARTIST, entry, published=VERSION) is not None
+    assert q.verify_slice_entry(ARTIST, entry, published="20260915-000001") is None
+
+
 def test_a_signed_zero_match_verifies():
     one = {"dump_version": VERSION, "artist": None, "recordings": [], "truncated": False}
-    core, _ = q.verify_slice_entry(ARTIST, _entry(ARTIST, one))
+    core, *_ = q.verify_slice_entry(ARTIST, _entry(ARTIST, one))
     assert core["recordings"] == [] and core["artist"] is None
 
 
@@ -119,3 +129,20 @@ def test_malformed_wire_entries_are_rejections_not_exceptions():
     assert q.verify_slice_entry(ARTIST, {**good, "author_pubkey": "ab" * 32}) is None
     assert q.verify_slice_entry(ARTIST, {**good, "blob_gz": base64.b64encode(
         gzip.compress(json.dumps([1, 2]).encode())).decode()}) is None
+
+
+def test_a_blob_signed_before_the_protocol_took_certificates_still_verifies():
+    """The signed bytes kept their format when the entry gained the author's
+    certificate: a dump node's cache and a replica's kept blobs from before
+    answer as they are, under the certificate the entry now carries."""
+    one = _slice()
+    blob = json.dumps({"v": 1, "artist_mbid": ARTIST, "dump_version": VERSION,
+                       "artist": one["artist"], "recordings": sorted(one["recordings"]),
+                       "truncated": False},
+                      sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    sig = KEY.sign(q.RECEIPT_CONTEXT + hashlib.sha256(blob).digest()).hex()
+    entry = certified({"dump_version": VERSION, "author_pubkey": PUB, "sig": sig,
+                       "blob_gz": base64.b64encode(gzip.compress(blob)).decode("ascii")}, CERT)
+    out = q.verify_slice_entry(ARTIST, entry)
+    assert out is not None and out[0]["v"] == 1
+    assert blob == q.slice_blob(ARTIST, one)

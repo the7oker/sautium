@@ -965,12 +965,17 @@ name_key and 16 MiB of blobs at most — a miss past any of these is
 `missing`, and the requester asks elsewhere or later. A finished dump load drops the blobs cut from the
 dump before it.
 
-**Who answers.** `/health` reports `mb_slices` (inventory size);
+**Who answers.** `/health` reports `mb_slices` — since 2026-11-07 the blobs
+the node may pass on: its own builds, and, on a node that asks MusicBrainz
+(slice-fed: catalogue slices in its ledger and no completed full dump), other authors' that it
+has checked against MusicBrainz or will check when first asked; every other
+node — a dump node included — counts its own builds only (§ "Slices from any
+author");
 `MbSliceCycle.find_sources` puts **replicas BEFORE dump nodes**, and misses (`missing`
 in the response) carry over to the next candidate. A dump node no longer 404s:
-partially useful is useful. Closed-world semantics are preserved exactly: a
-name closes only on the author's **signed** zero-match, never on transport
-silence.
+partially useful is useful. A name closes only on an author's **signed**
+zero-match, never on transport silence — and since 2026-11-07 for 30 days,
+after which it is asked again, of another author's source first.
 
 **A "Music catalogue" wizard step** with the box pre-ticked when the disk has
 room for the load (~31 GB: the 7.5 GB archive, ~21 GB of tables, a margin;
@@ -1045,6 +1050,62 @@ replica re-serves a verified blob → a second hop verifies it **against the dum
 node's key**; a flipped byte and a blob served under another name are both
 rejected.
 
+### Slices from any author — 2026-11-07
+
+Any node holding a dump may author slices of either family, and any node may
+pass them on; no key's signature is trusted for what it says.
+
+- **The slice nominates, MusicBrainz decides.** On a node without the
+  MusicBrainz database every irreversible canon decision a slice drives — a
+  merge, a rename, a mint, an imported scrobble placed, the stream a phantom
+  slot accepts — is re-made on MusicBrainz's own answers for the MBIDs
+  involved (`backend/canon/confirm.py`), asked of its web service by MBID
+  only, one request a second at most, in the background
+  (`backend/mb_answers.py`, `backend/musicbrainz.py`); the values written are
+  MusicBrainz's. While it cannot be reached the decisions wait and the rest
+  goes on. A node holding the dump asks nothing.
+- **The author's certificate** (a birth certificate of any method and date,
+  with its proof for `pow`) rides every entry: MB protocol v4, LB v2.
+- **Check before passing on** (`desktop/p2p/slice_checks.py`): only a node
+  that asks MusicBrainz (slice-fed: catalogue slices in its ledger and no
+  completed full dump) re-serves another author's blob, and only after its own check
+  against MusicBrainz in the last 30 days found no suspected fabrication;
+  every other node — a dump node included — passes on its own builds only
+  and queues no check.
+- **Proven falsifications** — a dump version later than MetaBrainz has
+  published, rows outside the slice's own subtree — convict the author and
+  quarantine the node that passed the slice on (for a version, only one
+  already past MetaBrainz's newest when that node passed it: its own check
+  could see it); **suspected** ones (an artist, or a group credited to it,
+  MusicBrainz does not know with its first release unknown too, where an
+  honest older dump cannot explain it) count by rate
+  (`desktop/p2p/slice_trust.py`). The penalties bind keys and only the slice
+  lanes; a penalized key's signed slice requests are refused with the
+  evidence. What a penalized key brought is dropped in the verdict's own
+  transaction, and the catalogue rows are rebuilt from the slices kept by a
+  backend worker of its own, on request, in one transaction
+  (`desktop/p2p/slice_rebuild.py`). A version later than MetaBrainz's newest
+  is neither imported nor passed on.
+- **Provenance**: every imported blob is indexed with its author, the node
+  that passed it (by the key its TLS channel proved) and the MBIDs it is
+  about (`slice_index`); an artist, release group, release or recording row
+  clashing with one held under another MBID — or an artist or group row
+  carrying, under another id, an MBID held here (one MBID has one row) —
+  lands none of its blob's rows until MusicBrainz settles it, and its name
+  stays open meanwhile, asked again of another author first. A clash
+  decides only which rows land — the held row stays unless MusicBrainz knows
+  the incoming MBID and not the held one, or, for one MBID under two ids,
+  unless MusicBrainz's answer carries the incoming row's name and not the
+  held one's — and counts against no one: its web service shows no row ids,
+  and it removes releases and recordings as a matter of course. Clashes are
+  asked about at the check's priority, one at a time, the first loss ending
+  them; a blob with more than three loses without a question (an honest
+  dump never clashes), and one author's wins over held blobs are bounded at
+  three a day (since 2026-11-08). A blob that loses stays out of every
+  rebuild and is not passed on, and its name is asked again, of another
+  author first (`mb_slice_fetches.void`); a name whose matched artists did
+  not land under their own id and MBID closes only like a zero-match.
+
 ### LB slices — a second dump family — 2026-09-20
 
 Track listening statistics left Last.fm (whose terms keep its answers on
@@ -1059,8 +1120,9 @@ replaces Last.fm track stats" has the loader; this is the protocol.
   credited to it}`: `desktop/p2p/lb_slice_queries.slice_blob` → canonical
   JSON (positional rows sorted by recording MBID) → gzip → Ed25519 over
   `sautium-lb-slice-v1:` + sha256. `POST /api/lb/slice` `{"artist_mbids":
-  [≤50], "min_version": …}` → `{"v": 1, "slices": {mbid: {dump_version,
-  author_pubkey, sig, blob_gz}}, "missing": […]}` on both peer surfaces
+  [≤50], "min_version": …}` → `{"v": 2, "slices": {mbid: {dump_version,
+  author_pubkey, sig, blob_gz, author_cert, author_proof}}, "missing": […]}`
+  (v2 since 2026-11-07: the author's birth certificate rides each entry) on both peer surfaces
   (`desktop/p2p/sync_server.py`, `backend/routers/sync.py`), identity-bound
   like `/api/mb/` (`peer_auth.IDENTITY_BOUND_PREFIXES`), priced as the
   `lb.slice` family. Replicas re-serve verbatim blobs under the ORIGINAL
@@ -1068,9 +1130,15 @@ replaces Last.fm track stats" has the loader; this is the protocol.
   `lb_slices` (the inventory) and `lb_slices_version` (the newest held).
 - **Versioned.** `dump_version` is inside the signed bytes and in every
   ledger row (`lb_slice_fetches`, `lb_slice_blobs`) and data row. A request's
-  `min_version` is the newest version a reachable source the release names as
-  a slice author advertised (since 2026-11-03 — a stranger's word moved it
-  before); a
+  `min_version` is the newest version a reachable source serves that is not
+  later than the newest MetaBrainz has published — its own listing, read at
+  most once a day (`desktop/p2p/published.py`, since 2026-11-07; a slice
+  author's `/health` decided it from 2026-11-03, any source's before); a
+  version past MetaBrainz's is refused at import and never passed on once
+  the listing is read (a day ahead at most while it is not), and a kept blob
+  that turns out later than the published newest convicts its author — and
+  quarantines the node that passed it on when the version was already past
+  that node's own bound (P1, § "Slices from any author"); a
   cache older than it is `missing`, not an answer; a dump node never serves
   a cache older than its own dump and rebuilds it; imports move rows
   forward only; the requester re-asks every ledger row older than the

@@ -43,6 +43,7 @@ for the whole handshake — see sync_walk).
 import asyncio
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
@@ -75,6 +76,20 @@ def _connect(dsn: str):
     return conn
 
 
+_checks_conn: dict = {}
+_checks_lock = threading.Lock()
+
+
+def _checks(dsn: str):
+    """The autocommit connection the per-batch author and source checks
+    share, for the process's life — not one a batch. Serialized: the
+    executor may run two batches' checks at once."""
+    conn = _checks_conn.get(dsn)
+    if conn is None or conn.closed:
+        conn = _checks_conn[dsn] = _connect(dsn)
+    return conn
+
+
 def read_interval(dsn: str, default: int, key: str = INTERVAL_KEY) -> Optional[int]:
     """A slice cycle's auto_interval_min (this family's by default): the
     default without a row, None when the row says null (explicitly
@@ -94,16 +109,59 @@ def read_interval(dsn: str, default: int, key: str = INTERVAL_KEY) -> Optional[i
 
 
 def load_bans(dsn: str) -> tuple[set, set]:
-    """Local ban list: (pubkeys, addr uuids) — the pubkey is the anchor,
-    the address id catches a banned key returning under a fresh identity."""
+    """The keys and addresses a slice cycle does not ask: the local ban list
+    (pubkeys, addr uuids — the pubkey is the anchor, the address id catches a
+    banned key returning under a fresh identity) and the slice lanes' own
+    penalties, which bind keys only (desktop/p2p/slice_trust.py)."""
+    from desktop.p2p import slice_trust
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT pubkey, addr::text FROM p2p_node_bans")
             rows = cur.fetchall()
-        return {r[0] for r in rows if r[0]}, {r[1] for r in rows if r[1]}
+        keys = {r[0] for r in rows if r[0]} | slice_trust.penalized_keys(conn)
+        return keys, {r[1] for r in rows if r[1]}
     finally:
         conn.close()
+
+
+def published_newest(dsn: str, family: str):
+    """MetaBrainz's newest published version of `family` and when its listing
+    was read (desktop/p2p/published.py, at most once a day), with every kept
+    blob from a later version judged a falsification (P1)."""
+    from desktop.p2p import published, slice_checks
+    conn = _connect(dsn)
+    try:
+        newest = published.newest(conn, family)
+        if newest is not None:
+            slice_checks.published_check(conn, family, newest[0], newest[1])
+        return newest
+    finally:
+        conn.close()
+
+
+def vet_authors(dsn: str, verified: list) -> list:
+    """The verified entries whose author this node takes: no penalty, mailbox
+    not burned, identity recorded (and a `pow` proof evaluated when the node
+    can afford it). `verified` items end with (certificate, proof)."""
+    from desktop.p2p import slice_trust
+    with _checks_lock:
+        conn = _checks(dsn)
+        kept = []
+        for item in verified:
+            cert, proof = item[-2], item[-1]
+            if slice_trust.refused_author(conn, cert):
+                continue
+            if slice_trust.observe_author(conn, cert, proof) in (None, "failed"):
+                continue
+            kept.append(item)
+        return kept
+
+
+def source_refused(dsn: str, relay: str) -> bool:
+    from desktop.p2p import slice_checks
+    with _checks_lock:
+        return slice_checks.source_refused(_checks(dsn), relay)
 
 
 def local_dump_available(dsn: str) -> Optional[str]:
@@ -123,9 +181,12 @@ def pending_slice_mbids(dsn: str, limit: int, newest: Optional[str]) -> list:
 
 
 def import_batch(dsn: str, source_node: str, source_addr: Optional[str],
-                 verified: list) -> int:
+                 verified: list, relay: Optional[str] = None) -> int:
     """One transaction for a batch of verified slices, under the loader's
-    lock (a full load must never interleave with an import)."""
+    lock (a full load must never interleave with an import). The penalties
+    are read again inside it: a verdict that committed while the batch was
+    verified, or the lock awaited, lands nothing of the key it penalized."""
+    from desktop.p2p import slice_checks, slice_trust
     conn = psycopg2.connect(dsn)
     try:
         conn.autocommit = True
@@ -134,10 +195,17 @@ def import_batch(dsn: str, source_node: str, source_addr: Optional[str],
         try:
             with conn.cursor() as cur:
                 cur.execute("BEGIN")
+            if slice_checks.source_refused(conn, relay):
+                with conn.cursor() as cur:
+                    cur.execute("ROLLBACK")
+                return 0
+            penalized = slice_trust.penalized_keys(conn)
             recordings = 0
-            for mbid, core, blob_gz, entry in verified:
+            for mbid, core, blob_gz, entry, *_cert in verified:
+                if (entry.get("author_pubkey") or "").lower() in penalized:
+                    continue
                 recordings += lb_slice_queries.import_slice(
-                    conn, mbid, core, blob_gz, entry, source_node, source_addr)
+                    conn, mbid, core, blob_gz, entry, source_node, source_addr, relay)
             with conn.cursor() as cur:
                 cur.execute("COMMIT")
             return recordings
@@ -270,6 +338,7 @@ class LbSliceCycle:
         self._lock: Optional[asyncio.Lock] = None
         self._next_at: Optional[float] = None
         self._status_cleared = False       # a dump node dropped its row this process
+        self._published: Optional[str] = None   # MetaBrainz's newest LB dump, per run
         self._running = False
 
     # ------------------------------------------------------------ lifecycle
@@ -379,17 +448,16 @@ class LbSliceCycle:
 
     # -------------------------------------------------------------- sources
 
-    async def find_sources(self) -> tuple[list[tuple[BackendAPIClient, str, Optional[str]]],
-                                          Optional[str]]:
+    async def find_sources(self, published: Optional[str] = None
+                           ) -> tuple[list[tuple[BackendAPIClient, str, Optional[str]]],
+                                      Optional[str]]:
         """Reachable slice sources as (client, node_id, version), REPLICAS
-        FIRST, and the newest dump version a slice author holds — read from
-        the /health of the sources the release names as authors
-        (master_node.SLICE_AUTHORS: their channel is their key, so that
-        /health is the author's own word), in the dump's version format and
-        no later than a day ahead. Any other /health only lists its node as
-        a source: the newest version decides what every node asks again,
-        and a stranger's claim of one would freeze the asking."""
-        from desktop.p2p.master_node import SLICE_AUTHORS
+        FIRST, and the newest dump version: the newest a reachable source
+        serves that is not later than what MetaBrainz has published
+        (`published`, its own listing — before the listing was read, no
+        later than a day ahead). The newest version decides what every node
+        asks again, so it is never a stranger's word alone: a version past
+        MetaBrainz's is a falsification (P1), not news."""
         sources, _ = await self._sources.find()
         replicas: list = []
         dumps: list = []
@@ -397,10 +465,10 @@ class LbSliceCycle:
         for api, node_id, health in sources:
             dump_version = health.get("lb_dump") or None
             held_version = health.get("lb_slices_version") or None
-            if str(node_id).lower() in SLICE_AUTHORS:
-                for v in (dump_version, held_version):
-                    if lb_slice_queries.plausible_version(v) and (newest is None or v > newest):
-                        newest = v
+            for v in (dump_version, held_version):
+                if (lb_slice_queries.plausible_version(v) and (published is None or v <= published)
+                        and (newest is None or v > newest)):
+                    newest = v
             if dump_version:
                 dumps.append((api, node_id, dump_version))
             else:
@@ -422,7 +490,9 @@ class LbSliceCycle:
                 self._status_cleared = True
             return {}
 
-        sources, newest = await self.find_sources()
+        listing = await loop.run_in_executor(None, published_newest, self.db_dsn, "lb")
+        self._published = listing[0] if listing else None
+        sources, newest = await self.find_sources(self._published)
         pending = await loop.run_in_executor(
             None, pending_slice_mbids, self.db_dsn, PENDING_PER_CYCLE, newest)
         if not pending:
@@ -454,17 +524,22 @@ class LbSliceCycle:
             source_addr = lb_slice_queries.addr_uuid(api.base_url)
             api.session_deadline = time.monotonic() + PEER_SESSION_S
             leftovers = {"stale": [], "fresh": []}
-            waited = limited = False
+            waited = limited = failed = False
             for lane, min_version in (("stale", newest), ("fresh", None)):
                 group = remaining[lane]
                 for i in range(0, len(group), batch_size):
                     batch = group[i:i + batch_size]
                     # A session that is over has not failed: what is left
                     # stays pending for the next source or cycle.
-                    if limited or time.monotonic() >= api.session_deadline:
+                    if limited or failed or time.monotonic() >= api.session_deadline:
                         leftovers[lane].extend(batch)
                         continue
-                    result = await self._exchange(api, node, source_addr, batch, min_version)
+                    result = await self._isolated(api, node, source_addr, batch, min_version)
+                    if result is None:
+                        reasons.add("error")
+                        failed = True
+                        leftovers[lane].extend(batch)
+                        continue
                     if result.get("retry_after") is not None and not waited:
                         # The peer's per-IP window is full — usually our own
                         # sync walk just spent it. Wait it out ONCE per
@@ -476,7 +551,12 @@ class LbSliceCycle:
                         if time.monotonic() >= api.session_deadline:
                             leftovers[lane].extend(batch)
                             continue
-                        result = await self._exchange(api, node, source_addr, batch, min_version)
+                        result = await self._isolated(api, node, source_addr, batch, min_version)
+                        if result is None:
+                            reasons.add("error")
+                            failed = True
+                            leftovers[lane].extend(batch)
+                            continue
                     if "error" in result and time.monotonic() >= api.session_deadline:
                         # The session ended under this batch, not the source.
                         leftovers[lane].extend(batch)
@@ -510,6 +590,18 @@ class LbSliceCycle:
             sources=len(sources), newest=newest)
         return total
 
+    async def _isolated(self, api: BackendAPIClient, node: str, source_addr: Optional[str],
+                        batch: list[str], min_version: Optional[str]) -> Optional[dict]:
+        """`_exchange`, or None when it raised: one source's answer must not
+        end the run for the others — the source is skipped for the rest of it."""
+        try:
+            return await self._exchange(api, node, source_addr, batch, min_version)
+        except Exception as e:
+            logger.warning("LB slice: source %s failed (%s) — skipped this run", node[:16], e,
+                           exc_info=True)
+            self._sources.drop(node)
+            return None
+
     async def _exchange(self, api: BackendAPIClient, node: str, source_addr: Optional[str],
                         batch: list[str], min_version: Optional[str]) -> dict:
         """One request to one source: verify every entry against the
@@ -523,6 +615,18 @@ class LbSliceCycle:
             err = (resp or {}).get("error") or (resp or {}).get("detail") or "no response"
             logger.warning(f"LB slice fetch failed ({node[:16]}): {err}")
             out = {"error": err}
+            if err == "slice_refused":
+                # What the peer says this node did, each field of its kind: the
+                # evidence in the node's log, its kind for support. A body that
+                # is no refusal is not recorded; the source is dropped anyway.
+                from desktop.p2p.slice_trust import refusal_of, refusal_report
+                refused = refusal_of(resp)
+                if refused is None:
+                    return {"error": "malformed refusal"}
+                logger.warning("LB slice: %s refuses this node's requests: %s", node[:16], refused)
+                if self._diag_record:
+                    await loop.run_in_executor(None, self._diag_record, "lb_slice.refused",
+                                               refusal_report(refused))
             if "retry_after" in (resp or {}):
                 out["retry_after"] = resp["retry_after"]
             return out
@@ -540,20 +644,28 @@ class LbSliceCycle:
             if not isinstance(entry, dict):
                 missing.append(mbid)
                 continue
-            out = lb_slice_queries.verify_slice_entry(mbid, entry, min_version)
+            out = lb_slice_queries.verify_slice_entry(mbid, entry, min_version, self._published)
             if out is None:
                 dropped += 1
                 missing.append(mbid)
                 logger.warning(f"LB slice for {mbid} from {node[:16]}: "
                                f"signature/identity/version check failed — dropped")
                 continue
-            verified.append((mbid, out[0], out[1], entry))
+            verified.append((mbid, out[0], out[1], entry, out[2], out[3]))
+        if verified:
+            kept = await loop.run_in_executor(None, vet_authors, self.db_dsn, verified)
+            dropped += len(verified) - len(kept)
+            missing += [v[0] for v in verified if v not in kept]
+            verified = kept
         if dropped and not verified:
             return {"error": "all slices failed verification"}
         recordings = 0
         if verified:
+            relay = (api.peer_pubkey or node or "").lower()
+            if await loop.run_in_executor(None, source_refused, self.db_dsn, relay):
+                return {"error": "source carries a penalty"}
             recordings = await loop.run_in_executor(
-                None, import_batch, self.db_dsn, node, source_addr, verified)
+                None, import_batch, self.db_dsn, node, source_addr, verified, relay)
             await loop.run_in_executor(None, notify, self.db_dsn, "sautium_lb_done")
         return {"imported": len(verified), "recordings": recordings,
                 "missing": missing, "dropped": dropped}

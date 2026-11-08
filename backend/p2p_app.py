@@ -657,7 +657,7 @@ def _dump_and_slice_counts() -> dict:
     if mb_slice_queries is not None:
         try:
             with get_conn() as conn:
-                mb_slices = mb_slice_queries.count_slice_blobs(conn)
+                mb_slices = mb_slice_queries.count_slice_blobs(conn, node_pubkey_hex())
         except Exception as e:
             logger.debug(f"slice inventory unreadable ({e}) — 0")   # absent until the first slice lands
     lb_slices, lb_slices_version = lb_inventory()

@@ -39,7 +39,7 @@ import re
 import shutil
 import tarfile
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from desktop import db_init
 from dump_common import (ProgressCb, ProgressReader, download_resumable,
@@ -64,16 +64,10 @@ STAGING_GB = 6.0
 TABLES_GB = 2.0
 MARGIN_GB = 2.0
 
-_FULLEXPORT = "https://data.metabrainz.org/pub/musicbrainz/listenbrainz/fullexport"
-_LB_UA = "Sautium/1.0 ( https://sautium.net )"   # ListenBrainz asks every client for a contact UA
-_HEADERS = {"User-Agent": _LB_UA}
+from desktop.p2p.published import LB_FULLEXPORT as _FULLEXPORT, USER_AGENT as _LB_UA  # noqa: E402
+from desktop.p2p.published import parse_directory, parse_listing  # noqa: E402,F401 — one parser
 
-# The mirror is an nginx autoindex (no LATEST file): the newest export is the
-# highest dump id; a directory still being uploaded lacks the archive or its
-# checksum and is skipped for the previous one.
-_DIR_RE = re.compile(r'href="(listenbrainz-dump-(\d+)-\d{8}-\d{6}-full)/?"')
-_ARCHIVE_RE = re.compile(r'href="(listenbrainz-statistics-dump-(\d{8}-\d{6})\.tar\.zst)"')
-_SHA_RE = re.compile(r'href="listenbrainz-statistics-dump-(\d{8}-\d{6})\.tar\.zst\.sha256"')
+_HEADERS = {"User-Agent": _LB_UA}
 _HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
@@ -101,23 +95,6 @@ def _archive_path(version: str) -> str:
 
 
 # ── version ──────────────────────────────────────────────────────────────────
-
-def parse_listing(html: str) -> List[Tuple[int, str]]:
-    """(dump id, directory name) for every full export in the listing, newest first."""
-    return sorted(((int(i), d) for d, i in _DIR_RE.findall(html)), reverse=True)
-
-
-def parse_directory(html: str) -> Optional[Tuple[str, str]]:
-    """(version, archive file name) when the directory holds the statistics
-    archive AND its .sha256 — anything less is an upload in progress."""
-    m = _ARCHIVE_RE.search(html)
-    if not m:
-        return None
-    version = m.group(2)
-    if version not in _SHA_RE.findall(html):
-        return None
-    return version, m.group(1)
-
 
 def latest_version() -> Optional[Tuple[str, str]]:
     """(dump_version, archive url) of the newest complete statistics dump, or

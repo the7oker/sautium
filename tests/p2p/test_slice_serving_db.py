@@ -7,12 +7,12 @@ signed and never kept; a name past the rules or the build budget is
 `missing`, with no build — only a build that found something counts, and a
 requester has a share of the minute; a name_key is answered once and an
 answer is bounded; a blob cut from an earlier dump is rebuilt and replaced;
-LB builds share the loader's lock among themselves."""
+LB builds share the loader's lock among themselves. Every entry of the node's
+own build carries its birth certificate, and a node without one serves none."""
 
 import base64
 import os
 import sys
-import threading
 import uuid
 from pathlib import Path
 
@@ -26,6 +26,7 @@ for _p in (REPO, REPO / "backend"):
 
 from desktop.p2p import lb_slice_queries as lb  # noqa: E402
 from desktop.p2p import mb_slice_queries as q  # noqa: E402
+from tests.slice_certs import certificate, trust  # noqa: E402
 
 BUILD = q.get_slice_one
 
@@ -38,14 +39,13 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
 DBNAME = "sautium_slice_serving_test"
 KEY = ed25519.Ed25519PrivateKey.generate()
 PUB = KEY.public_key().public_bytes_raw().hex()
+OWN_CERT = (certificate(PUB), None)          # this node's certificate and, for `pow`, its proof
+VERSION = "20261101-001500"
 
 
 @pytest.fixture(autouse=True)
-def _author(monkeypatch):
-    """The test key is the slice author the release names."""
-    from desktop.p2p import master_node
-    monkeypatch.setattr(master_node, "SLICE_AUTHORS", (PUB,))
-VERSION = "20261101-001500"
+def _authority(monkeypatch):
+    trust(monkeypatch)
 
 
 @pytest.fixture(scope="module")
@@ -104,8 +104,8 @@ def dump_node(monkeypatch):
     return builds
 
 
-def _serve(conn, names, requester=""):
-    return q.serve_slices(conn, names, KEY.sign, PUB, requester)
+def _serve(conn, names, requester="", own_cert=OWN_CERT):
+    return q.serve_slices(conn, names, KEY.sign, PUB, requester, own_cert, PUB)
 
 
 def _blob(entry) -> bytes:
@@ -151,6 +151,17 @@ def test_a_zero_match_is_served_signed_and_never_kept(conn, dump_node):
     assert out["missing"] == []
     assert all(_verifies(n, e) for n, e in out["slices"].items())
     assert _kept(conn) == []
+
+
+def test_a_build_carries_this_nodes_certificate_and_a_node_without_one_serves_none(conn, dump_node):
+    out = _serve(conn, ["Sigur Rós"])
+    entry = out["slices"]["Sigur Rós"]
+    assert (entry["author_cert"], entry["author_proof"]) == OWN_CERT
+    assert q.verify_slice_entry("Sigur Rós", entry)[2] == OWN_CERT[0]
+    out = _serve(conn, ["Sigur Rós", "Nobody By This Name"], own_cert=None)
+    assert out["slices"] == {} and out["missing"] == ["Sigur Rós", "Nobody By This Name"]
+    out = lb.serve_slices(conn, [str(uuid.UUID(int=7))], None, KEY.sign, PUB, "", None, PUB)
+    assert out["slices"] == {} and out["missing"] == [str(uuid.UUID(int=7))]
 
 
 @pytest.mark.parametrize("name", ["x" * 256, "Bell\u0007", "[unknown]", "Various Artists"])
@@ -209,7 +220,7 @@ def test_an_earlier_dumps_blob_is_replaced_when_its_match_set_is_full(conn, dump
 
 def test_an_mbid_listenbrainz_does_not_know_is_served_and_never_kept(conn):
     unknown, known = str(uuid.UUID(int=99)), str(uuid.UUID(int=7))
-    out = lb.serve_slices(conn, [unknown, known], None, KEY.sign, PUB)
+    out = lb.serve_slices(conn, [unknown, known], None, KEY.sign, PUB, "", OWN_CERT, PUB)
     assert set(out["slices"]) == {unknown, known} and out["missing"] == []
     assert lb.verify_slice_entry(unknown, out["slices"][unknown]) is not None
     with conn.cursor() as cur:
@@ -231,62 +242,3 @@ def test_lb_builds_share_the_loaders_lock_among_themselves(conn, dsn):
             lb.get_slice_one(conn, str(uuid.UUID(int=7)), VERSION)
     finally:
         other.close()
-
-
-def test_what_slices_of_an_unnamed_key_left_is_dropped(conn, monkeypatch):
-    import db_migrate
-    import master_node as backend_master
-    import p2p_identity
-    own, stranger = "cd" * 32, "ef" * 32
-    monkeypatch.setattr(backend_master, "SLICE_AUTHORS", (PUB,))
-    monkeypatch.setattr(p2p_identity, "resolve_identity", lambda s: {"public_key_hex": own})
-    with conn.cursor() as cur:
-        cur.execute("""INSERT INTO mb_slice_fetches (name_key, source_pubkey) VALUES
-                       ('by author', %s), ('by stranger', %s), ('before keys', NULL)""",
-                    (PUB.upper(), stranger))
-        cur.execute("""INSERT INTO lb_slice_fetches (artist_mbid, dump_version, source_pubkey) VALUES
-                       (%s, %s, %s), (%s, %s, %s), (%s, '29991231-000000', %s)""",
-                    (str(uuid.UUID(int=31)), VERSION, PUB, str(uuid.UUID(int=32)), VERSION, stranger,
-                     str(uuid.UUID(int=33)), PUB))
-        for key, signer in (("a", PUB), ("o", own), ("s", stranger)):
-            cur.execute("""INSERT INTO mb_slice_blobs (name_key, dump_version, author_pubkey, sig, blob_gz)
-                           VALUES (%s, %s, %s, %s, '\\x00')""", (key, VERSION, signer, "00" * 64))
-        cur.execute("""INSERT INTO lb_recording (recording_mbid, listen_count, user_count, artist_mbids,
-                                                 dump_version)
-                       VALUES (%s, 1, 1, ARRAY[%s::uuid], '29991231-000000')""",
-                    (str(uuid.UUID(int=34)), str(uuid.UUID(int=7))))
-        # What the stranger's slice for artist 32 gave, under a plausible version:
-        # its own recording goes, one credited to artist 31 as well stays.
-        cur.execute("""INSERT INTO lb_artist (artist_mbid, listen_count, user_count, dump_version)
-                       VALUES (%s, 9, 9, %s), (%s, 1, 1, %s)""",
-                    (str(uuid.UUID(int=32)), VERSION, str(uuid.UUID(int=31)), VERSION))
-        cur.execute("""INSERT INTO lb_recording (recording_mbid, listen_count, user_count, artist_mbids,
-                                                 dump_version)
-                       VALUES (%s, 9, 9, ARRAY[%s::uuid], %s), (%s, 9, 9, ARRAY[%s::uuid, %s::uuid], %s)""",
-                    (str(uuid.UUID(int=35)), str(uuid.UUID(int=32)), VERSION,
-                     str(uuid.UUID(int=36)), str(uuid.UUID(int=32)), str(uuid.UUID(int=31)), VERSION))
-        cur.execute("""INSERT INTO lb_slice_blobs (artist_mbid, dump_version, author_pubkey, sig, blob_gz)
-                       VALUES (%s, %s, %s, %s, '\\x00'), (%s, '29991231-000000', %s, %s, '\\x00')""",
-                    (str(uuid.UUID(int=37)), VERSION, stranger, "00" * 64,
-                     str(uuid.UUID(int=38)), PUB, "00" * 64))
-    db_migrate._drop_unauthored_slices(conn)
-    with conn.cursor() as cur:
-        cur.execute("SELECT name_key FROM mb_slice_fetches ORDER BY name_key")
-        assert [r[0] for r in cur.fetchall()] == ["before keys", "by author"]
-        cur.execute("SELECT artist_mbid::text FROM lb_slice_fetches")
-        assert [r[0] for r in cur.fetchall()] == [str(uuid.UUID(int=31))]
-        cur.execute("SELECT name_key FROM mb_slice_blobs ORDER BY name_key")
-        assert [r[0] for r in cur.fetchall()] == ["a", "o"]        # the author's and this node's own
-        cur.execute("SELECT count(*) FROM lb_recording WHERE dump_version > '2999'")
-        assert cur.fetchone()[0] == 0
-        cur.execute("SELECT artist_mbid::text FROM lb_artist")
-        assert [r[0] for r in cur.fetchall()] == [str(uuid.UUID(int=31))]
-        cur.execute("SELECT recording_mbid::text FROM lb_recording WHERE recording_mbid IN (%s, %s)",
-                    (str(uuid.UUID(int=35)), str(uuid.UUID(int=36))))
-        assert [r[0] for r in cur.fetchall()] == [str(uuid.UUID(int=36))]
-        cur.execute("SELECT count(*) FROM lb_slice_blobs")
-        assert cur.fetchone()[0] == 0                     # a stranger's, and one a day ahead
-        cur.execute("DELETE FROM mb_slice_fetches")
-        cur.execute("DELETE FROM lb_slice_fetches")
-        cur.execute("DELETE FROM lb_artist")
-        cur.execute("DELETE FROM lb_recording WHERE recording_mbid = %s", (str(uuid.UUID(int=36)),))

@@ -35,12 +35,18 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      (2026-11-04): an earlier release's carried the events' log tails
      unasked; the warrant is collected again on its next delivery, under the
      new rule, and one the switch withdrew is closed.
-     The slice step (`slice_authors_v1`) drops what slices of a key the
-     release does not name left behind, the day a slice came to count only
-     under its author (master_node.SLICE_AUTHORS, 2026-11-03). The master
-     step (`master_stub_bound_v1`) binds the support contact still waiting
-     unbound to the master's own key, the day a contact came to carry its
-     key's fingerprint (2026-11-07).
+     The slice step (`slice_authors_v1`) dropped what slices of a key the
+     release did not name had left behind, the day a slice came to count
+     only under its author (2026-11-03); its code went on 2026-11-07, when
+     any dump holder came to author slices — the nodes that ran it keep the
+     marker. The master step (`master_stub_bound_v1`) binds the support
+     contact still waiting unbound to the master's own key, the day a contact
+     came to carry its key's fingerprint (2026-11-07). The rebuild step
+     (`slice_rebuild_v1`) rebuilds a node's catalogue rows once from the
+     slices it keeps, under the import's rules of that day — a slice's own
+     subtree only, its rows of their columns' kinds, an artist or a group one
+     row per MBID — and indexes the slices kept before the subject index, on
+     a node without the dump (2026-11-07).
 
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
@@ -56,7 +62,6 @@ takes from autovacuum (below); the lifespan runs it in the background.
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
 
 import psycopg2
 from psycopg2 import errors, sql
@@ -204,51 +209,22 @@ def _recollect_staged_bundles(conn) -> dict:
     return counts
 
 
-def _drop_unauthored_slices(conn) -> dict:
-    """The ledger rows that closed a name or an artist on the word of a key
-    the release does not name — asked again, of an author — with the LB
-    numbers such a key gave; the blobs such a key signed, which every
-    requester now refuses (this node's own stay: a dump node's cache); and
-    the LB ledger and data rows under a version no dump has yet, a day ahead
-    or more (lb_slice_queries.plausible_version) — the LB import moves rows
-    forward only, so one such row kept the real numbers out for good. Rows a
-    slice put in the MB tables carry no author, and stay."""
-    from master_node import SLICE_AUTHORS
-    from p2p_identity import resolve_identity
-    authors = [a.lower() for a in SLICE_AUTHORS]
-    own = ((resolve_identity(settings) or {}).get("public_key_hex") or "").lower()
-    keep = authors + ([own] if own else [])
-    horizon = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y%m%d-%H%M%S")
-    counts = {}
+def _rebuild_slices(conn) -> dict:
+    """The catalogue rows of a node without the dump rebuilt from the slices
+    it keeps (desktop/p2p/slice_rebuild.py): the import's rules apply to rows
+    that landed before them, and every blob kept before the subject index
+    existed is indexed and its carried MBIDs noted. Asked for here and run by
+    the backend's rebuilder once it is up — the start never waits on the
+    loader's lock a slice import or a load holds. A dump node's own cache is
+    no slice of anyone's, and the rebuild leaves a dump node alone."""
+    from desktop.p2p import slice_rebuild
     with conn.cursor() as cur:
-        # A non-author's LB numbers first, while its ledger rows still name
-        # the artists: the import moves rows forward only, so a stranger's
-        # row under a newer version would keep the author's out when the
-        # artist is asked again. A recording credited to anyone else too
-        # stays — its other artist's slice is not asked again.
-        cur.execute("SELECT artist_mbid FROM lb_slice_fetches WHERE source_pubkey IS NOT NULL"
-                    "   AND lower(source_pubkey) <> ALL(%s::text[])", (authors,))
-        strangers = [r[0] for r in cur.fetchall()]
-        cur.execute("DELETE FROM lb_artist WHERE artist_mbid = ANY(%s::uuid[])", (strangers,))
-        counts["lb_artist"] = cur.rowcount
-        cur.execute("DELETE FROM lb_recording WHERE cardinality(artist_mbids) > 0"
-                    "   AND artist_mbids <@ %s::uuid[]", (strangers,))
-        counts["lb_recording"] = cur.rowcount
-        for table in ("mb_slice_fetches", "lb_slice_fetches"):
-            cur.execute(sql.SQL("DELETE FROM {} WHERE source_pubkey IS NOT NULL"
-                                "   AND lower(source_pubkey) <> ALL(%s::text[])")
-                        .format(sql.Identifier(table)), (authors,))
-            counts[table] = cur.rowcount
-        for table in ("mb_slice_blobs", "lb_slice_blobs"):
-            cur.execute(sql.SQL("DELETE FROM {} WHERE lower(btrim(author_pubkey)) <> ALL(%s::text[])")
-                        .format(sql.Identifier(table)), (keep,))
-            counts[table] = cur.rowcount
-        for table in ("lb_slice_fetches", "lb_slice_blobs", "lb_recording", "lb_artist"):
-            cur.execute(sql.SQL("DELETE FROM {} WHERE dump_version > %s")
-                        .format(sql.Identifier(table)), (horizon,))
-            counts[table] = counts.get(table, 0) + cur.rowcount
+        cur.execute("SELECT EXISTS (SELECT 1 FROM mb_slice_blobs)")
+        if not cur.fetchone()[0]:
+            return {}
+    slice_rebuild.request(conn, "upgrade")
     conn.commit()
-    return counts
+    return {"requested": True}
 
 
 def _bind_master_stub(conn) -> int:
@@ -326,9 +302,9 @@ def apply_pending() -> dict:
             out["staged_bundles"] = _recollect_staged_bundles(conn)
             _mark(conn, "diag_consent_v1")
 
-        if not _marked(conn, "slice_authors_v1"):
-            out["unauthored_slices_dropped"] = _drop_unauthored_slices(conn)
-            _mark(conn, "slice_authors_v1")
+        if not _marked(conn, "slice_rebuild_v1"):
+            out["slices_rebuilt"] = _rebuild_slices(conn)
+            _mark(conn, "slice_rebuild_v1")
 
         if not _marked(conn, "master_stub_bound_v1"):
             out["master_stub_bound"] = _bind_master_stub(conn)

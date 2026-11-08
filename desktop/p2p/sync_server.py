@@ -671,6 +671,8 @@ class SyncServer:
         Worker publishes every certificate anyway."""
         from desktop.p2p.birth_cert import served_certificate
         cert = served_certificate()
+        mb_slices, lb_dump, (lb_slices, lb_version) = \
+            await asyncio.get_event_loop().run_in_executor(None, self._slice_counts)
         return self._json_response(request, {
             "status": "ok",
             "node_id": self.node_id,
@@ -679,32 +681,66 @@ class SyncServer:
             "birth_cert": (cert if cert is not None
                            and cert["pubkey"].lower() == self.node_id.lower() else None),
             "mb_dump": self.mb_dump_version,
-            "mb_slices": self._slice_blob_total(),
+            "mb_slices": mb_slices,
             # The ListenBrainz family: the dump version this node serves
             # from, its re-serve inventory and the newest version in it —
             # a requester picks sources AND learns "newest known" from these.
-            "lb_dump": self._lb_dump_version(),
-            "lb_slices": self._lb_inventory()[0],
-            "lb_slices_version": self._lb_inventory()[1],
+            "lb_dump": lb_dump,
+            "lb_slices": lb_slices,
+            "lb_slices_version": lb_version,
             "capabilities": sync_queries.CAPABILITIES,
             # Version + counts of the holdings filter (None until built):
             # the asker prices fetching it against sending its own gaps.
             "holdings": sync_queries.holdings_summary(),
         })
 
+    def _slice_counts(self) -> tuple:
+        """What /health reports of the slices — read on an executor thread:
+        each is a query (cached 60 s), and one waiting on a lock must never
+        hold the event loop every other peer request runs on."""
+        return self._slice_blob_total(), self._lb_dump_version(), self._lb_inventory()
+
     def _slice_blob_total(self) -> int:
-        """Replica inventory size, cached 60 s — /health is probed often and
-        the number only needs to say "worth asking"."""
+        """The blobs this node may pass on (checked, or checkable when asked),
+        cached 60 s — /health is probed often and the number only needs to say
+        "worth asking"."""
         now = time.time()
         if now - getattr(self, "_slice_count_at", 0) > 60:
             try:
                 with self._db() as conn:
                     self._slice_count = \
-                        mb_slice_queries.count_slice_blobs(conn)
+                        mb_slice_queries.count_slice_blobs(conn, self.node_id)
             except Exception:
                 self._slice_count = 0
             self._slice_count_at = now
         return getattr(self, "_slice_count", 0)
+
+    def _own_slice_cert(self) -> Optional[tuple]:
+        """This node's certificate and, for `pow`, its proof — what an entry of
+        its own build carries."""
+        from desktop.p2p.birth_cert import proof_path, served_certificate
+        from desktop.p2p.identity_proof import load_proof
+        cert = served_certificate()
+        if cert is None or cert["pubkey"].lower() != self.node_id.lower():
+            return None
+        proof = load_proof(proof_path()) if cert.get("method") == "pow" else None
+        # The mining time stays home, as on /health: nothing verifies by it.
+        return cert, ({k: v for k, v in proof.items() if k != "mined_at"} if proof else None)
+
+    async def _slice_refusal(self, request: web.Request) -> Optional[web.Response]:
+        """A signed slice request from a key that carries a penalty on the
+        slice lanes is refused with the evidence, so its owner can read why in
+        the node's own diagnostics (desktop/p2p/slice_trust.refusal)."""
+        from desktop.p2p import slice_trust
+        pubkey = request.get("peer_pubkey")
+        if not pubkey:
+            return None
+
+        def _read():
+            with self._db() as conn:
+                return slice_trust.refusal(conn, pubkey)
+        refusal = await asyncio.get_event_loop().run_in_executor(None, _read)
+        return self._json_response(request, refusal, status=403) if refusal else None
 
     def _lb_dump_version(self) -> Optional[str]:
         """The ListenBrainz dump version served from THIS database, read
@@ -728,7 +764,7 @@ class SyncServer:
         if now - getattr(self, "_lb_inventory_at", 0) > 60:
             try:
                 with self._db() as conn:
-                    self._lb_inv = (lb_slice_queries.count_slice_blobs(conn),
+                    self._lb_inv = (lb_slice_queries.count_slice_blobs(conn, self.node_id),
                                     lb_slice_queries.max_blob_version(conn))
             except Exception:
                 self._lb_inv = (0, None)
@@ -943,17 +979,23 @@ class SyncServer:
             )
 
     async def handle_mb_slice(self, request: web.Request) -> web.Response:
-        """POST /api/mb/slice — per-name signed blobs (v3).
+        """POST /api/mb/slice — per-name signed blobs (v4: the author's
+        certificate rides each entry).
 
         A dump holder computes+signs+caches misses; a REPLICA (no dump,
-        mb_slice_blobs only) answers what it holds and lists the rest in
-        `missing` — no 404: partially useful is useful, and the requester
-        takes misses to the next candidate. Blobs carry the ORIGINAL
-        author's signature either way."""
+        mb_slice_blobs only) answers only the blobs it checked against
+        MusicBrainz in the last 30 days (desktop/p2p/slice_checks.servable)
+        and lists the rest in `missing` — no 404: partially useful is
+        useful, and the requester takes misses to the next candidate. Blobs
+        carry the ORIGINAL author's signature either way. A signer this node
+        penalized is refused with the evidence."""
 
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
+        refused = await self._slice_refusal(request)
+        if refused is not None:
+            return refused
 
         try:
             body = await request.json()
@@ -974,7 +1016,8 @@ class SyncServer:
 
         try:
             return await self._answer(request, mb_slice_queries.serve_slices,
-                                      names, sign_fn, author, request.remote or "")
+                                      names, sign_fn, author, request.remote or "",
+                                      self._own_slice_cert(), self.node_id)
         except ValueError as e:
             return self._json_response(request, {"error": str(e)}, status=400)
         except mb_slice_queries.DumpBusy:
@@ -989,14 +1032,19 @@ class SyncServer:
 
     async def handle_lb_slice(self, request: web.Request) -> web.Response:
         """POST /api/lb/slice — per-artist-MBID signed ListenBrainz
-        statistics blobs (v1). Same shape as the MB slice: a dump holder
-        computes+signs+caches misses, a replica answers what it holds and
-        lists the rest in `missing`; ``min_version`` keeps a stale cache
-        from answering a requester that knows a newer dump exists."""
+        statistics blobs (v2: the author's certificate rides each entry).
+        Same shape as the MB slice: a dump holder computes+signs+caches
+        misses, a replica answers only the blobs it checked and lists the
+        rest in `missing`; ``min_version`` keeps a stale cache from answering
+        a requester that knows a newer dump exists. A signer this node
+        penalized is refused with the evidence."""
 
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
+        refused = await self._slice_refusal(request)
+        if refused is not None:
+            return refused
 
         try:
             body = await request.json()
@@ -1018,7 +1066,8 @@ class SyncServer:
 
         try:
             return await self._answer(request, lb_slice_queries.serve_slices,
-                                      mbids, min_version, sign_fn, author, request.remote or "")
+                                      mbids, min_version, sign_fn, author, request.remote or "",
+                                      self._own_slice_cert(), self.node_id)
         except ValueError as e:
             return self._json_response(request, {"error": str(e)}, status=400)
         except lb_slice_queries.DumpBusy:

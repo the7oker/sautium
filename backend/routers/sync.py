@@ -351,6 +351,36 @@ class MBSliceRequest(BaseModel):
     names: list[str] = Field(default_factory=list, max_length=50)
 
 
+def _own_slice_cert() -> Optional[tuple]:
+    """This node's certificate and, for `pow`, its proof — what an entry of
+    its own build carries."""
+    from desktop.p2p.identity_proof import load_proof
+    from p2p_identity import proof_path, served_certificate
+    cert = served_certificate(settings)
+    if cert is None or cert["pubkey"].lower() != (node_pubkey_hex() or "").lower():
+        return None
+    path = proof_path(settings) if cert.get("method") == "pow" else None
+    proof = load_proof(path) if path is not None else None
+    # The mining time stays home, as on /health: nothing verifies by it.
+    return cert, ({k: v for k, v in proof.items() if k != "mined_at"} if proof else None)
+
+
+async def _slice_refusal(request: Request) -> Optional[Response]:
+    """A signed slice request from a key that carries a penalty on the slice
+    lanes is refused with the evidence, so its owner can read why in the
+    node's own diagnostics (desktop/p2p/slice_trust.refusal)."""
+    from desktop.p2p import slice_trust
+    pubkey = getattr(request.state, "peer_pubkey", None)
+    if not pubkey:
+        return None
+
+    def _read():
+        with get_conn() as conn:
+            return slice_trust.refusal(conn, pubkey)
+    refusal = await in_peer_lane(_read)
+    return JSONResponse(refusal, status_code=403) if refusal else None
+
+
 lb_router = APIRouter(prefix="/api/lb", tags=["sync"])
 
 
@@ -373,7 +403,7 @@ def lb_inventory() -> tuple:
         return 0, None
     try:
         with get_conn() as conn:
-            return (lb_slice_queries.count_slice_blobs(conn),
+            return (lb_slice_queries.count_slice_blobs(conn, node_pubkey_hex()),
                     lb_slice_queries.max_blob_version(conn))
     except Exception:
         return 0, None
@@ -386,13 +416,17 @@ class LBSliceRequest(BaseModel):
 
 @lb_router.post("/slice")
 async def lb_slice(req: LBSliceRequest, request: Request) -> Response:
-    """Per-artist-MBID signed ListenBrainz statistics blobs (v1) — mirrors
+    """Per-artist-MBID signed ListenBrainz statistics blobs (v2) — mirrors
     desktop/p2p/sync_server.handle_lb_slice. Dump holders compute+sign+
-    cache misses; a replica answers what it holds, misses land in
-    `missing`; ``min_version`` keeps a stale cache from answering."""
+    cache misses; a replica answers only the blobs it checked, misses land
+    in `missing`; ``min_version`` keeps a stale cache from answering. A
+    signer this node penalized is refused with the evidence."""
     _require_sharing()
     if lb_slice_queries is None:
         raise HTTPException(status_code=404, detail="lb slices unavailable")
+    refused = await _slice_refusal(request)
+    if refused is not None:
+        return refused
 
     def _run():
         sign_fn, author = None, ""
@@ -406,7 +440,7 @@ async def lb_slice(req: LBSliceRequest, request: Request) -> Response:
         with get_conn() as conn:
             return lb_slice_queries.serve_slices(
                 conn, req.artist_mbids, req.min_version, sign_fn, author,
-                _requester(request))
+                _requester(request), _own_slice_cert(), node_pubkey_hex())
 
     try:
         return await _answer(request, _run)
@@ -446,11 +480,15 @@ async def mb_search(q: str = Query(..., min_length=2, max_length=255)) -> dict:
 
 @mb_router.post("/slice")
 async def mb_slice(req: MBSliceRequest, request: Request) -> Response:
-    """Per-name signed blobs (v3) — mirrors
+    """Per-name signed blobs (v4) — mirrors
     desktop/p2p/sync_server.handle_mb_slice. Dump holders compute+sign+
-    cache misses; a replica answers what it holds, misses land in
-    `missing`. Blobs carry the ORIGINAL author's signature either way."""
+    cache misses; a replica answers only the blobs it checked, misses land
+    in `missing`. Blobs carry the ORIGINAL author's signature either way. A
+    signer this node penalized is refused with the evidence."""
     _require_sharing()
+    refused = await _slice_refusal(request)
+    if refused is not None:
+        return refused
 
     def _run():
         sign_fn, author = None, ""
@@ -464,7 +502,7 @@ async def mb_slice(req: MBSliceRequest, request: Request) -> Response:
         with get_conn() as conn:
             return mb_slice_queries.serve_slices(
                 conn, req.names, sign_fn, author,
-                _requester(request))
+                _requester(request), _own_slice_cert(), node_pubkey_hex())
 
     try:
         return await _answer(request, _run)

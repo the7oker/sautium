@@ -1,12 +1,13 @@
 """desktop/p2p/lb_slice_queries against a real PostgreSQL built from the
 migrations (the test_life_merge pattern): the pending tiers and the version
-rules, the serve matrix against min_version, the forward-only import,
+rules, the forward-only import, a kept blob passed on only once this node
+checked it against MusicBrainz and then the serve matrix against
+min_version, a dump node's own build under its certificate,
 backend/lb_dump_load's staging aggregation, and the status row both slice
 cycles publish (lb_slice_cycle.publish_status). Skipped without a cluster."""
 
 import base64
 import gzip
-import hashlib
 import io
 import json
 import os
@@ -25,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 
 from desktop.p2p import lb_slice_cycle  # noqa: E402
 from desktop.p2p import lb_slice_queries as q  # noqa: E402
+from desktop.p2p import slice_checks, slice_trust  # noqa: E402
+from tests.slice_certs import certificate, certified, trust  # noqa: E402
 
 ed25519 = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
 
@@ -36,13 +39,13 @@ DBNAME = "sautium_lb_slice_test"
 
 KEY = ed25519.Ed25519PrivateKey.generate()
 PUB = KEY.public_key().public_bytes_raw().hex()
+CERT = certificate(PUB)
 
 
 @pytest.fixture(autouse=True)
-def _author(monkeypatch):
-    """The test key is the slice author the release names."""
-    from desktop.p2p import master_node
-    monkeypatch.setattr(master_node, "SLICE_AUTHORS", (PUB,))
+def _authority(monkeypatch):
+    trust(monkeypatch)
+
 
 A_OWNED, A_ENGAGED, A_PHANTOM, A_ASKED = (uuid.UUID(int=n) for n in (1, 2, 3, 4))
 M_OWNED, M_ENGAGED, M_PHANTOM, M_ASKED = (str(uuid.UUID(int=n)) for n in (11, 12, 13, 14))
@@ -95,6 +98,8 @@ def _seed(c):
         cur.execute("""INSERT INTO listening_history (track_id, started_at, completed, skipped)
                        VALUES (%s, now(), true, false)""", (T_ENGAGED,))
         cur.execute("INSERT INTO lb_slice_requests (artist_id) VALUES (%s)", (A_ASKED,))
+        # The node took MusicBrainz slices and holds no dump: it checks.
+        cur.execute("INSERT INTO mb_slice_fetches (name_key, matched_ids) VALUES ('owned', 1)")
 
 
 def _entry(mbid, version, recordings, artist=(10, 3)):
@@ -102,12 +107,15 @@ def _entry(mbid, version, recordings, artist=(10, 3)):
            "recordings": recordings, "truncated": False}
     blob = q.slice_blob(mbid, one)
     sig = KEY.sign(q.receipt_message_for(blob)).hex()
-    return {"dump_version": version, "author_pubkey": PUB, "sig": sig,
-            "blob_gz": base64.b64encode(gzip.compress(blob)).decode("ascii")}
+    return certified({"dump_version": version, "author_pubkey": PUB, "sig": sig,
+                      "blob_gz": base64.b64encode(gzip.compress(blob)).decode("ascii")}, CERT)
 
 
 def _import(c, mbid, entry, node="peer-a"):
-    core, blob_gz = q.verify_slice_entry(mbid, entry)
+    """What the cycle does with a verified entry: its author recorded
+    (lb_slice_cycle.vet_authors), then the import."""
+    core, blob_gz, cert, proof = q.verify_slice_entry(mbid, entry)
+    assert slice_trust.observe_author(c, cert, proof) == "verified"
     return q.import_slice(c, mbid, core, blob_gz, entry, node, None)
 
 
@@ -157,13 +165,39 @@ def test_imports_move_rows_forward_only_in_any_arrival_order(conn):
         assert cur.fetchone()[0] == V2
 
 
+def _recording_known(c, recording, *artists):
+    """MusicBrainz's answer: `recording` exists, credited to `artists`."""
+    with c.cursor() as cur:
+        cur.execute("""INSERT INTO mbws_answers (kind, mbid, status, target)
+                       VALUES ('recording', %s, 'found', %s)""", (recording, recording))
+        for position, artist in enumerate(artists):
+            cur.execute("""INSERT INTO mbws_credits (owner_kind, owner, position, artist, artist_name,
+                                                     credited_as)
+                           VALUES ('recording', %s, %s, %s, '', '')""", (recording, position, artist))
+
+
 def test_serve_replica_matrix_against_min_version(conn):
-    # This node holds no dump: it re-serves M_OWNED at V2 and M_PHANTOM at V1.
+    # This node holds no dump: it keeps M_OWNED at V2 and M_PHANTOM at V1, and
+    # passes neither on before its own check — asked, it queues the check.
     out = q.serve_slices(conn, [M_OWNED, M_PHANTOM, M_ENGAGED], None, None, "")
-    assert set(out["slices"]) == {M_OWNED, M_PHANTOM, M_ENGAGED}
+    assert out["slices"] == {} and out["missing"] == [M_OWNED, M_PHANTOM, M_ENGAGED]
+    with conn.cursor() as cur:
+        cur.execute("""SELECT subject::text, subject_key FROM mbws_waiters
+                        WHERE kind = 'recording' AND mbid = %s ORDER BY 2""", (REC_1,))
+        assert cur.fetchall() == [("slice_check", f"lb:{M_OWNED}"), ("slice_check", f"lb:{M_PHANTOM}")]
+    _recording_known(conn, REC_1, M_OWNED, M_PHANTOM)
+    with conn.cursor() as cur:                    # the artists, as MusicBrainz answers them
+        for artist in (M_OWNED, M_PHANTOM):
+            cur.execute("""INSERT INTO mbws_answers (kind, mbid, status, target)
+                           VALUES ('artist', %s, 'found', %s)""", (artist, artist))
+    assert slice_checks.evaluate(conn, "lb", M_OWNED) is True
+    assert slice_checks.evaluate(conn, "lb", M_PHANTOM) is True
+    out = q.serve_slices(conn, [M_OWNED, M_PHANTOM, M_ENGAGED], None, None, "")
+    assert set(out["slices"]) == {M_OWNED, M_PHANTOM, M_ENGAGED}       # a zero-match checks out at once
     out = q.serve_slices(conn, [M_OWNED, M_PHANTOM], V2, None, "")
     assert set(out["slices"]) == {M_OWNED} and out["missing"] == [M_PHANTOM]
-    assert q.verify_slice_entry(M_OWNED, out["slices"][M_OWNED], V2) is not None
+    # Passed on under the certificate this node recorded for its author.
+    assert q.verify_slice_entry(M_OWNED, out["slices"][M_OWNED], V2)[2]["pubkey"] == PUB
     with pytest.raises(ValueError):
         q.serve_slices(conn, ["nope"], None, None, "")
     with pytest.raises(ValueError):
@@ -184,14 +218,15 @@ def test_a_dump_node_builds_signs_and_never_serves_a_cache_older_than_its_dump(c
                     (M_PHANTOM, V2))
     assert q.local_dump_available(conn) == V2
     # M_PHANTOM's cache is at V1 (a replica import) — rebuilt at V2 from the dump.
-    out = q.serve_slices(conn, [M_PHANTOM], None, KEY.sign, PUB)
+    out = q.serve_slices(conn, [M_PHANTOM], None, KEY.sign, PUB, "", (CERT, None), PUB)
     entry = out["slices"][M_PHANTOM]
     assert entry["dump_version"] == V2 and entry["author_pubkey"] == PUB
-    core, _ = q.verify_slice_entry(M_PHANTOM, entry, V2)
+    assert (entry["author_cert"], entry["author_proof"]) == (CERT, None)
+    core, *_ = q.verify_slice_entry(M_PHANTOM, entry, V2)
     assert core["artist"] == [100, 40]
     assert {r[0] for r in core["recordings"]} == {REC_1, str(uuid.UUID(int=33))}
     # A version above the dump's is a miss even on a dump node.
-    out = q.serve_slices(conn, [M_PHANTOM], "20261001-000000", KEY.sign, PUB)
+    out = q.serve_slices(conn, [M_PHANTOM], "20261001-000000", KEY.sign, PUB, "", (CERT, None), PUB)
     assert out["missing"] == [M_PHANTOM]
 
 
