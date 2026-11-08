@@ -5786,6 +5786,35 @@ def test_a_track_an_up_filter_not_tried_may_stop_on_plays_and_the_notice_warns_o
     assert b.rate_notice()["since"] != since and len(said()[1]) == 2
 
 
+def test_a_tick_with_no_verdict_keeps_the_rate_checks_notice(monkeypatch):
+    """A tick that gives no verdict — HQPlayer opening an entry, or a queue
+    edit in flight on an HQPlayer whose Status names no URI — says nothing
+    new of the queue: the notice the tick before served stands, playing or
+    paused. Withdrawn there, it came back at the next tick: two notice wakes,
+    no toast (atlas-release's review, L2). Stopped, none is served."""
+    import hqp_rate_check as rc
+    q = CanonicalQueue()
+    q.replace([_item(f"E:/Music/A/0{n}.flac", n) for n in range(1, 5)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    inp = rc.Inputs("pcm", 44100, "not checked", rc.Filter("sinc-short", "Any", True),
+                    rc.Filter("closed-form", "2^x", True), measured="6.2.4")
+    queue = [88200, 96000, 88200, 48000]
+    b._rate_check = rc.check(inp, rc.Sources({r: queue.count(r) for r in queue}, first=queue[0]))
+    b._rate_gen, b._rate_slot = q.generation, 1
+
+    def status(position, state=PlaybackState.PLAYING):
+        return TrackStatus(state=state, track_index=1, track_id="", position=position, length=300.0,
+                           volume=-3.0, src_rate=88200, active_rate=44100, active_filter="sinc-short",
+                           track_serial=1)
+    for position, asked in ((0.0, 1000.0), (5.0, 1005.0)):
+        b._rate_served = b._rate_notice_now(status(position), (1, q.item_at(1), False), asked)
+    served = b._rate_served
+    assert served is not None
+    assert b._rate_notice_now(status(6.0), None, 1006.0) is served
+    assert b._rate_notice_now(status(6.0, PlaybackState.PAUSED), None, 1007.0) is served
+    assert b._rate_notice_now(status(0.0, PlaybackState.STOPPED), None, 1008.0) is None
+
+
 def test_a_may_hqplayer_disproves_by_playing_is_said_no_more_at_that_setting(monkeypatch):
     # sinc-short (not tried) in the Nx slot, closed-form in the 1x one, at 44.1 kHz on engine 6: a queue of 88.2,
     # 96, 88.2 and 48 kHz tracks. While the take of the slot a "may" names starts — under a second past where its

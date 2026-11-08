@@ -3027,8 +3027,11 @@ class HqpBackend(PlayerBackend):
         speaks through its verdict instead, another controller's playlist
         through nothing. On a tick whose slot is not the one the check was
         judged for (judged again at a later tick, unless the check is parked
-        or its judgement fails), what the tick before served for this queue
-        and setting stands, and none is served otherwise. The slot a "may"
+        or its judgement fails), or that gives no verdict (HQPlayer opening
+        an entry, a queue edit in flight on an HQPlayer whose Status names no
+        URI: withdrawn there, the notice came back at the next tick — two
+        wakes for nothing), what the tick before served for this queue and
+        setting stands, and none is served otherwise. The slot a "may"
         names: while its take starts — under a second past the position the
         take's first status read (a start at a spot, as a resume after a
         rebuild is, reads the spot at once; a Seek sent after that status was
@@ -3053,11 +3056,11 @@ class HqpBackend(PlayerBackend):
         if (check is None or not check.groups or check.started_refused
                 or self._rate_gen != self._queue.generation
                 or status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED)
-                or playing is None or playing[1] is None or playing[2] or self.drift):
+                or (playing is not None and (playing[1] is None or playing[2])) or self.drift):
             return None
         kept = (self._rate_served if self._rate_onset is not None
                 and self._rate_onset[0] == (self._rate_gen, check.key) else None)
-        if playing[0] != self._rate_slot:
+        if playing is None or playing[0] != self._rate_slot:
             return kept
         unsaid = self.rate_heard(check.key)
         if check.started_may and check.first not in unsaid:

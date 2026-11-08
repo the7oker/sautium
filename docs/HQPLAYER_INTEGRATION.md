@@ -1999,7 +1999,10 @@ reads the spot at once; a Seek sent after that status was asked — a resume's
 own, one while HQPlayer builds — starts the take anew at the status after
 it; and a filter HQPlayer builds and then refuses shows one playing status) — what the tick before served for that queue and setting
 stands, and none is served otherwise — as on any tick whose slot is not yet
-the one the check was judged for (a skip, a row tapped); past it the take
+the one the check was judged for (a skip, a row tapped), and on one that
+gives no verdict (HQPlayer opening an entry, a queue edit in flight on an
+HQPlayer whose Status names no URI; since 2026-11-09 — withdrawn there, the
+notice came back at the next tick: two wakes, no toast); past it the take
 plays, and the notice leaves its rate out, heard or not (a stop is the
 verdict's). A "may" HQPlayer disproves by playing — that take, HQPlayer's
 own Status naming that source rate, the output rate checked and the filter
