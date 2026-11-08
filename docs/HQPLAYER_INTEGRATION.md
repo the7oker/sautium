@@ -657,7 +657,11 @@ comes after the control port answers again — so neither can end the wait.
   advance closed on the refusal its log named can meet, last, the one
   playing status at 0 s of a filter HQPlayer builds before it refuses: no
   play, and the spot is set there all the same (since 2026-11-01) — a
-  position moving on spends it, as above. Only an
+  position moving on spends it, as above. The rest is judged at the reading
+  the attempt closed on (since 2026-11-09): one that names no entry —
+  HQPlayer opening another — is no rest, though the status still shows the
+  stop before it; the spot set there stood under what plays, and Pause then
+  Play restarted the refused track. Only an
   entry of ours in a mirror in step or a tail mirror (the advance names its
   target only there); not a stop while another controller holds HQPlayer
   (Roon, its own window), and a spot set since stays. Another controller

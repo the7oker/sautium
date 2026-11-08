@@ -2458,6 +2458,40 @@ def test_an_advance_closed_on_a_filter_hqplayer_built_and_refused_leaves_the_spo
 
 
 
+def test_an_advance_closed_on_its_refusal_while_hqplayer_opens_another_entry_leaves_no_spot(traced, fake,
+                                                                                            monkeypatch, tmp_path):
+    """HQPlayer's own advance onto our next entry, whose filter it builds and
+    refuses; before the refusal its log names closes the advance, HQPlayer
+    stops on no entry and then opens another one — its opening answers
+    (playing at track 0, length 0) give no verdict, so the status still
+    shows the stop. The rest is judged at the reading the advance closed on:
+    HQPlayer opens an entry, resting on nothing of the advance's — no spot.
+    Judged on the stop the status showed, the spot stood under what plays,
+    and Pause then Play restarted the refused track (atlas-release's review,
+    N1)."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    for state, track, starting, opening in [(int(PlaybackState.PLAYING), 2, 10 ** 6, 0),
+                                            (int(PlaybackState.STOPPED), 0, 0, 0),
+                                            (int(PlaybackState.PLAYING), 1, 10 ** 6, 10 ** 6)]:
+        with fake._lock:
+            fake._advancing = None
+            fake.state, fake.track, fake.position, fake._starting, fake.opening = state, track, 0.0, starting, opening
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n, 2), 10.0)
+    assert traced._last_tick.state == "stopped"         # the opening answers give no verdict
+    with open(tmp_path / "HQPlayer9Desktop.log", "a", encoding="utf-8") as f:
+        f.write("I 2001/05/06 10:00:09 Rate: 48000, block size: 8192, frame size: 32768\n"
+                "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate\n")
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
+    last = att.facts["ticks"][-1]
+    assert (last["state"], last["track"], last["length"]) == ("playing", 0, 0)
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)        # the close's pass, the rest's, is over
+    assert traced._spot is None
+
+
 @pytest.mark.parametrize("why", ["rule", "slow"])
 def test_a_spot_hqplayer_plays_after_all_is_spent(traced, fake, monkeypatch, tmp_path, why):
     """HQPlayer's own advance whose rebuild outlasts its deadline while it
