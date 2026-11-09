@@ -1099,7 +1099,7 @@ class DlnaBackend(PlayerBackend):
                 extra["resume"] = {"index": self._index, "position": self._resume}
             else:
                 position, length, index = 0.0, 0.0, 0
-        elif self._unslotted is not None:
+        elif self._unslotted is not None and not self._loading:
             # Ours at no slot (_ours_at_no_slot): no queue slot named, the
             # track named by what the renderer reports of it — the DIDL this
             # node handed, read again by the position poll
@@ -1702,7 +1702,7 @@ class DlnaBackend(PlayerBackend):
         code = getattr(e, "error_code", None)
         if "q=opus" not in cur or code not in (710, 711):
             return False
-        if self._current_url == cur:
+        if self._current_url == cur and self._unslotted is None:
             if code == 710:
                 self._remember_opus_seek(False)
             logger.info("renderer '%s' refused a Seek in its Opus stream (%s) — loading it again "
@@ -1718,6 +1718,8 @@ class DlnaBackend(PlayerBackend):
         second, run on since."""
         self._seek_due = None
         self._remember_opus_seek(False)
+        if self._unslotted is not None:
+            return          # ours at no slot: nothing loaded again (P11)
         second = self._wall_estimate()
         logger.info("renderer '%s' did not land a Seek in its Opus stream — loading it again "
                     "from %.0f s", self.label, second)
@@ -2376,7 +2378,6 @@ class DlnaBackend(PlayerBackend):
             # tapped track with a transition spinner instead of either lying
             # ("playing") or looking dead while the old audio rides on.
             self._index, self._load_item = index, item
-            self._unslotted = None    # a load of ours: a slot named again
             self._load_gen += 1     # in-flight poll evidence is now about a dead world
             self._pos_offset = ss   # 0 for a fresh track; the seek offset otherwise
             self._position = ss or start_at   # so the loading state shows the target
@@ -2431,7 +2432,7 @@ class DlnaBackend(PlayerBackend):
         self._taking_back = False
         self._handed.add(url)
         await self._avt_retry("SetAVTransportURI", CurrentURI=url, CurrentURIMetaData=meta)
-        self._current_url = url
+        self._current_url, self._unslotted = url, None     # a load of ours: a slot named again
         self._resume = self._held_item = None
         # Ours again; a hand-over refused raised above, theirs still
         self._external, self._cut = False, None
@@ -2856,6 +2857,12 @@ class DlnaBackend(PlayerBackend):
         # track playing its ORIGINAL format (the change applies from the
         # next track), so its URL — not the setting — is the source of truth.
         cur = self._current_url or ""
+        if "q=opus" in cur and not self._seeks_opus_to(seconds) and self._unslotted is not None:
+            # Ours at no slot: a reload is a load of ours, and the track is no
+            # slot's — its stream is not handed over again (ROON-COEX §6.1 P11)
+            self._local.refusal = (f"{self.label} plays a track the queue no longer holds — "
+                                   "it cannot be sought there; Play starts the queue")
+            return False
         if "q=opus" in cur and not self._seeks_opus_to(seconds):
             # A renderer that cannot time-seek VBR Opus (a DAP: no byte↔time
             # map) gets the SAME stream again from the second. The reload

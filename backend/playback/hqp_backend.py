@@ -3222,7 +3222,12 @@ class HqpBackend(PlayerBackend):
         # handed it: an older cause is some earlier play's, never the other app's
         ours = [n for u in list(self._given) for n in diag._needles(u)]
         lines = log.get("lines") or []
-        last = max((i for i, line in enumerate(lines) if any(n in line for n in ours)), default=-1)
+        # ...nor at or before a line an attempt already took for its cause — the
+        # node's own refused start (Desktop 6 names an entry at its add, never
+        # at a Play), the other app's track refused before this one
+        judged = {((a.hqp_log or {}).get("cause") or {}).get("line") for a in diag.attempts()}
+        last = max((i for i, line in enumerate(lines) if line in judged or any(n in line for n in ours)),
+                   default=-1)
         log["cause"] = diag.classify(lines[last + 1:], uri)
         reason = diag.other_reason(log)
         if reason is None:
@@ -3536,7 +3541,8 @@ class HqpBackend(PlayerBackend):
                 "modulator": status.active_shaper, "rate": hqp_atlas.rate_name(status.active_rate)}
         diagnosis = self._diagnosis(status)
         other = self._other_refused
-        if other is not None and other[2] == self._spot_gen and status.state == PlaybackState.STOPPED:
+        if (other is not None and other[2] == self._spot_gen and status.state == PlaybackState.STOPPED
+                and self._spot_at() is not None):
             # The other app's refused track (§6.1 P7), beside the spot its
             # takeover left: the node's sentence, and its attempt for the sheet
             extra["other_refused"] = other[1]

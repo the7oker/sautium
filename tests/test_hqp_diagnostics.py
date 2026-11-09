@@ -933,3 +933,11 @@ def test_another_apps_refused_track_is_said_in_the_nodes_words_and_is_none_of_it
                                        "in its output family.")
     assert att.hqp_log["lines"] == log["lines"]
     assert diag.failing_run() is None
+
+
+def test_w_a_dsd_source_rate_is_named_as_the_node_names_it():
+    log = {"cause": diag.classify(["& 2026/11/02 18:00:00 No suitable output rate for 2822400, stop"])}
+    assert diag.other_reason(log) == "no output rate for DSD64 in its output family"
+    log = {"cause": diag.classify(["& 2026/11/02 18:00:00 No suitable output rate for 96000, stop"])}
+    assert diag.other_reason(log) == "no output rate for 96 kHz in its output family"
+

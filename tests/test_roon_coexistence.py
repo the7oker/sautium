@@ -43,8 +43,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_hqp_backend import (_QUESTIONS, _GatedStream, _album, _attach, _item, _link, _polls,  # noqa: E402,F401
                               _queue_stays_in_memory, _routes_on, _stopped_at_spot, _streams_on_hqplayer, _wait,
                               fake, listens, output)
-from test_dlna_backend import (FakeRenderer, _gena_port, _on_renderer, _playing_at, _seconds,  # noqa: E402,F401
-                               heard, manager, nodes, proxy, quality, renderers, stored, streamed, track, wait_for)
+from test_dlna_backend import (PHONE_SINK, FakeRenderer, _gena_port, _on_renderer, _playing_at,  # noqa: E402,F401
+                               _seconds, heard, manager, nodes, proxy, quality, renderers, stored, streamed, track,
+                               wait_for)
 
 from hqplayer_client import PlaybackState, TrackStatus  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
@@ -52,6 +53,7 @@ from playback import hqp_link as hl  # noqa: E402
 from playback import hqp_diagnostics as diag  # noqa: E402
 from playback import tracker  # noqa: E402
 from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
+from streaming import transcode  # noqa: E402
 
 
 PLAYING = int(PlaybackState.PLAYING)
@@ -3808,3 +3810,344 @@ def test_p7_the_row_goes_with_the_spot_it_was_read_under(fake, listens, monkeypa
     finally:
         b.shutdown()
         roon.close()
+
+
+# -- the last body's review round 2 ------------------------------------------------------------
+
+def _opus_no_slot(tmp_path, renderers, nodes, quality, monkeypatch, stored):
+    """A phone that does not seek Opus itself (remembered, N-7) plays slot 1 (Track 1) in opus_96; another controller
+    takes it; the person removes Track 1; the renderer plays Track 1's URI again by itself: ours at no slot (P11)."""
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK, reports=lambda uri, didl: (didl or 60.0) - FakeRenderer.offset(uri))
+    stored["output.dlna_opus_seek"] = {r.udn.lower(): False}
+    q = CanonicalQueue()
+    tracks = [track(tmp_path, i, seconds=60.0) for i in (1, 2, 3)]
+    q.replace(tracks)
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and n.last.position >= 3,
+             timeout=15, what="slot 1 playing")
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    assert q.remove(1) is tracks[0]
+    n.backend.queue_changed("remove")
+    time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 10.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.state == "playing"
+             and n.last.queue_index == 0, timeout=6, what="ours at no slot")
+    return r, n, q, ours.split("/file/")[1].split("?")[0]
+
+
+def test_a_an_opus_seek_at_no_slot_names_no_queued_track(tmp_path, proxy, renderers, nodes, quality,
+                                                             monkeypatch, stored):
+    """P11 (b): ours at no slot — Now Playing names it with no slot, no listen kept. A Seek there in an Opus stream
+    the renderer does not seek itself reloads the stream from the second (?ss=): whatever it does, no status may name
+    a queued slot while the renderer plays the removed track's stream."""
+    r, n, q, removed = _opus_no_slot(tmp_path, renderers, nodes, quality, monkeypatch, stored)
+    k = len(n.statuses)
+    n.backend.seek(30)
+    time.sleep(4.0)
+    named = [(s.state, s.queue_index, round(s.position, 1)) for s in n.statuses[k:] if s.queue_index]
+    _observed("A", renderer=(r.state, r.uri[-40:], removed in r.uri, "Track 2" in r.meta),
+              named=named[-4:], unslotted=n.backend._unslotted is not None, index=n.backend._index)
+    assert not (removed in r.uri and named), (
+        f"the removed track's stream plays ({r.uri[-40:]}) while the status names slot(s) {named[-3:]}")
+
+
+def test_a2_an_opus_seek_at_no_slot_announces_no_queued_track(tmp_path, proxy, renderers, manager, heard,
+                                                                  quality, monkeypatch):
+    """The same through the manager and the play tracker: no now-playing and no listen of the queued track that
+    took the removed one's slot (P11 (b): no listen of it is kept)."""
+    listened, lastfm = heard
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK, reports=lambda uri, didl: (didl or 60.0) - FakeRenderer.offset(uri))
+    manager.store["output.dlna_opus_seek"] = {r.udn.lower(): False}
+    _on_renderer(manager, r, [track(tmp_path, i, seconds=60.0) for i in (1, 2, 3)])
+    _playing_at(manager, r, 3)
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: manager.latest_status.get("source") == "external", timeout=6, what="external")
+    assert manager.queue.remove(1) is not None
+    manager.backend().queue_changed("remove")
+    time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 10.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: manager.latest_status.get("source") != "external"
+             and manager.latest_status.get("track_index") == 0
+             and manager.latest_status.get("state") == "playing", timeout=6, what="ours at no slot")
+    before = list(lastfm)
+    manager.backend().seek(30)
+    time.sleep(4.0)
+    st = manager.latest_status
+    _observed("A2", lastfm=lastfm[len(before):], status=(st.get("state"), st.get("track_index"), st.get("song")),
+              renderer=r.uri[-40:])
+    assert ("update_now_playing", "Track 2") not in lastfm[len(before):], (
+        "Track 2 announced as playing while the removed Track 1's stream plays")
+
+
+def _log(tmp_path, monkeypatch, text):
+    from config import settings
+    monkeypatch.setattr(settings, "hqplayer_data_dir", str(tmp_path))
+    (tmp_path / "settings.xml").write_text('<?xml version="1.0"?><hqplayer><log enabled="1"/></hqplayer>')
+    (tmp_path / "HQPlayer6Desktop.log").write_text(text)
+
+
+def test_e_a_play_at_no_slot_that_hands_nothing_over_leaves_it_at_no_slot(tmp_path, proxy, renderers, nodes,
+                                                                             quality):
+    """Ours at no slot (Track 1, removed, played again by the renderer itself); the queue's slots after it are
+    streams whose tokens the proxy no longer holds (evicted): the person's Play walks them and hands the renderer
+    nothing — it plays the removed track on. P11 (b): Now Playing names it with no slot and no listen of it is kept —
+    never a queued slot said playing over the removed track's stream."""
+    from test_dlna_backend import streamed
+    r = renderers()
+    q = CanonicalQueue()
+    t1 = track(tmp_path, 1, seconds=60.0)
+    q.replace([t1, streamed(proxy, 2, cover_url="", seconds=60.0), streamed(proxy, 3, cover_url="", seconds=60.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and n.last.position >= 3,
+             timeout=15, what="slot 1 playing")
+    ours, meta = r.uri, r.meta
+    removed = ours.split("/file/")[1].split("?")[0]
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    assert q.remove(1) is t1
+    n.backend.queue_changed("remove")
+    time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 10.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.state == "playing"
+             and n.last.queue_index == 0, timeout=6, what="ours at no slot")
+    for tok in ("stream2", "stream3"):
+        proxy._entries.pop(tok, None)              # evicted: nothing the proxy can serve
+    k = len(n.statuses)
+    assert n.backend.play()
+    time.sleep(4.0)
+    named = [(s.state, s.queue_index, round(s.position, 1)) for s in n.statuses[k:]
+             if s.state == "playing" and s.queue_index]
+    _observed("E", renderer=(r.state, removed in r.uri), named=named[-4:],
+              last=(n.last.state, n.last.queue_index, n.last.extra.get("song"), n.last.extra.get("error")),
+              sent=_sent(r, 0)[-4:])
+    assert not (removed in r.uri and r.state == "PLAYING" and named), (
+        f"the removed track plays on while the status names slot(s) {named[-3:]}")
+
+
+def test_b2_the_nodes_own_judged_refusal_is_not_the_other_apps(fake, listens, monkeypatch, tmp_path):
+    """B with the node's own refusal a real attempt: the node's tap on slot 1 refused at its rate (its log read,
+    "No suitable output rate for 48000" its cause), its tap on slot 2 playing; then Roon's track refused with a line
+    the node does not know, Desktop 6 resting on no entry. The row never says the node's own refusal (P7)."""
+    from playback import manager as manager_mod
+    path = tmp_path / "HQPlayer6Desktop.log"
+    _log(tmp_path, monkeypatch,
+         "& 2026/11/02 17:58:00 Playlist add file: E:/Music/A/01.flac\n"
+         "& 2026/11/02 17:58:00 Playlist add file: E:/Music/A/02.flac\n"
+         "& 2026/11/02 17:58:00 Playlist add file: E:/Music/A/03.flac\n"
+         "& 2026/11/02 17:58:01 Play (0/0)\n"
+         "& 2026/11/02 17:58:01 No suitable output rate for 48000, stop\n")
+    fake.raw_streams = "uri"
+    fake.rests_nowhere = True
+    fake.refuse_play.add("A/01.flac")
+    roon = FakeRoon(fake.port)
+    mgr = _album(3)
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    b = _attach(mgr)
+    try:
+        assert b.select(1)
+        assert _wait(lambda: any(a.intent != "other" and a.hqp_log and (a.hqp_log.get("cause") or {}).get("code")
+                                 == "no_output_rate" for a in diag.attempts()), timeout=15), \
+            [(a.intent, a.verdict, bool(a.hqp_log)) for a in diag.attempts()]
+        fake.refuse_play.discard("A/01.flac")
+        fake.refuse_play.add("stream.raw")
+        with open(path, "a") as log:
+            log.write("& 2026/11/02 17:58:05 Play (1/0)\n")
+        assert b.select(2)
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                     and mgr._latest_status.get("track_index") == 2
+                     and tracker._play_session is not None and tracker._play_session.max_position >= 3)
+        with open(path, "a") as log:
+            log.write(f"& 2026/11/02 18:00:00 Playlist add URI: http://127.0.0.1:30000/{1:032x}/stream.raw\n"
+                      "& 2026/11/02 18:00:00 Play (-1/0)\n"
+                      "& 2026/11/02 18:00:00 Unknown source format, stop\n")
+        roon.play_track()
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("index") == 2, timeout=10), \
+            mgr._latest_status
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=15)
+        st = mgr._latest_status
+        _observed("B2", other_refused=st.get("other_refused"), state=st.get("state"), resume=st.get("resume"))
+        assert "48 kHz" not in (st.get("other_refused") or ""), (
+            f"the node's own judged refusal said as the other app's: {st.get('other_refused')!r}")
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_f_the_row_goes_with_the_spot_its_track_took_out_of_the_queue(fake, listens, monkeypatch, tmp_path):
+    """P12 (a): the row only in F7's state — beside the takeover's spot while that spot stands (_other_refused).
+    The person removes the spot's track from the queue (F7: a queue edit that removes the item erases the spot): the
+    spot is gone, and so is F7's state — no row."""
+    _log(tmp_path, monkeypatch, "& 2026/11/02 18:00:00 No suitable output rate for 96000, stop\n")
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        roon.play_track()
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+        n = _mark(fake, roon)
+        assert mgr.remove(2)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=15)
+        st = mgr._latest_status
+        _observed("F", status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume",
+                                                             "other_refused")},
+                  spot=b._spot_at(), node_commands=_node_commands(fake, n, roon))
+        assert st.get("resume") is None, "the spot stands with its track out of the queue"
+        assert st.get("other_refused") is None, f"the row stands with no spot: {st.get('other_refused')!r}"
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_e2_a_play_at_no_slot_that_hands_nothing_over_announces_no_queued_track(tmp_path, proxy, renderers,
+                                                                                    manager, heard, quality):
+    """E through the manager and the play tracker: no now-playing, no scrobble of the stream slot the walk ended
+    on while the removed Track 1 plays on (P11 (b): no listen of it is kept)."""
+    from test_dlna_backend import streamed
+    listened, lastfm = heard
+    r = renderers()
+    _on_renderer(manager, r, [track(tmp_path, 1, seconds=60.0), streamed(proxy, 2, cover_url="", seconds=60.0),
+                              streamed(proxy, 3, cover_url="", seconds=60.0)])
+    _playing_at(manager, r, 3)
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: manager.latest_status.get("source") == "external", timeout=6, what="external")
+    assert manager.queue.remove(1) is not None
+    manager.backend().queue_changed("remove")
+    time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 40.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: manager.latest_status.get("source") != "external"
+             and manager.latest_status.get("track_index") == 0
+             and manager.latest_status.get("state") == "playing", timeout=6, what="ours at no slot")
+    for tok in ("stream2", "stream3"):
+        proxy._entries.pop(tok, None)
+    before = list(lastfm)
+    assert manager.backend().play()
+    time.sleep(4.0)
+    st = manager.latest_status
+    _observed("E2", lastfm=lastfm[len(before):], status=(st.get("state"), st.get("track_index"), st.get("song")))
+    assert not [c for c in lastfm[len(before):] if c[1] in ("Stream 2", "Stream 3")], (
+        f"a stream slot announced while the removed Track 1 plays: {lastfm[len(before):]}")
+
+
+def test_g_roons_refused_track_played_after_all_leaves_no_row(fake, listens, monkeypatch, tmp_path):
+    """A pin (mutant L6): F7's state with the row; the rate set right in HQPlayer, Roon's Play sent again plays that
+    very entry — the same playlist — and Roon stops it. HQPlayer refused nothing of what rests there now: no row."""
+    _log(tmp_path, monkeypatch, "& 2026/11/02 18:00:00 No suitable output rate for 96000, stop\n")
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        roon.play_track()
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+        fake.refuse_play.clear()                   # the rate set right in HQPlayer
+        roon.play_again()
+        assert _wait(lambda: fake.state == PLAYING and fake.position >= 2, timeout=10)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=10)
+        roon.stop()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
+        st = mgr._latest_status
+        _observed("G", status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume",
+                                                             "other_refused")},
+                  hqplayer=(fake.state, fake.playlist[-1][-30:] if fake.playlist else None))
+        assert st.get("other_refused") is None, "a refusal said of the track HQPlayer played after all"
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_h_an_opus_seeks_uri_at_no_slot_keeps_its_own_length(tmp_path, proxy, renderers, nodes, quality,
+                                                                 monkeypatch, stored):
+    """A pin (round 1's L6, the length at no slot): Track 1 (60 s) reloaded from 20 s (?ss=20, a renderer that does
+    not seek Opus itself); another controller takes the renderer; Track 1 removed; the renderer plays that ?ss=20 URI
+    again by itself — ours at no slot. Its length is the stream's offset plus what the renderer reports of it (60 s),
+    never the length of the queued track now at that slot (Track 2, 90 s)."""
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK, reports=lambda uri, didl: (didl or 60.0) - FakeRenderer.offset(uri))
+    stored["output.dlna_opus_seek"] = {r.udn.lower(): False}
+    q = CanonicalQueue()
+    tracks = [track(tmp_path, 1, seconds=60.0), track(tmp_path, 2, seconds=90.0), track(tmp_path, 3, seconds=60.0)]
+    q.replace(tracks)
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and n.last.position >= 2,
+             timeout=15, what="slot 1 playing")
+    assert n.backend.seek(20)
+    wait_for(lambda: "ss=20" in r.uri and r.state == "PLAYING" and n.last.state == "playing"
+             and n.last.position >= 21, timeout=15, what="reloaded from ?ss=20")
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    assert q.remove(1) is tracks[0]
+    n.backend.queue_changed("remove")
+    time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 5.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.state == "playing"
+             and n.last.queue_index == 0, timeout=6, what="ours at no slot")
+    time.sleep(2.5)                                # the poll's readings of it
+    _observed("H", length=n.last.length, position=round(n.last.position, 1), uri=r.uri[-24:])
+    assert n.last.length == 60, f"length {n.last.length} at no slot — not the ?ss=20 stream's track"
+
+
+def test_b_the_end_at_no_slot_the_poll_finds_advances_nothing(tmp_path, proxy, renderers, nodes, quality):
+    """Ours at no slot, its end found by the position poll — the renderer's
+    events gone quiet before it: nothing advances, no load of the queue's
+    next (the queue's slot and one after it stand)."""
+    r = renderers()
+    q = CanonicalQueue()
+    tracks = [track(tmp_path, i, seconds=60.0) for i in (1, 2, 3)]
+    q.replace(tracks)
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and n.last.position >= 3,
+             timeout=15, what="slot 1 playing")
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    assert q.remove(1) is tracks[0]
+    n.backend.queue_changed("remove")
+    time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 50.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.queue_index == 0
+             and n.last.position >= 50, timeout=8, what="ours at no slot, the poll's reading taken")
+    r.notifying = False
+    mark = len(r.calls)
+    wait_for(lambda: r.state == "STOPPED", timeout=15, what="its end")
+    time.sleep(3.0)
+    assert not [a for a in _sent(r, mark) if a == "SetAVTransportURI"], "its end loaded the queue's next"

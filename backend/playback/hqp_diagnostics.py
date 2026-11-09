@@ -727,10 +727,6 @@ def record_unreachable(message: str, context: dict) -> bool:
 _NO_RATE_LINE = re.compile(r"No suitable output rate for (\d+)")
 
 
-def _khz(rate: int) -> str:
-    return f"{rate / 1000:g} kHz"
-
-
 def other_reason(log: Optional[dict]) -> Optional[str]:
     """The node's sentence for why HQPlayer refused another controller's
     track — the refusal its log named; None where it names none (ROON-COEX
@@ -739,10 +735,10 @@ def other_reason(log: Optional[dict]) -> Optional[str]:
     line = cause.get("line") or ""
     if cause.get("code") == "no_output_rate":
         m = _NO_RATE_LINE.search(line)
-        return f"no output rate for {_khz(int(m.group(1)))} in its output family" if m else None
+        return f"no output rate for {rate_name(int(m.group(1)))} in its output family" if m else None
     if cause.get("code") == "rate_filter":
         m = _RATE_LINE.search(line)
-        return (f"its filter is not possible at {_khz(int(m.group(1)))}" if m
+        return (f"its filter is not possible at {rate_name(int(m.group(1)))}" if m
                 else "its filter is not possible at that rate")
     return None
 

@@ -688,3 +688,36 @@ def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():
     assert proc.returncode == 0, proc.stderr.decode()
     assert [tag for _np, _mp, tag, *_ in json.loads(proc.stdout)] == [
         "Connecting to Sautium Player…", "Connecting to Sautium Player…", ""]
+
+
+_SHEET = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const shell = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
+const cut = (from, to) => {
+  const a = shell.indexOf(from), b = shell.indexOf(to, a);
+  if (a < 0 || b < 0) throw new Error('marker not found: ' + (a < 0 ? from : to));
+  return shell.slice(a, b);
+};
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const ctx = { escapeHtml: esc };
+vm.createContext(ctx);
+vm.runInContext(cut('  const HQP_INTENTS = {', '\n  function hqpLogHtml(log) {') + '\nthis.__trace = hqpTraceHtml;', ctx);
+process.stdout.write(JSON.stringify(ctx.__trace(JSON.parse(fs.readFileSync(0, 'utf8')))));
+"""
+
+
+def test_j_the_sheet_of_another_apps_track_names_its_uri_and_says_sautium_sent_nothing():
+    """Round 1's L6 as built: the sheet of another app's refused track names that track's URI and says Sautium sent
+    nothing for it — never "Nothing reached HQPlayer" nor the media server's empty list, one of the node's plays'."""
+    uri = "http://127.0.0.1:30000/0a/stream.raw"
+    log = {"lines": ["& 2026/11/02 18:00:00 No suitable output rate for 96000, stop"], "cause": None}
+    log["cause"] = diag.classify(log["lines"])
+    att = diag.record_other_refused(uri, log, diag.other_reason(log))
+    proc = subprocess.run([NODE, "-e", _SHEET, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
+                          input=json.dumps(diag.public(att, redact=False)).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    html = json.loads(proc.stdout)
+    assert "Another app handed HQPlayer this track; Sautium sent nothing for it." in html
+    assert uri in html and "Another app&#39;s track" in html
+    assert "Nothing reached HQPlayer" not in html and "media server saw" not in html
+
