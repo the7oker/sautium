@@ -1290,6 +1290,10 @@ class HqpBackend(PlayerBackend):
         # on: (its track, the spot's generation then), judged at HQPlayer's
         # next answer (_judge_start)
         self._unjudged: Optional[tuple] = None
+        # The spot's generation the rest rule left it at (_rests_on_its_start)
+        # and when: HQPlayer playing another entry of ours on a take no
+        # command of the node's made since spends it (_spot_played)
+        self._rest_gen, self._rest_at = -1, 0.0
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
         self._stopped_at_attach = False
@@ -3216,10 +3220,17 @@ class HqpBackend(PlayerBackend):
         start may say it once before HQPlayer's own stop. The spot is spent,
         as a start of the node's spends it: a Pause then a Play resumes what
         plays, never restarts the track at the spot, and a stop later names
-        what HQPlayer stopped on. Called on the poller."""
+        what HQPlayer stopped on. So is a spot the rest rule left when
+        HQPlayer plays another entry of ours on a take no command of the
+        node's made since (the person's start in its own window: ROON-COEX
+        §6.1 P8) — Pause then Play restarted the refused track — never a
+        takeover's: another controller's entry is not ours. Called on the
+        poller."""
         with self._spot_lock:
             held = self._spot
-            if held is not None and held[0] is playing[1]:
+            if held is None or playing[1] is None or playing[2]:
+                return
+            if held[0] is playing[1] or (self._spot_gen == self._rest_gen and self._took_at <= self._rest_at):
                 self._spot, self._spot_gen = None, self._spot_gen + 1
 
     def _taken(self) -> bool:
@@ -4094,6 +4105,7 @@ class HqpBackend(PlayerBackend):
             if self._spot is not None:
                 return
             self._spot, self._spot_gen = (item, int(second)), self._spot_gen + 1
+            self._rest_gen, self._rest_at = self._spot_gen, time.time()
         logger.info("HQPlayer stopped on the start of slot %d by itself — Play starts it again",
                     self._queue.index_of(item))
         self.poke()
@@ -4445,8 +4457,12 @@ class HqpBackend(PlayerBackend):
     def _judge_mirror(self, playlist: list, status, *, expect: int) -> bool:
         """The canary: HQPlayer's playlist against the queue without its gaps,
         read together while the mirror's state had changed `expect` times. The
-        same, it is in step. Otherwise, back from a restart (_verify_mirror)
-        the mirror is lost and HQPlayer gets the queue back; a tail mirror
+        same, it is in step. Otherwise, back from a silence (_verify_mirror)
+        the mirror is lost and HQPlayer gets the queue back — a restart:
+        HQPlayer empty, or holding the node's own entries — unless its
+        playlist holds an entry the node never gave: another controller's,
+        drift, and nothing sent (ROON-COEX §6.1 P1: the node never writes
+        over another controller's playback without a person's word); a tail mirror
         whose tail holds stays one; any other difference is drift — an edit
         made outside this node — never reconciled on its own (a lost mirror
         stays lost). A verdict a change of the mirror overtook is not
@@ -4466,6 +4482,12 @@ class HqpBackend(PlayerBackend):
             if was != "step":
                 logger.info("HQPlayer's playlist is the queue again")
             self._drift_logged = False
+        elif self._verify_mirror and self._edited:
+            # Back from a silence holding an entry the node never gave HQPlayer:
+            # another controller's playlist (Roon's cycle went on meanwhile),
+            # never a restart — drift, nothing sent; a person's Play takes
+            # HQPlayer back (ROON-COEX §6.1 P1)
+            self._drifted("HQPlayer came back holding another controller's playlist", expect=expect)
         elif self._verify_mirror:
             return self.lose_mirror("HQPlayer came back with a different playlist (restarted?)",
                                     expect=expect)

@@ -5588,6 +5588,30 @@ def test_a_start_hqplayer_stops_on_by_itself_leaves_the_spot_there(fake, output,
     assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
 
 
+def test_a_spot_a_refused_start_left_is_spent_by_another_entry_hqplayer_plays_on_its_own(fake, output,
+                                                                                       monkeypatch):
+    """D6's spot at a start HQPlayer refused; the person then starts entry 1
+    in HQPlayer's own window — a take no command of the node's made, its
+    position moving: the spot is spent (ROON-COEX §6.1 P8), and Pause then
+    Play resumes what plays — never SelectTrack 2, the refused track
+    started again."""
+    mgr, b = output
+    _refused_next(mgr, b, fake, monkeypatch)
+    fake.refuse_play.clear()
+    with fake._lock:
+        fake.track_serial += 1                          # the person's Play in HQPlayer's own window
+        fake.state, fake.track, fake.position, fake._starting = int(PlaybackState.PLAYING), 1, 0.0, 0
+    assert _wait(lambda: b._spot is None and mgr._latest_status.get("track_index") == 1
+                 and mgr._latest_status.get("state") == "playing", 10)
+    fake.takes_seek = True
+    assert b.pause()
+    assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), 5)
+    n = len(fake.commands)
+    assert b.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING), 10)
+    assert [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")] == ["Play"]
+
+
 def test_next_and_previous_move_the_spot_a_refused_start_left(fake, output, monkeypatch):
     """At that spot Next and Previous move it, as at any spot: no command,
     no sound."""

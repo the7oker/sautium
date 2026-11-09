@@ -603,7 +603,10 @@ comes after the control port answers again — so neither can end the wait.
   at its slot, at the second the start went to (since 2026-10-31): Desktop's
   own stop rests on no entry, and Play then started HQPlayer's first entry.
   Now Playing keeps that track with its diagnosis, Play starts it, Next and
-  Previous move from it. HQPlayer's own advance onto the next entry of ours,
+  Previous move from it; HQPlayer playing another entry of ours on a take no
+  command of the node's made — the person's start in HQPlayer's own window —
+  spends it (since 2026-11-09, ROON-COEX §6.1 P8: Pause then Play restarted
+  the refused track), never a takeover's. HQPlayer's own advance onto the next entry of ours,
   stopped on the same way, leaves it too, at that slot at 0 (since
   2026-11-01): an album boundary into a rate the output family refuses — a
   44.1 kHz album, then a 96 kHz one — is the commonest road there. Only an
@@ -1210,7 +1213,10 @@ take-back asked while another app played on it outlasts that app's own next trac
 controller past UPnP may leave no URI of its own to read: the KANN under Roon's RAAT says
 our URI paused at its second (ROON-COEX, 2026-11-02), and the node keeps the renderer's
 word — paused, its Play resuming our track — said as the renderer's when the node sent no
-Pause ("Paused on ‹renderer›", since 2026-11-09): its own remote, or another app.
+Pause ("Paused on ‹renderer›", since 2026-11-09): its own remote, or another app. A URI of
+ours the renderer plays again by itself while another controller held it (its own controls
+resuming our media) is ours again (since 2026-11-09, ROON-COEX §6.1 P9): the external state
+ends, the node's Pause and Stop reach it, the listen held at the takeover goes on.
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last
@@ -1220,7 +1226,13 @@ after failed polls (a power cycle, a restart that takes longer than one
 poll; that second shape was missed until a live Pi reboot on 2026-09-27) —
 reads the playlist at once and, when it differs from the queue, marks the
 mirror lost; HQPlayer, back and stopped, takes the queue afresh at once (the
-mirror's state, above), and the play press rebuilds whatever is left. An HQPlayer Embedded in trial mode
+mirror's state, above), and the play press rebuilds whatever is left. A
+playlist read back so that holds an entry the node never gave HQPlayer is no
+restart (since 2026-11-09, ROON-COEX §6.1 P1): another controller's — Roon's
+cycle went on while HQPlayer answered nothing past the client's timeout, a
+heavy engine's Stop — so the mirror drifts and nothing is sent; only an empty
+playlist, or one of the node's own, is a restart. The node never writes over
+another controller's playback without a person's word. An HQPlayer Embedded in trial mode
 stops every 30 minutes and must be restarted — its control port stays open
 but closes every connection, which is why the play-intent probe asks
 `GetInfo` instead of trusting a TCP connect. Auto-resume after such a

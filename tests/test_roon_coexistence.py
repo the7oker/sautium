@@ -2261,15 +2261,14 @@ def test_f6_on_a_renderer_a_takeover_taken_back_is_one_listen(tmp_path, proxy, r
     assert lastfm.count(("update_now_playing", "Track 1")) == 1
 
 
-@pytest.mark.xfail(strict=True, reason="ROON-COEX §6.1 P1, for the design session: a reconnect inside Roon's cycle "
-                                       "reads its playlist as a restart and takes the queue afresh over it")
 def test_p1_a_reconnect_inside_roons_cycle_sends_its_playlist_nothing(fake, listens, monkeypatch):
-    """P1 (the heavy A1's question, ROON-COEX §6.1): Roon's start stands
-    between its add and its Play while HQPlayer answers nothing past the
-    node's client timeout (a heavy engine's Stop). The node reconnects and
-    reads a stopped HQPlayer holding Roon's stream: that is another
-    controller's playlist, not a restart — the node sends it nothing, and
-    Roon's Play plays Roon's stream (option (a))."""
+    """P1 (the heavy A1's question, ROON-COEX §6.1; the design session's
+    answer (a) of 2026-11-09): Roon's start stands between its add and its
+    Play while HQPlayer answers nothing past the node's client timeout (a
+    heavy engine's Stop). The node reconnects and reads a stopped HQPlayer
+    holding Roon's stream: that is another controller's playlist, not a
+    restart — drift, the node sends it nothing, and Roon's Play plays
+    Roon's stream."""
     fake.raw_streams = "uri"
     roon = FakeRoon(fake.port)
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
@@ -2283,8 +2282,8 @@ def test_p1_a_reconnect_inside_roons_cycle_sends_its_playlist_nothing(fake, list
         k = len(fake.commands)
         _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
         _observed("P1", node_commands=_node_commands(fake, n, roon), playlist=fake.playlist[:3],
-                  hqplayer=(fake.state, fake.track))
-        assert _node_commands(fake, n, roon) == []
+                  hqplayer=(fake.state, fake.track), mirror=b._mirror)
+        assert _node_commands(fake, n, roon) == [] and b._mirror == "drift"
         assert fake.playlist == [uri] and fake.state == PLAYING
     finally:
         b.shutdown()
@@ -2708,3 +2707,23 @@ def test_b_a_spot_held_after_the_take_backs_hand_over_follows_its_track_and_is_n
     assert manager.backend().play()
     wait_for(lambda: r.state == "PLAYING" and "raat://" not in r.uri, timeout=10, what="loaded")
     assert "Track 2" in r.meta
+
+
+def test_b_our_own_uri_played_again_by_the_renderer_is_ours_again(tmp_path, proxy, renderers, nodes, quality):
+    """Another controller loaded its URI on the renderer; later the renderer
+    plays our last URI again by itself (its own controls resuming its UPnP
+    media): ours again (ROON-COEX §6.1 P9) — the slot of ours playing, never
+    "another app", and the node's Pause reaches it."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 10.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.state == "playing"
+             and n.last.queue_index == 1, timeout=5, what="ours again")
+    mark = len(r.calls)
+    assert n.backend.pause()
+    wait_for(lambda: r.state == "PAUSED_PLAYBACK" and n.last.state == "paused", timeout=5, what="paused")
+    assert "Pause" in _sent(r, mark)
