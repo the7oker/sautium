@@ -562,9 +562,13 @@ class DlnaBackend(PlayerBackend):
         # Stops and Pauses said while another controller holds the renderer,
         # counted: one said after a take-back load of ours was asked ends it
         # before our URI is handed over (_load_seq) — the spot its takeover
-        # left, as that load found it (_held_load), stays where it was
+        # left stays where it was (_restore_spot); and whether such a load is
+        # under way, our URI not handed over yet
         self._halts = 0
-        self._held_load: Optional[tuple[int, float, float]] = None
+        self._taking_back = False
+        # The track a load of ours under way adopted its slot for: a queue
+        # edit meanwhile moves that slot with it (queue_changed)
+        self._load_item: Optional[QueueItem] = None
         # The node paused our track itself, and the renderer has not played
         # since: a pause by no word of the node's — the renderer's own remote,
         # a controller past UPnP (the KANN under Roon's RAAT says our URI
@@ -2058,19 +2062,32 @@ class DlnaBackend(PlayerBackend):
         halts = self._halts
         async with self._load_lock:
             self._loading = True
-            held = (self._index, self._position, self._length) if self._external else None
-            self._held_load = held
+            taking_back = self._taking_back = self._external
             try:
                 return await self._load_seq(index, play=play, ss=ss,
                                             url_override=url_override,
                                             start_at=start_at, halts=halts)
             except Exception:
-                if held is not None and self._external:
-                    self._index, self._position, self._length = held
+                if taking_back and self._external:
+                    self._restore_spot()
                 raise
             finally:
-                self._loading = False
-                self._held_load = None
+                self._loading = self._taking_back = False
+                self._load_item = None
+
+    def _restore_spot(self) -> None:
+        """The spot another controller's takeover left, said again after a
+        take-back of ours that handed the renderer nothing: its track's slot
+        as the queue stands now — never the number it had when the load was
+        asked, which a queue edit or a replace meanwhile gave another track —
+        at its second; none once its track left the queue. Runs on the
+        dlna-loop."""
+        item = self._held_item
+        slot = self._queue.index_of(item) if item is not None else None
+        if slot is None:
+            self._resume = self._held_item = None
+            return
+        self._index, self._position, self._length = slot, self._resume or 0.0, item.duration_seconds or 0.0
 
     def _unplayable_reason(self, first: int, skipped: int) -> str:
         """Why slots ``first`` .. ``first + skipped - 1`` had nothing this
@@ -2163,6 +2180,8 @@ class DlnaBackend(PlayerBackend):
                 # HQPlayer itself can be handed them.
                 if index > first:
                     self._error = self._unplayable_reason(first, index - first)
+                if self._taking_back:
+                    self._restore_spot()    # nothing of ours handed: the takeover's spot, as it stands
                 self._emit_now("stopped")
                 return False
             # url_override (a seek) carries the currently-playing stream's
@@ -2190,7 +2209,7 @@ class DlnaBackend(PlayerBackend):
                 if self._external:
                     self._held_item = item
                 self._parked = (item, start_at)
-                self._held_load = None      # a wait, no load: its spot is its own
+                self._taking_back = False   # a wait, no load: its spot is its own
                 self._park_uris = frozenset(u for u in (getattr(self._dmr, "current_track_uri", None),
                                                         getattr(self._dmr, "av_transport_uri", None)) if u)
                 self._park_under_another = (self._state_name() in ("playing", "paused")
@@ -2227,7 +2246,7 @@ class DlnaBackend(PlayerBackend):
             # the new slot and report `loading` FIRST, so the UI shows the
             # tapped track with a transition spinner instead of either lying
             # ("playing") or looking dead while the old audio rides on.
-            self._index = index
+            self._index, self._load_item = index, item
             self._load_gen += 1     # in-flight poll evidence is now about a dead world
             self._pos_offset = ss   # 0 for a fresh track; the seek offset otherwise
             self._position = ss or start_at   # so the loading state shows the target
@@ -2279,7 +2298,7 @@ class DlnaBackend(PlayerBackend):
             return True
         # The hand-over goes: a Stop or a Pause from here leaves our load
         # where it lands, not the spot before it
-        self._held_load = None
+        self._taking_back = False
         self._handed.add(url)
         await self._avt_retry("SetAVTransportURI", CurrentURI=url, CurrentURIMetaData=meta)
         self._current_url = url
@@ -2287,9 +2306,12 @@ class DlnaBackend(PlayerBackend):
         # Ours again; a hand-over refused raised above, theirs still
         self._external, self._cut = False, None
         if self._halts != halts:
-            # Said while the hand-over was on its way: ours, loaded and not
-            # started — stopped there, nothing more sent
-            self._emit_now("stopped")
+            # Said while the hand-over was on its way: our track is the
+            # renderer's now, never started — held paused at the load's
+            # second, as a switch's spot is (resume_at), nothing more sent:
+            # Play loads it there, and the listen goes on
+            self._current_url, self._resume = None, self._position
+            self._emit_now("paused")
             return True
         if play:
             await self._avt_retry("Play", Speed="1")
@@ -2613,14 +2635,13 @@ class DlnaBackend(PlayerBackend):
         """A Stop or a Pause while another controller holds the renderer:
         nothing is sent — its playback is not the node's (ROON-COEX L11) —
         and a take-back of ours asked before it ends (_load_seq: `_halts`),
-        the spot standing as it did — a wait for its stream's, a load's that
-        has not handed our URI over — said at once in the renderer's own
-        state. Runs on the dlna-loop."""
+        the spot standing as it did — a wait for its stream's, the
+        takeover's while a load has not handed our URI over (_restore_spot)
+        — said at once in the renderer's own state. Runs on the dlna-loop."""
         self._halts += 1
         self._parked = self._seek_on_start = self._seek_due = None
-        held = self._held_load
-        if held is not None:
-            self._index, self._position, self._length = held
+        if self._taking_back:
+            self._restore_spot()
         self._emit_now(self._state_name())
 
     def stop(self) -> bool:
@@ -2736,18 +2757,19 @@ class DlnaBackend(PlayerBackend):
 
     def queue_changed(self, kind: str, *, play: bool = False) -> None:
         if kind == "replace":
-            if play and len(self._queue):
-                self._call_async(self._load_and_play(1))
-            elif self._external:
-                # Another controller holds the renderer: nothing of ours plays
-                # there to stop, and the spot — or a play waiting for its
-                # stream — went with the queue it was in
+            if self._external:
+                # Another controller holds the renderer: the spot — or a play
+                # waiting for its stream — went with the queue it was in; a
+                # new queue played takes the renderer back from its head
                 async def _drop():
                     self._resume = self._held_item = self._parked = None
                     self._index = 0
-                    self._emit_now()
+                    if not play:
+                        self._emit_now()        # nothing of ours plays there to stop
                 self._call(_drop())
-            else:
+            if play and len(self._queue):
+                self._call_async(self._load_and_play(1))
+            elif not self._external:
                 self.stop()
             return
 
@@ -2772,7 +2794,12 @@ class DlnaBackend(PlayerBackend):
             # loaded — another controller's playback among it — arms nothing:
             # the renderer would roll from what it plays into our next
             slot = self._slot_of(self._current_url)
-            if self._external and self._held_item is not None:
+            if self._loading and self._load_item is not None:
+                # A load of ours under way says its own slot: it follows its
+                # track, never the spot's (a take-back says the spot again
+                # only if it hands nothing over: _restore_spot)
+                slot = self._queue.index_of(self._load_item)
+            elif self._external and self._held_item is not None:
                 # Another controller holds it: the slot Play loads follows its
                 # item, and the spot goes with it
                 slot = self._queue.index_of(self._held_item)

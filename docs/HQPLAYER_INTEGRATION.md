@@ -1151,11 +1151,19 @@ usual line, no second now-playing. Another track started instead ends it at its
 own seconds, and so does its track leaving the queue. The hold begins already at
 the other controller's Stop on our playing entry, before the tick that judges it:
 a stop the node did not send, its entry still queued, the listen not ended by then
-(above). A stop nothing explains holds it so until the node's next word, as a pause
-does: the person's Stop in HQPlayer's own window, HQPlayer's own on an error, an
-entry of no known length played out. On a renderer the hold ends once a load of
-ours hands it our URI, and while another controller holds the renderer a Stop or a
-Pause sends it nothing and ends a take-back of ours still on its way.
+(above), its take not moved by HQPlayer itself: on HQPlayer 6 the take tells
+HQPlayer's own end or advance (it moves with no command of the node's, and the
+playlist read at that tick is the node's own) from someone's Stop (it stays), and a
+reading whose position never moved is no listen (a start HQPlayer refuses after
+one playing answer cut nothing). A stop nothing explains holds it so until the
+node's next word, as a pause does — the person's Stop in HQPlayer's own window,
+HQPlayer's own on an error; HQPlayer 5, which names no take, until the track could
+have played out. On a renderer the hold ends once a load of ours hands it our URI;
+while another controller holds the renderer a Stop or a Pause sends it nothing and
+ends a take-back of ours still on its way, the takeover's spot standing at its
+track's slot as the queue stands then — and one that lands while our URI's
+hand-over is on its way leaves our track held paused at its second, as a switch's
+spot is.
 Three ticks give no verdict and are not emitted. One is the tick on which
 HQPlayer opens an entry: PLAYING at track 0 and length 0, with the URI already
 named; a listen opened there froze a length of 0. Another is an entry the
