@@ -102,11 +102,15 @@ def test_the_stream_enrichment_accepts_nothing_from_a_failing_fpcalc(fake_fpcalc
     from streaming import enrichment
     fake_fpcalc("exit 3")
     enricher = enrichment.PreviewEnricher()
-    assert enricher._fpcalc is False
+    enricher._max_pending = None
     submitted = []
     enricher._pool.submit = lambda *a: submitted.append(a)
     enricher.submit("a track", b"stream", (60.0,), True, "youtube")
     assert submitted == []
+    reference = provenance.PROBE_REFERENCE.read_text(encoding="ascii").strip()
+    fake_fpcalc(f"echo {reference}")                     # a passing fpcalc installed since
+    enricher.submit("a track", b"stream", (60.0,), True, "youtube")
+    assert len(submitted) == 1
 
 
 @shell

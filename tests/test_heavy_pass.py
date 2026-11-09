@@ -530,10 +530,17 @@ def test_a_streams_analysis_waiting_when_the_node_stops_ends_without_it(stream_d
     analysis.finish()
 
 
+def _a_passing_fingerprinter(monkeypatch):
+    import provenance
+    monkeypatch.setattr(provenance, "fingerprinter",
+                        lambda: provenance.Fingerprinter("ok", "/usr/bin/fpcalc"))
+
+
 def test_a_stopped_enricher_takes_no_job_and_drops_the_queued(monkeypatch):
     from streaming import enrichment
+    _a_passing_fingerprinter(monkeypatch)
     enricher = enrichment.PreviewEnricher()
-    enricher._fpcalc, enricher._max_pending = True, None
+    enricher._max_pending = None
     began, release = [], threading.Event()
 
     def enrich(track_id, *a):
@@ -556,8 +563,9 @@ def test_a_streams_job_is_handed_to_its_worker_under_the_lock_its_stop_takes(mon
     the job into the media proxy's hook."""
     from streaming import enrichment
     handed = []
+    _a_passing_fingerprinter(monkeypatch)
     enricher = enrichment.PreviewEnricher()
-    enricher._fpcalc, enricher._max_pending = True, None
+    enricher._max_pending = None
     monkeypatch.setattr(enricher, "_pool", types.SimpleNamespace(
         submit=lambda *a: handed.append(enricher._lock.locked())))
     enricher.submit("a track", b"stream", (60.0,), True, "youtube")

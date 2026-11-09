@@ -636,3 +636,22 @@ def test_the_mount_points_are_read_with_their_escapes(tmp_path, monkeypatch):
         "32 22 8:2 /x /home/agent/my\\134dir rw - ext4 /dev/sda2 rw\n")
     monkeypatch.setattr(node_user, "MOUNTINFO", str(info))
     assert node_user._mount_points() == {"/", "/home/agent/.cache", "/home/agent/my\\dir"}
+
+
+@as_root_with_the_node_user
+def test_a_data_folder_the_entrypoint_cannot_read_says_why_the_uid_stays(tmp_path, node_user,
+                                                                        accounts, monkeypatch, capfd):
+    import errno
+    data = str(tmp_path / "data")
+    real = os.lstat
+
+    def lstat(path, *a, **kw):
+        if str(path) == data:
+            raise OSError(errno.EIO, "Input/output error", data)
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(node_user.os, "lstat", lstat)
+    assert node_user.take_host_owner(accounts.pw, data, str(accounts.passwd),
+                                     str(accounts.group)) is accounts.pw
+    assert (f"{data} could not be read (Input/output error): the node's user stays uid "
+            f"{accounts.pw.pw_uid}") in capfd.readouterr().err

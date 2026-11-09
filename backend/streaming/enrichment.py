@@ -62,16 +62,6 @@ class PreviewEnricher:
         self._lock = threading.Lock()
         self._embedder = None
         self._analyzer = None
-        # Streamed audio with no fingerprint has no address and is never
-        # saved, and one from a fingerprinter that fails the self-test would
-        # carry another address than the release's: without a passing fpcalc
-        # say so once and accept nothing, rather than decode every track.
-        import provenance
-        verdict = provenance.fingerprinter()
-        self._fpcalc = verdict.ok
-        if not self._fpcalc:
-            logger.error("preview enrichment disabled: %s (fingerprint self-test: %s)",
-                         verdict.detail, verdict.state)
         # Trickle mode (CPU-only / lite profile — §2.7 HARDWARE-TIERS): the
         # per-track pipeline runs near listening pace there, so backlog is
         # bounded (1 running + 1 queued) and excess is DROPPED — enrichment
@@ -102,7 +92,15 @@ class PreviewEnricher:
         provenance. An ``excerpt`` (a 30 s clip) is refused here,
         before any decode or provenance row: it is not the recording, and
         every first-hand stream analysis is signed and synced."""
-        if not self._fpcalc or not track_id or not lengths or not flac:
+        if not track_id or not lengths or not flac:
+            return
+        # Streamed audio with no fingerprint has no address and is never
+        # saved, and one from a fingerprinter that fails the self-test would
+        # carry another address than the release's: without a passing fpcalc
+        # accept nothing, rather than decode the track (the self-test says
+        # why, once per fpcalc found; one installed later is taken then)
+        import provenance
+        if not provenance.fingerprinter().ok:
             return
         if excerpt:
             logger.debug("preview enrich skip %s: excerpt, not the recording", track_id)
