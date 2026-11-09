@@ -422,8 +422,10 @@ def test_the_arm64_image_fingerprints_with_the_release_images_ffmpeg():
     the arm64 image sits on the release image's Ubuntu 22.04 (FFmpeg 4.4), not
     a Debian whose FFmpeg moves prints, with the release's tools."""
     release, arm64 = _dockerfile("Dockerfile"), _dockerfile("Dockerfile.mac")
-    assert release.splitlines()[1] == "FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04"
-    assert [line for line in arm64.splitlines() if line.startswith("FROM ")] == ["FROM ubuntu:22.04"]
+    def bases(text):
+        return [line for line in text.splitlines() if line.startswith("FROM ")]
+    assert bases(release) == ["FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04"]
+    assert bases(arm64) == ["FROM ubuntu:22.04"]
     for text in (release, arm64):
         for wanted in ("ppa:deadsnakes/ppa", "libchromaprint-tools", "lbzip2",
                        "unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc", "jammy-pgdg main",

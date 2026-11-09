@@ -141,6 +141,7 @@ def _probe_verdict(path: Optional[str]) -> Fingerprinter:
     if path is None:
         return Fingerprinter("missing", None, "fpcalc (Chromaprint) is not on PATH")
     try:
+        reference = PROBE_REFERENCE.read_text(encoding="ascii").strip()
         fingerprint = _run_fpcalc(path, str(PROBE))
     except subprocess.CalledProcessError as e:
         said = (e.stderr or "").strip().splitlines()
@@ -149,21 +150,37 @@ def _probe_verdict(path: Optional[str]) -> Fingerprinter:
         return Fingerprinter("failed", path, str(e))
     if not fingerprint:
         return Fingerprinter("failed", path, "no fingerprint printed")
-    if not same_as_reference(fingerprint, PROBE_REFERENCE.read_text(encoding="ascii").strip()):
+    if not same_as_reference(fingerprint, reference):
         return Fingerprinter("mismatch", path, "another fingerprint than the release's")
     return Fingerprinter("ok", path)
 
 
+def _binary(path: Optional[str]) -> Optional[tuple]:
+    """What identifies the fpcalc file a path runs: a link moved to another
+    version (a Homebrew upgrade) or a file replaced in place is another."""
+    if path is None:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return (path,)
+    return (os.path.realpath(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def fingerprinter() -> Fingerprinter:
     """The self-test's verdict on the fpcalc this process would run, tested
-    once per fpcalc found: the backend's start asks first, every analysis
-    pass and the stream enrichment ask before they decode, the notices read
-    it. A tool installed or replaced later is a new path, tested anew."""
+    once per fpcalc file found: the backend's start asks first, every
+    analysis pass and the stream enrichment ask before they decode, each
+    fingerprint is made with the fpcalc it names, the notices read it. A tool
+    installed, upgraded or replaced later is another file, tested anew; a
+    decoder library upgraded under an unchanged fpcalc is tested at the
+    next start."""
     path = shutil.which("fpcalc")
+    key = _binary(path)
     with _verdicts_lock:
-        verdict = _verdicts.get(path)
+        verdict = _verdicts.get(key)
         if verdict is None:
-            verdict = _verdicts[path] = _probe_verdict(path)
+            verdict = _verdicts[key] = _probe_verdict(path)
             if verdict.ok:
                 logger.info("fpcalc %s fingerprints the probe as the release does", path)
             elif verdict.state != "missing":
@@ -185,13 +202,14 @@ def require_fingerprinter() -> None:
 
 
 def _run_fpcalc(fpcalc: str, path: str) -> str:
-    return subprocess.run([fpcalc, "-plain", path], capture_output=True,
-                          text=True, timeout=120, check=True).stdout.strip()
+    return subprocess.run([fpcalc, "-plain", path], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=120,
+                          check=True).stdout.strip()
 
 
-def _fpcalc(path: str) -> Optional[str]:
+def _fpcalc(fpcalc: str, path: str) -> Optional[str]:
     try:
-        return _run_fpcalc("fpcalc", path) or None
+        return _run_fpcalc(fpcalc, path) or None
     except (subprocess.SubprocessError, OSError) as e:
         logger.debug("fpcalc failed for %s: %s", path, e)
         return None
@@ -204,9 +222,15 @@ def chromaprint_file(local_path: str, cue_start=None,
     temp WAV first — fingerprinting the image would stamp every track of the
     disc with one identical anchor. The same WAV path is the fallback when
     fpcalc's own decoder rejects a whole file that ffmpeg can read. None when
-    neither yields a fingerprint: material with no address."""
+    neither yields a fingerprint: material with no address. The fingerprint
+    is made by the fpcalc that passed the self-test and by no other — one
+    that fails it, or appeared since and fails it, gives no address."""
+    verdict = fingerprinter()
+    if not verdict.ok:
+        logger.debug("no fingerprint for %s: fpcalc %s (%s)", local_path, verdict.state, verdict.detail)
+        return None
     if cue_start is None and cue_end is None:
-        fp = _fpcalc(local_path)
+        fp = _fpcalc(verdict.path, local_path)
         if fp:
             return fp
         logger.info("fpcalc could not read %s directly — decoding through ffmpeg",
@@ -227,7 +251,7 @@ def chromaprint_file(local_path: str, cue_start=None,
             logger.warning("ffmpeg decode for the fingerprint failed for %s: %s",
                            local_path, e)
             return None
-        fp = _fpcalc(tmp.name)
+        fp = _fpcalc(verdict.path, tmp.name)
         if fp is None:
             logger.warning("no fingerprint for %s: fpcalc produced nothing", local_path)
         return fp

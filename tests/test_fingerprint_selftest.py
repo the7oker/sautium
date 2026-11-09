@@ -20,7 +20,7 @@ if str(BACKEND) not in sys.path:
 
 import provenance  # noqa: E402
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="fake fpcalcs are shell scripts")
+shell = pytest.mark.skipif(sys.platform == "win32", reason="fake fpcalcs are shell scripts")
 
 
 @pytest.fixture
@@ -40,6 +40,7 @@ def fake_fpcalc(tmp_path, monkeypatch):
     return write
 
 
+@shell
 def test_an_fpcalc_that_exits_3_after_printing_fails_and_analysis_refuses(fake_fpcalc):
     """Debian bookworm's fpcalc on any track under its 120 s window: a
     fingerprint printed, then an error and exit 3."""
@@ -52,6 +53,7 @@ def test_an_fpcalc_that_exits_3_after_printing_fails_and_analysis_refuses(fake_f
         provenance.require_fingerprinter()
 
 
+@shell
 def test_an_fpcalc_that_prints_another_fingerprint_is_refused(fake_fpcalc):
     fake_fpcalc("echo AQAAZFMUJq0U4VaOkhRC_another")
     assert provenance.fingerprinter().state == "mismatch"
@@ -59,12 +61,14 @@ def test_an_fpcalc_that_prints_another_fingerprint_is_refused(fake_fpcalc):
         provenance.require_fingerprinter()
 
 
+@shell
 def test_an_fpcalc_that_prints_nothing_fails(fake_fpcalc):
     fake_fpcalc("exit 0")
     assert provenance.fingerprinter() == provenance.Fingerprinter(
         "failed", provenance.fingerprinter().path, "no fingerprint printed")
 
 
+@shell
 def test_the_reference_passes_and_the_verdict_is_kept_per_fpcalc_found(fake_fpcalc, tmp_path,
                                                                       monkeypatch):
     reference = provenance.PROBE_REFERENCE.read_text(encoding="ascii").strip()
@@ -82,6 +86,7 @@ def test_the_reference_passes_and_the_verdict_is_kept_per_fpcalc_found(fake_fpca
     assert runs.read_text().count("run") == 2          # a new fpcalc is tested anew
 
 
+@shell
 def test_no_fpcalc_is_missing_and_refused(monkeypatch, tmp_path):
     monkeypatch.setattr(provenance, "_verdicts", {})
     monkeypatch.setenv("PATH", str(tmp_path))
@@ -91,6 +96,7 @@ def test_no_fpcalc_is_missing_and_refused(monkeypatch, tmp_path):
         provenance.require_fingerprinter()
 
 
+@shell
 def test_the_stream_enrichment_accepts_nothing_from_a_failing_fpcalc(fake_fpcalc):
     pytest.importorskip("numpy")
     from streaming import enrichment
@@ -103,12 +109,38 @@ def test_the_stream_enrichment_accepts_nothing_from_a_failing_fpcalc(fake_fpcalc
     assert submitted == []
 
 
-def test_the_comparison_is_one_function():
-    """A similarity rule will turn equality into a bound on the bit error rate:
-    the verdict compares through same_as_reference alone."""
-    import inspect
-    source = inspect.getsource(provenance._probe_verdict)
-    assert "same_as_reference(" in source and "==" not in source
+@shell
+def test_the_verdict_compares_through_one_function(fake_fpcalc, monkeypatch):
+    """A similarity rule will turn equality into a bound on the bit error
+    rate: what same_as_reference accepts, the self-test passes."""
+    fake_fpcalc("echo AQAAZFMUJq0U4VaOkhRC_close_enough")
+    monkeypatch.setattr(provenance, "same_as_reference", lambda fingerprint, reference: True)
+    assert provenance.fingerprinter().ok
+
+
+@shell
+def test_an_fpcalc_replaced_in_place_is_tested_anew(fake_fpcalc):
+    """A package upgrade writes a new fpcalc where the old one was: the same
+    path, another file."""
+    reference = provenance.PROBE_REFERENCE.read_text(encoding="ascii").strip()
+    fake_fpcalc(f"echo {reference}")
+    assert provenance.fingerprinter().ok
+    fake_fpcalc("echo 'ERROR: Error decoding audio frame (End of file)' >&2\nexit 3")
+    assert provenance.fingerprinter().state == "failed"
+
+
+@shell
+def test_a_file_is_fingerprinted_by_the_fpcalc_that_passed_and_by_no_other(fake_fpcalc, tmp_path):
+    reference = provenance.PROBE_REFERENCE.read_text(encoding="ascii").strip()
+    decodes = tmp_path / "decodes"
+    ffmpeg = tmp_path / "bin" / "ffmpeg"
+    ffmpeg.write_text(f"#!/bin/sh\necho decode >> {decodes}\nexit 1\n")
+    ffmpeg.chmod(0o755)
+    fake_fpcalc(f'[ "$2" = "{provenance.PROBE}" ] && echo {reference} || echo AQAA_the_file')
+    assert provenance.chromaprint_file("/music/a.flac") == "AQAA_the_file"
+    fake_fpcalc("exit 3")
+    assert provenance.chromaprint_file("/music/a.flac") is None
+    assert not decodes.exists()             # refused before any decode, not after one
 
 
 def test_the_probe_is_twelve_seconds_of_cd_audio_and_one_reference_line():

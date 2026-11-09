@@ -331,6 +331,7 @@ album's "+ Queue → Next", the announce port of the macOS compose file).
 
 | Doc | Says | Code | Open question |
 |---|---|---|---|
+| `docker-compose.mac.yml` against `README.md` § Quick Start | a Docker node on macOS is a full node | aligned with `docker-compose.yml` on 2026-11-09 (the peer and media ports, the identity, certificate and slice mounts, the WAL lines), checked by `tests/test_supply_chain.py`; not yet started on a Mac | start it on a Mac that can test it |
 | `docs/design/INFORMATION-ARCHITECTURE.md:291` | a peer's profile opens from the chat header or the friends list | the screen exists, nothing navigates to `#profile/<prefix>`, and its "Add as friend" button has no handler (`static/app-shell.js: renderProfileOther`) | wire it, describe it as not reachable yet, or remove the screen |
 | `docs/design/INFORMATION-ARCHITECTURE.md` § Discovery structure | Danceable as a filter | the "No" chip is accepted and ignored (`routers/discovery.py: _engine_filters`) | postponed 2026-09-29: whether the chip is needed at all is undecided |
 | `backend/test_playback_queue.py: test_payload_shapes` | the queue payload has ten fields | the payload carries `play` since 2026-09-28; the test sits outside `tests/` and the usual run does not reach it | update the expectation, or keep `play` out of the payload |

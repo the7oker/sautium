@@ -24,9 +24,10 @@ NODE_USER = "agent"
 # not the node user's — a root backend's file from before the node ran as its
 # own user, a folder a Windows mount shows as root's — is handed to it at each
 # start. The host's ~/.claude and ~/.codex are the owner's and stay as they
-# are: only the agents' folders themselves, which Docker creates root-owned
-# when the host had none (or a compose file binds a node folder there that
-# did not exist yet), are handed.
+# are: only an agent's folder itself while it is root's and empty is handed —
+# what Docker creates for a host folder that did not exist (the Linux arm64
+# file's ./data/claude; the other files mount projects/ inside ~/.claude, so
+# Docker's folder there is never empty).
 NODE_TREES = ("/app/data", "/app/generated_eq", "/home/agent/.cache",
               "/home/agent/.claude/projects")
 NODE_FOLDERS = ("/home/agent/.claude", "/home/agent/.codex")
@@ -71,6 +72,18 @@ def _mount_points() -> set:
     return points
 
 
+def _real_dir(path: str) -> bool:
+    """A directory reached through no symlink. The node's user can write
+    where these paths lead (./backend is /app; ./data/claude holds
+    projects/), so a component it swapped for a link would point root's
+    chown, or the uid it takes, at a path of its choosing. Nothing of the
+    node user's runs while the entrypoint does: a fresh container's start."""
+    try:
+        return os.path.realpath(path) == path and stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 def _rehome(home: str, old_uid: int, uid: int, gid: int) -> None:
     """The image's own files in the node user's home follow its new uid;
     whatever is mounted there (the model cache, a host's ~/.claude) is not
@@ -85,15 +98,16 @@ def _rehome(home: str, old_uid: int, uid: int, gid: int) -> None:
 
 
 def take_host_owner(pw, folder: str, passwd: str, group: str):
-    """The node's user renumbered to the uid (and, unless it is root's, the
-    gid) of `folder`'s owner, when that owner is neither root nor the node's
+    """The node's user renumbered to the uid (and, unless it is a group of
+    the image's, the gid) of `folder`'s owner, when that owner is neither root nor the node's
     user already; the node user's passwd entry after. A uid another user of
     the image holds leaves the node's as it is, and says so. Idempotent: the
     next start finds the uid taken."""
-    try:
-        st = os.stat(folder)
-    except FileNotFoundError:
+    if not _real_dir(folder):
+        if os.path.lexists(folder):
+            _say(f"{folder} is reached through a link or is no folder: the node's user stays uid {pw.pw_uid}")
         return pw
+    st = os.lstat(folder)
     if st.st_uid in (0, pw.pw_uid):
         return pw
     users = _entries(passwd)
@@ -102,15 +116,17 @@ def take_host_owner(pw, folder: str, passwd: str, group: str):
         _say(f"{folder} is uid {st.st_uid}'s, which is {holder} in the image: "
              f"the node's user stays uid {pw.pw_uid}")
         return pw
-    gid = st.st_gid if st.st_gid else pw.pw_gid
+    # A gid of the image's own groups (root, shadow, adm …) is a privilege, never
+    # the node user's: its own group keeps its number then
+    groups = _entries(group)
+    taken = any(e[2] == str(st.st_gid) and e[0] != pw.pw_name for e in groups)
+    gid = pw.pw_gid if st.st_gid == 0 or taken else st.st_gid
     for e in users:
         if e[0] == pw.pw_name:
             e[2], e[3] = str(st.st_uid), str(gid)
-    groups = _entries(group)
-    if not any(e[2] == str(gid) for e in groups):
-        for e in groups:
-            if e[0] == pw.pw_name and e[2] == str(pw.pw_gid):
-                e[2] = str(gid)
+    for e in groups:
+        if e[0] == pw.pw_name and e[2] == str(pw.pw_gid):
+            e[2] = str(gid)
     _write_entries(group, groups)
     _write_entries(passwd, users)
     _rehome(pw.pw_dir, pw.pw_uid, st.st_uid, gid)
@@ -156,12 +172,14 @@ def hand_over(pw, trees, folders) -> tuple:
 
     for tree in trees:
         try:
-            if not stat.S_ISDIR(os.stat(tree).st_mode):
-                continue
+            os.lstat(tree)
         except FileNotFoundError:
             continue                        # not mounted on this node
         except OSError as e:
             refuse(e)
+            continue
+        if not _real_dir(tree):
+            _say(f"not handed over: {tree} is reached through a link or is no folder")
             continue
         if not writable(tree):
             continue
@@ -173,7 +191,7 @@ def hand_over(pw, trees, folders) -> tuple:
     for folder in folders:
         try:
             st = os.lstat(folder)
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid == pw.pw_uid or not writable(folder):
+            if not _real_dir(folder) or st.st_uid == pw.pw_uid or not writable(folder):
                 continue
             empty = not os.listdir(folder)
         except FileNotFoundError:

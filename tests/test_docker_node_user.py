@@ -582,3 +582,57 @@ def test_the_folder_whose_owner_the_node_user_takes_ships_with_the_clone():
     assert (REPO / "backend" / "data" / ".gitkeep").is_file()
     compose = (REPO / "docker-compose.pi.yml").read_text(encoding="utf-8")
     assert "      - ./backend:/app\n" in compose
+
+
+@as_root_with_the_node_user
+def test_a_tree_or_folder_reached_through_a_link_is_not_handed(tmp_path, node_user, capfd):
+    """./data/claude holds projects/ and ./backend holds data/, both the node
+    user's to write: one swapped for a link would aim root's chown at
+    whatever the link names."""
+    agent = pwd.getpwnam("agent")
+    target = tmp_path / "roots"
+    target.mkdir()
+    (target / "entrypoint.py").write_text("x")
+    link = tmp_path / "projects"
+    link.symlink_to(target)
+    assert node_user.hand_over(agent, (str(link),), (str(link),)) == (0, 0)
+    assert (target / "entrypoint.py").stat().st_uid == 0 and target.stat().st_uid == 0
+    assert f"not handed over: {link} is reached through a link" in capfd.readouterr().err
+    through = tmp_path / "via"
+    through.symlink_to(tmp_path)                         # a link in an earlier component
+    assert node_user.hand_over(agent, (str(through / "roots"),), ()) == (0, 0)
+    assert target.stat().st_uid == 0
+
+
+@as_root_with_the_node_user
+def test_a_data_folder_reached_through_a_link_leaves_the_uid(tmp_path, node_user, accounts, capfd):
+    owned = tmp_path / "someones"
+    owned.mkdir()
+    os.chown(owned, 4242, 4243)
+    link = tmp_path / "linked-data"
+    link.symlink_to(owned)
+    assert node_user.take_host_owner(accounts.pw, str(link), str(accounts.passwd),
+                                     str(accounts.group)) is accounts.pw
+    assert "reached through a link" in capfd.readouterr().err
+
+
+@as_root_with_the_node_user
+def test_a_group_of_the_images_own_is_never_the_node_users(tmp_path, node_user, accounts):
+    import grp
+    shadow = grp.getgrnam("shadow").gr_gid
+    os.chown(tmp_path / "data", 4242, shadow)
+    pw = node_user.take_host_owner(accounts.pw, str(tmp_path / "data"), str(accounts.passwd),
+                                   str(accounts.group))
+    assert (pw.pw_uid, pw.pw_gid) == (4242, accounts.pw.pw_gid)
+    assert _entry(accounts.passwd, "agent")[3] == str(accounts.pw.pw_gid)
+
+
+def test_the_mount_points_are_read_with_their_escapes(tmp_path, monkeypatch):
+    import node_user
+    info = tmp_path / "mountinfo"
+    info.write_text(
+        "22 1 0:21 / / rw,relatime - overlay overlay rw\n"
+        "31 22 8:2 /srv/a\\040b /home/agent/.cache rw,relatime - ext4 /dev/sda2 rw\n"
+        "32 22 8:2 /x /home/agent/my\\134dir rw - ext4 /dev/sda2 rw\n")
+    monkeypatch.setattr(node_user, "MOUNTINFO", str(info))
+    assert node_user._mount_points() == {"/", "/home/agent/.cache", "/home/agent/my\\dir"}

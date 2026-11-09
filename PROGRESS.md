@@ -3802,7 +3802,9 @@ device on the network; none of them may hold for it more than a bound.
   entrypoint gives the node's user the uid of `/app/data`'s owner — the
   checkout's `backend/data`, which the clone ships — when that is not
   root (a folder Docker made, a mount Docker Desktop shows as root's): one
-  image fits every host, with no build argument.
+  image fits every host whose binds keep the host's uids or show root's, with
+  no build argument (a rootless or user-namespaced Docker, which shows the
+  host user as root, keeps uid 1000 as before).
 
 ## Known Gotchas
 

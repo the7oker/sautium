@@ -92,7 +92,8 @@ class PreviewEnricher:
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
                lengths: tuple, lossless: bool, provider_id: str,
                excerpt: bool = False) -> None:
-        """Queue a previewed track for enrichment. No-ops without fpcalc, a
+        """Queue a previewed track for enrichment. No-ops without an fpcalc that
+        passed the fingerprint self-test, a
         track_id, catalog lengths (unverified match — see GATE) or audio, for
         an excerpt, or if already queued. In trickle mode a full backlog drops
         the track instead of queueing. ``lossless`` is the ACTUAL fetch

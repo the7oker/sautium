@@ -142,7 +142,7 @@ devices that cannot sign a request: the media proxy (`8830`, launcher
 - **Python 3.11+**, **FastAPI** (async)
 - **PostgreSQL 18 + pgvector** — vector similarity + relational data
 - **SQLAlchemy** ORM + `psycopg2` for raw SQL / batch operations
-- **Docker + Docker Compose** (WSL2 on Windows, native on macOS)
+- **Docker + Docker Compose** (WSL2 on Windows, native on macOS and on Linux arm64)
 - **CUDA or Apple MPS** for GPU work (CLAP embeddings, BGE-M3 text
   encoding); a CPU-only node imports analysis from peers
 - **CLAP** (audio, 512-d) + **BGE-M3** (text, 1024-d) + **librosa** + AST/PaSST
@@ -161,7 +161,7 @@ never what it stores or plays.
 
 | | Lite | Standard | Curator |
 |---|---|---|---|
-| CPU | x86-64 with AVX2, 4 cores, or any Apple Silicon | 6+ cores | 8+ cores |
+| CPU | x86-64 with AVX2, 4 cores, any Apple Silicon, or a 64-bit Arm board such as a Raspberry Pi 5 (Docker) | 6+ cores | 8+ cores |
 | RAM | 8 GB | 16 GB | 32 GB (Mac: 24 GB unified) |
 | Disk | 25 GB free, SSD | 40 GB free, SSD | 100 GB+ free, NVMe |
 | GPU | none | NVIDIA ≥ 6 GB (Turing or newer) or Apple Silicon with 16 GB | NVIDIA ≥ 8 GB (Ampere or newer) or an M-Pro-class Mac |
@@ -176,7 +176,7 @@ tracks, plus the optional ~21 GB MusicBrainz catalogue.
 
 - Docker and Docker Compose
 - NVIDIA GPU with CUDA support + NVIDIA Container Toolkit (Linux/WSL2 path).
-  Apple Silicon uses a CPU-only variant — see below.
+  Apple Silicon and Linux arm64 use a CPU-only variant — see below.
 - An LLM provider: an Anthropic API key, or a logged-in Claude Code CLI whose
   `~/.claude` is mounted into the backend (default provider is `claude_code`);
   an OpenAI Codex CLI login works as the second selectable agent.

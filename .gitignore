@@ -59,6 +59,8 @@ data/node_identity/
 data/support/
 # Claude Code session storage — bind-mounted so chat history survives rebuilds
 data/claude_sessions/
+# The Linux arm64 compose file's Claude Code folder: its sign-in and its sessions
+data/claude/
 # MusicBrainz dump (~7GB tarball + extracted TSVs) — re-downloadable, loaded into pg
 data/mbdump/
 # ListenBrainz statistics dump (~21 GB archive) — re-downloadable, aggregated into pg

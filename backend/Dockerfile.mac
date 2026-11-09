@@ -122,14 +122,6 @@ RUN curl -fsSLo /tmp/deno.zip \
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
 RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
 
-# Copy application code
-COPY . .
-
-# Expose FastAPI port and DHT UDP port
-EXPOSE 8000
-EXPOSE 19001/udp
-
-# Set environment variables
 # PostgreSQL 18 client — pg_dump / pg_restore for node backups (backup.py);
 # jammy's own client is the 14 series, which cannot dump an 18 server.
 # The repository's key is checked like any download (its fingerprint is
@@ -145,6 +137,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends gnupg ca-certif
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 ENV PG_BIN=/usr/lib/postgresql/18/bin
 
+# Copy application code
+COPY . .
+
+# Expose FastAPI port and DHT UDP port
+EXPOSE 8000
+EXPOSE 19001/udp
+
+# Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 

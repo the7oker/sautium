@@ -15,7 +15,9 @@
 #   - PostgreSQL sized for a 16 GB board with an NVMe disk (below).
 # Native Docker keeps the host's uids across a bind: the node's user takes the
 # uid of whoever owns the checkout's backend/data (backend/node_user.py), so
-# run compose as the user who cloned it.
+# run compose as the user who cloned it. A checkout an earlier image ran has
+# that folder (and data/) handed to uid 1000: give them back to the user who
+# cloned it once, `sudo chown -R "$USER:" backend/data data`.
 
 # Docker keeps a container's output with no bound unless told, and the
 # backend's says what the node does — requests, errors: three files of 10 MB

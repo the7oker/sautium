@@ -296,7 +296,8 @@ cold-loads (CPU, one-off); the segment-MAX block runs on imported segments.
 ## 5. User-facing configurations
 
 **Minimum ("Lite" — listener node):** x86-64 w/ AVX2, 4 cores / any Apple
-Silicon; **8 GB RAM**; **25 GB free SSD** (HDD unsupported — model cold-loads
+Silicon / a 64-bit Arm Linux board such as a Raspberry Pi 5 (Docker,
+`docker-compose.pi.yml`, since 2026-11-09); **8 GB RAM**; **25 GB free SSD** (HDD unsupported — model cold-loads
 take minutes even on NTFS SSD); no GPU; broadband (first run downloads ~6–8 GB).
 Works: library, player/HQPlayer, metadata enrichment, P2P sync/chat, text +
 semantic search (first semantic query warms the encoder for 1–3 min), similarity

@@ -6,6 +6,9 @@
 #     reservation — Apple's GPU (MPS) does not reach a container;
 #   - no Codex CLI in that image, so no CODEX_CLI_ENABLED and no ~/.codex mount;
 #   - a macOS default for the music folder.
+# A node that ran this file before 2026-11-09 kept its identity documents in
+# backend/data/node_identity (the file mounted no ./data/node_identity then):
+# move them to data/node_identity before its first start on this one.
 # Docker keeps a container's output with no bound unless told, and the
 # backend's says what the node does — requests, errors: three files of 10 MB
 # per container, the oldest dropped first.
