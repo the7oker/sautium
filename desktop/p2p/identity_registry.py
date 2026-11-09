@@ -472,19 +472,19 @@ def _note_failed(failed: Dict[str, List[float]], key: str, recent: List[float], 
 def verify_relayed(conn, cert: dict, proof: Optional[dict], relay: str) -> str:
     """A `pow` author's proof that came with one of its slices from `relay`,
     the key the node's channel proved (empty where no channel proved one) —
-    that node's word, and the author's own only where `relay` is the
-    author. Evaluated on this thread
-    when the node can afford it now (the load meter at its ceiling, another
-    evaluation running or too little memory leave it 'unverified' for a later
-    try, where the identity gate's `admit` answers busy); a proof that
+    that node's word, and the author's own only where `relay` is the author.
+    Evaluated on this thread when the node can afford it now (the load meter
+    at its ceiling, another evaluation running or too little memory leave it
+    'unverified' for a later try, where the identity gate's `admit` answers
+    busy; so does a policy version this build does not know); a proof that
     verifies is kept as the author's own verification keeps it ('verified');
     one that does not is no evidence against the author — nothing is
-    recorded, the slice carrying it is dropped ('failed'), and that nonce is
-    never evaluated again. After _RELAYED_PER_DAY failed nonces in a day
-    brought by `relay`, none it brings is evaluated that day, and after as
-    many of the author's, none of the author's that another node brings
-    ('unverified': kept, not passed on). Never called for a verified
-    author."""
+    recorded, the slice carrying it is dropped ('failed'), and that nonce
+    beside that certificate is never evaluated again. After _RELAYED_PER_DAY
+    failed nonces in a day brought by `relay`, none it brings is evaluated
+    that day, and after as many of the author's, none of the author's that
+    another node brings ('unverified': kept, not passed on). Never called for
+    a verified author."""
     if not identity_proof.proof_binds(proof, cert):
         return "unverified"
     if cert.get("params_version") not in identity_pow.POW_PARAMS:

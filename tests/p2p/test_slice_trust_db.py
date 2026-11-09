@@ -764,18 +764,22 @@ def test_the_lb_requester_counts_a_false_proof_under_its_relay_and_asks_a_refuse
     cert = certificate(pub(author), method="pow")
     cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=None, dead=DeadAddresses())
 
-    def offer(nonce, relay):
+    def offer(nonce, relay=None, node="a-node"):
         artist = str(uuid.uuid4())
         one = {"dump_version": "20261101-001500", "artist": [10, 3],
                "recordings": [[str(uuid.uuid4()), 5, 2, [artist]]], "truncated": False}
-        peer = Peer({artist: lb_entry(author, artist, one, cert, _nonced(cert, nonce))}, pub(relay))
-        return asyncio.run(cycle._exchange(peer, "a-node", None, [artist], None))
+        peer = Peer({artist: lb_entry(author, artist, one, cert, _nonced(cert, nonce))},
+                    pub(relay) if relay else None)
+        return asyncio.run(cycle._exchange(peer, node, None, [artist], None))
     with conn.cursor() as cur:
         cur.execute("INSERT INTO slice_penalties (pubkey, party) VALUES (%s, 'relay')", (pub(refused),))
     assert offer(_false_nonce(9), refused) == {"error": "source carries a penalty"}
     assert by_nonce == []                                   # nothing evaluated for a refused source
     for n in range(1, 4):
         assert offer(_false_nonce(n), forger)["error"] == "all slices failed verification"
+    # A source whose channel proved no key, its node id claiming the author's: no author.
+    assert offer(TRUE_NONCE, node=pub(author))["imported"] == 1
+    assert _status_of(conn, pub(author)) == "unverified"
     assert offer(TRUE_NONCE, author)["imported"] == 1
     assert _status_of(conn, pub(author)) == "verified"
     assert by_nonce == [_false_nonce(1), _false_nonce(2), _false_nonce(3), TRUE_NONCE]

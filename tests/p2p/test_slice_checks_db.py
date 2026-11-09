@@ -349,8 +349,9 @@ def test_at_start_a_slice_whose_subject_was_answered_unknown_after_its_check_is_
     before it was read by it."""
     author, relay = _key(), _key()
     later, earlier = Subtree("Answered Later"), Subtree("Answered Earlier")
-    groups = {x.name: x.group() for x in (later, earlier)}
-    for x in (later, earlier):
+    artist_later, replaced = Subtree("Artist Answered Later"), Subtree("Since Replaced")
+    groups = {x.name: x.group() for x in (later, earlier, artist_later, replaced)}
+    for x in (later, earlier, artist_later, replaced):
         _offer(scratch_dsn, author, x, relay=relay)
         _checked(conn, x, groups[x.name][0], groups[x.name][1][0])
     artist, heard = str(uuid.uuid4()), str(uuid.uuid4())
@@ -365,15 +366,20 @@ def test_at_start_a_slice_whose_subject_was_answered_unknown_after_its_check_is_
     with conn.cursor() as cur:
         cur.execute("""UPDATE mbws_answers SET status = 'unknown', target = NULL,
                               answered_at = now() + interval '1 minute'
-                        WHERE (kind = 'release_group' AND mbid = %s) OR (kind = 'artist' AND mbid = %s)""",
-                    (groups[later.name][0], artist))
+                        WHERE (kind = 'release_group' AND mbid = %s)
+                           OR (kind = 'artist' AND mbid = ANY(%s::uuid[]))""",
+                    (groups[later.name][0], [artist, artist_later.gid, replaced.gid]))
+        # The index row of "since replaced" names another version of its blob.
+        cur.execute("UPDATE slice_index SET payload_sha256 = %s WHERE key = 'since replaced'", ("cd" * 32,))
         cur.execute("""UPDATE mbws_answers SET status = 'unknown', target = NULL,
                               answered_at = now() - interval '1 minute'
                         WHERE kind = 'artist' AND mbid = %s""", (earlier.gid,))
-    assert slice_checks.uncheck_answered(conn) == 2
+    assert slice_checks.uncheck_answered(conn) == 3
     assert slice_checks.servable(conn, "mb", "answered later", OWN) is None
+    assert slice_checks.servable(conn, "mb", "artist answered later", OWN) is None
     assert slice_checks.servable(conn, "lb", artist, OWN) is None
     assert slice_checks.servable(conn, "mb", "answered earlier", OWN) is True
+    assert slice_checks.servable(conn, "mb", "since replaced", OWN) is True
     assert slice_checks.uncheck_answered(conn) == 0
 
 
@@ -410,6 +416,35 @@ def test_a_verified_author_s_row_of_an_older_format_is_passed_on_by_no_slice_lan
     assert slice_checks.checkable_count(conn, "mb", OWN) == 0
     assert slice_checks.checkable_count(conn, "lb", OWN) == 0
     assert _count(conn, "mbws_queue") == queued
+
+
+def test_a_source_whose_proof_failed_here_is_refused_on_the_slice_lanes_once_its_ban_row_is_gone(
+        conn, scratch_dsn):
+    """A key whose proof failed here is refused as a banned one is, after its
+    ban row was evicted past the cap: not asked for slices, what it passed on
+    neither passed on nor advertised, and left out of a rebuild."""
+    from desktop.p2p import identity_registry
+    author, failed, honest = _key(), _key(), _key()
+    s, other = Subtree("Through A Liar"), Subtree("Through An Honest Relay")
+    groups = {x.name: x.group() for x in (s, other)}
+    _offer(scratch_dsn, author, s, relay=failed)
+    _offer(scratch_dsn, author, other, relay=honest)
+    for x in (s, other):
+        _checked(conn, x, groups[x.name][0], groups[x.name][1][0])
+    assert slice_checks.checkable_count(conn, "mb", OWN) == 2
+    identity_registry.observe(conn, certificate(pub(failed), method="pow"))
+    identity_registry.mark_failed(conn, pub(failed), None, "pow_failed")
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM p2p_node_bans WHERE pubkey = %s", (pub(failed),))
+    assert slice_checks.source_refused(conn, pub(failed)) and not slice_checks.source_refused(conn, pub(honest))
+    assert pub(failed) in lb_slice_cycle.load_bans(scratch_dsn)[0]
+    assert pub(honest) not in lb_slice_cycle.load_bans(scratch_dsn)[0]
+    assert slice_checks.servable(conn, "mb", "through a liar", OWN) is False
+    assert slice_checks.servable(conn, "mb", "through an honest relay", OWN) is True
+    assert slice_checks.checkable_count(conn, "mb", OWN) == 1
+    slice_rebuild.rebuild(conn)
+    gids = {r[0] for r in _rows(conn, "SELECT gid::text FROM mb_artist")}
+    assert other.gid in gids and s.gid not in gids
 
 
 # --------------------------------------------------------------------------

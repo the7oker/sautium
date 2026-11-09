@@ -568,8 +568,8 @@ def test_a_backup_from_before_the_witness_record_still_merges(tmp_path):
 def test_witness_records_merge_as_the_recorder_takes_them(clones, tmp_path):
     """Run last: witness rows can never be deleted, and the clones are the
     module's. No sighting of a key whose proof failed here, its ban row gone, and
-    none a key refused here delivered — whichever machine knew of the
-    refusal."""
+    none a key refused here delivered — refused here, or on the backup's
+    machine for a key this node's registry did not hold."""
     a, b = clones["a"], clones["b"]
     failed, banned_via, failed_via, honest_via = "91" * 32, "92" * 32, "93" * 32, "94" * 32
     carried_banned, carried_failed, carried_honest = "95" * 32, "96" * 32, "97" * 32
