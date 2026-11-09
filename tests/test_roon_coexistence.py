@@ -2182,7 +2182,7 @@ def test_p7_the_refusal_of_roons_track_is_said_beside_the_spot_in_the_nodes_word
                                                           "other_refused", "diagnosis")},
                   node_commands=_node_commands(fake, n, roon))
         assert st["other_refused"] == "no output rate for 96 kHz in its output family"
-        assert (st["state"], st["resume"]["index"]) == ("stopped", 2)
+        assert (st["state"], st["resume"]["index"], st.get("source")) == ("stopped", 2, None)
         att = diag.find(st["diagnosis"]["id"])
         assert (att.intent, att.verdict["code"]) == ("other", "other_refused")
         assert any("No suitable output rate for 96000" in line for line in att.hqp_log["lines"])

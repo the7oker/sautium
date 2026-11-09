@@ -685,5 +685,5 @@ def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():
     proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
-    assert [tag for _np, _mp, tag in json.loads(proc.stdout)] == [
+    assert [tag for _np, _mp, tag, *_ in json.loads(proc.stdout)] == [
         "Connecting to Sautium Player…", "Connecting to Sautium Player…", ""]

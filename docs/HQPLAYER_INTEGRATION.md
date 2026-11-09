@@ -627,9 +627,11 @@ comes after the control port answers again — so neither can end the wait.
   sent again and again — nothing of it ever plays; before, no spot was
   left); where HQPlayer names no take (HQPlayer 5), only for a listen read
   while the playlist was the queue's mirror. Now Playing keeps that track,
-  stopped there and external ("Another app took HQPlayer — Play takes it
-  back at …"), and Play takes HQPlayer back at it; a Seek moves it, nothing
-  sent. Where HQPlayer stopped on the other app's track at that verdict, its
+  stopped there — external while the other controller plays ("Another app
+  took HQPlayer — Play takes it back at …"), "Stopped at … — Play resumes
+  here" once HQPlayer rests stopped on what it refused — and Play takes
+  HQPlayer back at it; a Seek moves it, nothing sent. Where HQPlayer stopped
+  on the other app's track at that verdict, its
   log is read once and the refusal it names is said in the node's words, in
   a row of its own under Now Playing's meta row — "HQPlayer refused the other
   app's track: no output rate for 96 kHz in its output family" (since
