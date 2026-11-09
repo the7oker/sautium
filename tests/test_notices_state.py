@@ -124,6 +124,29 @@ def test_the_rate_check_notice_is_the_hqplayer_backends_own(cur, monkeypatch):
     assert served(None) is None
 
 
+def test_an_fpcalc_that_fails_the_self_test_is_a_notice_and_a_missing_one_is_tools_missing(
+        cur, monkeypatch):
+    import provenance
+
+    def served(verdict, on_path):
+        monkeypatch.setattr(provenance, "fingerprinter", lambda: verdict)
+        monkeypatch.setattr(settings_router.shutil, "which",
+                            lambda tool: f"/usr/bin/{tool}" if tool in on_path else None)
+        items = {i["key"]: i for i in settings_router._notice_items()}
+        return items.get("tools.fingerprint"), items.get("tools.missing")
+
+    failed = provenance.Fingerprinter("failed", "/usr/bin/fpcalc", "exit 3: ERROR: Error decoding audio frame")
+    notice, missing = served(failed, ("ffmpeg", "fpcalc"))
+    assert missing is None and (notice["kind"], notice["until"], notice["data"]) == (
+        "warning", None, {"state": "failed", "detail": "exit 3: ERROR: Error decoding audio frame",
+                          "path": "/usr/bin/fpcalc"})
+    mismatch = provenance.Fingerprinter("mismatch", "/usr/bin/fpcalc", "another fingerprint than the release's")
+    assert served(mismatch, ("ffmpeg", "fpcalc"))[0]["since"] == notice["since"]   # one condition
+    notice, missing = served(provenance.Fingerprinter("missing", None, "not on PATH"), ("ffmpeg",))
+    assert notice is None and missing["data"] == {"tools": ["fpcalc"]}
+    assert served(provenance.Fingerprinter("ok", "/usr/bin/fpcalc"), ("ffmpeg", "fpcalc")) == (None, None)
+
+
 _TABS = r"""
 const fs = require('node:fs'), vm = require('node:vm');
 const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');

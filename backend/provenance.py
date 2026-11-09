@@ -27,6 +27,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import text as sa_text
@@ -99,23 +101,100 @@ _UPSERT_SQL = sa_text(f"""
 """)
 
 
-def require_fpcalc() -> None:
-    """Analysis passes call this first: without fpcalc nothing they compute
-    can be addressed, and unaddressed analysis is never saved — stop before
-    decoding a library rather than skip every track of it."""
-    if shutil.which("fpcalc") is None:
-        raise RuntimeError("fpcalc (Chromaprint) is not on PATH — audio analysis "
-                           "registers no material without it")
+# The fingerprinter's self-test (2026-11-09). The fingerprint is the content
+# address, and fpcalc's FFmpeg is part of it: Debian bookworm's fpcalc exits 3
+# on every track under its 120 s window, Debian trixie's FFmpeg 7.1 moved the
+# prints of 17 of 90 synthetic test files. So before any analysis this process runs
+# fpcalc on a generated signal shipped in the tree (scripts/
+# make_fingerprint_probe.py) and compares the print with the release image's.
+PROBE = Path(__file__).resolve().parent / "fingerprint_probe" / "probe.flac"
+PROBE_REFERENCE = PROBE.with_name("reference.txt")
+
+
+@dataclass(frozen=True)
+class Fingerprinter:
+    """The self-test's verdict on the fpcalc at `path`: `ok`, `missing` (not
+    on PATH), `failed` (fpcalc gave no fingerprint of the probe) or
+    `mismatch` (another fingerprint than the reference); `detail` says why."""
+    state: str
+    path: Optional[str]
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.state == "ok"
+
+
+_verdicts: dict = {}
+_verdicts_lock = threading.Lock()
+
+
+def same_as_reference(fingerprint: str, reference: str) -> bool:
+    """Whether the probe's print is the reference's. Equality while every
+    image decodes with the release's FFmpeg 4.4; a similarity rule for
+    fingerprints will make it a bound on the aligned bit error rate (the same
+    item count, offset 0, BER ≤ 0.01) — here, the self-test's one comparison."""
+    return fingerprint == reference
+
+
+def _probe_verdict(path: Optional[str]) -> Fingerprinter:
+    if path is None:
+        return Fingerprinter("missing", None, "fpcalc (Chromaprint) is not on PATH")
+    try:
+        fingerprint = _run_fpcalc(path, str(PROBE))
+    except subprocess.CalledProcessError as e:
+        said = (e.stderr or "").strip().splitlines()
+        return Fingerprinter("failed", path, f"exit {e.returncode}" + (f": {said[-1]}" if said else ""))
+    except (subprocess.SubprocessError, OSError) as e:
+        return Fingerprinter("failed", path, str(e))
+    if not fingerprint:
+        return Fingerprinter("failed", path, "no fingerprint printed")
+    if not same_as_reference(fingerprint, PROBE_REFERENCE.read_text(encoding="ascii").strip()):
+        return Fingerprinter("mismatch", path, "another fingerprint than the release's")
+    return Fingerprinter("ok", path)
+
+
+def fingerprinter() -> Fingerprinter:
+    """The self-test's verdict on the fpcalc this process would run, tested
+    once per fpcalc found: the backend's start asks first, every analysis
+    pass and the stream enrichment ask before they decode, the notices read
+    it. A tool installed or replaced later is a new path, tested anew."""
+    path = shutil.which("fpcalc")
+    with _verdicts_lock:
+        verdict = _verdicts.get(path)
+        if verdict is None:
+            verdict = _verdicts[path] = _probe_verdict(path)
+            if verdict.ok:
+                logger.info("fpcalc %s fingerprints the probe as the release does", path)
+            elif verdict.state != "missing":
+                logger.error("fpcalc %s failed the fingerprint self-test (%s): %s — audio "
+                             "analysis refuses until it passes", path, verdict.state, verdict.detail)
+    return verdict
+
+
+def require_fingerprinter() -> None:
+    """Analysis passes call this first: without a fingerprint nothing they
+    compute can be addressed, and unaddressed analysis is never saved; with
+    another fingerprinter's, what they saved would carry other addresses
+    than every release node's. Stop before decoding a library rather than
+    skip, or mis-address, every track of it."""
+    verdict = fingerprinter()
+    if not verdict.ok:
+        raise RuntimeError(f"audio analysis refused: {verdict.detail} "
+                           f"(fingerprint self-test: {verdict.state})")
+
+
+def _run_fpcalc(fpcalc: str, path: str) -> str:
+    return subprocess.run([fpcalc, "-plain", path], capture_output=True,
+                          text=True, timeout=120, check=True).stdout.strip()
 
 
 def _fpcalc(path: str) -> Optional[str]:
     try:
-        out = subprocess.run(["fpcalc", "-plain", path], capture_output=True,
-                             text=True, timeout=120, check=True)
+        return _run_fpcalc("fpcalc", path) or None
     except (subprocess.SubprocessError, OSError) as e:
         logger.debug("fpcalc failed for %s: %s", path, e)
         return None
-    return out.stdout.strip() or None
 
 
 def chromaprint_file(local_path: str, cue_start=None,

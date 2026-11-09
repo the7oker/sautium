@@ -438,6 +438,11 @@ async def lifespan(app: FastAPI):
         torch.set_num_threads(_profile.torch_cpu_threads)
         logger.info(f"torch CPU threads capped at {_profile.torch_cpu_threads}")
 
+    # The fingerprint self-test, before anything could analyse: its verdict
+    # is logged now and kept for the analysis passes and the notices.
+    import provenance
+    await asyncio.to_thread(provenance.fingerprinter)
+
     # Overlay Last.fm credentials from user_settings (Pydantic Settings
     # only reads .env at startup; the OAuth callback persists to DB).
     lastfm_auth.load_from_db()

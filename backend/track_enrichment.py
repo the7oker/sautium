@@ -912,7 +912,7 @@ class TrackEnrichmentPipeline:
         """
         if not (self.skip_embeddings and self.skip_audio_analysis):
             import provenance
-            provenance.require_fpcalc()
+            provenance.require_fingerprinter()
         stats = {
             'processed': 0,
             'audio_embedding_success': 0,

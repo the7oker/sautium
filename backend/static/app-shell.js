@@ -11879,6 +11879,17 @@
     title: 'Media tools missing',
     text: `${escapeHtml(((n.data && n.data.tools) || []).join(', '))} not found — audio analysis and fingerprinting are skipped until installed.`,
   });
+  // fpcalc is there but failed its self-test on the shipped probe signal
+  // (backend/provenance.py fingerprinter): analysis refuses while it lasts.
+  // Draft words, for the words review.
+  NOTICE_COPY['tools.fingerprint'] = n => {
+    const d = n.data || {};
+    const why = d.state === 'mismatch'
+      ? "fingerprints a test signal differently from the release, so this node's analysis would not match anyone else's"
+      : `could not fingerprint a test signal (${escapeHtml(d.detail || 'no fingerprint')})`;
+    return { title: 'Audio analysis paused',
+             text: `fpcalc ${why}. Analysis waits for a fpcalc that passes the test, then a restart.` };
+  };
   // The CLI's own verdict (backend/claude_code.py), raised only while
   // something needs it: the assistant runs on Claude Code, or gear research
   // waits for it. The gear chips and the gear sheet say it where it bites.

@@ -494,7 +494,7 @@ class AudioAnalyzer:
         import time
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        provenance.require_fpcalc()
+        provenance.require_fingerprinter()
         if not force:
             # A failed look costs only the work it would have saved: the
             # pass analyses what stays pending, as before.

@@ -1233,6 +1233,16 @@ def _notice_items() -> List[Dict[str, Any]]:
     if since:
         items.append({"key": "tools.missing", "kind": "warning",
                       "since": since, "until": None, "data": {"tools": missing}})
+    # An fpcalc that is there and fails the fingerprint self-test (a missing
+    # one is tools.missing): analysis refuses while it lasts
+    import provenance
+    verdict = provenance.fingerprinter()
+    since = _derived("tools.fingerprint", verdict.state in ("failed", "mismatch"))
+    if since:
+        items.append({"key": "tools.fingerprint", "kind": "warning",
+                      "since": since, "until": None,
+                      "data": {"state": verdict.state, "detail": verdict.detail,
+                               "path": verdict.path}})
     from streaming import service as streaming_service
     for pid, health in sorted(streaming_service.provider_health.items()):
         items.append({"key": f"streaming.silent.{pid}", "kind": "warning",

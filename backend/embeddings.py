@@ -402,7 +402,7 @@ class AudioEmbeddingGenerator:
         """
         import time
 
-        provenance.require_fpcalc()
+        provenance.require_fingerprinter()
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
         if not force:

@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import io
 import logging
-import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -64,11 +63,15 @@ class PreviewEnricher:
         self._embedder = None
         self._analyzer = None
         # Streamed audio with no fingerprint has no address and is never
-        # saved; without fpcalc that is every stream — say so once and accept
-        # nothing, rather than decode and drop every track.
-        self._fpcalc = shutil.which("fpcalc") is not None
+        # saved, and one from a fingerprinter that fails the self-test would
+        # carry another address than the release's: without a passing fpcalc
+        # say so once and accept nothing, rather than decode every track.
+        import provenance
+        verdict = provenance.fingerprinter()
+        self._fpcalc = verdict.ok
         if not self._fpcalc:
-            logger.error("preview enrichment disabled: fpcalc (Chromaprint) is not on PATH")
+            logger.error("preview enrichment disabled: %s (fingerprint self-test: %s)",
+                         verdict.detail, verdict.state)
         # Trickle mode (CPU-only / lite profile — §2.7 HARDWARE-TIERS): the
         # per-track pipeline runs near listening pace there, so backlog is
         # bounded (1 running + 1 queued) and excess is DROPPED — enrichment
