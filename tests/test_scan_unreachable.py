@@ -330,7 +330,7 @@ def test_an_empty_walk_records_no_scan(cur, library, main_module, heard, monkeyp
         _empty_the_folder_during_the_walk(monkeypatch, library)
     ran = []
     monkeypatch.setattr(post_import, "run", lambda *a: ran.append("post_import"))
-    monkeypatch.setattr(scanner, "prune_missing_files", lambda **kw: ran.append("prune"))
+    monkeypatch.setattr(scanner, "plan_prune", lambda **kw: ran.append("prune"))
     main_module._scan_state.update(running=True, cancel_requested=False,
                                    progress="Starting scan...", stats=None, result=None)
 
@@ -339,6 +339,7 @@ def test_an_empty_walk_records_no_scan(cur, library, main_module, heard, monkeyp
     assert main_module._scan_state["running"] is False
     assert main_module._scan_state["progress"] == progress
     assert ran == []                              # no post-import pass, no prune
+    assert main_module._scan_state["prune_plan"] is None
     assert _last_scan(cur) is None
     assert heard(timeout=0.5) == wakes
 
@@ -434,14 +435,31 @@ def test_a_folder_with_an_entry_it_cannot_type_is_left_out_whole(library, monkey
     assert (audio, cues, unread) == ([], [], [str(album)])
 
 
-def _rescan(main_module, monkeypatch):
-    """The Library's Rescan up to its question: the scan, then the plan."""
+def _post_import(state, result, since):
+    """The post-import pass as far as these tests need it, in its order:
+    pass-1 artist normalization (the canon that re-keys a returned file's
+    raw-tag track), then the re-link. The MB tiers, the AI job, the notary
+    and the scrobble placer are not this module's."""
     from canon import post_import
-    monkeypatch.setattr(post_import, "run", lambda *a: None)
+    from canon.migrations import normalize_artists
+    from database import get_db_context
+    with get_db_context() as db:
+        normalize_artists(db, pass1=True)
+    post_import.relink(state, result)
+
+
+def _scan(main_module, monkeypatch, prune, post=_post_import):
+    from canon import post_import
+    monkeypatch.setattr(post_import, "run", post)
     main_module._scan_state.update(running=True, cancel_requested=False,
                                    progress="Starting scan...", stats=None, result=None)
-    main_module._scan_worker(None, True, None, True)
+    main_module._scan_worker(None, True, None, prune)
     return main_module._scan_state
+
+
+def _rescan(main_module, monkeypatch):
+    """The Library's Rescan up to its question: the scan, then the plan."""
+    return _scan(main_module, monkeypatch, True)
 
 
 def _answer(main_module, plan_id, remove):
@@ -479,7 +497,7 @@ def test_a_prune_of_its_own_keeps_what_it_could_not_read(cur, library, monkeypat
 
     assert (plan["pruned"], plan["kept_unread"]) == (1, 1)
     assert _catalog(cur) == ["A", "B", "C"]
-    scanner.prune_missing_files(plan["file_ids"])
+    scanner.prune_missing_files(plan["file_ids"], scanner.prune_counts(plan))
     assert _catalog(cur) == ["A", "B"]
 
 
@@ -529,7 +547,7 @@ def test_a_no_keeps_everything_and_an_answer_is_taken_once(
     assert _catalog(cur) == ["A", "Gone"]
     with pytest.raises(HTTPException) as again:   # a second device's yes
         asyncio.run(main_module.scan_prune(plan_id=plan_id, remove=True))
-    assert again.value.status_code == 409
+    assert again.value.status_code == 410
     assert _catalog(cur) == ["A", "Gone"]
 
 
@@ -594,8 +612,50 @@ def test_a_new_scan_replaces_the_plan(cur, library, main_module, monkeypatch):
     assert state["prune_plan"] is None
     with pytest.raises(HTTPException) as refused:
         asyncio.run(main_module.scan_prune(plan_id=stale, remove=True))
-    assert refused.value.status_code == 409
+    assert refused.value.status_code == 410
     assert _catalog(cur) == ["A", "Gone"]
+
+
+def test_a_yes_that_would_now_remove_more_removes_nothing_and_asks_again(
+        cur, library, main_module, monkeypatch):
+    """The question named what the removal took when it was asked; the yes
+    covers no more. A listen kept the track out of the count, and it is gone
+    by the time of the yes."""
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+    _owned_file(cur, "Gone")
+    cur.execute("INSERT INTO listening_history (track_id, started_at, completed) "
+                "SELECT mf.track_id, now(), true FROM media_files mf WHERE mf.file_path LIKE '%/Gone/%'")
+    state = _rescan(main_module, monkeypatch)
+    asked = state["prune_plan"]
+    assert asked["counts"] == {"files": 1, "tracks": 0, "albums": 1, "artists": 0}
+    cur.execute("DELETE FROM listening_history")
+
+    _answer(main_module, asked["id"], True)
+
+    assert _catalog(cur) == ["A", "Gone"]
+    again = state["prune_plan"]
+    assert again["id"] != asked["id"]
+    assert again["counts"] == {"files": 1, "tracks": 1, "albums": 1, "artists": 0}
+    assert state["progress"] == ("The library changed since the question — "
+                                 "1 missing file(s) wait for your answer")
+    _answer(main_module, again["id"], True)
+    assert _catalog(cur) == ["A"]
+
+
+def test_a_plan_for_a_subfolder_judges_only_that_subfolder(cur, library):
+    """`cli.py scan --prune --path Jazz` walks <root>/Jazz alone; a missing
+    file under another folder whose name merely contains it is not its."""
+    (library / "Jazz" / "Kept").mkdir(parents=True)
+    (library / "Jazz" / "Kept" / "01.flac").touch()
+    _owned_file(cur, "Jazz/Kept")
+    _owned_file(cur, "Jazz/Gone")
+    _owned_file(cur, "Acid Jazz Collection/Gone too")
+
+    plan = scanner.plan_prune(subpath="Jazz")
+
+    assert (plan["checked"], plan["pruned"]) == (2, 1)
 
 
 def test_the_cli_asks_before_it_removes(cur, library, monkeypatch):
@@ -690,11 +750,7 @@ def scanned_library(cur, library, main_module, monkeypatch):
     _flac(library / "Ostrava Unit" / "Pulse Archive" / "02.flac", 2, "Relay", track=2)
     _flac(library / "Q2 Probe" / "Probe EP" / "01.flac", 3, "Probe B",
           artist="Q2 Probe", album="Probe EP")
-    from canon import post_import
-    monkeypatch.setattr(post_import, "run", lambda *a: None)
-    main_module._scan_state.update(running=True, cancel_requested=False,
-                                   progress="Starting scan...", stats=None, result=None)
-    main_module._scan_worker(None, True, None, False)
+    _scan(main_module, monkeypatch, False)
     analysed = {t: _analyse(cur, t) for t in ("Carrier", "Relay")}
     for t in ("Carrier", "Relay"):
         assert _queued(cur, t) == {"embeddings": False, "features": False}
@@ -729,9 +785,7 @@ def test_a_folder_that_comes_back_gets_its_analysis_back_not_a_new_pass(
 
     _move(away / "Ostrava Unit", library / "Ostrava Unit")
     _move(away / "Q2 Probe", library / "Q2 Probe")
-    main_module._scan_state.update(running=True, cancel_requested=False,
-                                   progress="Starting scan...", stats=None, result=None)
-    main_module._scan_worker(None, True, None, False)        # "Scan for new"
+    _scan(main_module, monkeypatch, False)                   # "Scan for new"
 
     assert state["result"]["relinked"] == 2
     for title, (track_id, sid) in scanned_library.items():
@@ -775,10 +829,99 @@ def test_another_master_at_the_old_place_is_analysed_as_new(
     _move(away / "Ostrava Unit" / "Pulse Archive" / "02.flac",
           library / "Ostrava Unit" / "Pulse Archive" / "02.flac")
 
-    main_module._scan_state.update(running=True, cancel_requested=False,
-                                   progress="Starting scan...", stats=None, result=None)
-    main_module._scan_worker(None, True, None, False)
+    _scan(main_module, monkeypatch, False)
 
     assert state["result"]["relinked"] == 1
+    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
+    assert _queued(cur, "Relay") == {"embeddings": False, "features": False}
+
+
+def _away_and_removed(main_module, monkeypatch, library, tmp_path, folder="Ostrava Unit"):
+    away = tmp_path / "away"
+    _move(library / folder, away / folder)
+    state = _rescan(main_module, monkeypatch)
+    _answer(main_module, state["prune_plan"]["id"], True)
+    return away / folder
+
+
+def test_a_returned_file_the_canon_re_keys_gets_its_analysis_back(
+        cur, library, main_module, monkeypatch, tmp_path):
+    """The returned file is minted under the track its raw tags name; the
+    canon moves it onto the track that kept the analysis, and only then is
+    there anything to link. The canon here is MusicBrainz's name for an
+    artist with new content (canon.content on a dump node), played by the
+    primitive it calls (recanonicalize_artist): "Bjork" becomes "Björk"."""
+    from canon import post_import
+    from canon.identity import recanonicalize_artist
+    from database import get_db_context
+
+    def canon_then_relink(state, result, since):
+        with get_db_context() as db:
+            raw = db.execute(text("SELECT id FROM artists WHERE name = 'Bjork'")).scalar()
+            if raw:
+                recanonicalize_artist(db, raw, "Björk")
+        post_import.relink(state, result)
+
+    _flac(library / "Bjork" / "Vespertine" / "01.flac", 7, "Hidden Place",
+          artist="Bjork", album="Vespertine")
+    _flac(library / "Keep" / "01.flac", 9, "Anchor", artist="Keeper", album="Keep")
+    _scan(main_module, monkeypatch, False, canon_then_relink)   # the canon names the artist
+    cur.execute("SELECT ar.name FROM track_artists ta JOIN artists ar ON ar.id = ta.artist_id "
+                "JOIN tracks t ON t.id = ta.track_id WHERE t.title = 'Hidden Place'")
+    assert cur.fetchall() == [("Björk",)]
+    track_id, _sid = _analyse(cur, "Hidden Place")
+    away = tmp_path / "away"
+    _move(library / "Bjork", away / "Bjork")
+    state = _scan(main_module, monkeypatch, True, canon_then_relink)
+    _answer(main_module, state["prune_plan"]["id"], True)
+    assert _sources(cur, track_id) == [(None, None)]
+    _move(away / "Bjork", library / "Bjork")
+
+    _scan(main_module, monkeypatch, False, canon_then_relink)  # minted as "Bjork", canon, re-link
+
+    assert state["result"]["relinked"] == 1
+    [(mf_id, path)] = _sources(cur, track_id)
+    assert path.endswith("Vespertine/01.flac")
+    assert _queued(cur, "Hidden Place") == {"embeddings": False, "features": False}
+
+
+def test_what_a_scan_left_unlinked_the_next_scan_links(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """The look is the state's, not one run's files: a return scanned while
+    the files could not be compared (no fpcalc; a cancel or a restart leaves
+    the same state) is linked by the next scan, which finds nothing new."""
+    import provenance
+    back = _away_and_removed(main_module, monkeypatch, library, tmp_path)
+    _move(back, library / "Ostrava Unit")
+    real_which = provenance.shutil.which
+    monkeypatch.setattr(provenance.shutil, "which",
+                        lambda name: None if name == "fpcalc" else real_which(name))
+
+    state = _scan(main_module, monkeypatch, False)
+    assert "relinked" not in state["result"]
+    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
+
+    monkeypatch.setattr(provenance.shutil, "which", real_which)
+    state = _scan(main_module, monkeypatch, False)
+
+    assert state["result"]["added"] == 0
+    assert state["result"]["relinked"] == 2
+    assert _queued(cur, "Carrier") == {"embeddings": False, "features": False}
+
+
+def test_another_length_under_the_same_fingerprint_is_not_linked(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """The fingerprint covers fpcalc's first 120 s; the duration is the
+    other half of what a seal binds. A cut of another length is another
+    material, analysed as new."""
+    track_id, sid = scanned_library["Carrier"]
+    cur.execute("UPDATE analysis_sources SET duration_seconds = duration_seconds + 95 "
+                "WHERE id = %s", (sid,))
+    back = _away_and_removed(main_module, monkeypatch, library, tmp_path)
+    _move(back, library / "Ostrava Unit")
+
+    state = _scan(main_module, monkeypatch, False)
+
+    assert state["result"]["relinked"] == 1       # Relay; Carrier's length differs
     assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
     assert _queued(cur, "Relay") == {"embeddings": False, "features": False}

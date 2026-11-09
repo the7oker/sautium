@@ -1365,6 +1365,11 @@ _scan_state: Dict[str, Any] = {
 _scan_lock = threading.Lock()
 
 
+def _new_prune_plan(file_ids: List[int], stats: Dict[str, Any]) -> Dict[str, Any]:
+    from scanner import prune_counts
+    return {"id": secrets.token_hex(8), "file_ids": file_ids, "counts": prune_counts(stats)}
+
+
 def _prune_plan_counts(plan: Dict[str, Any]) -> Dict[str, Any]:
     """What the Library screen asks about: the plan without its file ids."""
     return {"id": plan["id"], **plan["counts"]}
@@ -1431,11 +1436,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                     file_ids = prune_stats.pop("file_ids")
                     result["prune"] = prune_stats
                     if file_ids:
-                        plan = {"id": secrets.token_hex(8), "file_ids": file_ids,
-                                "counts": {"files": prune_stats["pruned"],
-                                           "tracks": prune_stats["orphan_tracks"],
-                                           "albums": prune_stats["orphan_albums"],
-                                           "artists": prune_stats["orphan_artists"]}}
+                        plan = _new_prune_plan(file_ids, prune_stats)
                         result["prune_plan"] = _prune_plan_counts(plan)
                     logger.info(f"Prune plan: {prune_stats}")
                 except Exception as e:
@@ -1497,26 +1498,36 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             pass
 
 
-def _prune_worker(file_ids: List[int]) -> None:
+def _prune_worker(plan: Dict[str, Any]) -> None:
     """The owner's yes to a Rescan's plan: its files that are still missing
-    go, with what only they held."""
+    go, with what only they held — or, when that would now take more than
+    the question named, nothing goes and the new plan is asked."""
     state = _scan_state
+    again = None
     try:
         from scanner import prune_missing_files
         stats = prune_missing_files(
+            plan["file_ids"], plan["counts"],
             progress_cb=lambda msg: state.update(progress=msg),
             cancel_check=lambda: state["cancel_requested"],
-            file_ids=file_ids,
         )
-        state["result"] = {"prune": stats}
-        state["progress"] = f"Removal complete — {stats['pruned']} missing file(s) removed"
+        if stats.pop("grew", False):
+            again = _new_prune_plan(stats.pop("file_ids"), stats)
+            state["result"] = {"prune": stats, "prune_plan": _prune_plan_counts(again)}
+            state["progress"] = ("The library changed since the question — "
+                                 f"{again['counts']['files']} missing file(s) wait for your answer")
+        else:
+            state["result"] = {"prune": stats}
+            state["progress"] = f"Removal complete — {stats['pruned']} missing file(s) removed"
         logger.info(f"Prune results: {stats}")
     except Exception as e:
         logger.error(f"Prune failed: {e}", exc_info=True)
         state["progress"] = f"Removal failed: {str(e)[:200]}"
         state["result"] = {"prune_error": str(e)}
     finally:
-        state["running"] = False
+        with _scan_lock:
+            state["prune_plan"] = again
+            state["running"] = False
         from routers.settings import notify_library_subscribers
         notify_library_subscribers()
 
@@ -1566,7 +1577,8 @@ async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
     with _scan_lock:
         plan = _scan_state["prune_plan"]
         if plan is None or plan["id"] != plan_id:
-            raise HTTPException(status_code=409, detail=(
+            # 410: the question is gone for good — the page stops asking it
+            raise HTTPException(status_code=410, detail=(
                 "This Rescan has been answered already, or a newer scan replaced it."))
         _scan_state["prune_plan"] = None
         if remove:
@@ -1577,7 +1589,7 @@ async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
             _scan_state["progress"] = (f"Scan complete — {plan['counts']['files']} missing "
                                        "file(s) kept")
     if remove:
-        threading.Thread(target=_prune_worker, args=(plan["file_ids"],), daemon=True).start()
+        threading.Thread(target=_prune_worker, args=(plan,), daemon=True).start()
     else:
         from routers.settings import notify_library_subscribers
         notify_library_subscribers()

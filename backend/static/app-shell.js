@@ -15455,12 +15455,25 @@
       confirmText: 'Remove',
       cancelText: 'Keep',
     });
-    const r = await fetch('/api/settings/library/scan/prune?plan_id='
-      + encodeURIComponent(plan.id) + '&remove=' + remove, { method: 'POST' });
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({}));
+    let detail = null;
+    try {
+      const r = await fetch('/api/settings/library/scan/prune?plan_id='
+        + encodeURIComponent(plan.id) + '&remove=' + remove, { method: 'POST' });
+      if (!r.ok) {
+        detail = (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`;
+        // 410: answered elsewhere or replaced — gone for good. Anything else
+        // (the benchmark measuring, the node out of reach) leaves the plan
+        // waiting, and the next look at the screen asks it again.
+        if (r.status !== 410) _prunePlansAsked.delete(plan.id);
+      }
+    } catch (e) {
+      detail = 'The node did not answer.';
+      _prunePlansAsked.delete(plan.id);
+    }
+    if (detail) {
       notices.toast({ kind: 'error', key: 'library.prune', title: 'Rescan',
-                      text: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
+                      text: escapeProfileHtml(detail) });
+      return;
     }
     if (parseHash().startsWith('more/library')) render();
   }

@@ -103,7 +103,7 @@ def scan(limit, no_skip, path, prune, yes):
     if prune:
         click.echo(f"\n🧹 Pruning missing files...")
         try:
-            from scanner import plan_prune, prune_missing_files
+            from scanner import plan_prune, prune_counts, prune_missing_files
             # its progress says why when it skips (no files, a folder gone)
             plan = plan_prune(subpath=path, progress_cb=lambda msg: click.echo(f"   {msg}"))
             file_ids = plan.pop("file_ids")
@@ -122,7 +122,10 @@ def scan(limit, no_skip, path, prune, yes):
             if not yes and not click.confirm("   Remove them?", default=False):
                 click.echo("   Nothing removed")
                 return
-            prune_stats = prune_missing_files(file_ids=file_ids)
+            prune_stats = prune_missing_files(file_ids, prune_counts(plan))
+            if prune_stats.get("grew"):
+                click.echo("   The library changed since the plan; nothing removed — run it again")
+                return
             click.echo(f"   • Pruned: {prune_stats['pruned']} missing files")
             click.echo(f"   • Orphan tracks removed: {prune_stats['orphan_tracks']}")
             click.echo(f"   • Orphan album variants removed: {prune_stats['orphan_variants']}")

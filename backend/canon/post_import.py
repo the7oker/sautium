@@ -3,7 +3,8 @@ or a sync of the HQPlayer library. Factored out of the scan worker
 (2026-09-27) so both importers run the same passes in the same order:
 artist normalization pass 1 (safe patterns), the MB canon over artists
 whose content is newer than their last canon, the AI judgment tier over
-what the deterministic canon left (scoped to this run's files), then the
+what the deterministic canon left (scoped to this run's files), the re-link
+of returned files to their analysis, then the
 notary and the scrobble placer are woken — new tracks are signable state
 and may be exactly what imported listens wait for."""
 
@@ -73,6 +74,8 @@ def run(state: Dict[str, Any], result: Dict[str, Any], since: datetime) -> None:
                 logger.info("Post-import: AI canonization started (new files)")
         except Exception as e:
             logger.error(f"Post-import MB canonicalization failed: {e}")
+    if not state["cancel_requested"]:
+        relink(state, result)
     # The import's analysis and its canon are signable state: wake the
     # sealing owner (full — canon may have anchored albums whose tracks were
     # signed long ago). New files can be the tracks imported scrobbles wait for.
@@ -81,3 +84,26 @@ def run(state: Dict[str, Any], result: Dict[str, Any], since: datetime) -> None:
         notary.wake("scan", full=True)
         from canon import scrobbles
         scrobbles.wake()
+
+
+def relink(state: Dict[str, Any], result: Dict[str, Any]) -> None:
+    """A returned file's analysis follows it by its fingerprint — after the
+    canon, which moves a returned file's raw-tag track onto the track that
+    kept the analysis (a split credit, an MB name). The look is the state's,
+    not this run's files, so what a cancel, a restart or a missing fpcalc
+    left is found again by the next import."""
+    from provenance import relink_returned_files
+    from routers.settings import notify_library_subscribers
+
+    def progress(done, total):
+        state["progress"] = f"Linking returned files to their analysis: {done}/{total}"
+        notify_library_subscribers()
+
+    try:
+        relinked = relink_returned_files(
+            cancel_check=lambda: state["cancel_requested"], progress_cb=progress)
+    except Exception as e:
+        logger.error(f"Post-import re-link failed: {e}", exc_info=True)
+        return
+    if relinked:
+        result["relinked"] = relinked

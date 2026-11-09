@@ -192,75 +192,96 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
 # on the file row's delete) and the analysis-source file now holding its
 # track: a file that came back, at its old path or a new one. Only first-hand
 # file rows — a stream row is the stream→owned upgrade policy's, an imported
-# one the reanalyze_imported policy's, and neither is this node's file.
-_RETURNED_SQL = sa_text("""
+# one the reanalyze_imported policy's, and neither is this node's file. Read
+# from the state alone, so whatever a cancel, a restart or a missing fpcalc
+# left is found again by the next run.
+_RETURNED_SQL = """
     SELECT mf.id, mf.track_id::text AS track_id, mf.file_path,
-           mf.cue_start_seconds, mf.cue_end_seconds
+           mf.cue_start_seconds, mf.cue_end_seconds, mf.duration_seconds
     FROM media_files mf
-    WHERE mf.track_id = ANY(CAST(:tids AS uuid[]))
-      AND mf.is_analysis_source
+    WHERE mf.is_analysis_source
+      {scope}
       AND NOT EXISTS (SELECT 1 FROM analysis_sources s WHERE s.media_file_id = mf.id)
       AND EXISTS (SELECT 1 FROM analysis_sources s
                   WHERE s.track_id = mf.track_id AND s.media_file_id IS NULL
                     AND s.provider_id IS NULL AND NOT s.imported)
     ORDER BY mf.id
-""")
+"""
 
+# The fingerprint covers fpcalc's first 120 s; the duration is the other half
+# of the material declaration a seal binds (record_sig.segment_payload), so a
+# longer or shorter cut of the same opening is another material.
 _RELINK_SQL = sa_text("""
     UPDATE analysis_sources SET media_file_id = :mfid
     WHERE track_id = :tid AND chromaprint_key = sha256(decode(:fp, 'escape'))
       AND media_file_id IS NULL AND provider_id IS NULL AND NOT imported
+      AND (duration_seconds IS NULL OR CAST(:dur AS int) IS NULL
+           OR duration_seconds = CAST(:dur AS int))
 """)
 
 _RELINK_CHUNK = 100
 
 
-def relink_returned_files(track_ids, cancel_check=None) -> int:
+def relink_returned_files(track_ids=None, cancel_check=None, progress_cb=None) -> int:
     """Link the node's own analysis back to the file it was made from when
     that file returns — a folder moved back, a drive re-attached, a library
     moved under a new root. The analysis passes would see the track as
     pending (its source names no file, or another one) and recompute it in
-    full; the fingerprint says the material is the same, and the content
-    address is what the analysis describes. A file whose fingerprint matches
-    no unlinked row (another master) stays pending, as any new file is.
+    full; the fingerprint and the duration say the material is the same, and
+    the content address is what the analysis describes. A file that matches
+    no unlinked row (another master, another cut) stays pending, as any new
+    file is. `track_ids` narrows the look to those tracks; without it every
+    such file is looked at.
 
-    Fingerprints run in a pool outside any transaction (fpcalc decodes up to
-    120 s of audio per file); each chunk's links commit on their own, so a
-    cancel or a crash keeps what was linked. Returns how many rows were
+    Each chunk's fingerprints are taken in a pool before its transaction
+    opens (fpcalc decodes up to 120 s of audio per file), and each chunk
+    commits on its own, so a cancel or a crash keeps what was linked.
+    progress_cb(done, total) after each chunk. Returns how many rows were
     linked."""
     from concurrent.futures import ThreadPoolExecutor
 
     from database import get_db_context
 
-    if not track_ids:
-        return 0
+    params = {}
+    scope = ""
+    if track_ids is not None:
+        if not track_ids:
+            return 0
+        scope = "AND mf.track_id = ANY(CAST(:tids AS uuid[]))"
+        params["tids"] = [str(t) for t in track_ids]
     with get_db_context() as db:
-        files = db.execute(_RETURNED_SQL, {"tids": [str(t) for t in track_ids]}).fetchall()
+        files = db.execute(sa_text(_RETURNED_SQL.format(scope=scope)), params).fetchall()
     if not files:
         return 0
     if shutil.which("fpcalc") is None:
         logger.warning("%d returned file(s) keep their analysis unlinked: fpcalc "
                        "(Chromaprint) is not on PATH, so their material cannot be "
-                       "compared — the analysis passes will recompute them", len(files))
+                       "compared", len(files))
         return 0
 
     def fingerprint(f):
         return f, chromaprint_file(settings.translate_to_local_path(f.file_path),
                                    f.cue_start_seconds, f.cue_end_seconds)
 
-    linked = 0
+    linked = done = 0
     with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 4)) as pool:
         for start in range(0, len(files), _RELINK_CHUNK):
             if cancel_check and cancel_check():
                 break
-            chunk = pool.map(fingerprint, files[start:start + _RELINK_CHUNK])
+            chunk = list(pool.map(fingerprint, files[start:start + _RELINK_CHUNK]))
             with get_db_context() as db:
                 for f, fp in chunk:
                     if fp:
                         linked += db.execute(_RELINK_SQL, {
-                            "mfid": f.id, "tid": f.track_id, "fp": fp}).rowcount
+                            "mfid": f.id, "tid": f.track_id, "fp": fp,
+                            # rounded as get_or_create_local declares it
+                            "dur": (int(round(float(f.duration_seconds)))
+                                    if f.duration_seconds else None)}).rowcount
+            done += len(chunk)
+            if progress_cb:
+                progress_cb(done, len(files))
     logger.info("Re-linked the analysis of %d of %d returned file(s) by their "
-                "fingerprint", linked, len(files))
+                "fingerprint", linked, done)
     return linked
 
 
