@@ -390,10 +390,11 @@ def _relink(files, cancel_check, progress_cb) -> int:
 
     from database import get_db_context
 
-    if shutil.which("fpcalc") is None:
-        logger.warning("%d returned file(s) keep their analysis unlinked: fpcalc "
-                       "(Chromaprint) is not on PATH, so their material cannot be "
-                       "compared", len(files))
+    verdict = fingerprinter()
+    if not verdict.ok:
+        logger.warning("%d returned file(s) keep their analysis unlinked: %s (fingerprint "
+                       "self-test: %s), so their material cannot be compared",
+                       len(files), verdict.detail, verdict.state)
         return 0
 
     def fingerprint(f):

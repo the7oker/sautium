@@ -993,7 +993,7 @@ def test_each_analysis_pass_links_returned_files_before_it_reads_its_queue(
     import importlib
     import provenance
     mod = importlib.import_module(module)
-    monkeypatch.setattr(provenance, "require_fpcalc", lambda: None)
+    monkeypatch.setattr(provenance, "require_fingerprinter", lambda: None)
     order = []
 
     def relink(track_ids, **kw):
