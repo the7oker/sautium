@@ -12,7 +12,7 @@ module keeps is the record and its consequences, the same for both families
   pinned authority, and for `method: pow` its proof, bound to it here and
   evaluated once per key when the node's memory allows (the identity
   registry). A relay forwards the author's certificate from its own record of
-  the key, with the proof that verified there (`author_certificate`); a
+  the key, with the proof its registry keeps for it (`author_certificate`); a
   relayed proof is that relay's word — it verifies the author or its slice is
   dropped, never stored and never held against the author. The sync's sealed
   payloads carry the same pair under each author's key (`author_entries`),

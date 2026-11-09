@@ -197,7 +197,9 @@ class Recorder:
         a banned key, or the channel's ceiling met today — a refusal is never
         remembered, so a sighting past a ceiling counts on a later day it
         recurs (a `carried` one recurs only with more of its author's records)
-        and a lifted ban is seen at once."""
+        and a lifted ban is seen at once. Until it recurs, a node that met
+        the subject only that way holds no certificate of it to pass on with
+        its records (slice_trust.author_entries reads this record)."""
         subject = subject.lower()
         sig = cert.get("sig")
         if not isinstance(sig, str) or not _SIG_RE.fullmatch(sig):
@@ -279,8 +281,9 @@ class Recorder:
             first = day[2] == 1
         if first:
             logger.warning("p2p_witness: the %s ceiling (%d new rows a day) is met — further %s "
-                           "sightings today are not recorded; a later day records those that "
-                           "come again", channel, ceiling, channel)
+                           "sightings today are not recorded, nor passed on with the records "
+                           "this node serves; a later day records those that come again",
+                           channel, ceiling, channel)
         return True
 
     def _count(self, channel: str, today) -> None:

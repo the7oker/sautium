@@ -883,9 +883,12 @@ certificate, channel), the first sighting of each.
   owner's machines — and in no sync payload, share export, seed or support
   warrant as a row. What leaves it is a certificate alone: the newest it
   holds of an author whose sealed records the node serves, in the payload's
-  `authors` map (since slice 2) — never a channel, a time or a deliverer;
-  the certificates are public, but which authors' the node holds tells a
-  little of whom it has met. The Web UI says so (Sync & P2P). Whether
+  `authors` map (since slice 2; an author the registry verified travels
+  with the proof the registry keeps instead) — never a channel, a time or a
+  deliverer. The certificates are public, but which authors' the node holds,
+  and which come with a proof, tells a little of whom it has met and whom
+  its identity gate checked. The Web UI says that the record stays and that
+  certificates and proofs travel with the analysis (Sync & P2P). Whether
   witness statements are ever shared is a decision of its own.
 - **Beside the registry, not instead of it.** `p2p_identities` stays what
   it is — mutable, evicted past its cap, rewritten by succession, filled

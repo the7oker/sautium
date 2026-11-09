@@ -494,9 +494,9 @@ push) carries an `authors` map, since 2026-11-09 (BIRTH-SYNC slice 2):
 `{"<author pubkey>": {"author_cert": {...}, "author_proof": {...}|null}}`
 for each author its seals name, the pair a catalogue slice's entry carries.
 A server puts in its own certificate for the records it authored (a push
-or a share file names none); an author it verified, with the proof it
-verified (without `mined_at`), as a slice relay forwards one, while that
-certificate is in the current format; any other author whose certificate it
+or a share file names none); an author it verified, with the proof its
+registry keeps for it (without `mined_at`), as a slice relay forwards one,
+while that certificate is in the current format; any other author whose certificate it
 witnessed, the newest in the current format, alone. It names no author it
 banned or whose proof failed there. The receiver reads only the certificate,
 for its witness record (below); older peers ignore the field.

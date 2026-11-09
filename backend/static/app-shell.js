@@ -16033,7 +16033,7 @@
         <div data-sync-content style="margin-top:calc(14*var(--px));">${_renderSync(sync)}</div>
         <div class="profile-group-label">Learn more</div>
         <div class="form-group">
-          <div class="form-row stacked"><div class="row-stack-sub">This node keeps a local record of the identities it meets, and never shares it. The analysis it passes on carries its authors' certificates, which are public.</div></div>
+          <div class="form-row stacked"><div class="row-stack-sub">This node keeps a local record of the identities it meets, and never shares it. The analysis it passes on carries its authors' public certificates, and the proof of work of those it verified.</div></div>
           ${linkRow('What leaves your machine', siteLink(SITE_PATHS.privacy))}
         </div>
       </section>

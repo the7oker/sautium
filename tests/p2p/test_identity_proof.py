@@ -149,3 +149,22 @@ def test_allocation_failure_pauses_instead_of_failing(tmp_path, monkeypatch):
     assert proof is not None
     seq = [(s["status"], s["detail"]) for s in states]
     assert ("paused", "memory") in seq and seq[-1] == ("ready", "proof")
+
+
+def test_the_served_proof_travels_without_its_mining_time_and_only_for_its_certificate(tmp_path):
+    cert = _cert()
+    p = tmp_path / ip.PROOF_FILENAME
+    assert ip.served_proof(p, cert) is None                          # no proof mined yet
+    proof = ip.make_proof(cert, b"\x5a" * 16)
+    ip.save_proof(p, proof)
+    served = ip.served_proof(p, cert)
+    assert served == {k: v for k, v in proof.items() if k != "mined_at"}
+    # A proof mined for an earlier certificate is no proof of this one: the
+    # node's own entry then carries none (BIRTH-SYNC slice 2, D49).
+    reissued = dict(cert, sig=os.urandom(64).hex())
+    assert ip.served_proof(p, reissued) is None
+    other = ip.make_proof(reissued, b"\x6b" * 16)
+    ip.save_proof(p, other)
+    os.utime(p, ns=(os.stat(p).st_atime_ns, os.stat(p).st_mtime_ns + 10 ** 9))   # a new version of the file
+    assert ip.served_proof(p, reissued)["nonce"] == other["nonce"]
+    assert ip.served_proof(p, cert) is None
