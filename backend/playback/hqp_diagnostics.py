@@ -757,7 +757,7 @@ def record_other_refused(uri: Optional[str], log: dict, reason: str) -> Attempt:
     attempt = Attempt(intent="other", end="hard")
     now = time.time()
     attempt.facts = {"intent": "other", "started": attempt.started, "t0": None, "closed": now, "end": "hard",
-                     "error": None, "slot": None, "expected_uri": uri, "mode": None, "handover": None,
+                     "error": None, "slot": None, "uri": uri, "expected_uri": uri, "mode": None, "handover": None,
                      "steps": [], "adds": {"count": 0, "failed": []}, "ticks": [], "misses": [],
                      "proxy": None, "playlist": None, "item": None, "context": {}}
     attempt.verdict = {"code": "other_refused", "title": "HQPlayer refused the other app's track",

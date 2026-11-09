@@ -607,7 +607,7 @@ for (const status of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   ctx.__np.onStatus.call(np, status);
   ctx.__mp.update.call(mp, status);
   out.push([drawn.np.startsWith('M9 5v20'), drawn.mp.startsWith('M8 5v14'), np.hqpTag.textContent,
-            np.hqpNote.hidden ? null : np.hqpNote.textContent, np.whyBtn.hidden]);
+            np.hqpNote.hidden ? null : np.hqpNote.textContent, np.whyBtn.hidden, np.hqpNote.dataset.attempt]);
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -632,9 +632,9 @@ def test_the_transport_offers_play_while_another_app_holds_the_output():
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     assert json.loads(proc.stdout) == [
-        [True, True, "Another app is playing through HQPlayer Desktop — Play takes it back", None, True],
-        [True, True, "Another app took HQPlayer Desktop — Play takes it back at 1:23", None, True],
-        [False, False, "", None, True]]
+        [True, True, "Another app is playing through HQPlayer Desktop — Play takes it back", None, True, ""],
+        [True, True, "Another app took HQPlayer Desktop — Play takes it back at 1:23", None, True, ""],
+        [False, False, "", None, True, ""]]
 
 
 def test_another_apps_refused_track_is_a_row_of_its_own_that_opens_the_why_sheet():
@@ -657,10 +657,11 @@ def test_another_apps_refused_track_is_a_row_of_its_own_that_opens_the_why_sheet
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     rows = json.loads(proc.stdout)
-    assert rows[0][2:] == ["Stopped at 0:17 — Play resumes here",
-                           "HQPlayer refused the other app's track: no output rate for 96 kHz in its output family",
-                           True]
-    assert rows[1][3:] == [None, False]
+    assert rows[0][2:5] == ["Stopped at 0:17 — Play resumes here",
+                            "HQPlayer refused the other app's track: no output rate for 96 kHz in its output family",
+                            True]
+    assert str(rows[0][5]) == "7"          # the row opens that attempt's sheet (a DOM dataset holds it as text)
+    assert rows[1][3:] == [None, False, ""]
 
 
 def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():

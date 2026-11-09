@@ -8974,6 +8974,13 @@
       lines.push(`${rel(t.ts)} ${escapeHtml(t.state)} · track <span class="num">${t.track}</span> · <span class="num">${t.position.toFixed(1)} s</span>${speed}${fill}`);
     }
     for (const m of f.misses || []) lines.push(`${rel(m.ts)} no status — ${escapeHtml(m.message || '')}`);
+    if (a.intent === 'other') {
+      // Another app's track HQPlayer refused (ROON-COEX P7): Sautium sent
+      // nothing for it, and served it nothing
+      return `
+      <dl class="hqp-diag-facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+      <p class="hqp-row-hint is-left">Another app handed HQPlayer this track; Sautium sent nothing for it.</p>`;
+    }
     const hits = !f.mode
       ? '<li>Nothing was handed over.</li>'
       : f.proxy === null

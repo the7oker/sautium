@@ -1232,10 +1232,10 @@ ours the renderer plays again by itself while another controller held it (its ow
 resuming our media) is ours again (since 2026-11-09, ROON-COEX §6.1 P9): the external state
 ends, the node's Pause and Stop reach it, the listen held at the takeover goes on from the
 takeover's second until the position poll reads the renderer's own — another slot's, the next
-it had armed, from that stream's start. Only a URI whose token names a slot of the queue (the
-quality tier it was handed in and an Opus seek's `?ss=` aside) — every lookup of a slot by its
-URL goes by the token so, a queue edit after ours again included; a track queued twice is ours
-again at the takeover's own slot, else the nearest, the one after first (the next it had
+it had armed, from that stream's start. The slot is the one its token names (the quality tier
+it was handed in and an Opus seek's `?ss=` aside) — every lookup of a slot by its URL goes by
+the token so, a queue edit after ours again included; a track queued twice is ours again at
+the takeover's own slot, else the nearest, the one after first (the next it had
 armed). A URI of ours an earlier attachment handed is ours too (since 2026-11-09, ROON-COEX
 §6.1 P11 and round 3's H6): one whose token names no queued track — a track since removed — is
 ours at no slot: the external state ends, the node's Pause and Stop reach it, Now Playing names

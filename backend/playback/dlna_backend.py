@@ -1104,6 +1104,7 @@ class DlnaBackend(PlayerBackend):
             # track named by what the renderer reports of it — the DIDL this
             # node handed, read again by the position poll
             index = 0
+            extra["unslotted"] = True     # no listen of it (the play tracker)
             for key, attr in (("song", "media_title"), ("artist", "media_artist"),
                               ("album", "media_album_name")):
                 value = getattr(self._dmr, attr, None)
@@ -1355,6 +1356,10 @@ class DlnaBackend(PlayerBackend):
         is read 0-based, like RelTime. A phone reports what its decoder
         measured (4:45 of a 6:32 track after ss=107): taken for the track's,
         it shrank the slider's scale and every later seek landed off."""
+        if self._unslotted is not None:
+            # Ours at no slot: the queue's item at that index is another track
+            self._length = self._pos_offset + reported
+            return
         if self._pos_offset <= 0:
             self._length = reported
             return
@@ -1435,6 +1440,9 @@ class DlnaBackend(PlayerBackend):
             # A spot already: carried over, or lost before; or another
             # controller held it — what was said is none of our listen; or
             # ours at no slot played there, no slot to resume
+            if self._unslotted is not None:
+                item = self._queue.item_at(self._index)
+                self._position, self._length = 0.0, (item.duration_seconds or 0.0) if item else 0.0
             self._unslotted = None
             return
         # By what this instance last said, not the renderer's stale state: a
@@ -1493,7 +1501,7 @@ class DlnaBackend(PlayerBackend):
         slot = self._queue.index_of(parked[0]) if parked is not None else None
         if slot is not None:
             self._index, self._resume = slot, parked[1]
-        elif self._said in ("playing", "paused"):
+        elif self._said in ("playing", "paused") and self._unslotted is None:
             self._resume = self._position
             self._cut = self._queue.item_at(self._index)
         self._held_item = self._queue.item_at(self._index)
@@ -1528,6 +1536,7 @@ class DlnaBackend(PlayerBackend):
         self._external, self._cut = False, None
         self._resume = self._held_item = self._parked = None
         self._current_url = uri
+        self._handed.add(uri)        # ours from here, an earlier attachment's too (H6)
         self._length = (item.duration_seconds or 0.0) if item is not None else self._length
         self._awaiting_play = False
         self._seek_on_start = self._seek_due = None
@@ -1550,8 +1559,10 @@ class DlnaBackend(PlayerBackend):
         ss = parse_qs(urlparse(uri).query).get("ss")
         self._pos_offset = float(ss[0]) if ss else 0.0
         self._external, self._cut = False, None
-        self._resume = self._held_item = self._parked = None
+        self._resume = self._parked = None
+        self._held_item = self._queue.item_at(self._index)     # the slot Play loads follows its track
         self._current_url = self._unslotted = uri
+        self._handed.add(uri)        # ours from here, an earlier attachment's too (H6)
         self._length = 0.0          # the poll's first reading adopts the renderer's
         self._awaiting_play = False
         self._seek_on_start = self._seek_due = None
@@ -2317,7 +2328,7 @@ class DlnaBackend(PlayerBackend):
                     self._preload_task.cancel()   # its "next" is not this wait's
                 self._index = index
                 self._load_gen += 1
-                self._current_url = self._next_url = None
+                self._current_url = self._next_url = self._unslotted = None
                 self._awaiting_play = False
                 # The second it starts at stays the slot's: a Play or a seek
                 # meanwhile keeps or moves it — and, while another controller
@@ -2930,7 +2941,8 @@ class DlnaBackend(PlayerBackend):
                 # track, never the spot's (a take-back says the spot again
                 # only if it hands nothing over: _restore_spot)
                 slot = self._queue.index_of(self._load_item)
-            elif (self._external or self._current_url is None) and self._held_item is not None:
+            elif (self._external or self._current_url is None or self._unslotted is not None) \
+                    and self._held_item is not None:
                 # Another controller holds it, or a spot of ours is held with
                 # nothing of ours loaded (a switch's, a take-back's hand-over
                 # stopped): the slot Play loads follows its item, and the spot

@@ -989,7 +989,8 @@ class PlaybackManager:
         # session/Home-shelf archival below — that snapshots the whole queue,
         # this records each play.
         tracker.track_play_event(new_data["state"], s.position, s.length, item,
-                                 external=s.extra.get("source") == "external",
+                                 external=(s.extra.get("source") == "external"
+                                           or bool(s.extra.get("unslotted"))),
                                  holds=bool(s.extra.get("resume")),
                                  corrected=bool(s.extra.get("corrected")),
                                  taken=bool(s.extra.get("taken")))
@@ -1214,6 +1215,8 @@ class PlaybackManager:
         # press); the backend's next tick decides whether they still hold.
         if self._latest_status.get("diagnosis"):
             idle["diagnosis"] = self._latest_status["diagnosis"]
+        if self._latest_status.get("other_refused"):
+            idle["other_refused"] = self._latest_status["other_refused"]
         if self._latest_status.get("starting"):
             idle["starting"] = True
         self._push_status(idle)
