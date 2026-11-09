@@ -486,7 +486,8 @@ const button = () => {
 };
 const el = () => ({ hidden: false, textContent: '', dataset: {}, setAttribute() {} });
 const npBtn = button(), mpBtn = button();
-const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), timeCurrent: el(), timeTotal: el(), radioBtn: el(),
+const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), hqpNote: el(), timeCurrent: el(), timeTotal: el(),
+             radioBtn: el(),
              playPauseIcon: { setAttribute() {}, closest: () => npBtn },
              _paintProgress() {}, tryFetchDetail() {}, lastTrackKey: 'Song|Artist' };
 const mp = { el: el(), title: el(), artist: el(), playPauseIcon: { setAttribute() {}, closest: () => mpBtn },
@@ -589,7 +590,8 @@ const drawn = { np: null, mp: null };
 const icon = key => ({ setAttribute(k, v) { if (k === 'd') drawn[key] = v; },
                        closest: () => ({ classList: { toggle() {} } }) });
 const el = () => ({ hidden: false, textContent: '', dataset: {}, setAttribute() {} });
-const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), timeCurrent: el(), timeTotal: el(), radioBtn: el(),
+const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), hqpNote: el(), timeCurrent: el(), timeTotal: el(),
+             radioBtn: el(),
              playPauseIcon: icon('np'), _paintProgress() {}, tryFetchDetail() {}, lastTrackKey: 'Song|Artist' };
 const mp = { el: el(), title: el(), artist: el(), playPauseIcon: icon('mp'), lastSongKey: 'Song|Album' };
 const ctx = { document: { body: { classList: { add() {}, remove() {} } } }, window: {} };
@@ -604,7 +606,8 @@ const out = [];
 for (const status of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   ctx.__np.onStatus.call(np, status);
   ctx.__mp.update.call(mp, status);
-  out.push([drawn.np.startsWith('M9 5v20'), drawn.mp.startsWith('M8 5v14'), np.hqpTag.textContent]);
+  out.push([drawn.np.startsWith('M9 5v20'), drawn.mp.startsWith('M8 5v14'), np.hqpTag.textContent,
+            np.hqpNote.hidden ? null : np.hqpNote.textContent, np.whyBtn.hidden]);
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -629,9 +632,35 @@ def test_the_transport_offers_play_while_another_app_holds_the_output():
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     assert json.loads(proc.stdout) == [
-        [True, True, "Another app is playing through HQPlayer Desktop — Play takes it back"],
-        [True, True, "Another app took HQPlayer Desktop — Play takes it back at 1:23"],
-        [False, False, ""]]
+        [True, True, "Another app is playing through HQPlayer Desktop — Play takes it back", None, True],
+        [True, True, "Another app took HQPlayer Desktop — Play takes it back at 1:23", None, True],
+        [False, False, "", None, True]]
+
+
+def test_another_apps_refused_track_is_a_row_of_its_own_that_opens_the_why_sheet():
+    """ROON-COEX §6.1 P7/P12 (a): beside the spot the takeover left, HQPlayer
+    stopped on another app's track it refused — the node's sentence for the
+    cause in a row of its own under the meta row (opening the Why sheet), the
+    Why button standing down beside it; a failed play of the node's own
+    keeps its Why button and no row."""
+    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
+            "position_formatted": "0:00", "length_formatted": "5:00",
+            "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
+    other = {"id": 7, "code": "other_refused", "title": "HQPlayer refused the other app's track", "next": "",
+             "track_id": None, "failing": False}
+    own = {"id": 8, "code": "not_played", "title": "HQPlayer could not play it", "next": "", "track_id": "t",
+           "failing": False}
+    statuses = [{**base, "state": "stopped", "resume": {"index": 2, "position": 17}, "diagnosis": other,
+                 "other_refused": "no output rate for 96 kHz in its output family"},
+                {**base, "state": "stopped", "diagnosis": own}]
+    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
+                          input=json.dumps(statuses).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    rows = json.loads(proc.stdout)
+    assert rows[0][2:] == ["Stopped at 0:17 — Play resumes here",
+                           "HQPlayer refused the other app's track: no output rate for 96 kHz in its output family",
+                           True]
+    assert rows[1][3:] == [None, False]
 
 
 def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():

@@ -629,7 +629,13 @@ comes after the control port answers again — so neither can end the wait.
   while the playlist was the queue's mirror. Now Playing keeps that track,
   stopped there and external ("Another app took HQPlayer — Play takes it
   back at …"), and Play takes HQPlayer back at it; a Seek moves it, nothing
-  sent. Next and Previous there — and at any spot while another controller
+  sent. Where HQPlayer stopped on the other app's track at that verdict, its
+  log is read once and the refusal it names is said in the node's words, in
+  a row of its own under Now Playing's meta row — "HQPlayer refused the other
+  app's track: no output rate for 96 kHz in its output family" (since
+  2026-11-09, ROON-COEX §6.1 P7 and P12; the words a draft) — which opens the
+  Why sheet with HQPlayer's own line: an attempt of its own (the Diagnostics
+  list's "Another app's track"), never one of the node's plays. Next and Previous there — and at any spot while another controller
   holds HQPlayer — start the slot beside it, from its start, as a tap there
   (since 2026-11-09, ROON-COEX L11: a press that starts playback takes the
   output back; at either end of the queue the spot stays); Pause and Stop

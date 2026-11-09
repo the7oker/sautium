@@ -2178,8 +2178,9 @@ def test_p7_the_refusal_of_roons_track_is_said_beside_the_spot_in_the_nodes_word
             time.sleep(0.15)
         _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10)
         st = mgr._latest_status
-        _observed("P7", status={k_: st.get(k_) for k_ in ("state", "track_index", "resume", "other_refused",
-                                                          "diagnosis")}, node_commands=_node_commands(fake, n, roon))
+        _observed("P7", status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume",
+                                                          "other_refused", "diagnosis")},
+                  node_commands=_node_commands(fake, n, roon))
         assert st["other_refused"] == "no output rate for 96 kHz in its output family"
         assert (st["state"], st["resume"]["index"]) == ("stopped", 2)
         att = diag.find(st["diagnosis"]["id"])

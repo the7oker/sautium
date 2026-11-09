@@ -1048,6 +1048,7 @@
       this.qBadge = document.getElementById('npQBadge');
       this.excerptBadge = document.getElementById('npExcerptBadge');
       this.whyBtn = document.getElementById('npWhy');
+      this.hqpNote = document.getElementById('npHqpNote');
       this.hqpTag = document.getElementById('npHqpTag');
       this.keyPill = document.getElementById('npKeyPill');
       this.bpm = document.getElementById('npBpm');
@@ -1077,6 +1078,11 @@
         e.stopPropagation();
         if (e.detail > 1) return;
         onceInFlight(this.whyBtn, () => openHqpDiagnosis(this.whyBtn.dataset.attempt));
+      });
+      this.hqpNote.addEventListener('click', e => {
+        e.stopPropagation();
+        if (e.detail > 1) return;
+        onceInFlight(this.hqpNote, () => openHqpDiagnosis(this.hqpNote.dataset.attempt));
       });
       this.playPause.addEventListener('click', e => {
         e.stopPropagation();
@@ -1343,7 +1349,15 @@
       // never beside the queue head a stopped status falls back to.
       const diag = data.diagnosis;
       const why = !!diag && (!diag.track_id || diag.track_id === data.track_id);
-      this.whyBtn.hidden = !why;
+      // Another app's track HQPlayer refused under the takeover's spot
+      // (ROON-COEX P7/P12): a row of its own that opens the same sheet, the
+      // Why button standing down beside it
+      const note = why && data.other_refused
+        ? `HQPlayer refused the other app's track: ${data.other_refused}` : '';
+      this.hqpNote.hidden = !note;
+      if (this.hqpNote.textContent !== note) this.hqpNote.textContent = note;
+      this.hqpNote.dataset.attempt = note ? diag.id : '';
+      this.whyBtn.hidden = !why || !!note;
       this.whyBtn.dataset.attempt = why ? diag.id : '';
       // What the HQPlayer output says beside the track: the build it is in —
       // its transport waits meanwhile — a silence no build of ours explains,

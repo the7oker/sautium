@@ -1366,6 +1366,23 @@ body.sautium-base {
   flex-wrap: wrap;
   row-gap: calc(6 * var(--px));
 }
+/* Another app's track HQPlayer refused under the takeover's spot (ROON-COEX
+   P7/P12): a row of its own under the meta row, only in that state; it opens
+   the Why sheet. Colour and words are drafts for the owner's words review. */
+.np-hqp-note {
+  display: block;
+  margin-top: calc(6 * var(--px));
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-negative);
+  font-family: var(--font-sans);
+  font-size: var(--text-caption);
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
 .np-q-badge {
   display: inline-flex;
   align-items: center;
