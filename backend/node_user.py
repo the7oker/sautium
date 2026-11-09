@@ -27,7 +27,9 @@ NODE_USER = "agent"
 # are: only an agent's folder itself while it is root's and empty is handed —
 # what Docker creates for a host folder that did not exist (the Linux arm64
 # file's ./data/claude; the other files mount projects/ inside ~/.claude, so
-# Docker's folder there is never empty).
+# Docker's folder there is never empty). A tree or folder reached through a
+# link is not handed (_real_dir): a host whose ~/.claude/projects is itself a
+# link has its sessions folder refused, and said, at each start.
 NODE_TREES = ("/app/data", "/app/generated_eq", "/home/agent/.cache",
               "/home/agent/.claude/projects")
 NODE_FOLDERS = ("/home/agent/.claude", "/home/agent/.codex")
@@ -103,11 +105,16 @@ def take_host_owner(pw, folder: str, passwd: str, group: str):
     user already; the node user's passwd entry after. A uid another user of
     the image holds leaves the node's as it is, and says so. Idempotent: the
     next start finds the uid taken."""
-    if not _real_dir(folder):
-        if os.path.lexists(folder):
-            _say(f"{folder} is reached through a link or is no folder: the node's user stays uid {pw.pw_uid}")
+    try:
+        st = os.lstat(folder)
+    except FileNotFoundError:
         return pw
-    st = os.lstat(folder)
+    except OSError as e:
+        _say(f"{folder} could not be read ({e.strerror or e}): the node's user stays uid {pw.pw_uid}")
+        return pw
+    if not _real_dir(folder):
+        _say(f"{folder} is reached through a link or is no folder: the node's user stays uid {pw.pw_uid}")
+        return pw
     if st.st_uid in (0, pw.pw_uid):
         return pw
     users = _entries(passwd)
@@ -116,8 +123,9 @@ def take_host_owner(pw, folder: str, passwd: str, group: str):
         _say(f"{folder} is uid {st.st_uid}'s, which is {holder} in the image: "
              f"the node's user stays uid {pw.pw_uid}")
         return pw
-    # A gid of the image's own groups (root, shadow, adm …) is a privilege, never
-    # the node user's: its own group keeps its number then
+    # A gid of the image's own groups (root, shadow, adm … and users, which a
+    # host's own users group may share) is never the node user's: its own
+    # group keeps its number then — a wrong group, never a privilege
     groups = _entries(group)
     taken = any(e[2] == str(st.st_gid) and e[0] != pw.pw_name for e in groups)
     gid = pw.pw_gid if st.st_gid == 0 or taken else st.st_gid

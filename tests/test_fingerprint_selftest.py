@@ -130,7 +130,7 @@ def test_an_fpcalc_replaced_in_place_is_tested_anew(fake_fpcalc):
 
 
 @shell
-def test_a_file_is_fingerprinted_by_the_fpcalc_that_passed_and_by_no_other(fake_fpcalc, tmp_path):
+def test_a_file_is_refused_before_any_decode_while_the_fpcalc_fails(fake_fpcalc, tmp_path):
     reference = provenance.PROBE_REFERENCE.read_text(encoding="ascii").strip()
     decodes = tmp_path / "decodes"
     ffmpeg = tmp_path / "bin" / "ffmpeg"

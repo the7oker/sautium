@@ -11885,10 +11885,10 @@
   NOTICE_COPY['tools.fingerprint'] = n => {
     const d = n.data || {};
     const why = d.state === 'mismatch'
-      ? "fingerprints a test signal differently from the release, so this node's analysis could be filed under other recordings than other nodes'"
+      ? "fingerprints a test signal differently from the release, so some of this node's analysis would carry other content addresses than other nodes'"
       : `could not fingerprint a test signal (${escapeHtml(d.detail || 'no fingerprint')})`;
     return { title: 'Audio analysis refused',
-             text: `fpcalc ${why}. No analysis runs until an fpcalc that passes the test is installed and the node restarted.` };
+             text: `fpcalc ${why}. No audio analysis runs until an fpcalc that passes the test is installed.` };
   };
   // The CLI's own verdict (backend/claude_code.py), raised only while
   // something needs it: the assistant runs on Claude Code, or gear research

@@ -223,8 +223,8 @@ def chromaprint_file(local_path: str, cue_start=None,
     disc with one identical anchor. The same WAV path is the fallback when
     fpcalc's own decoder rejects a whole file that ffmpeg can read. None when
     neither yields a fingerprint: material with no address. The fingerprint
-    is made by the fpcalc that passed the self-test and by no other — one
-    that fails it, or appeared since and fails it, gives no address."""
+    is made by the fpcalc file the self-test passed, by its path — one that
+    fails it, or appeared since and fails it, gives no address."""
     verdict = fingerprinter()
     if not verdict.ok:
         logger.debug("no fingerprint for %s: fpcalc %s (%s)", local_path, verdict.state, verdict.detail)
