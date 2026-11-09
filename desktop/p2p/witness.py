@@ -255,7 +255,10 @@ class Recorder:
 
     def note(self, cert: dict, channel: str, subject: str, via: Optional[str] = None) -> None:
         """record() for the paths a sighting rides on — a request, a probe, a
-        handshake: a failure to write it is said and never reaches them."""
+        handshake, an import that carried its authors' certificates: a
+        failure to write it is said and never reaches them. A `carried`
+        sighting lost so does not come again on its own: the import it rode
+        has filled its gap."""
         try:
             self.record(cert, channel, subject, via)
         except Exception as e:
