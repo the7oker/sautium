@@ -384,7 +384,10 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
     host (`PG_SHARED_BUFFERS:-1GB`, `PG_EFFECTIVE_CACHE_SIZE:-6GB`,
     `PG_MAINTENANCE_WORK_MEM:-512MB`, `PG_WORK_MEM:-16MB`; weak hosts
     override via .env); embedded PG gets RAM-tiered values written by
-    `db_init._pg_memory_tier()` (≥24GB / ≥15GB / stock below).
+    `db_init._pg_memory_tier()` (≥24GB / ≥15GB / stock below). The Linux
+    arm64 file (`docker-compose.pi.yml`, 2026-11-09) defaults to 2GB / 8GB
+    with NVMe costs (`random_page_cost=1.1`, `effective_io_concurrency=200`)
+    and `checkpoint_timeout=15min`, for a 16 GB Pi 5.
 14. ❌ Phantom prune for lite (SHIPPED 2026-07-10, **REMOVED 2026-08-27**):
     a startup job pruned the phantom layer after a 3-consecutive-lite-boots
     streak (`hardware.lite_streak`). It measured the wrong thing — `lite`

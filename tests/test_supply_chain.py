@@ -407,7 +407,81 @@ def test_nothing_in_the_image_updates_or_runs_a_cli_as_root_at_start():
         assert "COPY node_user.py /usr/local/lib/sautium/node_user.py" in text
         assert [line for line in text.splitlines() if line.startswith("ENTRYPOINT")] == [
             'ENTRYPOINT ["python3", "-I", "-S", "/usr/local/lib/sautium/node_user.py"]']
-    for compose in ("docker-compose.yml", "docker-compose.wsl.yml", "docker-compose.mac.yml"):
+    for compose in COMPOSE_FILES:
         text = (REPO / compose).read_text(encoding="utf-8")
         assert "command: python entrypoint.py" in text and "/root/.cache" not in text
         assert "no-new-privileges:true" in text
+
+
+COMPOSE_FILES = ("docker-compose.yml", "docker-compose.wsl.yml", "docker-compose.mac.yml",
+                 "docker-compose.pi.yml")
+
+
+def test_the_arm64_image_fingerprints_with_the_release_images_ffmpeg():
+    """The fingerprint is the content address and FFmpeg's decode makes it:
+    the arm64 image sits on the release image's Ubuntu 22.04 (FFmpeg 4.4), not
+    a Debian whose FFmpeg moves prints, with the release's tools."""
+    release, arm64 = _dockerfile("Dockerfile"), _dockerfile("Dockerfile.mac")
+    assert release.splitlines()[1] == "FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04"
+    assert [line for line in arm64.splitlines() if line.startswith("FROM ")] == ["FROM ubuntu:22.04"]
+    for text in (release, arm64):
+        for wanted in ("ppa:deadsnakes/ppa", "libchromaprint-tools", "lbzip2",
+                       "unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc", "jammy-pgdg main",
+                       "pip install --no-index /tmp/${PIP_WHEEL}"):
+            assert wanted in text, wanted
+
+
+def _compose(name: str) -> dict:
+    yaml = __import__("pytest").importorskip("yaml")
+    return yaml.safe_load((REPO / name).read_text(encoding="utf-8"))
+
+
+def _mount(volume: str) -> tuple:
+    """(source, target) of a short-syntax bind; a source may hold `:` (${X:-y})"""
+    rest, last = volume.rsplit(":", 1)
+    return tuple(rest.rsplit(":", 1)) if last in ("ro", "rw") else (rest, last)
+
+
+def _backend(name: str) -> tuple:
+    """(environment keys, mount targets, published ports, postgres flags)"""
+    spec = _compose(name)["services"]
+    backend = spec["backend"]
+    return (set(backend["environment"]), {_mount(v)[1] for v in backend["volumes"]},
+            set(backend["ports"]), set(spec["postgres"]["command"].split()))
+
+
+def test_the_arm64_compose_files_are_the_release_file_but_for_what_their_host_needs():
+    """docker-compose.mac.yml lacked the release's WAL lines, its peer and
+    media ports and its identity mounts; the arm64 files follow the release
+    file, short only of what their image or host has none of: CUDA, the
+    Codex CLI and, on Linux, a host user's ~/.claude."""
+    env, mounts, ports, flags = _backend("docker-compose.yml")
+    cuda_and_codex = {"CUDA_VISIBLE_DEVICES", "PYTORCH_CUDA_ALLOC_CONF", "CODEX_CLI_ENABLED"}
+    for name, other_mounts in (("docker-compose.mac.yml", set()),
+                               ("docker-compose.pi.yml", {"/home/agent/.claude/projects"})):
+        their_env, their_mounts, their_ports, their_flags = _backend(name)
+        assert their_env == env - cuda_and_codex, name
+        assert their_mounts == mounts - {"/home/agent/.codex"} - other_mounts, name
+        assert their_ports == ports, name
+        assert {"wal_level=minimal", "max_wal_senders=0", "jit=off"} <= their_flags, name
+        backend = _compose(name)["services"]["backend"]
+        assert backend["build"]["dockerfile"] == "Dockerfile.mac" and "deploy" not in backend
+    assert flags <= _backend("docker-compose.mac.yml")[3]
+
+
+def test_the_linux_arm64_file_binds_and_mounts_by_the_security_rules():
+    """Postgres on loopback alone, the Web UI on every address (the phone on
+    the Wi-Fi), no host user's home in the container; the Postgres sizing of
+    a 16 GB Pi 5 on NVMe; the music folder named, never guessed."""
+    spec = _compose("docker-compose.pi.yml")["services"]
+    assert spec["postgres"]["ports"] == ["127.0.0.1:5432:5432"]
+    assert "8800:8000" in spec["backend"]["ports"]
+    sources = [_mount(v)[0] for v in spec["backend"]["volumes"]]
+    assert not [s for s in sources if "HOME" in s or "USERPROFILE" in s or "SAUTIUM_WSL_HOME" in s]
+    assert "./data/claude" in sources
+    assert "${MUSIC_LIBRARY_PATH:?Set MUSIC_LIBRARY_PATH to the music folder in .env}" in sources
+    flags = set(spec["postgres"]["command"].split())
+    assert {"shared_buffers=${PG_SHARED_BUFFERS:-2GB}",
+            "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-8GB}", "random_page_cost=1.1",
+            "effective_io_concurrency=200", "checkpoint_timeout=15min"} <= flags
+    assert not {"synchronous_commit=off", "fsync=off"} & flags

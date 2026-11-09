@@ -1,6 +1,6 @@
-"""The Docker image's entrypoint: hand the node's own folders to the node's
-user, drop root in this process, then run the container's command as that
-user.
+"""The Docker image's entrypoint: give the node's user the uid of the host
+user the node runs for, hand the node's own folders to it, drop root in this
+process, then run the container's command as that user.
 
 The image copies this file to a folder of root's and runs it as root with
 `python3 -I -S`: no PYTHON* variable, no site-packages, no folder anyone else
@@ -14,6 +14,7 @@ root: the maintenance commands documented in the tree say `-u agent`.
 
 import os
 import pwd
+import re
 import stat
 import sys
 
@@ -23,17 +24,99 @@ NODE_USER = "agent"
 # not the node user's — a root backend's file from before the node ran as its
 # own user, a folder a Windows mount shows as root's — is handed to it at each
 # start. The host's ~/.claude and ~/.codex are the owner's and stay as they
-# are: only Codex's folder itself, which Docker creates root-owned when the
-# host had none, is handed.
+# are: only the agents' folders themselves, which Docker creates root-owned
+# when the host had none (or a compose file binds a node folder there that
+# did not exist yet), are handed.
 NODE_TREES = ("/app/data", "/app/generated_eq", "/home/agent/.cache",
               "/home/agent/.claude/projects")
-NODE_FOLDERS = ("/home/agent/.codex",)
+NODE_FOLDERS = ("/home/agent/.claude", "/home/agent/.codex")
 # Where compose files mounted the model cache while the backend ran as root
 ROOT_CACHE = "/root/.cache"
+# The folder whose owner the node's user becomes. A native Linux host keeps
+# its uids across a bind, so the image's fixed uid 1000 is whoever that is on
+# the host (a Pi's first user), and the host user running the node loses its
+# own folders to it. /app/data is the checkout's backend/data, which the clone
+# ships (backend/data/.gitkeep): its owner is the host user the node runs for.
+# root's — a folder Docker made, a mount Docker Desktop shows as root's —
+# says nothing, and the image's uid stays.
+HOST_OWNED = "/app/data"
+PASSWD, GROUP = "/etc/passwd", "/etc/group"
+MOUNTINFO = "/proc/self/mountinfo"
 
 
 def _say(message: str) -> None:
     print(f"[node-user] {message}", file=sys.stderr, flush=True)
+
+
+def _entries(path: str) -> list:
+    with open(path, encoding="utf-8") as f:
+        return [line.rstrip("\n").split(":") for line in f if line.strip()]
+
+
+def _write_entries(path: str, entries: list) -> None:
+    st = os.stat(path)
+    tmp = f"{path}.node-user"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(":".join(e) + "\n" for e in entries)
+    os.chmod(tmp, stat.S_IMODE(st.st_mode))
+    os.replace(tmp, path)
+
+
+def _mount_points() -> set:
+    points = set()
+    with open(MOUNTINFO, encoding="utf-8") as f:
+        for line in f:
+            # a space, a tab, a newline or a backslash in a path is octal-escaped
+            points.add(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), line.split()[4]))
+    return points
+
+
+def _rehome(home: str, old_uid: int, uid: int, gid: int) -> None:
+    """The image's own files in the node user's home follow its new uid;
+    whatever is mounted there (the model cache, a host's ~/.claude) is not
+    walked — the hand-over takes the node's trees, a host's stay its own."""
+    mounts = _mount_points()
+    for top, dirs, files in os.walk(home):
+        dirs[:] = [d for d in dirs if os.path.join(top, d) not in mounts]
+        for path in [top, *(os.path.join(top, name) for name in files)]:
+            st = os.lstat(path)
+            if st.st_uid == old_uid:
+                os.chown(path, uid, gid, follow_symlinks=False)
+
+
+def take_host_owner(pw, folder: str, passwd: str, group: str):
+    """The node's user renumbered to the uid (and, unless it is root's, the
+    gid) of `folder`'s owner, when that owner is neither root nor the node's
+    user already; the node user's passwd entry after. A uid another user of
+    the image holds leaves the node's as it is, and says so. Idempotent: the
+    next start finds the uid taken."""
+    try:
+        st = os.stat(folder)
+    except FileNotFoundError:
+        return pw
+    if st.st_uid in (0, pw.pw_uid):
+        return pw
+    users = _entries(passwd)
+    holder = next((e[0] for e in users if e[2] == str(st.st_uid) and e[0] != pw.pw_name), None)
+    if holder:
+        _say(f"{folder} is uid {st.st_uid}'s, which is {holder} in the image: "
+             f"the node's user stays uid {pw.pw_uid}")
+        return pw
+    gid = st.st_gid if st.st_gid else pw.pw_gid
+    for e in users:
+        if e[0] == pw.pw_name:
+            e[2], e[3] = str(st.st_uid), str(gid)
+    groups = _entries(group)
+    if not any(e[2] == str(gid) for e in groups):
+        for e in groups:
+            if e[0] == pw.pw_name and e[2] == str(pw.pw_gid):
+                e[2] = str(gid)
+    _write_entries(group, groups)
+    _write_entries(passwd, users)
+    _rehome(pw.pw_dir, pw.pw_uid, st.st_uid, gid)
+    _say(f"the node's user takes uid {st.st_uid}, gid {gid}: the owner of {folder}")
+    return pwd.struct_passwd((pw.pw_name, pw.pw_passwd, st.st_uid, gid,
+                              pw.pw_gecos, pw.pw_dir, pw.pw_shell))
 
 
 def hand_over(pw, trees, folders) -> tuple:
@@ -115,9 +198,10 @@ def can_become_root() -> bool:
 
 
 def become_node_user(trees, folders):
-    """Hand the node's folders over, then drop root for good in this process;
-    the node user's passwd entry."""
-    pw = pwd.getpwnam(NODE_USER)
+    """Give the node's user the uid of the host user its folders are for,
+    hand those folders over, then drop root for good in this process; the
+    node user's passwd entry."""
+    pw = take_host_owner(pwd.getpwnam(NODE_USER), HOST_OWNED, PASSWD, GROUP)
     handed, refused = hand_over(pw, trees, folders)
     os.initgroups(pw.pw_name, pw.pw_gid)
     os.setgid(pw.pw_gid)
@@ -125,7 +209,7 @@ def become_node_user(trees, folders):
     if can_become_root():
         raise SystemExit("[node-user] root could be taken back after the drop")
     os.environ.update(HOME=pw.pw_dir, USER=pw.pw_name, LOGNAME=pw.pw_name)
-    _say(f"running as {pw.pw_name}: {handed} path(s) handed to it"
+    _say(f"running as {pw.pw_name} (uid {pw.pw_uid}): {handed} path(s) handed to it"
          + (f", {refused} the filesystem would not hand over" if refused else ""))
     return pw
 

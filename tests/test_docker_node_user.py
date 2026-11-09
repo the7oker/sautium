@@ -187,8 +187,95 @@ def node_user(tmp_path, monkeypatch):
     import node_user
     monkeypatch.setattr(node_user, "NODE_TREES", (str(tmp_path / "data"),))
     monkeypatch.setattr(node_user, "NODE_FOLDERS", ())
+    monkeypatch.setattr(node_user, "HOST_OWNED", str(tmp_path / "data"))   # root's: the uid stays
     (tmp_path / "data").mkdir()
     return node_user
+
+
+@pytest.fixture
+def accounts(tmp_path, monkeypatch, node_user):
+    """Copies of the image's passwd and group for the entrypoint to renumber,
+    and a home of the node user's for it to re-own: the real ones stay."""
+    import shutil
+    for name in ("passwd", "group"):
+        shutil.copy(f"/etc/{name}", tmp_path / name)
+    monkeypatch.setattr(node_user, "PASSWD", str(tmp_path / "passwd"))
+    monkeypatch.setattr(node_user, "GROUP", str(tmp_path / "group"))
+    agent = pwd.getpwnam("agent")
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text("{}")
+    (home / ".cache").mkdir()                                # a bind mount, not the image's
+    for path in (home, home / ".claude", home / ".claude" / "settings.json", home / ".cache"):
+        os.chown(path, agent.pw_uid, agent.pw_gid)
+    monkeypatch.setattr(node_user, "_mount_points", lambda: {str(home / ".cache")})
+    return types.SimpleNamespace(passwd=tmp_path / "passwd", group=tmp_path / "group", home=home,
+                                 pw=pwd.struct_passwd((*agent[:5], str(home), agent.pw_shell)))
+
+
+def _entry(path, name):
+    return next(line.split(":") for line in path.read_text().splitlines()
+                if line.startswith(name + ":"))
+
+
+@as_root_with_the_node_user
+def test_the_node_user_takes_the_uid_of_the_host_user_its_data_is_for(tmp_path, node_user,
+                                                                      accounts, capfd):
+    """A native Linux host keeps its uids across a bind: the node's user
+    becomes the owner of the checkout's backend/data, and the image's own
+    files in its home follow; a mount there is no file of the image's."""
+    agent = pwd.getpwnam("agent")
+    data = tmp_path / "data"
+    os.chown(data, 4242, 4243)
+    pw = node_user.take_host_owner(accounts.pw, str(data), str(accounts.passwd), str(accounts.group))
+    assert (pw.pw_name, pw.pw_uid, pw.pw_gid, pw.pw_dir) == ("agent", 4242, 4243, str(accounts.home))
+    assert _entry(accounts.passwd, "agent")[2:4] == ["4242", "4243"]
+    assert _entry(accounts.group, "agent")[2] == "4243"
+    home = accounts.home
+    assert [p.stat().st_uid for p in (home, home / ".claude", home / ".claude" / "settings.json",
+                                      home / ".cache")] == [4242, 4242, 4242, agent.pw_uid]
+    assert "takes uid 4242, gid 4243" in capfd.readouterr().err
+    written = accounts.passwd.read_bytes(), accounts.group.read_bytes()
+    assert node_user.take_host_owner(pw, str(data), str(accounts.passwd), str(accounts.group)) is pw
+    assert (accounts.passwd.read_bytes(), accounts.group.read_bytes()) == written   # the next start
+
+
+@as_root_with_the_node_user
+def test_a_folder_root_owns_or_another_image_user_holds_leaves_the_uid(tmp_path, node_user,
+                                                                      accounts, capfd):
+    data = tmp_path / "data"
+    before = accounts.passwd.read_bytes(), accounts.group.read_bytes()
+    assert node_user.take_host_owner(accounts.pw, str(data), str(accounts.passwd),
+                                     str(accounts.group)) is accounts.pw        # Docker made it
+    nobody = pwd.getpwnam("nobody")
+    os.chown(data, nobody.pw_uid, nobody.pw_gid)
+    assert node_user.take_host_owner(accounts.pw, str(data), str(accounts.passwd),
+                                     str(accounts.group)) is accounts.pw
+    assert (accounts.passwd.read_bytes(), accounts.group.read_bytes()) == before
+    assert f"which is nobody in the image: the node's user stays uid {accounts.pw.pw_uid}" in \
+        capfd.readouterr().err
+
+
+@as_root_with_the_node_user
+def test_roots_group_is_never_the_node_users(tmp_path, node_user, accounts):
+    os.chown(tmp_path / "data", 4242, 0)
+    pw = node_user.take_host_owner(accounts.pw, str(tmp_path / "data"), str(accounts.passwd),
+                                   str(accounts.group))
+    assert (pw.pw_uid, pw.pw_gid) == (4242, accounts.pw.pw_gid)
+    assert _entry(accounts.group, "agent")[2] == str(accounts.pw.pw_gid)
+
+
+@as_root_with_the_node_user
+def test_the_image_entrypoint_runs_the_command_as_the_host_user(tmp_path, node_user, accounts,
+                                                               monkeypatch):
+    """The whole start, the drop included; the image's real home left alone
+    (its re-owning is the test above's)."""
+    os.chown(tmp_path / "data", 4242, 4243)
+    (tmp_path / "data" / "left-by-the-image").write_text("x")
+    monkeypatch.setattr(node_user, "_rehome", lambda *a: None)
+    out = _run_in_a_child(node_user, ["sh", "-c", "id -u; id -g"], 1).split()
+    assert out == ["4242", "4243"]
+    assert (tmp_path / "data" / "left-by-the-image").stat().st_uid == 4242
 
 
 def _in_a_child(fn) -> str:
@@ -485,3 +572,13 @@ def test_a_cli_put_under_the_node_users_home_never_stands_in_for_the_images(tmp_
         path.chmod(0o755)
     assert claude_code.get_claude_executable() not in planted
     assert codex_cli.get_codex_executable() not in planted
+
+
+def test_the_folder_whose_owner_the_node_user_takes_ships_with_the_clone():
+    """/app/data is the checkout's backend/data: a clone makes it its user's
+    (a folder Docker had to make for the binds under it would be root's)."""
+    import node_user
+    assert node_user.HOST_OWNED == "/app/data"
+    assert (REPO / "backend" / "data" / ".gitkeep").is_file()
+    compose = (REPO / "docker-compose.pi.yml").read_text(encoding="utf-8")
+    assert "      - ./backend:/app\n" in compose

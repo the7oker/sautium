@@ -229,6 +229,9 @@ docker compose -f docker-compose.wsl.yml up -d --build
 
 # macOS (Apple Silicon, CPU-only PyTorch)
 docker compose -f docker-compose.mac.yml up -d --build
+
+# Linux on arm64, e.g. a Raspberry Pi 5 (CPU-only; MUSIC_LIBRARY_PATH in .env)
+docker compose -f docker-compose.pi.yml up -d --build
 ```
 
 This starts PostgreSQL and the FastAPI backend; on its first start the
@@ -248,8 +251,7 @@ The first visit sets the node up: a nickname, a password, and the setup code
 the backend writes at each start to its log (`docker compose logs backend |
 grep "setup code"` — the last one is the live one) and to `setup_code.txt` in
 the node's identity folder: `data/node_identity` (under
-`docker-compose.wsl.yml` and `docker-compose.mac.yml`,
-`backend/data/node_identity`). The code dies with the account's creation. To
+`docker-compose.wsl.yml`, `backend/data/node_identity`). The code dies with the account's creation. To
 start over, stop the stack, empty that folder and start it again: the node
 writes a new code.
 
@@ -375,6 +377,7 @@ sautium/
 ├── docker-compose.yml              # default (WSL2/Windows + NVIDIA GPU)
 ├── docker-compose.wsl.yml          # Claude Code login inside WSL
 ├── docker-compose.mac.yml          # Apple Silicon (CPU-only)
+├── docker-compose.pi.yml           # Linux arm64, e.g. Raspberry Pi 5 (CPU-only)
 ├── .env.example                    # environment template
 ├── CLAUDE.md                       # project spec, conventions, security posture
 ├── PROGRESS.md                     # design decisions and lessons learned

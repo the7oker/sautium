@@ -1301,7 +1301,7 @@ HOST = "<windows-host-ip>"
 ```
 
 The compose files map the name already (`extra_hosts:
-host.docker.internal:host-gateway`, all three of them).
+host.docker.internal:host-gateway`, all four of them).
 
 ### Finding HQPlayers (2026-09-28)
 HQPlayer has a discovery protocol of its own: a `<discover/>` datagram to
@@ -2323,7 +2323,7 @@ launcher there reads `timed out`.
 ### Docker Connection Issues
 
 **Solutions**:
-1. Check that `extra_hosts` is still in the compose file you run (all three
+1. Check that `extra_hosts` is still in the compose file you run (all four
    ship it)
 2. Use Windows host IP instead of host.docker.internal
 3. Check Docker network mode

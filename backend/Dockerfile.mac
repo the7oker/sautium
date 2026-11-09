@@ -1,15 +1,37 @@
-# Apple Silicon (ARM64) base image — no CUDA
-FROM python:3.11-slim-bookworm
+# The CPU image for arm64 hosts — Docker on an Apple Silicon Mac
+# (docker-compose.mac.yml), a Raspberry Pi 5 (docker-compose.pi.yml); no CUDA.
+# Ubuntu 22.04, the release image's own base: the fingerprint (fpcalc over
+# FFmpeg's decode) is the content address of every analysis record, and only
+# the same FFmpeg gives the same fingerprints — Debian trixie's FFmpeg 7.1
+# changed 17 of 90 synthetic test files, bookworm's fpcalc exits 3 on every
+# track under 120 s (measured on a Raspberry Pi 5, 2026-11-09). A move of the base off FFmpeg 4.4 is a design
+# question first: the self-test (provenance.fingerprinter) refuses analysis
+# on an fpcalc that fingerprints its probe signal wrong or not at all, but
+# FFmpeg 7.1 moves a file's print one time in five, and its probe's not.
+FROM ubuntu:22.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+ENV PYTHON_VERSION=3.11
+
+# Install system dependencies. deadsnakes for a 3.11 final, as the release image (jammy's own is 3.11.0rc1)
+RUN apt-get update && apt-get install -y software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
+    python${PYTHON_VERSION}-distutils \
     # Audio processing libraries
     ffmpeg \
     libsndfile1 \
     libsndfile1-dev \
+    # Chromaprint fpcalc — the content address of every analysis record
+    # (provenance.require_fingerprinter refuses an analysis pass without it)
+    libchromaprint-tools \
+    # Parallel bzip2 for the MusicBrainz dump (mb_dump_load falls back to bzip2)
+    lbzip2 \
     # Build tools
     build-essential \
     git \
@@ -56,7 +78,18 @@ RUN useradd -m -s /bin/bash agent \
 COPY node_user.py /usr/local/lib/sautium/node_user.py
 ENTRYPOINT ["python3", "-I", "-S", "/usr/local/lib/sautium/node_user.py"]
 
-RUN python3 -m pip install pip==26.2.2 setuptools==78.1.1 wheel==0.48.0
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
+
+# pip from its wheel, checked by digest (the release image's way)
+ARG PIP_WHEEL=pip-26.2.2-py3-none-any.whl
+ARG PIP_URL=https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl
+ARG PIP_SHA256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
+RUN curl -fsSLo /tmp/${PIP_WHEEL} ${PIP_URL} \
+    && echo "${PIP_SHA256}  /tmp/${PIP_WHEEL}" | sha256sum -c - \
+    && python${PYTHON_VERSION} /tmp/${PIP_WHEEL}/pip install --no-index /tmp/${PIP_WHEEL} \
+    && rm /tmp/${PIP_WHEEL} \
+    && python${PYTHON_VERSION} -m pip install setuptools==78.1.1 wheel==0.48.0
 
 # Set working directory
 WORKDIR /app
@@ -71,6 +104,9 @@ RUN pip install --no-cache-dir torch==2.12.0 torchvision==0.27.0 torchaudio==2.1
 
 # Install remaining Python dependencies (torch already installed above, pip will skip it)
 RUN pip install --no-cache-dir -r requirements.txt
+
+# cutlet's Japanese dictionary (transliterate.py degrades without it), as the release image has it
+RUN pip install --no-cache-dir unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc
 
 # deno: the sandboxed JS runtime yt-dlp solves YouTube's player challenges in
 # (yt-dlp itself the node installs into its cache: streaming/ytdlp_release.py)
@@ -95,7 +131,7 @@ EXPOSE 19001/udp
 
 # Set environment variables
 # PostgreSQL 18 client — pg_dump / pg_restore for node backups (backup.py);
-# bookworm's own client is the 15 series, which cannot dump an 18 server.
+# jammy's own client is the 14 series, which cannot dump an 18 server.
 # The repository's key is checked like any download (its fingerprint is
 # B97B 0AFC AA1A 47F0 44F2 44A0 7FCC 7D46 ACCC 4CF8).
 ARG PGDG_SIGNER_SHA256=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76
@@ -103,7 +139,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gnupg ca-certif
     && curl -fsSLo /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     && echo "${PGDG_SIGNER_SHA256}  /tmp/pgdg.asc" | sha256sum -c - \
     && gpg --dearmor -o /usr/share/keyrings/postgresql.gpg /tmp/pgdg.asc && rm /tmp/pgdg.asc \
-    && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt jammy-pgdg main" \
          > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update && apt-get install -y --no-install-recommends postgresql-client-18 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*

@@ -119,7 +119,7 @@ A. Outbound destinations. List every host the software can connect to, with
 
 B. Listening ports and bind addresses. From backend/config.py, backend/main.py,
    backend/p2p_app.py, docker-compose.yml, docker-compose.mac.yml,
-   docker-compose.wsl.yml, desktop/config_manager.py,
+   docker-compose.pi.yml, docker-compose.wsl.yml, desktop/config_manager.py,
    desktop/service_manager.py (the launcher's backend bind), desktop/portmap.py
    (UPnP and PCP), desktop/p2p/upnp_service.py, desktop/p2p/p2p_manager.py,
    desktop/p2p/sync_server.py, desktop/p2p/dht_service.py and

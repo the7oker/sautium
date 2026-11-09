@@ -124,7 +124,7 @@ docker exec sautium-backend nc -zv host.docker.internal 4321
 3. Check the host IP: `ip route show | grep default`
 
 ### No connection from Docker
-1. Check that `extra_hosts` is in the compose file you run (all three ship
+1. Check that `extra_hosts` is in the compose file you run (all four ship
    it)
 2. Pick the HQPlayer again in More → Audio output, or add it by address
    (`host.docker.internal`, or `<windows-host-ip>`)

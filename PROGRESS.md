@@ -3774,6 +3774,36 @@ device on the network; none of them may hold for it more than a bound.
   raise near anything — is no cover, and leaves the DLNA track it was for
   without art, not without a load.
 
+### The fingerprinter is part of the format (2026-11-09)
+
+- **The arm64 image sits on the release's own base.** The fingerprint is
+  the content address, and fpcalc fingerprints FFmpeg's decode: Debian
+  trixie's FFmpeg 7.1 moved the prints of 17 of 90 synthetic test files
+  from the release's FFmpeg 4.4 (by one bit or so — the same material, but
+  another address), bookworm's fpcalc exits 3 on every file shorter than
+  its 120 s window, and the CPU architecture moved none. So
+  `Dockerfile.mac`, the one image for Docker on an Apple Silicon Mac and on
+  a Linux arm64 host (a Pi 5, `docker-compose.pi.yml`), is `ubuntu:22.04`
+  with deadsnakes 3.11, as the release image is. Moving the release's base
+  off FFmpeg 4.4 is a design question first, never a routine bump.
+- **Every process tests its fpcalc before it analyses.** It fingerprints a
+  12 s synthetic signal shipped in the tree (`backend/fingerprint_probe/`,
+  made by `scripts/make_fingerprint_probe.py`) and compares the print with
+  the release image's (`provenance.fingerprinter`): a failed fpcalc or
+  another print raises the `tools.fingerprint` notice, and the analysis
+  passes and the stream enrichment refuse while it lasts. Equality for now;
+  the comparison is one function (`same_as_reference`) for a similarity
+  bound later. The probe is not a canary of every FFmpeg move — 7.1 prints
+  it as 4.4 does, as it does most files — and catches a fingerprinter that
+  is broken or another, not one that differs a bit in one file of five.
+- **The node's user takes the host user's uid.** Native Docker keeps uids
+  across a bind, so the image's fixed uid 1000 was a Pi's first account,
+  and the user running the node lost its own folders to it. At start the
+  entrypoint gives the node's user the uid of `/app/data`'s owner — the
+  checkout's `backend/data`, which the clone ships — when that is not
+  root (a folder Docker made, a mount Docker Desktop shows as root's): one
+  image fits every host, with no build argument.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

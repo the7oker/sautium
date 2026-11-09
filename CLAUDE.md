@@ -404,11 +404,12 @@ See:
   proof-of-work must survive container recreation; same file names as the
   launcher so the export/import bundle moves between the two).
 - HQPlayer Desktop's data folder: `${HQPLAYER_DATA_DIR}` → `/hqplayer:ro` in
-  all three compose files (since 2026-10-02) — the playback diagnostics read
+  every compose file (since 2026-10-02; four since 2026-11-09, with the Linux
+  arm64 `docker-compose.pi.yml`) — the playback diagnostics read
   HQPlayer's own log there, and the DSP measurements its CUDA offload
   (`settings.xml` + `HQPlayer*Desktop.log`, nothing else); unset, an empty
   folder and the diagnostics say where the log is.
-- Build identity: `./.git` → `/app/.git:ro` in all three compose files
+- Build identity: `./.git` → `/app/.git:ro` in every compose file
   (since 2026-09-21). `config.build_identity()` is the one reader — `/config`,
   the backup manifest and the share export report the running commit through
   it; HEAD is read from `.git` by hand (`desktop/updater.head_commit`), never

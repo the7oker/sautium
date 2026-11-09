@@ -1,12 +1,11 @@
-# Docker Compose for macOS (Apple Silicon — M1/M2/M3/M4/M5)
-# Usage: docker compose -f docker-compose.mac.yml up --build
+# Docker Compose for macOS on Apple Silicon (M1–M5)
+#   docker compose -f docker-compose.mac.yml up -d --build
 #
-# Differences from main docker-compose.yml:
-#   - No NVIDIA GPU / CUDA (uses CPU-only PyTorch)
-#   - Dockerfile.mac instead of Dockerfile
-#   - No CUDA_VISIBLE_DEVICES env var
-#   - Mac-friendly path defaults
-
+# docker-compose.yml with only what the Mac needs changed — keep them in step:
+#   - Dockerfile.mac, the arm64 CPU image (no CUDA): no CUDA variables, no GPU
+#     reservation — Apple's GPU (MPS) does not reach a container;
+#   - no Codex CLI in that image, so no CODEX_CLI_ENABLED and no ~/.codex mount;
+#   - a macOS default for the music folder.
 # Docker keeps a container's output with no bound unless told, and the
 # backend's says what the node does — requests, errors: three files of 10 MB
 # per container, the oldest dropped first.
@@ -18,22 +17,39 @@ x-logging: &bounded-log
 
 services:
   postgres:
-    # Official pgvector image (ankane/pgvector is abandoned at 0.5.1). Same
-    # pg18 series as the main compose so a datadir initialized on either
-    # machine stays interchangeable.
+    # Official pgvector image (ankane/pgvector is abandoned at 0.5.1); MUST stay
+    # on the pg18 series — the data volume is a PostgreSQL 18 datadir.
     image: pgvector/pgvector:pg18
     container_name: sautium-postgres
     # Docker's default /dev/shm is 64MB — parallel hash joins / pgvector ops
     # allocate dynamic shared memory there and die with "could not resize
     # shared memory segment: No space left on device" on an 18GB database.
     shm_size: 1gb
-    # Tiered PG memory settings and jit=off — see docker-compose.yml for
-    # rationale.
+    # Stock PG memory settings (shared_buffers=128MB, maintenance_work_mem=64MB)
+    # waste a curator-tier machine: the MB-dump index builds (40M-row mb_track)
+    # spill to disk at 64MB, and HNSW/filtered-KNN scans thrash the tiny buffer
+    # pool on a 30GB+ database. Defaults target the recommended 16GB+ Docker
+    # host (HARDWARE-TIERS §6.13); weaker hosts override via .env, e.g.
+    # PG_SHARED_BUFFERS=128MB PG_EFFECTIVE_CACHE_SIZE=2GB.
+    # wal_level=minimal: single-node appliance, no replication/PITR consumers —
+    # lets the MB-dump loader's TRUNCATE+COPY-in-one-txn skip WAL entirely.
+    # max_wal_size=4GB: at the stock 1GB a 21GB dump load (or an embeddings
+    # backfill) checkpoints every ~1GB written — constant dirty-page flushing
+    # and re-inflated full_page_writes.
+    # jit=off: the app's queries are index probes and small reranks, and the
+    # cost estimate that switches JIT on follows the data, not the work — the
+    # Last.fm history import pushed the Home Recommendations query over it,
+    # and compiling took 0.86 s of its 1.1 s (the discovery engine 1.87 →
+    # 0.80 s and the assistant's search_tracks 719 → 126 ms before that,
+    # each once switched off per query). It never paid back here.
     command: postgres
       -c shared_buffers=${PG_SHARED_BUFFERS:-1GB}
       -c effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-6GB}
       -c maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-512MB}
       -c work_mem=${PG_WORK_MEM:-16MB}
+      -c wal_level=minimal
+      -c max_wal_senders=0
+      -c max_wal_size=${PG_MAX_WAL_SIZE:-4GB}
       -c jit=off
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-music_ai}
@@ -61,6 +77,8 @@ services:
       retries: 5
     restart: unless-stopped
     logging: *bounded-log
+    # Loopback-only: postgres is never accessed from outside the host.
+    # Inter-container traffic uses the docker network, not this port.
 
   backend:
     build:
@@ -89,9 +107,6 @@ services:
       LASTFM_USERNAME: ${LASTFM_USERNAME:-}
       LASTFM_SESSION_KEY: ${LASTFM_SESSION_KEY:-}
 
-      # No GPU — CPU-only inference on Mac
-      # CUDA_VISIBLE_DEVICES is not set
-
       # Application settings
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
@@ -103,7 +118,8 @@ services:
       # the diagnostics read its log there (settings.xml + HQPlayer*Desktop.log).
       HQPLAYER_DATA_DIR: /hqplayer
 
-      # Native OS path prefix for DB-stored paths
+      # Native OS path prefix for DB-stored paths (scanner translates /music/... → this)
+      # Set in .env, e.g.: MUSIC_HOST_PATH=/Users/<user>/Music
       MUSIC_HOST_PATH: ${MUSIC_HOST_PATH:-}
 
       # Claude Code integration
@@ -112,13 +128,38 @@ services:
       # P2P / DHT
       P2P_ENABLED: ${P2P_ENABLED:-true}
       P2P_DHT_PORT: ${P2P_DHT_PORT:-19001}
-      # External port announced to peers when the router maps the peer
-      # surface to a different number; 0 = announce the peer port itself.
-      # Never 8800: that is the Web UI, and an announce points peers at it.
+      # Peer surface port; 0 turns the peer server (and the announces
+      # pointing at it) off entirely.
+      P2P_SYNC_PORT: ${P2P_SYNC_PORT:-8801}
+      # External port announced to peers when the router maps it to a
+      # different number; empty/0 = announce P2P_SYNC_PORT itself.
       P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-0}
+      # 1 = a TLS-terminating front on the host (scripts/master-front/) is
+      # the only thing reaching the published peer port: the container
+      # serves it plain HTTP and takes the peer's address from the front's
+      # X-Forwarded-For (signals only — pricing, backstops, similarity —
+      # never auth). Pair with P2P_SYNC_PUBLISH=127.0.0.1:<upstream port>
+      # below; a directly reachable upstream lets anyone set that header.
+      P2P_TRUSTED_FRONT: ${P2P_TRUSTED_FRONT:-0}
       P2P_USERNAME: ${P2P_USERNAME:-}
       P2P_PASSWORD: ${P2P_PASSWORD:-}
       P2P_EMAIL: ${P2P_EMAIL:-}
+
+      # Phantom streaming preview (provider → in-memory proxy → player).
+      # Parity with docker-compose.wsl.yml — this block was missing here, so a
+      # container recreated from this file silently lost streaming (2026-07-10).
+      STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-true}
+      MEDIA_PROXY_PORT: ${MEDIA_PROXY_PORT:-8830}
+      # Stated explicitly even though config.py defaults to 8831. It used to
+      # be load-bearing: the launcher wrote its own config into backend/.env,
+      # which is bind-mounted here as /app/.env, so the container inherited the
+      # launcher's ports (8832/8833) for anything compose left unsaid — the
+      # GENA listener sat on an unpublished 8833 and every DLNA session fell
+      # back to poll-only. The launcher now writes to its own data dir, so
+      # compose is the container's only source; this line is the intent, in
+      # writing.
+      DLNA_GENA_PORT: ${DLNA_GENA_PORT:-8831}
+      MEDIA_PROXY_ADVERTISED_HOST: ${MEDIA_PROXY_ADVERTISED_HOST:-127.0.0.1}
 
       # Multi-provider LLM support
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -126,16 +167,42 @@ services:
       OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
       OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
       OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
+      # The pick at the node's FIRST boot only — copied into user_settings
+      # once; the Web UI's choice rules afterwards.
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
+
+      # The Web UI rides plain HTTP (PROGRESS.md "HTTP on the LAN").
+      # SAUTIUM_HOST_IPS names the host's own addresses — the LAN IP, a
+      # tunnel name — which Docker can't see from inside the container: the
+      # Host guard accepts them (auth_hmac.py) and the DLNA output hands a
+      # renderer the first LAN one. Set in .env, e.g.:
+      # SAUTIUM_HOST_IPS=192.168.1.10                  (the LAN address)
+      # SAUTIUM_HOST_IPS=192.168.1.10,100.101.102.103  (plus a Tailscale one)
+      SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
+      # Intra-container backend self-calls (Claude Code tools, MCP server).
+      BACKEND_URL: http://localhost:8000
       MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
       LB_DUMP_DIR: /app/data/lbdump        # writable mount for the ListenBrainz statistics dump
+      # Disable uvicorn auto-reload in Docker. The bind-mounted ./backend
+      # lives on WSL2 drvfs (or macOS osxfs); inotify periodically returns
+      # EIO (errno 5) on those filesystems, which crashes the Rust-based
+      # watchfiles watcher and takes the whole uvicorn process down. Manual
+      # `docker restart sautium-backend` is the documented workflow anyway.
+      UVICORN_RELOAD: "false"
     extra_hosts:
+      # Allow container to access the Mac's own services (like HQPlayer)
       - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
       - ./mcp:/app/mcp
       - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
       - ./data/generated_eq:/app/generated_eq
+      # Measurement-registry clones (AutoEq sparse checkout) — read-only
+      # source for gear_registry.py imports; refreshed via git pull.
+      - ./data/registry:/app/registry:ro
+      # The peer surface's TLS cert (pinned to the node key; tls_gen.py).
+      - ./data/tls:/app/data/tls
+      - ./data/node_identity:/app/data/node_identity   # identity certificate + mined proof (survive recreation)
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       - ./data/lbdump:/app/data/lbdump   # ListenBrainz statistics dump (download + aggregate)
       - ./data/support:/app/data/support # support desk — bundles user nodes sent, unpacked on demand (master only)
@@ -147,6 +214,12 @@ services:
       # Docker turns a single-file mount whose source is missing into a
       # directory of that name.
       - ./data/atlas:/app/data/atlas:ro
+      # Single-source P2P slice module (desktop/p2p owns it; the launcher sync
+      # server imports the same file) — lets the Docker backend serve
+      # /api/mb/slice to dump-less peers. Directory mount on purpose: a
+      # single-FILE bind mount breaks on docker restart after the host file
+      # is edited (WSL2 inode swap).
+      - ./desktop/p2p:/app/desktop_p2p:ro
       # The launcher tree as an importable `desktop` package — the peer
       # surface reuses its sync_client import gate for pushed enrichment
       # instead of mirroring the seal verification (see routers/sync.py
@@ -157,43 +230,64 @@ services:
       # the running commit (desktop/updater.head_commit reads HEAD by hand).
       - ./.git:/app/.git:ro
       # Mount music library as read-only
-      # Mac path example: /Users/username/Music -> /music in container
+      # Mac path example: /Users/<user>/Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/Users/Shared/Music}:/music:ro
       # HQPlayer Desktop's data folder on this host, read-only — the playback
       # diagnostics read its log (only settings.xml and HQPlayer*Desktop.log are
       # opened). Unset: an empty folder, and the diagnostics say where the log is.
       - ${HQPLAYER_DATA_DIR:-./data/hqplayer}:/hqplayer:ro
-      # Claude Code auth (OAuth tokens). USERPROFILE on Windows shells,
-      # HOME everywhere else — see the matching note in docker-compose.yml.
-      # Mount the WHOLE .claude directory (not just .credentials.json) so
-      # the container survives the CLI's atomic-rename refresh cycle —
-      # see docker-compose.yml for the long-form rationale.
+      # Claude Code's folder from the Mac user's ~/.claude/.
+      # Mount the WHOLE .claude directory, not just .credentials.json.
+      # The CLI rewrites credentials via atomic rename (write tmp → rename
+      # to .credentials.json), which changes the file's inode. A bind mount
+      # of a single file pins the original inode, so after every refresh
+      # the container reads a stale token until restart. Mounting the
+      # directory binds the dir inode (which doesn't change on rename),
+      # so the container sees the freshly-renamed file immediately.
       - ${USERPROFILE:-${HOME}}/.claude:/home/agent/.claude
+      # Claude Code session storage — persisted on the host so chat history
+      # survives container rebuilds. Without this, every `up --build`
+      # invalidates every saved session_id and chat retries fail with
+      # "No conversation found". Stacked on top of the .claude dir mount
+      # above so sessions live on the project's own volume, not in the
+      # user's home (where they'd mix with the host CLI's sessions).
       - ./data/claude_sessions:/home/agent/.claude/projects
     ports:
       # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
       # primary workflow. Internet exposure is blocked at the UPnP layer
-      # (p2p_manager.py never maps this port). See CLAUDE.md
-      # "Security Posture" before changing this.
+      # (p2p_manager.py never maps this port, and desktop/portmap.py
+      # refuses it). See CLAUDE.md "Security Posture" before changing this.
       - "8800:8000"
+      # The peer surface (backend/p2p_app.py) — sync protocol only, no Web
+      # UI, no API secret. THIS is the port that may be published to the
+      # internet (desktop/portmap.py map ...), never 8800.
+      # Docker Desktop (Windows/macOS) forwards published ports through
+      # user-space hops that rewrite the source address — the container sees
+      # every peer as the bridge gateway. A node that wants real peer
+      # addresses (the master: similarity axes, per-peer backstops, a working
+      # probe-connect) runs a TLS-terminating front on the host instead
+      # (scripts/master-front/) and publishes the upstream on loopback ONLY:
+      #   P2P_SYNC_PUBLISH=127.0.0.1:18801   P2P_TRUSTED_FRONT=1
+      # Native-Linux Docker (iptables DNAT) sees real addresses and needs none
+      # of this.
+      - "${P2P_SYNC_PUBLISH:-${P2P_SYNC_PORT:-8801}}:${P2P_SYNC_PORT:-8801}"
       # P2P DHT MUST stay on 0.0.0.0 — that's the public peer surface.
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
+      # Phantom-preview media proxy (plain http — HQPlayer pulls from it).
+      - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"
+      # DLNA GENA event callbacks from LAN renderers (plain http listener).
+      - "8831:8831"
     networks:
       - sautium-network
     depends_on:
       postgres:
         condition: service_healthy
-    # No GPU reservation — Apple Silicon GPU (MPS) is not available inside Docker
     restart: unless-stopped
     logging: *bounded-log
     # Docker kills a container ~3 s after SIGTERM unless told otherwise
     # (Docker 29, measured 2026-10-03); the backend's shutdown needs more —
-    # a benchmark run puts the owner's HQPlayer back. The Web UI's event
-    # streams never end on their own: 2 s for them, then the shutdown runs.
+    # a benchmark run puts the owner's HQPlayer back (entrypoint.py).
     stop_grace_period: 10s
-    # The backend's own entrypoint, as the other compose files have it —
-    # without reload (UVICORN_RELOAD=true is a development opt-in): restart
-    # the backend after a code change
     command: python entrypoint.py
 
 networks:

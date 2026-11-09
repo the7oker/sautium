@@ -232,7 +232,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 
 ## 10. Platforms, hardware tiers, remote access, auth
 
-- [auto] Docker: three compose files — NVIDIA GPU, a WSL-side agent login, Apple Silicon (CPU) — `docker-compose.yml`, `docker-compose.wsl.yml`, `docker-compose.mac.yml`
+- [auto] Docker: four compose files — NVIDIA GPU, a WSL-side agent login, Apple Silicon (CPU), Linux arm64 such as a Raspberry Pi 5 (CPU) — `docker-compose.yml`, `docker-compose.wsl.yml`, `docker-compose.mac.yml`, `docker-compose.pi.yml`; the two CPU ones share `backend/Dockerfile.mac`, on the release image's Ubuntu 22.04 base
 - [L] Windows installer (per user, Windows 10+) and macOS bundle (macOS 12+, needs Homebrew); both clone `main` and keep it current — `desktop/installer/sautium.iss`; `desktop/build_macos.py: MIN_MACOS`; `desktop/windows/bootstrap.py`; `desktop/macos/bootstrap.py`
 - [L] The launcher runs PostgreSQL, migrations, the backend and the P2P layer, restarts a crashed backend, holds off idle sleep — `desktop/service_manager.py: start_all`, `_watch_backend`; `desktop/utils.py: keep_awake`
 - [L] Setup wizard: welcome, identity (or restore from a backup), AI provider, Last.fm, Music catalogue, summary — `desktop/wizard.py: SetupWizard.steps`
@@ -333,5 +333,4 @@ album's "+ Queue → Next", the announce port of the macOS compose file).
 |---|---|---|---|
 | `docs/design/INFORMATION-ARCHITECTURE.md:291` | a peer's profile opens from the chat header or the friends list | the screen exists, nothing navigates to `#profile/<prefix>`, and its "Add as friend" button has no handler (`static/app-shell.js: renderProfileOther`) | wire it, describe it as not reachable yet, or remove the screen |
 | `docs/design/INFORMATION-ARCHITECTURE.md` § Discovery structure | Danceable as a filter | the "No" chip is accepted and ignored (`routers/discovery.py: _engine_filters`) | postponed 2026-09-29: whether the chip is needed at all is undecided |
-| `docker-compose.mac.yml` against `README.md` § Quick Start | a Docker node on macOS is a full node | the file publishes no peer or media port and mounts neither the identity documents nor the peer certificate | align it with `docker-compose.yml`, on a Mac that can test it |
 | `backend/test_playback_queue.py: test_payload_shapes` | the queue payload has ten fields | the payload carries `play` since 2026-09-28; the test sits outside `tests/` and the usual run does not reach it | update the expectation, or keep `play` out of the payload |
