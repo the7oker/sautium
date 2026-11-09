@@ -754,8 +754,9 @@ def other_reason(log: Optional[dict]) -> Optional[str]:
         m = _NO_RATE_LINE.search(line)
         return f"no output rate for {rate_name(int(m.group(1)))} in its output family" if m else None
     if cause.get("code") == "rate_filter":
-        m = _RATE_LINE.search(line)
-        return (f"its filter is not possible at {rate_name(int(m.group(1)))}" if m
+        m = _REFUSAL.search(line)
+        src = m.group("src") if m else None
+        return (f"its filter is not possible at {rate_name(int(src))}" if src
                 else "its filter is not possible at that rate")
     return None
 
