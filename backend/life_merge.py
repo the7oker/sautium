@@ -41,6 +41,7 @@ from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
 from desktop import node_backup as nb
+from desktop.p2p.identity_registry import REFUSED_SQL
 from playback.sessions import rebuild_imported_sessions
 from play_stats import LISTENS_LOCK_KEY, refresh_play_stats, repair_naive_listen_times, same_listen
 from sql_queries import best_rip_order
@@ -602,13 +603,17 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
         # holds keeps its row — evidence is never replaced, even by the other
         # machine's earlier record of it. Never the dump's id: a collision
         # with a live one would drop the row silently. As witness.record()
-        # would: no banned key's sighting, none of this node's own keys. A
+        # would: no sighting of a key refused here, nor one a key refused here
+        # delivered (identity_registry.REFUSED_SQL, on the bans and the
+        # registry as merged above), none of this node's own keys. A
         # row the other machine had not signed yet comes only from a backup
         # of this very key — signed here by another, the statement would not
         # be the key's that saw it.
+        refused = (f"NOT {REFUSED_SQL.format(key='s.subject')} "
+                   f"AND (s.via IS NULL OR NOT {REFUSED_SQL.format(key='s.via')}) ")
         merged["witness"] = _whole_rows(cur, "p2p_witness", exclude=("id",), where=sql.SQL(
-            "NOT EXISTS (SELECT 1 FROM p2p_node_bans b WHERE b.pubkey = s.subject) "
-            "AND s.subject <> ALL({own}::text[]) AND (s.signature IS NOT NULL OR {same})").format(
+            refused + "AND s.subject <> ALL({own}::text[]) "
+            "AND (s.signature IS NOT NULL OR {same})").format(
             own=sql.Literal([k.lower() for k in own_keys]), same=sql.Literal(same_key)))
 
         # --- preferences: the allowlist, missing keys only.

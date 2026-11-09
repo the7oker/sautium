@@ -5,8 +5,9 @@ compromised (desktop/p2p/slice_trust.py judges both).
 
 A kept blob is passed on (`servable`) when it is this node's own build, or:
 
-1. its author carries no penalty here and is verified, and the node it came
-   from carries none either;
+1. its author carries no penalty here and is verified, in the current
+   certificate format, and the node it came from carries none either, nor
+   is refused here;
 2. it carried no proven falsification — its own subtree at import (P2), a
    dump version MetaBrainz has published (P1, `published_check`);
 3. a check in the last CHECK_DAYS found no suspected fabrication in it: up to
@@ -28,10 +29,10 @@ A kept blob is passed on (`servable`) when it is this node's own build, or:
 
 The check is lazy: a blob is checked the first time a peer asks for it — that
 answer is `missing`, and the requester takes the next source — and again once
-CHECK_DAYS have passed, or as soon as MusicBrainz answers one of its subject
-artists or groups unknown, whatever asked (`uncheck_subject`). `/health` advertises the blobs that could pass
-(`checkable_count`); without that, a node holding only unchecked blobs would
-never be asked and so never check.
+CHECK_DAYS have passed, or once MusicBrainz answers one of its subject
+artists or groups unknown, whatever asked (`uncheck_subject`). `/health`
+advertises the blobs that could pass (`checkable_count`); without that, a
+node holding only unchecked blobs would never be asked and so never check.
 
 Only a node that asks MusicBrainz checks (mb_asks.node_asks: catalogue
 slices, no full dump). A node holding the dump serves its own builds alone,
@@ -123,14 +124,21 @@ def _blob(conn, family: str, key: str) -> Optional[dict]:
 
 
 def _author_ok(conn, author: str, relay: Optional[str]) -> bool:
+    """The author verified here in the current certificate format (the one
+    its certificate can be passed on in, slice_trust.author_certificate), and
+    neither it nor the node it came from penalized or refused here."""
+    from desktop.p2p.birth_cert import CERT_VERSION
     with conn.cursor() as cur:
-        cur.execute("""SELECT status::text FROM p2p_identities WHERE pubkey = %s""", (author.lower(),))
+        cur.execute("""SELECT status::text, cert_v FROM p2p_identities WHERE pubkey = %s""",
+                    (author.lower(),))
         row = cur.fetchone()
-        if row is None or row[0] != "verified":
+        if row is None or row[0] != "verified" or row[1] != CERT_VERSION:
             return False
         cur.execute("""SELECT 1 FROM slice_penalties WHERE pubkey = %(a)s OR pubkey = %(r)s
                        UNION ALL
                        SELECT 1 FROM p2p_node_bans WHERE lower(pubkey) IN (%(a)s, %(r)s)
+                       UNION ALL
+                       SELECT 1 FROM p2p_identities WHERE pubkey = %(r)s AND status = 'failed'
                         LIMIT 1""", {"a": author.lower(), "r": (relay or author).lower()})
         if cur.fetchone():
             return False
@@ -141,14 +149,15 @@ def _author_ok(conn, author: str, relay: Optional[str]) -> bool:
 
 def source_refused(conn, relay: Optional[str]) -> bool:
     """A source this node takes no slices from: it carries a slice penalty,
-    or a ban — read at each exchange, not once per list of sources, so a
-    penalty found this run counts at once."""
+    or it is refused here (a ban, or a proof that failed here) — read at each
+    exchange, not once per list of sources, so a penalty found this run
+    counts at once."""
+    from desktop.p2p.identity_registry import REFUSED_SQL
     if not relay:
         return False
     with conn.cursor() as cur:
-        cur.execute("""SELECT EXISTS (SELECT 1 FROM slice_penalties WHERE pubkey = %(k)s)
-                           OR EXISTS (SELECT 1 FROM p2p_node_bans WHERE lower(pubkey) = %(k)s)""",
-                    {"k": relay.lower()})
+        cur.execute(f"""SELECT EXISTS (SELECT 1 FROM slice_penalties WHERE pubkey = %(k)s)
+                               OR {REFUSED_SQL.format(key="%(k)s")}""", {"k": relay.lower()})
         return bool(cur.fetchone()[0])
 
 
@@ -179,6 +188,7 @@ def checkable_count(conn, family: str, own_pubkey: Optional[str]) -> int:
     builds, and — on a node that checks — those of verified authors with no
     penalty, from sources with none, not suspect nor contested: what
     `/health` advertises."""
+    from desktop.p2p.birth_cert import CERT_VERSION
     table, _ = _TABLE[family]
     contested = "AND NOT b.contested" if family == "mb" else ""
     checks = mb_asks.node_asks(conn)
@@ -190,6 +200,7 @@ def checkable_count(conn, family: str, own_pubkey: Optional[str]) -> int:
                     AND b.dump_version ~ '^[0-9]{{8}}-[0-9]{{6}}$' AND b.dump_version <= %(bound)s
                     AND EXISTS (SELECT 1 FROM p2p_identities i
                                  WHERE i.pubkey = btrim(b.author_pubkey) AND i.status = 'verified'
+                                   AND i.cert_v = %(cert_v)s
                                    AND NOT EXISTS (SELECT 1 FROM slice_burned_mailboxes m
                                                     WHERE m.email_token = i.email_token))
                     AND NOT EXISTS (SELECT 1 FROM slice_penalties p
@@ -197,9 +208,11 @@ def checkable_count(conn, family: str, own_pubkey: Optional[str]) -> int:
                                                         coalesce(btrim(b.relay), btrim(b.author_pubkey))))
                     AND NOT EXISTS (SELECT 1 FROM p2p_node_bans n
                                      WHERE lower(n.pubkey) IN (btrim(b.author_pubkey),
-                                                               coalesce(btrim(b.relay), btrim(b.author_pubkey)))))
+                                                               coalesce(btrim(b.relay), btrim(b.author_pubkey))))
+                    AND NOT EXISTS (SELECT 1 FROM p2p_identities f
+                                     WHERE f.pubkey = btrim(b.relay) AND f.status = 'failed'))
         """, {"own": (own_pubkey or "").lower(), "checks": checks,
-              "bound": version_bound(conn, family)})
+              "bound": version_bound(conn, family), "cert_v": CERT_VERSION})
         return int(cur.fetchone()[0])
 
 
@@ -324,34 +337,64 @@ _PAYLOAD = {"mb": "coalesce(payload_sha256, encode(sha256(blob_gz), 'hex'))",
 # Which of a kept blob's indexed subjects (slice_index) an answer's kind names.
 _SUBJECT_COLUMN = {"artist": "subject_artists", "release_group": "subject_groups"}
 
+_MB_PAYLOAD_OF_B = "coalesce(b.payload_sha256, encode(sha256(b.blob_gz), 'hex'))"
 
-def uncheck_subject(cur, kind: str, mbid: str) -> None:
-    """MusicBrainz answered `mbid` unknown: every kept blob indexed with it as
-    a subject — the version of the blob that index row names — is checked no
-    more, so it is passed on again only after a check that reads that answer
+
+def uncheck_subject(conn, kind: str, mbid: str) -> int:
+    """MusicBrainz answered `mbid` unknown: every kept blob about it — an MB
+    blob indexed with it as a subject, by the version of the blob its index
+    row names; the LB blob of that artist, whose one subject is its key — is
+    checked no more, so it is passed on again only after a check made since
     (rule 0's condition 4 in its narrowest form: the canon's own
-    confirmations reach the check through the answers they store). A check
-    that asked it stamps its blob again when its verdict follows the answer.
-    In the caller's transaction, as the answer's own write."""
+    confirmations reach the check through the answers they store). Run by the
+    backend's slice checker, after the answer's commit and between two
+    verdicts, so a verdict's stamp never lands over it; under a verdict's
+    lock, as the verdicts take it. Returns the blobs un-checked."""
+    from desktop.p2p import slice_rebuild
     column = _SUBJECT_COLUMN.get(kind)
     if column is None:
-        return
-    cur.execute(f"""UPDATE mb_slice_blobs b SET checked_at = NULL FROM slice_index i
-                     WHERE i.family = 'mb' AND i.{column} @> ARRAY[%(m)s::uuid]
-                       AND b.name_key = i.key AND b.checked_at IS NOT NULL
-                       AND i.payload_sha256 = coalesce(b.payload_sha256,
-                                                       encode(sha256(b.blob_gz), 'hex'))""",
-                {"m": mbid})
-    unchecked = cur.rowcount
-    if column == "subject_artists":
-        cur.execute("""UPDATE lb_slice_blobs b SET checked_at = NULL FROM slice_index i
-                        WHERE i.family = 'lb' AND i.subject_artists @> ARRAY[%(m)s::uuid]
-                          AND b.artist_mbid::text = i.key AND b.checked_at IS NOT NULL
-                          AND i.payload_sha256 = encode(sha256(b.blob_gz), 'hex')""", {"m": mbid})
-        unchecked += cur.rowcount
+        return 0
+    with slice_rebuild.verdict(conn), conn.cursor() as cur:
+        cur.execute(f"""UPDATE mb_slice_blobs b SET checked_at = NULL FROM slice_index i
+                         WHERE i.family = 'mb' AND i.{column} @> ARRAY[%(m)s::uuid]
+                           AND b.name_key = i.key AND b.checked_at IS NOT NULL
+                           AND i.payload_sha256 = {_MB_PAYLOAD_OF_B}""", {"m": mbid})
+        unchecked = cur.rowcount
+        if column == "subject_artists":
+            cur.execute("""UPDATE lb_slice_blobs SET checked_at = NULL
+                            WHERE artist_mbid = %s::uuid AND checked_at IS NOT NULL""", (mbid,))
+            unchecked += cur.rowcount
     if unchecked:
         logger.debug("%s %s unknown to MusicBrainz: %d kept slice(s) to check again",
                      kind, mbid, unchecked)
+    return unchecked
+
+
+def uncheck_answered(conn) -> int:
+    """uncheck_subject for every answer stored unknown after the check of a
+    kept blob about it — those a restart took from the slice checker before
+    it ran them. Returns the blobs un-checked."""
+    from desktop.p2p import slice_rebuild
+    with slice_rebuild.verdict(conn), conn.cursor() as cur:
+        cur.execute(f"""UPDATE mb_slice_blobs b SET checked_at = NULL
+                         WHERE b.checked_at IS NOT NULL AND EXISTS (
+                               SELECT 1 FROM slice_index i JOIN mbws_answers a
+                                   ON a.status = 'unknown' AND a.answered_at > b.checked_at
+                                  AND (a.kind = 'artist' AND a.mbid = ANY(i.subject_artists)
+                                       OR a.kind = 'release_group' AND a.mbid = ANY(i.subject_groups))
+                                WHERE i.family = 'mb' AND i.key = b.name_key
+                                  AND i.payload_sha256 = {_MB_PAYLOAD_OF_B})""")
+        unchecked = cur.rowcount
+        cur.execute("""UPDATE lb_slice_blobs b SET checked_at = NULL
+                        WHERE b.checked_at IS NOT NULL AND EXISTS (
+                              SELECT 1 FROM mbws_answers a
+                               WHERE a.kind = 'artist' AND a.mbid = b.artist_mbid
+                                 AND a.status = 'unknown' AND a.answered_at > b.checked_at)""")
+        unchecked += cur.rowcount
+    if unchecked:
+        logger.info("%d kept slice(s) to check again: MusicBrainz answered one of their "
+                    "subjects unknown since their check", unchecked)
+    return unchecked
 
 
 def _malformed(conn, family: str, key: str, payload: str) -> None:

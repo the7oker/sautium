@@ -178,7 +178,11 @@ outlives its node by up to 30 min, so every lookup keeps returning it; one
 record since 2026-10-07, `sync_walk.DeadAddresses`, fed by the walk's connect
 and skipped by the walk and both slice finders — a node that refused, a 429
 or a 503, is busy, not dead), and a reachable peer that answered with nothing
-for us is left alone until our gap set grows (a scan, a LAN peer). The DHT routing table itself is persisted
+for us is left alone until our gap set grows (a scan, a LAN peer). A peer
+whose channel-proved key is refused here (a ban row, or a proof that failed
+here) is probed like any other — only the channel names the key, and its
+`/health` counts towards the network's size — but nothing is pulled from it
+or carried to it (since 2026-11-09, TRUST-2). The DHT routing table itself is persisted
 (`p2p_dht_state`, saved at every key re-announce and on stop), so a restart
 rejoins from live neighbours in seconds, and the bootstrap never blocks the
 rest of P2P: announces and lookups await readiness, chat and friends do not.

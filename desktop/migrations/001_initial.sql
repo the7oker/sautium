@@ -3015,7 +3015,8 @@ CREATE TABLE IF NOT EXISTS p2p_node_bans (
 -- claims something identity-gated (token accept today); a forged proof marks
 -- the row failed AND inserts a p2p_node_bans row (deterministic evidence).
 -- Registry rules live in desktop/p2p/identity_registry.py (issued_at anchor
--- must match, method only pow -> email, first_seen_at/verified survive).
+-- must match, method only pow -> email, first_seen_at survives, and verified
+-- does unless a pow certificate is signed anew).
 DO $$ BEGIN
     CREATE TYPE p2p_cert_method AS ENUM ('pow', 'email');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

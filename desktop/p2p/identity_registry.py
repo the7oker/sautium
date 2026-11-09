@@ -432,8 +432,9 @@ def _ban(cur, pubkey: str, addr: Optional[str], reason: str) -> None:
 # either path, so no thread is ever parked on it.
 _EVALUATION = threading.Semaphore(1)
 
-# Relayed proofs that did not verify, by (key, nonce): evaluated once in a
-# process, however often a node forwards them again.
+# Relayed proofs that did not verify, by (key, certificate signature, nonce):
+# evaluated once in a process, however often a node forwards them again — a
+# nonce beside another certificate of the key is another proof.
 _REJECTED: set = set()
 _REJECTED_MAX = 4096
 # When relayed proofs failed in the last day, by the key of the node that
@@ -446,6 +447,7 @@ _REJECTED_MAX = 4096
 # nonce, and that must not keep the author's true proof from verifying.
 _RELAYED_FAILED: Dict[str, List[float]] = {}
 _RELAY_FAILED: Dict[str, List[float]] = {}
+_RELAYED_LOCK = threading.Lock()       # the slice cycles of both families, click-to-mint
 _RELAYED_PER_DAY = 3
 _RELAYED_DAY_S = 86400.0
 
@@ -455,15 +457,23 @@ def _failed_today(failed: Dict[str, List[float]], key: str, now: float) -> List[
 
 
 def _note_failed(failed: Dict[str, List[float]], key: str, recent: List[float], now: float) -> None:
-    if len(failed) >= _REJECTED_MAX:
-        failed.clear()
+    """Under _RELAYED_LOCK. At the cap the days that are over go first, then
+    the key with the fewest failures today, the oldest of them: relay keys
+    cost nothing, so wiping a key at its bound would take as many evaluations
+    for every key the table holds."""
+    if key not in failed and len(failed) >= _REJECTED_MAX:
+        for k in [k for k, ts in failed.items() if not ts or now - ts[-1] >= _RELAYED_DAY_S]:
+            del failed[k]
+        if len(failed) >= _REJECTED_MAX:
+            del failed[min(failed, key=lambda k: (len(_failed_today(failed, k, now)), failed[k][-1]))]
     failed[key] = recent + [now]
 
 
 def verify_relayed(conn, cert: dict, proof: Optional[dict], relay: str) -> str:
     """A `pow` author's proof that came with one of its slices from `relay`,
-    the key of the node that passed it on — that node's word, and the
-    author's own only where `relay` is the author. Evaluated on this thread
+    the key the node's channel proved (empty where no channel proved one) —
+    that node's word, and the author's own only where `relay` is the
+    author. Evaluated on this thread
     when the node can afford it now (the load meter at its ceiling, another
     evaluation running or too little memory leave it 'unverified' for a later
     try, where the identity gate's `admit` answers busy); a proof that
@@ -477,14 +487,21 @@ def verify_relayed(conn, cert: dict, proof: Optional[dict], relay: str) -> str:
     author."""
     if not identity_proof.proof_binds(proof, cert):
         return "unverified"
+    if cert.get("params_version") not in identity_pow.POW_PARAMS:
+        # A policy this build does not know: no evaluation could tell, and a
+        # refusal would count against an honest relay.
+        return "unverified"
     author, relay = cert["pubkey"].lower(), (relay or "").lower()
-    seen = (author, proof["nonce"])
-    if seen in _REJECTED:
-        return "failed"
-    now = time.monotonic()
-    by_relay = _failed_today(_RELAY_FAILED, relay, now)
-    of_author = _failed_today(_RELAYED_FAILED, author, now)
-    if len(by_relay) >= _RELAYED_PER_DAY or (relay != author and len(of_author) >= _RELAYED_PER_DAY):
+    seen = (author, "".join(str(cert.get("sig") or "").split()).lower(), proof["nonce"])
+    # Only a key a channel proved can be the author's own presentation.
+    own = bool(relay) and relay == author
+    with _RELAYED_LOCK:
+        if seen in _REJECTED:
+            return "failed"
+        now = time.monotonic()
+        by_relay = _failed_today(_RELAY_FAILED, relay, now)
+        of_author = _failed_today(_RELAYED_FAILED, author, now)
+    if len(by_relay) >= _RELAYED_PER_DAY or (not own and len(of_author) >= _RELAYED_PER_DAY):
         return "unverified"
     from desktop.p2p import load_meter
     meter = load_meter.current()
@@ -505,12 +522,13 @@ def verify_relayed(conn, cert: dict, proof: Optional[dict], relay: str) -> str:
     if ok:
         mark_verified(conn, author, proof["nonce"])
         return "verified"
-    if len(_REJECTED) >= _REJECTED_MAX:
-        _REJECTED.clear()
-    _REJECTED.add(seen)
-    now = time.monotonic()
-    _note_failed(_RELAY_FAILED, relay, by_relay, now)
-    _note_failed(_RELAYED_FAILED, author, of_author, now)
+    with _RELAYED_LOCK:
+        if len(_REJECTED) >= _REJECTED_MAX:
+            _REJECTED.clear()
+        _REJECTED.add(seen)
+        now = time.monotonic()
+        _note_failed(_RELAY_FAILED, relay, _failed_today(_RELAY_FAILED, relay, now), now)
+        _note_failed(_RELAYED_FAILED, author, _failed_today(_RELAYED_FAILED, author, now), now)
     logger.warning("a proof of identity %s relayed by %s did not verify — its slice dropped",
                    author[:8], relay[:8] or "-")
     return "failed"

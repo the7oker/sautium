@@ -111,13 +111,15 @@ def read_interval(dsn: str, default: int, key: str = INTERVAL_KEY) -> Optional[i
 def load_bans(dsn: str) -> tuple[set, set]:
     """The keys and addresses a slice cycle does not ask: the local ban list
     (pubkeys, addr uuids — the pubkey is the anchor, the address id catches a
-    banned key returning under a fresh identity) and the slice lanes' own
+    banned key returning under a fresh identity), the keys whose proof failed
+    here (their ban rows may be evicted past the cap) and the slice lanes' own
     penalties, which bind keys only (desktop/p2p/slice_trust.py)."""
     from desktop.p2p import slice_trust
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT pubkey, addr::text FROM p2p_node_bans")
+            cur.execute("""SELECT pubkey, addr::text FROM p2p_node_bans
+                           UNION ALL SELECT pubkey, NULL FROM p2p_identities WHERE status = 'failed'""")
             rows = cur.fetchall()
         keys = {r[0] for r in rows if r[0]} | slice_trust.penalized_keys(conn)
         return keys, {r[1] for r in rows if r[1]}
@@ -142,8 +144,8 @@ def published_newest(dsn: str, family: str):
 
 def vet_authors(dsn: str, verified: list, relay: str) -> list:
     """The verified entries whose author this node takes: no penalty, mailbox
-    not burned, identity recorded (and a `pow` proof that `relay` passed on
-    evaluated when the node can afford it). `verified` items end with
+    not burned, identity recorded (and a `pow` proof that `relay`, the key the
+    channel proved, passed on evaluated when the node can afford it). `verified` items end with
     (certificate, proof)."""
     from desktop.p2p import slice_trust
     with _checks_lock:
@@ -658,7 +660,10 @@ class LbSliceCycle:
             # A refused source's proofs are not worth an evaluation.
             if await loop.run_in_executor(None, source_refused, self.db_dsn, relay):
                 return {"error": "source carries a penalty"}
-            kept = await loop.run_in_executor(None, vet_authors, self.db_dsn, verified, relay)
+            # The verifier counts a proof under the key the channel proved
+            # alone: the source list's claim could name the author itself.
+            kept = await loop.run_in_executor(None, vet_authors, self.db_dsn, verified,
+                                              (api.peer_pubkey or "").lower())
             dropped += len(verified) - len(kept)
             missing += [v[0] for v in verified if v not in kept]
             verified = kept

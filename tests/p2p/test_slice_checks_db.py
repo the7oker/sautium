@@ -278,13 +278,21 @@ def _checked(conn, s, group, release):
 
 
 def test_an_answer_that_musicbrainz_does_not_know_a_subject_un_checks_the_slice_about_it(
-        conn, scratch_dsn, musicbrainz):
+        conn, scratch_dsn, musicbrainz, monkeypatch):
     """Rule 0's condition 4 in its narrowest form: whatever asked — the
     canon's own confirmation, another slice's check — an answer stored
     unknown for an artist or a group a kept slice is indexed about takes
     that slice's check away, so it is passed on again only after a check
     that read the answer."""
     import mb_answers
+    told = []
+
+    def uncheck(kind, mbid):
+        # As the backend's slice checker is told: after the answer's commit.
+        assert mb_asks.answer(conn, kind, mbid) == ("unknown", None)
+        told.append(kind)
+        slice_checks.uncheck_subject(conn, kind, mbid)
+    monkeypatch.setattr(mb_answers, "_unknown_waker", uncheck)
     author, relay = _key(), _key()
     s, other, third = Subtree("Unknown Since"), Subtree("Still Known"), Subtree("Another Version")
     groups = {x.name: x.group() for x in (s, other, third)}
@@ -331,6 +339,42 @@ def test_an_answer_that_musicbrainz_does_not_know_a_subject_un_checks_the_slice_
     assert slice_checks.servable(conn, "lb", artist, OWN) is True
     mb_answers.store("artist", artist, None)
     assert slice_checks.servable(conn, "lb", artist, OWN) is None
+    assert told == ["recording", "artist", "release_group", "artist", "artist"]
+
+
+def test_at_start_a_slice_whose_subject_was_answered_unknown_after_its_check_is_checked_again(
+        conn, scratch_dsn):
+    """What a restart took from the slice checker before it ran: an answer
+    kept unknown after a kept slice's check takes that check away; one kept
+    before it was read by it."""
+    author, relay = _key(), _key()
+    later, earlier = Subtree("Answered Later"), Subtree("Answered Earlier")
+    groups = {x.name: x.group() for x in (later, earlier)}
+    for x in (later, earlier):
+        _offer(scratch_dsn, author, x, relay=relay)
+        _checked(conn, x, groups[x.name][0], groups[x.name][1][0])
+    artist, heard = str(uuid.uuid4()), str(uuid.uuid4())
+    _offer_lb(scratch_dsn, author, {artist: {
+        "dump_version": dump_version(3), "artist": [10, 3], "recordings": [[heard, 5, 2, [artist]]],
+        "truncated": False}}, relay)
+    lb_slice_queries.serve_slices(conn, [artist], own_pubkey=OWN)
+    _answer(conn, "artist", artist)
+    _credited(conn, heard, artist)
+    assert slice_checks.evaluate(conn, "lb", artist) is True
+    _answer(conn, "release_group", groups[later.name][0], "unknown")
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE mbws_answers SET status = 'unknown', target = NULL,
+                              answered_at = now() + interval '1 minute'
+                        WHERE (kind = 'release_group' AND mbid = %s) OR (kind = 'artist' AND mbid = %s)""",
+                    (groups[later.name][0], artist))
+        cur.execute("""UPDATE mbws_answers SET status = 'unknown', target = NULL,
+                              answered_at = now() - interval '1 minute'
+                        WHERE kind = 'artist' AND mbid = %s""", (earlier.gid,))
+    assert slice_checks.uncheck_answered(conn) == 2
+    assert slice_checks.servable(conn, "mb", "answered later", OWN) is None
+    assert slice_checks.servable(conn, "lb", artist, OWN) is None
+    assert slice_checks.servable(conn, "mb", "answered earlier", OWN) is True
+    assert slice_checks.uncheck_answered(conn) == 0
 
 
 def test_a_verified_author_s_row_of_an_older_format_is_passed_on_by_no_slice_lane(
@@ -354,10 +398,18 @@ def test_a_verified_author_s_row_of_an_older_format_is_passed_on_by_no_slice_lan
     assert slice_checks.evaluate(conn, "lb", artist) is True
     assert list(mb_slice_queries.serve_slices(conn, [s.name], own_pubkey=OWN)["slices"]) == [s.name]
     assert list(lb_slice_queries.serve_slices(conn, [artist], own_pubkey=OWN)["slices"]) == [artist]
+    _slice_fed(conn)
+    assert slice_checks.checkable_count(conn, "mb", OWN) == 1
     monkeypatch.setattr(birth_cert, "CERT_VERSION", birth_cert.CERT_VERSION + 1)
     assert slice_trust.author_certificate(conn, pub(author)) is None
+    queued = _count(conn, "mbws_queue")
     assert mb_slice_queries.serve_slices(conn, [s.name], own_pubkey=OWN)["missing"] == [s.name]
     assert lb_slice_queries.serve_slices(conn, [artist], own_pubkey=OWN)["missing"] == [artist]
+    # Nor advertised, nor checked again for nothing: no check is queued.
+    assert slice_checks.servable(conn, "mb", "old format", OWN) is False
+    assert slice_checks.checkable_count(conn, "mb", OWN) == 0
+    assert slice_checks.checkable_count(conn, "lb", OWN) == 0
+    assert _count(conn, "mbws_queue") == queued
 
 
 # --------------------------------------------------------------------------

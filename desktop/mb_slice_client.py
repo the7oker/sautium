@@ -384,6 +384,9 @@ class MBSliceClient:
             if slice_checks.source_refused(idconn, relay):
                 return {"error": "source carries a penalty"}
             bound = slice_checks.version_bound(idconn, "mb")
+            # Who brought a proof, for its verifier: only the key the channel
+            # proved — the source list's claim could name the author itself.
+            proved = (getattr(self.peer_api, "peer_pubkey", None) or "").lower()
             for name, ((core, blob_gz, cert, proof), entry, rows) in signed.items():
                 author = entry["author_pubkey"].lower()
                 if not slice_checks.version_ok(core.get("dump_version"), bound):
@@ -398,7 +401,7 @@ class MBSliceClient:
                     passed.append(name)
                     continue
                 if slice_trust.refused_author(idconn, cert) \
-                        or slice_trust.observe_author(idconn, cert, proof, relay or author) \
+                        or slice_trust.observe_author(idconn, cert, proof, proved) \
                         in (None, "failed"):
                     dropped += 1
                     continue

@@ -309,8 +309,11 @@ def test_a_pow_certificate_signed_anew_is_unproven_until_its_proof_is_shown_agai
     forwarded = slice_trust.author_certificate(conn, pub(author))
     assert forwarded[0]["sig"] == again["sig"] and identity_proof.proof_binds(forwarded[1], forwarded[0])
     # Signed anew as an email certificate: verified by its mailbox, no proof.
-    identity_registry.observe(conn, _signed_anew(again, method="email", email_token="ab" * 32,
-                                                 email_class="major"))
+    by_mail = _signed_anew(again, method="email", email_token="ab" * 32, email_class="major")
+    identity_registry.observe(conn, by_mail)
+    assert _status(conn, pub(author))[0] == "verified"
+    # And signed anew for a changed mailbox: still verified by its mailbox.
+    identity_registry.observe(conn, _signed_anew(by_mail, email_token="cd" * 32))
     assert _status(conn, pub(author))[0] == "verified"
     # A key whose proof failed here stays failed whatever it presents next.
     liar = _key()
@@ -698,6 +701,84 @@ def test_the_requester_records_who_passed_each_slice_on(conn, scratch_dsn):
     _offer(scratch_dsn, author, _honest("Straight From Its Author"))
     assert dict(_rows(conn, "SELECT key, btrim(relay) FROM slice_index")) == {
         "passed along": pub(relay), "unpinned": pub(unpinned), "straight from its author": pub(author)}
+
+
+TRUE_NONCE = "77" * identity_pow.NONCE_LEN
+
+
+@pytest.fixture
+def by_nonce(monkeypatch):
+    """The relayed-proof verifier as it runs, its memory-hard evaluation
+    faked: a proof verifies when its nonce is TRUE_NONCE. Returns the nonces
+    evaluated."""
+    evaluated = []
+    monkeypatch.setattr(identity_proof, "verify_proof",
+                        lambda bound, cert: evaluated.append(bound["nonce"]) or bound["nonce"] == TRUE_NONCE)
+    monkeypatch.setattr(identity_pow, "mem_available_kib", lambda: None)
+    for name, empty in (("_REJECTED", set()), ("_RELAYED_FAILED", {}), ("_RELAY_FAILED", {})):
+        monkeypatch.setattr(identity_registry, name, empty)
+    return evaluated
+
+
+def _nonced(cert, nonce):
+    return {**proof(cert), "nonce": nonce}
+
+
+def _false_nonce(n):
+    return f"{n:02x}" * identity_pow.NONCE_LEN
+
+
+def _status_of(c, key):
+    return _rows(c, "SELECT status::text FROM p2p_identities WHERE pubkey = %s", key)[0][0]
+
+
+def test_false_proofs_a_relay_brings_never_keep_an_author_s_own_slice_from_verifying_it(
+        conn, scratch_dsn, by_nonce):
+    """Anyone can serve an honest author's slices beside a false nonce. The
+    requester counts each under the key the relay's channel proved: three
+    of them stop other relays' proofs of the author for the day, never the
+    author's own — and a source that only claims the author's key, its
+    channel proving none, is no author."""
+    author, forger, honest = _key(), _key(), _key()
+    cert = certificate(pub(author), method="pow")
+
+    def offer(name, nonce, relay=None, source_node=""):
+        s = _honest(name)
+        peer = Peer({s.name: mb_entry(author, s.name, s.one(), cert, _nonced(cert, nonce))},
+                    pub(relay) if relay else None)
+        return _take(scratch_dsn, peer, [s.name], source_node=source_node)
+    for n in range(1, 4):
+        assert offer(f"Forged {n}", _false_nonce(n), forger) == {"error": "all slices failed verification"}
+    assert "error" not in offer("Honest Relay", TRUE_NONCE, honest)
+    assert _status_of(conn, pub(author)) == "unverified"
+    assert "error" not in offer("Unpinned Claim", TRUE_NONCE, source_node=pub(author))
+    assert _status_of(conn, pub(author)) == "unverified"
+    assert by_nonce == [_false_nonce(1), _false_nonce(2), _false_nonce(3)]
+    assert "error" not in offer("From Itself", TRUE_NONCE, author)
+    assert _status_of(conn, pub(author)) == "verified" and by_nonce[-1] == TRUE_NONCE
+
+
+def test_the_lb_requester_counts_a_false_proof_under_its_relay_and_asks_a_refused_source_for_none(
+        conn, scratch_dsn, by_nonce):
+    author, forger, refused = _key(), _key(), _key()
+    cert = certificate(pub(author), method="pow")
+    cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=None, dead=DeadAddresses())
+
+    def offer(nonce, relay):
+        artist = str(uuid.uuid4())
+        one = {"dump_version": "20261101-001500", "artist": [10, 3],
+               "recordings": [[str(uuid.uuid4()), 5, 2, [artist]]], "truncated": False}
+        peer = Peer({artist: lb_entry(author, artist, one, cert, _nonced(cert, nonce))}, pub(relay))
+        return asyncio.run(cycle._exchange(peer, "a-node", None, [artist], None))
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO slice_penalties (pubkey, party) VALUES (%s, 'relay')", (pub(refused),))
+    assert offer(_false_nonce(9), refused) == {"error": "source carries a penalty"}
+    assert by_nonce == []                                   # nothing evaluated for a refused source
+    for n in range(1, 4):
+        assert offer(_false_nonce(n), forger)["error"] == "all slices failed verification"
+    assert offer(TRUE_NONCE, author)["imported"] == 1
+    assert _status_of(conn, pub(author)) == "verified"
+    assert by_nonce == [_false_nonce(1), _false_nonce(2), _false_nonce(3), TRUE_NONCE]
 
 
 def test_the_lb_requester_records_who_passed_each_slice_on(conn, scratch_dsn):

@@ -781,7 +781,9 @@ the ceiling and collapsed the planned tiers into one task.
   match — anything else is an anomaly and the update is refused; `method`
   only moves pow → email — a stale pow certificate for an email identity
   is ignored, not suspicious; `email_token` may change; `first_seen_at`
-  and a `verified` status survive every update) and `IdentityGate.admit`
+  survives every update, and a `verified` status every one but a `pow`
+  certificate signed anew, whose proof is asked again since 2026-11-09 —
+  the work was done over the earlier signature) and `IdentityGate.admit`
   (shape + authority signature → ban list → registry → one evaluation
   under semaphore/memory guard, `busy` = 503 + Retry-After, a per-address
   failure backstop = 429, forged proof = 403 + `failed` + ban). The invite

@@ -1761,9 +1761,13 @@ def _register_mb_wakers() -> None:
                         lambda _keys: background_enrichment.wake_db_steps("MusicBrainz answers"))
     mb_answers.on_ready("scrobble_name", lambda keys: scrobbles.wake(names=keys))
     mb_answers.on_ready("slice_check", _evaluate_slice_checks)
+    mb_answers.on_unknown(_uncheck_slices)
 
 
 _slice_checks_due: set = set()
+# (kind, MBID) answered unknown: the kept slices about them, checked no more
+# (slice_checks.uncheck_subject) before the next verdict runs.
+_slice_unchecks: set = set()
 _slice_checks_lock = threading.Lock()
 _slice_checks_wake = threading.Event()
 # A check that failed is tried again after these seconds, doubling to the cap.
@@ -1789,17 +1793,38 @@ def _evaluate_slice_checks(keys: list) -> None:
     _slice_checks_wake.set()
 
 
+def _uncheck_slices(kind: str, mbid: str) -> None:
+    """An answer kept unknown: the kept slices about it are checked again —
+    on the slice checker, between two verdicts, so no verdict that read the
+    answers before it can stamp over it, and so the answers' consumer never
+    waits on a slice's row."""
+    with _slice_checks_lock:
+        _slice_unchecks.add((kind, mbid))
+    _slice_checks_wake.set()
+
+
 def _start_slice_checker() -> None:
     """Each check's verdict, its evidence and the judgment of its author and
     source (desktop/p2p/slice_checks.evaluate), on a thread of its own: woken
     by the answers, a key whose check failed tried again after a growing
     delay — the deadline of a known failure, not a poll —, and at start every
-    check whose answers came while the node was down."""
+    check whose answers came while the node was down. An answer kept unknown
+    takes the check away from the kept slices about it first, between two
+    verdicts (_uncheck_slices); at start, from those whose answer came after
+    their check."""
     from db_pool import db_query, get_conn
     from desktop.p2p import slice_checks
 
     def run() -> None:
         failed: Dict[str, tuple] = {}      # key → (delay, when it is due)
+        unchecks_failed: Dict[tuple, tuple] = {}     # (kind, MBID) → (delay, when it is due)
+        try:
+            with get_conn() as conn:
+                slice_checks.uncheck_answered(conn)
+        except Exception:
+            logger.exception("slice checks: the start's un-check failed — those slices are "
+                             "checked again at their next answer or in %d days",
+                             slice_checks.CHECK_DAYS)
         try:
             _evaluate_slice_checks([r["k"] for r in db_query(_SLICE_CHECKS_SWEEP_SQL)])
         except Exception:
@@ -1809,6 +1834,22 @@ def _start_slice_checker() -> None:
             with _slice_checks_lock:
                 keys = set(_slice_checks_due)
                 _slice_checks_due.clear()
+                unchecks = set(_slice_unchecks)
+                _slice_unchecks.clear()
+            now = time.monotonic()
+            unchecks |= {u for u, (_, due) in unchecks_failed.items() if due <= now}
+            for kind, mbid in sorted(unchecks):
+                try:
+                    with get_conn() as conn:
+                        slice_checks.uncheck_subject(conn, kind, mbid)
+                    unchecks_failed.pop((kind, mbid), None)
+                except Exception:
+                    delay = min(_SLICE_CHECK_RETRY_CAP_S,
+                                unchecks_failed[(kind, mbid)][0] * 2 if (kind, mbid) in unchecks_failed
+                                else _SLICE_CHECK_RETRY_S)
+                    unchecks_failed[(kind, mbid)] = (delay, time.monotonic() + delay)
+                    logger.warning("slices about %s %s could not be un-checked — tried again in %d s",
+                                   kind, mbid, delay, exc_info=True)
             now = time.monotonic()
             keys |= {k for k, (_, due) in failed.items() if due <= now}
             for key in sorted(keys):
@@ -1824,9 +1865,10 @@ def _start_slice_checker() -> None:
                     logger.warning("slice check of %s failed — tried again in %d s", key[:80],
                                    delay, exc_info=True)
             with _slice_checks_lock:
-                if _slice_checks_due:
+                if _slice_checks_due or _slice_unchecks:
                     continue
-            due = min((d for _, d in failed.values()), default=None)
+            due = min((d for _, d in list(failed.values()) + list(unchecks_failed.values())),
+                      default=None)
             _slice_checks_wake.wait(None if due is None else max(0.0, due - time.monotonic()))
             _slice_checks_wake.clear()
 

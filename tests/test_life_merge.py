@@ -479,12 +479,20 @@ def test_requests_merge_by_their_code_dismissed_on_either_side_and_one_a_contact
     assert {r[0]: r[1:] for r in _rows(a, query)} == rows
 
 
-def _witness(subject, channel="probe", seen=T0, *, signed=False):
+def _witness(subject, channel="probe", seen=T0, *, signed=False, via=None):
     return ("""INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v, issued_at, method,
-                                       difficulty, params_version, channel, seen_at, author_pubkey, signature)
-               VALUES (%s, 'sautium-birth:v4:' || %s, %s, %s, 4, %s, 'pow', 32, 1, %s, %s, %s, %s)""",
-            (subject, subject, "5a" * 64, "aa" * 32, T0 - timedelta(days=30), channel, seen,
+                                       difficulty, params_version, channel, via, seen_at, author_pubkey,
+                                       signature)
+               VALUES (%s, 'sautium-birth:v4:' || %s, %s, %s, 4, %s, 'pow', 32, 1, %s, %s, %s, %s, %s)""",
+            (subject, subject, "5a" * 64, "aa" * 32, T0 - timedelta(days=30), channel, via, seen,
              PUB if signed else None, "6b" * 64 if signed else None))
+
+
+def _failed(pubkey):
+    """A key whose proof failed here, its ban row evicted past the cap."""
+    return ("""INSERT INTO p2p_identities (pubkey, cert_v, method, issued_at, difficulty, params_version,
+                                          issuer, cert_sig, status)
+               VALUES (%s, 4, 'pow', now(), 32, 1, %s, %s, 'failed')""", (pubkey, "aa" * 32, "5a" * 64))
 
 
 def test_witness_records_merge_insert_only(clones, tmp_path):
@@ -555,3 +563,23 @@ def test_a_backup_from_before_the_witness_record_still_merges(tmp_path):
         for name in (old, new):
             nb._drop_database(admin, name)
         admin.close()
+
+
+def test_witness_records_merge_as_the_recorder_takes_them(clones, tmp_path):
+    """Run last: witness rows can never be deleted, and the clones are the
+    module's. No sighting of a key whose proof failed here, its ban row gone, and
+    none a key refused here delivered — whichever machine knew of the
+    refusal."""
+    a, b = clones["a"], clones["b"]
+    failed, banned_via, failed_via, honest_via = "91" * 32, "92" * 32, "93" * 32, "94" * 32
+    carried_banned, carried_failed, carried_honest = "95" * 32, "96" * 32, "97" * 32
+    _exec(a, [_failed(failed), ("INSERT INTO p2p_node_bans (pubkey, reason) VALUES (%s, 'test')",
+                                (banned_via,))])
+    _exec(b, [_failed(failed_via), _witness(failed, signed=True),
+              _witness(carried_banned, "carried", signed=True, via=banned_via),
+              _witness(carried_failed, "carried", signed=True, via=failed_via),
+              _witness(carried_honest, "carried", signed=True, via=honest_via)])
+    _merge(_backup(b, tmp_path / "b"), a)        # the module's earlier rows of b may come too
+    assert _rows(a, "SELECT subject, via FROM p2p_witness WHERE subject = ANY(%s)",
+                 ([failed, carried_banned, carried_failed, carried_honest],)) == [
+        (carried_honest, honest_via)]

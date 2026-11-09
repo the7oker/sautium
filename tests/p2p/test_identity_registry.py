@@ -112,6 +112,10 @@ def _evaluator(monkeypatch, true_nonce="aa"):
     return evaluated, verified
 
 
+def _cert(pubkey: str, sig: str = "51" * 64) -> dict:
+    return {"pubkey": pubkey, "params_version": 1, "sig": sig}
+
+
 def test_a_key_s_relayed_proofs_are_evaluated_three_nonces_a_day_and_a_true_one_still_verifies(monkeypatch):
     """Fifty fake nonces for one key cost three 2 GiB evaluations, not fifty;
     a nonce that failed is never evaluated again; and an honest relay's true
@@ -119,16 +123,16 @@ def test_a_key_s_relayed_proofs_are_evaluated_three_nonces_a_day_and_a_true_one_
     author."""
     evaluated, verified = _evaluator(monkeypatch)
     forger, honest = "f0" * 32, "e0" * 32
-    cert = {"pubkey": "cd" * 32}
+    cert = _cert("cd" * 32)
     assert reg.verify_relayed(None, cert, {"nonce": "01"}, forger) == "failed"
     assert reg.verify_relayed(None, cert, {"nonce": "01"}, honest) == "failed"   # never evaluated again
     assert reg.verify_relayed(None, cert, {"nonce": "aa"}, honest) == "verified"  # the true proof
     assert verified == [(cert["pubkey"], "aa")]
-    forged = {"pubkey": "ab" * 32}
+    forged = _cert("ab" * 32)
     out = [reg.verify_relayed(None, forged, {"nonce": f"{n:02x}"}, f"{n:02x}" * 32) for n in range(1, 51)]
     assert out == ["failed"] * 3 + ["unverified"] * 47
     assert evaluated == ["01", "aa", "01", "02", "03"]
-    other = {"pubkey": "ef" * 32}
+    other = _cert("ef" * 32)
     assert reg.verify_relayed(None, other, {"nonce": "01"}, honest) == "failed"   # another key is its own
     assert evaluated[-1] == "01" and len(evaluated) == 6
 
@@ -139,7 +143,7 @@ def test_one_relay_s_false_proofs_cost_three_evaluations_a_day_whatever_authors_
     still evaluated."""
     evaluated, verified = _evaluator(monkeypatch)
     forger, honest = "f0" * 32, "e0" * 32
-    authors = [{"pubkey": f"{n:02x}" * 32} for n in range(1, 51)]
+    authors = [_cert(f"{n:02x}" * 32) for n in range(1, 51)]
     out = [reg.verify_relayed(None, a, {"nonce": "01"}, forger) for a in authors]
     assert out == ["failed"] * 3 + ["unverified"] * 47
     assert len(evaluated) == 3
@@ -152,7 +156,7 @@ def test_false_proofs_brought_for_an_author_never_keep_its_own_presentation_from
     three of them stop other relays' proofs of that author from being
     evaluated that day, never the proof the author presents itself."""
     evaluated, verified = _evaluator(monkeypatch)
-    author = {"pubkey": "cd" * 32}
+    author = _cert("cd" * 32)
     for n, forger in enumerate(("f1" * 32, "f2" * 32, "f3" * 32), start=1):
         assert reg.verify_relayed(None, author, {"nonce": f"{n:02x}"}, forger) == "failed"
     assert reg.verify_relayed(None, author, {"nonce": "aa"}, "e0" * 32) == "unverified"   # the bound
@@ -160,7 +164,7 @@ def test_false_proofs_brought_for_an_author_never_keep_its_own_presentation_from
     assert reg.verify_relayed(None, author, {"nonce": "aa"}, author["pubkey"].upper()) == "verified"
     assert evaluated[-1] == "aa" and verified == [(author["pubkey"], "aa")]
     # An author presenting false proofs of itself is bounded as any relay is.
-    liar = {"pubkey": "ab" * 32}
+    liar = _cert("ab" * 32)
     out = [reg.verify_relayed(None, liar, {"nonce": f"{n:02x}"}, liar["pubkey"]) for n in range(1, 6)]
     assert out == ["failed"] * 3 + ["unverified"] * 2
 
@@ -175,9 +179,56 @@ def test_a_relayed_proof_waits_while_the_load_meter_is_at_its_ceiling(monkeypatc
     monkeypatch.setattr(reg, "_EVALUATION", permit)
     meter = SimpleNamespace(headroom=load_meter.VERIFY_MIN_HEADROOM / 2)
     monkeypatch.setattr(load_meter, "current", lambda: meter)
-    author = {"pubkey": "cd" * 32}
+    author = _cert("cd" * 32)
     assert reg.verify_relayed(None, author, {"nonce": "aa"}, author["pubkey"]) == "unverified"
     assert evaluated == [] and permit.blocking == []
     meter.headroom = load_meter.VERIFY_MIN_HEADROOM
     assert reg.verify_relayed(None, author, {"nonce": "aa"}, author["pubkey"]) == "verified"
     assert evaluated == ["aa"] and permit.blocking == [False]
+
+
+def test_a_proof_whose_channel_proved_no_key_is_never_the_author_s_own(monkeypatch):
+    """Without a key its channel proved, the node that brought a proof is
+    no author: three false nonces brought so spend the author's bound like
+    any other relay's, and the next proof from an unproved channel waits."""
+    evaluated, _verified = _evaluator(monkeypatch)
+    author = _cert("cd" * 32)
+    for n in range(1, 4):
+        assert reg.verify_relayed(None, author, {"nonce": f"{n:02x}"}, f"{n:02x}" * 32) == "failed"
+    assert reg.verify_relayed(None, author, {"nonce": "aa"}, "") == "unverified"
+    assert evaluated == ["01", "02", "03"]
+
+
+def test_a_proof_of_a_policy_this_build_does_not_know_is_kept_and_counts_against_no_one(monkeypatch):
+    evaluated, _verified = _evaluator(monkeypatch)
+    newer = {**_cert("cd" * 32), "params_version": max(reg.identity_pow.POW_PARAMS) + 1}
+    relay = "e0" * 32
+    for n in range(5):
+        assert reg.verify_relayed(None, newer, {"nonce": f"{n:02x}"}, relay) == "unverified"
+    assert evaluated == [] and reg._RELAY_FAILED == {} and reg._RELAYED_FAILED == {}
+    assert reg.verify_relayed(None, _cert("ab" * 32), {"nonce": "aa"}, relay) == "verified"
+
+
+def test_a_nonce_that_failed_beside_one_certificate_is_evaluated_beside_another(monkeypatch):
+    """A rejected proof is the nonce beside that certificate: the same nonce
+    beside another certificate of the key is another proof."""
+    evaluated, verified = _evaluator(monkeypatch)
+    monkeypatch.setattr(reg.identity_proof, "verify_proof",
+                        lambda proof, cert: evaluated.append(cert["sig"]) or cert["sig"] == "52" * 64)
+    author = "cd" * 32
+    assert reg.verify_relayed(None, _cert(author, "51" * 64), {"nonce": "aa"}, "f0" * 32) == "failed"
+    assert reg.verify_relayed(None, _cert(author, "51" * 64), {"nonce": "aa"}, author) == "failed"
+    assert reg.verify_relayed(None, _cert(author, "52" * 64), {"nonce": "aa"}, author) == "verified"
+    assert evaluated == ["51" * 64, "52" * 64]
+
+
+def test_a_flood_of_relay_keys_does_not_wipe_the_count_of_a_key_within_its_day(monkeypatch):
+    evaluated, _verified = _evaluator(monkeypatch)
+    monkeypatch.setattr(reg, "_REJECTED_MAX", 8)
+    forger = "f0" * 32
+    for n in range(1, 4):
+        assert reg.verify_relayed(None, _cert(f"{n:02x}" * 32), {"nonce": "01"}, forger) == "failed"
+    for n in range(10, 30):          # twenty more relay keys, one false nonce each
+        reg.verify_relayed(None, _cert(f"{n:02x}" * 32), {"nonce": "01"}, f"{n:02x}" * 32)
+    assert len(reg._RELAY_FAILED) <= 8
+    assert reg.verify_relayed(None, _cert("aa" * 32), {"nonce": "02"}, forger) == "unverified"

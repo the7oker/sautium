@@ -3150,8 +3150,11 @@ class P2PManager:
             conn = psycopg2.connect(self.db_dsn)
             try:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT pubkey, addr::text FROM p2p_node_bans")
+                    # A key whose proof failed here is refused as a ban row
+                    # is, after its row was evicted past the cap.
+                    cur.execute("""SELECT pubkey, addr::text FROM p2p_node_bans
+                                   UNION ALL SELECT pubkey, NULL FROM p2p_identities
+                                              WHERE status = 'failed'""")
                     rows = cur.fetchall()
                 return ({r[0] for r in rows if r[0]},
                         {r[1] for r in rows if r[1]})

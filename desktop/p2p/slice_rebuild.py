@@ -241,6 +241,11 @@ def _rebuild(conn) -> dict:
                       WHERE n.pubkey IS NOT NULL
                         AND lower(n.pubkey) IN (lower(btrim(b.author_pubkey)),
                                                 lower(coalesce(btrim(b.relay), btrim(b.author_pubkey)))))
+               AND NOT EXISTS (
+                     SELECT 1 FROM p2p_identities f
+                      WHERE f.status = 'failed'
+                        AND f.pubkey IN (lower(btrim(b.author_pubkey)),
+                                         lower(coalesce(btrim(b.relay), btrim(b.author_pubkey)))))
              ORDER BY b.created_at, b.name_key""")
         for name_key, blob_gz, author, relay, version, payload in blobs:
             core = wire.loads(gzip.decompress(bytes(blob_gz)))

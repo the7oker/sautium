@@ -300,9 +300,6 @@ def _mark(cur, kind: str, mbid: str, status: str, target: Optional[str]) -> None
         ON CONFLICT (kind, mbid) DO UPDATE
            SET status = EXCLUDED.status, target = EXCLUDED.target, answered_at = now()""",
                 (kind, mbid, status, target))
-    if status == "unknown":
-        from desktop.p2p import slice_checks
-        slice_checks.uncheck_subject(cur, kind, mbid)
 
 
 def _put_artist(cur, d: dict) -> str:
@@ -438,10 +435,13 @@ def store(kind: str, mbid: str, data: Optional[dict]) -> List[Item]:
     """Keep MusicBrainz's answer for (kind, mbid): `data` is its JSON, None a
     definitive 404. Returns the other items the answer settled — the entity a
     merged MBID leads to, a release's group and recordings."""
-    with transaction() as cur:
-        if data is None:
+    if data is None:
+        with transaction() as cur:
             _mark(cur, kind, mbid, "unknown", None)
-            return []
+        if _unknown_waker is not None:
+            _unknown_waker(kind, mbid)
+        return []
+    with transaction() as cur:
         target = data["id"]
         also: List[Item] = []
         if kind == "artist":
@@ -513,6 +513,18 @@ def on_ready(subject: str, fn: Callable[[List[str]], None]) -> None:
     """`fn(keys)` runs on the consumer's thread when every row the subjects
     `keys` of `subject` waited on is answered."""
     _wakers[subject] = fn
+
+
+_unknown_waker: Optional[Callable[[str, str], None]] = None
+
+
+def on_unknown(fn: Callable[[str, str], None]) -> None:
+    """`fn(kind, mbid)` runs on the consumer's thread once an answer that
+    MusicBrainz does not know (kind, mbid) is kept, after its commit — the
+    kept slices about it are checked again (slice_checks.uncheck_subject),
+    on a thread that can wait for their rows; `fn` itself must not."""
+    global _unknown_waker
+    _unknown_waker = fn
 
 
 _READY = "(q.not_before IS NULL OR q.not_before <= now())"
