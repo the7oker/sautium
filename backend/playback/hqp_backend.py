@@ -1358,9 +1358,10 @@ class HqpBackend(PlayerBackend):
         # under the takeover's spot (_RefusalReads, _read_refusal_again, §6.1
         # P13). Under _spot_lock
         self._refusal_read: Optional[_RefusalReads] = None
-        # A start HQPlayer did not play whose close met a reading that names
-        # no entry: (its attempt, its track, its second), judged at the next
-        # reading that does (_judge_rest). The poller's alone
+        # A start HQPlayer did not play whose close met a reading that says
+        # nothing yet (no entry named, a stop under way): (its attempt, its
+        # track, its second), judged at the next reading that says it
+        # (_judge_rest). The poller's alone
         self._rest_due: Optional[tuple] = None
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
@@ -4717,10 +4718,10 @@ class HqpBackend(PlayerBackend):
         the tick the status last showed, which a reading with no verdict
         leaves older: there HQPlayer opening another entry had the spot set
         under what plays, and Pause then Play restarted the refused track.
-        A close on a reading that names no entry (no verdict and no URI that
-        names one, a state the SDK does not name) leaves the rest to the next
-        reading that does (_judge_rest). A spot set since stays. Called on
-        the poller."""
+        A close on a reading that says nothing yet (no verdict and no URI
+        that names an entry, a state the SDK does not name, a stop under way)
+        leaves the rest to the next reading that says it (_judge_rest). A
+        spot set since stays. Called on the poller."""
         item, second = att.target if att.target is not None else (None, 0.0)
         if item is None or self._queue.index_of(item) is None:
             return
@@ -4744,8 +4745,8 @@ class HqpBackend(PlayerBackend):
         word in HQPlayer's own window, another controller, whose takeover
         leaves its own spot (_note_listen) — or a pause is no rest. None —
         nothing said yet — when nothing names the entry it plays, and while a
-        stop is under way (STOPREQ: the stop that follows is HQPlayer's own,
-        a rest)."""
+        stop is under way (STOPREQ: the stop after it is a rest, as any stop
+        is)."""
         if status.state == PlaybackState.STOPPED:
             return True
         if status.state == PlaybackState.STOPREQ:
@@ -4762,11 +4763,11 @@ class HqpBackend(PlayerBackend):
     def _judge_rest(self, status, playing: Optional[tuple]) -> bool:
         """The rest a start's close left to a later reading (_rests_on_its_start),
         judged at the first that says one (_rest_at): a stop a rest, its own
-        entry playing one too, another entry or a pause none — dropped once a
-        start of the node's is watched or closed since (Play, a tap, Next or
-        Previous onto an entry, a new queue: the person's word is newer), or
-        its item left the queue. Whether it set the spot. Called on the
-        poller."""
+        entry playing one too, another entry or a pause none — dropped once
+        any start is watched or closed since (the node's Play, a tap, Next or
+        Previous onto an entry, a new queue: the person's word is newer;
+        HQPlayer's own advance: it played something), or its item left the
+        queue. Whether it set the spot. Called on the poller."""
         due = self._rest_due
         if due is None:
             return False

@@ -667,8 +667,9 @@ comes after the control port answers again — so neither can end the wait.
   yet (no URI from this build, a state the SDK does not name, a stop under
   way) leaves the rest to the next reading that says it: a stop is a rest,
   whatever names its entry, its own entry playing one too, another entry or
-  a pause none. A start of the node's meanwhile (Play, a tap, Next or
-  Previous onto an entry, a new queue) drops it. Only an
+  a pause none. Any start watched or closed meanwhile (the node's Play, a
+  tap, Next or Previous onto an entry, a new queue, HQPlayer's own advance)
+  drops it. Only an
   entry of ours in a mirror in step or a tail mirror (the advance names its
   target only there); not a stop while another controller holds HQPlayer
   (Roon, its own window), and a spot set since stays. Another controller
