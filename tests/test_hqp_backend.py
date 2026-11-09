@@ -2489,7 +2489,7 @@ def test_an_advance_closed_on_its_refusal_while_hqplayer_opens_another_entry_lea
     assert (last["state"], last["track"], last["length"]) == ("playing", 0, 0)
     n = len(fake.commands)
     assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)        # the close's pass, the rest's, is over
-    assert traced._spot is None
+    assert traced._spot is None and traced._rest_due is None        # its URI said: another entry, at once
 
 
 def _refused_in_log(tmp_path):
@@ -2498,12 +2498,12 @@ def _refused_in_log(tmp_path):
                 "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate\n")
 
 
-def _hqplayer_is(fake, state, track, starting, opening=0):
+def _hqplayer_is(fake, state, track, starting, opening=0, reads=2):
     with fake._lock:
         fake._advancing = None
         fake.state, fake.track, fake.position, fake._starting, fake.opening = state, track, 0.0, starting, opening
     n = len(fake.commands)
-    assert _wait(lambda: _statuses_after(fake, n, 2), 10.0)
+    assert _wait(lambda: _statuses_after(fake, n, reads), 10.0)
 
 
 def test_an_advance_closed_on_the_build_answer_of_its_own_entry_in_the_opening_shape_leaves_the_spot(
@@ -2522,6 +2522,8 @@ def test_an_advance_closed_on_the_build_answer_of_its_own_entry_in_the_opening_s
     assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
     last = att.facts["ticks"][-1]
     assert (last["state"], last["track"], last["length"]) == ("playing", 0, 0)
+    assert _wait(lambda: traced._spot is not None, 5.0)             # its URI said: the start's own, at once
+    assert (traced._spot[0].track_id, traced._spot[1]) == ("track-2", 0) and traced._rest_due is None
     _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0)
     assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 10.0)
 
@@ -2576,6 +2578,106 @@ def test_a_close_on_a_state_the_sdk_does_not_name_leaves_the_rest_to_the_next_re
     assert traced._spot is None and traced._rest_due is not None
     _hqplayer_is(fake, int(PlaybackState.PLAYING), 1, 10 ** 6)
     assert traced._spot is None and traced._rest_due is None
+
+
+def _rest_left_to_a_later_reading(traced, fake, monkeypatch, tmp_path):
+    """The advance's close at the build's playing answer of entry 2 on an
+    HQPlayer whose Status names no URI, a queue edit in flight: nothing names
+    the entry, the rest left to a later reading. Returns (the attempt, the
+    edit still open)."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    monkeypatch.setattr(traced, "_readings", lambda uri: [])        # no URI from this build
+    edit = traced._queue.mutation()
+    edit.__enter__()                                                 # a queue edit in flight
+    _hqplayer_is(fake, int(PlaybackState.PLAYING), 2, 10 ** 6)
+    _refused_in_log(tmp_path)
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert att.verdict["code"] == "rate_refused" and att.facts["ticks"][-1]["track"] == 2
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)
+    assert traced._spot is None and traced._rest_due is not None
+    return att, edit
+
+
+def test_a_start_of_the_nodes_while_the_rest_is_due_drops_it(traced, fake, monkeypatch, tmp_path):
+    """The rest left to a later reading; the person taps slot 1 meanwhile — a
+    start watched, newer than the close — and HQPlayer still reads entry 2's
+    build once after the edit, then plays entry 1: the rest is dropped, no
+    spot at slot 2 under what plays, and Pause then Play resumes entry 1
+    (Play alone) — never the refused track again."""
+    att, edit = _rest_left_to_a_later_reading(traced, fake, monkeypatch, tmp_path)
+    try:
+        monkeypatch.setattr(diag, "OBSERVE_S", 60.0)                # the tap stays watched through the test
+        with fake._lock:
+            fake.length = 300
+        assert traced.select(1)
+        assert traced._attempt is not None and traced._attempt.intent == "select"
+        _hqplayer_is(fake, int(PlaybackState.PLAYING), 2, 10 ** 6, reads=1)
+    finally:
+        edit.__exit__(None, None, None)
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), 10.0)
+    with fake._lock:
+        fake.track_serial += 1
+        fake.state, fake.track, fake.position, fake._starting = int(PlaybackState.PLAYING), 1, 0.0, 0
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 4), 10.0)
+    assert traced._rest_due is None and (traced._spot is None or traced._spot[0].track_id != "track-2")
+    fake.takes_seek = True
+    assert traced.pause()
+    assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), 5.0)
+    n = len(fake.commands)
+    assert traced.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING), 10.0)
+    assert [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")] == ["Play"]
+
+
+@pytest.mark.parametrize("met", ["after the close", "at the close"])
+def test_a_stop_under_way_says_nothing_of_the_rest_and_the_stop_after_it_is_one(traced, fake, monkeypatch,
+                                                                                tmp_path, met):
+    """HQPlayer's own stop after it refused: a stop under way (STOPREQ), then
+    stopped on no entry. Under way it says nothing yet — met by a rest left
+    to a later reading, or by the close itself — and the stop that follows
+    is the rest: the spot at slot 2, as D6 leaves it."""
+    if met == "after the close":
+        att, edit = _rest_left_to_a_later_reading(traced, fake, monkeypatch, tmp_path)
+        try:
+            _hqplayer_is(fake, int(PlaybackState.STOPREQ), 2, 0)
+            assert traced._rest_due is not None and traced._spot is None
+        finally:
+            edit.__exit__(None, None, None)
+    else:
+        att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+        assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+        _hqplayer_is(fake, int(PlaybackState.PLAYING), 2, 10 ** 6)
+        _hqplayer_is(fake, int(PlaybackState.STOPREQ), 2, 0)
+        _refused_in_log(tmp_path)
+        assert _wait(lambda: att.verdict is not None, 10.0)
+        assert att.verdict["code"] == "rate_refused" and att.facts["ticks"][-1]["state"] == "stopping"
+    _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0)
+    assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 5.0)
+
+
+def test_the_reading_a_rest_left_to_it_sets_the_spot_on_is_said_with_the_spot(traced, fake, monkeypatch,
+                                                                              tmp_path):
+    """The rest left to a later reading is set at HQPlayer's stop on no entry:
+    that very reading is said at the spot — its slot and track beside the
+    resume — never slot 0 with a resume a tick ahead of it."""
+    said = []
+    say = traced._say
+
+    def saying(st):
+        said.append((st.state, st.queue_index, st.item.track_id if st.item is not None else None,
+                     st.extra.get("resume")))
+        return say(st)
+    monkeypatch.setattr(traced, "_say", saying)
+    att, edit = _rest_left_to_a_later_reading(traced, fake, monkeypatch, tmp_path)
+    edit.__exit__(None, None, None)
+    n = len(said)
+    _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0, reads=3)
+    resumed = [t for t in said[n:] if t[3] == {"index": 2, "position": 0}]
+    assert resumed and resumed[0][:3] == ("stopped", 2, "track-2")
 
 
 @pytest.mark.parametrize("why", ["rule", "slow"])

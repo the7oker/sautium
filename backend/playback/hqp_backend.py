@@ -2775,7 +2775,9 @@ class HqpBackend(PlayerBackend):
                             and listed is not None):
                         self._read_refusal_again(status, [t.get("uri") for t in hqp_playlist])
                     self._judge_start(status, playing)
-                    self._judge_rest(status, playing)
+                    if self._judge_rest(status, playing):
+                        # The spot set on this reading: what HQPlayer reads, said with it
+                        playing = self._playing(status) or playing
                     if self._reconverge_due and link.owed is None:
                         # Once per loss: HQPlayer answers again — the add it
                         # owed among it — and gets the queue back
@@ -4740,10 +4742,14 @@ class HqpBackend(PlayerBackend):
         verdict, or with none (HQPlayer's opening answer, a queue edit in
         flight) by what its URI names. Another entry playing — the person's
         word in HQPlayer's own window, another controller, whose takeover
-        leaves its own spot (_note_listen) — or a pause is no rest. None when
-        nothing names the entry it plays."""
+        leaves its own spot (_note_listen) — or a pause is no rest. None —
+        nothing said yet — when nothing names the entry it plays, and while a
+        stop is under way (STOPREQ: the stop that follows is HQPlayer's own,
+        a rest)."""
         if status.state == PlaybackState.STOPPED:
             return True
+        if status.state == PlaybackState.STOPREQ:
+            return None
         if status.state != PlaybackState.PLAYING:
             return False
         if playing is not None:
@@ -4753,36 +4759,42 @@ class HqpBackend(PlayerBackend):
             return None
         return any(_reads_item(r, item) for r in readings)
 
-    def _judge_rest(self, status, playing: Optional[tuple]) -> None:
+    def _judge_rest(self, status, playing: Optional[tuple]) -> bool:
         """The rest a start's close left to a later reading (_rests_on_its_start),
-        judged at the first that names an entry — dropped once the person's
-        word is newer (another attempt watched, or closed, since) or its item
-        left the queue. Called on the poller."""
+        judged at the first that says one (_rest_at): a stop a rest, its own
+        entry playing one too, another entry or a pause none — dropped once a
+        start of the node's is watched or closed since (Play, a tap, Next or
+        Previous onto an entry, a new queue: the person's word is newer), or
+        its item left the queue. Whether it set the spot. Called on the
+        poller."""
         due = self._rest_due
         if due is None:
-            return
+            return False
         att, item, second = due
         if self._attempt is not None or self._last_closed is not att or self._queue.index_of(item) is None:
             self._rest_due = None
-            return
+            return False
         rests = self._rest_at(status, playing, item)
         if rests is None:
-            return
+            return False
         self._rest_due = None
         if rests:
-            self._leave_spot(att, item, second)
+            return self._leave_spot(att, item, second)
+        return False
 
-    def _leave_spot(self, att: diag.Attempt, item: QueueItem, second: float) -> None:
+    def _leave_spot(self, att: diag.Attempt, item: QueueItem, second: float) -> bool:
         """The spot a start HQPlayer did not play leaves at its track and
-        second, unless one was set since. Called on the poller."""
+        second, unless one was set since: whether it did. Called on the
+        poller."""
         with self._spot_lock:
             if self._spot is not None:
-                return
+                return False
             self._spot, self._spot_gen = (item, int(second)), self._spot_gen + 1
             self._rest_gen, self._rest_left = self._spot_gen, time.time()
         logger.info("HQPlayer did not play the start of slot %d (%s) — the spot stays there, Play starts it again",
                     self._queue.index_of(item), att.verdict["code"])
         self.poke()
+        return True
 
     def _attach_log(self, att: diag.Attempt, uri: Optional[str]) -> None:
         source = diag.log_source(self._link.host, self._info)
