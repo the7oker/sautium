@@ -406,7 +406,12 @@ class AudioEmbeddingGenerator:
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
         if not force:
-            provenance.relink_returned_files(cancel_check=cancel_flag)
+            # A failed look costs only the work it would have saved: the
+            # pass analyses what stays pending, as before.
+            try:
+                provenance.relink_returned_files(track_ids, cancel_check=cancel_flag)
+            except Exception as e:
+                logger.error(f"Re-link before the pass failed: {e}", exc_info=True)
 
         with get_db_context() as db:
             embedding_model = self._get_or_create_embedding_model(db)

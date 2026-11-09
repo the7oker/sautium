@@ -1345,12 +1345,15 @@ def prune_missing_files(file_ids: Sequence[int], counts: Dict[str, int],
 
 def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
     """Of a plan's files, those still in the catalog and still missing now,
-    judged as the plan's walk judged them: a path outside the current root is
-    missing, and one inside it is there only when its folder lists that exact
-    name (a case-only rename on a case-insensitive disk keeps the old
-    spelling openable, yet the walk saw only the new one). A folder that
-    cannot be listed keeps its files, as the walk keeps unread folders. The
-    music folder is asked first: gone as a whole, nothing may go."""
+    judged as the plan's walk judged them: from the music folder down, every
+    folder of the path listed by its exact name as a folder (not a link to
+    one, which the walk never enters) and the file by its exact name. A path
+    outside the current root is missing; a case-only rename on a
+    case-insensitive disk, or a folder swapped for a link, leaves the old
+    spelling openable but not walked, so it is missing too. A folder that
+    cannot be listed keeps what lies under it, as the walk keeps unread
+    folders. The music folder is asked first: gone as a whole, nothing may
+    go."""
     if library_unreachable():
         logger.error("Prune aborted at the yes: the music folder is unreachable")
         stats["unreachable"] = True
@@ -1360,23 +1363,42 @@ def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
             MediaFile.id.in_(list(file_ids))).all()
     stats["checked"] = len(rows)
     root = settings.library_db_root() + "/"
-    listings: Dict[str, Optional[Set[str]]] = {}
+    local_root = str(Path(settings.music_library_path).absolute())
+    listings: Dict[Tuple[str, ...], Optional[Dict[str, str]]] = {}
 
-    def listed(path: str) -> Optional[bool]:
-        folder, _, name = path.rpartition("/")
-        if folder not in listings:
+    def listing(parts: Tuple[str, ...]) -> Optional[Dict[str, str]]:
+        if parts not in listings:
+            kinds: Optional[Dict[str, str]] = {}
             try:
-                listings[folder] = set(os.listdir(settings.translate_to_local_path(folder)))
+                with os.scandir(os.path.join(local_root, *parts)) as it:
+                    for entry in it:
+                        kinds[entry.name] = ("dir" if entry.is_dir(follow_symlinks=False)
+                                             else "file" if entry.is_file() else "other")
             except (FileNotFoundError, NotADirectoryError):
-                listings[folder] = set()
+                kinds = {}
             except OSError as e:
-                logger.warning(f"Prune at the yes keeps what {folder} holds: {e}")
-                listings[folder] = None
-        return None if listings[folder] is None else name in listings[folder]
+                logger.warning(f"Prune at the yes keeps what {os.path.join(*parts or ('.',))} "
+                               f"holds: {e}")
+                kinds = None
+            listings[parts] = kinds
+        return listings[parts]
+
+    def walked(path: str) -> Optional[bool]:
+        if not path.startswith(root):
+            return False
+        *folders, name = path[len(root):].split("/")
+        for depth in range(len(folders) + 1):
+            kinds = listing(tuple(folders[:depth]))
+            if kinds is None:
+                return None
+            want = folders[depth] if depth < len(folders) else name
+            if kinds.get(want) != ("dir" if depth < len(folders) else "file"):
+                return False
+        return True
 
     missing = []
     for mf_id, path in rows:
-        there = listed(path) if path.startswith(root) else False
+        there = walked(path)
         if there is None:
             stats["kept_unread"] += 1
         elif not there:

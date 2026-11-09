@@ -1435,7 +1435,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                     )
                     file_ids = prune_stats.pop("file_ids")
                     result["prune"] = prune_stats
-                    if file_ids:
+                    if file_ids and not state["cancel_requested"]:
                         plan = _new_prune_plan(file_ids, prune_stats)
                         result["prune_plan"] = _prune_plan_counts(plan)
                     logger.info(f"Prune plan: {prune_stats}")

@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from typing import Optional
 
 from sqlalchemy import text as sa_text
@@ -197,7 +198,12 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
 # left is found again by the next run.
 _RETURNED_SQL = """
     SELECT mf.id, mf.track_id::text AS track_id, mf.file_path,
-           mf.cue_start_seconds, mf.cue_end_seconds, mf.duration_seconds
+           mf.cue_start_seconds, mf.cue_end_seconds, mf.duration_seconds,
+           mf.file_size_bytes, mf.file_modified_at,
+           ARRAY(SELECT s.id FROM analysis_sources s
+                 WHERE s.track_id = mf.track_id AND s.media_file_id IS NULL
+                   AND s.provider_id IS NULL AND NOT s.imported
+                 ORDER BY s.id) AS rows
     FROM media_files mf
     WHERE mf.is_analysis_source
       AND (mf.duration_seconds IS NULL OR mf.duration_seconds >= :min_seconds)
@@ -211,16 +217,28 @@ _RETURNED_SQL = """
 
 # The fingerprint covers fpcalc's first 120 s; the duration is the other half
 # of the material declaration a seal binds (record_sig.segment_payload), so a
-# longer or shorter cut of the same opening is another material.
+# longer or shorter cut of the same opening is another material, and a file
+# of unknown length matches only a row that declares none either.
 _RELINK_SQL = sa_text("""
     UPDATE analysis_sources SET media_file_id = :mfid
     WHERE track_id = :tid AND chromaprint_key = sha256(decode(:fp, 'escape'))
       AND media_file_id IS NULL AND provider_id IS NULL AND NOT imported
-      AND (duration_seconds IS NULL OR CAST(:dur AS int) IS NULL
-           OR duration_seconds = CAST(:dur AS int))
+      AND (duration_seconds IS NULL OR duration_seconds = CAST(:dur AS int))
 """)
 
 _RELINK_CHUNK = 100
+
+# One look at a time: the import's, the yes's and each analysis pass's would
+# otherwise fingerprint the same list side by side. A caller that waits reads
+# the list again once the look before it is done, so it finds what is left.
+_relink_lock = threading.Lock()
+
+# A file compared and matching nothing — another master, another cut, or
+# material fpcalc cannot read — is not fingerprinted again by every import
+# and pass while nothing about it or its track's unlinked rows changed: until
+# an analysis pass registers the file's own row it would stay a candidate.
+# Per process: a restart compares it once more.
+_unmatched: dict = {}
 
 
 def relink_returned_files(track_ids=None, cancel_check=None, progress_cb=None) -> int:
@@ -239,8 +257,6 @@ def relink_returned_files(track_ids=None, cancel_check=None, progress_cb=None) -
     commits on its own, so a cancel or a crash keeps what was linked.
     progress_cb(done, total) after each chunk. Returns how many rows were
     linked."""
-    from concurrent.futures import ThreadPoolExecutor
-
     from database import get_db_context
 
     params = {"min_seconds": MIN_MATERIAL_SECONDS}
@@ -250,10 +266,27 @@ def relink_returned_files(track_ids=None, cancel_check=None, progress_cb=None) -
             return 0
         scope = "AND mf.track_id = ANY(CAST(:tids AS uuid[]))"
         params["tids"] = [str(t) for t in track_ids]
-    with get_db_context() as db:
-        files = db.execute(sa_text(_RETURNED_SQL.format(scope=scope)), params).fetchall()
-    if not files:
-        return 0
+    with _relink_lock:
+        with get_db_context() as db:
+            files = [f for f in db.execute(sa_text(_RETURNED_SQL.format(scope=scope)),
+                                           params).fetchall()
+                     if _unmatched.get(f.id) != _compared(f)]
+        if not files:
+            return 0
+        return _relink(files, cancel_check, progress_cb)
+
+
+def _compared(f) -> tuple:
+    """What a comparison of a file was made against: the file as scanned and
+    its track's unlinked rows."""
+    return (f.file_size_bytes, f.file_modified_at, tuple(f.rows))
+
+
+def _relink(files, cancel_check, progress_cb) -> int:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from database import get_db_context
+
     if shutil.which("fpcalc") is None:
         logger.warning("%d returned file(s) keep their analysis unlinked: fpcalc "
                        "(Chromaprint) is not on PATH, so their material cannot be "
@@ -272,12 +305,16 @@ def relink_returned_files(track_ids=None, cancel_check=None, progress_cb=None) -
             chunk = list(pool.map(fingerprint, files[start:start + _RELINK_CHUNK]))
             with get_db_context() as db:
                 for f, fp in chunk:
-                    if fp:
-                        linked += db.execute(_RELINK_SQL, {
-                            "mfid": f.id, "tid": f.track_id, "fp": fp,
-                            # rounded as get_or_create_local declares it
-                            "dur": (int(round(float(f.duration_seconds)))
-                                    if f.duration_seconds else None)}).rowcount
+                    hit = fp is not None and db.execute(_RELINK_SQL, {
+                        "mfid": f.id, "tid": f.track_id, "fp": fp,
+                        # rounded as get_or_create_local declares it
+                        "dur": (int(round(float(f.duration_seconds)))
+                                if f.duration_seconds else None)}).rowcount
+                    if hit:
+                        linked += 1
+                        _unmatched.pop(f.id, None)
+                    else:
+                        _unmatched[f.id] = _compared(f)
             done += len(chunk)
             if progress_cb:
                 progress_cb(done, len(files))

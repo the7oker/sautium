@@ -117,8 +117,8 @@ def scan(limit, no_skip, path, prune, yes):
                 return
             click.echo(f"   • Missing: {plan['pruned']} files; removing them also deletes")
             click.echo(f"     {plan['orphan_tracks']} tracks with no analysis and no listens,")
-            click.echo(f"     {plan['orphan_variants']} album variants, {plan['orphan_albums']} albums "
-                       f"and {plan['orphan_artists']} artists that nothing else holds")
+            click.echo(f"     {plan['orphan_albums']} albums and {plan['orphan_artists']} artists "
+                       "that nothing else holds")
             if not yes and not click.confirm("   Remove them?", default=False):
                 click.echo("   Nothing removed")
                 return

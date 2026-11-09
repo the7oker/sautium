@@ -976,7 +976,7 @@ def test_the_import_links_after_its_canon_and_before_the_notary(monkeypatch):
     assert done == ["canon", "relink", "notary", "scrobbles"]
 
 
-class _Linked(Exception):
+class _QueueRead(Exception):
     pass
 
 
@@ -988,18 +988,74 @@ def test_each_analysis_pass_links_returned_files_before_it_reads_its_queue(
         monkeypatch, module, cls, method):
     """A canon pass that re-keys later than the import (the AI tier, a
     MusicBrainz answer) leaves its returned file to the next pass, which
-    links it before it reads what is pending."""
+    links it — within the pass's own scope — before it reads what is
+    pending; a failed look does not stop the pass."""
     import importlib
     import provenance
     mod = importlib.import_module(module)
     monkeypatch.setattr(provenance, "require_fpcalc", lambda: None)
+    order = []
 
-    def linked(**kw):
-        raise _Linked
+    def relink(track_ids, **kw):
+        order.append(("relink", track_ids))
+        raise RuntimeError("a deadlock, say")
 
-    monkeypatch.setattr(provenance, "relink_returned_files", linked)
-    monkeypatch.setattr(mod, "get_db_context", lambda: pytest.fail("the queue was read first"))
+    def queue():
+        order.append(("queue", None))
+        raise _QueueRead
+
+    monkeypatch.setattr(provenance, "relink_returned_files", relink)
+    monkeypatch.setattr(mod, "get_db_context", queue)
     instance = object.__new__(getattr(mod, cls))
 
-    with pytest.raises(_Linked):
-        getattr(instance, method)()
+    with pytest.raises(_QueueRead):
+        getattr(instance, method)(track_ids=["t-1"])
+
+    assert order == [("relink", ["t-1"]), ("queue", None)]
+
+
+def test_a_folder_swapped_for_a_link_is_missing_at_the_yes_as_in_the_walk(
+        cur, library, main_module, monkeypatch, tmp_path):
+    """The walk never enters a link to a folder, so its files are planned as
+    missing; the yes, which could open them through the link, judges as the
+    walk did and removes them as asked."""
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+    _owned_file(cur, "Linked")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "01.flac").touch()
+    os.symlink(elsewhere, library / "Linked")
+    state = _rescan(main_module, monkeypatch)
+    assert state["prune_plan"]["counts"]["files"] == 1
+
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    assert state["result"]["prune"]["pruned"] == 1
+    assert _catalog(cur) == ["A"]
+
+
+def test_a_file_that_matched_nothing_is_not_fingerprinted_again(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """Another master returned: compared once, it matches nothing, and the
+    next imports and passes do not decode it again while nothing changed."""
+    import provenance
+    back = _away_and_removed(main_module, monkeypatch, library, tmp_path)
+    (back / "Pulse Archive" / "01.flac").unlink()
+    _flac(back / "Pulse Archive" / "01.flac", 41, "Carrier", track=1)
+    _move(back, library / "Ostrava Unit")
+    decoded = []
+    real = provenance.chromaprint_file
+    monkeypatch.setattr(provenance, "chromaprint_file",
+                        lambda path, *a: decoded.append(path) or real(path, *a))
+
+    _scan(main_module, monkeypatch, False)
+    assert sorted(Path(p).name for p in decoded) == ["01.flac", "02.flac"]
+    decoded.clear()
+
+    _scan(main_module, monkeypatch, False)
+    assert provenance.relink_returned_files() == 0
+
+    assert decoded == []
+    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
