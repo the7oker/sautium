@@ -115,7 +115,7 @@ def _import(c, mbid, entry, node="peer-a"):
     """What the cycle does with a verified entry: its author recorded
     (lb_slice_cycle.vet_authors), then the import."""
     core, blob_gz, cert, proof = q.verify_slice_entry(mbid, entry)
-    assert slice_trust.observe_author(c, cert, proof) == "verified"
+    assert slice_trust.observe_author(c, cert, proof, cert["pubkey"]) == "verified"
     return q.import_slice(c, mbid, core, blob_gz, entry, node, None)
 
 

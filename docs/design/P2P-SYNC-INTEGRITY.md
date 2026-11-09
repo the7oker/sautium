@@ -831,9 +831,12 @@ certificate, channel), the first sighting of each.
   channel TLS-bound to its key, carried `birth_cert`; `carried` (since
   2026-11-09, BIRTH-SYNC slice 2) — a peer's sealed payload carried the
   subject's certificate in its `authors` map beside records the subject
-  authored, and at least one of them verified here (`via` the peer that
-  delivered it: the pulled peer's TLS-bound key, or the key that signed the
-  push). It is the one channel by which two nodes that never meet witness
+  authored, and at least one of them verified here — a segment bundle only
+  when the subject's key sealed all its segments, so one bundle cannot
+  credit a key per segment (since 2026-11-09, TRUST-2) — (`via` the peer
+  that delivered it: the pulled peer's TLS-bound key, or the key that signed
+  the push; a key banned here delivers no sighting, since its date would be
+  that key's word). It is the one channel by which two nodes that never meet witness
   each other. The certificate is checked as on every channel, alone: the
   map carries a proof only where the sender has one — its own, or one it
   verified — and the receiver reads none, so an author is carried whether

@@ -300,6 +300,9 @@ def _mark(cur, kind: str, mbid: str, status: str, target: Optional[str]) -> None
         ON CONFLICT (kind, mbid) DO UPDATE
            SET status = EXCLUDED.status, target = EXCLUDED.target, answered_at = now()""",
                 (kind, mbid, status, target))
+    if status == "unknown":
+        from desktop.p2p import slice_checks
+        slice_checks.uncheck_subject(cur, kind, mbid)
 
 
 def _put_artist(cur, d: dict) -> str:

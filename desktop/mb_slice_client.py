@@ -398,7 +398,8 @@ class MBSliceClient:
                     passed.append(name)
                     continue
                 if slice_trust.refused_author(idconn, cert) \
-                        or slice_trust.observe_author(idconn, cert, proof) in (None, "failed"):
+                        or slice_trust.observe_author(idconn, cert, proof, relay or author) \
+                        in (None, "failed"):
                     dropped += 1
                     continue
                 if not slice_trust.subtree_ok(core, rows):

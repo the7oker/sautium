@@ -190,14 +190,16 @@ def evaluator(monkeypatch):
     outcome: dict = {}
     real = identity_registry.verify_relayed
 
-    def verify_relayed(c, cert, bound):
+    def verify_relayed(c, cert, bound, relay):
         if cert["pubkey"] not in outcome:
             return "unverified"
-        return real(c, cert, bound)
+        return real(c, cert, bound, relay)
 
     monkeypatch.setattr(identity_proof, "verify_proof", lambda bound, cert: outcome[cert["pubkey"]])
     monkeypatch.setattr(identity_pow, "mem_available_kib", lambda: None)
     monkeypatch.setattr(identity_registry, "_REJECTED", set())
+    monkeypatch.setattr(identity_registry, "_RELAYED_FAILED", {})
+    monkeypatch.setattr(identity_registry, "_RELAY_FAILED", {})
     monkeypatch.setattr(identity_registry, "verify_relayed", verify_relayed)
     return outcome
 
@@ -267,6 +269,58 @@ def test_a_relayed_proof_never_replaces_the_one_a_verification_proved(conn, scra
     assert _nonce(conn)[pub(author)] == proved["nonce"]
 
 
+def _signed_anew(cert: dict, **changed) -> dict:
+    """`cert` as the authority signs it again, the same anchor and new fields."""
+    from tests.slice_certs import AUTHORITY
+    again = {**cert, **changed}
+    again["sig"] = AUTHORITY.sign(birth_cert.canonical_payload(again)).hex()
+    return again
+
+
+def _status(c, key):
+    return _rows(c, "SELECT status::text, proof_nonce, verified_at IS NOT NULL FROM p2p_identities "
+                    "WHERE pubkey = %s", key)[0]
+
+
+def test_a_pow_certificate_signed_anew_is_unproven_until_its_proof_is_shown_again(
+        conn, scratch_dsn, evaluator):
+    """A pow proof is work over its certificate's signature: once the
+    authority signs the key's certificate anew, the nonce the earlier one
+    was proved with fails beside it, so the row is unverified with no nonce
+    — no relay forwards the old proof beside the new certificate — until a
+    proof of the new one verifies."""
+    author = _key()
+    first = certificate(pub(author), method="pow")
+    proved = {**proof(first), "nonce": "11" * identity_pow.NONCE_LEN}
+    identity_registry.observe(conn, first, proof=proved)
+    identity_registry.mark_verified(conn, pub(author), proved["nonce"])
+    # The same certificate, its signature spelled otherwise, is no new one.
+    identity_registry.observe(conn, {**first, "sig": first["sig"].upper()})
+    assert _status(conn, pub(author)) == ("verified", proved["nonce"], True)
+    again = _signed_anew(first, difficulty=first["difficulty"] + 1)
+    identity_registry.observe(conn, again, proof=proved)            # the old proof binds no more
+    assert _status(conn, pub(author)) == ("unverified", None, False)
+    assert slice_trust.author_certificate(conn, pub(author)) is None
+    assert slice_trust.author_entries(conn, [pub(author)]) == {}
+    shown = {**proof(again), "nonce": "22" * identity_pow.NONCE_LEN}
+    evaluator[pub(author)] = True
+    assert slice_trust.observe_author(conn, again, shown, pub(author)) == "verified"
+    assert _status(conn, pub(author)) == ("verified", shown["nonce"], True)
+    forwarded = slice_trust.author_certificate(conn, pub(author))
+    assert forwarded[0]["sig"] == again["sig"] and identity_proof.proof_binds(forwarded[1], forwarded[0])
+    # Signed anew as an email certificate: verified by its mailbox, no proof.
+    identity_registry.observe(conn, _signed_anew(again, method="email", email_token="ab" * 32,
+                                                 email_class="major"))
+    assert _status(conn, pub(author))[0] == "verified"
+    # A key whose proof failed here stays failed whatever it presents next.
+    liar = _key()
+    lie = certificate(pub(liar), method="pow")
+    identity_registry.observe(conn, lie)
+    identity_registry.mark_failed(conn, pub(liar), None, "pow_failed")
+    identity_registry.observe(conn, _signed_anew(lie, difficulty=lie["difficulty"] + 1))
+    assert _status(conn, pub(liar))[0] == "failed"
+
+
 def test_the_certificate_a_node_passes_on_is_taken_by_the_next_one(conn, scratch_dsn, evaluator):
     author = _key()
     cert = certificate(pub(author), method="pow")
@@ -280,7 +334,7 @@ def test_the_certificate_a_node_passes_on_is_taken_by_the_next_one(conn, scratch
     with conn.cursor() as cur:
         cur.execute("DELETE FROM p2p_identities WHERE pubkey = %s", (pub(author),))
     evaluator[pub(author)] = True
-    assert slice_trust.observe_author(conn, forwarded, forwarded_proof) == "verified"
+    assert slice_trust.observe_author(conn, forwarded, forwarded_proof, pub(_key())) == "verified"
     assert _rows(conn, "SELECT email_class FROM p2p_identities WHERE pubkey = %s", pub(author)) == [(None,)]
 
 

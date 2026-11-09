@@ -265,6 +265,101 @@ def test_an_lb_slice_is_passed_on_once_musicbrainz_credits_its_recordings_to_its
     assert lb_slice_queries.verify_slice_entry(artist, out["slices"][artist])[2]["pubkey"] == pub(author)
 
 
+def _checked(conn, s, group, release):
+    """`s`'s kept slice checked here against MusicBrainz's answers (the
+    artist known, the group credited to it), and passed on."""
+    key = s.name.lower()
+    assert mb_slice_queries.serve_slices(conn, [s.name], own_pubkey=OWN)["missing"] == [s.name]
+    _answer(conn, "artist", s.gid)
+    _browse(conn, s.gid, [group])
+    _answer(conn, "release", release)
+    assert slice_checks.evaluate(conn, "mb", key) is True
+    assert slice_checks.servable(conn, "mb", key, OWN) is True
+
+
+def test_an_answer_that_musicbrainz_does_not_know_a_subject_un_checks_the_slice_about_it(
+        conn, scratch_dsn, musicbrainz):
+    """Rule 0's condition 4 in its narrowest form: whatever asked — the
+    canon's own confirmation, another slice's check — an answer stored
+    unknown for an artist or a group a kept slice is indexed about takes
+    that slice's check away, so it is passed on again only after a check
+    that read the answer."""
+    import mb_answers
+    author, relay = _key(), _key()
+    s, other, third = Subtree("Unknown Since"), Subtree("Still Known"), Subtree("Another Version")
+    groups = {x.name: x.group() for x in (s, other, third)}
+    for x in (s, other, third):
+        _offer(scratch_dsn, author, x, relay=relay)
+        _checked(conn, x, groups[x.name][0], groups[x.name][1][0])
+    # A known answer takes nothing away; nor an unknown one of a kind that is
+    # no subject.
+    musicbrainz.artist(other.gid, other.name)
+    mb_answers.store("artist", other.gid, musicbrainz.lookup("artist", other.gid))
+    mb_answers.store("recording", str(uuid.uuid4()), None)
+    assert slice_checks.servable(conn, "mb", "still known", OWN) is True
+    # The artist unknown: its slice is checked no more — `missing`, its check
+    # queued — while the other is passed on as before.
+    mb_answers.store("artist", s.gid, None)
+    assert slice_checks.servable(conn, "mb", "unknown since", OWN) is None
+    assert slice_checks.servable(conn, "mb", "still known", OWN) is True
+    out = mb_slice_queries.serve_slices(conn, [s.name, other.name], own_pubkey=OWN)
+    assert out["missing"] == [s.name] and list(out["slices"]) == [other.name]
+    assert _rows(conn, "SELECT key FROM slice_check_plans") == [("unknown since",)]
+    # The check that follows reads the answer: an artist MusicBrainz does not
+    # know whose release it still knows is an honest older dump's — passed on.
+    assert slice_checks.evaluate(conn, "mb", "unknown since") is True
+    assert slice_checks.servable(conn, "mb", "unknown since", OWN) is True
+    # A group answered unknown takes its slice's check away too.
+    mb_answers.store("release_group", groups[other.name][0], None)
+    assert slice_checks.servable(conn, "mb", "still known", OWN) is None
+    # By the version of the blob its index row names: the name's blob since
+    # replaced keeps its check.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE slice_index SET payload_sha256 = %s WHERE key = 'another version'",
+                    ("ab" * 32,))
+    mb_answers.store("artist", third.gid, None)
+    assert slice_checks.servable(conn, "mb", "another version", OWN) is True
+    # An LB slice of an artist answered unknown.
+    artist, heard = str(uuid.uuid4()), str(uuid.uuid4())
+    assert _offer_lb(scratch_dsn, author, {artist: {
+        "dump_version": dump_version(3), "artist": [10, 3], "recordings": [[heard, 5, 2, [artist]]],
+        "truncated": False}}, relay)["imported"] == 1
+    assert lb_slice_queries.serve_slices(conn, [artist], own_pubkey=OWN)["missing"] == [artist]
+    _answer(conn, "artist", artist)
+    _credited(conn, heard, artist)
+    assert slice_checks.evaluate(conn, "lb", artist) is True
+    assert slice_checks.servable(conn, "lb", artist, OWN) is True
+    mb_answers.store("artist", artist, None)
+    assert slice_checks.servable(conn, "lb", artist, OWN) is None
+
+
+def test_a_verified_author_s_row_of_an_older_format_is_passed_on_by_no_slice_lane(
+        conn, scratch_dsn, monkeypatch):
+    """After a certificate format bump, a registry row not observed since is
+    no certificate the next hop takes: neither family passes its author's
+    slices on under it."""
+    from desktop.p2p import birth_cert
+    author, relay = _key(), _key()
+    s = Subtree("Old Format")
+    group, (release,) = s.group()
+    _offer(scratch_dsn, author, s, relay=relay)
+    _checked(conn, s, group, release)
+    artist, heard = str(uuid.uuid4()), str(uuid.uuid4())
+    _offer_lb(scratch_dsn, author, {artist: {
+        "dump_version": dump_version(3), "artist": [10, 3], "recordings": [[heard, 5, 2, [artist]]],
+        "truncated": False}}, relay)
+    lb_slice_queries.serve_slices(conn, [artist], own_pubkey=OWN)
+    _answer(conn, "artist", artist)
+    _credited(conn, heard, artist)
+    assert slice_checks.evaluate(conn, "lb", artist) is True
+    assert list(mb_slice_queries.serve_slices(conn, [s.name], own_pubkey=OWN)["slices"]) == [s.name]
+    assert list(lb_slice_queries.serve_slices(conn, [artist], own_pubkey=OWN)["slices"]) == [artist]
+    monkeypatch.setattr(birth_cert, "CERT_VERSION", birth_cert.CERT_VERSION + 1)
+    assert slice_trust.author_certificate(conn, pub(author)) is None
+    assert mb_slice_queries.serve_slices(conn, [s.name], own_pubkey=OWN)["missing"] == [s.name]
+    assert lb_slice_queries.serve_slices(conn, [artist], own_pubkey=OWN)["missing"] == [artist]
+
+
 # --------------------------------------------------------------------------
 # What an honest dump explains
 # --------------------------------------------------------------------------

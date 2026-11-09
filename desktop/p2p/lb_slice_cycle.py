@@ -140,10 +140,11 @@ def published_newest(dsn: str, family: str):
         conn.close()
 
 
-def vet_authors(dsn: str, verified: list) -> list:
+def vet_authors(dsn: str, verified: list, relay: str) -> list:
     """The verified entries whose author this node takes: no penalty, mailbox
-    not burned, identity recorded (and a `pow` proof evaluated when the node
-    can afford it). `verified` items end with (certificate, proof)."""
+    not burned, identity recorded (and a `pow` proof that `relay` passed on
+    evaluated when the node can afford it). `verified` items end with
+    (certificate, proof)."""
     from desktop.p2p import slice_trust
     with _checks_lock:
         conn = _checks(dsn)
@@ -152,7 +153,7 @@ def vet_authors(dsn: str, verified: list) -> list:
             cert, proof = item[-2], item[-1]
             if slice_trust.refused_author(conn, cert):
                 continue
-            if slice_trust.observe_author(conn, cert, proof) in (None, "failed"):
+            if slice_trust.observe_author(conn, cert, proof, relay) in (None, "failed"):
                 continue
             kept.append(item)
         return kept
@@ -652,8 +653,12 @@ class LbSliceCycle:
                                f"signature/identity/version check failed — dropped")
                 continue
             verified.append((mbid, out[0], out[1], entry, out[2], out[3]))
+        relay = (api.peer_pubkey or node or "").lower()
         if verified:
-            kept = await loop.run_in_executor(None, vet_authors, self.db_dsn, verified)
+            # A refused source's proofs are not worth an evaluation.
+            if await loop.run_in_executor(None, source_refused, self.db_dsn, relay):
+                return {"error": "source carries a penalty"}
+            kept = await loop.run_in_executor(None, vet_authors, self.db_dsn, verified, relay)
             dropped += len(verified) - len(kept)
             missing += [v[0] for v in verified if v not in kept]
             verified = kept
@@ -661,9 +666,6 @@ class LbSliceCycle:
             return {"error": "all slices failed verification"}
         recordings = 0
         if verified:
-            relay = (api.peer_pubkey or node or "").lower()
-            if await loop.run_in_executor(None, source_refused, self.db_dsn, relay):
-                return {"error": "source carries a penalty"}
             recordings = await loop.run_in_executor(
                 None, import_batch, self.db_dsn, node, source_addr, verified, relay)
             await loop.run_in_executor(None, notify, self.db_dsn, "sautium_lb_done")

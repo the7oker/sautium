@@ -248,6 +248,43 @@ def test_banned_and_own_keys_are_recorded_on_no_channel(recorder, conn):
     assert sorted(r[0] for r in _rows(conn, anyone)) == sorted(witness.CHANNELS)
 
 
+def _failed_without_its_ban_row(conn, key: str) -> None:
+    """A key whose proof failed here, its ban row evicted past the cap since."""
+    identity_registry.observe(conn, certificate(key))
+    identity_registry.mark_failed(conn, key, None, "pow_failed")
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM p2p_node_bans WHERE pubkey = %s", (key,))
+
+
+def test_a_key_whose_proof_failed_here_is_recorded_on_no_channel_once_its_ban_row_is_gone(
+        recorder, conn):
+    failed, anyone = _key_hex(), _key_hex()
+    _failed_without_its_ban_row(conn, failed)
+    for channel in witness.CHANNELS:
+        via = _key_hex() if channel == "carried" else None
+        assert recorder.record(certificate(failed), channel, failed, via) is False
+        assert recorder.record(certificate(anyone), channel, anyone, via)
+    assert _rows(conn, failed) == []
+    assert sorted(r[0] for r in _rows(conn, anyone)) == sorted(witness.CHANNELS)
+
+
+def test_a_sighting_a_key_banned_here_delivered_is_refused(recorder, conn):
+    """The certificate may be genuine, but a carried sighting's date is its
+    deliverer's word: a banned node must not start an accomplice's age clock
+    — banned by a ban row, or by a proof that failed here."""
+    banned, failed, honest = _key_hex(), _key_hex(), _key_hex()
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO p2p_node_bans (pubkey, reason) VALUES (%s, 'test')", (banned,))
+    _failed_without_its_ban_row(conn, failed)
+    subject = _key_hex()
+    cert = certificate(subject)
+    assert recorder.record(cert, "carried", subject, banned.upper()) is False
+    assert recorder.record(cert, "carried", subject, failed) is False
+    assert _rows(conn, subject) == []
+    assert recorder.record(cert, "carried", subject, honest)
+    assert [(r[0], r[2]) for r in _rows(conn, subject)] == [("carried", honest)]
+
+
 def test_a_carried_sighting_names_its_deliverer(recorder, conn):
     subject, via = _key_hex(), _key_hex()
     assert recorder.record(certificate(subject), "carried", subject, via.upper())

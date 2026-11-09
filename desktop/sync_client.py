@@ -753,8 +753,8 @@ class SyncClient:
         invalid OR MISSING seal is dropped whole — a broken seal on
         TLS-protected wire is evidence of tampering, and an unsigned one is a
         claim this node would go on to redistribute unattributably. Returns
-        the count of imported tracks; `authors` gains the authors of every
-        bundle whose seals all verified."""
+        the count of imported tracks; `authors` gains the author of every
+        bundle whose seals all verified under one key."""
         batch_ok = self._batch_verifier(batches)
 
         # Decode + verify outside the write path: (item, [(idx, floats, seal)])
@@ -804,7 +804,12 @@ class SyncClient:
                                item.get("track_uuid", "?")[:8], bad)
             elif segs:
                 decoded.append((item, segs))
-                authors.update(seal[0].lower() for _i, _f, seal in segs)
+                # An honest bundle is one author's analysis, sealed by one
+                # key; one that mixes keys imports all the same, but credits
+                # no author: one bundle must not carry a certificate per key.
+                sealed_by = {seal[0].lower() for _i, _f, seal in segs}
+                if len(sealed_by) == 1:
+                    authors.update(sealed_by)
 
         if not decoded:
             return 0

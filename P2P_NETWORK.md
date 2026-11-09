@@ -575,9 +575,12 @@ POST /api/sync/offer, /push/{…}  carry: segments, audio_features, track_mbids
   two nodes that never meet witness each other. A peer's sealed payload
   carries an author's certificate in its `authors` map (above), and the
   receiver records it after the import, only for an author with a record
-  whose seal verified there. `via` is the peer that delivered it: the pulled
-  peer's TLS-bound key, or the key that signed the push. The receiver takes
-  the certificate alone, checked as on every channel. It writes no
+  whose seal verified there (a segment bundle credits its author only when
+  one key sealed all its segments, as an honest one always is — since
+  2026-11-09, TRUST-2). `via` is the peer that delivered it: the pulled
+  peer's TLS-bound key, or the key that signed the push; a sighting a key
+  banned here delivered is refused (a ban row, or a proof that failed here).
+  The receiver takes the certificate alone, checked as on every channel. It writes no
   identity-registry row, and evaluates no proof. A share file, or an
   unsigned push, is no sighting. The deliverer is never carried by its own
   payload — a pusher is witnessed through its push's introduction, a pulled

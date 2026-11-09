@@ -328,7 +328,7 @@ def test_each_peer_session_ends_by_its_deadline_and_by_the_runs(monkeypatch):
 
     monkeypatch.setattr(sync_walk, "SyncClient", _Sync)
     walk = _walk()
-    api = SimpleNamespace(session_deadline=None)
+    api = SimpleNamespace(session_deadline=None, peer_pubkey=None)
 
     walk._run_deadline = time.monotonic() + 5            # the run ends first
     asyncio.run(walk._sync_from_peer("x", ([], []), lambda m: None, None, peer_api=api))

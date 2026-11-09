@@ -151,6 +151,17 @@ def read_setting(dsn: str, key: str):
         conn.close()
 
 
+def peer_refused(dsn: str, pubkey: str) -> bool:
+    """A peer banned here (identity_registry.refused), as every lane of this
+    node's peer surface refuses it."""
+    from desktop.p2p import identity_registry
+    conn = _connect(dsn)
+    try:
+        return identity_registry.refused(conn, pubkey)
+    finally:
+        conn.close()
+
+
 def write_settings(dsn: str, values: dict) -> None:
     conn = _connect(dsn)
     try:
@@ -973,6 +984,13 @@ class SyncWalk:
         if not peer_api:
             _progress(f"  {peer_addr} not reachable, skipping")
             return {"error": "unreachable"}
+        # Only the channel names the key, so a banned node is probed like any
+        # other — its /health counts towards the network's size — but nothing
+        # is pulled from it or carried to it: what it delivers would come on
+        # the word of a key this node refuses on every lane of its own.
+        if peer_api.peer_pubkey and await self.db(peer_refused, peer_api.peer_pubkey):
+            _progress(f"  {peer_addr} is a node banned here, skipping")
+            return {"error": "refused"}
 
         peer_api.session_deadline = min(time.monotonic() + PEER_SESSION_S,
                                         self._run_deadline)

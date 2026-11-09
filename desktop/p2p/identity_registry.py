@@ -34,7 +34,9 @@ Registry rules for a pubkey we already know: the authority anchor
 and the update is refused); `method` only ever moves pow → email (a device
 holding a superseded pow certificate for an email identity is stale, not
 suspicious); `email_token` may change (a changed mailbox); `first_seen_at`
-and a `verified` status survive every update — the work was done.
+survives every update, and a `verified` status every update but one: a
+`pow` certificate signed anew, whose proof must be shown again — the work
+was done over the earlier signature, which is the proof's challenge.
 
 Succession (Ф13). A password change makes a new key; re-verifying the
 mailbox makes the notary name the previous holder in the new certificate
@@ -223,6 +225,20 @@ def is_banned(conn, pubkey: str) -> bool:
         return cur.fetchone() is not None
 
 
+# A key refused here on every lane, as the peer middlewares refuse it: a ban
+# row, or a proof that failed here — the status stays when its ban row is
+# evicted past BAN_ROWS_CAP. `{key}` is the SQL of a lower-case key.
+REFUSED_SQL = """(EXISTS (SELECT 1 FROM p2p_node_bans WHERE pubkey = {key})
+                  OR EXISTS (SELECT 1 FROM p2p_identities
+                              WHERE pubkey = {key} AND status = 'failed'))"""
+
+
+def refused(conn, pubkey: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT " + REFUSED_SQL.format(key="%(k)s"), {"k": pubkey.lower()})
+        return bool(cur.fetchone()[0])
+
+
 def observe(conn, cert: dict, *, proof: Optional[dict] = None,
             addr: Optional[str] = None) -> dict:
     """Upsert a certified identity under the registry rules (module doc).
@@ -278,25 +294,43 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
             """, (addr_id, subnet_id, pubkey))
         else:
             upgrade = existing["method"] == "pow" and cert["method"] == "email"
+            # A pow proof is work over the certificate's signature (its
+            # challenge), so a pow certificate signed anew is unproven: the
+            # nonce proved for the earlier one would fail beside it. Compared
+            # as bytes — the registry keeps whichever spelling it last saw.
+            reproved = (existing["method"] == "pow" and cert["method"] == "pow"
+                        and bytes.fromhex(existing["cert_sig"]) != bytes.fromhex(cert["sig"]))
             cur.execute("""
                 UPDATE p2p_identities
-                   SET cert_v = %s, method = %s, difficulty = %s, params_version = %s,
-                       email_token = %s, email_class = %s, email_domain_token = %s,
-                       issuer = %s, cert_sig = %s, predecessor = COALESCE(%s, predecessor),
-                       -- the nonce a verification proved stays: the work was done
-                       proof_nonce = CASE WHEN status = 'verified' THEN proof_nonce
-                                          ELSE COALESCE(%s, proof_nonce) END,
-                       status = CASE WHEN %s AND status <> 'failed' THEN 'verified'::p2p_identity_status
+                   SET cert_v = %(v)s, method = %(method)s, difficulty = %(difficulty)s,
+                       params_version = %(params)s, email_token = %(token)s,
+                       email_class = %(klass)s, email_domain_token = %(domain)s,
+                       issuer = %(issuer)s, cert_sig = %(sig)s,
+                       predecessor = COALESCE(%(predecessor)s, predecessor),
+                       -- the nonce a verification proved stays while its certificate does
+                       proof_nonce = CASE WHEN %(reproved)s THEN %(nonce)s
+                                          WHEN status = 'verified' THEN proof_nonce
+                                          ELSE COALESCE(%(nonce)s, proof_nonce) END,
+                       status = CASE WHEN status = 'failed' THEN status
+                                     WHEN %(upgrade)s THEN 'verified'::p2p_identity_status
+                                     WHEN %(reproved)s THEN 'unverified'::p2p_identity_status
                                      ELSE status END,
-                       verified_at = CASE WHEN %s AND status <> 'failed' AND verified_at IS NULL
-                                          THEN now() ELSE verified_at END,
+                       verified_at = CASE WHEN status = 'failed' THEN verified_at
+                                          WHEN %(upgrade)s THEN COALESCE(verified_at, now())
+                                          WHEN %(reproved)s THEN NULL
+                                          ELSE verified_at END,
                        last_seen_at = now(), contacts = contacts + 1,
-                       last_addr = COALESCE(%s, last_addr),
-                       last_subnet = COALESCE(%s, last_subnet)
-                 WHERE pubkey = %s
-            """, (cert["v"], cert["method"], cert["difficulty"], cert["params_version"],
-                  token, klass, domain, cert["issuer"], cert["sig"], predecessor, proof_nonce,
-                  upgrade, upgrade, addr_id, subnet_id, pubkey))
+                       last_addr = COALESCE(%(addr)s, last_addr),
+                       last_subnet = COALESCE(%(subnet)s, last_subnet)
+                 WHERE pubkey = %(pubkey)s
+            """, {"v": cert["v"], "method": cert["method"], "difficulty": cert["difficulty"],
+                  "params": cert["params_version"], "token": token, "klass": klass,
+                  "domain": domain, "issuer": cert["issuer"], "sig": cert["sig"],
+                  "predecessor": predecessor, "reproved": reproved, "nonce": proof_nonce,
+                  "upgrade": upgrade, "addr": addr_id, "subnet": subnet_id, "pubkey": pubkey})
+            if reproved and existing["status"] != "failed":
+                logger.info("identity %s presented a pow certificate signed anew — its proof "
+                            "is asked again", pubkey[:8])
             _succeed(cur, pubkey, cert)
     conn.commit()
     row = get(conn, pubkey)
@@ -402,34 +436,59 @@ _EVALUATION = threading.Semaphore(1)
 # process, however often a node forwards them again.
 _REJECTED: set = set()
 _REJECTED_MAX = 4096
-# When a key's relayed proofs failed in the last day: at most _RELAYED_PER_DAY
-# distinct nonces of one key are evaluated a day — a node that sends fifty fake
-# proofs costs three 2 GiB evaluations, never fifty, and the true proof an
-# honest relay brings the same day is still among them.
+# When relayed proofs failed in the last day, by the key of the node that
+# brought them and by the author they claimed: at most _RELAYED_PER_DAY failed
+# nonces are evaluated a day from one relay, whatever authors it names, and of
+# one author from relays other than itself — a node that sends fifty fake
+# proofs costs three 2 GiB evaluations, never fifty. The author's own
+# presentation (it passed its slice on itself) is evaluated whatever others
+# brought for it: anyone can serve an honest author's slices beside a false
+# nonce, and that must not keep the author's true proof from verifying.
 _RELAYED_FAILED: Dict[str, List[float]] = {}
+_RELAY_FAILED: Dict[str, List[float]] = {}
 _RELAYED_PER_DAY = 3
 _RELAYED_DAY_S = 86400.0
 
 
-def verify_relayed(conn, cert: dict, proof: Optional[dict]) -> str:
-    """A `pow` author's proof that came with one of its slices from another
-    node — that node's word, not the author's. Evaluated on this thread when
-    the node can afford it now (another evaluation running, or too little
-    memory, leaves it 'unverified' for a later try); a proof that verifies is
-    kept as the author's own verification keeps it ('verified'); one that does
-    not is no evidence against the author — nothing is recorded, the slice
-    carrying it is dropped ('failed'), that nonce is never evaluated again, and
-    after _RELAYED_PER_DAY failed nonces of the key in a day no other is
-    evaluated that day ('unverified': kept, not passed on). Never called for a
-    verified author."""
+def _failed_today(failed: Dict[str, List[float]], key: str, now: float) -> List[float]:
+    return [t for t in failed.get(key, ()) if now - t < _RELAYED_DAY_S]
+
+
+def _note_failed(failed: Dict[str, List[float]], key: str, recent: List[float], now: float) -> None:
+    if len(failed) >= _REJECTED_MAX:
+        failed.clear()
+    failed[key] = recent + [now]
+
+
+def verify_relayed(conn, cert: dict, proof: Optional[dict], relay: str) -> str:
+    """A `pow` author's proof that came with one of its slices from `relay`,
+    the key of the node that passed it on — that node's word, and the
+    author's own only where `relay` is the author. Evaluated on this thread
+    when the node can afford it now (the load meter at its ceiling, another
+    evaluation running or too little memory leave it 'unverified' for a later
+    try, where the identity gate's `admit` answers busy); a proof that
+    verifies is kept as the author's own verification keeps it ('verified');
+    one that does not is no evidence against the author — nothing is
+    recorded, the slice carrying it is dropped ('failed'), and that nonce is
+    never evaluated again. After _RELAYED_PER_DAY failed nonces in a day
+    brought by `relay`, none it brings is evaluated that day, and after as
+    many of the author's, none of the author's that another node brings
+    ('unverified': kept, not passed on). Never called for a verified
+    author."""
     if not identity_proof.proof_binds(proof, cert):
         return "unverified"
-    seen = (cert["pubkey"].lower(), proof["nonce"])
+    author, relay = cert["pubkey"].lower(), (relay or "").lower()
+    seen = (author, proof["nonce"])
     if seen in _REJECTED:
         return "failed"
     now = time.monotonic()
-    recent = [t for t in _RELAYED_FAILED.get(seen[0], ()) if now - t < _RELAYED_DAY_S]
-    if len(recent) >= _RELAYED_PER_DAY:
+    by_relay = _failed_today(_RELAY_FAILED, relay, now)
+    of_author = _failed_today(_RELAYED_FAILED, author, now)
+    if len(by_relay) >= _RELAYED_PER_DAY or (relay != author and len(of_author) >= _RELAYED_PER_DAY):
+        return "unverified"
+    from desktop.p2p import load_meter
+    meter = load_meter.current()
+    if meter is not None and meter.headroom < load_meter.VERIFY_MIN_HEADROOM:
         return "unverified"
     if not _EVALUATION.acquire(blocking=False):
         return "unverified"
@@ -444,16 +503,16 @@ def verify_relayed(conn, cert: dict, proof: Optional[dict]) -> str:
     finally:
         _EVALUATION.release()
     if ok:
-        mark_verified(conn, cert["pubkey"].lower(), proof["nonce"])
+        mark_verified(conn, author, proof["nonce"])
         return "verified"
     if len(_REJECTED) >= _REJECTED_MAX:
         _REJECTED.clear()
     _REJECTED.add(seen)
-    if len(_RELAYED_FAILED) >= _REJECTED_MAX:
-        _RELAYED_FAILED.clear()
-    _RELAYED_FAILED[seen[0]] = recent + [time.monotonic()]
-    logger.warning("a relayed proof of identity %s did not verify — its slice dropped",
-                   cert["pubkey"][:8])
+    now = time.monotonic()
+    _note_failed(_RELAY_FAILED, relay, by_relay, now)
+    _note_failed(_RELAYED_FAILED, author, of_author, now)
+    logger.warning("a proof of identity %s relayed by %s did not verify — its slice dropped",
+                   author[:8], relay[:8] or "-")
     return "failed"
 
 

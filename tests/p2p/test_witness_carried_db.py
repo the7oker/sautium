@@ -385,6 +385,76 @@ def test_only_an_author_of_a_record_the_import_took_is_carried(conn, recorder, s
     assert _carried(conn, pub(honest)) == [peer] and _carried(conn, pub(forger)) == []
 
 
+def test_a_bundle_sealed_by_more_than_one_key_imports_and_credits_no_author(conn, recorder, scratch_dsn):
+    """An honest bundle is one author's analysis under one key: one whose
+    segments name two keys still imports, every seal verified, but carries
+    neither key's certificate — one bundle must not credit a key a segment."""
+    one, two = _key(), _key()
+    _witnessed(recorder, one)
+    _witnessed(recorder, two)
+    track, recording = _track(conn)
+    with conn.cursor() as cur:
+        seal_track(cur, one, track, MODEL, recording=recording)
+    payload = sync_queries.PULL_HANDLERS["segments"](conn, [track])
+    _forget(conn, track)
+    with conn.cursor() as cur:
+        seal_track(cur, two, track, MODEL, recording=recording)
+    other = sync_queries.PULL_HANDLERS["segments"](conn, [track])
+    _forget(conn, track)
+    payload["items"][0]["segments"][1] = other["items"][0]["segments"][1]
+    payload["batches"].update(other["batches"])
+    payload["authors"].update(other["authors"])
+    peer = pub(_key())
+    assert _pull(scratch_dsn, _Peer(peer, recorder), "segments", track, payload) == 1
+    assert _carried(conn, pub(one)) == [] and _carried(conn, pub(two)) == []
+    # The same track sealed by one key alone: its author is carried.
+    _forget(conn, track)
+    assert _pull(scratch_dsn, _Peer(peer, recorder), "segments", track, other) == 1
+    assert _carried(conn, pub(two)) == [peer]
+
+
+class _WalkPeer:
+    """A peer the walk dialed: /health answered on a channel bound to `key`."""
+
+    def __init__(self, key: str):
+        self.peer_pubkey = key
+        self.base_url = "https://198.51.100.30:21000"
+
+
+@pytest.mark.parametrize("ban", ["row", "failed"])
+def test_the_walk_pulls_nothing_from_and_carries_nothing_to_a_peer_banned_here(
+        conn, scratch_dsn, monkeypatch, ban):
+    import asyncio
+    pulled = []
+
+    class _Client:
+        def __init__(self, api_client, **_kw):
+            self.peer_capabilities = set()
+            pulled.append(api_client.peer_pubkey)
+
+        def run_sync(self, *_a):
+            return {"segments": 0}
+    monkeypatch.setattr(sync_walk, "SyncClient", _Client)
+    walk = sync_walk.SyncWalk(scratch_dsn, identity=lambda: None, sharing_enabled=lambda: True)
+    banned, honest = pub(_key()), pub(_key())
+    if ban == "row":
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO p2p_node_bans (pubkey, reason) VALUES (%s, 'test')", (banned,))
+    else:
+        identity_registry.observe(conn, certificate(banned))
+        identity_registry.mark_failed(conn, banned, None, "pow_failed")
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM p2p_node_bans WHERE pubkey = %s", (banned,))
+
+    def sync(key):
+        return asyncio.run(walk._sync_from_peer("198.51.100.30:21000", ([], []), lambda _m: None, None,
+                                                peer_api=_WalkPeer(key)))
+    assert sync(banned.upper()) == {"error": "refused"}
+    assert pulled == []
+    assert sync(honest) == {"segments": 0}
+    assert pulled == [honest]
+
+
 def test_the_deliverer_is_no_carried_author(conn, recorder, scratch_dsn):
     peer, author = _key(), _key()
     _witnessed(recorder, peer)

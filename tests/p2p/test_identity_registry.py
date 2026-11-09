@@ -7,6 +7,7 @@ import asyncio
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from desktop.p2p import identity_registry as reg
 
@@ -93,28 +94,90 @@ def test_while_the_slice_cycle_evaluates_a_request_is_told_busy_at_once(monkeypa
     assert (out.status, out.retry_after) == ("busy", reg.RETRY_BUSY_SECONDS)
 
 
+def _evaluator(monkeypatch, true_nonce="aa"):
+    """verify_relayed before a fresh process, its 2 GiB evaluation faked (a
+    proof verifies when its nonce is `true_nonce`) and the load meter absent;
+    returns the nonces evaluated and the keys verified."""
+    from desktop.p2p import load_meter
+    evaluated, verified = [], []
+    monkeypatch.setattr(reg, "_RELAYED_FAILED", {})
+    monkeypatch.setattr(reg, "_RELAY_FAILED", {})
+    monkeypatch.setattr(reg, "_REJECTED", set())
+    monkeypatch.setattr(reg.identity_proof, "proof_binds", lambda proof, cert: True)
+    monkeypatch.setattr(reg.identity_proof, "verify_proof",
+                        lambda proof, cert: evaluated.append(proof["nonce"]) or proof["nonce"] == true_nonce)
+    monkeypatch.setattr(reg.identity_pow, "mem_available_kib", lambda: None)
+    monkeypatch.setattr(reg, "mark_verified", lambda conn, key, nonce: verified.append((key, nonce)))
+    monkeypatch.setattr(load_meter, "current", lambda: None)
+    return evaluated, verified
+
+
 def test_a_key_s_relayed_proofs_are_evaluated_three_nonces_a_day_and_a_true_one_still_verifies(monkeypatch):
     """Fifty fake nonces for one key cost three 2 GiB evaluations, not fifty;
     a nonce that failed is never evaluated again; and an honest relay's true
     proof, coming after a forger's fake one the same day, still verifies the
     author."""
-    evaluated, verified = [], []
-    monkeypatch.setattr(reg, "_RELAYED_FAILED", {})
-    monkeypatch.setattr(reg, "_REJECTED", set())
-    monkeypatch.setattr(reg.identity_proof, "proof_binds", lambda proof, cert: True)
-    monkeypatch.setattr(reg.identity_proof, "verify_proof",
-                        lambda proof, cert: evaluated.append(proof["nonce"]) or proof["nonce"] == "aa")
-    monkeypatch.setattr(reg.identity_pow, "mem_available_kib", lambda: None)
-    monkeypatch.setattr(reg, "mark_verified", lambda conn, key, nonce: verified.append((key, nonce)))
+    evaluated, verified = _evaluator(monkeypatch)
+    forger, honest = "f0" * 32, "e0" * 32
     cert = {"pubkey": "cd" * 32}
-    assert reg.verify_relayed(None, cert, {"nonce": "01"}) == "failed"
-    assert reg.verify_relayed(None, cert, {"nonce": "01"}) == "failed"      # never evaluated again
-    assert reg.verify_relayed(None, cert, {"nonce": "aa"}) == "verified"    # the true proof
+    assert reg.verify_relayed(None, cert, {"nonce": "01"}, forger) == "failed"
+    assert reg.verify_relayed(None, cert, {"nonce": "01"}, honest) == "failed"   # never evaluated again
+    assert reg.verify_relayed(None, cert, {"nonce": "aa"}, honest) == "verified"  # the true proof
     assert verified == [(cert["pubkey"], "aa")]
     forged = {"pubkey": "ab" * 32}
-    out = [reg.verify_relayed(None, forged, {"nonce": f"{n:02x}"}) for n in range(1, 51)]
+    out = [reg.verify_relayed(None, forged, {"nonce": f"{n:02x}"}, f"{n:02x}" * 32) for n in range(1, 51)]
     assert out == ["failed"] * 3 + ["unverified"] * 47
     assert evaluated == ["01", "aa", "01", "02", "03"]
     other = {"pubkey": "ef" * 32}
-    assert reg.verify_relayed(None, other, {"nonce": "01"}) == "failed"   # another key is its own
+    assert reg.verify_relayed(None, other, {"nonce": "01"}, honest) == "failed"   # another key is its own
     assert evaluated[-1] == "01" and len(evaluated) == 6
+
+
+def test_one_relay_s_false_proofs_cost_three_evaluations_a_day_whatever_authors_it_names(monkeypatch):
+    """A node that brings a false proof for each of fifty authors costs three
+    2 GiB evaluations, not fifty; another relay's proofs of those authors are
+    still evaluated."""
+    evaluated, verified = _evaluator(monkeypatch)
+    forger, honest = "f0" * 32, "e0" * 32
+    authors = [{"pubkey": f"{n:02x}" * 32} for n in range(1, 51)]
+    out = [reg.verify_relayed(None, a, {"nonce": "01"}, forger) for a in authors]
+    assert out == ["failed"] * 3 + ["unverified"] * 47
+    assert len(evaluated) == 3
+    assert reg.verify_relayed(None, authors[10], {"nonce": "aa"}, honest) == "verified"
+    assert verified == [(authors[10]["pubkey"], "aa")]
+
+
+def test_false_proofs_brought_for_an_author_never_keep_its_own_presentation_from_verifying(monkeypatch):
+    """Anyone can serve an honest author's slices beside a false nonce:
+    three of them stop other relays' proofs of that author from being
+    evaluated that day, never the proof the author presents itself."""
+    evaluated, verified = _evaluator(monkeypatch)
+    author = {"pubkey": "cd" * 32}
+    for n, forger in enumerate(("f1" * 32, "f2" * 32, "f3" * 32), start=1):
+        assert reg.verify_relayed(None, author, {"nonce": f"{n:02x}"}, forger) == "failed"
+    assert reg.verify_relayed(None, author, {"nonce": "aa"}, "e0" * 32) == "unverified"   # the bound
+    assert evaluated == ["01", "02", "03"]
+    assert reg.verify_relayed(None, author, {"nonce": "aa"}, author["pubkey"].upper()) == "verified"
+    assert evaluated[-1] == "aa" and verified == [(author["pubkey"], "aa")]
+    # An author presenting false proofs of itself is bounded as any relay is.
+    liar = {"pubkey": "ab" * 32}
+    out = [reg.verify_relayed(None, liar, {"nonce": f"{n:02x}"}, liar["pubkey"]) for n in range(1, 6)]
+    assert out == ["failed"] * 3 + ["unverified"] * 2
+
+
+def test_a_relayed_proof_waits_while_the_load_meter_is_at_its_ceiling(monkeypatch):
+    """As the identity gate's admit answers busy at the ceiling, a relayed
+    proof is not evaluated then — kept for a later try, nothing counted —
+    and the permit is not taken."""
+    from desktop.p2p import load_meter
+    evaluated, verified = _evaluator(monkeypatch)
+    permit = _Permit()
+    monkeypatch.setattr(reg, "_EVALUATION", permit)
+    meter = SimpleNamespace(headroom=load_meter.VERIFY_MIN_HEADROOM / 2)
+    monkeypatch.setattr(load_meter, "current", lambda: meter)
+    author = {"pubkey": "cd" * 32}
+    assert reg.verify_relayed(None, author, {"nonce": "aa"}, author["pubkey"]) == "unverified"
+    assert evaluated == [] and permit.blocking == []
+    meter.headroom = load_meter.VERIFY_MIN_HEADROOM
+    assert reg.verify_relayed(None, author, {"nonce": "aa"}, author["pubkey"]) == "verified"
+    assert evaluated == ["aa"] and permit.blocking == [False]

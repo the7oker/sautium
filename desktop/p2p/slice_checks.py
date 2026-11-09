@@ -28,7 +28,8 @@ A kept blob is passed on (`servable`) when it is this node's own build, or:
 
 The check is lazy: a blob is checked the first time a peer asks for it — that
 answer is `missing`, and the requester takes the next source — and again once
-CHECK_DAYS have passed. `/health` advertises the blobs that could pass
+CHECK_DAYS have passed, or as soon as MusicBrainz answers one of its subject
+artists or groups unknown, whatever asked (`uncheck_subject`). `/health` advertises the blobs that could pass
 (`checkable_count`); without that, a node holding only unchecked blobs would
 never be asked and so never check.
 
@@ -319,6 +320,38 @@ def request_check(conn, family: str, key: str, rng: Optional[random.Random] = No
 
 _PAYLOAD = {"mb": "coalesce(payload_sha256, encode(sha256(blob_gz), 'hex'))",
             "lb": "encode(sha256(blob_gz), 'hex')"}
+
+# Which of a kept blob's indexed subjects (slice_index) an answer's kind names.
+_SUBJECT_COLUMN = {"artist": "subject_artists", "release_group": "subject_groups"}
+
+
+def uncheck_subject(cur, kind: str, mbid: str) -> None:
+    """MusicBrainz answered `mbid` unknown: every kept blob indexed with it as
+    a subject — the version of the blob that index row names — is checked no
+    more, so it is passed on again only after a check that reads that answer
+    (rule 0's condition 4 in its narrowest form: the canon's own
+    confirmations reach the check through the answers they store). A check
+    that asked it stamps its blob again when its verdict follows the answer.
+    In the caller's transaction, as the answer's own write."""
+    column = _SUBJECT_COLUMN.get(kind)
+    if column is None:
+        return
+    cur.execute(f"""UPDATE mb_slice_blobs b SET checked_at = NULL FROM slice_index i
+                     WHERE i.family = 'mb' AND i.{column} @> ARRAY[%(m)s::uuid]
+                       AND b.name_key = i.key AND b.checked_at IS NOT NULL
+                       AND i.payload_sha256 = coalesce(b.payload_sha256,
+                                                       encode(sha256(b.blob_gz), 'hex'))""",
+                {"m": mbid})
+    unchecked = cur.rowcount
+    if column == "subject_artists":
+        cur.execute("""UPDATE lb_slice_blobs b SET checked_at = NULL FROM slice_index i
+                        WHERE i.family = 'lb' AND i.subject_artists @> ARRAY[%(m)s::uuid]
+                          AND b.artist_mbid::text = i.key AND b.checked_at IS NOT NULL
+                          AND i.payload_sha256 = encode(sha256(b.blob_gz), 'hex')""", {"m": mbid})
+        unchecked += cur.rowcount
+    if unchecked:
+        logger.debug("%s %s unknown to MusicBrainz: %d kept slice(s) to check again",
+                     kind, mbid, unchecked)
 
 
 def _malformed(conn, family: str, key: str, payload: str) -> None:

@@ -55,6 +55,7 @@ from typing import Callable, ContextManager, Optional
 
 from desktop.p2p import record_sig
 from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES, canonical_payload, verify_certificate
+from desktop.p2p.identity_registry import REFUSED_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +140,14 @@ def own_keys(current: str, identity_dir: Optional[Path]) -> frozenset:
 # nothing of its own under this format or a newer one yet — so a second
 # certificate under the new format (an upgrade, another email) counts again on
 # a channel that already holds one.
-_PROBE_SQL = """
-    SELECT EXISTS (SELECT 1 FROM p2p_node_bans WHERE pubkey = %(subject)s),
+#
+# A sighting is refused when its subject is refused here, or when a key that is
+# delivered it: the certificate may be genuine, but a carried sighting's date
+# is the deliverer's word, and a banned node must not start an accomplice's age
+# clock.
+_PROBE_SQL = f"""
+    SELECT {REFUSED_SQL.format(key="%(subject)s")}
+           OR (%(via)s IS NOT NULL AND {REFUSED_SQL.format(key="%(via)s")}),
            EXISTS (SELECT 1 FROM p2p_witness
                     WHERE subject = %(subject)s AND cert_sig = %(cert_sig)s
                       AND channel = %(channel)s),
@@ -194,7 +201,8 @@ class Recorder:
         verified); the certificate must be a valid one FOR it. True when the
         sighting is on record, now or from before. False when it is refused:
         no valid certificate for `subject`, this node's own or a retired key,
-        a banned key, or the channel's ceiling met today — a refusal is never
+        a key banned here (a ban row, or a proof that failed here) as the
+        subject or as `via`, or the channel's ceiling met today — a refusal is never
         remembered, so a sighting past a ceiling counts on a later day it
         recurs (a `carried` one recurs only with more of its author's records)
         and a lifted ban is seen at once. Until it recurs, a node that met

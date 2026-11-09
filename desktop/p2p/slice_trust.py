@@ -10,11 +10,13 @@ module keeps is the record and its consequences, the same for both families
 - **The author's certificate** rides each slice entry (`entry_certificate`):
   a birth certificate of any method and date, checked offline against the
   pinned authority, and for `method: pow` its proof, bound to it here and
-  evaluated once per key when the node's memory allows (the identity
+  evaluated once per key when the node's load and memory allow (the identity
   registry). A relay forwards the author's certificate from its own record of
   the key, with the proof its registry keeps for it (`author_certificate`); a
   relayed proof is that relay's word — it verifies the author or its slice is
-  dropped, never stored and never held against the author. The sync's sealed
+  dropped, never stored and never held against the author, and the false ones
+  a relay brings are counted against that relay as well as the author, so no
+  relay can keep the author's own presentation from verifying it. The sync's sealed
   payloads carry the same pair under each author's key (`author_entries`),
   with one rule more: an author this node only witnessed travels with its
   certificate alone, for the receiver's witness record, which needs no proof.
@@ -102,15 +104,21 @@ def _certificate(pubkey: str, v, method, issued_at, difficulty, params_version, 
 
 def _verified_certificates(conn, pubkeys: List[str]) -> Dict[str, Tuple[dict, Optional[dict]]]:
     """The certificate and proof of each of `pubkeys` that this node verified
-    (p2p_identities `verified`), as a relay forwards them."""
+    (p2p_identities `verified`), as a relay forwards them — while the
+    registry's row is in the current certificate format: after a format bump
+    a row not observed since is no certificate a receiver takes (its check
+    refuses an old format), and on the sync lanes the witness record may hold
+    the current one."""
+    from desktop.p2p.birth_cert import CERT_VERSION
     from desktop.p2p.identity_proof import PROOF_VERSION
     with conn.cursor() as cur:
         cur.execute("""
             SELECT pubkey, cert_v, method::text, issued_at, difficulty, params_version, email_token,
                    email_class::text, email_domain_token, predecessor, issuer, cert_sig,
                    proof_nonce
-              FROM p2p_identities WHERE pubkey = ANY(%s) AND status = 'verified'""",
-                    ([k.lower() for k in pubkeys],))
+              FROM p2p_identities
+             WHERE pubkey = ANY(%s) AND status = 'verified' AND cert_v = %s""",
+                    ([k.lower() for k in pubkeys], CERT_VERSION))
         rows = cur.fetchall()
     pairs = {}
     for row in rows:
@@ -128,7 +136,8 @@ def _verified_certificates(conn, pubkeys: List[str]) -> Dict[str, Tuple[dict, Op
 def author_certificate(conn, pubkey: str) -> Optional[Tuple[dict, Optional[dict]]]:
     """The author's certificate and proof as this node's registry holds them
     for a key it verified (p2p_identities) — what a relay forwards. None for
-    a key this node has not verified: its slices are not passed on."""
+    a key this node has not verified, or whose row is in an older certificate
+    format: its slices are not passed on."""
     return _verified_certificates(conn, [pubkey]).get(pubkey.lower())
 
 
@@ -164,7 +173,6 @@ def author_entries(conn, pubkeys: Iterable[str],
     The receiver records the certificate as a `carried` sighting by the
     witness record's own check (desktop/p2p/witness.py), which reads no
     proof; nothing in the sync evaluates one."""
-    from desktop.p2p.birth_cert import CERT_VERSION
     keys = {str(p).lower() for p in pubkeys if p}
     if not keys:
         return {}
@@ -182,21 +190,19 @@ def author_entries(conn, pubkeys: Iterable[str],
         refused = {r[0] for r in cur.fetchall()}
     others = [k for k in others if k not in refused]
     for key, (cert, proof) in _verified_certificates(conn, others).items():
-        # After a format bump a row not observed since is no certificate a
-        # receiver takes: the witness record may hold the current one.
-        if cert["v"] == CERT_VERSION:
-            entries[key] = {"author_cert": cert, "author_proof": proof}
+        entries[key] = {"author_cert": cert, "author_proof": proof}
     for key, cert in _witnessed_certificates(conn, [k for k in others if k not in entries]).items():
         entries[key] = {"author_cert": cert, "author_proof": None}
     return entries
 
 
-def observe_author(conn, cert: dict, proof: Optional[dict]) -> Optional[str]:
+def observe_author(conn, cert: dict, proof: Optional[dict], relay: str) -> Optional[str]:
     """The author's identity recorded (p2p_identities) from its certificate,
-    and for `pow` the proof that came with the slice evaluated once when the
-    node can afford the 2 GiB (identity_registry.verify_relayed) — the proof
-    is the relay's word, so it is never stored unless it verifies, and one
-    that fails is never held against the author. Returns 'verified',
+    and for `pow` the proof that came with the slice from `relay` (the key
+    of the node that passed it on) evaluated once when the node can afford
+    the 2 GiB (identity_registry.verify_relayed) — the proof is the relay's
+    word, so it is never stored unless it verifies, and one that fails is
+    never held against the author. Returns 'verified',
     'unverified' (not evaluated yet), 'failed' (the author's own proof failed
     here, or this one did: the slice is dropped), or None when the key is
     banned or its record does not match."""
@@ -207,7 +213,7 @@ def observe_author(conn, cert: dict, proof: Optional[dict]) -> Optional[str]:
     if row is None or row.get("anomaly"):
         return None
     if row["status"] == "unverified" and proof is not None:
-        return identity_registry.verify_relayed(conn, cert, proof)
+        return identity_registry.verify_relayed(conn, cert, proof, relay)
     return row["status"]
 
 
