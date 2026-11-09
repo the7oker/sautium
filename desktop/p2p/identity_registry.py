@@ -476,7 +476,8 @@ def verify_relayed(conn, cert: dict, proof: Optional[dict], relay: str) -> str:
     Evaluated on this thread when the node can afford it now (the load meter
     at its ceiling, another evaluation running or too little memory leave it
     'unverified' for a later try, where the identity gate's `admit` answers
-    busy; so does a policy version this build does not know); a proof that
+    busy; a policy version this build does not know leaves it 'unverified'
+    too, counted against no one); a proof that
     verifies is kept as the author's own verification keeps it ('verified');
     one that does not is no evidence against the author — nothing is
     recorded, the slice carrying it is dropped ('failed'), and that nonce

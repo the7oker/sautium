@@ -445,6 +445,12 @@ def test_a_source_whose_proof_failed_here_is_refused_on_the_slice_lanes_once_its
     slice_rebuild.rebuild(conn)
     gids = {r[0] for r in _rows(conn, "SELECT gid::text FROM mb_artist")}
     assert other.gid in gids and s.gid not in gids
+    # An author whose proof failed here since its blobs were kept: left out too.
+    identity_registry.observe(conn, certificate(pub(author), method="pow"))
+    with conn.cursor() as cur:
+        cur.execute("UPDATE p2p_identities SET status = 'failed' WHERE pubkey = %s", (pub(author),))
+    slice_rebuild.rebuild(conn)
+    assert other.gid not in {r[0] for r in _rows(conn, "SELECT gid::text FROM mb_artist")}
 
 
 # --------------------------------------------------------------------------

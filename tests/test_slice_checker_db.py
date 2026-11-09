@@ -35,10 +35,16 @@ WAIT_S = 30
 
 @pytest.fixture(scope="module")
 def checker(scratch_dsn):
+    """The checker for the module. Its wakers are unregistered at the
+    module's end, so the thread, which outlives it, is never woken by
+    another module's answers."""
     import db_pool
+    import mb_answers
     with pytest.MonkeyPatch.context() as mp:
         pool = psycopg2.pool.ThreadedConnectionPool(1, 8, dsn=scratch_dsn, options="-c timezone=UTC")
         mp.setattr(db_pool, "_pool", pool)
+        mp.setattr(mb_answers, "_unknown_waker", None)
+        mp.setattr(mb_answers, "_wakers", {})
         mp.chdir(BACKEND)
         import main
         main._register_mb_wakers()
@@ -48,16 +54,17 @@ def checker(scratch_dsn):
 
 @pytest.fixture
 def unchecked(monkeypatch):
-    """Set once the checker un-checked the slices about an answer."""
-    done = threading.Event()
+    """unchecked(kind, mbid): an event set once the checker un-checked the
+    slices about that answer — that one, not a stray one's."""
+    events: dict = {}
     real = slice_checks.uncheck_subject
 
     def uncheck(c, kind, mbid):
         out = real(c, kind, mbid)
-        done.set()
+        events.setdefault((kind, mbid), threading.Event()).set()
         return out
     monkeypatch.setattr(slice_checks, "uncheck_subject", uncheck)
-    return done
+    return lambda kind, mbid: events.setdefault((kind, mbid), threading.Event())
 
 
 def _kept(conn, scratch_dsn, name):
@@ -80,7 +87,7 @@ def test_an_idle_checker_takes_the_check_away_once_an_answer_is_kept_unknown(
     assert slice_checks.evaluate(conn, "mb", key) is True
     assert slice_checks.servable(conn, "mb", key, OWN) is True
     mb_answers.store("artist", s.gid, None)              # the consumer's step: the commit, then the waker
-    assert unchecked.wait(WAIT_S), "the checker never un-checked the slice"
+    assert unchecked("artist", s.gid).wait(WAIT_S), "the checker never un-checked the slice"
     assert slice_checks.servable(conn, "mb", key, OWN) is None
 
 
@@ -101,5 +108,5 @@ def test_a_verdict_that_read_the_answers_before_one_kept_unknown_never_stamps_ov
     monkeypatch.setattr(slice_checks, "_finish", finish)
     checker._evaluate_slice_checks([slice_checks.subject_key("mb", key)])
     assert stamped.wait(WAIT_S), "the checker ran no verdict"
-    assert unchecked.wait(WAIT_S), "the checker never un-checked the slice"
+    assert unchecked("artist", s.gid).wait(WAIT_S), "the checker never un-checked the slice"
     assert slice_checks.servable(conn, "mb", key, OWN) is None
