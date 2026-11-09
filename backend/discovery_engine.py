@@ -68,7 +68,8 @@ ENTITIES: dict[str, EntityDef] = {
                         "ON mf.album_variant_id=av.id WHERE av.album_id=al.id AND mf.cover_id IS NOT NULL "
                         "LIMIT 1) AS cover_id, "
                         "(SELECT mf.id FROM album_variants av JOIN media_files mf ON mf.album_variant_id=av.id "
-                        "WHERE av.album_id=al.id ORDER BY mf.disc_number NULLS FIRST, mf.track_number "
+                        "WHERE av.album_id=al.id ORDER BY (av.absent_since IS NOT NULL), "
+                        "mf.disc_number NULLS FIRST, mf.track_number "
                         "LIMIT 1) AS media_file_id"),
     # Genre is a CATEGORY level above the containment chain: reachable as a
     # roll-up target from any atom ("romantic saxophone" → smooth jazz), plus two
@@ -87,8 +88,11 @@ ENTITIES: dict[str, EntityDef] = {
                         surface=", (SELECT a.name FROM track_artists ta JOIN artists a ON a.id=ta.artist_id "
                         "WHERE ta.track_id=t.id AND ta.role='primary' LIMIT 1) AS artist, "
                         "EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id=t.id) AS is_owned, "
-                        "(SELECT mf.id FROM media_files mf WHERE mf.track_id=t.id "
-                        f"ORDER BY {best_rip_order('mf')} LIMIT 1) AS media_file_id, "
+                        # a copy that is away last: a tap plays this file
+                        "(SELECT mf.id FROM media_files mf JOIN album_variants av "
+                        "ON av.id = mf.album_variant_id WHERE mf.track_id=t.id "
+                        f"ORDER BY (av.absent_since IS NOT NULL), {best_rip_order('mf')} "
+                        "LIMIT 1) AS media_file_id, "
                         # 'local' when a file is here, 'hqplayer' when only the
                         # HQPlayer's library holds it (the UI's held-row contract).
                         "(SELECT f.location::text FROM owned_files f WHERE f.track_id=t.id "

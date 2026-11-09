@@ -864,7 +864,7 @@ def test_a_copy_found_again_elsewhere_is_asked_about_apart_and_its_analysis_foll
     state = _rescan(main_module, monkeypatch)
     assert state["prune_plan"]["counts"] == {"files": 0, "copies": 1, "tracks": 0,
                                              "albums": 0, "artists": 0, "away": 0}
-    assert _away(cur) == []
+    assert _away(cur) == ["Pulse Archive"]        # not read while the question waits
     _answer(main_module, state["prune_plan"]["id"], True)
 
     for title, (track_id, _sid) in scanned_library.items():
@@ -1213,8 +1213,8 @@ def test_a_copy_at_the_hqplayer_is_a_copy_found_elsewhere(
 
     state = _rescan(main_module, monkeypatch)
 
-    assert _away(cur) == []
     assert state["prune_plan"]["counts"]["copies"] == 1
+    assert state["prune_plan"]["counts"]["away"] == 0   # asked about, not kept away
 
 
 def test_one_copy_must_hold_every_track_to_count_as_found(
@@ -1234,26 +1234,89 @@ def test_one_copy_must_hold_every_track_to_count_as_found(
     assert state["prune_plan"] is None
 
 
-def test_a_track_another_album_holds_is_elected_there_while_its_copy_is_away(
-        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
-    """A track on two albums: while one copy is away the other's file is its
-    analysis source, so the passes and the re-link see a file they can read."""
-    target = library / "Compilation" / "Best Of" / "01.flac"
-    target.parent.mkdir(parents=True)
-    target.write_bytes((library / "Ostrava Unit" / "Pulse Archive" / "01.flac").read_bytes())
+def _also_on_a_compilation(library, src: Path, album="Best Of"):
     import mutagen
+    target = library / "Compilation" / album / src.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(src.read_bytes())
     tags = mutagen.File(target)
-    tags["album"] = "Best Of"
+    tags["album"] = album
     tags.save()
+    return target
+
+
+def _elected(cur, title):
+    cur.execute("SELECT mf.file_path FROM media_files mf JOIN tracks t ON t.id = mf.track_id "
+                "WHERE t.title = %s AND mf.is_analysis_source", (title,))
+    return cur.fetchone()[0]
+
+
+def test_a_track_another_album_holds_is_analysed_there_only_while_it_lacks_analysis(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """While its copy is away, a track another album also holds is analysed
+    from that album's file if it has no analysis yet; a track analysed
+    already keeps its source (unplugging a card re-analyses nothing). Back,
+    the rule elects again: the first rip."""
+    _also_on_a_compilation(library, library / "Q2 Probe" / "Probe EP" / "01.flac", "Probes")
+    _also_on_a_compilation(library, library / "Ostrava Unit" / "Pulse Archive" / "01.flac")
     _scan(main_module, monkeypatch, False)
-    carrier, _ = scanned_library["Carrier"]
+    _move(library / "Q2 Probe", tmp_path / "card" / "Q2 Probe")
     _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
 
     _rescan(main_module, monkeypatch)
 
-    cur.execute("SELECT file_path FROM media_files WHERE track_id = %s AND is_analysis_source",
-                (carrier,))
-    assert "Compilation/Best Of/01.flac" in cur.fetchone()[0]
+    assert "Compilation/Probes/01.flac" in _elected(cur, "Probe B")
+    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True}
+    assert "Pulse Archive/01.flac" in _elected(cur, "Carrier")
+    assert _queued(cur, "Carrier") == {"embeddings": False, "features": False}
+
+    _move(tmp_path / "card" / "Q2 Probe", library / "Q2 Probe")
+    _scan(main_module, monkeypatch, False)
+
+    assert "Probe EP/01.flac" in _elected(cur, "Probe B")
+
+
+def test_a_queued_file_of_a_copy_set_aside_moves_to_a_present_copy(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """A slot queued on the card's file moves to the disk's copy of the
+    track when the card's copy is set aside, as when files go; a track with
+    no other copy keeps its file."""
+    from playback.queue import QueueItem, rebind_origins
+    _also_on_a_compilation(library, library / "Ostrava Unit" / "Pulse Archive" / "01.flac")
+    _scan(main_module, monkeypatch, False)
+    cur.execute("SELECT mf.id, mf.track_id::text FROM media_files mf JOIN tracks t ON t.id = mf.track_id "
+                "WHERE mf.file_path LIKE '%%/Pulse Archive/%%' ORDER BY t.title")
+    (carrier_mf, carrier), (relay_mf, relay) = cur.fetchall()
+    slots = [QueueItem(track_id=tid, media_file_id=mid, title="",
+                       source={"kind": "file", "path": "", "format": "FLAC"})
+             for mid, tid in ((carrier_mf, carrier), (relay_mf, relay))]
+    _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
+
+    _rescan(main_module, monkeypatch)
+
+    moved, kept = rebind_origins(slots)
+    assert "Compilation/Best Of/01.flac" in moved["source"]["path"]
+    assert kept is None
+
+
+def test_a_copy_found_elsewhere_and_kept_is_away(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """The question about a copy found again elsewhere answered Keep: the
+    copy stays, away — nothing reads it, a play takes the copy found."""
+    from routers import player
+    _move(library / "Ostrava Unit" / "Pulse Archive",
+          library / "Ostrava Unit" / "Pulse Archive (2019)")
+    state = _rescan(main_module, monkeypatch)
+    assert state["prune_plan"]["counts"]["copies"] == 1
+    assert _away(cur) == ["Pulse Archive"]
+
+    _answer(main_module, state["prune_plan"]["id"], False)
+
+    assert _away(cur) == ["Pulse Archive"]
+    cur.execute("SELECT id FROM albums WHERE title = 'Pulse Archive'")
+    picked = [r["id"] for r in player._album_media_rows(str(cur.fetchone()[0]))]
+    cur.execute("SELECT file_path FROM media_files WHERE id = ANY(%s)", (picked,))
+    assert all("(2019)/" in p for (p,) in cur.fetchall())
 
 
 def test_coverage_and_the_trail_count_what_the_passes_read(

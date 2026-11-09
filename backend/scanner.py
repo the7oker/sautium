@@ -1246,13 +1246,27 @@ def _mark_present(paths: Set[str]) -> int:
         if db.execute(text("SELECT 1 FROM album_variants WHERE absent_since IS NOT NULL "
                            "LIMIT 1")).first() is None:
             return 0
-        back = db.execute(text("""
+        back_ids = list(db.execute(text("""
             UPDATE album_variants av SET absent_since = NULL
             WHERE av.absent_since IS NOT NULL
               AND EXISTS (SELECT 1 FROM media_files mf
                           WHERE mf.album_variant_id = av.id
                             AND mf.file_path = ANY(CAST(:p AS text[])))
-        """), {"p": list(paths)}).rowcount
+            RETURNING av.id
+        """), {"p": list(paths)}).scalars())
+        # The rule picks again now that the copy is readable (present, then
+        # the best rip): a better rip back is an upgrade, as a better rip
+        # added is — the passes re-analyse from it.
+        if back_ids:
+            for tid in db.execute(text("""
+                SELECT DISTINCT mf.track_id FROM media_files mf
+                WHERE mf.album_variant_id = ANY(CAST(:v AS int[]))
+                  AND EXISTS (SELECT 1 FROM media_files o
+                              WHERE o.track_id = mf.track_id
+                                AND o.album_variant_id <> mf.album_variant_id)
+            """), {"v": back_ids}).scalars():
+                elect_analysis_source(db, tid)
+        back = len(back_ids)
     if back:
         logger.info(f"{back} cop(ies) away are present again: the walk saw their files")
     return back
@@ -1304,28 +1318,41 @@ def _set_aside(missing_ids: List[int], seen: Set[str], stats: Dict[str, Any]) ->
     """A copy whose files are all missing is away, not gone: it is marked
     absent (nothing removed, nothing asked — a walk that sees one of its
     files marks it present again) and its files leave the removal. A copy
-    found again elsewhere stays in it, a copy to remove. Returns the files
-    the removal is left with."""
+    found again elsewhere is marked absent too — nothing can read it while
+    the question waits, or after a Keep — and stays in the removal, a copy
+    to remove. Returns the files the removal is left with."""
     if not missing_ids:
         return missing_ids
     with get_db_context() as db:
         copies = db.execute(_GONE_COPIES_SQL, {"ids": missing_ids, "seen": list(seen)}).fetchall()
         away = [c.vid for c in copies if not c.found_elsewhere]
-        newly = [c.vid for c in copies if not c.found_elsewhere and not c.away]
+        newly = [c.vid for c in copies if not c.away]
         if newly:
             db.execute(text("UPDATE album_variants SET absent_since = now() "
                             "WHERE id = ANY(CAST(:v AS int[]))"), {"v": newly})
+            # The queue moves a slot on a file of this copy to a present copy
+            # of its track (playback.queue.rebind_origins), as when files go.
+            db.execute(text("SELECT pg_notify('sautium_files_removed', '')"))
             # A track another present copy also holds (a compilation, a second
-            # rip) is analysed and queued from that copy while this one is
-            # away: elect again, present first.
+            # rip) and that has no analysis yet is analysed from that copy
+            # while this one is away. A track analysed already keeps its
+            # source: unplugging a card must not re-analyse it from another
+            # master (the return, below, elects by the rule again).
             for tid in db.execute(text("""
-                SELECT DISTINCT track_id FROM media_files
-                WHERE album_variant_id = ANY(CAST(:v AS int[]))"""), {"v": newly}).scalars():
+                SELECT DISTINCT mf.track_id FROM media_files mf
+                WHERE mf.album_variant_id = ANY(CAST(:v AS int[]))
+                  AND EXISTS (SELECT 1 FROM media_files o
+                              JOIN album_variants ov ON ov.id = o.album_variant_id
+                              WHERE o.track_id = mf.track_id AND ov.absent_since IS NULL)
+                  AND (NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = mf.track_id)
+                       OR NOT EXISTS (SELECT 1 FROM audio_features af
+                                      WHERE af.track_id = mf.track_id))
+            """), {"v": newly}).scalars():
                 elect_analysis_source(db, tid)
         kept = set(db.execute(text(
             "SELECT id FROM media_files WHERE album_variant_id = ANY(CAST(:v AS int[]))"),
             {"v": away}).scalars()) if away else set()
-    stats["away"] = len(newly)
+    stats["away"] = sum(1 for c in copies if not c.away and not c.found_elsewhere)
     if newly:
         logger.info(f"Rescan set {len(newly)} cop(ies) aside as away: none of their files was found")
     return [i for i in missing_ids if i not in kept]

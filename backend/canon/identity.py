@@ -65,6 +65,17 @@ def _ensure_artist(db: Session, name: str):
     return uid
 
 
+# The analysis-source ranking of a track's files, over media_files `mf`
+# joined to its album_variants `av`: a present copy's file over one of a copy
+# that is away, then CD (16-bit lossless) > other lossless > lossy, then the
+# oldest row. The one rule — elect_analysis_source and the CLI's bulk
+# recalculation both order by it.
+ANALYSIS_SOURCE_ORDER = """(av.absent_since IS NULL) DESC,
+                           (mf.bit_depth = 16 AND mf.is_lossless) DESC,
+                           mf.is_lossless DESC,
+                           mf.id"""
+
+
 def elect_analysis_source(db: Session, track_id) -> None:
     """Designate the best-quality media_file of a track as its analysis source.
 
@@ -80,16 +91,10 @@ def elect_analysis_source(db: Session, track_id) -> None:
     The media_files one-source-per-track invariant belongs to this base layer;
     the scanner and the merge path (_update_track_uuid) are both callers.
     """
-    ranked = """
+    ranked = f"""
         WITH ranked AS (
             SELECT mf.id,
-                   ROW_NUMBER() OVER (
-                       ORDER BY
-                           (av.absent_since IS NULL) DESC,
-                           (mf.bit_depth = 16 AND mf.is_lossless) DESC,
-                           mf.is_lossless DESC,
-                           mf.id
-                   ) as rn
+                   ROW_NUMBER() OVER (ORDER BY {ANALYSIS_SOURCE_ORDER}) as rn
             FROM media_files mf
             JOIN album_variants av ON av.id = mf.album_variant_id
             WHERE mf.track_id = :tid

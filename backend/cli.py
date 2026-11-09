@@ -1501,7 +1501,8 @@ def fix_analysis_source(dry_run):
     """Recalculate is_analysis_source for all tracks.
 
     Sets the best quality file per track as analysis source.
-    Priority: CD (16bit lossless) > other lossless > lossy.
+    Priority: a present copy's file, then CD (16bit lossless) > other
+    lossless > lossy (canon.identity.ANALYSIS_SOURCE_ORDER).
     """
     with get_db_context() as db:
         # Count current state
@@ -1514,9 +1515,10 @@ def fix_analysis_source(dry_run):
         click.echo(f"Total tracks: {total_tracks}")
         click.echo(f"Missing analysis source: {total_tracks - result}")
 
+        from canon.identity import ANALYSIS_SOURCE_ORDER
         if dry_run:
             # Show breakdown by format for tracks that would get analysis source
-            rows = db.execute(text("""
+            rows = db.execute(text(f"""
                 WITH no_source AS (
                     SELECT t.id as track_id
                     FROM tracks t
@@ -1528,13 +1530,10 @@ def fix_analysis_source(dry_run):
                 best_file AS (
                     SELECT mf.track_id, mf.file_format, mf.is_lossless,
                            ROW_NUMBER() OVER (
-                               PARTITION BY mf.track_id
-                               ORDER BY
-                                   (mf.bit_depth = 16 AND mf.is_lossless) DESC,
-                                   mf.is_lossless DESC,
-                                   mf.id
+                               PARTITION BY mf.track_id ORDER BY {ANALYSIS_SOURCE_ORDER}
                            ) as rn
                     FROM media_files mf
+                    JOIN album_variants av ON av.id = mf.album_variant_id
                     JOIN no_source ns ON ns.track_id = mf.track_id
                 )
                 SELECT file_format, is_lossless, COUNT(*) as cnt
@@ -1548,14 +1547,20 @@ def fix_analysis_source(dry_run):
             click.echo("\nRun without --dry-run to apply.")
             return
 
-        # Recalculate through the one rule (canon.identity.elect_analysis_source:
-        # a present copy first, then the best rip)
+        # Reset all and recalculate, by the one rule (ANALYSIS_SOURCE_ORDER)
         click.echo("Recalculating is_analysis_source for all tracks...")
-        from canon.identity import elect_analysis_source
-        track_ids = db.execute(text("SELECT DISTINCT track_id FROM media_files")).scalars().all()
-        for tid in track_ids:
-            elect_analysis_source(db, tid)
-        updated = len(track_ids)
+        db.execute(text("UPDATE media_files SET is_analysis_source = false"))
+        updated = db.execute(text(f"""
+            WITH ranked AS (
+                SELECT mf.id,
+                       ROW_NUMBER() OVER (PARTITION BY mf.track_id
+                                          ORDER BY {ANALYSIS_SOURCE_ORDER}) as rn
+                FROM media_files mf
+                JOIN album_variants av ON av.id = mf.album_variant_id
+            )
+            UPDATE media_files SET is_analysis_source = true
+            WHERE id IN (SELECT id FROM ranked WHERE rn = 1)
+        """)).rowcount
 
         db.commit()
 

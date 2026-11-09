@@ -695,6 +695,14 @@ def resolve_cover_for_folder(db: Session, media_file_id: int) -> Optional[uuid.U
         return None
 
     siblings = _siblings_in_folder(db, src_row[0]) or [(media_file_id, src_row[0])]
+    # A folder two copies share (a box set, a loose mix): the files of a copy
+    # that is away are left as they are, for the same reason.
+    away = set(db.execute(
+        text("SELECT mf.id FROM media_files mf JOIN album_variants av "
+             "ON av.id = mf.album_variant_id "
+             "WHERE mf.id = ANY(:ids) AND av.absent_since IS NOT NULL"),
+        {"ids": [mid for mid, _fp in siblings]}).scalars())
+    siblings = [(mid, fp) for mid, fp in siblings if mid not in away]
 
     requested_cover: Optional[uuid.UUID] = None
     still_unresolved: list[int] = []

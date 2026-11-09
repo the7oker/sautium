@@ -412,14 +412,26 @@ def _item_from_media_row(r: dict) -> QueueItem:
 # queue: which slots name a media_files row that is gone — as their origin or
 # as their way in — and, for a gone origin, the best live copy of the track
 # (one on the album the slot was queued from first) and whether the track
-# itself is still in the catalogue.
+# itself is still in the catalogue. A file of a copy that is away
+# (album_variants.absent_since) counts as gone while a present copy of the
+# track is here: the slot moves to it; with none, it keeps its file, which
+# opens to a missing file as an unreachable root's do.
+_AWAY_FILE = """EXISTS (SELECT 1 FROM media_files af
+                     JOIN album_variants av ON av.id = af.album_variant_id
+                     WHERE af.id = {m} AND av.absent_since IS NOT NULL)
+            AND EXISTS (SELECT 1 FROM media_files pf
+                        JOIN album_variants pv ON pv.id = pf.album_variant_id
+                        WHERE pf.track_id = s.track_id AND pv.absent_since IS NULL)"""
+
 _REBIND_SQL = f"""
     WITH q AS (
         SELECT s.*,
-               s.mid IS NOT NULL AND NOT EXISTS (
-                   SELECT 1 FROM media_files mf WHERE mf.id = s.mid) AS origin_gone,
-               s.pmid IS NOT NULL AND NOT EXISTS (
-                   SELECT 1 FROM media_files mf WHERE mf.id = s.pmid) AS play_gone
+               s.mid IS NOT NULL AND (NOT EXISTS (
+                   SELECT 1 FROM media_files mf WHERE mf.id = s.mid)
+                   OR {_AWAY_FILE.format(m='s.mid')}) AS origin_gone,
+               s.pmid IS NOT NULL AND (NOT EXISTS (
+                   SELECT 1 FROM media_files mf WHERE mf.id = s.pmid)
+                   OR {_AWAY_FILE.format(m='s.pmid')}) AS play_gone
         FROM unnest(%(mids)s::int[], %(pmids)s::int[], %(tids)s::uuid[], %(aids)s::uuid[])
              WITH ORDINALITY AS s(mid, pmid, track_id, album_id, slot)
     )

@@ -1612,7 +1612,7 @@ def _away_worker() -> None:
         if file_ids:
             plan = _new_prune_plan(file_ids, stats, "away")
             state["result"]["prune_plan"] = _prune_plan_counts(plan)
-            state["progress"] = f"{_plan_said(plan)} away wait for your answer"
+            state["progress"] = "The albums away wait for your answer"
         else:
             state["progress"] = "Nothing is away"
     except Exception as e:

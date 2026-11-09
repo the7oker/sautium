@@ -15471,14 +15471,15 @@
       if (p.copies) gone.push(_count(p.copies, 'album copy (its album stays)', 'album copies (their albums stay)'));
       return `The files of these albums were not found at the last Rescan.`
         + ` Removing them deletes ${_listed(gone.concat(also.map(x => x + ' that nothing else holds')))}.`
-        + ' Tracks you have played or analysed stay, without their album.'
+        + (p.albums ? ' Tracks you have played or analysed stay, without their album.'
+                    : ' Tracks you have played or analysed stay.')
         + ' If a drive or a folder is only disconnected, keep them and reconnect it first —'
         + ' they come back by themselves at the next scan.';
     }
     if (p.albums) also.push(_count(p.albums, 'album', 'albums'));
     const lines = [];
     if (p.files)  lines.push(`Rescan did not find ${_count(p.files, 'file', 'files')} in your music folder.`);
-    if (p.copies) lines.push(`${_count(p.copies, 'album copy was', 'album copies were')} found again elsewhere in your music folder: the old entries go, the music stays.`);
+    if (p.copies) lines.push(`${_count(p.copies, 'album copy was', 'album copies were')} found again in another copy of the same album — here or in an HQPlayer's library: the old entries go, the albums stay.`);
     if (also.length) lines.push(`Removing them also deletes ${_listed(also)} that nothing else holds.`);
     if (p.away)   lines.push(`${_count(p.away, 'album copy whose files were all missing was', 'album copies whose files were all missing were')} set aside as away; they stay.`);
     lines.push('Tracks you have played or analysed stay.');

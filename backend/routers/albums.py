@@ -386,7 +386,7 @@ def get_album(
                 JOIN album_variants av2 ON av2.id = mf2.album_variant_id
                 WHERE av2.album_id = al.id
                   AND (%(vid)s::int IS NULL OR av2.id = %(vid)s::int)
-                ORDER BY mf2.disc_number, mf2.track_number
+                ORDER BY (av2.absent_since IS NOT NULL), mf2.disc_number, mf2.track_number
                 LIMIT 1) AS media_file_id,
                -- The external cover (Cover Art Archive, by release group) only
                -- where no file here carries one: an album held only in the
@@ -496,7 +496,7 @@ def get_album(
                    THEN av.location = 'hqplayer'
                         AND av.hqp_endpoint_id = %(hqp_id)s
                    ELSE av.location = 'local' END
-        ORDER BY {best_rip_order('av')}
+        ORDER BY (av.absent_since IS NOT NULL), {best_rip_order('av')}
     """, params)
     # A copy held at an HQPlayer says whose: two rips on the same box read
     # alike otherwise, and one of them was taken for a stream (2026-09-28).

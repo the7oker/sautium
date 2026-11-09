@@ -298,7 +298,7 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
 # delete) or belongs to a copy that is away (album_variants.absent_since): the
 # material has no readable file here, and a present file of the same material
 # takes it over — the copy found again elsewhere keeps its analysis while the
-# old one waits for the owner's removal.
+# old one, away too, waits for the owner's answer.
 _UNLINKED = """s.provider_id IS NULL AND NOT s.imported
     AND (s.media_file_id IS NULL
          OR EXISTS (SELECT 1 FROM media_files x
