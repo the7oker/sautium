@@ -4447,8 +4447,7 @@ class HqpBackend(PlayerBackend):
         read together while the mirror's state had changed `expect` times. The
         same, it is in step. Otherwise, back from a restart (_verify_mirror)
         the mirror is lost and HQPlayer gets the queue back; a tail mirror
-        whose tail holds — and that holds no entry of another controller's —
-        stays one; any other difference is drift — an edit
+        whose tail holds stays one; any other difference is drift — an edit
         made outside this node — never reconciled on its own (a lost mirror
         stays lost). A verdict a change of the mirror overtook is not
         applied. Returns whether the verdict stands. A playlist that holds
@@ -4470,7 +4469,7 @@ class HqpBackend(PlayerBackend):
         elif self._verify_mirror:
             return self.lose_mirror("HQPlayer came back with a different playlist (restarted?)",
                                     expect=expect)
-        elif self._mirror == "tail" and not self._edited and self._tail_holds(playlist, layout, status):
+        elif self._mirror == "tail" and self._tail_holds(playlist, layout, status):
             return True
         elif self._mirror in ("step", "tail"):
             self._drifted("HQPlayer's playlist drifted from the canonical queue (an external edit?)",
@@ -4480,10 +4479,12 @@ class HqpBackend(PlayerBackend):
     def _tail_holds(self, playlist: list, layout: _Layout, status) -> bool:
         """A tail mirror's invariant: from the entry HQPlayer reads to its
         end, its playlist is what it holds of the queue from the slot it
-        reads. One that reads nothing holds it as it was: the play press
-        rebuilds."""
+        reads. One that reads nothing holds it as it was — the play press
+        rebuilds — while its playlist still holds an entry of the node's:
+        one that holds none is another controller's (Roon's Clear and its
+        stream, F7's refused one among them), drift, never a tail of ours."""
         if status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
-            return True
+            return any(self.gave(t.get("uri") or "", layout) for t in playlist)
         playing = self._playing(status)
         reads = Entry.read(status)
         if playing is None or playing[2] or reads is None:

@@ -116,7 +116,7 @@ def test_a_library_gone_from_disk_is_walked_past_without_recursing(monkeypatch):
                                     "location": "http://127.0.0.1:9/desc.xml"})
     backend._dmr = types.SimpleNamespace(is_subscribed=True, transport_state=None,
                                          volume_level=None, sink_protocol_info=[])
-    assert asyncio.run(backend._load_seq(1)) is False
+    assert asyncio.run(backend._load_seq(1, halts=backend._halts)) is False
     assert backend._error.startswith("1200 queued track(s) could not be read")
     assert backend._gone is False
     assert statuses[-1].state == "stopped"
