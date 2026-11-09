@@ -603,6 +603,11 @@ async def _library_state() -> Dict[str, Any]:
     # hangs on the folder: an answer that differs from what the notices show
     # wakes them.
     check_folder()
+    # Copies a Rescan found none of the files of: kept, and removed only from
+    # the row these numbers make (the partial index holds only them).
+    away = db_query_one("""
+        SELECT count(*) AS copies, count(DISTINCT album_id) AS albums
+        FROM album_variants WHERE absent_since IS NOT NULL""")
 
     return {
         "music_path":         music_path,
@@ -627,6 +632,7 @@ async def _library_state() -> Dict[str, Any]:
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,
         "enrich":             enrich,
+        "away":               {"albums": int(away["albums"]), "copies": int(away["copies"])},
         "hqp_library":        _hqp_library_state(),
     }
 
@@ -2583,6 +2589,13 @@ async def trigger_scan(prune: bool = False) -> Dict[str, Any]:
     removal waits for the answer below (the default is add-only)."""
     from main import scan_start
     return await scan_start(prune=prune)
+
+
+@router.post("/library/away/remove")
+async def remove_away() -> Dict[str, Any]:
+    """Plan the removal of the copies that are away; the Library asks it."""
+    from main import scan_away
+    return await scan_away()
 
 
 @router.post("/library/scan/prune")

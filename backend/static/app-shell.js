@@ -15451,17 +15451,39 @@
   // plan in this tab; a second device's answer is refused there and says so.
   const _prunePlansAsked = new Set();
   const _count = (n, one, many) => `${fmtNum(n)} ${n === 1 ? one : many}`;
+  const _listed = parts => parts.length > 1
+    ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
+  // A plan's words. "rescan": the files a Rescan did not find, and the copies
+  // of albums it found again elsewhere — counted apart, since a copy that
+  // goes is not music that goes. "away": the owner's removal of the copies
+  // that are away, which takes their albums when nothing else holds them.
+  function _prunePlanTitle(p) {
+    if (p.kind === 'away') return 'Remove albums that are away?';
+    return p.files ? 'Remove missing files?' : 'Remove the old copies?';
+  }
   function _prunePlanMessage(p) {
     const also = [];
     if (p.tracks)  also.push(`${_count(p.tracks, 'track', 'tracks')} with no analysis and no listens`);
-    if (p.albums)  also.push(_count(p.albums, 'album', 'albums'));
     if (p.artists) also.push(_count(p.artists, 'artist', 'artists'));
-    const list = also.length > 1
-      ? `${also.slice(0, -1).join(', ')} and ${also[also.length - 1]}` : also[0];
-    return `Rescan did not find ${_count(p.files, 'file', 'files')} in your music folder.`
-      + (list ? ` Removing them also deletes ${list} that nothing else holds.` : '')
-      + ' Tracks you have played or analysed stay.'
-      + ' If a drive or a folder is only disconnected, keep everything and reconnect it first.';
+    if (p.kind === 'away') {
+      const gone = [];
+      if (p.albums) gone.push(_count(p.albums, 'album', 'albums'));
+      if (p.copies) gone.push(_count(p.copies, 'copy of an album you also have elsewhere', 'copies of albums you also have elsewhere'));
+      return `The files of these albums were not found at the last Rescan.`
+        + ` Removing them deletes ${_listed(gone.concat(also.map(x => x + ' that nothing else holds')))}.`
+        + ' Tracks you have played or analysed stay, without their album.'
+        + ' If a drive or a folder is only disconnected, keep them and reconnect it first —'
+        + ' they come back by themselves at the next scan.';
+    }
+    if (p.albums) also.push(_count(p.albums, 'album', 'albums'));
+    const lines = [];
+    if (p.files)  lines.push(`Rescan did not find ${_count(p.files, 'file', 'files')} in your music folder.`);
+    if (p.copies) lines.push(`${_count(p.copies, 'album copy was', 'album copies were')} found again elsewhere in your music folder: the old entries go, the music stays.`);
+    if (also.length) lines.push(`Removing them also deletes ${_listed(also)} that nothing else holds.`);
+    if (p.away)   lines.push(`${_count(p.away, 'album whose files were all missing was', 'albums whose files were all missing were')} set aside as away; they stay.`);
+    lines.push('Tracks you have played or analysed stay.');
+    if (p.files)  lines.push('If a drive or a folder is only disconnected, keep everything and reconnect it first.');
+    return lines.join(' ');
   }
   let _prunePlanOpen = false;
   async function _askPrunePlan(plan) {
@@ -15472,7 +15494,7 @@
     _prunePlansAsked.add(plan.id);
     _prunePlanOpen = true;
     const remove = await window.confirmDestructive({
-      title: 'Remove missing files?',
+      title: _prunePlanTitle(plan),
       message: escapeProfileHtml(_prunePlanMessage(plan)),
       confirmText: 'Remove',
       cancelText: 'Keep',
@@ -15558,6 +15580,26 @@
       </div>
     `;
 
+    // Copies a Rescan found none of the files of stay in the library, away,
+    // until they come back or the owner removes them here — the one place
+    // they are removed from.
+    const away = lib.away || {};
+    const awayRow = !away.copies ? '' : `
+      <div class="form-group">
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Away</span>
+            <span class="row-stack-value">${escapeProfileHtml(_count(away.albums, 'album', 'albums'))}</span>
+          </div>
+          <div class="row-stack-sub">Their files were not found at the last Rescan. They stay in your library and come back by themselves when a scan finds their files.</div>
+        </div>
+      </div>
+      ${scanRunning ? '' : `
+      <div class="btn-row single">
+        <button class="btn btn-secondary" data-action="remove-away">Remove albums that are away</button>
+      </div>`}
+    `;
+
     // No ML runtime → no button: the run would be a no-op there (analysis
     // arrives over P2P) and the backend refuses it. Lite keeps the button —
     // it is the manual path for the text side when Background enrichment is
@@ -15588,6 +15630,7 @@
         </div>
       </div>
       ${scanActions}
+      ${awayRow}
 
       <div class="profile-group-label">Enrichment</div>
       <div class="form-group">
@@ -15680,6 +15723,15 @@
     });
     onAction('[data-action="scan"]',       startScan(''));
     onAction('[data-action="scan-prune"]', startScan('?prune=true'));
+    onAction('[data-action="remove-away"]', e => onceInFlight(e.currentTarget, async () => {
+      const r = await fetch('/api/settings/library/away/remove', { method: 'POST' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        await window.notifyDialog({ title: 'Nothing removed', kind: 'error',
+          message: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
+      }
+      render();
+    }));
     onAction('[data-action="enrich"]',     async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });

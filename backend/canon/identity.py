@@ -68,7 +68,9 @@ def _ensure_artist(db: Session, name: str):
 def elect_analysis_source(db: Session, track_id) -> None:
     """Designate the best-quality media_file of a track as its analysis source.
 
-    Priority: CD (16-bit lossless) > other lossless > lossy. Two statements —
+    Priority: a present copy's file over one of a copy that is away
+    (album_variants.absent_since — nothing can read it), then CD (16-bit
+    lossless) > other lossless > lossy. Two statements —
     losers cleared before the winner is set — because a single UPDATE that flips
     both rows transiently holds two TRUE rows for one track_id, which the partial
     unique index uq_media_files_analysis_source rejects. When the elected file
@@ -80,15 +82,17 @@ def elect_analysis_source(db: Session, track_id) -> None:
     """
     ranked = """
         WITH ranked AS (
-            SELECT id,
+            SELECT mf.id,
                    ROW_NUMBER() OVER (
                        ORDER BY
-                           (bit_depth = 16 AND is_lossless) DESC,
-                           is_lossless DESC,
-                           id
+                           (av.absent_since IS NULL) DESC,
+                           (mf.bit_depth = 16 AND mf.is_lossless) DESC,
+                           mf.is_lossless DESC,
+                           mf.id
                    ) as rn
-            FROM media_files
-            WHERE track_id = :tid
+            FROM media_files mf
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE mf.track_id = :tid
         )
     """
     db.execute(text(ranked + """

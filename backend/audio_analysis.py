@@ -138,7 +138,8 @@ def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
 # Pending = no features yet, OR unlinked provenance (legacy rows), OR linked
 # to material other than the current analysis source (source moved to a
 # better rip, or a stream preview awaiting its owned upgrade). Material under
-# one grid window is never pending (provenance.MIN_MATERIAL_SECONDS).
+# one grid window is never pending (provenance.MIN_MATERIAL_SECONDS), nor is
+# a file of a copy that is away (album_variants.absent_since).
 # P2P-imported analysis re-enters only when the enrichment.reanalyze_imported
 # toggle says so — see the policy comment in embeddings.py, which owns the
 # flag. A file that returned after a prune is linked back to its analysis
@@ -152,9 +153,11 @@ PENDING_SQL = """
            mf.cue_start_seconds, mf.cue_end_seconds
     FROM media_files mf
     JOIN tracks t ON t.id = mf.track_id
+    JOIN album_variants av ON av.id = mf.album_variant_id
     LEFT JOIN audio_features af ON af.track_id = t.id
     LEFT JOIN analysis_sources asrc ON asrc.id = af.analysis_source_id
     WHERE mf.is_analysis_source = true
+      AND av.absent_since IS NULL
       AND (mf.duration_seconds IS NULL
            OR mf.duration_seconds >= :min_seconds)
       AND (af.id IS NULL
@@ -519,7 +522,9 @@ class AudioAnalyzer:
                            mf.cue_start_seconds, mf.cue_end_seconds
                     FROM media_files mf
                     JOIN tracks t ON t.id = mf.track_id
+                    JOIN album_variants av ON av.id = mf.album_variant_id
                     WHERE mf.is_analysis_source = true
+                      AND av.absent_since IS NULL
                       AND (mf.duration_seconds IS NULL
                            OR mf.duration_seconds >= :min_seconds)
                 """

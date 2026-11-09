@@ -465,6 +465,10 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             db.add(variant)
                             db.flush()
                         pending_cache.append(("variant", vkey, variant))
+                    # A file read here makes its copy present: the walk's own
+                    # look (_mark_present) knows only the rows it had before.
+                    if variant.absent_since is not None:
+                        variant.absent_since = None
                     # ── Track-Artist association ──
                     ta_key = (track.id, artist.id, "primary")
                     if ta_key not in assoc_ta:
@@ -952,6 +956,7 @@ class LibraryScanner:
             "unique_tracks": 0,
             "superseded": 0,
             "unread": 0,
+            "back": 0,
         }
         def _report(msg: str = None):
             if progress_cb:
@@ -982,9 +987,11 @@ class LibraryScanner:
         # one, with the paths it could not read — the prune keeps what lies
         # under them. A limited scan truncates the list, so it never becomes a prune
         # input — everything outside the limit would read as deleted.
-        self.last_disk_paths = None if limit else {
-            settings.translate_to_host_path(str(fp.absolute())) for fp in audio_files
-        }
+        walked = {settings.translate_to_host_path(str(fp.absolute())) for fp in audio_files}
+        self.last_disk_paths = None if limit else walked
+        # A copy that was away is present again as soon as any walk sees one
+        # of its files — a limited or partial one too: seeing is proof.
+        stats["back"] = _mark_present(walked)
 
         total_files = len(audio_files)
 
@@ -1217,15 +1224,98 @@ def scan_library(limit: Optional[int] = None, skip_existing: bool = True, subpat
 
 
 def prune_counts(stats: Dict[str, Any]) -> Dict[str, int]:
-    """What a plan asks about, from a prune's stats."""
-    return {"files": stats["pruned"], "tracks": stats["orphan_tracks"],
-            "albums": stats["orphan_albums"], "artists": stats["orphan_artists"]}
+    """What a plan asks about, from a prune's stats: the files that go
+    (`files`, a copy found again elsewhere counted apart as `copies`), what
+    only they held (tracks, albums, artists), and the copies a Rescan just
+    set aside as away (`away`, nothing removed)."""
+    return {"files": stats["pruned"] - stats["copy_files"], "copies": stats["copies"],
+            "tracks": stats["orphan_tracks"], "albums": stats["orphan_albums"],
+            "artists": stats["orphan_artists"], "away": stats["away"]}
+
+
+# What a yes is held to: no more of what only the removed files held than the
+# question named. Files and copies cannot grow — the yes takes a subset of the
+# plan's files.
+_BOUND = ("tracks", "albums", "artists")
+
+
+def _mark_present(paths: Set[str]) -> int:
+    """Mark present again the away copies one of whose files a walk saw.
+    Returns how many came back."""
+    with get_db_context() as db:
+        if db.execute(text("SELECT 1 FROM album_variants WHERE absent_since IS NOT NULL "
+                           "LIMIT 1")).first() is None:
+            return 0
+        back = db.execute(text("""
+            UPDATE album_variants av SET absent_since = NULL
+            WHERE av.absent_since IS NOT NULL
+              AND EXISTS (SELECT 1 FROM media_files mf
+                          WHERE mf.album_variant_id = av.id
+                            AND mf.file_path = ANY(CAST(:p AS text[])))
+        """), {"p": list(paths)}).rowcount
+    if back:
+        logger.info(f"{back} cop(ies) away are present again: the walk saw their files")
+    return back
 
 
 def _prune_stats() -> Dict[str, Any]:
     return {"checked": 0, "pruned": 0, "kept_unread": 0, "orphan_tracks": 0,
             "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0,
-            "relinked": 0}
+            "copies": 0, "copy_files": 0, "away": 0, "relinked": 0}
+
+
+# The local copies whose files are ALL among a walk's missing ones, and
+# whether another present copy of the same album holds every one of their
+# tracks — a folder moved within the library, re-ripped elsewhere, the card's
+# copy away while the disk holds the album. One statement over the missing
+# set; a copy is present when it is not away and none of the files that hold
+# the track is missing too.
+_GONE_COPIES_SQL = text("""
+    WITH missing AS (SELECT unnest(CAST(:ids AS int[])) AS id),
+    gone AS (
+        SELECT mf.album_variant_id AS vid
+        FROM media_files mf LEFT JOIN missing m ON m.id = mf.id
+        WHERE mf.album_variant_id IN (SELECT f.album_variant_id FROM media_files f
+                                      JOIN missing USING (id))
+        GROUP BY mf.album_variant_id
+        HAVING count(m.id) = count(*)
+    )
+    SELECT g.vid, av.absent_since IS NOT NULL AS away,
+           NOT EXISTS (
+               SELECT 1 FROM media_files mf WHERE mf.album_variant_id = g.vid
+                 AND NOT EXISTS (
+                     SELECT 1 FROM media_files o
+                     JOIN album_variants ov ON ov.id = o.album_variant_id
+                     WHERE o.track_id = mf.track_id AND ov.album_id = av.album_id
+                       AND ov.id <> g.vid AND ov.absent_since IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM missing m2 WHERE m2.id = o.id))
+           ) AS found_elsewhere
+    FROM gone g JOIN album_variants av ON av.id = g.vid
+""")
+
+
+def _set_aside(missing_ids: List[int], stats: Dict[str, Any]) -> List[int]:
+    """A copy whose files are all missing is away, not gone: it is marked
+    absent (nothing removed, nothing asked — a walk that sees one of its
+    files marks it present again) and its files leave the removal. A copy
+    found again elsewhere stays in it, a copy to remove. Returns the files
+    the removal is left with."""
+    if not missing_ids:
+        return missing_ids
+    with get_db_context() as db:
+        copies = db.execute(_GONE_COPIES_SQL, {"ids": missing_ids}).fetchall()
+        away = [c.vid for c in copies if not c.found_elsewhere]
+        newly = [c.vid for c in copies if not c.found_elsewhere and not c.away]
+        if newly:
+            db.execute(text("UPDATE album_variants SET absent_since = now() "
+                            "WHERE id = ANY(CAST(:v AS int[]))"), {"v": newly})
+        kept = set(db.execute(text(
+            "SELECT id FROM media_files WHERE album_variant_id = ANY(CAST(:v AS int[]))"),
+            {"v": away}).scalars()) if away else set()
+    stats["away"] = len(newly)
+    if newly:
+        logger.info(f"Rescan set {len(newly)} cop(ies) aside as away: none of their files was found")
+    return [i for i in missing_ids if i not in kept]
 
 
 def plan_prune(
@@ -1318,8 +1408,24 @@ def plan_prune(
             missing_ids.append(mf_id)
             logger.info(f"Missing: {file_path}")
 
-    return _prune_files(missing_ids, stats, dry_run=True,
+    return _prune_files(_set_aside(missing_ids, stats), stats, dry_run=True,
                         progress_cb=progress_cb, cancel_check=cancel_check)
+
+
+def plan_away_removal() -> Dict[str, Any]:
+    """The owner's removal of the copies that are away: every file of every
+    absent copy, planned as a Rescan's removal is (rolled back, its counts)
+    and removed only at the yes — as the prune removed them before copies
+    could be away: the files, the tracks only they held, the copy, the album
+    and its own rows when nothing else holds it."""
+    stats = _prune_stats()
+    with get_db_context() as db:
+        file_ids = list(db.execute(text("""
+            SELECT mf.id FROM media_files mf
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE av.absent_since IS NOT NULL ORDER BY mf.id""")).scalars())
+    stats["checked"] = len(file_ids)
+    return _prune_files(file_ids, stats, dry_run=True, progress_cb=None, cancel_check=None)
 
 
 def prune_missing_files(file_ids: Sequence[int], counts: Dict[str, int],
@@ -1440,6 +1546,10 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
         """), {"ids": missing_ids}).one()
         track_ids = list(affected.tracks or [])
         variant_ids = list(affected.variants or [])
+        files_of = dict(db.execute(text("""
+            SELECT album_variant_id, count(*) FROM media_files
+            WHERE id = ANY(CAST(:ids AS int[])) GROUP BY album_variant_id
+        """), {"ids": missing_ids}).fetchall())
 
         album_ids = [r[0] for r in db.execute(text("""
             SELECT DISTINCT album_id FROM album_variants
@@ -1468,18 +1578,25 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
         """), {"ids": [str(t) for t in track_ids]})
         stats["orphan_tracks"] = r.rowcount
 
-        r = db.execute(text("""
+        gone_variants = db.execute(text("""
             DELETE FROM album_variants av WHERE av.id = ANY(CAST(:ids AS int[]))
               AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.album_variant_id = av.id)
-        """), {"ids": variant_ids})
-        stats["orphan_variants"] = r.rowcount
+            RETURNING av.id, av.album_id
+        """), {"ids": variant_ids}).fetchall()
+        stats["orphan_variants"] = len(gone_variants)
 
-        r = db.execute(text("""
+        gone_albums = set(db.execute(text("""
             DELETE FROM albums a WHERE a.id = ANY(CAST(:ids AS uuid[]))
               AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = a.id)
               AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = a.id)
-        """), {"ids": [str(a) for a in album_ids]})
-        stats["orphan_albums"] = r.rowcount
+            RETURNING a.id
+        """), {"ids": [str(a) for a in album_ids]}).scalars())
+        stats["orphan_albums"] = len(gone_albums)
+        # A copy that goes while its album stays is a copy, not music: the
+        # question names it apart from the files.
+        copies = [vid for vid, album in gone_variants if album not in gone_albums]
+        stats["copies"] = len(copies)
+        stats["copy_files"] = sum(files_of.get(v, 0) for v in copies)
 
         r = db.execute(text("""
             DELETE FROM artists ar WHERE ar.id = ANY(CAST(:ids AS uuid[]))
@@ -1492,7 +1609,7 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
             db.rollback()
             logger.info("Prune plan: %s", {k: v for k, v in stats.items() if k != "file_ids"})
             return stats
-        if bound is not None and any(n > bound[k] for k, n in prune_counts(stats).items()):
+        if bound is not None and any(prune_counts(stats)[k] > bound[k] for k in _BOUND):
             db.rollback()
             stats["grew"], stats["file_ids"] = True, missing_ids
             logger.info("Prune at the yes would remove more than it asked about "

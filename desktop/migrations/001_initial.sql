@@ -568,6 +568,13 @@ CREATE TABLE IF NOT EXISTS album_variants (
     -- Home "New in my collection" feed sorts by an indexed column instead of a
     -- runtime GROUP BY across 30k media_files on every request.
     file_modified_at TIMESTAMPTZ,
+    -- A local copy whose files a Rescan found none of (a folder moved out, a
+    -- drive or a nested mount gone): set at that Rescan, NULL again when any
+    -- walk sees one of its files. Its media_files rows stay — the tracklist,
+    -- the analysis link and the album with its own rows — and nothing reads
+    -- its bytes while it is away. Only the owner's confirmed removal deletes
+    -- it (ROOT-1, 2026-11-09).
+    absent_since TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     -- The same directory string can name a local folder AND the folder an
@@ -581,6 +588,8 @@ CREATE TABLE IF NOT EXISTS album_variants (
 );
 CREATE INDEX IF NOT EXISTS idx_album_variants_hqp_endpoint
     ON album_variants(hqp_endpoint_id) WHERE hqp_endpoint_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_album_variants_absent
+    ON album_variants(album_id) WHERE absent_since IS NOT NULL;
 
 -- Phantom-album tracklists (Phantom Discovery, Stage B). Owned albums keep
 -- the authoritative albums → album_variants → media_files → tracks chain;

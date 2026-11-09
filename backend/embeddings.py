@@ -99,7 +99,8 @@ def _padded_to_rung(inputs, pad_token_id: int) -> dict:
 # millions of trackless phantom rows; driving from tracks would scan them all
 # to find owned ones needing an embedding. Material under one grid window is
 # never queued: no fingerprint, no address, no analysis
-# (provenance.MIN_MATERIAL_SECONDS).
+# (provenance.MIN_MATERIAL_SECONDS), nor is a file of a copy that is away
+# (album_variants.absent_since): nothing can read it until it is back.
 SOURCE_FILES_SQL = """
     SELECT t.id as track_id, mf.id as media_file_id,
            mf.file_path, mf.bit_depth,
@@ -108,9 +109,11 @@ SOURCE_FILES_SQL = """
            mf.cue_start_seconds, mf.cue_end_seconds
     FROM media_files mf
     JOIN tracks t ON t.id = mf.track_id
+    JOIN album_variants av ON av.id = mf.album_variant_id
     LEFT JOIN embeddings e ON e.track_id = t.id
     LEFT JOIN analysis_sources asrc ON asrc.id = e.analysis_source_id
     WHERE mf.is_analysis_source = true
+      AND av.absent_since IS NULL
       AND (mf.duration_seconds IS NULL
            OR mf.duration_seconds >= :min_seconds)
 """

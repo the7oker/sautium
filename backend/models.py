@@ -482,6 +482,7 @@ class AlbumVariant(Base):
     sample_rate = Column(Integer)
     bit_depth = Column(Integer)
     is_lossless = Column(Boolean, default=True)
+    absent_since = Column(DateTime(timezone=True))   # a local copy away (001_initial.sql)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())

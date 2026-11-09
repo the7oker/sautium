@@ -101,7 +101,9 @@ See:
   lite` decides what the node derives locally (analysis, pre-warm, thread
   caps); it never decides what the node stores. Rows the owner can see are
   deleted only by an explicit, confirmed user action (Settings › Library ›
-  "Remove phantom layer") — no startup job, boot-streak counter or tier
+  "Remove phantom layer", Rescan's question, the Away row — a copy whose
+  files a Rescan did not find is away, never gone, since 2026-11-09) — no
+  startup job, boot-streak counter or tier
   heuristic may drop them. The phantom layer's growth is the owner's switch
   (`discovery.phantom_layer`, default on). The lite phantom prune of
   2026-07-10 broke this rule and was removed 2026-08-27.

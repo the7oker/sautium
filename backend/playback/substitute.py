@@ -59,18 +59,20 @@ _COPIES_SQL = f"""
            hf.hqp_path, hf.file_format::text AS hqp_format
     FROM (
         SELECT mf.id, mf.track_id, av.location, av.hqp_endpoint_id,
-               mf.is_lossless, mf.sample_rate, mf.bit_depth
+               mf.is_lossless, mf.sample_rate, mf.bit_depth, av.absent_since
         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
         WHERE mf.track_id = ANY(%(ids)s::uuid[])
         UNION ALL
         SELECT hf.id, hf.track_id, av.location, av.hqp_endpoint_id,
-               hf.is_lossless, hf.sample_rate, hf.bit_depth
+               hf.is_lossless, hf.sample_rate, hf.bit_depth, av.absent_since
         FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
         WHERE hf.track_id = ANY(%(ids)s::uuid[])
     ) f
     LEFT JOIN media_files mf ON f.location = 'local' AND mf.id = f.id
     LEFT JOIN hqp_library_files hf ON f.location = 'hqplayer' AND hf.id = f.id
-    ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
+    -- a copy that is away (its files not found at the last Rescan) only when
+    -- no other copy holds the track: it opens to a "file missing on disk"
+    ORDER BY f.track_id, (f.absent_since IS NOT NULL), {owned_rank('f')}, {best_rip_order('f')}
 """
 
 

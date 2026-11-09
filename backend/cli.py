@@ -111,11 +111,17 @@ def scan(limit, no_skip, path, prune, yes):
             click.echo(f"   • Checked: {plan['checked']} files")
             if plan['kept_unread']:
                 click.echo(f"   • Kept: {plan['kept_unread']} files under folders that could not be read")
+            if plan['away']:
+                click.echo(f"   • Away: {plan['away']} album copies with none of their files found, "
+                           "kept until removed in the Library")
             if not file_ids:
-                if plan['checked'] and not plan['kept_unread']:
+                if plan['checked'] and not plan['kept_unread'] and not plan['away']:
                     click.echo(f"   ✅ All files present on disk")
                 return
-            click.echo(f"   • Missing: {plan['pruned']} files; removing them also deletes")
+            if plan['copies']:
+                click.echo(f"   • Found again elsewhere: {plan['copies']} album copies "
+                           f"({plan['copy_files']} files) whose old entries go")
+            click.echo(f"   • Missing: {plan['pruned'] - plan['copy_files']} files; removing them also deletes")
             click.echo(f"     {plan['orphan_tracks']} tracks with no analysis and no listens,")
             click.echo(f"     {plan['orphan_albums']} albums and {plan['orphan_artists']} artists "
                        "that nothing else holds")

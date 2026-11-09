@@ -292,29 +292,38 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
     }).scalar()
 
 
-# The node's own analysis whose file left the library (media_file_id SET NULL
-# on the file row's delete) and the analysis-source file now holding its
-# track: a file that came back, at its old path or a new one. Only first-hand
-# file rows — a stream row is the stream→owned upgrade policy's, an imported
-# one the reanalyze_imported policy's, and neither is this node's file. Read
-# from the state alone, so whatever a cancel, a restart or a missing fpcalc
-# left is found again by the next run.
-_RETURNED_SQL = """
+# A first-hand file row (a stream row is the stream→owned upgrade policy's, an
+# imported one the reanalyze_imported policy's, and neither is this node's
+# file) whose file left the library (media_file_id SET NULL on the file row's
+# delete) or belongs to a copy that is away (album_variants.absent_since): the
+# material has no readable file here, and a present file of the same material
+# takes it over — the copy found again elsewhere keeps its analysis while the
+# old one waits for the owner's removal.
+_UNLINKED = """s.provider_id IS NULL AND NOT s.imported
+    AND (s.media_file_id IS NULL
+         OR EXISTS (SELECT 1 FROM media_files x
+                    JOIN album_variants xv ON xv.id = x.album_variant_id
+                    WHERE x.id = s.media_file_id AND xv.absent_since IS NOT NULL))"""
+
+# Such a row and the present analysis-source file now holding its track: a
+# file that came back, at its old path or a new one. Read from the state alone,
+# so whatever a cancel, a restart or a missing fpcalc left is found again by
+# the next run.
+_RETURNED_SQL = f"""
     SELECT mf.id, mf.track_id::text AS track_id, mf.file_path,
            mf.cue_start_seconds, mf.cue_end_seconds, mf.duration_seconds,
            mf.file_size_bytes, mf.file_modified_at,
            ARRAY(SELECT s.id FROM analysis_sources s
-                 WHERE s.track_id = mf.track_id AND s.media_file_id IS NULL
-                   AND s.provider_id IS NULL AND NOT s.imported
+                 WHERE s.track_id = mf.track_id AND {_UNLINKED}
                  ORDER BY s.id) AS rows
     FROM media_files mf
-    WHERE mf.is_analysis_source
+    JOIN album_variants av ON av.id = mf.album_variant_id
+    WHERE mf.is_analysis_source AND av.absent_since IS NULL
       AND (mf.duration_seconds IS NULL OR mf.duration_seconds >= :min_seconds)
-      {scope}
+      {{scope}}
       AND NOT EXISTS (SELECT 1 FROM analysis_sources s WHERE s.media_file_id = mf.id)
       AND EXISTS (SELECT 1 FROM analysis_sources s
-                  WHERE s.track_id = mf.track_id AND s.media_file_id IS NULL
-                    AND s.provider_id IS NULL AND NOT s.imported)
+                  WHERE s.track_id = mf.track_id AND {_UNLINKED})
     ORDER BY mf.id
 """
 
@@ -322,11 +331,11 @@ _RETURNED_SQL = """
 # of the material declaration a seal binds (record_sig.segment_payload), so a
 # longer or shorter cut of the same opening is another material, and a file
 # of unknown length matches only a row that declares none either.
-_RELINK_SQL = sa_text("""
-    UPDATE analysis_sources SET media_file_id = :mfid
-    WHERE track_id = :tid AND chromaprint_key = sha256(decode(:fp, 'escape'))
-      AND media_file_id IS NULL AND provider_id IS NULL AND NOT imported
-      AND (duration_seconds IS NULL OR duration_seconds = CAST(:dur AS int))
+_RELINK_SQL = sa_text(f"""
+    UPDATE analysis_sources s SET media_file_id = :mfid
+    WHERE s.track_id = :tid AND s.chromaprint_key = sha256(decode(:fp, 'escape'))
+      AND {_UNLINKED}
+      AND (s.duration_seconds IS NULL OR s.duration_seconds = CAST(:dur AS int))
 """)
 
 _RELINK_CHUNK = 100
