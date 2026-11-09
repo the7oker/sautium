@@ -569,11 +569,17 @@ class DlnaBackend(PlayerBackend):
         # The track a load of ours under way adopted its slot for: a queue
         # edit meanwhile moves that slot with it (queue_changed)
         self._load_item: Optional[QueueItem] = None
-        # The node paused our track itself, and the renderer has not played
-        # since: a pause by no word of the node's — the renderer's own remote,
-        # a controller past UPnP (the KANN under Roon's RAAT says our URI
-        # paused) — is said as the renderer's (`paused_on_device`)
-        self._paused_by_node = False
+        # The node's own last transport word was a Pause — whether the
+        # renderer then said paused (`_pause_seen`: only its playing after
+        # that, its own remote's play, ends the node's pause; a playing it
+        # still reported before carrying the Pause out does not) — and
+        # whether the renderer has said it plays since the node's last Play
+        # or load: a pause by no word of the node's after that — the
+        # renderer's own remote, a controller past UPnP (the KANN under
+        # Roon's RAAT says our URI paused) — is said as the renderer's
+        # (`paused_on_device`); one it still reported before carrying the
+        # node's Play out is not
+        self._paused_by_node = self._pause_seen = self._played_seen = False
         self._position = 0.0
         # Wall-clock position estimate for renderers that don't report RelTime
         # (KANN on VBR Opus): position at the last baseline + elapsed since.
@@ -871,7 +877,7 @@ class DlnaBackend(PlayerBackend):
         item = self._queue.item_at(index)
         if item is None:
             return
-        self._index = index
+        self._index, self._held_item = index, item
         self._current_url = None     # play() loads this slot fresh
         self._resume = position
         self._position = position
@@ -1090,10 +1096,15 @@ class DlnaBackend(PlayerBackend):
                 and self._queue.index_of(self._cut) is not None):
             extra["taken"] = True       # the play tracker holds the cut listen
         state = state or self._state_name()
-        if state == "playing":
-            self._paused_by_node = False
-        elif (state == "paused" and not self._paused_by_node and self._current_url is not None
-              and not self._external and not self._gone):
+        seen = self._state_name()
+        if seen == "playing":
+            self._played_seen = True
+            if self._pause_seen:
+                self._paused_by_node = self._pause_seen = False
+        elif seen == "paused" and self._paused_by_node:
+            self._pause_seen = True
+        if (state == "paused" and not self._paused_by_node and self._played_seen
+                and self._current_url is not None and not self._external and not self._gone):
             # The node cannot see RAAT: the renderer's own word, "paused",
             # stays — said as the renderer's, so the person knows it was not
             # Sautium (ROON-COEX, the design session's answer to §10.3 B1)
@@ -2309,11 +2320,13 @@ class DlnaBackend(PlayerBackend):
             # Said while the hand-over was on its way: our track is the
             # renderer's now, never started — held paused at the load's
             # second, as a switch's spot is (resume_at), nothing more sent:
-            # Play loads it there, and the listen goes on
-            self._current_url, self._resume = None, self._position
+            # Play loads it there, and the listen goes on; a queue edit moves
+            # its slot with its track
+            self._current_url, self._resume, self._held_item = None, self._position, item
             self._emit_now("paused")
             return True
         if play:
+            self._paused_by_node = self._pause_seen = self._played_seen = False
             await self._avt_retry("Play", Speed="1")
             # The clock starts at the offset (0 for a fresh track), or at the
             # second the start's own Seek goes to once the renderer plays —
@@ -2588,6 +2601,7 @@ class DlnaBackend(PlayerBackend):
                 # from STOPPED (a finished or refused track, still loaded)
                 # this is a fresh start it has yet to confirm.
                 fresh_start = self._state_name() != "paused"
+                self._paused_by_node = self._pause_seen = self._played_seen = False
                 await self._avt_retry("Play", Speed="1")
                 # Paused → resumes where it was; stopped → UPnP Stop reset the
                 # position and Play starts the track over (KANN, live: the
@@ -2622,11 +2636,11 @@ class DlnaBackend(PlayerBackend):
                 # still plays (the track tapped away from) is paused
                 self._parked = None
                 if self._state_name() == "playing":
-                    self._paused_by_node = True
+                    self._paused_by_node, self._pause_seen = True, False
                     await self._avt("Pause")
                 self._emit_now("paused")
                 return
-            self._paused_by_node = True
+            self._paused_by_node, self._pause_seen = True, False
             await self._avt("Pause")
             self._emit_now("paused")
         return self._call(_p())
@@ -2799,9 +2813,11 @@ class DlnaBackend(PlayerBackend):
                 # track, never the spot's (a take-back says the spot again
                 # only if it hands nothing over: _restore_spot)
                 slot = self._queue.index_of(self._load_item)
-            elif self._external and self._held_item is not None:
-                # Another controller holds it: the slot Play loads follows its
-                # item, and the spot goes with it
+            elif (self._external or self._current_url is None) and self._held_item is not None:
+                # Another controller holds it, or a spot of ours is held with
+                # nothing of ours loaded (a switch's, a take-back's hand-over
+                # stopped): the slot Play loads follows its item, and the spot
+                # goes with it
                 slot = self._queue.index_of(self._held_item)
                 if slot is None:
                     self._resume = self._held_item = None

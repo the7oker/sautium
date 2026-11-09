@@ -631,8 +631,11 @@ comes after the control port answers again — so neither can end the wait.
   standing, and a start that waited for its stream leaves its own. A listen
   ended first — by a Stop, a start, a Seek or a clear of the node's, or by
   HQPlayer moving on by itself — was cut by no one, nor one read in its last
-  seconds or long enough ago to have played them (HQPlayer's own advance,
-  or near enough): another controller took an idle HQPlayer, no spot is
+  seconds or, where HQPlayer names no take, long enough ago to have played
+  them (HQPlayer's own advance, or near enough); a takeover in a start's
+  first seconds, its position not yet moved, cuts it all the same, but no
+  spot set or moved since the listen's reading (D6's, the person's) is put
+  back over: another controller took an idle HQPlayer, no spot is
   set, and while it holds HQPlayer — or its playlist rests there with
   nothing of ours read — a Seek, Next or Previous is refused in words:
   nothing of the queue's to move, and HQPlayer's own would move that

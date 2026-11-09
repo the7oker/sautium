@@ -966,7 +966,9 @@ class _Listen(NamedTuple):
     take's track_serial (None: HQPlayer 5 names none), when that tick was
     asked for, whether it was in its last seconds, its entry's length —
     HQPlayer's, else the queue item's; 0 where neither knows it — and
-    whether HQPlayer's playlist was the queue's mirror then."""
+    whether HQPlayer's playlist was the queue's mirror then; whether its
+    position moved on that take since it began (the spend's evidence), and
+    the spot's generation then."""
     item: QueueItem
     second: float
     take: Optional[int]
@@ -974,6 +976,8 @@ class _Listen(NamedTuple):
     near_end: bool
     length: float
     in_step: bool
+    moved: bool
+    spot_gen: int
 
 
 @dataclass
@@ -1650,8 +1654,11 @@ class HqpBackend(PlayerBackend):
             return True
         from streaming import service as streaming_service
         proxy = streaming_service.get_proxy()
-        return (proxy is not None and _token_of(uri) is not None
-                and urlsplit(uri).netloc == f"{self._url_host}:{proxy.port}")
+        # The proxy's port, or — at a boot, HQPlayer attached before the proxy
+        # starts — the one it is configured to serve on (it serves there or
+        # not at all)
+        port = proxy.port if proxy is not None else settings.media_proxy_port
+        return _token_of(uri) is not None and urlsplit(uri).netloc == f"{self._url_host}:{port}"
 
     def _handed_here(self, uri: Optional[str]) -> bool:
         """Did this attachment hand this HQPlayer `uri` since its last full
@@ -3044,12 +3051,14 @@ class HqpBackend(PlayerBackend):
         its entry is, never by its place alone: the layout's slot for an
         entry nothing names may be another controller's stream — is the
         listen's latest reading: its item, the second handed on, the take,
-        whether it is in its last seconds; one whose position never moved is
-        no listen (`moving`, the spend's evidence: _spot_played) unless it
-        reads that listen on its own take again, paused or playing — the one
-        PLAYING answer of a start HQPlayer refuses (a filter it builds) cut
-        nothing, and a takeover after it put the spot back on the refused
-        track at 0 though the person had moved it. The first tick after it that finds
+        whether it is in its last seconds, whether its position moved on its
+        take (`moving`, the spend's evidence: _spot_played) — the hold before
+        a verdict keeps only a listen that moved (_listen_held: the one
+        PLAYING answer of a start HQPlayer refuses held nothing), while a
+        takeover in a start's first seconds cuts it all the same (D3.2) — and
+        the spot's generation then: a spot set or moved since that reading
+        (D6's at a refused start, the person's move of it) is the node's
+        newer word, and no verdict puts the spot back over it. The first tick after it that finds
         HQPlayer playing or pausing an entry not ours judges it, once:
         another controller's start cut the listen — the take moved once since
         that reading (where HQPlayer names no take, the tick before was the
@@ -3060,8 +3069,9 @@ class HqpBackend(PlayerBackend):
         start from it is taken. A listen that ended before cut nothing — a
         Stop, a start, a Seek or a clear of ours ended it, and so did
         HQPlayer moving on by itself first (the other controller's start then
-        two takes past the listen's), and one read in its last seconds, or
-        long enough ago to have played them, is HQPlayer's own advance (onto
+        two takes past the listen's), and one read in its last seconds — or,
+        where HQPlayer names no take, long enough ago to have played them —
+        is HQPlayer's own advance (onto
         an entry the queue no longer names, read as not ours) or close
         enough to it; a verdict that turned on the same take is no start of
         anyone's. Another controller then took an idle HQPlayer: no spot,
@@ -3088,19 +3098,20 @@ class HqpBackend(PlayerBackend):
         if busy and playing[1] is not None and not playing[2]:
             self._cut = None                # HQPlayer reads an entry of ours again
             listen = self._listen
-            if playing[0] and self._readings(status.uri) and (moving or (
-                    listen is not None and listen.item is playing[1] and listen.take == status.track_serial)):
+            if playing[0] and self._readings(status.uri):
+                same = listen is not None and listen.item is playing[1] and listen.take == status.track_serial
                 length = status.length if status.length > 0 else (playing[1].duration_seconds or 0.0)
                 self._listen = _Listen(playing[1], position, status.track_serial, read_at,
                                        length > 0 and status.position >= length - diag.ADVANCE_END_S,
-                                       length, self._mirror == "step")
+                                       length, self._mirror == "step", moving or (same and listen.moved),
+                                       self._spot_gen)
             return False
         listen = self._listen
         if listen is None:
             return False
         if playing[2]:
             self._listen = None
-            if self._ended(listen, read_at, status.track_serial):
+            if self._ended(listen, read_at, status.track_serial) or self._spot_gen != listen.spot_gen:
                 return False
             if listen.take is not None and status.track_serial is not None:
                 if status.track_serial != listen.take + 1:
@@ -3108,7 +3119,7 @@ class HqpBackend(PlayerBackend):
             elif listen.at != prev_at:
                 return False
         elif edited:
-            if self._ended(listen, read_at, status.track_serial):
+            if self._ended(listen, read_at, status.track_serial) or self._spot_gen != listen.spot_gen:
                 self._listen = None
                 return False
             if listen.take is not None and status.track_serial is not None:
@@ -3169,7 +3180,7 @@ class HqpBackend(PlayerBackend):
         if cut is not None and self._queue.index_of(cut) is not None:
             return True
         listen = self._listen
-        if (listen is None or self._queue.index_of(listen.item) is None
+        if (listen is None or not listen.moved or self._queue.index_of(listen.item) is None
                 or self._ended(listen, read_at, status.track_serial)):
             return False
         moved = listen.take is not None and status.track_serial is not None and status.track_serial != listen.take
@@ -4325,12 +4336,15 @@ class HqpBackend(PlayerBackend):
         a newer word that superseded their start, leaves none; else the
         attempt watched, a play intent of this node's or HQPlayer's own
         advance, until HQPlayer starts it or anything ends it
-        (diag.Attempt.under_way)."""
+        (diag.Attempt.under_way) — never while another controller holds
+        HQPlayer (_taken): its start superseded the node's, whose attempt
+        still waits out its window, and a Play then was swallowed as that
+        start while the other app played on."""
         pressed = self.pressing()
         if pressed is not None:
             return bool(pressed)
         att = self._attempt
-        return att is not None and att.under_way()
+        return att is not None and att.under_way() and not self._taken()
 
     def _start_is_this_play(self, n: Optional[int]) -> bool:
         """A Play numbered `n` (None: a held one carried out), its turn come:
@@ -4407,6 +4421,11 @@ class HqpBackend(PlayerBackend):
         proxy = streaming_service.get_proxy()
         for i, (t, it) in enumerate(zip(hqp_tracks, snapshot), start=1):
             src = it.opener()
+            if src["kind"] == "uri":
+                # A URI the node adopted or re-bound: its identity, never re-minted
+                if not _same_entry(t.get("uri") or "", src["uri"]):
+                    return i
+                continue
             if src["kind"] == "hqp":
                 # A file in HQPlayer's own library: the URI's path is the
                 # identity, no remap.
@@ -4428,7 +4447,8 @@ class HqpBackend(PlayerBackend):
         read together while the mirror's state had changed `expect` times. The
         same, it is in step. Otherwise, back from a restart (_verify_mirror)
         the mirror is lost and HQPlayer gets the queue back; a tail mirror
-        whose tail holds stays one; any other difference is drift — an edit
+        whose tail holds — and that holds no entry of another controller's —
+        stays one; any other difference is drift — an edit
         made outside this node — never reconciled on its own (a lost mirror
         stays lost). A verdict a change of the mirror overtook is not
         applied. Returns whether the verdict stands. A playlist that holds
@@ -4450,7 +4470,7 @@ class HqpBackend(PlayerBackend):
         elif self._verify_mirror:
             return self.lose_mirror("HQPlayer came back with a different playlist (restarted?)",
                                     expect=expect)
-        elif self._mirror == "tail" and self._tail_holds(playlist, layout, status):
+        elif self._mirror == "tail" and not self._edited and self._tail_holds(playlist, layout, status):
             return True
         elif self._mirror in ("step", "tail"):
             self._drifted("HQPlayer's playlist drifted from the canonical queue (an external edit?)",
