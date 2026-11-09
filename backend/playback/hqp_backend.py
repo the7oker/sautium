@@ -1358,6 +1358,10 @@ class HqpBackend(PlayerBackend):
         # under the takeover's spot (_RefusalReads, _read_refusal_again, §6.1
         # P13). Under _spot_lock
         self._refusal_read: Optional[_RefusalReads] = None
+        # A start HQPlayer did not play whose close met a reading that names
+        # no entry: (its attempt, its track, its second), judged at the next
+        # reading that does (_judge_rest). The poller's alone
+        self._rest_due: Optional[tuple] = None
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
         self._stopped_at_attach = False
@@ -2771,6 +2775,7 @@ class HqpBackend(PlayerBackend):
                             and listed is not None):
                         self._read_refusal_again(status, [t.get("uri") for t in hqp_playlist])
                     self._judge_start(status, playing)
+                    self._judge_rest(status, playing)
                     if self._reconverge_due and link.owed is None:
                         # Once per loss: HQPlayer answers again — the add it
                         # owed among it — and gets the queue back
@@ -4706,24 +4711,70 @@ class HqpBackend(PlayerBackend):
         it — erased as any spot is, with its item or once a start from it is
         taken. Only an entry of ours in an intact mirror (an advance aims at
         none elsewhere: _advance), only while HQPlayer still rests at the
-        reading the attempt closed on — the poller's own, never the tick the
-        status last showed, which a reading with no verdict leaves older —
-        stopped, or saying it plays that very entry: the one PLAYING answer
-        of a filter it builds before it refuses, which an advance closed on
-        the refusal its log named can meet last, no play, as _spot_played
-        reads one (a position moving on spends the spot); not once anything
-        else plays (the person's word in its own window, another controller,
-        whose takeover leaves its own spot: _note_listen), nor while HQPlayer
-        opens an entry its answer names none of — set there, the spot stood
-        under what plays, and Pause then Play restarted the refused track —
-        and a spot set since stays. Called on the poller."""
+        reading the attempt closed on (_rest_at) — the poller's own, never
+        the tick the status last showed, which a reading with no verdict
+        leaves older: there HQPlayer opening another entry had the spot set
+        under what plays, and Pause then Play restarted the refused track.
+        A close on a reading that names no entry (no verdict and no URI that
+        names one, a state the SDK does not name) leaves the rest to the next
+        reading that does (_judge_rest). A spot set since stays. Called on
+        the poller."""
         item, second = att.target if att.target is not None else (None, 0.0)
-        status, playing = self._before or (None, None)
-        rests = status is not None and (status.state == PlaybackState.STOPPED or (
-            status.state == PlaybackState.PLAYING and playing is not None
-            and playing[1] is item and not playing[2]))
-        if item is None or not rests or self._queue.index_of(item) is None:
+        if item is None or self._queue.index_of(item) is None:
             return
+        status, playing = self._before or (None, None)
+        closed_on = att.ticks[-1]["ts"] if att.ticks else None
+        rests = (self._rest_at(status, playing, item)
+                 if status is not None and closed_on == self._before_at else None)
+        if rests is None:
+            self._rest_due = (att, item, second)
+        elif rests:
+            self._leave_spot(att, item, second)
+
+    def _rest_at(self, status, playing: Optional[tuple], item: QueueItem) -> Optional[bool]:
+        """Does HQPlayer rest on `item`'s start at this reading: stopped, or
+        saying it plays that very entry — the one PLAYING answer of a filter
+        it builds before it refuses, which an advance closed on the refusal
+        its log named can meet last, no play, as _spot_played reads one (a
+        position moving on spends the spot); its entry named by the reading's
+        verdict, or with none (HQPlayer's opening answer, a queue edit in
+        flight) by what its URI names. Another entry playing — the person's
+        word in HQPlayer's own window, another controller, whose takeover
+        leaves its own spot (_note_listen) — or a pause is no rest. None when
+        nothing names the entry it plays."""
+        if status.state == PlaybackState.STOPPED:
+            return True
+        if status.state != PlaybackState.PLAYING:
+            return False
+        if playing is not None:
+            return playing[1] is item and not playing[2]
+        readings = self._readings(status.uri)
+        if not readings:
+            return None
+        return any(_reads_item(r, item) for r in readings)
+
+    def _judge_rest(self, status, playing: Optional[tuple]) -> None:
+        """The rest a start's close left to a later reading (_rests_on_its_start),
+        judged at the first that names an entry — dropped once the person's
+        word is newer (another attempt watched, or closed, since) or its item
+        left the queue. Called on the poller."""
+        due = self._rest_due
+        if due is None:
+            return
+        att, item, second = due
+        if self._attempt is not None or self._last_closed is not att or self._queue.index_of(item) is None:
+            self._rest_due = None
+            return
+        rests = self._rest_at(status, playing, item)
+        if rests is None:
+            return
+        self._rest_due = None
+        if rests:
+            self._leave_spot(att, item, second)
+
+    def _leave_spot(self, att: diag.Attempt, item: QueueItem, second: float) -> None:
+        """The spot a start HQPlayer did not play leaves at its track and
+        second, unless one was set since. Called on the poller."""
         with self._spot_lock:
             if self._spot is not None:
                 return

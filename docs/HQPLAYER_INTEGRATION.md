@@ -658,10 +658,15 @@ comes after the control port answers again — so neither can end the wait.
   playing status at 0 s of a filter HQPlayer builds before it refuses: no
   play, and the spot is set there all the same (since 2026-11-01) — a
   position moving on spends it, as above. The rest is judged at the reading
-  the attempt closed on (since 2026-11-09): one that names no entry —
-  HQPlayer opening another — is no rest, though the status still shows the
-  stop before it; the spot set there stood under what plays, and Pause then
-  Play restarted the refused track. Only an
+  the attempt closed on (since 2026-11-09), never at the tick the status last
+  showed: an opening answer gives no verdict, and judged on the stop before
+  it the spot stood under what HQPlayer opened, Pause then Play restarting
+  the refused track. A reading with no verdict is judged by what its URI
+  names — the start's own entry is a rest (the build's playing answer in its
+  opening shape), another entry none — and a close on one that names no
+  entry (no URI from this build, a state the SDK does not name) leaves the
+  rest to the next reading that does; the person's word meanwhile drops it.
+  Only an
   entry of ours in a mirror in step or a tail mirror (the advance names its
   target only there); not a stop while another controller holds HQPlayer
   (Roon, its own window), and a spot set since stays. Another controller

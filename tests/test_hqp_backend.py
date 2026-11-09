@@ -2492,6 +2492,92 @@ def test_an_advance_closed_on_its_refusal_while_hqplayer_opens_another_entry_lea
     assert traced._spot is None
 
 
+def _refused_in_log(tmp_path):
+    with open(tmp_path / "HQPlayer9Desktop.log", "a", encoding="utf-8") as f:
+        f.write("I 2001/05/06 10:00:09 Rate: 48000, block size: 8192, frame size: 32768\n"
+                "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate\n")
+
+
+def _hqplayer_is(fake, state, track, starting, opening=0):
+    with fake._lock:
+        fake._advancing = None
+        fake.state, fake.track, fake.position, fake._starting, fake.opening = state, track, 0.0, starting, opening
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), 10.0)
+
+
+def test_an_advance_closed_on_the_build_answer_of_its_own_entry_in_the_opening_shape_leaves_the_spot(
+        traced, fake, monkeypatch, tmp_path):
+    """The one playing answer of the filter HQPlayer builds for the advance's
+    entry, given in the shape HQPlayer opens an entry in (playing at track 0,
+    length 0, no verdict) with its URI naming that entry: the close meets it
+    — what the URI names is the start's own entry, a rest, and the spot
+    stays at slot 2 once HQPlayer stops (the rest's reading, not the opening
+    shape, decides)."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    _hqplayer_is(fake, int(PlaybackState.PLAYING), 2, 10 ** 6, opening=10 ** 6)
+    _refused_in_log(tmp_path)
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
+    last = att.facts["ticks"][-1]
+    assert (last["state"], last["track"], last["length"]) == ("playing", 0, 0)
+    _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0)
+    assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 10.0)
+
+
+@pytest.mark.parametrize("hqplayer", ["plays its entry", "rests on it"])
+def test_a_close_on_a_reading_with_no_verdict_and_no_uri_leaves_the_rest_to_the_next_reading(
+        traced, fake, monkeypatch, tmp_path, hqplayer):
+    """An HQPlayer whose Status names no URI, a queue edit in flight: its
+    readings give no verdict (D4). The advance's close meets one — playing
+    its entry, nothing naming it: the next reading that names an entry
+    decides, HQPlayer's own stop a rest (the spot at slot 2); or stopped on
+    it: a stop is a rest whatever names its entry, the spot at once."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    monkeypatch.setattr(traced, "_readings", lambda uri: [])        # no URI from this build
+    edit = traced._queue.mutation()
+    edit.__enter__()                                                 # a queue edit in flight
+    try:
+        state = int(PlaybackState.PLAYING) if hqplayer == "plays its entry" else int(PlaybackState.STOPPED)
+        _hqplayer_is(fake, state, 2, 10 ** 6)
+        assert traced._before[1] is None                             # no verdict
+        _refused_in_log(tmp_path)
+        assert _wait(lambda: att.verdict is not None, 10.0)
+        assert att.verdict["code"] == "rate_refused" and att.facts["ticks"][-1]["track"] == 2
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)     # the close's pass is over
+        spot = traced._spot and (traced._spot[0].track_id, traced._spot[1])
+        assert spot == (None if hqplayer == "plays its entry" else ("track-2", 0))
+    finally:
+        edit.__exit__(None, None, None)
+    _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0)
+    assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 10.0)
+
+
+def test_a_close_on_a_state_the_sdk_does_not_name_leaves_the_rest_to_the_next_reading(traced, fake, monkeypatch,
+                                                                                      tmp_path):
+    """The reading the advance's close meets is a state the SDK does not name
+    (Embedded said 5 while it started a play): the poller keeps no reading of
+    it, so the stop before it is not the close's reading — the rest waits for
+    the next reading that names an entry, and HQPlayer playing another entry
+    then is none: no spot."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    for state, track, starting in [(int(PlaybackState.PLAYING), 2, 10 ** 6), (int(PlaybackState.STOPPED), 0, 0),
+                                   (5, 1, 10 ** 6)]:
+        _hqplayer_is(fake, state, track, starting)
+    _refused_in_log(tmp_path)
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)
+    assert traced._spot is None and traced._rest_due is not None
+    _hqplayer_is(fake, int(PlaybackState.PLAYING), 1, 10 ** 6)
+    assert traced._spot is None and traced._rest_due is None
+
+
 @pytest.mark.parametrize("why", ["rule", "slow"])
 def test_a_spot_hqplayer_plays_after_all_is_spent(traced, fake, monkeypatch, tmp_path, why):
     """HQPlayer's own advance whose rebuild outlasts its deadline while it
@@ -5813,6 +5899,13 @@ def test_a_tick_with_no_verdict_keeps_the_rate_checks_notice(monkeypatch):
     assert b._rate_notice_now(status(6.0), None, 1006.0) is served
     assert b._rate_notice_now(status(6.0, PlaybackState.PAUSED), None, 1007.0) is served
     assert b._rate_notice_now(status(0.0, PlaybackState.STOPPED), None, 1008.0) is None
+    # another setting, the same queue: what was served is that setting's, never kept for this one
+    other = rc.Inputs("pcm", 44100, "not checked", rc.Filter("sinc-short", "Any", True),
+                      rc.Filter("poly-sinc-gauss-xla", "Any", False), measured="6.2.4")
+    b._rate_check = rc.check(other, rc.Sources({r: queue.count(r) for r in queue}, first=queue[0]))
+    check = b._rate_check
+    assert check.groups and not check.started_refused and check.key != b._rate_onset[0][1]
+    assert b._rate_notice_now(status(7.0), None, 1009.0) is None
 
 
 def test_a_may_hqplayer_disproves_by_playing_is_said_no_more_at_that_setting(monkeypatch):
