@@ -948,6 +948,10 @@ class PlaybackManager:
         # `error` is a string the UI toasts as it stands.
         if s.extra.get("diagnosis"):
             new_data["diagnosis"] = s.extra["diagnosis"]
+        # Another app's track HQPlayer refused under the takeover's spot
+        # (ROON-COEX §6.1 P7): the node's sentence for the cause
+        if s.extra.get("other_refused"):
+            new_data["other_refused"] = s.extra["other_refused"]
         # How often HQPlayer's limiter acted on its output (<Status clips>):
         # the meter's peak is read before upsampling, this is the after.
         if s.extra.get("limited") is not None:

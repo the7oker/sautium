@@ -8905,7 +8905,7 @@
   const HQP_INTENTS = {
     play: 'Play', select: 'Play this track', next: 'Next', previous: 'Previous',
     replace: 'Play a new queue', rebuild: 'Queue rebuilt', resume: 'Resume after a DSP change',
-    advance: 'Next track (automatic)',
+    advance: 'Next track (automatic)', other: "Another app's track",
   };
   const HQP_HANDED = {
     path: 'a path HQPlayer opens itself', stream: 'a stream from the media server',

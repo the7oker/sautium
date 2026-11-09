@@ -1306,6 +1306,11 @@ class HqpBackend(PlayerBackend):
         # counts afresh (_judge_mirror). The poller's alone
         self._serial_seen: Optional[int] = None
         self._serial_before_return: Optional[int] = None
+        # Another controller's track HQPlayer refused at F7's verdict, as its
+        # log named it (ROON-COEX §6.1 P7): (its attempt's id, the node's
+        # sentence, the spot's generation it was read under) — said beside
+        # the takeover's spot while that spot stands (_status)
+        self._other_refused: Optional[tuple] = None
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
         self._stopped_at_attach = False
@@ -3187,7 +3192,31 @@ class HqpBackend(PlayerBackend):
         self._cut = listen.item
         logger.info("another controller took HQPlayer at slot %d, %d s — Play takes it back there",
                     slot, int(listen.second))
+        if edited and status.state == PlaybackState.STOPPED:
+            # Stopped on the other controller's entry (F7): why, from HQPlayer's
+            # log, once — off the poller, as a failed attempt's log is read
+            threading.Thread(target=self._other_refused_log, args=(status.uri, self._spot_gen),
+                             daemon=True, name="hqp-log").start()
         return True
+
+    def _other_refused_log(self, uri: Optional[str], gen: int) -> None:
+        """HQPlayer's log read once at F7's verdict — the takeover judged on
+        a playlist not the node's, HQPlayer stopped on the other app's entry
+        (ROON-COEX §6.1 P7): the refusal it names is kept as an attempt of
+        its own (diag.record_other_refused) and said beside the takeover's
+        spot while the spot it was read under stands — its words the node's,
+        HQPlayer's own line in the Why sheet."""
+        source = diag.log_source(self._link.host, self._info)
+        log = diag.read_log(source, self._info, uri)
+        reason = diag.other_reason(log)
+        if reason is None:
+            return
+        att = diag.record_other_refused(uri, log, reason)
+        with self._spot_lock:
+            if self._spot_gen == gen:
+                self._other_refused = (att.id, reason, gen)
+        logger.info("HQPlayer refused the other app's track: %s", reason)
+        self.poke()
 
     def _ended(self, listen: _Listen, read_at: float, take: Optional[int]) -> bool:
         """Had the node's own listen ended, by a tick asked at `read_at` that
@@ -3490,7 +3519,15 @@ class HqpBackend(PlayerBackend):
                                                   status.active_rate),
                 "modulator": status.active_shaper, "rate": hqp_atlas.rate_name(status.active_rate)}
         diagnosis = self._diagnosis(status)
-        if diagnosis is not None:
+        other = self._other_refused
+        if other is not None and other[2] == self._spot_gen and status.state == PlaybackState.STOPPED:
+            # The other app's refused track (§6.1 P7), beside the spot its
+            # takeover left: the node's sentence, and its attempt for the sheet
+            extra["other_refused"] = other[1]
+            extra["diagnosis"] = {"id": other[0], "code": "other_refused",
+                                  "title": "HQPlayer refused the other app's track", "next": "",
+                                  "track_id": None, "failing": False}
+        elif diagnosis is not None:
             extra["diagnosis"] = diagnosis
         watch = self._link.build
         if watch.state is not None and watch.state.get("not_answering"):
@@ -3514,7 +3551,7 @@ class HqpBackend(PlayerBackend):
             # A start waiting for its stream (_park): the slot it waits on,
             # loading, at its second — what HQPlayer plays meanwhile is none of
             # this status's words
-            for key in ("artist", "album", "song", "source", "resume", "diagnosis", "starting"):
+            for key in ("artist", "album", "song", "source", "resume", "diagnosis", "other_refused", "starting"):
                 extra.pop(key, None)
             return PlaybackStatus(state="loading", position=float(parked.second),
                                   length=parked.item.duration_seconds or 0.0, queue_index=slot,

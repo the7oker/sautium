@@ -907,3 +907,29 @@ def test_a_status_of_the_entry_a_jump_left_is_no_move_of_the_new_one():
                           (106.0, "playing", 2, 0.0), (107.5, "stopped", 0, 0.0), length=6.0)
     meter = _seen((90.0, 90.5, 100.1), (100.1, 100.9, 107.0))
     assert diag.verdict(_select(ticks, meter))["code"] == "played"
+
+
+def test_another_apps_refused_track_is_said_in_the_nodes_words_and_is_none_of_its_plays():
+    """ROON-COEX §6.1 P7: HQPlayer's log line for a rate the output family
+    holds none for (Desktop 6.1.1) and a filter's rate refusal are named,
+    and said in the node's words for another app's track; the attempt kept
+    for it carries HQPlayer's own line and is none of the node's plays — three
+    in a row are no failing run."""
+    log = {"lines": ["& 2026/11/02 18:00:00 No suitable output rate for 96000, stop"], "cause": None}
+    log["cause"] = diag.classify(log["lines"])
+    assert log["cause"]["code"] == "no_output_rate"
+    assert diag.other_reason(log) == "no output rate for 96 kHz in its output family"
+    filt = {"cause": diag.classify(["& 2026/11/02 18:00:00 Requested filter not possible with this rate "
+                                    "combination 44100/49152000"])}
+    assert diag.other_reason(filt) == "its filter is not possible at 44.1 kHz"
+    assert diag.other_reason({"cause": None}) is None
+    before = len(diag.attempts())
+    for _ in range(3):
+        att = diag.record_other_refused("http://127.0.0.1:30000/0a/stream.raw", log,
+                                        diag.other_reason(log))
+    assert len(diag.attempts()) == before + 3 and diag.find(att.id) is att
+    assert (att.intent, att.verdict["code"]) == ("other", "other_refused")
+    assert att.verdict["sentence"] == ("HQPlayer refused the other app's track: no output rate for 96 kHz "
+                                       "in its output family.")
+    assert att.hqp_log["lines"] == log["lines"]
+    assert diag.failing_run() is None

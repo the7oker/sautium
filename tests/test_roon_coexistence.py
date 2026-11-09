@@ -2155,6 +2155,42 @@ def test_a_takeover_in_a_starts_first_seconds_leaves_the_spot_there(fake, listen
         roon.close()
 
 
+def test_p7_the_refusal_of_roons_track_is_said_beside_the_spot_in_the_nodes_words(fake, listens, monkeypatch,
+                                                                                  tmp_path):
+    """P7 (ROON-COEX §6.1, answer (a)): at F7's verdict — HQPlayer stopped on
+    Roon's track it refused — the node reads HQPlayer's log once: the
+    refusal it names is said beside the takeover's spot in the node's words,
+    and kept as an attempt of its own whose sheet carries HQPlayer's own
+    line; never one of the node's plays. The node sends nothing."""
+    from config import settings
+    monkeypatch.setattr(settings, "hqplayer_data_dir", str(tmp_path))
+    (tmp_path / "settings.xml").write_text('<?xml version="1.0"?><hqplayer><log enabled="1"/></hqplayer>')
+    (tmp_path / "HQPlayer6Desktop.log").write_text("& 2026/11/02 18:00:00 No suitable output rate for 96000, stop\n")
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        n = _mark(fake, roon)
+        roon.play_track()
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10)
+        st = mgr._latest_status
+        _observed("P7", status={k_: st.get(k_) for k_ in ("state", "track_index", "resume", "other_refused",
+                                                          "diagnosis")}, node_commands=_node_commands(fake, n, roon))
+        assert st["other_refused"] == "no output rate for 96 kHz in its output family"
+        assert (st["state"], st["resume"]["index"]) == ("stopped", 2)
+        att = diag.find(st["diagnosis"]["id"])
+        assert (att.intent, att.verdict["code"]) == ("other", "other_refused")
+        assert any("No suitable output rate for 96000" in line for line in att.hqp_log["lines"])
+        assert diag.failing_run() is None and _node_commands(fake, n, roon) == []
+    finally:
+        b.shutdown()
+        roon.close()
+
+
 def test_f7_under_a_tail_mirror_is_another_controllers_playlist(fake, listens, monkeypatch):
     """The node removed the slot it played (a tail mirror, as any removal of
     the playing slot leaves) and plays on; Roon takes over with a stream

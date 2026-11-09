@@ -724,6 +724,51 @@ def record_unreachable(message: str, context: dict) -> bool:
                            "item": None, "context": context})
 
 
+_NO_RATE_LINE = re.compile(r"No suitable output rate for (\d+)")
+
+
+def _khz(rate: int) -> str:
+    return f"{rate / 1000:g} kHz"
+
+
+def other_reason(log: Optional[dict]) -> Optional[str]:
+    """The node's sentence for why HQPlayer refused another controller's
+    track — the refusal its log named; None where it names none (ROON-COEX
+    §6.1 P7: the node's words, HQPlayer's own line in the Why sheet)."""
+    cause = (log or {}).get("cause") or {}
+    line = cause.get("line") or ""
+    if cause.get("code") == "no_output_rate":
+        m = _NO_RATE_LINE.search(line)
+        return f"no output rate for {_khz(int(m.group(1)))} in its output family" if m else None
+    if cause.get("code") == "rate_filter":
+        m = _RATE_LINE.search(line)
+        return (f"its filter is not possible at {_khz(int(m.group(1)))}" if m
+                else "its filter is not possible at that rate")
+    return None
+
+
+def record_other_refused(uri: Optional[str], log: dict, reason: str) -> Attempt:
+    """A track of another controller's that HQPlayer refused while that
+    controller held it — the takeover the node judged on a playlist not its
+    own (ROON-COEX F7) — kept as a closed attempt of its own (§6.1 P7): its
+    verdict says HQPlayer refused the other app's track, the node's sentence
+    for the cause, HQPlayer's own line in the log beside it — never one of
+    the node's plays (failing_run leaves it out). Returns the attempt."""
+    attempt = Attempt(intent="other", end="hard")
+    now = time.time()
+    attempt.facts = {"intent": "other", "started": attempt.started, "t0": None, "closed": now, "end": "hard",
+                     "error": None, "slot": None, "expected_uri": uri, "mode": None, "handover": None,
+                     "steps": [], "adds": {"count": 0, "failed": []}, "ticks": [], "misses": [],
+                     "proxy": None, "playlist": None, "item": None, "context": {}}
+    attempt.verdict = {"code": "other_refused", "title": "HQPlayer refused the other app's track",
+                       "sentence": f"HQPlayer refused the other app's track: {reason}.",
+                       "next": "The other app decides what it plays; Play in Sautium takes HQPlayer back."}
+    attempt.hqp_log = log
+    with _lock:
+        _ring.append(attempt)
+    return attempt
+
+
 def attach_log(attempt: Attempt, log: dict) -> bool:
     """HQPlayer's log, read after the attempt closed. A verdict the protocol
     left without a cause, or a refused rate, is judged again with it: the
@@ -835,9 +880,11 @@ def refused() -> Optional[dict]:
 
 def failing_run() -> Optional[dict]:
     """Three or more closed attempts in a row ending in the same failure — a
-    dead output, as opposed to one track that would not play."""
+    dead output, as opposed to one track that would not play. Another
+    controller's refused track is none of the node's plays (record_other_refused)."""
     with _lock:
-        closed = [(a.verdict, a.started, a.cleared) for a in reversed(_ring) if a.verdict]
+        closed = [(a.verdict, a.started, a.cleared) for a in reversed(_ring)
+                  if a.verdict and a.intent != "other"]
     run: list = []
     for v, started, cleared in closed:
         if v["code"] == "interrupted":
@@ -1318,6 +1365,9 @@ _CAUSES = [
      "HQPlayer lost its Network Audio Adapter."),
     # The filter or the modulator: the line names neither (rate_refused tells them apart)
     ("rate_filter", re.compile(r"Requested filter not possible with this rate combination"), rc.LOG_CAUSE),
+    # Desktop 6.1.1: a source rate the output family holds no rate for (ROON-COEX, day 1's A8)
+    ("no_output_rate", re.compile(r"No suitable output rate for \d+"),
+     "HQPlayer's output family has no rate for the source's rate."),
     ("format_rejected", re.compile(r"StartAudioClient\(\): no formats available"),
      "The output device accepts none of the formats HQPlayer offered."),
     ("decode_failed", re.compile(r"FLAC__STREAM_DECODER_SEEK_ERROR"),
