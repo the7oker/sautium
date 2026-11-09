@@ -86,7 +86,9 @@ def _decode_and_amp(file_path: str, cue_start=None, cue_end=None):
 
 
 def _fetch_batch(conn, after_id: int, ids: list[int] | None, batch: int):
-    where = "mf.is_analysis_source AND mf.id > %(after)s"
+    where = ("mf.is_analysis_source AND mf.id > %(after)s AND NOT EXISTS ("
+             "SELECT 1 FROM album_variants av WHERE av.id = mf.album_variant_id"
+             " AND av.absent_since IS NOT NULL)")
     params: dict = {"after": after_id, "batch": batch}
     if ids:
         where += " AND mf.id = ANY(%(ids)s)"

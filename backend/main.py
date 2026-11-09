@@ -1296,10 +1296,14 @@ async def get_stats() -> Dict[str, Any]:
             -- Numerators come from the SAME set (this overrides the view's
             -- tracks_with_embeddings): twenty sub-floor files analysed before
             -- the floor existed would otherwise push the ratio past 100 %.
+            -- A copy that is away is not read either (the queues skip it), so
+            -- its tracks leave both sides until it is back.
             WITH analysable AS (
                 SELECT t.id FROM tracks t
                  WHERE EXISTS (SELECT 1 FROM media_files mf
+                                JOIN album_variants av ON av.id = mf.album_variant_id
                                 WHERE mf.track_id = t.id AND mf.is_analysis_source
+                                  AND av.absent_since IS NULL
                                   AND (mf.duration_seconds IS NULL
                                        OR mf.duration_seconds >= :min_seconds))
             )
@@ -1377,6 +1381,15 @@ def _new_prune_plan(file_ids: List[int], stats: Dict[str, Any], kind: str) -> Di
     from scanner import prune_counts
     return {"id": secrets.token_hex(8), "kind": kind, "file_ids": file_ids,
             "counts": prune_counts(stats)}
+
+
+def _plan_said(plan: Dict[str, Any]) -> str:
+    """A plan in a progress line: the missing files and the old copies,
+    named apart as the question names them."""
+    c = plan["counts"]
+    parts = ([f"{c['files']} missing file(s)"] if c["files"] else []) + \
+            ([f"{c['copies']} old album cop(ies)"] if c["copies"] else [])
+    return " and ".join(parts) or f"{len(plan['file_ids'])} file(s)"
 
 
 def _prune_plan_counts(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -1458,8 +1471,8 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                                  + (f"; the prune keeps {kept} file(s) there" if kept else "")
                                  + (f" — {away} album cop(ies) set aside as away, their files "
                                     "not found" if away else "")
-                                 + (f" — {len(plan['file_ids'])} missing file(s) wait for "
-                                    "your answer" if plan else ""))
+                                 + (f" — {_plan_said(plan)} wait for your answer"
+                                    if plan else ""))
             # Persist the completion timestamp so the Library screen's
             # "Last scan" row reflects reality across backend restarts.
             try:
@@ -1536,10 +1549,10 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
             again = _new_prune_plan(stats.pop("file_ids"), stats, plan["kind"])
             state["result"] = {"prune": stats, "prune_plan": _prune_plan_counts(again)}
             state["progress"] = ("The library changed since the question — "
-                                 f"{len(again['file_ids'])} missing file(s) wait for your answer")
+                                 f"{_plan_said(again)} wait for your answer")
         else:
             state["result"] = {"prune": stats}
-            state["progress"] = f"Removal complete — {stats['pruned']} missing file(s) removed"
+            state["progress"] = f"Removal complete — {stats['pruned']} file(s) removed"
         logger.info(f"Prune results: {stats}")
     except Exception as e:
         logger.error(f"Prune failed: {e}", exc_info=True)
@@ -1599,7 +1612,7 @@ def _away_worker() -> None:
         if file_ids:
             plan = _new_prune_plan(file_ids, stats, "away")
             state["result"]["prune_plan"] = _prune_plan_counts(plan)
-            state["progress"] = f"{len(file_ids)} file(s) away wait for your answer"
+            state["progress"] = f"{_plan_said(plan)} away wait for your answer"
         else:
             state["progress"] = "Nothing is away"
     except Exception as e:
@@ -1649,10 +1662,9 @@ async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
         if remove:
             _scan_state.update(
                 running=True, cancel_requested=False, stats=None, result=None,
-                progress=f"Removing {len(plan['file_ids'])} missing file(s)...")
+                progress=f"Removing {_plan_said(plan)}...")
         else:
-            _scan_state["progress"] = (f"Kept — {len(plan['file_ids'])} missing file(s) "
-                                       "stay in the library")
+            _scan_state["progress"] = f"Kept — {_plan_said(plan)} stay in the library"
     if remove:
         threading.Thread(target=_prune_worker, args=(plan,), daemon=True).start()
     from routers.settings import notify_library_subscribers

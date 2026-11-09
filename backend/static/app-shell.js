@@ -15468,7 +15468,7 @@
     if (p.kind === 'away') {
       const gone = [];
       if (p.albums) gone.push(_count(p.albums, 'album', 'albums'));
-      if (p.copies) gone.push(_count(p.copies, 'copy of an album you also have elsewhere', 'copies of albums you also have elsewhere'));
+      if (p.copies) gone.push(_count(p.copies, 'album copy (its album stays)', 'album copies (their albums stay)'));
       return `The files of these albums were not found at the last Rescan.`
         + ` Removing them deletes ${_listed(gone.concat(also.map(x => x + ' that nothing else holds')))}.`
         + ' Tracks you have played or analysed stay, without their album.'
@@ -15480,9 +15480,9 @@
     if (p.files)  lines.push(`Rescan did not find ${_count(p.files, 'file', 'files')} in your music folder.`);
     if (p.copies) lines.push(`${_count(p.copies, 'album copy was', 'album copies were')} found again elsewhere in your music folder: the old entries go, the music stays.`);
     if (also.length) lines.push(`Removing them also deletes ${_listed(also)} that nothing else holds.`);
-    if (p.away)   lines.push(`${_count(p.away, 'album whose files were all missing was', 'albums whose files were all missing were')} set aside as away; they stay.`);
+    if (p.away)   lines.push(`${_count(p.away, 'album copy whose files were all missing was', 'album copies whose files were all missing were')} set aside as away; they stay.`);
     lines.push('Tracks you have played or analysed stay.');
-    if (p.files)  lines.push('If a drive or a folder is only disconnected, keep everything and reconnect it first.');
+    if (p.files || p.copies) lines.push('If a drive or a folder is only disconnected, keep everything and reconnect it first.');
     return lines.join(' ');
   }
   let _prunePlanOpen = false;
@@ -15516,7 +15516,8 @@
       waiting = true;
     }
     if (detail) {
-      notices.toast({ kind: 'error', key: 'library.prune', title: 'Rescan',
+      notices.toast({ kind: 'error', key: 'library.prune',
+                      title: plan.kind === 'away' ? 'Albums away' : 'Rescan',
                       text: escapeProfileHtml(detail) });
     }
     if (waiting) { _prunePlansAsked.delete(plan.id); return; }

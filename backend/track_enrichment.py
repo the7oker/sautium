@@ -592,14 +592,12 @@ class TrackEnrichmentPipeline:
         return self._lastfm_service
 
     def _get_analysis_file(self, db: Session, track: Track) -> Optional[MediaFile]:
-        """Get the preferred media file for audio analysis (is_analysis_source=True)."""
-        mf = db.query(MediaFile).filter(
-            MediaFile.track_id == track.id,
-            MediaFile.is_analysis_source == True,
-        ).first()
-        if not mf:
-            mf = db.query(MediaFile).filter(MediaFile.track_id == track.id).first()
-        return mf
+        """Get the preferred media file for audio analysis (is_analysis_source=True),
+        never one of a copy that is away (nothing can read it)."""
+        present = db.query(MediaFile).join(AlbumVariant).filter(
+            MediaFile.track_id == track.id, AlbumVariant.absent_since.is_(None))
+        return (present.filter(MediaFile.is_analysis_source == True).first()
+                or present.first())
 
     def _check_track_status(self, db: Session, track: Track) -> Dict[str, bool]:
         """

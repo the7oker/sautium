@@ -170,13 +170,13 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                        f.file_path, f.file_format,
                        al.title AS album_title, al.release_year, al.cover_url AS album_cover_url
                 FROM (
-                    SELECT mf.id, av.location, av.hqp_endpoint_id,
+                    SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
                            mf.album_variant_id, mf.file_path, mf.file_format,
                            mf.is_lossless, mf.sample_rate, mf.bit_depth
                     FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                     WHERE mf.track_id = t.id
                     UNION ALL
-                    SELECT hf.id, av.location, av.hqp_endpoint_id,
+                    SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
                            hf.album_variant_id, hf.hqp_path, hf.file_format,
                            hf.is_lossless, hf.sample_rate, hf.bit_depth
                     FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id

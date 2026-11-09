@@ -166,13 +166,13 @@ def hydrate_tracks(refs: list) -> list[dict]:
             SELECT f.id, f.location::text AS location, f.cover_id, f.duration_seconds,
                    al.id AS album_id, al.title AS album, al.release_year
             FROM (
-                SELECT mf.id, av.location, av.hqp_endpoint_id,
+                SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
                        mf.album_variant_id, mf.cover_id, mf.duration_seconds,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE mf.track_id = t.id
                 UNION ALL
-                SELECT hf.id, av.location, av.hqp_endpoint_id,
+                SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
                        hf.album_variant_id, NULL::uuid, hf.duration_seconds,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id

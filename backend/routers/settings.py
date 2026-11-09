@@ -1044,7 +1044,8 @@ def _analysis_pending() -> bool:
     """Any owned track the audio passes would still analyse: an analysis-
     source file at or above the material floor (the queues' own predicate
     — under one grid window nothing is analysed, provenance.
-    MIN_MATERIAL_SECONDS) without embeddings or without features. EXISTS,
+    MIN_MATERIAL_SECONDS — and not of a copy that is away) without
+    embeddings or without features. EXISTS,
     not a count — the trail is a boolean, so the query stops at the
     first hit. Driven from media_files, never from tracks: the phantom
     layer makes `tracks` three million rows, and the owned-first shape
@@ -1053,7 +1054,8 @@ def _analysis_pending() -> bool:
     row = db_query_one("""
         SELECT EXISTS (
             SELECT 1 FROM media_files mf
-             WHERE mf.is_analysis_source
+              JOIN album_variants av ON av.id = mf.album_variant_id
+             WHERE mf.is_analysis_source AND av.absent_since IS NULL
                AND (mf.duration_seconds IS NULL
                     OR mf.duration_seconds >= %(min_seconds)s)
                AND (NOT EXISTS (SELECT 1 FROM embeddings e

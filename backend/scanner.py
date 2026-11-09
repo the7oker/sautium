@@ -1261,15 +1261,17 @@ def _mark_present(paths: Set[str]) -> int:
 def _prune_stats() -> Dict[str, Any]:
     return {"checked": 0, "pruned": 0, "kept_unread": 0, "orphan_tracks": 0,
             "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0,
-            "copies": 0, "copy_files": 0, "away": 0, "relinked": 0}
+            "copies": 0, "copy_files": 0, "away": 0, "back": 0, "relinked": 0}
 
 
 # The local copies whose files are ALL among a walk's missing ones, and
-# whether another present copy of the same album holds every one of their
+# whether ONE other present copy of the same album holds every one of their
 # tracks — a folder moved within the library, re-ripped elsewhere, the card's
-# copy away while the disk holds the album. One statement over the missing
-# set; a copy is present when it is not away and none of the files that hold
-# the track is missing too.
+# copy away while the disk holds the album, the disk moved to the HQPlayer's
+# box. Present means seen: a local copy's file this very walk found
+# (`seen`, its paths — a copy outside a --path walk or under an unread folder
+# was not looked at), or a copy in an HQPlayer's library, which its own sync
+# keeps. One statement over the missing set.
 _GONE_COPIES_SQL = text("""
     WITH missing AS (SELECT unnest(CAST(:ids AS int[])) AS id),
     gone AS (
@@ -1281,20 +1283,24 @@ _GONE_COPIES_SQL = text("""
         HAVING count(m.id) = count(*)
     )
     SELECT g.vid, av.absent_since IS NOT NULL AS away,
-           NOT EXISTS (
-               SELECT 1 FROM media_files mf WHERE mf.album_variant_id = g.vid
+           EXISTS (
+               SELECT 1 FROM album_variants ov
+               WHERE ov.album_id = av.album_id AND ov.id <> g.vid AND ov.absent_since IS NULL
                  AND NOT EXISTS (
-                     SELECT 1 FROM media_files o
-                     JOIN album_variants ov ON ov.id = o.album_variant_id
-                     WHERE o.track_id = mf.track_id AND ov.album_id = av.album_id
-                       AND ov.id <> g.vid AND ov.absent_since IS NULL
-                       AND NOT EXISTS (SELECT 1 FROM missing m2 WHERE m2.id = o.id))
+                     SELECT 1 FROM media_files mf WHERE mf.album_variant_id = g.vid
+                       AND NOT EXISTS (SELECT 1 FROM media_files o
+                                       WHERE o.album_variant_id = ov.id
+                                         AND o.track_id = mf.track_id
+                                         AND o.file_path = ANY(CAST(:seen AS text[])))
+                       AND NOT EXISTS (SELECT 1 FROM hqp_library_files h
+                                       WHERE h.album_variant_id = ov.id
+                                         AND h.track_id = mf.track_id))
            ) AS found_elsewhere
     FROM gone g JOIN album_variants av ON av.id = g.vid
 """)
 
 
-def _set_aside(missing_ids: List[int], stats: Dict[str, Any]) -> List[int]:
+def _set_aside(missing_ids: List[int], seen: Set[str], stats: Dict[str, Any]) -> List[int]:
     """A copy whose files are all missing is away, not gone: it is marked
     absent (nothing removed, nothing asked — a walk that sees one of its
     files marks it present again) and its files leave the removal. A copy
@@ -1303,12 +1309,19 @@ def _set_aside(missing_ids: List[int], stats: Dict[str, Any]) -> List[int]:
     if not missing_ids:
         return missing_ids
     with get_db_context() as db:
-        copies = db.execute(_GONE_COPIES_SQL, {"ids": missing_ids}).fetchall()
+        copies = db.execute(_GONE_COPIES_SQL, {"ids": missing_ids, "seen": list(seen)}).fetchall()
         away = [c.vid for c in copies if not c.found_elsewhere]
         newly = [c.vid for c in copies if not c.found_elsewhere and not c.away]
         if newly:
             db.execute(text("UPDATE album_variants SET absent_since = now() "
                             "WHERE id = ANY(CAST(:v AS int[]))"), {"v": newly})
+            # A track another present copy also holds (a compilation, a second
+            # rip) is analysed and queued from that copy while this one is
+            # away: elect again, present first.
+            for tid in db.execute(text("""
+                SELECT DISTINCT track_id FROM media_files
+                WHERE album_variant_id = ANY(CAST(:v AS int[]))"""), {"v": newly}).scalars():
+                elect_analysis_source(db, tid)
         kept = set(db.execute(text(
             "SELECT id FROM media_files WHERE album_variant_id = ANY(CAST(:v AS int[]))"),
             {"v": away}).scalars()) if away else set()
@@ -1358,6 +1371,7 @@ def plan_prune(
             logger.info("Prune cancelled during discovery")
             return stats
         disk_paths = {settings.translate_to_host_path(str(fp.absolute())) for fp in disk_files}
+        stats["back"] = _mark_present(disk_paths)
 
     # What the walk could not read keeps its rows: a folder it could not list
     # is missing its files here, and they would read as deleted. The rest of
@@ -1408,7 +1422,7 @@ def plan_prune(
             missing_ids.append(mf_id)
             logger.info(f"Missing: {file_path}")
 
-    return _prune_files(_set_aside(missing_ids, stats), stats, dry_run=True,
+    return _prune_files(_set_aside(missing_ids, disk_paths, stats), stats, dry_run=True,
                         progress_cb=progress_cb, cancel_check=cancel_check)
 
 

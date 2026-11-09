@@ -115,7 +115,10 @@ def scan(limit, no_skip, path, prune, yes):
                 click.echo(f"   • Away: {plan['away']} album copies with none of their files found, "
                            "kept until removed in the Library")
             if not file_ids:
-                if plan['checked'] and not plan['kept_unread'] and not plan['away']:
+                with get_db_context() as db:
+                    away = db.execute(text("SELECT count(*) FROM album_variants "
+                                           "WHERE absent_since IS NOT NULL")).scalar()
+                if plan['checked'] and not plan['kept_unread'] and not away:
                     click.echo(f"   ✅ All files present on disk")
                 return
             if plan['copies']:
@@ -1545,25 +1548,14 @@ def fix_analysis_source(dry_run):
             click.echo("\nRun without --dry-run to apply.")
             return
 
-        # Reset all and recalculate
+        # Recalculate through the one rule (canon.identity.elect_analysis_source:
+        # a present copy first, then the best rip)
         click.echo("Recalculating is_analysis_source for all tracks...")
-        db.execute(text("UPDATE media_files SET is_analysis_source = false"))
-
-        updated = db.execute(text("""
-            WITH ranked AS (
-                SELECT id, track_id,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY track_id
-                           ORDER BY
-                               (bit_depth = 16 AND is_lossless) DESC,
-                               is_lossless DESC,
-                               id
-                       ) as rn
-                FROM media_files
-            )
-            UPDATE media_files SET is_analysis_source = true
-            WHERE id IN (SELECT id FROM ranked WHERE rn = 1)
-        """)).rowcount
+        from canon.identity import elect_analysis_source
+        track_ids = db.execute(text("SELECT DISTINCT track_id FROM media_files")).scalars().all()
+        for tid in track_ids:
+            elect_analysis_source(db, tid)
+        updated = len(track_ids)
 
         db.commit()
 
@@ -1613,7 +1605,8 @@ def bench(tracks):
             SELECT mf.file_path, mf.duration_seconds,
                    mf.cue_start_seconds, mf.cue_end_seconds
             FROM media_files mf
-            WHERE mf.is_analysis_source = true
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE mf.is_analysis_source = true AND av.absent_since IS NULL
               AND mf.duration_seconds BETWEEN 120 AND 480
             ORDER BY random()
             LIMIT :n

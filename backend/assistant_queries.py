@@ -64,13 +64,13 @@ _OWN_LATERAL = f"""
                f.is_lossless, f.track_number, f.disc_number, f.sample_rate, f.bit_depth,
                f.file_path, al.id AS album_id, al.title AS album, al.release_year
         FROM (
-            SELECT mf.id, av.location, av.hqp_endpoint_id,
+            SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
                    mf.album_variant_id, mf.cover_id, mf.duration_seconds, mf.is_lossless,
                    mf.track_number, mf.disc_number, mf.sample_rate, mf.bit_depth, mf.file_path
             FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
             WHERE mf.track_id = t.id
             UNION ALL
-            SELECT hf.id, av.location, av.hqp_endpoint_id,
+            SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
                    hf.album_variant_id, NULL::uuid, hf.duration_seconds, hf.is_lossless,
                    hf.track_number, hf.disc_number, hf.sample_rate, hf.bit_depth, hf.hqp_path
             FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id

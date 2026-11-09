@@ -230,12 +230,12 @@ def get_genre(genre_id: str) -> dict:
             JOIN (
                 SELECT mf.id, mf.track_id, mf.duration_seconds,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth,
-                       av.location, av.hqp_endpoint_id, av.album_id
+                       av.location, av.hqp_endpoint_id, av.absent_since, av.album_id
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 UNION ALL
                 SELECT hf.id, hf.track_id, hf.duration_seconds,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth,
-                       av.location, av.hqp_endpoint_id, av.album_id
+                       av.location, av.hqp_endpoint_id, av.absent_since, av.album_id
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
             ) f ON f.track_id = t.id
             JOIN albums al ON al.id = f.album_id

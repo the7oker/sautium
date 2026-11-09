@@ -434,7 +434,8 @@ _REBIND_SQL = f"""
         FROM media_files mf
         JOIN album_variants av ON av.id = mf.album_variant_id
         WHERE q.origin_gone AND mf.track_id = q.track_id
-        ORDER BY (av.album_id = q.album_id) DESC NULLS LAST, {best_rip_order('mf')}
+        ORDER BY (av.absent_since IS NOT NULL), (av.album_id = q.album_id) DESC NULLS LAST,
+                 {best_rip_order('mf')}
         LIMIT 1
     ) c ON true
     WHERE q.origin_gone OR q.play_gone

@@ -517,7 +517,7 @@ def test_a_rescan_keeps_what_it_could_not_read_and_sets_aside_what_is_away(
 
     _answer(main_module, state["prune_plan"]["id"], True)
 
-    assert state["progress"] == "Removal complete — 1 missing file(s) removed"
+    assert state["progress"] == "Removal complete — 1 file(s) removed"
     assert _files(cur) == ["A/01.flac", "B/01.flac", "C/01.flac"]
 
 
@@ -898,6 +898,12 @@ def test_a_copy_away_while_another_is_found_keeps_one_analysis(
         [(mf_id, path)] = _sources(cur, track_id)
         assert "Disk/Pulse Archive/" in path
         assert _queued(cur, title) == {"embeddings": False, "features": False}
+    # a play of the album takes the copy found, not the one away
+    from routers import player
+    cur.execute("SELECT id FROM albums WHERE title = 'Pulse Archive'")
+    picked = [r["id"] for r in player._album_media_rows(str(cur.fetchone()[0]))]
+    cur.execute("SELECT file_path FROM media_files WHERE id = ANY(%s)", (picked,))
+    assert len(picked) == 2 and all("Disk/" in p for (p,) in cur.fetchall())
 
     state = _rescan(main_module, monkeypatch)
     assert state["prune_plan"]["counts"]["copies"] == 1
@@ -1186,3 +1192,95 @@ def test_a_new_file_in_a_folder_away_brings_its_copy_back(
     assert _away(cur) == []
     state = _rescan(main_module, monkeypatch)
     assert state["prune_plan"]["counts"]["files"] == 2
+
+
+def test_a_copy_at_the_hqplayer_is_a_copy_found_elsewhere(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """The disk moved to the HQPlayer's box and its library synced: the
+    local copy is a copy to remove, asked about apart, not a copy away."""
+    cur.execute("INSERT INTO hqp_endpoints (name, host, port) VALUES ('Box', 'box.lan', 4321) "
+                "RETURNING id")
+    endpoint = cur.fetchone()[0]
+    cur.execute("""INSERT INTO album_variants (album_id, directory_path, location, hqp_endpoint_id)
+                   SELECT album_id, '/mnt/disk/Pulse Archive', 'hqplayer', %s
+                   FROM album_variants WHERE directory_path LIKE '%%/Pulse Archive' RETURNING id""",
+                (endpoint,))
+    hv = cur.fetchone()[0]
+    cur.execute("""INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path)
+                   SELECT track_id, %s, '/mnt/disk/' || track_id FROM media_files
+                   WHERE file_path LIKE '%%/Pulse Archive/%%'""", (hv,))
+    _move(library / "Ostrava Unit", tmp_path / "gone" / "Ostrava Unit")
+
+    state = _rescan(main_module, monkeypatch)
+
+    assert _away(cur) == []
+    assert state["prune_plan"]["counts"]["copies"] == 1
+
+
+def test_one_copy_must_hold_every_track_to_count_as_found(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """Two copies each holding part of the album are not a copy of it: the
+    copy whose files are gone is away, not asked to be removed."""
+    _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
+    for i, name in enumerate(("01.flac", "02.flac")):
+        target = library / f"Part {i}" / "Pulse Archive" / name
+        target.parent.mkdir(parents=True)
+        target.write_bytes((tmp_path / "card" / "Ostrava Unit" / "Pulse Archive" / name).read_bytes())
+    _scan(main_module, monkeypatch, False)
+
+    state = _rescan(main_module, monkeypatch)
+
+    assert _away(cur) == ["Pulse Archive"]
+    assert state["prune_plan"] is None
+
+
+def test_a_track_another_album_holds_is_elected_there_while_its_copy_is_away(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """A track on two albums: while one copy is away the other's file is its
+    analysis source, so the passes and the re-link see a file they can read."""
+    target = library / "Compilation" / "Best Of" / "01.flac"
+    target.parent.mkdir(parents=True)
+    target.write_bytes((library / "Ostrava Unit" / "Pulse Archive" / "01.flac").read_bytes())
+    import mutagen
+    tags = mutagen.File(target)
+    tags["album"] = "Best Of"
+    tags.save()
+    _scan(main_module, monkeypatch, False)
+    carrier, _ = scanned_library["Carrier"]
+    _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
+
+    _rescan(main_module, monkeypatch)
+
+    cur.execute("SELECT file_path FROM media_files WHERE track_id = %s AND is_analysis_source",
+                (carrier,))
+    assert "Compilation/Best Of/01.flac" in cur.fetchone()[0]
+
+
+def test_coverage_and_the_trail_count_what_the_passes_read(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """An unanalysed album away leaves the Library's "left" figures and the
+    analysis trail, as it leaves the queues."""
+    _move(library / "Q2 Probe", tmp_path / "card" / "Q2 Probe")
+    assert settings_router._analysis_pending() is True   # Probe B, unanalysed, here
+
+    _rescan(main_module, monkeypatch)
+
+    assert settings_router._analysis_pending() is False
+    stats = asyncio.run(main_module.get_stats())
+    assert stats["analysable_tracks"] == stats["tracks_with_embeddings"] == 2
+
+
+def test_a_cover_asked_for_a_copy_away_is_deferred_and_nothing_pinned(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    import covers
+    from database import get_db_context
+    _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
+    _rescan(main_module, monkeypatch)
+    cur.execute("SELECT id FROM media_files WHERE file_path LIKE '%/Pulse Archive/01.flac'")
+    mf = cur.fetchone()[0]
+
+    with get_db_context() as db:
+        assert covers.resolve_cover_for_folder(db, mf) is None
+
+    cur.execute("SELECT count(*) FROM media_files WHERE cover_id IS NOT NULL")
+    assert cur.fetchone()[0] == 0

@@ -3449,13 +3449,13 @@ def _session_segments(session_id: str) -> tuple[list, int]:
         LEFT JOIN LATERAL (
             SELECT f.id, f.location
             FROM (
-                SELECT mf.id, av.location, av.hqp_endpoint_id,
+                SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth,
                        (mf.id = st.media_file_id) AS own
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE mf.track_id = st.track_id
                 UNION ALL
-                SELECT hf.id, av.location, av.hqp_endpoint_id,
+                SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth, false
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
                 WHERE hf.track_id = st.track_id

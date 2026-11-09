@@ -681,10 +681,17 @@ def resolve_cover_for_folder(db: Session, media_file_id: int) -> Optional[uuid.U
     SENTINEL_COVER_ID).
     """
     src_row = db.execute(
-        text("SELECT file_path FROM media_files WHERE id = :id"),
+        text("SELECT mf.file_path, av.absent_since FROM media_files mf "
+             "JOIN album_variants av ON av.id = mf.album_variant_id WHERE mf.id = :id"),
         {"id": media_file_id},
     ).first()
     if not src_row:
+        return None
+    if src_row[1] is not None:
+        # A copy that is away (a Rescan found none of its files): its files
+        # cannot be read now, and an answer pinned now — Last.fm's image, the
+        # sentinel — would outlive its return. Nothing is written; the
+        # endpoint serves the deferred 404 until the copy is back.
         return None
 
     siblings = _siblings_in_folder(db, src_row[0]) or [(media_file_id, src_row[0])]
