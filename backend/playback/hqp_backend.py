@@ -3216,6 +3216,9 @@ class HqpBackend(PlayerBackend):
         its own (diag.record_other_refused) and said beside the takeover's
         spot while the spot it was read under stands — its words the node's,
         HQPlayer's own line in the Why sheet."""
+        # Desktop 6 rests on no entry at the refused stop (A8): the entry is
+        # the one the verdict's playlist holds that the node never gave
+        uri = uri or next((u for u in playlist if u and not self.gave(u)), None)
         source = diag.log_source(self._link.host, self._info)
         log = diag.read_log(source, self._info, uri)
         # Only what HQPlayer logged after the last line naming an entry the node
@@ -3348,9 +3351,12 @@ class HqpBackend(PlayerBackend):
         an entry the node never gave (_edited), nothing of ours read: Roon's
         stream before its Play (ROON-COEX §6.1 P1)? What goes behind it
         would play inside that controller's session, as while it holds
-        HQPlayer (_taken)."""
+        HQPlayer (_taken) — or since its takeover cut the node's listen
+        (_cut): the spot it left names the status's track, never what
+        HQPlayer reads (F7's refused stream, Roon's Play sent again)."""
         last = self._last_tick
-        return self._mirror == "drift" and self._edited and (last is None or last.item is None)
+        return self._mirror == "drift" and self._edited and (last is None or last.item is None
+                                                             or self._cut is not None)
 
     def _foreign_in_step(self, status) -> Optional[tuple]:
         """Does HQPlayer read an entry of no queue slot while its playlist is

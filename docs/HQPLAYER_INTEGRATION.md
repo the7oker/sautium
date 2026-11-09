@@ -659,7 +659,8 @@ comes after the control port answers again — so neither can end the wait.
   HQPlayer — as the poller last read it, whatever the status says meanwhile
   (a take-back that waits for its stream says "loading") — or HQPlayer rests
   on its playlist with nothing of ours read (drifted to an entry the node
-  never gave: Roon's stream before its Play, since 2026-11-09), an append (a
+  never gave: Roon's stream before its Play, since 2026-11-09 — or F7's
+  refused stream under the takeover's spot, Roon's Play sent again), an append (a
   filler's, the radio's, a person's), the radio's own clear and a new queue
   put together without playing it are the queue's alone: nothing goes into
   that controller's playlist; the press that takes HQPlayer back hands the
