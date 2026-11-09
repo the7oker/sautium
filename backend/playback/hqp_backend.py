@@ -1192,6 +1192,9 @@ class HqpBackend(PlayerBackend):
         # elsewhere what the entry it reads is does (_playing).
         self._mirror = "step"
         self._lost_by: Optional[str] = None
+        # What the mirror was when it was lost: only a tail mirror's playlist
+        # holds HQPlayer's own entries beside ours (_follow_queue)
+        self._lost_from = "step"
         self._reconverge_due = False
         # The losses so far (a play press holding the queue meanwhile none)
         self.mirror_losses = 0
@@ -2067,6 +2070,8 @@ class HqpBackend(PlayerBackend):
                 state, by, asked = "lost", "owed", False
             if state == "lost" and by == "owed" and (self._mirror, self._lost_by) == ("lost", "owed"):
                 return False
+            if state == "lost" and self._mirror != "lost":
+                self._lost_from = self._mirror
             self._mirror, self._lost_by = state, by
             self._reconverge_due = state == "lost" and by in ("silence", "owed")
             self._mirror_moves += 1
@@ -2129,8 +2134,9 @@ class HqpBackend(PlayerBackend):
                  only_from: tuple = ("step", "tail")) -> None:
         """HQPlayer's playlist differs from the queue by an edit made outside
         this node, or a mirror step it did not take: never reconciled on its
-        own (a lost mirror stays lost — but at a return holding another
-        controller's playlist: _judge_mirror)."""
+        own (a lost mirror stays lost — but on another controller's
+        playlist, read at a return (_judge_mirror) or by the reconverge
+        (_follow_queue))."""
         self._move_mirror("drift", only_from=only_from, expect=expect)
         if not self._drift_logged:
             logger.warning("%s — the Sautium queue is authoritative", why)
@@ -2199,17 +2205,19 @@ class HqpBackend(PlayerBackend):
         elif status.state == PlaybackState.STOPPED:
             named = [r for t in playlist for r in self._readings(t.get("uri") or "")]
             if (any(not self.gave(t.get("uri") or "", layout) for t in playlist)
-                    and (not layout.handed or any(not any(_reads_item(r, it) for r in named)
-                                                  for it in layout.handed))):
+                    and ((self._mirror == "lost" and self._lost_from != "tail") or not layout.handed
+                         or any(not any(_reads_item(r, it) for r in named) for it in layout.handed))):
                 # Stopped on another controller's playlist — an entry the node
-                # never gave HQPlayer while a slot of the queue it held is gone
-                # from it, or the queue holds none: its Clear and its own entry,
-                # an owed add of ours landed behind them. The reconverge writes
-                # nothing over it, whatever road lost the mirror (ROON-COEX §6.1
-                # P1: never over another controller's playback without a
-                # person's word); the person's Play takes HQPlayer back through
-                # the play press. HQPlayer's own entries beside all of ours are
-                # taken afresh as before
+                # never gave HQPlayer in a mirror lost from anything but a tail
+                # (only a tail mirror holds HQPlayer's own entries beside ours),
+                # or while a slot of the queue it held is gone from it, or the
+                # queue holds none: its Clear and its own entry, the owed adds
+                # of ours landed behind them — all the queue holds among them.
+                # The reconverge writes nothing over it, whatever road lost the
+                # mirror (ROON-COEX §6.1 P1: never over another controller's
+                # playback without a person's word); the person's Play takes
+                # HQPlayer back through the play press. A tail mirror's own
+                # entries beside all of ours are taken afresh as before
                 self._drifted("HQPlayer holds another controller's playlist", only_from=("lost",))
                 return
             self._remirror(at=playing[1] if playing is not None and not playing[2]
@@ -3275,6 +3283,15 @@ class HqpBackend(PlayerBackend):
         intent while held takes the queue afresh (_press): never HQPlayer's
         own Play, nor a resume of the other controller's entry."""
         return self._held_by_another and self._cleared_at <= self._held_read_at
+
+    def _rests_on_another(self) -> bool:
+        """Does HQPlayer rest on another controller's playlist — drifted to
+        an entry the node never gave (_edited), nothing of ours read: Roon's
+        stream before its Play (ROON-COEX §6.1 P1)? What goes behind it
+        would play inside that controller's session, as while it holds
+        HQPlayer (_taken)."""
+        last = self._last_tick
+        return self._mirror == "drift" and self._edited and (last is None or last.item is None)
 
     def _foreign_in_step(self, status) -> Optional[tuple]:
         """Does HQPlayer read an entry of no queue slot while its playlist is
@@ -4788,7 +4805,7 @@ class HqpBackend(PlayerBackend):
                             self._rest_gen = self._spot_gen       # moved, still the rest rule's
             self.poke()
             return True
-        if self._taken() or (self._mirror == "drift" and self._edited and (last is None or last.item is None)):
+        if self._taken() or self._rests_on_another():
             # Another controller holds HQPlayer, or its playlist rests there
             # (an entry the node never gave) with nothing of ours read, and no
             # spot stands: HQPlayer's own Next or Previous would move that
@@ -5584,7 +5601,7 @@ class HqpBackend(PlayerBackend):
                         self._rest_gen = self._spot_gen           # moved, still the rest rule's
             self.poke()
             return True
-        if self._taken() or (self._mirror == "drift" and self._edited and (last is None or last.item is None)):
+        if self._taken() or self._rests_on_another():
             # Another controller holds HQPlayer, or its playlist rests there
             # (an entry the node never gave) with nothing of ours read, and no
             # spot stands: nothing of ours to seek in, and its stream is not
@@ -5973,7 +5990,7 @@ class HqpBackend(PlayerBackend):
         layout = _Layout(items, self.gap)
         if items and not layout.handed:
             raise OutputRefused(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
-        if not play and self._taken():
+        if not play and (self._taken() or self._rests_on_another()):
             self._drifted("another controller holds HQPlayer")
             return list(items)
         uris = [self._uri_for(it) for it in layout.handed]
@@ -6084,7 +6101,11 @@ class HqpBackend(PlayerBackend):
             # no mirror — the press that takes HQPlayer back hands it over
             self._drifted("another controller holds HQPlayer")
             return list(items)
-        if self._mirror == "lost":
+        if self._mirror == "lost" or self._rests_on_another():
+            # Lost; or HQPlayer rests on another controller's playlist (an
+            # entry the node never gave, nothing of ours read: Roon's stream
+            # before its Play, ROON-COEX §6.1 P1) — what goes behind it would
+            # play inside its session: the queue's alone
             return list(items)
         handed = _Layout(items, self.gap).handed
         uris = [self._uri_for(it) for it in handed]
@@ -6379,10 +6400,11 @@ class HqpBackend(PlayerBackend):
             took = _hqp_safe(self._link, clear_it, "PlaylistClear")
             return took, unanswered, now, playing
         self._link.refuse_edits()           # before it is numbered: it supersedes nothing
-        if self._taken():
-            # Another controller holds HQPlayer: its playlist is not ours to
-            # clear — the radio's clear is the queue's alone, and the press
-            # that takes HQPlayer back hands the radio's queue over
+        if self._taken() or self._rests_on_another():
+            # Another controller holds HQPlayer, or HQPlayer rests on its
+            # playlist (Roon's stream before its Play): that playlist is not
+            # ours to clear — the radio's clear is the queue's alone, and the
+            # press that takes HQPlayer back hands the radio's queue over
             archive()
             self._drifted("another controller holds HQPlayer")
             self.poke()

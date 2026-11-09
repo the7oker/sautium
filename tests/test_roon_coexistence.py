@@ -2380,6 +2380,81 @@ def test_p1_an_owed_add_answered_into_roons_playlist_sends_it_nothing(fake, list
         roon.close()
 
 
+def test_p1_an_owed_add_that_is_all_the_queue_holds_sends_roons_playlist_nothing(fake, listens, monkeypatch):
+    """The owed add is all the queue holds (the album removed while it was
+    owed: the queue's alone); HQPlayer carries it out behind Roon's stream,
+    and the reconverge reads Roon's playlist, stopped — the one slot of the
+    queue present in it. By content alone that is a tail mirror's playlist;
+    the mirror was lost from in step, so it is another controller's:
+    nothing is written over it, and Roon's Play plays Roon's stream."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        go = _an_owed_add(fake, mgr, b, monkeypatch)
+        for _ in range(3):
+            assert mgr.remove(1)
+        assert [it.track_id for it in mgr.queue.snapshot()] == ["track-9"]
+        n = _mark(fake, roon)
+        uri = roon.start_before_its_play()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
+        go.set()
+        assert _wait(lambda: b._link.owed is None, 10)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=20)
+        roon.play_again()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
+        _observed("P1-owed-whole-queue", node_commands=_node_commands(fake, n, roon),
+                  playlist=fake.playlist[:6], hqplayer=(fake.state, fake.track), mirror=b._mirror)
+        assert _node_commands(fake, n, roon) == ["PlaylistAdd"], "the node wrote over Roon's playlist"
+        assert fake.playlist[0] == uri and fake.state == PLAYING and fake.track == 1
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+@pytest.mark.parametrize("word", ["append", "replace", "radio"])
+def test_p1_the_persons_words_for_the_queue_while_hqplayer_rests_on_roons_stream_send_it_nothing(
+        fake, listens, monkeypatch, word):
+    """P1's drift: a reconnect read a stopped HQPlayer holding Roon's stream,
+    its Play still to come. The person's words for the queue then — an
+    append, a new queue put together without play, the radio's clear — are
+    the queue's alone, as while Roon plays: nothing goes into Roon's
+    playlist, and Roon's Play plays its stream — never our track inside
+    Roon's session."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        uri = roon.start_before_its_play()
+        fake.silence(6.0)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=30)
+        assert b._mirror == "drift" and fake.playlist == [uri] and fake.state == int(PlaybackState.STOPPED)
+        n = _mark(fake, roon)
+        if word == "append":
+            assert mgr.append([_item("E:/Music/B/09.flac", 9)]) == 1
+        elif word == "replace":
+            mgr.replace_queue([_item("E:/Music/C/01.flac", 21), _item("E:/Music/C/02.flac", 22)], play=False)
+        else:
+            mgr.clear_for_radio(lambda: None)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2)
+        sent, held = _node_commands(fake, n, roon), list(fake.playlist)
+        roon.play_again()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3)
+        _observed("P1-rests", word=word, node_commands=sent, playlist=[u[-24:] for u in held],
+                  hqplayer=(fake.state, fake.track))
+        assert sent == [] and held == [uri], "the node wrote into Roon's playlist"
+        assert fake.playlist == [uri] and fake.state == PLAYING and fake.track == 1
+    finally:
+        b.shutdown()
+        roon.close()
+
+
 @pytest.mark.parametrize("owed", [False, True])
 def test_p1_a_persons_play_after_the_drift_takes_hqplayer_back(fake, listens, monkeypatch, owed):
     """D3 after P1's drift — and after a lost mirror's drift: Roon's Play
@@ -3057,6 +3132,84 @@ def test_b_an_opus_seeks_uri_played_again_is_ours_again_in_the_tracks_time(tmp_p
     wait_for(lambda: any(s.extra.get("source") != "external" and s.queue_index == 1 for s in n.statuses[k:]),
              timeout=5, what="ours again")
     wait_for(lambda: n.last.position >= 24, timeout=6, what="the track's time")
+
+
+def test_b_a_track_queued_twice_is_ours_again_at_the_slot_the_takeover_cut(tmp_path, proxy, renderers, nodes,
+                                                                            quality):
+    """Track 1 at slots 1 and 3; slot 3 plays at 8 s; another controller
+    takes the renderer (the spot: slot 3 at 8 s); the renderer's own
+    controls then play that URI of ours again where it was. Ours again is
+    the takeover's slot, from its second — never slot 1 from 0 (the held
+    listen split, the queue walking on from slot 1)."""
+    r = renderers()
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=60.0), track(tmp_path, 2, seconds=60.0), track(tmp_path, 1, seconds=60.0)])
+    n = nodes(q, r)
+    assert n.backend.select(3)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 3 and n.last.position >= 8,
+             timeout=20, what="slot 3 at 8 s")
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external"
+             and (n.last.extra.get("resume") or {}).get("index") == 3, timeout=5, what="the spot at slot 3")
+    at = n.last.extra["resume"]["position"]
+    k = len(n.statuses)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = at + 1.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: any(s.extra.get("source") != "external" and s.state == "playing" for s in n.statuses[k:]),
+             timeout=5, what="ours again")
+    first = next(s for s in n.statuses[k:] if s.extra.get("source") != "external" and s.state == "playing")
+    assert first.queue_index == 3, f"ours again at slot {first.queue_index}"
+    assert first.position >= at - 1, f"from {first.position} s, the takeover at {at} s"
+
+
+def test_b_the_next_it_had_armed_queued_twice_is_ours_again_at_that_slot(tmp_path, proxy, renderers, nodes,
+                                                                         quality):
+    """Track 1 at slots 1 and 3; slot 2 plays, slot 3 armed; another
+    controller takes the renderer, which then plays the URI it had armed
+    (Track 1's token) by itself from its start: ours again at slot 3, the
+    next it had armed — never slot 1."""
+    r = renderers()
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=60.0), track(tmp_path, 2, seconds=60.0), track(tmp_path, 1, seconds=60.0)])
+    n = nodes(q, r)
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 2 and n.last.position >= 3,
+             timeout=20, what="slot 2 playing")
+    wait_for(lambda: r.next_uri, timeout=5, what="slot 3 armed")
+    nxt, nxt_meta = r.next_uri, r.next_meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    k = len(n.statuses)
+    r.uri, r.meta, r.state = nxt, nxt_meta, "PLAYING"
+    r._base, r._t0 = 0.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: any(s.extra.get("source") != "external" and s.state == "playing" for s in n.statuses[k:]),
+             timeout=5, what="ours again")
+    first = next(s for s in n.statuses[k:] if s.extra.get("source") != "external" and s.state == "playing")
+    assert first.queue_index == 3, f"ours again at slot {first.queue_index}"
+
+
+def test_b_ours_again_on_a_uri_of_another_tier_follows_its_track_through_a_queue_edit(tmp_path, proxy, renderers,
+                                                                                      nodes, quality):
+    """Ours again on a URI handed before a quality change; a track is then
+    inserted before it: the slot follows its track (Track 1 at slot 2),
+    every lookup by its token — never the inserted track's slot, from which
+    the next armed would be Track 1 itself."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    quality["q"] = "opus_96"
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 10.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.queue_index == 1, timeout=5,
+             what="ours again")
+    n.queue.insert_after(0, [track(tmp_path, 3, seconds=60.0)])
+    n.backend.queue_changed("insert")
+    wait_for(lambda: n.last.queue_index == 2, timeout=5, what="the slot following its track")
 
 
 def test_b_a_removed_tracks_uri_played_again_stays_another_apps(tmp_path, proxy, renderers, nodes, quality):

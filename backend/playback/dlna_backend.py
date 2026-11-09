@@ -1150,9 +1150,11 @@ class DlnaBackend(PlayerBackend):
             cur = getattr(self._dmr, "current_track_uri", None)
             if (cur and cur in self._handed and self._state_name() == "playing"
                     and not self._loading and self._parked is None):
-                base = cur.split("?")[0]
-                slot = next((i for i, it in enumerate(self._queue.snapshot(), start=1)
-                             if (self._url_for(it) or "").split("?")[0] == base), None)
+                # A track queued twice names two slots: the one nearest the
+                # slot held (the takeover's own, which a queue edit moves with
+                # its track), the one after first (the next it had armed)
+                slot = min(self._slots_of(cur), key=lambda i: (abs(i - self._index), i < self._index),
+                           default=None)
                 if slot is not None:
                     self._ours_again(cur, slot)
                     return
@@ -2483,16 +2485,21 @@ class DlnaBackend(PlayerBackend):
         except Exception as e:
             logger.debug("SetNextAVTransportURI unsupported/failed: %s", e)
 
-    def _slot_of(self, url: Optional[str]) -> Optional[int]:
-        """Queue slot whose media URL is `url` (file tokens are idempotent
-        per path, preview tokens stable — URLs survive queue edits)."""
+    def _slots_of(self, url: Optional[str]) -> list:
+        """Every queue slot whose media URL names `url`'s token — the quality
+        tier it was handed in and an Opus seek's ?ss= aside (file tokens are
+        idempotent per path, preview tokens stable — URLs survive queue
+        edits)."""
         if not url:
-            return None
-        quality = self._quality()
-        for i, it in enumerate(self._queue.snapshot(), start=1):
-            if self._url_for(it, quality=quality) == url:
-                return i
-        return None
+            return []
+        base, quality = url.split("?")[0], self._quality()
+        return [i for i, it in enumerate(self._queue.snapshot(), start=1)
+                if (self._url_for(it, quality=quality) or "").split("?")[0] == base]
+
+    def _slot_of(self, url: Optional[str]) -> Optional[int]:
+        """The first queue slot `url` names (_slots_of)."""
+        named = self._slots_of(url)
+        return named[0] if named else None
 
     def _advanced_to_next(self, *, restart_poll: bool) -> None:
         """Renderer moved to the preloaded next URI by itself. The slot is
