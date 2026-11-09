@@ -1060,9 +1060,11 @@ class SyncWalk:
                                     ("audio_features", 500),
                                     ("track_mbids", 500)):
                 uuids = wanted.get(category) or []
-                # No own entry in the `authors` map: what is pushed is this
-                # node's own analysis, and the carrier skips the pusher as an
-                # author — it witnessed it through the push's introduction.
+                # No own entry in the `authors` map: the carrier never counts
+                # the pusher as an author of its push — it witnessed it through
+                # the push's introduction. Another author's record riding along
+                # (an imported binding of a first-hand track) carries its
+                # certificate as in a pull.
                 handler = sync_queries.PULL_HANDLERS[category]
                 for i in range(0, len(uuids), batch):
                     if limited["stop"]:

@@ -4,9 +4,11 @@ one-time proof verification behind identity-gated decisions.
 `p2p_identities` is this node's LOCAL ledger of certified peers: the
 certificate fields, `first_seen_at` (the anchor of witnessed age — a
 hoarded certificate ripens in nobody's drawer), the last contact, and the
-verification status of the proof-of-work. It is never shared: history is
-per-node, banlists are local (docs/design/P2P-SYNC-INTEGRITY.md
-§§ "Proof-of-work certificates", "Defense strategy").
+verification status of the proof-of-work. Its rows are never shared:
+history is per-node, banlists are local (docs/design/P2P-SYNC-INTEGRITY.md
+§§ "Proof-of-work certificates", "Defense strategy"). What leaves is a
+verified identity's certificate and proof (no mining time), beside the
+slices and sealed payloads it authored (slice_trust.author_certificate).
 
 Verification is LAZY. Seeing an identity costs nothing but an upsert; the
 ~1.5 s Argon2id evaluation runs the first time the identity claims

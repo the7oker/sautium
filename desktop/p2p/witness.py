@@ -35,7 +35,10 @@ a known subject is exempt), never by deletion.
 
 Local only: shared, it would be this node's contact graph with times. It is
 life data — backed up, merged insert-only — and never part of the sync
-protocol, a share export, the seed bundle or a support warrant.
+protocol, a share export, the seed bundle or a support warrant. What leaves
+it is a certificate alone: the newest one it holds of an author whose sealed
+records this node serves, in the payload's `authors` map
+(slice_trust.author_entries) — never a row's channel, time or deliverer.
 
 Shared by both runtimes. The launcher records through its sync server's pool
 (SyncServer.witness), the Docker backend through db_pool
@@ -187,12 +190,14 @@ class Recorder:
     def record(self, cert: dict, channel: str, subject: str, via: Optional[str] = None) -> bool:
         """Put one sighting on record. `subject` is the key the channel
         authenticated (a signed request's, a TLS-bound /health's, a guest's
-        signature's); the certificate must be a valid one FOR it. True when
-        the sighting is on record, now or from before. False when it is
-        refused: no valid certificate for `subject`, this node's own or a
-        retired key, a banned key, or the channel's ceiling met today — a
-        refusal is never remembered, so a sighting past a ceiling counts on a
-        later day and a lifted ban is seen at once."""
+        signature's — for `carried`, the author whose records' seals
+        verified); the certificate must be a valid one FOR it. True when the
+        sighting is on record, now or from before. False when it is refused:
+        no valid certificate for `subject`, this node's own or a retired key,
+        a banned key, or the channel's ceiling met today — a refusal is never
+        remembered, so a sighting past a ceiling counts on a later day it
+        recurs (a `carried` one recurs only with more of its author's records)
+        and a lifted ban is seen at once."""
         subject = subject.lower()
         sig = cert.get("sig")
         if not isinstance(sig, str) or not _SIG_RE.fullmatch(sig):
@@ -274,8 +279,8 @@ class Recorder:
             first = day[2] == 1
         if first:
             logger.warning("p2p_witness: the %s ceiling (%d new rows a day) is met — further %s "
-                           "sightings today are not recorded; a later day records them",
-                           channel, ceiling, channel)
+                           "sightings today are not recorded; a later day records those that "
+                           "come again", channel, ceiling, channel)
         return True
 
     def _count(self, channel: str, today) -> None:

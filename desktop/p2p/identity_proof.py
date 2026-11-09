@@ -121,10 +121,12 @@ def save_proof(path: Path, proof: dict) -> None:
 _served: dict = {}           # path -> (the file's mtime_ns, the proof as it travels)
 
 
-def served_proof(path: Path) -> Optional[dict]:
-    """This node's proof as it travels beside its certificate in what the
-    node serves: without `mined_at` — nothing verifies by it, and the Worker
-    does not publish it. Read once per version of the file."""
+def served_proof(path: Path, cert: dict) -> Optional[dict]:
+    """This node's proof as it travels beside its certificate `cert` in what
+    the node serves: without `mined_at` — nothing verifies by it, and the
+    Worker does not publish it — and only while it binds to `cert` (a proof
+    mined for an earlier certificate is no proof of this one). The file is
+    read once per version of it."""
     try:
         mtime = Path(path).stat().st_mtime_ns
     except OSError:
@@ -133,7 +135,8 @@ def served_proof(path: Path) -> Optional[dict]:
     if _served.get(key, (None,))[0] != mtime:
         proof = load_proof(path)
         _served[key] = (mtime, {k: v for k, v in proof.items() if k != "mined_at"} if proof else None)
-    return _served[key][1]
+    proof = _served[key][1]
+    return proof if proof_binds(proof, cert) else None
 
 
 def _lower_thread_priority() -> None:

@@ -32,7 +32,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- sheds a seal when content changes (there content may change; here it is a
 -- past observation), and no row is ever deleted. Growth is bounded where
 -- rows come in (per-channel daily ceilings), never by deletion. Life data,
--- local only: never in the sync protocol, a share export or the seed.
+-- local only: never in the sync protocol, a share export or the seed as a
+-- row; only a certificate it holds travels, alone, in the `authors` map of
+-- the sealed payloads its author's records ride (desktop/p2p/slice_trust.py).
 DO $$ BEGIN
     CREATE TYPE p2p_witness_channel AS ENUM ('introduced', 'handshake', 'probe', 'carried');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

@@ -39,11 +39,18 @@ def trusted(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_evaluation(monkeypatch):
-    """Nothing in the sync evaluates a proof: the 2 GiB call raises."""
-    def evaluate(*_a, **_k):
-        raise AssertionError("the sync evaluated a proof")
+    """Nothing in the sync evaluates a proof: the 2 GiB call is counted, and
+    the count is checked after the test — a raise could be swallowed by a
+    handler on the way."""
+    calls = []
+
+    def evaluate(*a, **_k):
+        calls.append(a)
+        return False
     monkeypatch.setattr(identity_proof, "verify_proof", evaluate)
     monkeypatch.setattr(identity_registry, "verify_relayed", evaluate)
+    yield
+    assert calls == [], "the sync evaluated a proof"
 
 
 @pytest.fixture(scope="module")
@@ -154,23 +161,34 @@ def _witnessed(recorder, key, **over) -> dict:
 # The map
 # ---------------------------------------------------------------------------
 
+def _verified(conn, key: str, cert: dict) -> None:
+    identity_registry.observe(conn, cert, proof=_proof(cert))
+    identity_registry.mark_verified(conn, key, "ab" * 16)
+
+
 def test_the_map_names_each_author_by_what_this_node_holds(conn, recorder):
     own = (certificate(OWN), _proof(certificate(OWN)))
-    verified, mailbox, seen, banned, unknown = (pub(_key()) for _ in range(5))
+    verified, mailbox, seen, banned, banned_verified, failed, unknown = (pub(_key()) for _ in range(7))
     vcert = certificate(verified)
-    identity_registry.observe(conn, vcert, proof=_proof(vcert))
-    identity_registry.mark_verified(conn, verified, "ab" * 16)
+    _verified(conn, verified, vcert)
     mcert = certificate(mailbox, method="email", email_token="cd" * 32, email_class="major")
     identity_registry.observe(conn, mcert)                       # an email certificate: verified at once
     scert = certificate(seen)
     assert recorder.record(scert, "probe", seen)
     identity_registry.observe(conn, scert, proof=_proof(scert))   # registered, never evaluated
     assert recorder.record(certificate(banned), "probe", banned)
+    _verified(conn, banned_verified, certificate(banned_verified))
+    # A proof that failed here is a ban, its ban row evicted past the cap or not.
+    assert recorder.record(certificate(failed), "probe", failed)
+    identity_registry.observe(conn, certificate(failed))
     with conn.cursor() as cur:
-        cur.execute("INSERT INTO p2p_node_bans (pubkey, reason) VALUES (%s, 'manual')", (banned,))
+        cur.execute("INSERT INTO p2p_node_bans (pubkey, reason) VALUES (%s, 'manual'), (%s, 'manual')",
+                    (banned, banned_verified))
+        cur.execute("UPDATE p2p_identities SET status = 'failed' WHERE pubkey = %s", (failed,))
 
     entries = slice_trust.author_entries(
-        conn, [OWN, verified.upper(), mailbox, seen, banned, unknown, None], own)
+        conn, [OWN, verified.upper(), mailbox, seen, banned, banned_verified, failed, unknown, None],
+        own)
     assert set(entries) == {OWN, verified, mailbox, seen}
     assert entries[OWN] == {"author_cert": own[0], "author_proof": own[1]}
     assert entries[verified]["author_cert"] == vcert
@@ -201,19 +219,56 @@ def test_a_respelled_signature_is_forwarded_as_the_authority_writes_it(conn, poo
     assert downstream.record(entry["author_cert"], "carried", key, pub(_key()))
 
 
-def test_the_newest_certificate_witnessed_travels_an_anomaly_too(conn, recorder, monkeypatch):
+def _sighting_at(conn, cert: dict, channel: str, seen_at: str) -> None:
+    """A witness row as `record` writes one, seen at `seen_at`."""
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO p2p_witness (subject, cert_payload, cert_sig, issuer, cert_v, issued_at,
+                                                method, difficulty, params_version, channel, seen_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (cert["pubkey"], birth_cert.canonical_payload(cert).decode(), cert["sig"],
+                     cert["issuer"], cert["v"], cert["issued_at"], cert["method"], cert["difficulty"],
+                     cert["params_version"], channel, seen_at))
+
+
+def test_the_newest_certificate_witnessed_travels_an_anomaly_too(conn, recorder, scratch_dsn, monkeypatch):
     key = _key()
     first = _witnessed(recorder, key)
     entries = slice_trust.author_entries(conn, [pub(key)])
     assert entries[pub(key)]["author_cert"] == first
     # Another issued_at for the same key — an authority's misbehaviour the
-    # record keeps (BIRTH-SYNC §2.5) — travels as the newest sighting.
+    # record keeps (BIRTH-SYNC §2.5) — travels as the newest sighting, and is
+    # recorded where it is carried to.
     anomaly = certificate(pub(key), issued_at="2026-11-03T09:00:00Z")
     assert recorder.record(anomaly, "probe", pub(key))
     assert slice_trust.author_entries(conn, [pub(key)])[pub(key)]["author_cert"] == anomaly
+    track, _rec, payload = _served(conn, key)
+    assert _pull(scratch_dsn, _Peer(pub(_key()), recorder), "segments", track, payload) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT cert_sig FROM p2p_witness WHERE subject = %s AND channel = 'carried'",
+                    (pub(key),))
+        assert [r[0] for r in cur.fetchall()] == [anomaly["sig"]]
+    # The newest by the node's clock, not by the row's order.
+    later = _key()
+    _sighting_at(conn, certificate(pub(later), issued_at="2026-11-04T09:00:00Z"), "probe",
+                 "2026-11-09T12:00:00Z")
+    _sighting_at(conn, certificate(pub(later)), "introduced", "2026-11-08T12:00:00Z")
+    assert slice_trust.author_entries(conn, [pub(later)])[pub(later)]["author_cert"]["issued_at"] == \
+        "2026-11-04T09:00:00Z"
     # After a format bump the old format is no certificate anyone takes.
     monkeypatch.setattr(birth_cert, "CERT_VERSION", birth_cert.CERT_VERSION + 1)
     assert slice_trust.author_entries(conn, [pub(key)]) == {}
+
+
+def test_a_verified_row_of_an_older_format_gives_way_to_the_current_witnessed_one(
+        conn, recorder, monkeypatch):
+    key = pub(_key())
+    _verified(conn, key, certificate(key))
+    assert slice_trust.author_entries(conn, [key])[key]["author_proof"] is not None
+    monkeypatch.setattr(birth_cert, "CERT_VERSION", birth_cert.CERT_VERSION + 1)
+    assert slice_trust.author_entries(conn, [key]) == {}            # nothing current to give
+    current = certificate(key)                                       # issued under the new format
+    assert recorder.record(current, "probe", key)
+    assert slice_trust.author_entries(conn, [key]) == {key: {"author_cert": current, "author_proof": None}}
 
 
 def test_the_pull_handlers_carry_the_map_of_their_authors(conn, recorder):
@@ -252,6 +307,16 @@ def test_a_push_part_names_the_authors_of_its_items(conn, recorder, monkeypatch)
         named = {it["author_pubkey"] for it in part["items"]}
         assert set(part["authors"]) == named
         assert set(part["batches"]) == {it["batch_root"] for it in part["items"]}
+    # The map's entries count toward a part's size: both items and their
+    # batches fit the bound, their two entries do not.
+    import json
+    weight = sum(len(json.dumps(it)) + len(json.dumps(payload["batches"][it["batch_root"]]))
+                 for it in payload["items"])
+    monkeypatch.setattr(sync_walk, "PUSH_MAX_BYTES", weight + 10)
+    assert len(sync_walk.push_parts(payload)) == 2
+    monkeypatch.setattr(sync_walk, "PUSH_MAX_BYTES",
+                        weight + sum(len(json.dumps(e)) for e in payload["authors"].values()))
+    assert len(sync_walk.push_parts(payload)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +325,7 @@ def test_a_push_part_names_the_authors_of_its_items(conn, recorder, monkeypatch)
 
 @pytest.mark.parametrize("category", ["segments", "audio_features"])
 def test_an_author_whose_record_verified_is_carried_by_the_peer_that_delivered_it(
-        conn, recorder, scratch_dsn, category):
+        conn, recorder, pool, scratch_dsn, category):
     author, peer = _key(), pub(_key())
     _witnessed(recorder, author)                     # a pow author, never mined: no proof travels
     track, _rec, payload = _served(conn, author, category)
@@ -268,9 +333,56 @@ def test_an_author_whose_record_verified_is_carried_by_the_peer_that_delivered_i
     assert _pull(scratch_dsn, _Peer(peer, recorder), category, track, payload) == 1
     assert _carried(conn, pub(author)) == [peer]
     assert not _registered(conn, pub(author))         # the sync writes no identity row
+    # Another deliverer, through a process that never saw it (no memo): the
+    # record keeps the first sighting.
     _forget(conn, track)
-    assert _pull(scratch_dsn, _Peer(pub(_key()), recorder), category, track, payload) == 1
-    assert _carried(conn, pub(author)) == [peer]      # the first deliverer stays the record's
+    fresh = witness.Recorder(pool, own_keys=lambda: frozenset({OWN}))
+    assert _pull(scratch_dsn, _Peer(pub(_key()), fresh), category, track, payload) == 1
+    assert _carried(conn, pub(author)) == [peer]
+
+
+def test_a_map_keyed_in_another_case_is_read_all_the_same(conn, recorder, scratch_dsn):
+    author = _key()
+    _witnessed(recorder, author)
+    track, _rec, payload = _served(conn, author)
+    payload["authors"] = {k.upper(): v for k, v in payload["authors"].items()}
+    peer = pub(_key())
+    assert _pull(scratch_dsn, _Peer(peer, recorder), "segments", track, payload) == 1
+    assert _carried(conn, pub(author)) == [peer]
+
+
+def test_only_an_author_of_a_record_the_import_took_is_carried(conn, recorder, scratch_dsn):
+    # A bundle with one bad seal is dropped whole: none of its authors is
+    # carried, though its other segments' seals verified.
+    author = _key()
+    _witnessed(recorder, author)
+    track, _rec, payload = _served(conn, author)
+    segments = payload["items"][0]["segments"]
+    good = segments[-1]["signature"]
+    segments[-1]["signature"] = ("00" if good[:2] != "00" else "11") + good[2:]
+    assert _pull(scratch_dsn, _Peer(pub(_key()), recorder), "segments", track, payload) == 0
+    assert _carried(conn, pub(author)) == []
+    segments[-1]["signature"] = good
+    peer = pub(_key())
+    assert _pull(scratch_dsn, _Peer(peer, recorder), "segments", track, payload) == 1
+    assert _carried(conn, pub(author)) == [peer]
+    # Two bindings in one payload: the one whose seal verified is carried,
+    # the forged one is not.
+    honest, forger = _key(), _key()
+    _witnessed(recorder, honest)
+    _witnessed(recorder, forger)
+    one, _r1, payload = _served(conn, honest, "track_mbids")
+    two, _r2, other = _served(conn, forger, "track_mbids")
+    other["items"][0]["confidence"] = "user"                          # not what it signed
+    payload["items"] += other["items"]
+    payload["batches"].update(other["batches"])
+    payload["authors"].update(other["authors"])
+    client = sync_client.SyncClient(_Peer(peer, recorder), scratch_dsn)
+    try:
+        assert client._import_items("track_mbids", sync_client.answer_to(payload, {one, two})) == 1
+    finally:
+        client._close_conn()
+    assert _carried(conn, pub(honest)) == [peer] and _carried(conn, pub(forger)) == []
 
 
 def test_the_deliverer_is_no_carried_author(conn, recorder, scratch_dsn):

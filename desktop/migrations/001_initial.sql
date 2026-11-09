@@ -2999,7 +2999,9 @@ CREATE TABLE IF NOT EXISTS p2p_node_bans (
 
 -- Identity registry: every CERTIFIED peer identity this node has met
 -- (identity certificate v2 fields, the witnessed-age anchor first_seen_at,
--- the proof-of-work verification status). Local, never shared. Verification
+-- the proof-of-work verification status). Local: the rows are never shared;
+-- a verified identity's certificate and proof travel beside the slices and
+-- sealed payloads it authored (desktop/p2p/slice_trust.py). Verification
 -- is lazy — the one-time ~2 GiB Argon2id check runs when the identity first
 -- claims something identity-gated (token accept today); a forged proof marks
 -- the row failed AND inserts a p2p_node_bans row (deterministic evidence).
@@ -3070,7 +3072,9 @@ CREATE INDEX IF NOT EXISTS idx_p2p_identities_issued ON p2p_identities (issued_a
 -- sheds a seal when content changes (there content may change; here it is a
 -- past observation), and no row is ever deleted. Growth is bounded where
 -- rows come in (per-channel daily ceilings), never by deletion. Life data,
--- local only: never in the sync protocol, a share export or the seed.
+-- local only: never in the sync protocol, a share export or the seed as a
+-- row; only a certificate it holds travels, alone, in the `authors` map of
+-- the sealed payloads its author's records ride (desktop/p2p/slice_trust.py).
 DO $$ BEGIN
     CREATE TYPE p2p_witness_channel AS ENUM ('introduced', 'handshake', 'probe', 'carried');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

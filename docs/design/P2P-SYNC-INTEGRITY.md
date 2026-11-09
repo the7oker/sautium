@@ -835,8 +835,9 @@ certificate, channel), the first sighting of each.
   delivered it: the pulled peer's TLS-bound key, or the key that signed the
   push). It is the one channel by which two nodes that never meet witness
   each other. The certificate is checked as on every channel, alone: the
-  map carries a proof only where the sender verified one, and the receiver
-  reads none, so an author is carried whether it has mined or not. No
+  map carries a proof only where the sender has one — its own, or one it
+  verified — and the receiver reads none, so an author is carried whether
+  it has mined or not. No
   identity-registry row comes of it. The deliverer itself is never a carried
   subject, and a share file or an unsigned push is no sighting. The DHT and
   the relay are no channels: they carry addresses and ciphertext, no
@@ -880,8 +881,12 @@ certificate, channel), the first sighting of each.
 - **Local.** Shared, the table would be the node's contact graph with
   times. It is life data — backed up, merged insert-only between one
   owner's machines — and in no sync payload, share export, seed or support
-  warrant. The Web UI says so (Sync & P2P). Whether witness statements are
-  ever shared is a decision of its own.
+  warrant as a row. What leaves it is a certificate alone: the newest it
+  holds of an author whose sealed records the node serves, in the payload's
+  `authors` map (since slice 2) — never a channel, a time or a deliverer;
+  the certificates are public, but which authors' the node holds tells a
+  little of whom it has met. The Web UI says so (Sync & P2P). Whether
+  witness statements are ever shared is a decision of its own.
 - **Beside the registry, not instead of it.** `p2p_identities` stays what
   it is — mutable, evicted past its cap, rewritten by succession, filled
   only on the contacted side — and keeps deciding lanes and verification.

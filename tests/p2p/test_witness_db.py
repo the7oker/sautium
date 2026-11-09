@@ -289,7 +289,7 @@ def test_the_first_sighting_past_a_ceiling_is_refused_and_said(recorder, conn, m
         assert recorder.record(certificate(subjects[3]), "probe", subjects[3]) is False
     assert [r.getMessage() for r in caplog.records if "ceiling" in r.getMessage()] == [
         "p2p_witness: the probe ceiling (%d new rows a day) is met — further probe sightings "
-        "today are not recorded; a later day records them" % witness.CEILINGS["probe"]]
+        "today are not recorded; a later day records those that come again" % witness.CEILINGS["probe"]]
     assert _rows(conn, subjects[2]) == [] and _rows(conn, subjects[3]) == []
     # Another channel is not this one's ceiling; a known sighting is no new row.
     assert recorder.record(certificate(subjects[2]), "introduced", subjects[2])

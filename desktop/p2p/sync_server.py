@@ -723,7 +723,7 @@ class SyncServer:
         cert = served_certificate()
         if cert is None or cert["pubkey"].lower() != self.node_id.lower():
             return None
-        return cert, (served_proof(proof_path()) if cert.get("method") == "pow" else None)
+        return cert, (served_proof(proof_path(), cert) if cert.get("method") == "pow" else None)
 
     async def _slice_refusal(self, request: web.Request) -> Optional[web.Response]:
         """A signed slice request from a key that carries a penalty on the

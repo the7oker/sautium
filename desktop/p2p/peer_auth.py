@@ -86,9 +86,12 @@ def decode_cert_bundle(value: str) -> Optional[dict]:
 def verify_request(headers: Mapping[str, str], server_pubkey: str, method: str,
                    request_target: str, body: bytes,
                    now: Optional[float] = None) -> Tuple[Optional[str], Optional[str]]:
-    """(pubkey, None) for a valid signature, (None, None) for an unsigned
-    request, (None, error) for a signature that is present but wrong —
-    the caller answers 403 in the last case."""
+    """(pubkey, None) for a valid signature — the key in its one spelling,
+    lower-case hex, however the header spelled it (`bytes.fromhex` also
+    takes upper case and spaces between the pairs, and a ban, a registry row
+    or a witness record keyed by another spelling would miss it) —, (None,
+    None) for an unsigned request, (None, error) for a signature that is
+    present but wrong — the caller answers 403 in the last case."""
     pubkey = headers.get(HDR_PUBKEY)
     ts = headers.get(HDR_TS)
     sig = headers.get(HDR_SIG)
@@ -113,7 +116,7 @@ def verify_request(headers: Mapping[str, str], server_pubkey: str, method: str,
             sig_bytes, canonical_message(server_pubkey, method, request_target, ts_int, body))
     except (InvalidSignature, ValueError):
         return None, "identity signature invalid"
-    return pubkey.lower(), None
+    return raw.hex(), None
 
 
 @dataclass(frozen=True)

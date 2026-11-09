@@ -45,6 +45,20 @@ def test_verify_accepts_vectors_and_rejects_everything_else():
         assert pa.verify_request(dict(h, **{pa.HDR_PUBKEY: "ab" * 32}), SERVER_PUB, v["method"], v["request_target"], body, now=v["ts"])[1] == "identity signature invalid"
 
 
+def test_a_signer_is_named_in_its_one_spelling():
+    """`bytes.fromhex` also takes upper case and spaces between the pairs:
+    the key comes back lower-case hex, so a ban, a registry row or a witness
+    record keyed by it never misses (BIRTH-SYNC slice 2's review, L1)."""
+    v = VECTORS["requests"][0]
+    body = v["body_utf8"].encode("utf-8")
+    key = VECTORS["client_pubkey"]
+    assert key == key.lower()
+    for spelled in (key.upper(), " ".join(key[i:i + 2] for i in range(0, len(key), 2))):
+        h = dict(v["headers"], **{pa.HDR_PUBKEY: spelled})
+        assert pa.verify_request(h, SERVER_PUB, v["method"], v["request_target"], body,
+                                 now=v["ts"]) == (key, None)
+
+
 def test_cert_bundle_round_trip_matches_vector():
     bundle = json.loads(VECTORS["cert_bundle"]["json"])
     encoded = pa.encode_cert_bundle(bundle["cert"], bundle["proof"])

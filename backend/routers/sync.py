@@ -369,7 +369,7 @@ def _own_slice_cert() -> Optional[tuple]:
     if cert is None or cert["pubkey"].lower() != (node_pubkey_hex() or "").lower():
         return None
     path = proof_path(settings) if cert.get("method") == "pow" else None
-    return cert, (served_proof(path) if path is not None else None)
+    return cert, (served_proof(path, cert) if path is not None else None)
 
 
 async def _slice_refusal(request: Request) -> Optional[Response]:

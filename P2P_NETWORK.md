@@ -14,8 +14,9 @@ server (public bootstrap resources only).
 
 **Shared** (the pull categories — `sync_queries.PULL_HANDLERS`): sealed CLAP
 segment bundles with their provenance, audio features, track↔recording
-bindings, chat (P4). Carry — the push channel — is narrower on purpose:
-audio analysis only (§ "Only audio analysis travels").
+bindings, with the birth certificates of their authors (the `authors` map,
+§ "Segment bundle"), chat (P4). Carry — the push channel — is narrower on
+purpose: audio analysis only (§ "Only audio analysis travels").
 
 **Never shared**: audio files; lyrics (the one category that is verbatim
 copyrighted text — every node fetches its own from the public sources);
@@ -492,12 +493,13 @@ Beside `batches`, every sealed payload (the three pulls and every carry
 push) carries an `authors` map, since 2026-11-09 (BIRTH-SYNC slice 2):
 `{"<author pubkey>": {"author_cert": {...}, "author_proof": {...}|null}}`
 for each author its seals name, the pair a catalogue slice's entry carries.
-The serving node puts in its own certificate for the records it authored;
-an author it verified, with the proof it verified (without `mined_at`), as a
-slice relay forwards one; any other author whose certificate it witnessed,
-with the certificate alone. It names no author it banned. The receiver reads
-only the certificate, for its witness record (below); older peers ignore
-the field.
+A server puts in its own certificate for the records it authored (a push
+or a share file names none); an author it verified, with the proof it
+verified (without `mined_at`), as a slice relay forwards one, while that
+certificate is in the current format; any other author whose certificate it
+witnessed, the newest in the current format, alone. It names no author it
+banned or whose proof failed there. The receiver reads only the certificate,
+for its witness record (below); older peers ignore the field.
 
 The unsealed mean-vector pull (`embeddings`, for peers without `segments`)
 was removed 2026-11-03: its rows carried no seal, so the peer chose a
@@ -560,8 +562,12 @@ POST /api/sync/offer, /push/{…}  carry: segments, audio_features, track_mbids
   signature over the statement and a self-contained copy of the Worker stamp
   of the batch it rode: evidence of when the node first saw whom, for the
   witnessed age the trust design rests on. The database refuses to change or
-  delete a row. Never shared: not in the sync protocol, a share export, the
-  seed or a support bundle; life data in a backup.
+  delete a row. The record is never shared — not in the sync protocol, a
+  share export, the seed or a support bundle; life data in a backup — but a
+  certificate it holds, alone, travels in the `authors` map of the sealed
+  payloads its author's records ride (since slice 2, below): the newest one
+  of an author whose records the node serves, never its channel, time or
+  deliverer.
 - `/health` carries `birth_cert`, the node's own certificate (never its
   proof; the Worker publishes certificates by key anyway), so the node that
   dials it can witness it. Older peers ignore the field.
@@ -573,8 +579,10 @@ POST /api/sync/offer, /push/{…}  carry: segments, audio_features, track_mbids
   peer's TLS-bound key, or the key that signed the push. The receiver takes
   the certificate alone, checked as on every channel. It writes no
   identity-registry row, and evaluates no proof. A share file, or an
-  unsigned push, is no sighting. A push carries the pusher's own analysis,
-  and the pusher is witnessed through its introduction, never as carried.
+  unsigned push, is no sighting. The deliverer is never carried by its own
+  payload — a pusher is witnessed through its push's introduction, a pulled
+  peer through the probe — while another author's record riding in it
+  carries that author's certificate.
 - Design: P2P-SYNC-INTEGRITY.md § "Witness records".
 
 ### Future

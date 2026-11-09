@@ -753,8 +753,8 @@ class SyncClient:
         invalid OR MISSING seal is dropped whole — a broken seal on
         TLS-protected wire is evidence of tampering, and an unsigned one is a
         claim this node would go on to redistribute unattributably. Returns
-        the count of imported tracks; `authors` gains the author of every
-        segment whose seal verified."""
+        the count of imported tracks; `authors` gains the authors of every
+        bundle whose seals all verified."""
         batch_ok = self._batch_verifier(batches)
 
         # Decode + verify outside the write path: (item, [(idx, floats, seal)])
@@ -796,7 +796,6 @@ class SyncClient:
                         and batch_ok(s.get("batch_root"))):
                     bad = f"segment {s['i']} seal invalid"
                     break
-                authors.add(s["author_pubkey"].lower())
                 seal = (s["author_pubkey"], s["signature"], s["batch_root"],
                         psycopg2.extras.Json(s.get("proof") or []))
                 segs.append((s["i"], floats, seal))
@@ -805,6 +804,7 @@ class SyncClient:
                                item.get("track_uuid", "?")[:8], bad)
             elif segs:
                 decoded.append((item, segs))
+                authors.update(seal[0].lower() for _i, _f, seal in segs)
 
         if not decoded:
             return 0

@@ -25,8 +25,11 @@ One process holds both nodes, so what is process-wide is shared:
   p2p_identity.witness_recorder), each with its own memo;
 - the proof evaluator's permit and its rejected-nonce memory
   (identity_registry._EVALUATION, _REJECTED) are never reached: the
-  evaluation is patched to fail the test;
-- no load meter runs, for either node; no assertion reads a price;
+  evaluation is counted, and the test fails on any;
+- no load meter runs, for either node, and no assertion reads a price: the
+  pricer and the similarity index are one per process too (pricing._current,
+  similarity._current, so the second surface's pricer would read the first
+  node's database), and with no meter a price is 0 before either is asked;
 - the holdings filter is one per process (sync_queries._holdings), built by
   whichever node is first asked for it and served by both: it is emptied
   before each walk, so the node a walk asks builds and serves its own.
@@ -193,9 +196,13 @@ def world(scratch_dsn, launcher_dsn, monkeypatch, tmp_path):
     which verified it), F and G (third authors pushed by hand)."""
     for mirror in (birth_cert, witness, sync_client, birth_authority):
         monkeypatch.setattr(mirror, "TRUSTED_AUTHORITIES", [ISSUER])
+    # Counted, not raised: a handler on the way (the carry push's, the walk's)
+    # would swallow a raise.
+    evaluations = []
 
-    def evaluate(*_a, **_k):
-        raise AssertionError("the sync evaluated a proof")
+    def evaluate(*a, **_k):
+        evaluations.append(a)
+        return False
     monkeypatch.setattr(identity_proof, "verify_proof", evaluate)
     monkeypatch.setattr(identity_registry, "verify_relayed", evaluate)
 
@@ -266,7 +273,8 @@ def world(scratch_dsn, launcher_dsn, monkeypatch, tmp_path):
     launcher = Served(srv.build_app(), _tls_context(L))
     try:
         yield dict(L=L, D=D, C=C, E=E, F=F, G=G, tracks=tracks, srv=srv, manager=manager,
-                   docker=docker, launcher=launcher, docker_db=docker_db, launcher_db=launcher_db)
+                   docker=docker, launcher=launcher, docker_db=docker_db, launcher_db=launcher_db,
+                   evaluations=evaluations)
     finally:
         launcher.close()
         docker.close()
@@ -338,14 +346,18 @@ def test_two_nodes_witness_the_authors_of_what_they_pull_and_carry(world, scratc
     # endpoints serve what the shared handlers build; each its own entry with
     # the proof that travels (no mined_at), a verified author with its proof,
     # a witnessed one with its certificate alone.
-    from_docker = to_docker.sync_pull("segments", [t["C"], t["D"]])
-    assert from_docker["authors"] == sync_queries.pull_segments(
-        ddb, [t["C"], t["D"]], own=D.travels)["authors"]
-    assert from_docker["authors"] == {
-        D.pub: {"author_cert": D.cert, "author_proof": D.travels[1]},
-        C.pub: {"author_cert": C.cert, "author_proof": None}}
-    from_launcher = to_launcher.sync_pull("segments", [t["E"], t["L"]])
-    assert from_launcher["authors"][L.pub] == {"author_cert": L.cert, "author_proof": L.travels[1]}
-    assert from_launcher["authors"][E.pub]["author_cert"] == E.cert
-    assert identity_proof.proof_binds(from_launcher["authors"][E.pub]["author_proof"], E.cert)
-    assert "mined_at" not in json.dumps(from_docker) + json.dumps(from_launcher)
+    served = {D.pub: {"author_cert": D.cert, "author_proof": D.travels[1]},
+              C.pub: {"author_cert": C.cert, "author_proof": None}}
+    for route, handler in (("segments", sync_queries.pull_segments),
+                           ("audio-features", sync_queries.pull_audio_features)):
+        from_docker = to_docker.sync_pull(route, [t["C"], t["D"]])
+        assert from_docker["authors"] == handler(ddb, [t["C"], t["D"]], own=D.travels)["authors"]
+        assert from_docker["authors"] == served, route
+        assert "mined_at" not in json.dumps(from_docker)
+    for route in ("segments", "audio-features", "track-mbids"):
+        from_launcher = to_launcher.sync_pull(route, [t["E"], t["L"]])
+        assert from_launcher["authors"][L.pub] == {"author_cert": L.cert, "author_proof": L.travels[1]}
+        assert from_launcher["authors"][E.pub]["author_cert"] == E.cert, route
+        assert identity_proof.proof_binds(from_launcher["authors"][E.pub]["author_proof"], E.cert)
+        assert "mined_at" not in json.dumps(from_launcher)
+    assert w["evaluations"] == [], "the sync evaluated a proof"
