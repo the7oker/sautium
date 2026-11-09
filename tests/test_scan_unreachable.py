@@ -592,7 +592,34 @@ def test_a_yes_with_the_folder_gone_removes_nothing(cur, library, main_module, m
     _answer(main_module, state["prune_plan"]["id"], True)
 
     assert state["result"]["prune"]["pruned"] == 0
+    assert state["progress"] == ("Nothing removed: the music folder is empty or not mounted. "
+                                 "Reconnect it, then Rescan")
     assert _catalog(cur) == ["A", "Gone"]
+
+
+def test_a_yes_judges_a_file_as_the_plan_did(cur, library, main_module, monkeypatch, tmp_path):
+    """The plan's walk covers the current root, by exact name. A row under
+    the folder the library was copied away from (the old copy kept on its
+    old drive) is missing from the library though the file still opens, and
+    the yes removes it as the plan said."""
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+    old = tmp_path / "old drive" / "A" / "01.flac"
+    old.parent.mkdir(parents=True)
+    old.touch()
+    cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'Old copy')", (str(uuid.uuid4()),))
+    cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path) "
+                "SELECT t.id, (SELECT min(id) FROM album_variants), %s FROM tracks t "
+                "WHERE t.title = 'Old copy'", (old.as_posix(),))
+    state = _rescan(main_module, monkeypatch)
+    assert state["prune_plan"]["counts"]["files"] == 1
+
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    assert state["result"]["prune"]["pruned"] == 1
+    cur.execute("SELECT count(*) FROM media_files WHERE file_path = %s", (old.as_posix(),))
+    assert cur.fetchone()[0] == 0
 
 
 def test_a_new_scan_replaces_the_plan(cur, library, main_module, monkeypatch):
@@ -925,3 +952,54 @@ def test_another_length_under_the_same_fingerprint_is_not_linked(
     assert state["result"]["relinked"] == 1       # Relay; Carrier's length differs
     assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
     assert _queued(cur, "Relay") == {"embeddings": False, "features": False}
+
+
+def test_the_import_links_after_its_canon_and_before_the_notary(monkeypatch):
+    """post_import.run's order: the canon may move a returned file onto the
+    track that kept the analysis, so the re-link comes after it; the notary
+    is woken last, over what both left."""
+    import notary
+    from canon import migrations, post_import, scrobbles
+    from routers import settings as settings_router_mod
+    import provenance
+    done = []
+    monkeypatch.setattr(migrations, "normalize_artists", lambda db, pass1: done.append("canon") or {})
+    monkeypatch.setattr(settings_router_mod, "mb_load_active", lambda: True)   # the MB tier defers
+    monkeypatch.setattr(provenance, "relink_returned_files",
+                        lambda **kw: done.append("relink") or 0)
+    monkeypatch.setattr(notary, "wake", lambda *a, **kw: done.append("notary"))
+    monkeypatch.setattr(scrobbles, "wake", lambda: done.append("scrobbles"))
+    monkeypatch.setattr(settings_router_mod, "notify_library_subscribers", lambda: None)
+
+    post_import.run({"cancel_requested": False, "progress": ""}, {}, None)
+
+    assert done == ["canon", "relink", "notary", "scrobbles"]
+
+
+class _Linked(Exception):
+    pass
+
+
+@pytest.mark.parametrize("module, cls, method", [
+    ("embeddings", "AudioEmbeddingGenerator", "generate_embeddings"),
+    ("audio_analysis", "AudioAnalyzer", "analyze_all"),
+])
+def test_each_analysis_pass_links_returned_files_before_it_reads_its_queue(
+        monkeypatch, module, cls, method):
+    """A canon pass that re-keys later than the import (the AI tier, a
+    MusicBrainz answer) leaves its returned file to the next pass, which
+    links it before it reads what is pending."""
+    import importlib
+    import provenance
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(provenance, "require_fpcalc", lambda: None)
+
+    def linked(**kw):
+        raise _Linked
+
+    monkeypatch.setattr(provenance, "relink_returned_files", linked)
+    monkeypatch.setattr(mod, "get_db_context", lambda: pytest.fail("the queue was read first"))
+    instance = object.__new__(getattr(mod, cls))
+
+    with pytest.raises(_Linked):
+        getattr(instance, method)()

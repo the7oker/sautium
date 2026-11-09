@@ -200,6 +200,7 @@ _RETURNED_SQL = """
            mf.cue_start_seconds, mf.cue_end_seconds, mf.duration_seconds
     FROM media_files mf
     WHERE mf.is_analysis_source
+      AND (mf.duration_seconds IS NULL OR mf.duration_seconds >= :min_seconds)
       {scope}
       AND NOT EXISTS (SELECT 1 FROM analysis_sources s WHERE s.media_file_id = mf.id)
       AND EXISTS (SELECT 1 FROM analysis_sources s
@@ -242,7 +243,7 @@ def relink_returned_files(track_ids=None, cancel_check=None, progress_cb=None) -
 
     from database import get_db_context
 
-    params = {}
+    params = {"min_seconds": MIN_MATERIAL_SECONDS}
     scope = ""
     if track_ids is not None:
         if not track_ids:

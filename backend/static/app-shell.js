@@ -11570,7 +11570,7 @@
   /* Destructive-action confirm dialog. Replaces window.confirm so
      the prompt sits inside our visual language (warm dark sheet,
      terracotta primary). Returns a Promise<boolean>. */
-  function confirmDestructive({ title, message, confirmText = 'Remove', cancelText = 'Cancel', confirmKind = 'destructive' }) {
+  function confirmDestructive({ title, message, confirmText = 'Remove', cancelText = 'Cancel', confirmKind = 'destructive', focusCancel = false }) {
     return new Promise(resolve => {
       const confirmCls = confirmKind === 'destructive'
         ? 'profile-btn destructive' : 'profile-btn primary';
@@ -11586,7 +11586,10 @@
       `, resolve, false);
       el.querySelector('[data-cancel]').addEventListener('click', () => close(false));
       el.querySelector('[data-confirm]').addEventListener('click', () => close(true));
-      el.querySelector('[data-confirm]').focus();
+      // A question the person did not open this moment (it arrived with an
+      // update) starts on the safe answer: a key press or a tap in flight
+      // must not answer it destructively.
+      el.querySelector(focusCancel ? '[data-cancel]' : '[data-confirm]').focus();
     });
   }
 
@@ -15446,16 +15449,22 @@
       + ' Tracks you have played or analysed stay.'
       + ' If a drive or a folder is only disconnected, keep everything and reconnect it first.';
   }
+  let _prunePlanOpen = false;
   async function _askPrunePlan(plan) {
-    if (!plan || _prunePlansAsked.has(plan.id)) return;
+    // One question at a time: a plan that arrives while one is open (another
+    // device's Rescan, a yes that had to ask again) waits for the render that
+    // follows the answer.
+    if (!plan || _prunePlanOpen || _prunePlansAsked.has(plan.id)) return;
     _prunePlansAsked.add(plan.id);
+    _prunePlanOpen = true;
     const remove = await window.confirmDestructive({
       title: 'Remove missing files?',
       message: escapeProfileHtml(_prunePlanMessage(plan)),
       confirmText: 'Remove',
       cancelText: 'Keep',
-    });
-    let detail = null;
+      focusCancel: true,
+    }).finally(() => { _prunePlanOpen = false; });
+    let detail = null, waiting = false;
     try {
       const r = await fetch('/api/settings/library/scan/prune?plan_id='
         + encodeURIComponent(plan.id) + '&remove=' + remove, { method: 'POST' });
@@ -15463,18 +15472,18 @@
         detail = (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`;
         // 410: answered elsewhere or replaced — gone for good. Anything else
         // (the benchmark measuring, the node out of reach) leaves the plan
-        // waiting, and the next look at the screen asks it again.
-        if (r.status !== 410) _prunePlansAsked.delete(plan.id);
+        // waiting: the next look at the screen asks it again, not this one.
+        waiting = r.status !== 410;
       }
     } catch (e) {
       detail = 'The node did not answer.';
-      _prunePlansAsked.delete(plan.id);
+      waiting = true;
     }
     if (detail) {
       notices.toast({ kind: 'error', key: 'library.prune', title: 'Rescan',
                       text: escapeProfileHtml(detail) });
-      return;
     }
+    if (waiting) { _prunePlansAsked.delete(plan.id); return; }
     if (parseHash().startsWith('more/library')) render();
   }
 

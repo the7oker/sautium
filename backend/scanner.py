@@ -1344,21 +1344,46 @@ def prune_missing_files(file_ids: Sequence[int], counts: Dict[str, int],
 
 
 def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
-    """Of a plan's files, those still in the catalog and still missing now.
-    The folder is asked first: gone as a whole, every file reads as missing
-    and nothing may go."""
+    """Of a plan's files, those still in the catalog and still missing now,
+    judged as the plan's walk judged them: a path outside the current root is
+    missing, and one inside it is there only when its folder lists that exact
+    name (a case-only rename on a case-insensitive disk keeps the old
+    spelling openable, yet the walk saw only the new one). A folder that
+    cannot be listed keeps its files, as the walk keeps unread folders. The
+    music folder is asked first: gone as a whole, nothing may go."""
     if library_unreachable():
         logger.error("Prune aborted at the yes: the music folder is unreachable")
+        stats["unreachable"] = True
         return []
     with get_db_context() as db:
         rows = db.query(MediaFile.id, MediaFile.file_path).filter(
             MediaFile.id.in_(list(file_ids))).all()
     stats["checked"] = len(rows)
-    missing = [mf_id for mf_id, path in rows
-               if not os.path.exists(settings.translate_to_local_path(path))]
+    root = settings.library_db_root() + "/"
+    listings: Dict[str, Optional[Set[str]]] = {}
+
+    def listed(path: str) -> Optional[bool]:
+        folder, _, name = path.rpartition("/")
+        if folder not in listings:
+            try:
+                listings[folder] = set(os.listdir(settings.translate_to_local_path(folder)))
+            except (FileNotFoundError, NotADirectoryError):
+                listings[folder] = set()
+            except OSError as e:
+                logger.warning(f"Prune at the yes keeps what {folder} holds: {e}")
+                listings[folder] = None
+        return None if listings[folder] is None else name in listings[folder]
+
+    missing = []
+    for mf_id, path in rows:
+        there = listed(path) if path.startswith(root) else False
+        if there is None:
+            stats["kept_unread"] += 1
+        elif not there:
+            missing.append(mf_id)
     if len(missing) < len(file_ids):
         logger.info(f"Prune at the yes: {len(file_ids) - len(missing)} of the plan's "
-                    f"{len(file_ids)} files are back or already gone, and are left")
+                    f"{len(file_ids)} files are back, unread or already gone, and are left")
     return missing
 
 
@@ -1463,7 +1488,15 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
         db.commit()
 
     # The elected file may be the analysed material at another path (a folder
-    # the last "Scan for new" found moved): its analysis follows it.
-    stats["relinked"] = relink_returned_files(still_held, cancel_check)
+    # the same Rescan found moved): its analysis follows it. The removal is
+    # committed by now, so a failure here is the re-link's alone — the next
+    # import or analysis pass looks again.
+    def relink_progress(done, total):
+        if progress_cb:
+            progress_cb(f"Linking returned files to their analysis: {done}/{total}")
+    try:
+        stats["relinked"] = relink_returned_files(still_held, cancel_check, relink_progress)
+    except Exception as e:
+        logger.error(f"Re-link after the prune failed: {e}", exc_info=True)
     logger.info(f"Prune complete: {stats}")
     return stats

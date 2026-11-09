@@ -124,8 +124,8 @@ SOURCE_FILES_SQL = """
 # node's actual rip and is the network's poison detector, yet it re-spends GPU
 # on tracks that already work. enrichment.reanalyze_imported picks the
 # policy; default off. A file that returned after a prune is linked back to
-# its analysis by the scan (provenance.relink_returned_files), so it is not
-# pending here.
+# its analysis (provenance.relink_returned_files) after the import's canon and
+# again before each pass reads this queue, so it is not pending here.
 PENDING_SQL = SOURCE_FILES_SQL + """
       AND (e.id IS NULL
            OR e.analysis_source_id IS NULL
@@ -405,6 +405,8 @@ class AudioEmbeddingGenerator:
         provenance.require_fpcalc()
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
+        if not force:
+            provenance.relink_returned_files(cancel_check=cancel_flag)
 
         with get_db_context() as db:
             embedding_model = self._get_or_create_embedding_model(db)

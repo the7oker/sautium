@@ -1502,16 +1502,25 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
     """The owner's yes to a Rescan's plan: its files that are still missing
     go, with what only they held — or, when that would now take more than
     the question named, nothing goes and the new plan is asked."""
+    from routers.settings import notify_library_subscribers
     state = _scan_state
     again = None
+
+    def progress(msg):
+        state["progress"] = msg
+        notify_library_subscribers()
+
     try:
         from scanner import prune_missing_files
         stats = prune_missing_files(
-            plan["file_ids"], plan["counts"],
-            progress_cb=lambda msg: state.update(progress=msg),
+            plan["file_ids"], plan["counts"], progress_cb=progress,
             cancel_check=lambda: state["cancel_requested"],
         )
-        if stats.pop("grew", False):
+        if stats.pop("unreachable", False):
+            state["result"] = {"prune": stats}
+            state["progress"] = ("Nothing removed: the music folder is empty or not mounted. "
+                                 "Reconnect it, then Rescan")
+        elif stats.pop("grew", False):
             again = _new_prune_plan(stats.pop("file_ids"), stats)
             state["result"] = {"prune": stats, "prune_plan": _prune_plan_counts(again)}
             state["progress"] = ("The library changed since the question — "
@@ -1528,7 +1537,6 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
         with _scan_lock:
             state["prune_plan"] = again
             state["running"] = False
-        from routers.settings import notify_library_subscribers
         notify_library_subscribers()
 
 
@@ -1590,9 +1598,8 @@ async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
                                        "file(s) kept")
     if remove:
         threading.Thread(target=_prune_worker, args=(plan,), daemon=True).start()
-    else:
-        from routers.settings import notify_library_subscribers
-        notify_library_subscribers()
+    from routers.settings import notify_library_subscribers
+    notify_library_subscribers()
     return {"success": True, "removed": remove}
 
 

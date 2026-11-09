@@ -123,6 +123,9 @@ def scan(limit, no_skip, path, prune, yes):
                 click.echo("   Nothing removed")
                 return
             prune_stats = prune_missing_files(file_ids, prune_counts(plan))
+            if prune_stats.get("unreachable"):
+                click.echo("   The music folder is empty or not mounted; nothing removed")
+                return
             if prune_stats.get("grew"):
                 click.echo("   The library changed since the plan; nothing removed — run it again")
                 return

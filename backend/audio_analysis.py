@@ -141,8 +141,9 @@ def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
 # one grid window is never pending (provenance.MIN_MATERIAL_SECONDS).
 # P2P-imported analysis re-enters only when the enrichment.reanalyze_imported
 # toggle says so — see the policy comment in embeddings.py, which owns the
-# flag. A file that returned after a prune is linked back to its analysis by
-# the scan (provenance.relink_returned_files), so it is not pending here.
+# flag. A file that returned after a prune is linked back to its analysis
+# (provenance.relink_returned_files) after the import's canon and again before
+# each pass reads this queue, so it is not pending here.
 PENDING_SQL = """
     SELECT t.id as track_id, mf.id as media_file_id,
            mf.file_path, mf.bit_depth,
@@ -494,6 +495,8 @@ class AudioAnalyzer:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         provenance.require_fpcalc()
+        if not force:
+            provenance.relink_returned_files(cancel_check=cancel_flag)
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
         clap_batch_size = 16
