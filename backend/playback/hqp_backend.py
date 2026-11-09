@@ -1300,6 +1300,12 @@ class HqpBackend(PlayerBackend):
         # ours on a take no command of the node's made spends it (_spot_played)
         self._rest_gen, self._rest_left = -1, 0.0
         self._take_by_node: Optional[bool] = None
+        # The take HQPlayer 6 named at its last answer — kept through a
+        # silence and a restart — and the one it named before a return: an
+        # empty playlist read at a return is a restart only where its take
+        # counts afresh (_judge_mirror). The poller's alone
+        self._serial_seen: Optional[int] = None
+        self._serial_before_return: Optional[int] = None
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
         self._stopped_at_attach = False
@@ -2490,6 +2496,7 @@ class HqpBackend(PlayerBackend):
                         self._losses = hqp.losses
                         if came_back:
                             self._verify_mirror = True
+                            self._serial_before_return = self._serial_seen
                             self._library_check()
                             self._rate_event("state", "lists")
                         if came_back or self._info_due:
@@ -2613,6 +2620,8 @@ class HqpBackend(PlayerBackend):
                     self._failures = 0
                 elif status is not None:
                     self._failures = self._silent_misses = 0
+                    if status.track_serial is not None:
+                        self._serial_seen = status.track_serial
                     self._judge_start(status, playing)
                     if self._reconverge_due and link.owed is None:
                         # Once per loss: HQPlayer answers again — the add it
@@ -4541,6 +4550,16 @@ class HqpBackend(PlayerBackend):
             # before the one it reads — is the node's still: lost and
             # reconverged as at any return
             self._drifted("HQPlayer came back holding another controller's playlist", expect=expect,
+                          only_from=("step", "tail", "lost"))
+        elif (self._verify_mirror and not playlist and status.track_serial is not None
+              and self._serial_before_return and status.track_serial >= self._serial_before_return):
+            # Back to an empty playlist whose take counts on from the one read
+            # before the silence (HQPlayer 6): no restart — a restart counts it
+            # afresh — but a silence inside another controller's cycle, its
+            # Clear read before its add (ROON-COEX §6.1, the evening's note 1):
+            # drift, nothing sent. HQPlayer 5, which names no take, and one that
+            # had taken nothing yet to count on, read it as a restart still
+            self._drifted("HQPlayer came back with its playlist emptied, its take counting on", expect=expect,
                           only_from=("step", "tail", "lost"))
         elif self._verify_mirror:
             return self.lose_mirror("HQPlayer came back with a different playlist (restarted?)",

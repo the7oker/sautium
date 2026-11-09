@@ -2455,6 +2455,51 @@ def test_p1_the_persons_words_for_the_queue_while_hqplayer_rests_on_roons_stream
         roon.close()
 
 
+@pytest.mark.parametrize("hq5", [False, True])
+def test_p1_an_empty_playlist_read_at_a_return_inside_roons_cycle(fake, listens, monkeypatch, hq5):
+    """The evening's note 1 (ROON-COEX §6.1): Roon's start stands between its
+    Clear and its add — HQPlayer opening Roon's stream first, answering
+    others meanwhile — when a silence ends, and the return reads an EMPTY
+    playlist. On HQPlayer 6 its take counts on from the one read before the
+    silence: no restart, drift, nothing sent — Roon's Play plays Roon's
+    stream. HQPlayer 5, which names no take, reads it as a restart still:
+    the queue goes in before Roon's add (today's reading, kept)."""
+    fake.raw_streams = "uri"
+    if hq5:
+        fake.track_serial = None
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        go = threading.Event()
+        fake.probe_holds["stream.raw"] = go                      # HQPlayer opens Roon's stream first
+        roon.sock.settimeout(60)                                 # Roon waits for its add's answer meanwhile
+        n = _mark(fake, roon)
+        started = []
+        t = threading.Thread(target=lambda: started.append(roon.start_before_its_play()), daemon=True)
+        t.start()                                                # Stop, Clear, its add (held)
+        assert _wait(lambda: fake.playlist == [] and any(c == "PlaylistAdd" for _, c in fake.arrivals[-3:]), 10)
+        fake.silence(6.0)                                        # the node's client times out meanwhile
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=30)       # the return and its canary
+        go.set()
+        t.join(10)
+        uri = started[0]
+        roon.play_again()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
+        sent = _node_commands(fake, n, roon)
+        _observed("P1-empty-return", hq5=hq5, node_commands=sent, playlist=[u[-24:] for u in fake.playlist],
+                  hqplayer=(fake.state, fake.track), mirror=b._mirror)
+        if hq5:
+            assert "PlaylistAdd" in sent, "HQPlayer 5's return no longer read as a restart"
+        else:
+            assert sent == [] and b._mirror == "drift", "the node wrote into Roon's cycle"
+            assert fake.playlist == [uri] and fake.state == PLAYING and fake.track == 1
+    finally:
+        b.shutdown()
+        roon.close()
+
+
 @pytest.mark.parametrize("owed", [False, True])
 def test_p1_a_persons_play_after_the_drift_takes_hqplayer_back(fake, listens, monkeypatch, owed):
     """D3 after P1's drift — and after a lost mirror's drift: Roon's Play
@@ -3212,12 +3257,10 @@ def test_b_ours_again_on_a_uri_of_another_tier_follows_its_track_through_a_queue
     wait_for(lambda: n.last.queue_index == 2, timeout=5, what="the slot following its track")
 
 
-def test_b_a_removed_tracks_uri_played_again_stays_another_apps(tmp_path, proxy, renderers, nodes, quality):
-    """Another controller cut slot 1 (Track 1); the person removes Track 1
-    from the queue meanwhile; then the renderer plays Track 1's URI again by
-    itself. It names no slot of the queue: the playback stays the other
-    app's — never said as the queued track now at that slot (a listen and a
-    scrobble of a track that did not sound)."""
+def _removed_tracks_uri_played_again(tmp_path, renderers, nodes):
+    """Slot 1 (Track 1) plays; another controller takes the renderer; the
+    person removes Track 1 from the queue meanwhile; then the renderer plays
+    Track 1's URI again by itself. Returns (renderer, node, queue)."""
     r = renderers()
     q = CanonicalQueue()
     tracks = [track(tmp_path, i, seconds=60.0) for i in (1, 2, 3)]
@@ -3235,10 +3278,85 @@ def test_b_a_removed_tracks_uri_played_again_stays_another_apps(tmp_path, proxy,
     r.uri, r.meta, r.state = ours, meta, "PLAYING"
     r._base, r._t0 = 10.0, time.monotonic()
     r._run(r._changed())
+    return r, n, q
+
+
+def test_b_a_removed_tracks_uri_played_again_is_ours_at_no_slot(tmp_path, proxy, renderers, nodes, quality):
+    """P11's answer (b) (ROON-COEX §6.1, 2026-11-09 evening): the URI of a
+    track since removed, played again by the renderer itself, is ours at no
+    slot — the external state ends, Now Playing names it by what the
+    renderer reports with no slot (never the queued track now at that
+    slot), the node's Pause reaches it, and the next Play loads the queue's
+    slot."""
+    r, n, q = _removed_tracks_uri_played_again(tmp_path, renderers, nodes)
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.state == "playing"
+             and n.last.queue_index == 0 and n.last.extra.get("song") == "Track 1", timeout=6,
+             what="ours at no slot, named")
+    mark = len(r.calls)
+    assert n.backend.pause()
+    wait_for(lambda: "Pause" in _sent(r, mark) and n.last.state == "paused" and n.last.queue_index == 0,
+             timeout=5, what="paused at no slot")
+    assert n.backend.play()
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and "Track 2" in r.meta, timeout=10,
+             what="the queue's slot loaded")
+
+
+def test_b_ours_at_no_slot_keeps_no_listen_and_its_end_advances_nothing(tmp_path, proxy, renderers, manager,
+                                                                         heard, quality):
+    """Ours at no slot keeps no listen of it (only the listen the takeover
+    cut, ended with its track leaving the queue), and its end advances
+    nothing: the renderer stops there, the queue's slot waits for Play."""
+    listened, lastfm = heard
+    r = renderers()
+    _on_renderer(manager, r, [track(tmp_path, 1, seconds=30.0), track(tmp_path, 2, seconds=30.0)])
+    _playing_at(manager, r, 3)
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: manager.latest_status.get("source") == "external", timeout=6, what="external")
+    assert manager.queue.remove(1) is not None
+    manager.backend().queue_changed("remove")
+    time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 24.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: manager.latest_status.get("source") != "external"
+             and manager.latest_status.get("track_index") == 0, timeout=6, what="ours at no slot")
+    wait_for(lambda: r.state == "STOPPED", timeout=15, what="its end")
     time.sleep(2.0)
-    last = n.last
-    _observed("B-P9-removed", state=last.state, queue_index=last.queue_index, source=last.extra.get("source"))
-    assert last.extra.get("source") == "external" and last.queue_index == 0
+    _observed("B-P11-no-listen", listened=listened, lastfm=lastfm, status=(manager.latest_status.get("state"),
+              manager.latest_status.get("track_index")), renderer=r.uri[-12:])
+    assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"], "a listen of the track at no slot"
+    assert manager.latest_status.get("state") == "stopped" and "Track 2" not in r.meta, "its end advanced the queue"
+
+
+@pytest.mark.parametrize("queued", [True, False])
+def test_b_an_earlier_attachments_uri_played_again_is_ours(tmp_path, proxy, renderers, nodes, quality, queued):
+    """Round 3's H6, P11's answer: a URI an earlier attachment handed (none
+    this one did — its record cleared here) played again by the renderer
+    itself is ours too: at the slot its token names where its track is
+    still queued, else at no slot."""
+    r = renderers()
+    q = CanonicalQueue()
+    tracks = [track(tmp_path, i, seconds=60.0) for i in (1, 2)]
+    q.replace(tracks)
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and n.last.position >= 3,
+             timeout=15, what="slot 1 playing")
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    n.backend._handed.clear()                      # handed by an earlier attachment, not this one
+    if not queued:
+        assert q.remove(1) is tracks[0]
+        n.backend.queue_changed("remove")
+        time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 10.0, time.monotonic()
+    r._run(r._changed())
+    want = 1 if queued else 0
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.state == "playing"
+             and n.last.queue_index == want, timeout=6, what=f"ours at slot {want}")
 
 
 def test_b_our_own_uri_read_paused_while_another_app_holds_the_renderer_stays_its(tmp_path, proxy, renderers,

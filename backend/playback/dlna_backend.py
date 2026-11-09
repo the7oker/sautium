@@ -555,6 +555,13 @@ class DlnaBackend(PlayerBackend):
         # queue — until a load of ours (_taken_by_another), or a URI of ours
         # it plays again by itself (_ours_again)
         self._external = False
+        # A URI of ours the renderer plays again by itself whose token names no
+        # slot of the queue — a track since removed, an earlier attachment's
+        # (ROON-COEX §6.1 P11, round 3's H6): ours at no slot, named by the
+        # metadata the renderer reports of it as it reads it; no listen of it,
+        # no advance at its end, nothing armed after it, and Play loads the
+        # queue's slot (_ours_at_no_slot)
+        self._unslotted: Optional[str] = None
         # The queue item whose listen its takeover cut: the play tracker
         # holds that listen — a takeover is a pause for it (ROON-COEX F6) —
         # until a load of ours hands the renderer our URI, the renderer plays
@@ -1092,6 +1099,16 @@ class DlnaBackend(PlayerBackend):
                 extra["resume"] = {"index": self._index, "position": self._resume}
             else:
                 position, length, index = 0.0, 0.0, 0
+        elif self._unslotted is not None:
+            # Ours at no slot (_ours_at_no_slot): no queue slot named, the
+            # track named by what the renderer reports of it — the DIDL this
+            # node handed, read again by the position poll
+            index = 0
+            for key, attr in (("song", "media_title"), ("artist", "media_artist"),
+                              ("album", "media_album_name")):
+                value = getattr(self._dmr, attr, None)
+                if value:
+                    extra[key] = value
         elif state is None and self._current_url is None and self._resume is not None:
             state = "paused"          # a spot carried over, nothing of it loaded yet
         if (not self._gone and self._external and self._cut is not None
@@ -1141,15 +1158,15 @@ class DlnaBackend(PlayerBackend):
         if self._external:
             # Another controller holds it: its state is said, and moves
             # nothing — unless it plays a URI of ours again (its own controls
-            # resumed our media) whose token names a slot of the queue, the
-            # tier it was handed in and an Opus seek's ?ss= aside: ours again
-            # (ROON-COEX §6.1 P9). One of a track since removed names none:
-            # what the renderer plays is no queued track's (§6.1 P11). A
-            # take-back of the person's under way — its load, or its wait for
-            # the slot's stream — is the newer word
+            # resumed our media), this attachment's or an earlier one's: ours
+            # again at the slot its token names, the tier it was handed in and
+            # an Opus seek's ?ss= aside (ROON-COEX §6.1 P9), or at no slot
+            # where it names none — a track since removed (§6.1 P11, round 3's
+            # H6). A take-back of the person's under way — its load, or its
+            # wait for the slot's stream — is the newer word
             cur = getattr(self._dmr, "current_track_uri", None)
-            if (cur and cur in self._handed and self._state_name() == "playing"
-                    and not self._loading and self._parked is None):
+            if (cur and self._state_name() == "playing" and not self._loading and self._parked is None
+                    and (cur in self._handed or self._served_here(cur))):
                 # A track queued twice names two slots: the one nearest the
                 # slot held (the takeover's own, which a queue edit moves with
                 # its track), the one after first (the next it had armed)
@@ -1157,7 +1174,9 @@ class DlnaBackend(PlayerBackend):
                            default=None)
                 if slot is not None:
                     self._ours_again(cur, slot)
-                    return
+                else:
+                    self._ours_at_no_slot(cur)
+                return
             self._emit_now()
             return
         if self._parked is not None:
@@ -1199,7 +1218,7 @@ class DlnaBackend(PlayerBackend):
             self._stop_poll()
             finished = (self._length > 0
                         and self._position >= self._length - _TRACK_END_SLACK)
-            if finished:
+            if finished and self._unslotted is None:
                 await self._advance()
                 return
         self._emit_now(state)
@@ -1412,9 +1431,11 @@ class DlnaBackend(PlayerBackend):
         moved this instance on; the play press then started the slot it was
         left at from 0:00, after the phone had played the next one."""
         self._gone = True
-        if self._resume is not None or self._external:
+        if self._resume is not None or self._external or self._unslotted is not None:
             # A spot already: carried over, or lost before; or another
-            # controller held it — what was said is none of our listen
+            # controller held it — what was said is none of our listen; or
+            # ours at no slot played there, no slot to resume
+            self._unslotted = None
             return
         # By what this instance last said, not the renderer's stale state: a
         # track change under way is at its own start (0, or the second it
@@ -1476,7 +1497,7 @@ class DlnaBackend(PlayerBackend):
             self._resume = self._position
             self._cut = self._queue.item_at(self._index)
         self._held_item = self._queue.item_at(self._index)
-        self._external = True
+        self._external, self._unslotted = True, None
         self._current_url = self._next_url = None
         self._awaiting_play = False
         self._seek_on_start = self._seek_due = None
@@ -1514,6 +1535,41 @@ class DlnaBackend(PlayerBackend):
         self._ensure_poll()
         self._arm_preload()
         self._emit_now("playing")
+
+    def _ours_at_no_slot(self, uri: str) -> None:
+        """A URI of ours read playing again while another controller held the
+        renderer whose token names no slot of the queue — a track since
+        removed, an earlier attachment's: ours at no slot (ROON-COEX §6.1
+        P11, round 3's H6). The external state ends and the node's Pause and
+        Stop reach it; Now Playing names it by the metadata the renderer
+        reports (the DIDL this node handed), with no slot; no listen of it is
+        kept (no slot, no item said), its end advances nothing, nothing is
+        armed after it, and the next Play loads the queue's slot. Runs on the
+        dlna-loop."""
+        logger.info("%s plays a track of ours no queue slot names — the node's controls reach it", self.label)
+        ss = parse_qs(urlparse(uri).query).get("ss")
+        self._pos_offset = float(ss[0]) if ss else 0.0
+        self._external, self._cut = False, None
+        self._resume = self._held_item = self._parked = None
+        self._current_url = self._unslotted = uri
+        self._length = 0.0          # the poll's first reading adopts the renderer's
+        self._awaiting_play = False
+        self._seek_on_start = self._seek_due = None
+        self._rebaseline(self._pos_offset)
+        self._ensure_poll()
+        self._emit_now("playing")
+
+    def _served_here(self, uri: str) -> bool:
+        """Is `uri` a stream of this node's own media proxy at the address it
+        hands this renderer — an earlier attachment's too, its token perhaps
+        no longer registered (ROON-COEX §6.1, round 3's H6)? No one else
+        hands that address."""
+        from streaming import service as streaming_service
+        proxy = streaming_service.get_proxy()
+        port = proxy.port if proxy is not None else settings.media_proxy_port
+        parts = urlparse(uri)
+        return (parts.netloc == f"{media_host(self._peer_host)}:{port}"
+                and parts.path.startswith(("/file/", "/preview/")))
 
     def _confirmed(self) -> None:
         """The renderer was seen acting on our Play: the pending play is
@@ -1834,7 +1890,7 @@ class DlnaBackend(PlayerBackend):
                                 pos >= self._length - _TRACK_END_SLACK)
                     logger.info("position poll exit: device stopped (pos=%.1f/%.1f finished=%s)",
                                 pos, self._length, finished)
-                    if finished:
+                    if finished and self._unslotted is None:
                         await self._advance()
                     else:
                         self._emit_now("stopped")
@@ -2309,6 +2365,7 @@ class DlnaBackend(PlayerBackend):
             # tapped track with a transition spinner instead of either lying
             # ("playing") or looking dead while the old audio rides on.
             self._index, self._load_item = index, item
+            self._unslotted = None    # a load of ours: a slot named again
             self._load_gen += 1     # in-flight poll evidence is now about a dead world
             self._pos_offset = ss   # 0 for a fresh track; the seek offset otherwise
             self._position = ss or start_at   # so the loading state shows the target
@@ -2640,6 +2697,10 @@ class DlnaBackend(PlayerBackend):
 
     def play(self) -> bool:
         async def _p():
+            if self._unslotted is not None:
+                # Ours at no slot: the next Play loads the queue's slot (§6.1 P11)
+                await self._load_and_play(self._index if self._index >= 1 else 1)
+                return
             if self._current_url is None:
                 await self._load_and_play(self._index if self._index >= 1 else 1,
                                           start_at=self._resume or 0.0)
@@ -2879,7 +2940,7 @@ class DlnaBackend(PlayerBackend):
                     self._resume = self._held_item = None
             if slot is not None:
                 self._index = slot
-            if self._current_url is not None:
+            if self._current_url is not None and self._unslotted is None:
                 self._arm_preload()
             self._emit_now()
         self._call(_resync())

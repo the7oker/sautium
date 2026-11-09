@@ -1228,8 +1228,11 @@ it had armed, from that stream's start. Only a URI whose token names a slot of t
 quality tier it was handed in and an Opus seek's `?ss=` aside) — every lookup of a slot by its
 URL goes by the token so, a queue edit after ours again included; a track queued twice is ours
 again at the takeover's own slot, else the nearest, the one after first (the next it had
-armed). One of a track since removed names no queued track, and the playback stays the other
-app's (an open question, ROON-COEX §6.1 P11). A take-back of the person's under way — its load, or its wait for the slot's stream
+armed). A URI of ours an earlier attachment handed is ours too (since 2026-11-09, ROON-COEX
+§6.1 P11 and round 3's H6): one whose token names no queued track — a track since removed — is
+ours at no slot: the external state ends, the node's Pause and Stop reach it, Now Playing names
+it by what the renderer reports of it with no slot, no listen of it is kept, its end advances
+nothing, and the next Play loads the queue's slot. A take-back of the person's under way — its load, or its wait for the slot's stream
 — is the newer word: nothing is ours again meanwhile.
 
 **A restarted HQPlayer gets the queue back.** The status poller
@@ -1246,7 +1249,12 @@ restart (since 2026-11-09, ROON-COEX §6.1 P1): another controller's — Roon's
 cycle went on while HQPlayer answered nothing past the client's timeout, a
 heavy engine's Stop — so the mirror drifts and nothing is sent, a mirror lost
 in the silence (an add owed, an edit's hand-over) too, its reconverge given up;
-only an empty playlist, or one of the node's own, is a restart. A tail mirror
+only an empty playlist, or one of the node's own, is a restart — and on
+HQPlayer 6 an empty one only where its take counts afresh (since 2026-11-09, the
+design session's evening note): one whose `track_serial` counts on from the one
+read before the silence is Roon's Clear read before its add, and drifts too.
+HQPlayer 5, which names no take, and one that had taken nothing yet to count on
+read an empty playlist as a restart still. A tail mirror
 whose tail still holds — HQPlayer's own entries before the one it reads — stays
 the node's: lost and reconverged as at any return. The reconverge holds to the same
 rule whatever road lost the mirror (an add HQPlayer owed and carried out into
