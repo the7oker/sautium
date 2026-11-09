@@ -1290,10 +1290,13 @@ class HqpBackend(PlayerBackend):
         # on: (its track, the spot's generation then), judged at HQPlayer's
         # next answer (_judge_start)
         self._unjudged: Optional[tuple] = None
-        # The spot's generation the rest rule left it at (_rests_on_its_start)
-        # and when: HQPlayer playing another entry of ours on a take no
-        # command of the node's made since spends it (_spot_played)
-        self._rest_gen, self._rest_at = -1, 0.0
+        # The spot's generation the rest rule left it at (_rests_on_its_start;
+        # carried along by a move of the person's: _step, seek) and when, and
+        # whether the take HQPlayer plays was made by a command of the node's
+        # (None: no take seen to move yet): HQPlayer playing another entry of
+        # ours on a take no command of the node's made spends it (_spot_played)
+        self._rest_gen, self._rest_left = -1, 0.0
+        self._take_by_node: Optional[bool] = None
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
         self._stopped_at_attach = False
@@ -2122,11 +2125,13 @@ class HqpBackend(PlayerBackend):
     def _in_step(self, *, expect: Optional[int] = None) -> bool:
         return self._move_mirror("step", expect=expect)
 
-    def _drifted(self, why: str, *, expect: Optional[int] = None) -> None:
+    def _drifted(self, why: str, *, expect: Optional[int] = None,
+                 only_from: tuple = ("step", "tail")) -> None:
         """HQPlayer's playlist differs from the queue by an edit made outside
         this node, or a mirror step it did not take: never reconciled on its
-        own (a lost mirror stays lost)."""
-        self._move_mirror("drift", only_from=("step", "tail"), expect=expect)
+        own (a lost mirror stays lost — but at a return holding another
+        controller's playlist: _judge_mirror)."""
+        self._move_mirror("drift", only_from=only_from, expect=expect)
         if not self._drift_logged:
             logger.warning("%s — the Sautium queue is authoritative", why)
             self._drift_logged = True
@@ -2456,8 +2461,8 @@ class HqpBackend(PlayerBackend):
                         came_back = hqp.losses != self._losses or self._failures > 0
                         if hqp.losses != self._losses:
                             # A restart counts its track_serial afresh — and
-                            # ended any listen of ours itself
-                            self._before = self._listen = None
+                            # ended any listen of ours itself, and the take
+                            self._before = self._listen = self._take_by_node = None
                         self._losses = hqp.losses
                         if came_back:
                             self._verify_mirror = True
@@ -2472,6 +2477,13 @@ class HqpBackend(PlayerBackend):
                             self._info = info or self._info
                     if status is not None and self._unexplained_take(status):
                         self._take_unread = True
+                    before = self._before[0] if self._before is not None else None
+                    if (status is not None and before is not None and status.track_serial is not None
+                            and before.track_serial is not None and status.track_serial != before.track_serial):
+                        # Who made the take that plays now: a command of the
+                        # node's since the tick before (_TAKES), or HQPlayer,
+                        # another controller, the person in its own window
+                        self._take_by_node = self._took_at > self._before_at
                     foreign = self._foreign_in_step(status) if status is not None else None
                     edited = False
                     if status is not None and (self._verify_mirror
@@ -3230,7 +3242,10 @@ class HqpBackend(PlayerBackend):
             held = self._spot
             if held is None or playing[1] is None or playing[2]:
                 return
-            if held[0] is playing[1] or (self._spot_gen == self._rest_gen and self._took_at <= self._rest_at):
+            # The take that plays, where HQPlayer names one; else no take
+            # command of the node's since the rest (HQPlayer 5)
+            by_node = self._take_by_node if self._take_by_node is not None else self._took_at > self._rest_left
+            if held[0] is playing[1] or (self._spot_gen == self._rest_gen and not by_node):
                 self._spot, self._spot_gen = None, self._spot_gen + 1
 
     def _taken(self) -> bool:
@@ -4105,7 +4120,7 @@ class HqpBackend(PlayerBackend):
             if self._spot is not None:
                 return
             self._spot, self._spot_gen = (item, int(second)), self._spot_gen + 1
-            self._rest_gen, self._rest_at = self._spot_gen, time.time()
+            self._rest_gen, self._rest_left = self._spot_gen, time.time()
         logger.info("HQPlayer stopped on the start of slot %d by itself — Play starts it again",
                     self._queue.index_of(item))
         self.poke()
@@ -4482,12 +4497,18 @@ class HqpBackend(PlayerBackend):
             if was != "step":
                 logger.info("HQPlayer's playlist is the queue again")
             self._drift_logged = False
-        elif self._verify_mirror and self._edited:
+        elif (self._verify_mirror and self._edited
+              and not (self._mirror == "tail" and self._tail_holds(playlist, layout, status))):
             # Back from a silence holding an entry the node never gave HQPlayer:
             # another controller's playlist (Roon's cycle went on meanwhile),
-            # never a restart — drift, nothing sent; a person's Play takes
-            # HQPlayer back (ROON-COEX §6.1 P1)
-            self._drifted("HQPlayer came back holding another controller's playlist", expect=expect)
+            # never a restart — drift, nothing sent, a mirror lost already (an
+            # add owed, an edit's hand-over in the silence) too, its due
+            # reconverge given up; a person's Play takes HQPlayer back
+            # (ROON-COEX §6.1 P1). A tail that holds — HQPlayer's own entries
+            # before the one it reads — is the node's still: lost and
+            # reconverged as at any return
+            self._drifted("HQPlayer came back holding another controller's playlist", expect=expect,
+                          only_from=("step", "tail", "lost"))
         elif self._verify_mirror:
             return self.lose_mirror("HQPlayer came back with a different playlist (restarted?)",
                                     expect=expect)
@@ -4744,8 +4765,11 @@ class HqpBackend(PlayerBackend):
             if target is not None:
                 with self._spot_lock:
                     if self._spot is held:
+                        rest = self._spot_gen == self._rest_gen
                         self._spot = (target, 0)
                         self._spot_gen += 1
+                        if rest:
+                            self._rest_gen = self._spot_gen       # moved, still the rest rule's
             self.poke()
             return True
         if self._taken() or (self._mirror == "drift" and self._edited and (last is None or last.item is None)):
@@ -5538,7 +5562,10 @@ class HqpBackend(PlayerBackend):
             # controller's stream), and Play starts there
             with self._spot_lock:
                 if self._spot is held:
+                    rest = self._spot_gen == self._rest_gen
                     self._spot, self._spot_gen = (held[0], int(seconds)), self._spot_gen + 1
+                    if rest:
+                        self._rest_gen = self._spot_gen           # moved, still the rest rule's
             self.poke()
             return True
         if self._taken() or (self._mirror == "drift" and self._edited and (last is None or last.item is None)):

@@ -1314,6 +1314,33 @@ def test_a_return_after_a_long_outage_also_loses_the_mirror(fake, monkeypatch):
         b.shutdown()
 
 
+def test_a_return_holding_only_entries_of_ours_is_a_restart(fake, monkeypatch):
+    """HQPlayer back from an outage holding entries the node gave it and none
+    it did not — its own last playlist restored, an older queue of ours — is
+    a restart, never another controller's playlist (ROON-COEX §6.1 P1: only
+    an entry the node never gave makes it one): the mirror is lost and
+    HQPlayer gets the queue back."""
+    monkeypatch.setattr(hl, "CIRCUIT_COOLDOWN_S", 0.0)
+    from playback import manager as manager_mod
+    mgr = PlaybackManager()
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    try:
+        assert len(fake.playlist) == 2
+        fake.close()
+        assert _wait(lambda: b._failures >= 1 and _link().client.socket is None, timeout=15.0)
+        fake.playlist = ["file:///E:/Music/A/02.flac"]
+        fake.come_back()
+        assert _wait(lambda: (b.poke(), b.mirror_losses >= 1)[1], timeout=15.0), \
+            "the return never lost the mirror"
+        assert _wait(lambda: fake.playlist == ["file:///E:/Music/A/01.flac",
+                                               "file:///E:/Music/A/02.flac"], timeout=10.0)
+        assert b._mirror != "drift"
+    finally:
+        b.shutdown()
+
+
 def test_reachable_needs_a_protocol_answer(fake):
     b = HqpBackend(emit=lambda *_: None, queue=PlaybackManager().queue)
     assert b.reachable()
@@ -5588,16 +5615,31 @@ def test_a_start_hqplayer_stops_on_by_itself_leaves_the_spot_there(fake, output,
     assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
 
 
+@pytest.mark.parametrize("before", [None, "dsp", "seek", "next"])
 def test_a_spot_a_refused_start_left_is_spent_by_another_entry_hqplayer_plays_on_its_own(fake, output,
-                                                                                       monkeypatch):
+                                                                                       monkeypatch, before):
     """D6's spot at a start HQPlayer refused; the person then starts entry 1
     in HQPlayer's own window — a take no command of the node's made, its
     position moving: the spot is spent (ROON-COEX §6.1 P8), and Pause then
     Play resumes what plays — never SelectTrack 2, the refused track
-    started again."""
+    started again. So too after a filter change of the node's at the spot
+    (the refusal's natural fix: a take command of the node's, made before
+    that take), after a Seek that moved the spot's second (L12: nothing
+    sent) and after a Next that moved it to slot 3 (nothing sent either) —
+    a spot moved is still the rest rule's."""
     mgr, b = output
     _refused_next(mgr, b, fake, monkeypatch)
     fake.refuse_play.clear()
+    if before == "dsp":
+        hb.change_dsp({"filter": "f57", "filter1x": "f57"})
+        _polls(fake, 2)
+        assert b._spot is not None and fake.state == int(PlaybackState.STOPPED)
+    elif before == "seek":
+        assert b.seek(30)
+        assert _wait(lambda: mgr._latest_status.get("resume") == {"index": 2, "position": 30}, 5)
+    elif before == "next":
+        assert b.next()
+        assert _wait(lambda: mgr._latest_status.get("resume") == {"index": 3, "position": 0}, 5)
     with fake._lock:
         fake.track_serial += 1                          # the person's Play in HQPlayer's own window
         fake.state, fake.track, fake.position, fake._starting = int(PlaybackState.PLAYING), 1, 0.0, 0
@@ -5610,6 +5652,33 @@ def test_a_spot_a_refused_start_left_is_spent_by_another_entry_hqplayer_plays_on
     assert b.play()
     assert _wait(lambda: fake.state == int(PlaybackState.PLAYING), 10)
     assert [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")] == ["Play"]
+
+
+def test_only_the_rest_rules_spot_goes_when_another_entry_of_ours_plays_on_a_take_not_the_nodes(fake):
+    """_spot_played's P8 arm on its own: HQPlayer plays entry 1 of ours while
+    the spot holds entry 2. The rest rule's spot goes when the take that
+    plays is not the node's — HQPlayer 6 says whose it is; HQPlayer 5, which
+    names no take, by no take command of the node's since the rest — and
+    stays on the node's own take; any other spot, a takeover's among them,
+    stays whatever made the take."""
+    q = PlaybackManager().queue
+    one, two = _item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)
+    q.replace([one, two])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    try:
+        def spent(rest: bool, by_node, *, took_since_rest: bool = False) -> bool:
+            b._spot, b._spot_gen = (two, 0), b._spot_gen + 1
+            b._rest_gen = b._spot_gen if rest else -1
+            b._rest_left = 100.0
+            b._took_at = 101.0 if took_since_rest else 99.0
+            b._take_by_node = by_node
+            b._spot_played((1, one, False))
+            return b._spot is None
+        assert spent(True, False) and not spent(True, True)
+        assert not spent(False, False) and not spent(False, True)
+        assert spent(True, None) and not spent(True, None, took_since_rest=True)
+    finally:
+        b.shutdown()
 
 
 def test_next_and_previous_move_the_spot_a_refused_start_left(fake, output, monkeypatch):

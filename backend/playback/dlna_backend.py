@@ -557,8 +557,9 @@ class DlnaBackend(PlayerBackend):
         self._external = False
         # The queue item whose listen its takeover cut: the play tracker
         # holds that listen — a takeover is a pause for it (ROON-COEX F6) —
-        # until a load of ours hands the renderer our URI, or the item leaves
-        # the queue
+        # until a load of ours hands the renderer our URI, the renderer plays
+        # a URI of ours again by itself (_ours_again), or the item leaves the
+        # queue
         self._cut: Optional[QueueItem] = None
         # Stops and Pauses said while another controller holds the renderer,
         # counted: one said after a take-back load of ours was asked ends it
@@ -1140,11 +1141,16 @@ class DlnaBackend(PlayerBackend):
         if self._external:
             # Another controller holds it: its state is said, and moves
             # nothing — unless it plays a URI of ours again (its own controls
-            # resumed our media): ours again (ROON-COEX §6.1 P9)
+            # resumed our media) that names a slot of the queue, an Opus
+            # seek's ?ss= aside: ours again (ROON-COEX §6.1 P9). One of a
+            # track since removed, or handed under another quality, names
+            # none — what the renderer plays is no queued track's
             cur = getattr(self._dmr, "current_track_uri", None)
             if cur and cur in self._handed and self._state_name() == "playing" and not self._loading:
-                self._ours_again(cur)
-                return
+                slot = self._slot_of(cur.split("&ss=")[0].split("?ss=")[0])
+                if slot is not None:
+                    self._ours_again(cur, slot)
+                    return
             self._emit_now()
             return
         if self._parked is not None:
@@ -1439,20 +1445,20 @@ class DlnaBackend(PlayerBackend):
         (_handed). Its playback is external, at slot 0: the listen counts
         its own seconds, the clock running on no further — held, as a pause
         holds it, where this takeover cut it (ROON-COEX F6: `_cut`), until a
-        load of ours hands the renderer our URI; the load is let
-        go — nothing of ours current or armed, no start or Seek owed; and
-        nothing the renderer does from here is a track end or an advance
-        (_handle_state_change). Nothing is sent to it: the next play intent
-        loads our slot afresh (play). Taken from the node's own listen —
-        playing or paused, as this instance last said — it cut that listen:
-        the spot stays at the slot and its last own second, Now Playing names
-        its track saying another app took the renderer (_emit_now), and Play
-        loads it there; erased as any spot is, with its item or once a start
-        from it is taken. Taken from a stop, no listen was cut: no spot. A
-        play that waited for its slot's stream (_parked) is over: the other
-        controller's word is newer — its track and second are the spot, as a
-        Stop leaves them. Its callers end the position poll. Runs on the
-        dlna-loop."""
+        load of ours hands the renderer our URI or it plays one of ours again
+        by itself (_ours_again); the load is let go — nothing of ours current
+        or armed, no start or Seek owed; and nothing the renderer does from
+        here is a track end or an advance (_handle_state_change). Nothing is
+        sent to it: the next play intent loads our slot afresh (play). Taken
+        from the node's own listen — playing or paused, as this instance last
+        said — it cut that listen: the spot stays at the slot and its last
+        own second, Now Playing names its track saying another app took the
+        renderer (_emit_now), and Play loads it there; erased as any spot
+        is, with its item or once a start from it is taken. Taken from a
+        stop, no listen was cut: no spot. A play that waited for its slot's
+        stream (_parked) is over: the other controller's word is newer — its
+        track and second are the spot, as a Stop leaves them. Its callers
+        end the position poll. Runs on the dlna-loop."""
         logger.info("another controller took %s — slot %d let go at %.0f s",
                     self.label, self._index, self._position)
         parked, self._parked = self._parked, None
@@ -1471,24 +1477,24 @@ class DlnaBackend(PlayerBackend):
             self._preload_task.cancel()
         self._emit_now()
 
-    def _ours_again(self, uri: str) -> None:
+    def _ours_again(self, uri: str, slot: int) -> None:
         """A URI this attachment handed, read playing again while another
-        controller held the renderer — its own controls resumed our media:
-        ours again (ROON-COEX §6.1 P9). The external state ends: the slot is
-        the one its URI names, the node's Pause and Stop reach it, the
-        position poll runs on it, at its RelTime — else at the takeover's
-        spot, so the listen held there goes on. Leaving a track playing that
-        the node could not stop was the worse failure. Runs on the
-        dlna-loop."""
+        controller held the renderer — its own controls resumed our media —
+        at `slot`, the one it names: ours again (ROON-COEX §6.1 P9). The
+        external state ends: the node's Pause and Stop reach it, the next is
+        armed, the position poll runs on it from the takeover's spot (else
+        the stream's own start), so the listen held there goes on — the
+        renderer's last RelTime read is no reading of ours: the poll may
+        have found the takeover itself, the other controller's stream. The
+        poll's first reading moves it to where the renderer plays. Leaving a
+        track playing that the node could not stop was the worse failure.
+        Runs on the dlna-loop."""
         logger.info("%s plays a track of ours again — the node's controls reach it", self.label)
-        slot = self._slot_of(uri)
-        if slot is not None:
-            self._index = slot
-        item = self._queue.item_at(self._index)
+        self._index = slot
+        item = self._queue.item_at(slot)
         ss = parse_qs(urlparse(uri).query).get("ss")
         self._pos_offset = float(ss[0]) if ss else 0.0
-        rel = getattr(self._dmr, "media_position", None)
-        at = self._pos_offset + float(rel) if rel else (self._resume or self._pos_offset)
+        at = self._resume if self._resume is not None else self._pos_offset
         self._external, self._cut = False, None
         self._resume = self._held_item = self._parked = None
         self._current_url = uri
@@ -1497,6 +1503,7 @@ class DlnaBackend(PlayerBackend):
         self._seek_on_start = self._seek_due = None
         self._rebaseline(at)
         self._ensure_poll()
+        self._arm_preload()
         self._emit_now("playing")
 
     def _confirmed(self) -> None:

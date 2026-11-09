@@ -40,9 +40,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_hqp_backend import (_QUESTIONS, _GatedStream, _album, _attach, _item, _link,  # noqa: E402,F401
+from test_hqp_backend import (_QUESTIONS, _GatedStream, _album, _attach, _item, _link, _polls,  # noqa: E402,F401
                               _queue_stays_in_memory, _routes_on, _stopped_at_spot, _streams_on_hqplayer, _wait,
-                              fake, listens)
+                              fake, listens, output)
 from test_dlna_backend import (FakeRenderer, _gena_port, _on_renderer, _playing_at, _seconds,  # noqa: E402,F401
                                heard, manager, nodes, proxy, quality, renderers, streamed, track, wait_for)
 
@@ -2290,6 +2290,68 @@ def test_p1_a_reconnect_inside_roons_cycle_sends_its_playlist_nothing(fake, list
         roon.close()
 
 
+def test_p1_an_add_owed_through_the_silence_sends_roons_playlist_nothing(fake, listens, monkeypatch):
+    """P1 with the person's append in the silence: its add outlasts the
+    client's wait — owed, the mirror lost to it, a reconverge due — and
+    HQPlayer carries it out after the silence into Roon's playlist. The
+    return reads Roon's entry there: drift all the same, the reconverge
+    given up, nothing sent past that add — and Roon's Play plays Roon's
+    stream."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        n = _mark(fake, roon)
+        uri = roon.start_before_its_play()
+        fake.silence(8.0)
+        monkeypatch.setattr(b._link.client, "timeout", 1.0)        # the add's wait (5 s live)
+        added = []
+        t = threading.Thread(target=lambda: added.append(mgr.append([_item("E:/Music/S/later.flac", 9)])),
+                             daemon=True)
+        t.start()
+        t.join(20)
+        assert (b._mirror, b._reconverge_due) == ("lost", True)
+        monkeypatch.setattr(b._link.client, "timeout", hl.COMMAND_WAIT_S)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 5, timeout=40)
+        roon.play_again()
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
+        _observed("P1-owed", added=added, node_commands=_node_commands(fake, n, roon), playlist=fake.playlist[:6],
+                  hqplayer=(fake.state, fake.track), mirror=b._mirror)
+        assert _node_commands(fake, n, roon) == ["PlaylistAdd"], "the node wrote over Roon's playlist"
+        assert b._mirror == "drift" and not b._reconverge_due
+        assert fake.playlist[0] == uri and fake.state == PLAYING and fake.track == 1
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p1_a_tail_mirror_through_a_silence_stays_a_tail(fake, output, monkeypatch):
+    """A tail mirror over an entry of HQPlayer's own before ours, HQPlayer
+    playing our slot 1: a silence past the client's timeout (a heavy build)
+    is no other controller's playlist — HQPlayer's own entries before the
+    one it reads are a tail's — so the tail stays the node's, and a play
+    next reaches HQPlayer behind the entry it reads."""
+    mgr, b = output
+    with fake._lock:
+        fake.playlist.insert(0, "file:///E:/Other/x.flac")       # the person's, in HQPlayer's own window
+        fake.track += 1
+    b._move_mirror("tail")
+    _polls(fake, 2)
+    assert b._mirror == "tail"
+    fake.silence(6.0)
+    k = len(fake.commands)
+    _wait(lambda: _statuses(fake, k) >= 4, timeout=30)
+    _polls(fake, 2)
+    after = b._mirror
+    assert mgr.append([_item("E:/Music/B/09.flac", 19)], "next") == 1
+    _polls(fake, 2)
+    _observed("P1-tail", after=after, playlist=list(fake.playlist), track=fake.track)
+    assert after == "tail"
+    assert any("B/09.flac" in u for u in fake.playlist), "the play next never reached HQPlayer"
+
+
 @pytest.mark.parametrize("press, slot", [("next", 2), ("previous", 1)])
 def test_l11_on_a_renderer_next_and_previous_at_the_takeovers_spot_load_their_slot(tmp_path, proxy, renderers, nodes,
                                                                                    quality, press, slot):
@@ -2727,3 +2789,138 @@ def test_b_our_own_uri_played_again_by_the_renderer_is_ours_again(tmp_path, prox
     assert n.backend.pause()
     wait_for(lambda: r.state == "PAUSED_PLAYBACK" and n.last.state == "paused", timeout=5, what="paused")
     assert "Pause" in _sent(r, mark)
+
+
+def test_b_ours_again_after_a_takeover_the_poll_found_is_the_listen_it_held(tmp_path, proxy, renderers, manager,
+                                                                            heard, quality):
+    """Slot 1 plays at 36 s; another controller's URI is found by the
+    position poll (its event lost), its stream 2 s in as the poll reads it;
+    later the renderer's own controls resume our URI where it was, evented.
+    Ours again from the takeover's spot — the poll's last reading was the
+    other app's stream — so the listen held at the takeover goes on: one
+    row, one now-playing; and the poll runs on it again: a jump the
+    renderer makes by itself, no event said, is read. One slot: arming its
+    next (none) changes nothing the renderer would event."""
+    listened, lastfm = heard
+    r = renderers()
+    _on_renderer(manager, r, [track(tmp_path, 1, seconds=60.0)])
+    _playing_at(manager, r, 1)
+    assert manager.backend().seek(35)
+    _playing_at(manager, r, 36)
+    ours, meta = r.uri, r.meta
+    r.notifying = False
+    r.taken_by_another("playing")
+    r._base = 2.0
+    wait_for(lambda: manager.latest_status.get("source") == "external", timeout=6, what="external")
+    time.sleep(1.0)
+    assert listened == []
+    r.notifying = True
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 37.0, time.monotonic()
+    r._run(r._changed())
+    wait_for(lambda: manager.latest_status.get("source") != "external"
+             and manager.latest_status.get("state") == "playing", timeout=5, what="ours again")
+    first = manager.latest_status.get("position")
+    r.notifying = False                                 # only the poll reads it
+    r._base, r._t0 = 50.0, time.monotonic()
+    wait_for(lambda: manager.latest_status.get("position", 0) >= 50, timeout=6, what="the poll's reading")
+    r.notifying = True
+    assert manager.backend().stop()
+    wait_for(lambda: listened, timeout=10, what="the listen written")
+    time.sleep(1.0)
+    _observed("B-P9-poll", first_position=first, listened=listened, lastfm=lastfm)
+    assert first >= 30
+    assert [t for t, _ in listened] == ["00000000-0000-0000-0000-000000000001"], "the held listen split"
+    assert lastfm.count(("update_now_playing", "Track 1")) == 1
+
+
+def test_b_ours_again_runs_the_position_poll_itself(tmp_path, proxy, renderers, nodes, quality):
+    """Ours again starts the position poll itself — never left to a second
+    callback of the same event (the UPnP stack delivers one here; a
+    renderer that events once would leave the node deaf on its own track:
+    no RelTime, no track-end backstop)."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    ours = r.uri
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    b = n.backend
+
+    async def again() -> bool:
+        b._stop_poll()
+        await asyncio.sleep(0)
+        b._ours_again(ours, 1)
+        return b._poll_task is not None and not b._poll_task.done()
+    assert asyncio.run_coroutine_threadsafe(again(), b._loop).result(5)
+
+
+def test_b_a_removed_tracks_uri_played_again_stays_another_apps(tmp_path, proxy, renderers, nodes, quality):
+    """Another controller cut slot 1 (Track 1); the person removes Track 1
+    from the queue meanwhile; then the renderer plays Track 1's URI again by
+    itself. It names no slot of the queue: the playback stays the other
+    app's — never said as the queued track now at that slot (a listen and a
+    scrobble of a track that did not sound)."""
+    r = renderers()
+    q = CanonicalQueue()
+    tracks = [track(tmp_path, i, seconds=60.0) for i in (1, 2, 3)]
+    q.replace(tracks)
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and n.last.position >= 3,
+             timeout=15, what="slot 1 playing")
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    assert q.remove(1) is tracks[0]
+    n.backend.queue_changed("remove")
+    time.sleep(0.5)
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 10.0, time.monotonic()
+    r._run(r._changed())
+    time.sleep(2.0)
+    last = n.last
+    _observed("B-P9-removed", state=last.state, queue_index=last.queue_index, source=last.extra.get("source"))
+    assert last.extra.get("source") == "external" and last.queue_index == 0
+
+
+def test_b_our_own_uri_read_paused_while_another_app_holds_the_renderer_stays_its(tmp_path, proxy, renderers,
+                                                                                  nodes, quality):
+    """A URI of ours the renderer names PAUSED while another controller holds
+    it is no word of its own controls — a renderer names the URI before ours
+    for a tick after a load and can sit paused on it: only playing it again
+    makes it ours (P9)."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    r.uri, r.meta, r.state = ours, meta, "PAUSED_PLAYBACK"
+    r._base, r._t0 = 10.0, None
+    r._run(r._changed())
+    time.sleep(1.5)
+    assert n.last.extra.get("source") == "external"
+
+
+def test_b_our_own_uri_played_again_while_a_take_back_loads_waits_for_that_load(tmp_path, proxy, renderers, nodes,
+                                                                               quality):
+    """The person tapped slot 2 while another controller held the renderer:
+    that take-back waits for slot 2's stream (loading). The renderer's own
+    controls then play slot 1's URI again: the load under way is the newer
+    word — nothing is ours again meanwhile — and once the stream lands the
+    renderer plays slot 2, said as slot 2, never slot 1's track over it."""
+    r, n = _renderer_plays_slot_1(tmp_path, renderers, nodes)
+    ours, meta = r.uri, r.meta
+    r.taken_by_another("playing")
+    wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
+    n.queue.item_at(2).play = streamed(proxy, 2, cover_url="").source
+    proxy._entries["stream2"].ready.clear()
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 2, timeout=5, what="the take-back loading")
+    r.uri, r.meta, r.state = ours, meta, "PLAYING"
+    r._base, r._t0 = 10.0, time.monotonic()
+    r._run(r._changed())
+    time.sleep(1.0)
+    during = (n.last.state, n.last.queue_index)
+    proxy._entries["stream2"].ready.set()
+    wait_for(lambda: n.last.state == "playing" and "stream2" in r.uri, timeout=10, what="slot 2 playing")
+    time.sleep(1.0)
+    _observed("B-P9-load", during=during, after=(n.last.state, n.last.queue_index))
+    assert during == ("loading", 2) and n.last.queue_index == 2

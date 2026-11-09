@@ -606,7 +606,9 @@ comes after the control port answers again — so neither can end the wait.
   Previous move from it; HQPlayer playing another entry of ours on a take no
   command of the node's made — the person's start in HQPlayer's own window —
   spends it (since 2026-11-09, ROON-COEX §6.1 P8: Pause then Play restarted
-  the refused track), never a takeover's. HQPlayer's own advance onto the next entry of ours,
+  the refused track), never a takeover's; on HQPlayer 6 the take that plays
+  tells who made it, so a filter change or a Seek of the node's at the spot
+  before the person's start spends it all the same. HQPlayer's own advance onto the next entry of ours,
   stopped on the same way, leaves it too, at that slot at 0 (since
   2026-11-01): an album boundary into a rate the output family refuses — a
   44.1 kHz album, then a 96 kHz one — is the commonest road there. Only an
@@ -1164,7 +1166,8 @@ reading whose position never moved is no listen (a start HQPlayer refuses after
 one playing answer cut nothing). A stop nothing explains holds it so until the
 node's next word, as a pause does — the person's Stop in HQPlayer's own window,
 HQPlayer's own on an error; HQPlayer 5, which names no take, until the track could
-have played out. On a renderer the hold ends once a load of ours hands it our URI;
+have played out. On a renderer the hold ends once a load of ours hands it our URI,
+or once it plays a URI of ours again by itself (below);
 while another controller holds the renderer a Stop or a Pause sends it nothing and
 ends a take-back of ours still on its way, the takeover's spot standing at its
 track's slot as the queue stands then — and one that lands while our URI's
@@ -1216,7 +1219,11 @@ word — paused, its Play resuming our track — said as the renderer's when the
 Pause ("Paused on ‹renderer›", since 2026-11-09): its own remote, or another app. A URI of
 ours the renderer plays again by itself while another controller held it (its own controls
 resuming our media) is ours again (since 2026-11-09, ROON-COEX §6.1 P9): the external state
-ends, the node's Pause and Stop reach it, the listen held at the takeover goes on.
+ends, the node's Pause and Stop reach it, the listen held at the takeover goes on from the
+takeover's second until the position poll reads the renderer's own. Only a URI that names a
+slot of the queue (an Opus seek's `?ss=` aside): one of a track since removed, or handed
+under another quality setting, names no queued track, and the playback stays the other
+app's.
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last
@@ -1230,8 +1237,11 @@ mirror's state, above), and the play press rebuilds whatever is left. A
 playlist read back so that holds an entry the node never gave HQPlayer is no
 restart (since 2026-11-09, ROON-COEX §6.1 P1): another controller's — Roon's
 cycle went on while HQPlayer answered nothing past the client's timeout, a
-heavy engine's Stop — so the mirror drifts and nothing is sent; only an empty
-playlist, or one of the node's own, is a restart. The node never writes over
+heavy engine's Stop — so the mirror drifts and nothing is sent, a mirror lost
+in the silence (an add owed, an edit's hand-over) too, its reconverge given up;
+only an empty playlist, or one of the node's own, is a restart. A tail mirror
+whose tail still holds — HQPlayer's own entries before the one it reads — stays
+the node's: lost and reconverged as at any return. The node never writes over
 another controller's playback without a person's word. An HQPlayer Embedded in trial mode
 stops every 30 minutes and must be restarted — its control port stays open
 but closes every connection, which is why the play-intent probe asks
