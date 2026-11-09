@@ -874,7 +874,8 @@ class P2PManager:
         signer, pubkey and a lazy {cert, proof} loader — the certificate and
         the mined proof can land after the client object exists. A peer's
         certificate on its /health goes to the sync server's witness record
-        as a `probe` sighting (desktop/p2p/witness.py)."""
+        as a `probe` sighting, and an author's certificate a pulled payload
+        carried as a `carried` one (desktop/p2p/witness.py)."""
         from desktop.node_identity import get_account_info, sign_message
         from desktop.p2p import birth_cert, peer_auth
         account = get_account_info()
@@ -890,9 +891,14 @@ class P2PManager:
             if server is not None:
                 server.witness.note(cert, "probe", pubkey)
 
+        def carried(cert: dict, author: str, via: str) -> None:
+            server = self._sync_server
+            if server is not None:
+                server.witness.note(cert, "carried", author, via)
+
         return peer_auth.PeerIdentity(pubkey=account["public_key_hex"].lower(),
                                       sign=sign_message, cert_bundle=bundle,
-                                      witness=witness)
+                                      witness=witness, carried=carried)
 
     # -------------------------------------------------------------------
     # Chat operations (called from launcher thread)

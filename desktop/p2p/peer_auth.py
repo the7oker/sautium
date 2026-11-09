@@ -123,11 +123,15 @@ class PeerIdentity:
     (called lazily — the certificate can arrive after the client exists).
     `witness(cert, pubkey)` takes the certificate a peer's /health carried,
     with the key its TLS channel is bound to — a `probe` sighting for the
-    node's witness record (desktop/p2p/witness.py); it never raises."""
+    node's witness record (desktop/p2p/witness.py); `carried(cert, author,
+    via)` the certificate a peer's payload carried for an author of records
+    that verified, `via` that peer's TLS-bound key — a `carried` sighting.
+    Neither ever raises."""
     pubkey: str
     sign: Callable[[bytes], bytes]
     cert_bundle: Callable[[], Optional[dict]]
     witness: Optional[Callable[[dict, str], None]] = None
+    carried: Optional[Callable[[dict, str, str], None]] = None
 
 
 # ---------------------------------------------------------------------------

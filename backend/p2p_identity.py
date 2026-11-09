@@ -304,8 +304,9 @@ _witness = None
 
 def witness_recorder(settings):
     """This process's witness record (desktop/p2p/witness.py) over db_pool:
-    the introductions and handshakes the peer surface serves, and the probes
-    the walk and the slice cycles make. The launcher's lives on its sync
+    the introductions and handshakes the peer surface serves, the probes the
+    walk and the slice cycles make, and the authors' certificates the sync's
+    payloads carry, pulled or pushed. The launcher's lives on its sync
     server."""
     global _witness
     if _witness is None:
@@ -327,7 +328,8 @@ def peer_identity(settings):
     """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
     signer, pubkey and a lazy {cert, proof} loader. None without identity.
     A peer's certificate on its /health goes to the witness record as a
-    `probe` sighting."""
+    `probe` sighting, and an author's certificate a pulled payload carried
+    as a `carried` one."""
     from desktop.p2p import identity_proof, peer_auth
 
     ident = resolve_identity(settings)
@@ -347,5 +349,9 @@ def peer_identity(settings):
     def witness(cert: dict, pubkey: str) -> None:
         witness_recorder(settings).note(cert, "probe", pubkey)
 
+    def carried(cert: dict, author: str, via: str) -> None:
+        witness_recorder(settings).note(cert, "carried", author, via)
+
     return peer_auth.PeerIdentity(pubkey=ident["public_key_hex"].lower(),
-                                  sign=key.sign, cert_bundle=bundle, witness=witness)
+                                  sign=key.sign, cert_bundle=bundle, witness=witness,
+                                  carried=carried)

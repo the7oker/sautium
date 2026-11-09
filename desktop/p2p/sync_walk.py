@@ -54,7 +54,7 @@ import psycopg2.extensions
 from desktop.api_client import PEER_SESSION_S, BackendAPIClient
 from desktop.p2p import master_hint, network_size, node_hints, sync_queries
 from desktop.p2p.addrs import canon_host, fmt_addr
-from desktop.sync_client import SEGMENT_PULL_BATCH, SyncClient, batch_roots
+from desktop.sync_client import SEGMENT_PULL_BATCH, SyncClient, batch_roots, seal_authors
 
 logger = logging.getLogger(__name__)
 
@@ -87,23 +87,31 @@ PUSH_MAX_BYTES = 900 * 1024
 def push_parts(payload: dict) -> list:
     """`payload` (pull-shaped) cut into parts of at most PUSH_MAX_BYTES of
     items each, in order, each with the `batches` entries its items' seals
-    reference. An item larger than the bound alone is a part of its own."""
+    reference and the `authors` entries of the authors they name. An item
+    larger than the bound alone is a part of its own."""
     batches = payload.get("batches") or {}
-    parts, items, roots, size = [], [], set(), 0
+    authors = payload.get("authors") or {}
+    parts, items, roots, named, size = [], [], set(), set(), 0
 
     def close():
         parts.append({**payload, "items": items,
-                      "batches": {r: batches[r] for r in roots if r in batches}})
+                      "batches": {r: batches[r] for r in roots if r in batches},
+                      "authors": {a: authors[a] for a in named if a in authors}})
+
+    def weight(item, roots_new, named_new) -> int:
+        return (len(json.dumps(item)) + sum(len(json.dumps(batches.get(r))) for r in roots_new)
+                + sum(len(json.dumps(authors.get(a))) for a in named_new))
 
     for item in payload.get("items") or []:
-        mine = batch_roots(item)
-        n = len(json.dumps(item)) + sum(len(json.dumps(batches.get(r))) for r in mine - roots)
+        mine, by = batch_roots(item), seal_authors(item)
+        n = weight(item, mine - roots, by - named)
         if items and size + n > PUSH_MAX_BYTES:
             close()
-            items, roots, size = [], set(), 0
-            n = len(json.dumps(item)) + sum(len(json.dumps(batches.get(r))) for r in mine)
+            items, roots, named, size = [], set(), set(), 0
+            n = weight(item, mine, by)
         items.append(item)
         roots |= mine
+        named |= by
         size += n
     if items:
         close()
@@ -1052,6 +1060,9 @@ class SyncWalk:
                                     ("audio_features", 500),
                                     ("track_mbids", 500)):
                 uuids = wanted.get(category) or []
+                # No own entry in the `authors` map: what is pushed is this
+                # node's own analysis, and the carrier skips the pusher as an
+                # author — it witnessed it through the push's introduction.
                 handler = sync_queries.PULL_HANDLERS[category]
                 for i in range(0, len(uuids), batch):
                     if limited["stop"]:

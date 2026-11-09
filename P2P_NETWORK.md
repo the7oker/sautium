@@ -488,6 +488,17 @@ is the material declaration the signature commits to — no format, sample
 rate, bit depth or provider. The importer derives the track-level mean
 itself.
 
+Beside `batches`, every sealed payload (the three pulls and every carry
+push) carries an `authors` map, since 2026-11-09 (BIRTH-SYNC slice 2):
+`{"<author pubkey>": {"author_cert": {...}, "author_proof": {...}|null}}`
+for each author its seals name, the pair a catalogue slice's entry carries.
+The serving node puts in its own certificate for the records it authored;
+an author it verified, with the proof it verified (without `mined_at`), as a
+slice relay forwards one; any other author whose certificate it witnessed,
+with the certificate alone. It names no author it banned. The receiver reads
+only the certificate, for its witness record (below); older peers ignore
+the field.
+
 The unsealed mean-vector pull (`embeddings`, for peers without `segments`)
 was removed 2026-11-03: its rows carried no seal, so the peer chose a
 track's vectors and nothing named who. A peer without `segments` is asked
@@ -554,6 +565,16 @@ POST /api/sync/offer, /push/{…}  carry: segments, audio_features, track_mbids
 - `/health` carries `birth_cert`, the node's own certificate (never its
   proof; the Worker publishes certificates by key anyway), so the node that
   dials it can witness it. Older peers ignore the field.
+- Since 2026-11-09 (BIRTH-SYNC slice 2) a fourth channel, `carried`, lets
+  two nodes that never meet witness each other. A peer's sealed payload
+  carries an author's certificate in its `authors` map (above), and the
+  receiver records it after the import, only for an author with a record
+  whose seal verified there. `via` is the peer that delivered it: the pulled
+  peer's TLS-bound key, or the key that signed the push. The receiver takes
+  the certificate alone, checked as on every channel. It writes no
+  identity-registry row, and evaluates no proof. A share file, or an
+  unsigned push, is no sighting. A push carries the pusher's own analysis,
+  and the pusher is witnessed through its introduction, never as carried.
 - Design: P2P-SYNC-INTEGRITY.md § "Witness records".
 
 ### Future

@@ -118,6 +118,24 @@ def save_proof(path: Path, proof: dict) -> None:
     Path(path).write_text(json.dumps(proof, indent=2), encoding="utf-8")
 
 
+_served: dict = {}           # path -> (the file's mtime_ns, the proof as it travels)
+
+
+def served_proof(path: Path) -> Optional[dict]:
+    """This node's proof as it travels beside its certificate in what the
+    node serves: without `mined_at` — nothing verifies by it, and the Worker
+    does not publish it. Read once per version of the file."""
+    try:
+        mtime = Path(path).stat().st_mtime_ns
+    except OSError:
+        return None
+    key = str(path)
+    if _served.get(key, (None,))[0] != mtime:
+        proof = load_proof(path)
+        _served[key] = (mtime, {k: v for k, v in proof.items() if k != "mined_at"} if proof else None)
+    return _served[key][1]
+
+
 def _lower_thread_priority() -> None:
     """Best effort: mining must never compete with playback or the UI."""
     try:

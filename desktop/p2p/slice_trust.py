@@ -14,7 +14,10 @@ module keeps is the record and its consequences, the same for both families
   registry). A relay forwards the author's certificate from its own record of
   the key, with the proof that verified there (`author_certificate`); a
   relayed proof is that relay's word — it verifies the author or its slice is
-  dropped, never stored and never held against the author.
+  dropped, never stored and never held against the author. The sync's sealed
+  payloads carry the same pair under each author's key (`author_entries`),
+  with one rule more: an author this node only witnessed travels with its
+  certificate alone, for the receiver's witness record, which needs no proof.
 - **The subject index** (`slice_index`): one row per imported blob — its
   author, the node that passed it (by the key its TLS channel proved), the
   payload's hash, its dump version and the MBIDs it is about. Appended,
@@ -80,6 +83,23 @@ def entry_certificate(entry: dict, author: str) -> Optional[Tuple[dict, Optional
     return cert, None
 
 
+def _certificate(pubkey: str, v, method, issued_at, difficulty, params_version, token, klass,
+                 domain, predecessor, issuer, sig) -> dict:
+    """A stored certificate rebuilt as it travels. An empty field travels as
+    null: the signed payload reads null and "" alike, and a receiver's
+    registry stores null — "" is no email class. The signature travels in the
+    authority's spelling, whatever spelling the registry last observed
+    (`bytes.fromhex` takes upper case and spaced pairs, and the signature is
+    the one field the authority's cannot cover): a witness records only that
+    spelling (desktop/p2p/witness.py)."""
+    return {"v": v, "pubkey": pubkey.lower(),
+            "issued_at": issued_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "method": method, "difficulty": int(difficulty), "params_version": int(params_version),
+            "email_token": token or None, "email_class": klass or None,
+            "email_domain_token": domain or None, "predecessor": predecessor or None,
+            "issuer": issuer, "sig": bytes.fromhex(sig).hex()}
+
+
 def author_certificate(conn, pubkey: str) -> Optional[Tuple[dict, Optional[dict]]]:
     """The author's certificate and proof as this node recorded them when it
     took one of its slices (p2p_identities) — what a relay forwards. None for
@@ -95,20 +115,70 @@ def author_certificate(conn, pubkey: str) -> Optional[Tuple[dict, Optional[dict]
         return None
     (v, method, issued_at, difficulty, params_version, token, klass, domain, issuer, sig,
      nonce, predecessor, _status) = row
-    # An empty field travels as null: the signed payload reads null and "" alike,
-    # and a receiver's registry stores null — "" is no email class.
-    cert = {"v": v, "pubkey": pubkey.lower(),
-            "issued_at": issued_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "method": method, "difficulty": int(difficulty), "params_version": int(params_version),
-            "email_token": token or None, "email_class": klass or None,
-            "email_domain_token": domain or None, "predecessor": predecessor or None,
-            "issuer": issuer, "sig": sig}
+    cert = _certificate(pubkey, v, method, issued_at, difficulty, params_version, token, klass,
+                        domain, predecessor, issuer, sig)
     proof = None
     if method == "pow":
         from desktop.p2p.identity_proof import PROOF_VERSION
-        proof = {"v": PROOF_VERSION, "pubkey": pubkey.lower(), "cert_sig": sig, "nonce": nonce,
-                 "difficulty": int(difficulty), "params_version": int(params_version)}
+        # The proof names the certificate's signature as the certificate spells it.
+        proof = {"v": PROOF_VERSION, "pubkey": pubkey.lower(), "cert_sig": cert["sig"],
+                 "nonce": nonce, "difficulty": int(difficulty),
+                 "params_version": int(params_version)}
     return cert, proof
+
+
+def _witnessed_certificates(conn, pubkeys: List[str]) -> Dict[str, dict]:
+    """The newest certificate in the current format this node witnessed for
+    each of `pubkeys` (p2p_witness, any channel): the certificate alone — the
+    record keeps no proof."""
+    from desktop.p2p.birth_cert import CERT_VERSION
+    if not pubkeys:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (subject) subject, cert_v, method::text, issued_at, difficulty,
+                   params_version, email_token, email_class::text, email_domain_token,
+                   predecessor, issuer, cert_sig
+              FROM p2p_witness
+             WHERE subject = ANY(%s) AND cert_v = %s
+             ORDER BY subject, seen_at DESC, id DESC""", (pubkeys, CERT_VERSION))
+        rows = cur.fetchall()
+    return {r[0]: _certificate(*r) for r in rows}
+
+
+def author_entries(conn, pubkeys: Iterable[str],
+                   own: Optional[Tuple[dict, Optional[dict]]] = None) -> Dict[str, dict]:
+    """The `authors` map of a sealed sync payload (BIRTH-SYNC slice 2): for
+    each author its certificate in a slice entry's form, under its key —
+    this node's own (`own`: its certificate and proof, as an entry of its own
+    build carries them); an author verified here, as a slice relay forwards
+    one (`author_certificate`); any other author whose certificate this node
+    witnessed, with the certificate alone. An author it knows no certificate
+    of, or one banned here, gets no entry. The receiver records the
+    certificate as a `carried` sighting by the witness record's own check
+    (desktop/p2p/witness.py), which reads no proof; nothing in the sync
+    evaluates one."""
+    keys = {str(p).lower() for p in pubkeys if p}
+    if not keys:
+        return {}
+    entries: Dict[str, dict] = {}
+    own_key = own[0]["pubkey"].lower() if own else None
+    if own_key in keys:
+        entries[own_key] = {"author_cert": own[0], "author_proof": own[1]}
+    others = sorted(keys - {own_key})
+    if not others:
+        return entries
+    with conn.cursor() as cur:
+        cur.execute("SELECT pubkey FROM p2p_node_bans WHERE pubkey = ANY(%s)", (others,))
+        banned = {r[0] for r in cur.fetchall()}
+    others = [k for k in others if k not in banned]
+    for key in others:
+        pair = author_certificate(conn, key)
+        if pair is not None:
+            entries[key] = {"author_cert": pair[0], "author_proof": pair[1]}
+    for key, cert in _witnessed_certificates(conn, [k for k in others if k not in entries]).items():
+        entries[key] = {"author_cert": cert, "author_proof": None}
+    return entries
 
 
 def observe_author(conn, cert: dict, proof: Optional[dict]) -> Optional[str]:

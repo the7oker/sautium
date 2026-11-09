@@ -15,7 +15,10 @@ channel) — the first sighting of each — in `p2p_witness`:
   - `handshake`: an accepted token or grant handshake carried it;
   - `probe`: this node dialed it, and its /health, on a channel TLS-bound to
     its key, carried it;
-  - `carried`: it came beside records the subject authored (slice 2);
+  - `carried`: a peer's sealed sync payload carried it, in its `authors`
+    map, beside records the subject authored whose seals verified here —
+    pulled from that peer or pushed by it, the peer as `via`
+    (desktop/sync_client.py);
 - this node's clock (`seen_at`, the database's, to the second);
 - the notary's seal, added later (backend/sign_audio.py): this node's
   signature over the statement, then a self-contained copy of the Worker

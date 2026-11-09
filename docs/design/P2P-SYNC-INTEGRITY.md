@@ -828,10 +828,19 @@ certificate, channel), the first sighting of each.
   handshake carried the guest's certificate (never the classic path, which
   carries none — and was unsigned before 2026-11-03); `probe` — this node
   dialed the subject and its `/health`, on a
-  channel TLS-bound to its key, carried `birth_cert`. A fourth value,
-  `carried` (a certificate riding with records its key authored, `via` the
-  deliverer), is reserved for slice 2. The DHT and the relay are no
-  channels: they carry addresses and ciphertext, no certificate.
+  channel TLS-bound to its key, carried `birth_cert`; `carried` (since
+  2026-11-09, BIRTH-SYNC slice 2) — a peer's sealed payload carried the
+  subject's certificate in its `authors` map beside records the subject
+  authored, and at least one of them verified here (`via` the peer that
+  delivered it: the pulled peer's TLS-bound key, or the key that signed the
+  push). It is the one channel by which two nodes that never meet witness
+  each other. The certificate is checked as on every channel, alone: the
+  map carries a proof only where the sender verified one, and the receiver
+  reads none, so an author is carried whether it has mined or not. No
+  identity-registry row comes of it. The deliverer itself is never a carried
+  subject, and a share file or an unsigned push is no sighting. The DHT and
+  the relay are no channels: they carry addresses and ciphertext, no
+  certificate.
 - **What a row holds.** The certificate exactly as the authority signed it
   (`cert_payload`, `cert_sig`, `issuer` — authentic forever by Ed25519
   alone, no builder of the format needed; the fields beside it are for

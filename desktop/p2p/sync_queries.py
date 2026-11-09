@@ -16,7 +16,7 @@ from uuid import UUID
 
 import psycopg2.extras
 
-from desktop.p2p import record_sig
+from desktop.p2p import record_sig, slice_trust
 from desktop.p2p.bloom import BloomFilter
 
 logger = logging.getLogger(__name__)
@@ -286,8 +286,16 @@ def split_engaged(conn, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
 # Pull handlers
 # ---------------------------------------------------------------------------
 
+# Beside `batches`, every sealed payload carries an `authors` map (BIRTH-SYNC
+# slice 2): for each author its seals name, the author's birth certificate in
+# a slice entry's form (slice_trust.author_entries) — what lets a node that
+# never meets the author witness it as a `carried` sighting
+# (desktop/p2p/witness.py). `own` is this node's own (certificate, proof),
+# passed by a server for the records it authored itself. Older peers ignore
+# the field.
+
 def _pull_simple(conn, category: str, sql: str, uuids: list[str],
-                 post_process=None) -> dict:
+                 post_process=None, own=None) -> dict:
     """Common handler for the sealed plain-row categories.
 
     Every SELECT here MUST carry the four seal columns plus fetched_at, and
@@ -299,14 +307,16 @@ def _pull_simple(conn, category: str, sql: str, uuids: list[str],
 
     Rows without a seal are not served at all (see _SEALED_ONLY)."""
     if not uuids:
-        return {"category": category, "items": [], "batches": {}}
+        return {"category": category, "items": [], "batches": {}, "authors": {}}
     rows = db_query(conn, sql, [uuids])
     items = [_serialize_row(r) for r in rows]
     if post_process:
         items = [post_process(item) for item in items]
     roots = {i["batch_root"] for i in items if i.get("batch_root")}
     return {"category": category, "items": items,
-            "batches": _batches_map(conn, roots)}
+            "batches": _batches_map(conn, roots),
+            "authors": slice_trust.author_entries(
+                conn, {i.get("author_pubkey") for i in items}, own)}
 
 
 # Appended to every enrichment SELECT: unsigned rows never leave this node.
@@ -408,15 +418,16 @@ def _batches_map(conn, roots: set) -> dict:
     }
 
 
-def pull_segments(conn, uuids: list[str]) -> dict:
+def pull_segments(conn, uuids: list[str], own=None) -> dict:
     """Per-track CLAP segment bundles with their seals — the signed, synced
     unit (the importer derives the mean locally; see record_sig.py). Vectors
     travel as base64 of the canonical float32-LE bytes so vector_hash verifies
     over the received bytes with no float re-derivation. The response-level
     `batches` map carries each seal's Worker timestamp so the full chain
-    travels with the records and survives relay."""
+    travels with the records and survives relay; `authors`, each author's
+    certificate."""
     if not uuids:
-        return {"category": "segments", "items": [], "batches": {}}
+        return {"category": "segments", "items": [], "batches": {}, "authors": {}}
     if len(uuids) > SEGMENTS_MAX_UUIDS:
         raise ValueError(
             f"segments pull is capped at {SEGMENTS_MAX_UUIDS} tracks per request")
@@ -441,6 +452,7 @@ def pull_segments(conn, uuids: list[str]) -> dict:
 
     items_by_track: dict[str, dict] = {}
     roots: set = set()
+    authors: set = set()
     for r in rows:
         bundle = items_by_track.get(r["track_uuid"])
         if bundle is None:
@@ -464,18 +476,21 @@ def pull_segments(conn, uuids: list[str]) -> dict:
             seg["batch_root"] = r["batch_root"]
             seg["proof"] = r["merkle_proof"]
             roots.add(r["batch_root"])
+            authors.add(r["author_pubkey"])
         bundle["segments"].append(seg)
 
     return {"category": "segments", "items": list(items_by_track.values()),
-            "batches": _batches_map(conn, roots)}
+            "batches": _batches_map(conn, roots),
+            "authors": slice_trust.author_entries(conn, authors, own)}
 
 
-def pull_audio_features(conn, uuids: list[str]) -> dict:
+def pull_audio_features(conn, uuids: list[str], own=None) -> dict:
     """Feature rows travel WITH their seals (author sig + Merkle proof) and a
     `batches` map for the Worker timestamps — imported rows stay verifiable
-    and re-servable with authorship intact."""
+    and re-servable with authorship intact; `authors`, each author's
+    certificate."""
     if not uuids:
-        return {"category": "audio_features", "items": [], "batches": {}}
+        return {"category": "audio_features", "items": [], "batches": {}, "authors": {}}
 
     rows = db_query(
         conn,
@@ -500,10 +515,12 @@ def pull_audio_features(conn, uuids: list[str]) -> dict:
         roots.add(item["batch_root"])
         items.append(item)
     return {"category": "audio_features", "items": items,
-            "batches": _batches_map(conn, roots)}
+            "batches": _batches_map(conn, roots),
+            "authors": slice_trust.author_entries(
+                conn, {i["author_pubkey"] for i in items}, own)}
 
 
-def pull_track_mbids(conn, track_uuids: list[str]) -> dict:
+def pull_track_mbids(conn, track_uuids: list[str], own=None) -> dict:
     """Sealed track↔recording bindings (carry v3)."""
     return _pull_simple(
         conn, "track_mbids",
@@ -515,7 +532,7 @@ def pull_track_mbids(conn, track_uuids: list[str]) -> dict:
             FROM track_mbids tm
             WHERE tm.track_id = ANY(%s::uuid[])
             {_SEALED_ONLY.format(t='tm')}""",
-        track_uuids,
+        track_uuids, own=own,
     )
 
 

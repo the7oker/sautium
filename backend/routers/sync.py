@@ -232,6 +232,13 @@ async def carry_offer(req: CarryOffer, request: Request) -> Response:
     return await _answer(request, lambda: {"wanted": _run()})
 
 
+def _carried(cert: dict, author: str, via: str) -> None:
+    """An author's certificate a peer's push carried: a `carried` sighting,
+    delivered by the key that signed the push (desktop/p2p/witness.py)."""
+    from p2p_identity import witness_recorder
+    witness_recorder(settings).note(cert, "carried", author, via)
+
+
 @router.post("/push/{category}")
 async def carry_push(category: str, request: Request) -> dict:
     """Accept a pushed payload — byte-for-byte what pull/{category} returns,
@@ -252,6 +259,7 @@ async def carry_push(category: str, request: Request) -> dict:
         raise HTTPException(
             status_code=404, detail=f"category not carryable: {category}")
     raw = await request.body()
+    pusher = getattr(request.state, "peer_pubkey", None)
 
     def _run():
         try:
@@ -261,7 +269,8 @@ async def carry_push(category: str, request: Request) -> dict:
         items = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(items, list) or len(items) > 10000:
             return None
-        return carry_importer.import_pushed(settings.database_url, category, payload, budget)
+        return carry_importer.import_pushed(settings.database_url, category, payload, budget,
+                                            deliverer=pusher, carried=_carried)
 
     try:
         imported = await in_peer_lane(_run)
@@ -354,15 +363,13 @@ class MBSliceRequest(BaseModel):
 def _own_slice_cert() -> Optional[tuple]:
     """This node's certificate and, for `pow`, its proof — what an entry of
     its own build carries."""
-    from desktop.p2p.identity_proof import load_proof
+    from desktop.p2p.identity_proof import served_proof
     from p2p_identity import proof_path, served_certificate
     cert = served_certificate(settings)
     if cert is None or cert["pubkey"].lower() != (node_pubkey_hex() or "").lower():
         return None
     path = proof_path(settings) if cert.get("method") == "pow" else None
-    proof = load_proof(path) if path is not None else None
-    # The mining time stays home, as on /health: nothing verifies by it.
-    return cert, ({k: v for k, v in proof.items() if k != "mined_at"} if proof else None)
+    return cert, (served_proof(path) if path is not None else None)
 
 
 async def _slice_refusal(request: Request) -> Optional[Response]:
@@ -727,6 +734,15 @@ def _batches_map(roots: set) -> dict:
     }
 
 
+def _authors_map(authors: set) -> dict:
+    """The `authors` map beside `batches`: each author's certificate, this
+    node's own for the records it authored (desktop/p2p/sync_queries.py
+    builds the same for the launcher's pulls)."""
+    from desktop.p2p import slice_trust
+    with get_conn() as conn:
+        return slice_trust.author_entries(conn, authors, _own_slice_cert())
+
+
 @router.post("/pull/segments")
 async def pull_segments(req: PullRequest, request: Request) -> Response:
     """Per-track CLAP segment bundles with their seals — the signed, synced
@@ -736,7 +752,7 @@ async def pull_segments(req: PullRequest, request: Request) -> Response:
     Mirrors desktop/p2p/sync_queries.pull_segments."""
     _require_sharing()
     if not req.uuids:
-        return {"category": "segments", "items": [], "batches": {}}
+        return {"category": "segments", "items": [], "batches": {}, "authors": {}}
     if len(req.uuids) > SEGMENTS_MAX_UUIDS:
         raise HTTPException(
             status_code=400,
@@ -762,6 +778,7 @@ async def pull_segments(req: PullRequest, request: Request) -> Response:
 
         items_by_track: dict[str, dict] = {}
         roots: set = set()
+        authors: set = set()
         for r in rows:
             bundle = items_by_track.get(r["track_uuid"])
             if bundle is None:
@@ -785,10 +802,11 @@ async def pull_segments(req: PullRequest, request: Request) -> Response:
                 seg["batch_root"] = r["batch_root"]
                 seg["proof"] = r["merkle_proof"]
                 roots.add(r["batch_root"])
+                authors.add(r["author_pubkey"])
             bundle["segments"].append(seg)
 
         return {"category": "segments", "items": list(items_by_track.values()),
-                "batches": _batches_map(roots)}
+                "batches": _batches_map(roots), "authors": _authors_map(authors)}
 
     try:
         return await _answer(request, _run)
@@ -804,7 +822,7 @@ async def pull_audio_features(req: PullRequest, request: Request) -> Response:
     verifiable and re-servable with authorship intact."""
     _require_sharing()
     if not req.uuids:
-        return {"category": "audio_features", "items": [], "batches": {}}
+        return {"category": "audio_features", "items": [], "batches": {}, "authors": {}}
 
     def _run():
         rows = _db_query(
@@ -829,7 +847,8 @@ async def pull_audio_features(req: PullRequest, request: Request) -> Response:
             roots.add(item["batch_root"])
             items.append(item)
         return {"category": "audio_features", "items": items,
-                "batches": _batches_map(roots)}
+                "batches": _batches_map(roots),
+                "authors": _authors_map({i["author_pubkey"] for i in items})}
 
     try:
         return await _answer(request, _run)

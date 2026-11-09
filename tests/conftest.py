@@ -19,9 +19,12 @@ and removed at the end, for the same reason: the diagnostics, the rate check
 and the benchmark read HQPlayer's settings.xml and its log there, and a test
 that needs either writes its own.
 
-The peer protocol between two real nodes is not tested here: that is the
-two-node checks (launcher stand <-> Docker) and the `--selftest` CLIs, per
-CLAUDE.md "Testing Expectations".
+Two real nodes syncing are tested here in one process: the launcher's sync
+server and the Docker peer surface, each served over TLS bound to its own key
+on a database of its own, each node's walk pulling from the other and
+carrying to it (test_two_node_sync.py, which says what the one process
+shares between them). Between machines it is the two-node checks (launcher
+stand <-> Docker) and the `--selftest` CLIs.
 
 Run from the repo root: `python -m pytest tests/`.
 """

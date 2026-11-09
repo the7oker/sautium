@@ -719,13 +719,11 @@ class SyncServer:
         """This node's certificate and, for `pow`, its proof — what an entry of
         its own build carries."""
         from desktop.p2p.birth_cert import proof_path, served_certificate
-        from desktop.p2p.identity_proof import load_proof
+        from desktop.p2p.identity_proof import served_proof
         cert = served_certificate()
         if cert is None or cert["pubkey"].lower() != self.node_id.lower():
             return None
-        proof = load_proof(proof_path()) if cert.get("method") == "pow" else None
-        # The mining time stays home, as on /health: nothing verifies by it.
-        return cert, ({k: v for k, v in proof.items() if k != "mined_at"} if proof else None)
+        return cert, (served_proof(proof_path()) if cert.get("method") == "pow" else None)
 
     async def _slice_refusal(self, request: web.Request) -> Optional[web.Response]:
         """A signed slice request from a key that carries a penalty on the
@@ -848,6 +846,10 @@ class SyncServer:
                 request, {"error": f"uuids must be a list of at most {limit} items"},
                 status=400,
             )
+        if category != "tracks":
+            # A sealed category: its `authors` map carries this node's own
+            # certificate for the records it authored.
+            handler = partial(handler, own=self._own_slice_cert())
 
         try:
             return await self._answer(request, handler, uuids)
@@ -937,7 +939,8 @@ class SyncServer:
         from desktop.sync_client import import_pushed
         try:
             imported = await asyncio.get_event_loop().run_in_executor(
-                None, partial(import_pushed, self.db_dsn, category, body, budget))
+                None, partial(import_pushed, self.db_dsn, category, body, budget,
+                              deliverer=request.get("peer_pubkey"), carried=self._carried))
         except Exception as e:
             logger.error(f"Carry push {category} failed: {e}")
             return self._json_response(
@@ -946,6 +949,11 @@ class SyncServer:
             logger.info("Carrying %d %s record(s) pushed by %s",
                         imported, category, ip)
         return self._json_response(request, {"imported": imported})
+
+    def _carried(self, cert: dict, author: str, via: str) -> None:
+        """An author's certificate a peer's push carried: a `carried`
+        sighting, delivered by the key that signed the push."""
+        self.witness.note(cert, "carried", author, via)
 
     async def handle_mb_search(self, request: web.Request) -> web.Response:
         """GET /api/mb/search?q= — artist candidates from the FULL local dump.
@@ -2122,6 +2130,57 @@ class SyncServer:
     # Lifecycle
     # -----------------------------------------------------------------------
 
+    def build_app(self) -> web.Application:
+        """The peer surface's app: every route behind the inbound middleware."""
+        app = web.Application(middlewares=[self._inbound_middleware])
+        app.router.add_get("/health", self.handle_health)
+        app.router.add_post("/api/sync/inventory", self.handle_inventory)
+        app.router.add_get("/api/sync/holdings", self.handle_holdings)
+        app.router.add_post(
+            "/api/sync/pull/{category}", self.handle_pull
+        )
+        app.router.add_post("/api/sync/offer", self.handle_carry_offer)
+        app.router.add_post(
+            "/api/sync/push/{category}", self.handle_carry_push)
+        app.router.add_post("/api/mb/slice", self.handle_mb_slice)
+        app.router.add_post("/api/lb/slice", self.handle_lb_slice)
+        app.router.add_get("/api/mb/search", self.handle_mb_search)
+        app.router.add_get("/api/gate/quote", self.handle_gate_quote)
+        # Chat endpoints
+        app.router.add_post(
+            "/api/chat/handshake", self.handle_chat_handshake
+        )
+        app.router.add_post(
+            "/api/chat/message", self.handle_chat_message
+        )
+        app.router.add_post(
+            "/api/chat/history", self.handle_chat_history
+        )
+        app.router.add_post(
+            "/api/chat/key-rotation", self.handle_chat_key_rotation
+        )
+        app.router.add_post(
+            "/api/chat/invite-accepted", self.handle_invite_accepted
+        )
+        # Relay protocol (proxy-agnostic contract; this node = a relay
+        # candidate once Phase D lands, the master serves it today)
+        app.router.add_get(
+            "/api/relay/wake-stream", self.handle_wake_stream
+        )
+        app.router.add_post(
+            "/api/relay/probe-connect", self.handle_probe_connect
+        )
+        app.router.add_post(
+            "/api/relay/forward", self.handle_relay_forward
+        )
+        app.router.add_post(
+            "/api/relay/ack", self.handle_relay_ack
+        )
+        app.router.add_get(
+            "/api/relay/voucher", self.handle_relay_voucher
+        )
+        return app
+
     async def start(self):
         """Build aiohttp app, bind to port, start serving."""
         try:
@@ -2141,53 +2200,7 @@ class SyncServer:
             self._admission()          # eager: the idle gold seeder rides the load meter from now on
         except Exception as e:
             logger.warning(f"gate price calibration failed: {e}")
-        self._app = web.Application(middlewares=[self._inbound_middleware])
-        self._app.router.add_get("/health", self.handle_health)
-        self._app.router.add_post("/api/sync/inventory", self.handle_inventory)
-        self._app.router.add_get("/api/sync/holdings", self.handle_holdings)
-        self._app.router.add_post(
-            "/api/sync/pull/{category}", self.handle_pull
-        )
-        self._app.router.add_post("/api/sync/offer", self.handle_carry_offer)
-        self._app.router.add_post(
-            "/api/sync/push/{category}", self.handle_carry_push)
-        self._app.router.add_post("/api/mb/slice", self.handle_mb_slice)
-        self._app.router.add_post("/api/lb/slice", self.handle_lb_slice)
-        self._app.router.add_get("/api/mb/search", self.handle_mb_search)
-        self._app.router.add_get("/api/gate/quote", self.handle_gate_quote)
-        # Chat endpoints
-        self._app.router.add_post(
-            "/api/chat/handshake", self.handle_chat_handshake
-        )
-        self._app.router.add_post(
-            "/api/chat/message", self.handle_chat_message
-        )
-        self._app.router.add_post(
-            "/api/chat/history", self.handle_chat_history
-        )
-        self._app.router.add_post(
-            "/api/chat/key-rotation", self.handle_chat_key_rotation
-        )
-        self._app.router.add_post(
-            "/api/chat/invite-accepted", self.handle_invite_accepted
-        )
-        # Relay protocol (proxy-agnostic contract; this node = a relay
-        # candidate once Phase D lands, the master serves it today)
-        self._app.router.add_get(
-            "/api/relay/wake-stream", self.handle_wake_stream
-        )
-        self._app.router.add_post(
-            "/api/relay/probe-connect", self.handle_probe_connect
-        )
-        self._app.router.add_post(
-            "/api/relay/forward", self.handle_relay_forward
-        )
-        self._app.router.add_post(
-            "/api/relay/ack", self.handle_relay_ack
-        )
-        self._app.router.add_get(
-            "/api/relay/voucher", self.handle_relay_voucher
-        )
+        self._app = self.build_app()
 
         self._runner = web.AppRunner(
             self._app,

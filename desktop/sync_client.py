@@ -100,6 +100,14 @@ def batch_roots(item: dict) -> set:
     return {r for r in named if isinstance(r, str)}
 
 
+def seal_authors(item: dict) -> set:
+    """The authors an item's seals name — a bundle's per segment."""
+    segments = item.get("segments")
+    named = ([s.get("author_pubkey") for s in segments if isinstance(s, dict)]
+             if isinstance(segments, list) else [item.get("author_pubkey")])
+    return {a.lower() for a in named if isinstance(a, str)}
+
+
 def _track_of(row) -> Optional[str]:
     track = row if isinstance(row, str) else row[0] if isinstance(row, list) and row else None
     return track if isinstance(track, str) else None
@@ -144,14 +152,20 @@ class SyncClient:
         batch_size: int = DEFAULT_BATCH_SIZE,
         progress_cb: Optional[Callable[[str], None]] = None,
         holdings_cache: Optional[dict] = None,
+        deliverer: Optional[str] = None,
+        carried: Optional[Callable[[dict, str, str], None]] = None,
     ):
         # api_client is None on the receiving side of a push: the payload
         # arrives instead of being fetched, but it goes through the same
-        # verify-and-import gate (see import_pushed).
+        # verify-and-import gate (see import_pushed). Who delivered a
+        # payload, and where its authors' certificates go as `carried`
+        # sightings: on a pull the peer's TLS-bound key and this node's
+        # PeerIdentity sink; on a push what the server passes (_deliverer).
         self.api = api_client
         self.db_dsn = db_dsn
         self.batch_size = batch_size
         self.progress_cb = progress_cb
+        self._delivered_by = (deliverer.lower(), carried) if deliverer and carried else None
         # peer pubkey -> {"version", "tracks": BloomFilter}: the peers'
         # published holdings, kept by the manager across runs (process
         # lifetime) and refreshed by version.
@@ -532,13 +546,14 @@ class SyncClient:
             return 0
         importer = importer.__get__(self)
 
+        authors: set = set()          # of the records whose seal verified
         conn = self._get_conn()
         try:
             # Sealed categories also need the response-level Worker-timestamp
             # map to verify (and re-serve) the full chain.
             if category in ("segments", "audio_features"):
                 count = importer(conn, result["items"],
-                                 result.get("batches") or {})
+                                 result.get("batches") or {}, authors)
             else:
                 items = result["items"]
                 # Sealed plain rows verify here rather than inside the
@@ -550,11 +565,11 @@ class SyncClient:
                         kind, items, result.get("batches") or {})
                     if not items:
                         return 0
+                    authors.update(*(seal_authors(it) for it in items))
                     self._insert_batches_for(conn, result.get("batches") or {},
                                              items)
                 count = importer(conn, items)
             conn.commit()
-            return count
         except Exception as e:
             conn.rollback()
             logger.error(f"Import {category} failed: {e}")
@@ -567,6 +582,38 @@ class SyncClient:
                 self.db_dsn, get_data_dir(), "sync.import_failed",
                 {"category": category, "error": str(e)[:500]})
             return 0
+        self._note_carried(result.get("authors"), authors)
+        return count
+
+    # -- Witnessing the authors a payload carried (BIRTH-SYNC slice 2) -------
+
+    def _deliverer(self) -> Optional[tuple]:
+        """(the deliverer's key, the `carried` sink), or None when nobody
+        delivered the payload: a share file, an unsigned push."""
+        if self._delivered_by is not None:
+            return self._delivered_by
+        sink = getattr(getattr(self.api, "peer", None), "carried", None)
+        via = getattr(self.api, "peer_pubkey", None)
+        return (via.lower(), sink) if sink is not None and via else None
+
+    def _note_carried(self, entries, authors: set) -> None:
+        """The certificate the payload's `authors` map carried for each author
+        of a record whose seal verified goes on this node's witness record as
+        a `carried` sighting delivered by the peer. The record's own check
+        decides, as on every channel (desktop/p2p/witness.py): a certificate
+        valid for that author, no proof read. The deliverer is no carried
+        author — it introduced itself, or this node dialed it — and a payload
+        nobody delivered is no sighting at all. The sink never raises."""
+        delivered = self._deliverer()
+        if delivered is None or not isinstance(entries, dict):
+            return
+        via, sink = delivered
+        by_key = {k.lower(): v for k, v in entries.items() if isinstance(k, str)}
+        for author in sorted(authors - {via}):
+            entry = by_key.get(author)
+            cert = entry.get("author_cert") if isinstance(entry, dict) else None
+            if isinstance(cert, dict):
+                sink(cert, author, via)
 
     # -- Seal verification (verify-on-import) -------------------------------
 
@@ -700,13 +747,14 @@ class SyncClient:
 
     # -- Category importers (batch) ----------------------------------------
 
-    def _import_segments(self, conn, items: list[dict], batches: dict) -> int:
+    def _import_segments(self, conn, items: list[dict], batches: dict, authors: set) -> int:
         """Import per-track segment bundles: verify every seal, store the
         segments seal-intact, derive the track mean locally. A bundle with ANY
         invalid OR MISSING seal is dropped whole — a broken seal on
         TLS-protected wire is evidence of tampering, and an unsigned one is a
         claim this node would go on to redistribute unattributably. Returns
-        the count of imported tracks."""
+        the count of imported tracks; `authors` gains the author of every
+        segment whose seal verified."""
         batch_ok = self._batch_verifier(batches)
 
         # Decode + verify outside the write path: (item, [(idx, floats, seal)])
@@ -748,6 +796,7 @@ class SyncClient:
                         and batch_ok(s.get("batch_root"))):
                     bad = f"segment {s['i']} seal invalid"
                     break
+                authors.add(s["author_pubkey"].lower())
                 seal = (s["author_pubkey"], s["signature"], s["batch_root"],
                         psycopg2.extras.Json(s.get("proof") or []))
                 segs.append((s["i"], floats, seal))
@@ -906,7 +955,9 @@ class SyncClient:
         return source_map.get((item["track_uuid"], p["chromaprint"]))
 
     def _import_audio_features(self, conn, items: list[dict],
-                               batches: dict) -> int:
+                               batches: dict, authors: set) -> int:
+        """Import feature rows whose seal verifies; `authors` gains the
+        author of each."""
         batch_ok = self._batch_verifier(batches)
 
         # Verify-on-import: a row must verify end-to-end (author sig → Merkle
@@ -943,6 +994,7 @@ class SyncClient:
                     item.get("track_uuid", "?")[:8])
                 continue
             verified.append(item)
+            authors.add(item["author_pubkey"].lower())
         items = verified
         if not items:
             return 0
@@ -1060,7 +1112,9 @@ class SyncClient:
     }
 
 
-def import_pushed(db_dsn: str, category: str, payload: dict, budget: int) -> int:
+def import_pushed(db_dsn: str, category: str, payload: dict, budget: int,
+                  deliverer: Optional[str] = None,
+                  carried: Optional[Callable[[dict, str, str], None]] = None) -> int:
     """Verify and import a payload a peer PUSHED to us.
 
     The receiving side of push-seeding deliberately reuses the pull path's
@@ -1071,10 +1125,14 @@ def import_pushed(db_dsn: str, category: str, payload: dict, budget: int) -> int
     node's own answer to an offer would have asked for
     (sync_queries.wanted_for_push): its tracklist, the gaps, the carry
     limit's room, the phantom switch — a pusher chooses nothing else.
+
+    `deliverer` is the key that signed the push (None for an unsigned one),
+    `carried` the server's witness sink: the authors' certificates the push
+    carried go on record as delivered by that key (SyncClient._note_carried).
     """
     if category not in CARRY_CATEGORIES:
         raise ValueError(f"category not carryable: {category}")
-    client = SyncClient(api_client=None, db_dsn=db_dsn)
+    client = SyncClient(api_client=None, db_dsn=db_dsn, deliverer=deliverer, carried=carried)
     try:
         items = [it for it in payload.get("items") or [] if isinstance(it, dict)]
         kept = sync_queries.wanted_for_push(client._get_conn(), category, items, budget)
