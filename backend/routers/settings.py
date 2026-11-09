@@ -570,7 +570,7 @@ async def _library_state() -> Dict[str, Any]:
     The Library screen is where these numbers live — Tracks / Artists /
     Albums / Genres on the Library side, Embeddings / Features /
     Last.fm / Lyrics on the Enrichment side."""
-    from main import get_stats, _scan_state, _enrich_state
+    from main import get_stats, _scan_state, _enrich_state, _prune_plan_counts
     from scanner import check_folder
 
     try:
@@ -584,6 +584,8 @@ async def _library_state() -> Dict[str, Any]:
         "cancel_requested":  bool(_scan_state.get("cancel_requested")),
         "progress":          _scan_state.get("progress"),
         "stats":             _scan_state.get("stats"),
+        "prune_plan":        (_prune_plan_counts(_scan_state["prune_plan"])
+                              if _scan_state.get("prune_plan") else None),
     }
     enrich = {
         "running":           bool(_enrich_state.get("running")),
@@ -2565,11 +2567,19 @@ async def trigger_scan(prune: bool = False) -> Dict[str, Any]:
     """Start a library scan from the Settings screen.
 
     Delegates to the existing /scan/start endpoint logic so we don't
-    duplicate the scan-worker setup. `prune=true` also removes DB
-    rows whose underlying files have disappeared from the music
-    folder (slower; the default is add-only)."""
+    duplicate the scan-worker setup. `prune=true` (Rescan) also
+    looks for DB rows whose files have disappeared from the music
+    folder and ends with a plan of what it would remove — the
+    removal waits for the answer below (the default is add-only)."""
     from main import scan_start
     return await scan_start(prune=prune)
+
+
+@router.post("/library/scan/prune")
+async def answer_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
+    """The owner's answer to a Rescan's plan of removals."""
+    from main import scan_prune
+    return await scan_prune(plan_id=plan_id, remove=remove)
 
 
 @router.post("/library/scan/cancel")

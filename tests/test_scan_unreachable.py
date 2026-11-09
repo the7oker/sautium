@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 
 BACKEND = Path(__file__).resolve().parent.parent / "backend"
 if str(BACKEND) not in sys.path:
@@ -346,9 +347,9 @@ def test_a_prune_handed_a_partial_tree_deletes_nothing_once_the_folder_is_gone(c
     album_dir = _owned_file(cur)
 
     # a walk that saw one file before the drive left
-    stats = scanner.prune_missing_files(disk_paths={f"{album_dir}/02.flac"})
+    plan = scanner.plan_prune(disk_paths={f"{album_dir}/02.flac"})
 
-    assert stats["pruned"] == 0
+    assert (plan["pruned"], plan["file_ids"]) == (0, [])
     cur.execute("SELECT count(*) FROM media_files")
     assert cur.fetchone()[0] == 1
 
@@ -433,27 +434,351 @@ def test_a_folder_with_an_entry_it_cannot_type_is_left_out_whole(library, monkey
     assert (audio, cues, unread) == ([], [], [str(album)])
 
 
-def test_a_rescan_keeps_what_it_could_not_read_and_prunes_the_rest(
-        cur, library, main_module, monkeypatch):
+def _rescan(main_module, monkeypatch):
+    """The Library's Rescan up to its question: the scan, then the plan."""
     from canon import post_import
-    _albums_one_unreadable_one_gone(cur, library, monkeypatch)
     monkeypatch.setattr(post_import, "run", lambda *a: None)
     main_module._scan_state.update(running=True, cancel_requested=False,
                                    progress="Starting scan...", stats=None, result=None)
+    main_module._scan_worker(None, True, None, True)
+    return main_module._scan_state
 
-    main_module._scan_worker(None, True, None, True)   # Rescan: the scan, then the prune
 
-    prune = main_module._scan_state["result"]["prune"]
+def _answer(main_module, plan_id, remove):
+    """The owner's answer, as the Library screen sends it; a yes runs the
+    removal in a worker of its own, waited for here."""
+    out = asyncio.run(main_module.scan_prune(plan_id=plan_id, remove=remove))
+    assert _wait_until(lambda: not main_module._scan_state["running"], timeout=60)
+    return out
+
+
+def test_a_rescan_keeps_what_it_could_not_read_and_removes_the_rest_at_the_yes(
+        cur, library, main_module, monkeypatch):
+    _albums_one_unreadable_one_gone(cur, library, monkeypatch)
+
+    state = _rescan(main_module, monkeypatch)
+
+    prune = state["result"]["prune"]
     assert (prune["pruned"], prune["kept_unread"]) == (1, 1)
-    assert main_module._scan_state["progress"] == (
-        "Scan complete — 1 folder(s) could not be read; the prune kept 1 file(s) there")
-    assert _catalog(cur) == ["A", "B"]            # C pruned; B unread, so kept
+    assert state["progress"] == (
+        "Scan complete — 1 folder(s) could not be read; the prune keeps 1 file(s) there"
+        " — 1 missing file(s) wait for your answer")
+    assert _catalog(cur) == ["A", "B", "C"]       # nothing removed before the yes
+
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    assert state["result"]["prune"]["pruned"] == 1
+    assert state["progress"] == "Removal complete — 1 missing file(s) removed"
+    assert _catalog(cur) == ["A", "B"]            # C removed; B unread, so kept
 
 
 def test_a_prune_of_its_own_keeps_what_it_could_not_read(cur, library, monkeypatch):
     _albums_one_unreadable_one_gone(cur, library, monkeypatch)
 
-    stats = scanner.prune_missing_files()         # its own walk
+    plan = scanner.plan_prune()                   # its own walk
 
-    assert (stats["pruned"], stats["kept_unread"]) == (1, 1)
+    assert (plan["pruned"], plan["kept_unread"]) == (1, 1)
+    assert _catalog(cur) == ["A", "B", "C"]
+    scanner.prune_missing_files(plan["file_ids"])
     assert _catalog(cur) == ["A", "B"]
+
+
+# ── ROOT-1: a part of the library that goes missing loses nothing ──────────
+# PI5-4A § Q2's demonstration on the Pi: a Rescan with a folder moved out
+# deleted, unasked, every album whose files were all there and the tracks
+# nobody had played or analysed, and when the folder came back its analysis
+# stayed unlinked, so the next pass recomputed it in full.
+
+def test_the_plan_names_what_the_removal_would_delete_and_deletes_nothing(
+        cur, library, main_module, monkeypatch):
+    _owned_file(cur)                              # one file, its track, album, variant
+    (library / "Other").mkdir()
+    (library / "Other" / "01.flac").touch()
+    _owned_file(cur, "Other")
+    cur.execute("SELECT count(*) FROM tracks")
+    tracks = cur.fetchone()[0]
+
+    state = _rescan(main_module, monkeypatch)
+
+    plan = state["prune_plan"]
+    assert plan["counts"] == {"files": 1, "tracks": 1, "albums": 1, "artists": 0}
+    # the Library screen and /scan/status show it without the file ids
+    lib = asyncio.run(settings_router._library_state())
+    assert lib["scan"]["prune_plan"] == {"id": plan["id"], "files": 1, "tracks": 1,
+                                         "albums": 1, "artists": 0}
+    assert asyncio.run(main_module.scan_status())["prune_plan"] == lib["scan"]["prune_plan"]
+    cur.execute("SELECT count(*) FROM tracks")
+    assert cur.fetchone()[0] == tracks
+    assert _catalog(cur) == ["Other", "Shaped By Time"]
+
+
+def test_a_no_keeps_everything_and_an_answer_is_taken_once(
+        cur, library, main_module, monkeypatch):
+    from fastapi import HTTPException
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+    _owned_file(cur, "Gone")
+    state = _rescan(main_module, monkeypatch)
+    plan_id = state["prune_plan"]["id"]
+
+    assert _answer(main_module, plan_id, False) == {"success": True, "removed": False}
+
+    assert state["prune_plan"] is None
+    assert state["progress"] == "Scan complete — 1 missing file(s) kept"
+    assert _catalog(cur) == ["A", "Gone"]
+    with pytest.raises(HTTPException) as again:   # a second device's yes
+        asyncio.run(main_module.scan_prune(plan_id=plan_id, remove=True))
+    assert again.value.status_code == 409
+    assert _catalog(cur) == ["A", "Gone"]
+
+
+def test_a_rescan_with_nothing_missing_asks_nothing(cur, library, main_module, monkeypatch):
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+
+    state = _rescan(main_module, monkeypatch)
+
+    assert state["prune_plan"] is None
+    assert "prune_plan" not in state["result"]
+    assert state["progress"] == "Scan complete"
+
+
+def test_a_file_back_before_the_yes_keeps_its_rows(cur, library, main_module, monkeypatch):
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+    _owned_file(cur, "Back")
+    _owned_file(cur, "Gone")
+    state = _rescan(main_module, monkeypatch)
+    assert state["prune_plan"]["counts"]["files"] == 2
+    (library / "Back").mkdir()
+    (library / "Back" / "01.flac").touch()        # reconnected while the dialog was open
+
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    assert state["result"]["prune"]["pruned"] == 1
+    assert _catalog(cur) == ["A", "Back"]
+
+
+def test_a_yes_with_the_folder_gone_removes_nothing(cur, library, main_module, monkeypatch):
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+    _owned_file(cur, "Gone")
+    state = _rescan(main_module, monkeypatch)
+    (library / "A" / "01.flac").unlink()
+    (library / "A").rmdir()                       # the drive left with the dialog open
+
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    assert state["result"]["prune"]["pruned"] == 0
+    assert _catalog(cur) == ["A", "Gone"]
+
+
+def test_a_new_scan_replaces_the_plan(cur, library, main_module, monkeypatch):
+    from fastapi import HTTPException
+    from canon import post_import
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+    _owned_file(cur, "Gone")
+    state = _rescan(main_module, monkeypatch)
+    stale = state["prune_plan"]["id"]
+    monkeypatch.setattr(post_import, "run", lambda *a: None)
+
+    asyncio.run(main_module.scan_start())         # "Scan for new"
+    assert _wait_until(lambda: not state["running"], timeout=60)
+
+    assert state["prune_plan"] is None
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(main_module.scan_prune(plan_id=stale, remove=True))
+    assert refused.value.status_code == 409
+    assert _catalog(cur) == ["A", "Gone"]
+
+
+def test_the_cli_asks_before_it_removes(cur, library, monkeypatch):
+    from click.testing import CliRunner
+    import cli
+    (library / "A").mkdir()
+    (library / "A" / "01.flac").touch()
+    _owned_file(cur, "A")
+    _owned_file(cur, "Gone")
+    monkeypatch.setattr(cli, "scan_library", lambda **kw: {
+        "processed": 1, "added": 0, "skipped": 1, "errors": 0, "unread": 0})
+
+    no = CliRunner().invoke(cli.cli, ["scan", "--prune"], input="n\n")
+    assert "Nothing removed" in no.output, no.output
+    assert _catalog(cur) == ["A", "Gone"]
+
+    yes = CliRunner().invoke(cli.cli, ["scan", "--prune"], input="y\n")
+    assert "Pruned: 1 missing files" in yes.output, yes.output
+    assert _catalog(cur) == ["A"]
+
+
+def _flac(path: Path, seed: int, title: str, artist: str = "Ostrava Unit",
+          album: str = "Pulse Archive", track: int = 1):
+    """A real FLAC: 15 s of noise from `seed` — one master per seed, so the
+    fingerprint tells two seeds apart and one seed's copies alike."""
+    import subprocess
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                    "-i", f"anoisesrc=d=15:c=pink:r=44100:a=0.3:s={seed}",
+                    "-sample_fmt", "s16",
+                    "-metadata", f"title={title}", "-metadata", f"artist={artist}",
+                    "-metadata", f"album={album}", "-metadata", f"tracknumber={track}",
+                    str(path)], check=True)
+
+
+def _analyse(cur, title):
+    """The analysis passes' record of a track, as they write it: the source
+    registered by its fingerprint (provenance.get_or_create_local), then an
+    embedding and the features linked to it."""
+    import provenance
+    from database import get_db_context
+    cur.execute("""
+        SELECT mf.id, mf.track_id, mf.file_path, mf.sample_rate, mf.bit_depth,
+               mf.is_lossless, mf.duration_seconds
+        FROM media_files mf JOIN tracks t ON t.id = mf.track_id
+        WHERE t.title = %s AND mf.is_analysis_source""", (title,))
+    mf_id, track_id, path, sr, bd, ll, dur = cur.fetchone()
+    with get_db_context() as db:
+        sid = provenance.get_or_create_local(db, track_id, mf_id, path, sr, bd, ll, dur)
+    assert sid is not None
+    cur.execute("INSERT INTO embedding_models (id, name, dimension) "
+                "VALUES (%s, 'root-1 test model', 512) ON CONFLICT (name) DO NOTHING",
+                (str(uuid.uuid4()),))
+    cur.execute("INSERT INTO embeddings (vector, model_id, track_id, analysis_source_id) "
+                "SELECT %s::vector, id, %s, %s FROM embedding_models "
+                "WHERE name = 'root-1 test model'",
+                ("[" + ",".join(["0.1"] * 512) + "]", track_id, sid))
+    cur.execute("INSERT INTO audio_features (track_id, analysis_source_id) VALUES (%s, %s)",
+                (track_id, sid))
+    return str(track_id), sid
+
+
+def _queued(cur, title):
+    """Is the track in the queue of either analysis pass — their own SQL."""
+    from database import get_db_context
+    import audio_analysis
+    import embeddings
+    params = {"min_seconds": 10, "reanalyze": False}
+    out = {}
+    with get_db_context() as db:
+        for name, sql in (("embeddings", embeddings.PENDING_SQL),
+                          ("features", audio_analysis.PENDING_SQL)):
+            rows = db.execute(text(f"SELECT 1 FROM ({sql}) q JOIN tracks tt "
+                                   f"ON tt.id = q.track_id WHERE tt.title = :title"),
+                              {**params, "title": title}).fetchall()
+            out[name] = bool(rows)
+    return out
+
+
+def _sources(cur, track_id):
+    cur.execute("SELECT s.media_file_id, mf.file_path FROM analysis_sources s "
+                "LEFT JOIN media_files mf ON mf.id = s.media_file_id WHERE s.track_id = %s",
+                (track_id,))
+    return cur.fetchall()
+
+
+@pytest.fixture
+def scanned_library(cur, library, main_module, monkeypatch):
+    """PI5-4A § Q2's set-up on a real scan: an analysed album (Pulse
+    Archive, two tracks) and a probe EP nobody analysed or played."""
+    _flac(library / "Ostrava Unit" / "Pulse Archive" / "01.flac", 1, "Carrier", track=1)
+    _flac(library / "Ostrava Unit" / "Pulse Archive" / "02.flac", 2, "Relay", track=2)
+    _flac(library / "Q2 Probe" / "Probe EP" / "01.flac", 3, "Probe B",
+          artist="Q2 Probe", album="Probe EP")
+    from canon import post_import
+    monkeypatch.setattr(post_import, "run", lambda *a: None)
+    main_module._scan_state.update(running=True, cancel_requested=False,
+                                   progress="Starting scan...", stats=None, result=None)
+    main_module._scan_worker(None, True, None, False)
+    analysed = {t: _analyse(cur, t) for t in ("Carrier", "Relay")}
+    for t in ("Carrier", "Relay"):
+        assert _queued(cur, t) == {"embeddings": False, "features": False}
+    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True}
+    return analysed
+
+
+def _move(src: Path, dst: Path):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)
+
+
+def test_a_folder_that_comes_back_gets_its_analysis_back_not_a_new_pass(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """Q2's steps 5b–6: two folders moved out, Rescan, the yes; the folders
+    back, "Scan for new"."""
+    away = tmp_path / "away"
+    _move(library / "Ostrava Unit", away / "Ostrava Unit")
+    _move(library / "Q2 Probe", away / "Q2 Probe")
+    (library / "Keep").mkdir()                    # the root itself stays reachable
+    _flac(library / "Keep" / "01.flac", 9, "Anchor", artist="Keeper", album="Keep")
+
+    state = _rescan(main_module, monkeypatch)
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    for title, (track_id, _sid) in scanned_library.items():
+        cur.execute("SELECT count(*) FROM media_files WHERE track_id = %s", (track_id,))
+        assert cur.fetchone()[0] == 0
+        assert _sources(cur, track_id) == [(None, None)]   # kept, unlinked
+    cur.execute("SELECT count(*) FROM tracks WHERE title = 'Probe B'")
+    assert cur.fetchone()[0] == 0                 # nothing to keep it: an orphan, as before
+
+    _move(away / "Ostrava Unit", library / "Ostrava Unit")
+    _move(away / "Q2 Probe", library / "Q2 Probe")
+    main_module._scan_state.update(running=True, cancel_requested=False,
+                                   progress="Starting scan...", stats=None, result=None)
+    main_module._scan_worker(None, True, None, False)        # "Scan for new"
+
+    assert state["result"]["relinked"] == 2
+    for title, (track_id, sid) in scanned_library.items():
+        [(mf_id, path)] = _sources(cur, track_id)
+        assert path.endswith(f"Pulse Archive/0{1 if title == 'Carrier' else 2}.flac")
+        assert _queued(cur, title) == {"embeddings": False, "features": False}
+    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True}
+
+
+def test_a_folder_moved_within_the_library_takes_its_analysis_along(
+        cur, library, main_module, monkeypatch, scanned_library):
+    """The same Rescan sees the old path missing and the new one: the new
+    file is added beside the old row, the yes removes the old one, and the
+    analysis follows the file the track is left with."""
+    _move(library / "Ostrava Unit" / "Pulse Archive",
+          library / "Ostrava Unit" / "Pulse Archive (2019)")
+
+    state = _rescan(main_module, monkeypatch)
+    assert state["prune_plan"]["counts"] == {"files": 2, "tracks": 0, "albums": 0,
+                                             "artists": 0}
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    assert state["result"]["prune"]["relinked"] == 2
+    for title, (track_id, _sid) in scanned_library.items():
+        [(mf_id, path)] = _sources(cur, track_id)
+        assert "Pulse Archive (2019)/" in path
+        cur.execute("SELECT is_analysis_source FROM media_files WHERE id = %s", (mf_id,))
+        assert cur.fetchone()[0] is True          # elected again once the old row went
+        assert _queued(cur, title) == {"embeddings": False, "features": False}
+
+
+def test_another_master_at_the_old_place_is_analysed_as_new(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """A file that returns with other audio under the same tags is another
+    master: its fingerprint matches nothing kept, so it is analysed."""
+    away = tmp_path / "away"
+    _move(library / "Ostrava Unit", away / "Ostrava Unit")
+    state = _rescan(main_module, monkeypatch)
+    _answer(main_module, state["prune_plan"]["id"], True)
+    _flac(library / "Ostrava Unit" / "Pulse Archive" / "01.flac", 41, "Carrier", track=1)
+    _move(away / "Ostrava Unit" / "Pulse Archive" / "02.flac",
+          library / "Ostrava Unit" / "Pulse Archive" / "02.flac")
+
+    main_module._scan_state.update(running=True, cancel_requested=False,
+                                   progress="Starting scan...", stats=None, result=None)
+    main_module._scan_worker(None, True, None, False)
+
+    assert state["result"]["relinked"] == 1
+    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
+    assert _queued(cur, "Relay") == {"embeddings": False, "features": False}

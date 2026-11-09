@@ -94,6 +94,45 @@ def _padded_to_rung(inputs, pad_token_id: int) -> dict:
             for k, v in inputs.items()}
 
 
+
+# Driven from media_files (is_analysis_source) — the OWNED set. tracks holds
+# millions of trackless phantom rows; driving from tracks would scan them all
+# to find owned ones needing an embedding. Material under one grid window is
+# never queued: no fingerprint, no address, no analysis
+# (provenance.MIN_MATERIAL_SECONDS).
+SOURCE_FILES_SQL = """
+    SELECT t.id as track_id, mf.id as media_file_id,
+           mf.file_path, mf.bit_depth,
+           mf.sample_rate, mf.is_lossless,
+           mf.duration_seconds,
+           mf.cue_start_seconds, mf.cue_end_seconds
+    FROM media_files mf
+    JOIN tracks t ON t.id = mf.track_id
+    LEFT JOIN embeddings e ON e.track_id = t.id
+    LEFT JOIN analysis_sources asrc ON asrc.id = e.analysis_source_id
+    WHERE mf.is_analysis_source = true
+      AND (mf.duration_seconds IS NULL
+           OR mf.duration_seconds >= :min_seconds)
+"""
+
+# Pending = no embedding yet, OR unlinked provenance (legacy rows —
+# re-analysis links them), OR linked to material other than the current
+# analysis source (source moved to a better rip, or a stream preview awaiting
+# its owned upgrade). Analysis that arrived over P2P (asrc.imported) also
+# matches that third arm — its source has no media_file — but re-deriving it
+# from the owned file is a POLICY, not a repair: first-hand matches this
+# node's actual rip and is the network's poison detector, yet it re-spends GPU
+# on tracks that already work. enrichment.reanalyze_imported picks the
+# policy; default off. A file that returned after a prune is linked back to
+# its analysis by the scan (provenance.relink_returned_files), so it is not
+# pending here.
+PENDING_SQL = SOURCE_FILES_SQL + """
+      AND (e.id IS NULL
+           OR e.analysis_source_id IS NULL
+           OR (asrc.media_file_id IS DISTINCT FROM mf.id
+               AND (:reanalyze OR NOT asrc.imported)))
+"""
+
 class AudioEmbeddingGenerator:
     """Generate audio embeddings using CLAP model on GPU."""
 
@@ -370,43 +409,9 @@ class AudioEmbeddingGenerator:
         with get_db_context() as db:
             embedding_model = self._get_or_create_embedding_model(db)
 
-            # Pending = no embedding yet, OR unlinked provenance (legacy rows
-            # — re-analysis links them), OR linked to material other than the
-            # current analysis source (source moved to a better rip, or a
-            # stream preview awaiting its owned upgrade). Material under one
-            # grid window is never pending: no fingerprint, no address, no
-            # analysis (provenance.MIN_MATERIAL_SECONDS).
-            # Analysis that arrived over P2P (asrc.imported) also matches that
-            # third arm — its source has no media_file — but re-deriving it
-            # from the owned file is a POLICY, not a repair: first-hand
-            # matches this node's actual rip and is the network's poison
-            # detector, yet it re-spends GPU on tracks that already work.
-            # enrichment.reanalyze_imported picks the policy; default off.
-            # Driven from media_files (is_analysis_source) — the OWNED set.
-            # tracks now holds millions of trackless phantom rows; driving from
-            # tracks would scan them all to find owned ones needing an embedding.
-            query_sql = """
-                SELECT t.id as track_id, mf.id as media_file_id,
-                       mf.file_path, mf.bit_depth,
-                       mf.sample_rate, mf.is_lossless,
-                       mf.duration_seconds,
-                       mf.cue_start_seconds, mf.cue_end_seconds
-                FROM media_files mf
-                JOIN tracks t ON t.id = mf.track_id
-                LEFT JOIN embeddings e ON e.track_id = t.id
-                LEFT JOIN analysis_sources asrc ON asrc.id = e.analysis_source_id
-                WHERE mf.is_analysis_source = true
-                  AND (mf.duration_seconds IS NULL
-                       OR mf.duration_seconds >= :min_seconds)
-            """
+            query_sql = SOURCE_FILES_SQL if force else PENDING_SQL
             params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS}
             if not force:
-                query_sql += """
-                  AND (e.id IS NULL
-                       OR e.analysis_source_id IS NULL
-                       OR (asrc.media_file_id IS DISTINCT FROM mf.id
-                           AND (:reanalyze OR NOT asrc.imported)))
-            """
                 params["reanalyze"] = _reanalyze_imported()
 
             if track_ids is not None:

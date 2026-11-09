@@ -15428,6 +15428,43 @@
   }
 
   /* ============ Library screen — #more/library ============ */
+  // A Rescan ends with a plan of what it would remove, and the removal waits
+  // for this answer: rows the owner sees go only at a confirmed yes. The
+  // server holds the plan, so the screen asks wherever it is open — once per
+  // plan in this tab; a second device's answer is refused there and says so.
+  const _prunePlansAsked = new Set();
+  const _count = (n, one, many) => `${fmtNum(n)} ${n === 1 ? one : many}`;
+  function _prunePlanMessage(p) {
+    const also = [];
+    if (p.tracks)  also.push(`${_count(p.tracks, 'track', 'tracks')} with no analysis and no listens`);
+    if (p.albums)  also.push(_count(p.albums, 'album', 'albums'));
+    if (p.artists) also.push(_count(p.artists, 'artist', 'artists'));
+    const list = also.length > 1
+      ? `${also.slice(0, -1).join(', ')} and ${also[also.length - 1]}` : also[0];
+    return `Rescan did not find ${_count(p.files, 'file', 'files')} in your music folder.`
+      + (list ? ` Removing them also deletes ${list} that nothing else holds.` : '')
+      + ' Tracks you have played or analysed stay.'
+      + ' If a drive or a folder is only disconnected, keep everything and reconnect it first.';
+  }
+  async function _askPrunePlan(plan) {
+    if (!plan || _prunePlansAsked.has(plan.id)) return;
+    _prunePlansAsked.add(plan.id);
+    const remove = await window.confirmDestructive({
+      title: 'Remove missing files?',
+      message: escapeProfileHtml(_prunePlanMessage(plan)),
+      confirmText: 'Remove',
+      cancelText: 'Keep',
+    });
+    const r = await fetch('/api/settings/library/scan/prune?plan_id='
+      + encodeURIComponent(plan.id) + '&remove=' + remove, { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      notices.toast({ kind: 'error', key: 'library.prune', title: 'Rescan',
+                      text: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
+    }
+    if (parseHash().startsWith('more/library')) render();
+  }
+
   // The library.mount_missing condition explained where it bites: a scan here
   // would walk an empty folder, so the server refuses one. The notice set is
   // the one source, on render and on every snapshot (the library read wakes
@@ -15612,6 +15649,7 @@
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
     guide.paint();
     _subscribeLibraryStream(root);
+    _askPrunePlan(lib.scan && lib.scan.prune_plan);
   }
 
   /* Live Library updates over SSE. Replaces 1.5s polling per
@@ -15655,6 +15693,7 @@
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
+      _askPrunePlan(lib.scan && lib.scan.prune_plan);
 
       // A worker finishing → full re-render, which flips its Cancel row back.
       const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');

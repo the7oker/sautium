@@ -34,6 +34,7 @@ from db_pool import db_execute, db_query, db_query_one
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
+from provenance import relink_returned_files
 import cue_sheet
 
 logger = logging.getLogger(__name__)
@@ -306,7 +307,7 @@ def _classify_dirs(entries, sink: FileSink):
 
 def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink,
                     stats: Dict[str, int], progress_cb: Optional[callable] = None,
-                    cancel_check: Optional[callable] = None) -> None:
+                    cancel_check: Optional[callable] = None) -> Set[str]:
     """Phase 2 of a scan: canonical entities and file rows from extracted
     metadata. ``entries`` = ``(dir_path, metadata)`` — the directory in DB
     form (the variant key) and the metadata as extract_metadata returns it
@@ -314,6 +315,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     Single-threaded with entity caches, one savepoint per file, a commit
     every 100 files; counts into ``stats`` (added, errors, unique_tracks).
     cancel_check stops after the current file, keeping what was committed.
+    Returns the ids of the tracks it added file rows to.
     """
     from normalize_genres import parse_genre_string, normalize_genre_name
 
@@ -605,6 +607,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                 logger.error(f"Error processing {file_path}: {e}")
                 stats["errors"] += 1
         db.commit()
+    return {str(t) for t in seen_track_ids}
 
 
 class LibraryScanner:
@@ -951,6 +954,7 @@ class LibraryScanner:
             "unique_tracks": 0,
             "superseded": 0,
             "unread": 0,
+            "relinked": 0,
         }
         def _report(msg: str = None):
             if progress_cb:
@@ -1132,8 +1136,9 @@ class LibraryScanner:
                 logger.info(f"Cue reconciliation: removed {stats['superseded']} "
                             f"superseded media_files rows across {len(recon_plans)} paths")
 
-        import_metadata(entries, sink=LOCAL_FILES, stats=stats, progress_cb=progress_cb,
-                        cancel_check=None if cancelled_in_phase1 else cancel_check)
+        added_tracks = import_metadata(
+            entries, sink=LOCAL_FILES, stats=stats, progress_cb=progress_cb,
+            cancel_check=None if cancelled_in_phase1 else cancel_check)
         # ── Cue supersede post-pass ─────────────────────────────
         # Runs after the re-import so a track whose slices merely moved
         # keeps its row (and listening history). A track left with no
@@ -1183,6 +1188,12 @@ class LibraryScanner:
 
                 db.commit()
 
+        # A file whose analysis outlived it (pruned while a folder was away)
+        # gets that analysis back instead of a second pass over its audio.
+        if added_tracks and not _cancelled():
+            _report("Linking returned files to their analysis...")
+            stats["relinked"] = relink_returned_files(added_tracks, cancel_check)
+
         if _cancelled():
             _report(f"Cancelled: {stats['added']} added before cancel")
             logger.info(f"Scan cancelled: {stats['added']} added, "
@@ -1215,22 +1226,30 @@ def scan_library(limit: Optional[int] = None, skip_existing: bool = True, subpat
     return scanner.scan_and_import(limit=limit, skip_existing=skip_existing, subpath=subpath)
 
 
-def prune_missing_files(
+def _prune_stats() -> Dict[str, Any]:
+    return {"checked": 0, "pruned": 0, "kept_unread": 0, "orphan_tracks": 0,
+            "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0,
+            "relinked": 0}
+
+
+def plan_prune(
     progress_cb: Optional[callable] = None,
     subpath: Optional[str] = None,
     cancel_check: Optional[callable] = None,
     disk_paths: Optional[Set[str]] = None,
     unread: Sequence[str] = (),
-) -> Dict[str, int]:
-    """Remove DB records for files that no longer exist on disk.
+) -> Dict[str, Any]:
+    """What removing the DB records of files no longer on disk would delete.
+
+    Removing them deletes rows the owner sees, which goes only at the owner's
+    yes (CLAUDE.md), so the walk never deletes: it takes every step of the
+    removal in a transaction it rolls back and returns the counts with the
+    files it would remove (`file_ids`) — the plan a person says yes to, its
+    counts read off the very statements that would delete. The yes is
+    prune_missing_files(file_ids).
 
     Uses a single directory scan + set difference instead of per-file exists()
     calls, which is orders of magnitude faster on WSL2/network mounts.
-
-    Deletion order: MediaFile → Track → AlbumVariant → Album → Artist, each
-    step scoped to the rows the removed files justified — the phantom layer
-    is not this function's business. DB-level ON DELETE CASCADE handles child
-    tables (embeddings, stats, etc).
 
     disk_paths lets a caller that has just walked the tree hand its result in
     (see LibraryScanner.scan_and_import) instead of paying for a second walk,
@@ -1240,10 +1259,8 @@ def prune_missing_files(
     cancel_check is forwarded to find_audio_files so a Cancel tap takes
     effect during the slow disk-discovery phase.
     """
-    from sqlalchemy import text
-
-    stats = {"checked": 0, "pruned": 0, "kept_unread": 0, "orphan_tracks": 0,
-             "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0}
+    stats = _prune_stats()
+    stats["file_ids"] = []
 
     if disk_paths is None:
         if progress_cb:
@@ -1303,14 +1320,58 @@ def prune_missing_files(
             missing_ids.append(mf_id)
             logger.info(f"Missing: {file_path}")
 
-        if not missing_ids:
-            logger.info("Prune: no missing files found")
-            return stats
+    return _prune_files(missing_ids, stats, dry_run=True,
+                        progress_cb=progress_cb, cancel_check=cancel_check)
 
-        stats["pruned"] = len(missing_ids)
-        logger.info(f"Pruning {len(missing_ids)} missing media files")
 
-        if progress_cb:
+def prune_missing_files(file_ids: Sequence[int], progress_cb: Optional[callable] = None,
+                        cancel_check: Optional[callable] = None) -> Dict[str, Any]:
+    """Remove the DB records of a plan's files (plan_prune) — of them only
+    those still missing: a file that came back since keeps its rows.
+
+    Deletion order: MediaFile → Track → AlbumVariant → Album → Artist, each
+    step scoped to the rows the removed files justified — the phantom layer
+    is not this function's business. DB-level ON DELETE CASCADE handles child
+    tables (embeddings, stats, etc)."""
+    stats = _prune_stats()
+    return _prune_files(_still_missing(file_ids, stats), stats, dry_run=False,
+                        progress_cb=progress_cb, cancel_check=cancel_check)
+
+
+def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
+    """Of a plan's files, those still in the catalog and still missing now.
+    The folder is asked first: gone as a whole, every file reads as missing
+    and nothing may go."""
+    if library_unreachable():
+        logger.error("Prune aborted at the yes: the music folder is unreachable")
+        return []
+    with get_db_context() as db:
+        rows = db.query(MediaFile.id, MediaFile.file_path).filter(
+            MediaFile.id.in_(list(file_ids))).all()
+    stats["checked"] = len(rows)
+    missing = [mf_id for mf_id, path in rows
+               if not os.path.exists(settings.translate_to_local_path(path))]
+    if len(missing) < len(file_ids):
+        logger.info(f"Prune at the yes: {len(file_ids) - len(missing)} of the plan's "
+                    f"{len(file_ids)} files are back or already gone, and are left")
+    return missing
+
+
+def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool,
+                 progress_cb: Optional[callable],
+                 cancel_check: Optional[callable]) -> Dict[str, Any]:
+    if dry_run:
+        stats["file_ids"] = missing_ids
+    if not missing_ids:
+        logger.info("Prune: no missing files found")
+        return stats
+
+    stats["pruned"] = len(missing_ids)
+    with get_db_context() as db:
+        logger.info(f"{'Planning the removal of' if dry_run else 'Pruning'} "
+                    f"{len(missing_ids)} missing media files")
+
+        if progress_cb and not dry_run:
             progress_cb(f"Removing {len(missing_ids)} missing files...")
 
         # Everything below is scoped to the rows THESE files justified. The
@@ -1375,7 +1436,23 @@ def prune_missing_files(
         """), {"ids": [str(a) for a in artist_ids]})
         stats["orphan_artists"] = r.rowcount
 
+        if dry_run:
+            db.rollback()
+            logger.info("Prune plan: %s", {k: v for k, v in stats.items() if k != "file_ids"})
+            return stats
+
+        # A track whose analysis-source file was among the removed keeps its
+        # other files with none of them elected: elect again, or no pending
+        # query would ever see the track.
+        still_held = [str(t) for t in db.execute(text("""
+            SELECT DISTINCT track_id FROM media_files WHERE track_id = ANY(CAST(:ids AS uuid[]))
+        """), {"ids": [str(t) for t in track_ids]}).scalars()]
+        for tid in still_held:
+            elect_analysis_source(db, tid)
         db.commit()
 
+    # The elected file may be the analysed material at another path (a folder
+    # the last "Scan for new" found moved): its analysis follows it.
+    stats["relinked"] = relink_returned_files(still_held, cancel_check)
     logger.info(f"Prune complete: {stats}")
     return stats

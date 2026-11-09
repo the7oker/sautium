@@ -134,6 +134,34 @@ def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
     return features
 
 
+
+# Pending = no features yet, OR unlinked provenance (legacy rows), OR linked
+# to material other than the current analysis source (source moved to a
+# better rip, or a stream preview awaiting its owned upgrade). Material under
+# one grid window is never pending (provenance.MIN_MATERIAL_SECONDS).
+# P2P-imported analysis re-enters only when the enrichment.reanalyze_imported
+# toggle says so — see the policy comment in embeddings.py, which owns the
+# flag. A file that returned after a prune is linked back to its analysis by
+# the scan (provenance.relink_returned_files), so it is not pending here.
+PENDING_SQL = """
+    SELECT t.id as track_id, mf.id as media_file_id,
+           mf.file_path, mf.bit_depth,
+           mf.sample_rate as mf_sample_rate, mf.is_lossless,
+           mf.duration_seconds,
+           mf.cue_start_seconds, mf.cue_end_seconds
+    FROM media_files mf
+    JOIN tracks t ON t.id = mf.track_id
+    LEFT JOIN audio_features af ON af.track_id = t.id
+    LEFT JOIN analysis_sources asrc ON asrc.id = af.analysis_source_id
+    WHERE mf.is_analysis_source = true
+      AND (mf.duration_seconds IS NULL
+           OR mf.duration_seconds >= :min_seconds)
+      AND (af.id IS NULL
+           OR af.analysis_source_id IS NULL
+           OR (asrc.media_file_id IS DISTINCT FROM mf.id
+               AND (:reanalyze OR NOT asrc.imported)))
+"""
+
 class AudioAnalyzer:
     """Extract audio features from audio files using librosa and CLAP zero-shot."""
 
@@ -488,32 +516,7 @@ class AudioAnalyzer:
                            OR mf.duration_seconds >= :min_seconds)
                 """
             else:
-                # Pending = no features yet, OR unlinked provenance (legacy
-                # rows), OR linked to material other than the current
-                # analysis source (source moved to a better rip, or a stream
-                # preview awaiting its owned upgrade). Material under one
-                # grid window is never pending (provenance.MIN_MATERIAL_SECONDS).
-                # P2P-imported analysis re-enters only when the
-                # enrichment.reanalyze_imported toggle says so — see the
-                # policy comment in embeddings.py, which owns the flag.
-                query_sql = """
-                    SELECT t.id as track_id, mf.id as media_file_id,
-                           mf.file_path, mf.bit_depth,
-                           mf.sample_rate as mf_sample_rate, mf.is_lossless,
-                           mf.duration_seconds,
-                           mf.cue_start_seconds, mf.cue_end_seconds
-                    FROM media_files mf
-                    JOIN tracks t ON t.id = mf.track_id
-                    LEFT JOIN audio_features af ON af.track_id = t.id
-                    LEFT JOIN analysis_sources asrc ON asrc.id = af.analysis_source_id
-                    WHERE mf.is_analysis_source = true
-                      AND (mf.duration_seconds IS NULL
-                           OR mf.duration_seconds >= :min_seconds)
-                      AND (af.id IS NULL
-                           OR af.analysis_source_id IS NULL
-                           OR (asrc.media_file_id IS DISTINCT FROM mf.id
-                               AND (:reanalyze OR NOT asrc.imported)))
-                """
+                query_sql = PENDING_SQL
 
             params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS}
             if not force:

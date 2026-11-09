@@ -9,11 +9,12 @@ faulthandler.enable()   # native crashes (PortAudio/ASIO AVs) leave a traceback 
 import asyncio
 import logging
 import logging.config
+import secrets
 import sys
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 import psycopg2
 try:
@@ -1356,15 +1357,27 @@ _scan_state: Dict[str, Any] = {
     "progress": "",
     "stats": None,        # live stats dict (processed/added/skipped/errors)
     "result": None,       # final result when done
+    # What a Rescan would remove, waiting for the owner's answer: rows the
+    # owner sees go only at an explicit yes (CLAUDE.md). Published with the
+    # worker's end under _scan_lock; a new scan's walk replaces it.
+    "prune_plan": None,
 }
 _scan_lock = threading.Lock()
 
 
+def _prune_plan_counts(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """What the Library screen asks about: the plan without its file ids."""
+    return {"id": plan["id"], **plan["counts"]}
+
+
 def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[str], prune: bool = False):
-    """Background worker for library scanning."""
+    """Background worker for library scanning. A Rescan (`prune`) ends with a
+    plan of what it would remove, never with the removal: that waits for the
+    owner's yes (/scan/prune)."""
     state = _scan_state
     from datetime import datetime, timezone
     _scan_started = datetime.now(timezone.utc)   # AI-canon `since`: only this scan's new files
+    plan = None
     try:
         from scanner import LibraryScanner, LibraryUnreachable, refuse_if_unreachable
         from routers.settings import notify_library_subscribers
@@ -1405,25 +1418,35 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             post_import.run(state, result, _scan_started)
 
             if prune and not state["cancel_requested"]:
-                state["progress"] = "Pruning missing files..."
+                state["progress"] = "Looking for missing files..."
                 try:
-                    from scanner import prune_missing_files
-                    prune_stats = prune_missing_files(
+                    from scanner import plan_prune
+                    prune_stats = plan_prune(
                         progress_cb=lambda msg: state.update(progress=msg),
                         subpath=subpath,
                         cancel_check=lambda: state["cancel_requested"],
                         disk_paths=scanner.last_disk_paths,
                         unread=scanner.last_unread,
                     )
+                    file_ids = prune_stats.pop("file_ids")
                     result["prune"] = prune_stats
-                    logger.info(f"Prune results: {prune_stats}")
+                    if file_ids:
+                        plan = {"id": secrets.token_hex(8), "file_ids": file_ids,
+                                "counts": {"files": prune_stats["pruned"],
+                                           "tracks": prune_stats["orphan_tracks"],
+                                           "albums": prune_stats["orphan_albums"],
+                                           "artists": prune_stats["orphan_artists"]}}
+                        result["prune_plan"] = _prune_plan_counts(plan)
+                    logger.info(f"Prune plan: {prune_stats}")
                 except Exception as e:
-                    logger.error(f"Prune failed: {e}")
+                    logger.error(f"Prune plan failed: {e}")
                     result["prune_error"] = str(e)
 
             kept = (result.get("prune") or {}).get("kept_unread")
             state["progress"] = ("Scan complete" + unread_note
-                                 + (f"; the prune kept {kept} file(s) there" if kept else ""))
+                                 + (f"; the prune keeps {kept} file(s) there" if kept else "")
+                                 + (f" — {plan['counts']['files']} missing file(s) wait for "
+                                    "your answer" if plan else ""))
             # Persist the completion timestamp so the Library screen's
             # "Last scan" row reflects reality across backend restarts.
             try:
@@ -1464,12 +1487,38 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
         state["progress"] = f"Scan failed: {str(e)[:200]}"
         state["result"] = {"error": str(e)}
     finally:
-        state["running"] = False
+        with _scan_lock:
+            state["prune_plan"] = plan
+            state["running"] = False
         try:
             from routers.settings import notify_library_subscribers
             notify_library_subscribers()
         except Exception:
             pass
+
+
+def _prune_worker(file_ids: List[int]) -> None:
+    """The owner's yes to a Rescan's plan: its files that are still missing
+    go, with what only they held."""
+    state = _scan_state
+    try:
+        from scanner import prune_missing_files
+        stats = prune_missing_files(
+            progress_cb=lambda msg: state.update(progress=msg),
+            cancel_check=lambda: state["cancel_requested"],
+            file_ids=file_ids,
+        )
+        state["result"] = {"prune": stats}
+        state["progress"] = f"Removal complete — {stats['pruned']} missing file(s) removed"
+        logger.info(f"Prune results: {stats}")
+    except Exception as e:
+        logger.error(f"Prune failed: {e}", exc_info=True)
+        state["progress"] = f"Removal failed: {str(e)[:200]}"
+        state["result"] = {"prune_error": str(e)}
+    finally:
+        state["running"] = False
+        from routers.settings import notify_library_subscribers
+        notify_library_subscribers()
 
 
 @app.post("/scan/start")
@@ -1494,7 +1543,7 @@ async def scan_start(
             raise HTTPException(status_code=409, detail="Scan already running")
         _scan_state.update(
             running=True, cancel_requested=False,
-            progress="Starting scan...", stats=None, result=None,
+            progress="Starting scan...", stats=None, result=None, prune_plan=None,
         )
 
     t = threading.Thread(
@@ -1504,6 +1553,35 @@ async def scan_start(
     )
     t.start()
     return {"success": True, "message": "Scan started"}
+
+
+@app.post("/scan/prune")
+async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
+    """The owner's answer to a Rescan's plan (`prune_plan` in /scan/status):
+    `remove=true` removes its files that are still missing, `false` keeps
+    everything. A plan is answered once; a newer scan replaces it."""
+    from playback import hqp_benchmark
+    if remove and hqp_benchmark.measures_here():
+        raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
+    with _scan_lock:
+        plan = _scan_state["prune_plan"]
+        if plan is None or plan["id"] != plan_id:
+            raise HTTPException(status_code=409, detail=(
+                "This Rescan has been answered already, or a newer scan replaced it."))
+        _scan_state["prune_plan"] = None
+        if remove:
+            _scan_state.update(
+                running=True, cancel_requested=False, stats=None, result=None,
+                progress=f"Removing {plan['counts']['files']} missing file(s)...")
+        else:
+            _scan_state["progress"] = (f"Scan complete — {plan['counts']['files']} missing "
+                                       "file(s) kept")
+    if remove:
+        threading.Thread(target=_prune_worker, args=(plan["file_ids"],), daemon=True).start()
+    else:
+        from routers.settings import notify_library_subscribers
+        notify_library_subscribers()
+    return {"success": True, "removed": remove}
 
 
 @app.post("/scan/cancel")
@@ -1523,6 +1601,8 @@ async def scan_status() -> Dict[str, Any]:
         "progress": _scan_state["progress"],
         "stats": _scan_state["stats"],
         "result": _scan_state["result"],
+        "prune_plan": (_prune_plan_counts(_scan_state["prune_plan"])
+                       if _scan_state["prune_plan"] else None),
     }
 
 

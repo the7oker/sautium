@@ -290,8 +290,8 @@ See:
   library of its own (an Embedded box, a Desktop on a second computer —
   `has_own_library`, by address); one on this machine reads this node's
   folder and is never synced. No path
-  mapping of a moved disk: Rescan prunes the local rows, the sync adds the
-  copy, the UUID keeps the analysis. Since 2026-09-28 `hqp_endpoints` is
+  mapping of a moved disk: Rescan prunes the local rows (at the owner's
+  yes), the sync adds the copy, the UUID keeps the analysis. Since 2026-09-28 `hqp_endpoints` is
   also the registry of every HQPlayer the owner picked (`hqp_library.
   register`, a Desktop included): the Output picker lists each one found
   by the network scan (HQPlayer's own `<discover/>` datagram on UDP 4321,
