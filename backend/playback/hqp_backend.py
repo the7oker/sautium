@@ -2141,8 +2141,9 @@ class HqpBackend(PlayerBackend):
         queue back, under the queue lock, as background work (a build met is
         waited out). Playing or paused on an entry of ours, what lies behind
         it is replaced, the sound never stopped; stopped, it takes the queue
-        afresh and the play press resumes its slot; on an entry not ours it
-        stays lost, and the play press re-mirrors. After a Play that resumed
+        afresh and the play press resumes its slot — never stopped on another
+        controller's playlist, which drifts (_follow_queue); on an entry not
+        ours it stays lost, and the play press re-mirrors. After a Play that resumed
         a pause (`press`) a drifted playlist is repaired the same way."""
         from playback.manager import manager
         try:
@@ -2196,6 +2197,21 @@ class HqpBackend(PlayerBackend):
             self._repair_tail(reads, playing[0], playlist, layout,
                               stale=self._first_reshaped(playlist, reads))
         elif status.state == PlaybackState.STOPPED:
+            named = [r for t in playlist for r in self._readings(t.get("uri") or "")]
+            if (any(not self.gave(t.get("uri") or "", layout) for t in playlist)
+                    and (not layout.handed or any(not any(_reads_item(r, it) for r in named)
+                                                  for it in layout.handed))):
+                # Stopped on another controller's playlist — an entry the node
+                # never gave HQPlayer while a slot of the queue it held is gone
+                # from it, or the queue holds none: its Clear and its own entry,
+                # an owed add of ours landed behind them. The reconverge writes
+                # nothing over it, whatever road lost the mirror (ROON-COEX §6.1
+                # P1: never over another controller's playback without a
+                # person's word); the person's Play takes HQPlayer back through
+                # the play press. HQPlayer's own entries beside all of ours are
+                # taken afresh as before
+                self._drifted("HQPlayer holds another controller's playlist", only_from=("lost",))
+                return
             self._remirror(at=playing[1] if playing is not None and not playing[2]
                            and not twice else None)
 

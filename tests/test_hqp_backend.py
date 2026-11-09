@@ -5654,6 +5654,29 @@ def test_a_spot_a_refused_start_left_is_spent_by_another_entry_hqplayer_plays_on
     assert [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")] == ["Play"]
 
 
+@pytest.mark.parametrize("before", [None, "dsp"])
+def test_on_hqplayer_5_a_rest_spot_goes_by_the_time_since_the_rest(fake, output, monkeypatch, before):
+    """On HQPlayer 5, which names no take, P8 goes by the time rule — no take
+    command of the node's since the rest: the person's start of entry 1 in
+    HQPlayer's own window spends the rest spot; a filter change of the
+    node's since the rest keeps it (the limit of a take no one names)."""
+    mgr, b = output
+    fake.track_serial = None
+    _polls(fake, 2)
+    _refused_next(mgr, b, fake, monkeypatch)
+    fake.refuse_play.clear()
+    if before == "dsp":
+        hb.change_dsp({"filter": "f57", "filter1x": "f57"})
+        _polls(fake, 2)
+        assert b._spot is not None
+    with fake._lock:
+        fake.state, fake.track, fake.position, fake._starting = int(PlaybackState.PLAYING), 1, 0.0, 0
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 1
+                 and mgr._latest_status.get("state") == "playing", 10)
+    _polls(fake, 3)
+    assert (b._spot is None) == (before is None), b._spot
+
+
 def test_only_the_rest_rules_spot_goes_when_another_entry_of_ours_plays_on_a_take_not_the_nodes(fake):
     """_spot_played's P8 arm on its own: HQPlayer plays entry 1 of ours while
     the spot holds entry 2. The rest rule's spot goes when the take that

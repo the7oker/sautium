@@ -1220,10 +1220,12 @@ Pause ("Paused on ‹renderer›", since 2026-11-09): its own remote, or another
 ours the renderer plays again by itself while another controller held it (its own controls
 resuming our media) is ours again (since 2026-11-09, ROON-COEX §6.1 P9): the external state
 ends, the node's Pause and Stop reach it, the listen held at the takeover goes on from the
-takeover's second until the position poll reads the renderer's own. Only a URI that names a
-slot of the queue (an Opus seek's `?ss=` aside): one of a track since removed, or handed
-under another quality setting, names no queued track, and the playback stays the other
-app's.
+takeover's second until the position poll reads the renderer's own — another slot's, the next
+it had armed, from that stream's start. Only a URI whose token names a slot of the queue (the
+quality tier it was handed in and an Opus seek's `?ss=` aside): one of a track since removed
+names no queued track, and the playback stays the other app's (an open question, ROON-COEX
+§6.1 P11). A take-back of the person's under way — its load, or its wait for the slot's stream
+— is the newer word: nothing is ours again meanwhile.
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last
@@ -1241,7 +1243,12 @@ heavy engine's Stop — so the mirror drifts and nothing is sent, a mirror lost
 in the silence (an add owed, an edit's hand-over) too, its reconverge given up;
 only an empty playlist, or one of the node's own, is a restart. A tail mirror
 whose tail still holds — HQPlayer's own entries before the one it reads — stays
-the node's: lost and reconverged as at any return. The node never writes over
+the node's: lost and reconverged as at any return. The reconverge holds to the same
+rule whatever road lost the mirror (an add HQPlayer owed and carried out into
+Roon's playlist, no return at all): a stopped HQPlayer whose playlist holds an entry
+the node never gave while a slot of the queue is gone from it, or the queue holds
+none, drifts and is sent nothing; HQPlayer's own entries beside all of ours are taken
+afresh as before. The node never writes over
 another controller's playback without a person's word. An HQPlayer Embedded in trial mode
 stops every 30 minutes and must be restarted — its control port stays open
 but closes every connection, which is why the play-intent probe asks
