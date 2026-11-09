@@ -1637,6 +1637,9 @@ async def scan_away() -> Dict[str, Any]:
     with _scan_lock:
         if _scan_state["running"]:
             raise HTTPException(status_code=409, detail="Scan already running")
+        if _scan_state["prune_plan"] is not None:
+            raise HTTPException(status_code=409, detail=(
+                "A question about removals is waiting for its answer — answer it first."))
         _scan_state.update(running=True, cancel_requested=False, stats=None, result=None,
                            prune_plan=None, progress="Looking at what is away...")
     threading.Thread(target=_away_worker, daemon=True).start()

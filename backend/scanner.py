@@ -1142,6 +1142,13 @@ class LibraryScanner:
 
         import_metadata(entries, sink=LOCAL_FILES, stats=stats, progress_cb=progress_cb,
                         cancel_check=None if cancelled_in_phase1 else cancel_check)
+        # A slot queued on a file of a copy that is away moves to a copy of
+        # its track as soon as one is here: the queue's rebind looks again.
+        if stats["added"]:
+            with get_db_context() as db:
+                db.execute(text("""
+                    SELECT pg_notify('sautium_files_removed', '')
+                    WHERE EXISTS (SELECT 1 FROM album_variants WHERE absent_since IS NOT NULL)"""))
         # ── Cue supersede post-pass ─────────────────────────────
         # Runs after the re-import so a track whose slices merely moved
         # keeps its row (and listening history). A track left with no
@@ -1254,9 +1261,9 @@ def _mark_present(paths: Set[str]) -> int:
                             AND mf.file_path = ANY(CAST(:p AS text[])))
             RETURNING av.id
         """), {"p": list(paths)}).scalars())
-        # The rule picks again now that the copy is readable (present, then
-        # the best rip): a better rip back is an upgrade, as a better rip
-        # added is — the passes re-analyse from it.
+        # The rule picks again now that the copy is readable: a better rip
+        # back is an upgrade, as a better rip added is — the passes re-analyse
+        # from it; an equal one leaves the analysis where it is.
         if back_ids:
             for tid in db.execute(text("""
                 SELECT DISTINCT mf.track_id FROM media_files mf
@@ -1333,20 +1340,16 @@ def _set_aside(missing_ids: List[int], seen: Set[str], stats: Dict[str, Any]) ->
             # The queue moves a slot on a file of this copy to a present copy
             # of its track (playback.queue.rebind_origins), as when files go.
             db.execute(text("SELECT pg_notify('sautium_files_removed', '')"))
-            # A track another present copy also holds (a compilation, a second
-            # rip) and that has no analysis yet is analysed from that copy
-            # while this one is away. A track analysed already keeps its
-            # source: unplugging a card must not re-analyse it from another
-            # master (the return, below, elects by the rule again).
+            # A track another copy here also holds (a compilation, a second
+            # rip) is elected again by the rule: one with no analysis yet is
+            # analysed from that copy while this one is away; one analysed
+            # keeps its source (canon.identity.ANALYSIS_SOURCE_ORDER).
             for tid in db.execute(text("""
                 SELECT DISTINCT mf.track_id FROM media_files mf
                 WHERE mf.album_variant_id = ANY(CAST(:v AS int[]))
                   AND EXISTS (SELECT 1 FROM media_files o
-                              JOIN album_variants ov ON ov.id = o.album_variant_id
-                              WHERE o.track_id = mf.track_id AND ov.absent_since IS NULL)
-                  AND (NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = mf.track_id)
-                       OR NOT EXISTS (SELECT 1 FROM audio_features af
-                                      WHERE af.track_id = mf.track_id))
+                              WHERE o.track_id = mf.track_id
+                                AND o.album_variant_id <> mf.album_variant_id)
             """), {"v": newly}).scalars():
                 elect_analysis_source(db, tid)
         kept = set(db.execute(text(

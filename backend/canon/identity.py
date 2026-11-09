@@ -65,23 +65,35 @@ def _ensure_artist(db: Session, name: str):
     return uid
 
 
+# Does this file (`mf`) carry the track's analysis — the material its
+# embedding was made from?
+_CARRIES_ANALYSIS = """EXISTS (SELECT 1 FROM analysis_sources s
+                               JOIN embeddings e ON e.analysis_source_id = s.id
+                               WHERE s.media_file_id = mf.id)"""
+
 # The analysis-source ranking of a track's files, over media_files `mf`
-# joined to its album_variants `av`: a present copy's file over one of a copy
-# that is away, then CD (16-bit lossless) > other lossless > lossy, then the
-# oldest row. The one rule — elect_analysis_source and the CLI's bulk
-# recalculation both order by it.
-ANALYSIS_SOURCE_ORDER = """(av.absent_since IS NULL) DESC,
+# joined to its album_variants `av`. A file of a copy that is away
+# (album_variants.absent_since) ranks last unless it carries the track's
+# analysis: a track with none is analysed from a copy that is here, and one
+# analysed already keeps its source while a card is out (nothing reads it,
+# nothing is pending, nothing is re-analysed when it goes or comes back).
+# Then CD (16-bit lossless) > other lossless > lossy — a better rip is the
+# upgrade the passes re-analyse from — then, between equal rips, the file that
+# carries the analysis, then the oldest row. The one rule: elect_analysis_source
+# and the CLI's bulk recalculation both order by it.
+ANALYSIS_SOURCE_ORDER = f"""(av.absent_since IS NULL OR {_CARRIES_ANALYSIS}) DESC,
                            (mf.bit_depth = 16 AND mf.is_lossless) DESC,
                            mf.is_lossless DESC,
+                           {_CARRIES_ANALYSIS} DESC,
                            mf.id"""
 
 
 def elect_analysis_source(db: Session, track_id) -> None:
     """Designate the best-quality media_file of a track as its analysis source.
 
-    Priority: a present copy's file over one of a copy that is away
-    (album_variants.absent_since — nothing can read it), then CD (16-bit
-    lossless) > other lossless > lossy. Two statements —
+    Priority: ANALYSIS_SOURCE_ORDER — a copy that is away last unless it
+    carries the track's analysis, then CD (16-bit lossless) > other lossless
+    > lossy, then the file carrying the analysis. Two statements —
     losers cleared before the winner is set — because a single UPDATE that flips
     both rows transiently holds two TRUE rows for one track_id, which the partial
     unique index uq_media_files_analysis_source rejects. When the elected file

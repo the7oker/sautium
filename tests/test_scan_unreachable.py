@@ -880,11 +880,12 @@ def test_a_copy_found_again_elsewhere_is_asked_about_apart_and_its_analysis_foll
 
 def test_a_copy_away_while_another_is_found_keeps_one_analysis(
         cur, library, main_module, monkeypatch, tmp_path, scanned_library):
-    """The card's copy away while the disk holds the album: the copy found
-    in the library takes the analysis over at once (present above away), and
-    the next Rescan asks only to remove the copy that is away."""
+    """The card's copy away while the disk holds the album: plays take the
+    copy found at once; the analysis stays where it was made (nothing is
+    pending, nothing re-analysed) until the copy away is removed, when it
+    follows the copy found by its fingerprint."""
     _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
-    state = _rescan(main_module, monkeypatch)
+    _rescan(main_module, monkeypatch)
     assert _away(cur) == ["Pulse Archive"]
     for name in ("01.flac", "02.flac"):
         target = library / "Disk" / "Pulse Archive" / name
@@ -893,10 +894,9 @@ def test_a_copy_away_while_another_is_found_keeps_one_analysis(
 
     _scan(main_module, monkeypatch, False)
 
-    assert state["result"]["relinked"] == 2
     for title, (track_id, _sid) in scanned_library.items():
         [(mf_id, path)] = _sources(cur, track_id)
-        assert "Disk/Pulse Archive/" in path
+        assert "Ostrava Unit/Pulse Archive/" in path
         assert _queued(cur, title) == {"embeddings": False, "features": False}
     # a play of the album takes the copy found, not the one away
     from routers import player
@@ -908,10 +908,33 @@ def test_a_copy_away_while_another_is_found_keeps_one_analysis(
     state = _rescan(main_module, monkeypatch)
     assert state["prune_plan"]["counts"]["copies"] == 1
     _answer(main_module, state["prune_plan"]["id"], True)
+
     assert _away(cur) == []
-    cur.execute("SELECT count(*) FROM media_files WHERE file_path LIKE %s",
-                ("%/Ostrava Unit/Pulse Archive/%",))
-    assert cur.fetchone()[0] == 0                 # the card's copy went; the disk's stays
+    assert state["result"]["prune"]["relinked"] == 2
+    for title, (track_id, _sid) in scanned_library.items():
+        [(mf_id, path)] = _sources(cur, track_id)
+        assert "Disk/Pulse Archive/" in path
+        assert _queued(cur, title) == {"embeddings": False, "features": False}
+
+
+def test_an_equal_copy_back_leaves_the_analysis_where_it_is(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """The card goes, a copy of the album comes to the disk, the card comes
+    back: no step re-analyses the same audio."""
+    _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
+    _rescan(main_module, monkeypatch)
+    for name in ("01.flac", "02.flac"):
+        target = library / "Disk" / "Pulse Archive" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((tmp_path / "card" / "Ostrava Unit" / "Pulse Archive" / name).read_bytes())
+    _scan(main_module, monkeypatch, False)
+    _move(tmp_path / "card" / "Ostrava Unit", library / "Ostrava Unit")
+
+    state = _scan(main_module, monkeypatch, False)
+
+    assert state["result"]["back"] == 1
+    for title in ("Carrier", "Relay"):
+        assert _queued(cur, title) == {"embeddings": False, "features": False}
 
 
 def test_a_track_away_plays_as_a_missing_file_and_a_present_copy_first(
@@ -1277,7 +1300,7 @@ def test_a_track_another_album_holds_is_analysed_there_only_while_it_lacks_analy
 
 
 def test_a_queued_file_of_a_copy_set_aside_moves_to_a_present_copy(
-        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library, scratch_dsn):
     """A slot queued on the card's file moves to the disk's copy of the
     track when the card's copy is set aside, as when files go; a track with
     no other copy keeps its file."""
@@ -1291,9 +1314,15 @@ def test_a_queued_file_of_a_copy_set_aside_moves_to_a_present_copy(
                        source={"kind": "file", "path": "", "format": "FLAC"})
              for mid, tid in ((carrier_mf, carrier), (relay_mf, relay))]
     _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
+    listener = psycopg2.connect(scratch_dsn)
+    listener.autocommit = True
+    listener.cursor().execute("LISTEN sautium_files_removed")
 
     _rescan(main_module, monkeypatch)
 
+    listener.poll()
+    assert [n.channel for n in listener.notifies] == ["sautium_files_removed"]
+    listener.close()
     moved, kept = rebind_origins(slots)
     assert "Compilation/Best Of/01.flac" in moved["source"]["path"]
     assert kept is None

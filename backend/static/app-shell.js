@@ -15583,8 +15583,8 @@
     `;
 
     // Copies a Rescan found none of the files of stay in the library, away,
-    // until they come back or the owner removes them here — the one place
-    // they are removed from.
+    // until they come back or the owner removes them — here, or at the
+    // Rescan's question for a copy found again in another copy.
     const away = lib.away || {};
     const awayRow = !away.copies ? '' : `
       <div class="form-group">
@@ -15593,7 +15593,7 @@
             <span class="row-stack-label">Away</span>
             <span class="row-stack-value">${escapeProfileHtml(_count(away.albums, 'album', 'albums'))}</span>
           </div>
-          <div class="row-stack-sub">Their files were not found at the last Rescan. They stay in your library and come back by themselves when a scan finds their files.</div>
+          <div class="row-stack-sub">Their files were not found at the last Rescan. They stay in your library until you remove them, and come back by themselves when a scan finds their files.</div>
         </div>
       </div>
       ${scanRunning ? '' : `

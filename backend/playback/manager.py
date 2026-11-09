@@ -1248,8 +1248,10 @@ class PlaybackManager:
         a gone file is re-read for the active output (playback.queue.
         rebind_origins). The media_files delete trigger wakes the files
         listener below — a rescan's prune, a superseded CUE image, a cascade,
-        whichever process ran it — and the restore of a persisted queue calls
-        it once. A gone id left in a slot is written into session_tracks and
+        whichever process ran it — as do a Rescan that sets a copy aside as
+        away and an import while copies are away (a slot on an away file
+        moves to a copy here); the restore of a persisted queue calls it
+        once. A gone id left in a slot is written into session_tracks and
         listening_history against their foreign keys (every Play died on the
         archive of the old queue) and its path no longer opens. The output
         converges through queue_changed("rebind"); the status is re-published
@@ -1374,7 +1376,8 @@ class PlaybackManager:
 manager = PlaybackManager()
 
 # Re-binds the queue on sautium_files_removed (the media_files delete
-# trigger) and on every (re)connect. A burst — a CUE reconcile commits per
+# trigger, a Rescan that sets a copy aside as away, an import while copies
+# are away) and on every (re)connect. A burst — a CUE reconcile commits per
 # image — folds into few passes. The manager is looked up at each call.
 _files_listener = Listener("queue-files-listener", ("sautium_files_removed",),
                            on_notify=lambda notifies: manager.rebind_files(),

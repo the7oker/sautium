@@ -284,7 +284,8 @@ See:
   which no switch touches; since 2026-09-30 it changes only when its file
   leaves the library (the `media_files` delete trigger wakes
   `PlaybackManager.rebind_files`: a live copy of the track, else the track
-  itself, streamed). How an owned file reaches HQPlayer is read off its
+  itself, streamed) and, since 2026-11-09, when its file's copy is away
+  while a copy of the track is here (it moves to that copy). How an owned file reaches HQPlayer is read off its
   address, never configured (`_stream_mode`, `auth_hmac.is_own_address`):
   on this machine by path, anywhere else as a stream from the media proxy
   — a share the HQPlayer would mount is an extra setup for the same bytes,
