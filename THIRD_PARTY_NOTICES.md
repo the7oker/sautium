@@ -94,6 +94,19 @@ mutagen is GPL-2.0-or-later. Sautium imports it for tag reading; it is
 installed by pip on the user's machine and is not redistributed with
 Sautium. Source: https://github.com/quodlibet/mutagen.
 
+## Formats and methods
+
+- **Chromaprint's compressed fingerprint** (the Chromaprint project,
+  acoustid.org/chromaprint) — `desktop/p2p/material.py` decodes the
+  fingerprints fpcalc prints, to tell whether two prints of one track are
+  one material. The decoder is Sautium's own, written from the format; no
+  Chromaprint code is included.
+- **AcoustID's fingerprint alignment** (the AcoustID project, acoustid.org)
+  — the same module aligns two prints as AcoustID does: offsets voted for
+  by items whose top 14 bits agree, within 80 items of each other, and the
+  bit error rate at the winning offset. Written from the method; no AcoustID
+  code is included.
+
 ## Services and data
 
 - **Last.fm** — metadata enrichment, scrobbling and, since 2026-09-24, the
