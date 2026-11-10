@@ -187,13 +187,14 @@ def _move_analysis(db: Session, old: str, new: str, kinds) -> None:
     of those kinds.
 
     A source the target already holds — the same declaration (the print and
-    the duration the records' seals bind) AND the same origin (UNIQUE NULLS
-    NOT DISTINCT (track_id, chromaprint_key, imported, duration_seconds)) —
-    is the same row: the moving records re-point at it, the source's group
-    members re-point at the target row's root, and the duplicate is
-    dropped. A declaration the target holds under the other origin is its
-    twin, and one of another duration another row: this node's records and
-    another author's never share a row, nor do records of two declarations. Each
+    the duration the records' seals bind), the same copy and the same origin
+    (UNIQUE NULLS NOT DISTINCT (track_id, chromaprint_key, duration_seconds,
+    imported, copy_rank)) — is the same row: the moving records re-point at
+    it, the source's group members re-point at the target row's root, and
+    the duplicate is dropped. Any other row moves as a row of its own and
+    joins the target's group: this node's records and another author's never
+    share a row, nor do records of two declarations or of two copies — a
+    lossy stream's features never stand for the target's CD. Each
     source that moves joins the target's material group by the rule
     (material.root_among: a twin's group with no comparison, else the first
     row that is one material with it), a moving root bringing its members
@@ -214,6 +215,7 @@ def _move_analysis(db: Session, old: str, new: str, kinds) -> None:
                                  AND t.chromaprint_key = o.chromaprint_key
                                  AND t.imported = o.imported
                                  AND t.duration_seconds IS NOT DISTINCT FROM o.duration_seconds
+                                 AND t.copy_rank = o.copy_rank
          WHERE o.track_id = :old AND o.id = ANY(:ids)"""),
         {**p, "ids": list(moving)}).fetchall()
     for d in dups:

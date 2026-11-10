@@ -794,19 +794,23 @@ CREATE TABLE IF NOT EXISTS stream_providers (
 -- enricher; never recomputed after the fact. A row is one DECLARATION — the
 -- fingerprint (chromaprint_key, the database's digest of the ~3 KB print,
 -- too long for a btree row) and the duration, which a record's seal binds —
--- of one origin: UNIQUE NULLS NOT DISTINCT (track_id, chromaprint_key,
--- imported, duration_seconds). This node's registrations share the
--- first-hand row of their declaration, the sync import an imported row of
--- its record's own declaration, nothing ever turns one into the other
--- (since 2026-11-10: a registration used to flip an imported row
--- first-hand, and the other author's records linked to it became signable
--- here), and no declaration changes under the records sealed with it.
--- Unchanged material reuses its row, a different master or another cut
--- mints a new one, two rips of one master collapse. The first-hand row
--- describes the copy its records were made from (own file > lossless stream
--- > lossy stream, then the quality); media_file_id survives file deletion
--- as NULL — the row remains the durable statement of WHAT was analyzed. No
--- fingerprint = no row = no analysis saved.
+-- of one COPY of one origin: UNIQUE NULLS NOT DISTINCT (track_id,
+-- chromaprint_key, duration_seconds, imported, copy_rank), copy_rank the
+-- copy's place among the copies of one material (own file > lossless stream
+-- > lossy stream, then CD > other lossless > lossy; every imported row
+-- ranks as imported whatever its author claims). A row describes the copy
+-- its records were made from, and nothing rewrites that: a registration of
+-- another print, duration or copy is a row of its own, joined to its group,
+-- and the passes replace their own kind at their saves by the rank. Only
+-- media_file_id (an equal copy elected, a returned file re-linked),
+-- material_of and track_id (the merge) are ever written to a row. This
+-- node's registrations are first-hand, the sync import's rows imported,
+-- and nothing turns one into the other (since 2026-11-10: a registration
+-- used to flip an imported row first-hand, and the other author's records
+-- linked to it became signable here). Unchanged material reuses its row;
+-- media_file_id survives file deletion as NULL — the row remains the
+-- durable statement of WHAT was analyzed. No fingerprint = no row = no
+-- analysis saved.
 --
 -- material_of groups a track's rows that are one material without one
 -- digest (desktop/p2p/material.py: a decoder that moved the print, a lossy
@@ -855,11 +859,20 @@ CREATE TABLE IF NOT EXISTS analysis_sources (
                                           -- registration of the declaration
                                           -- is its twin
     material_of   INTEGER REFERENCES analysis_sources(id) ON DELETE SET NULL,
+    copy_rank     SMALLINT GENERATED ALWAYS AS (
+                      CASE WHEN imported THEN -1000
+                           ELSE CASE WHEN provider_id IS NULL THEN 2000
+                                     WHEN is_lossless THEN 1000 ELSE 0 END
+                              + CASE WHEN is_lossless AND bit_depth = 16 THEN 100
+                                     WHEN is_lossless THEN 50 ELSE 10 END
+                      END) STORED,
+                                          -- provenance.copy_rank: the material
+                                          -- rank, then the quality score
     computed_at   TIMESTAMPTZ DEFAULT now(),
     CONSTRAINT chk_asrc_stream_no_file CHECK (provider_id IS NULL OR media_file_id IS NULL),
     CONSTRAINT chk_asrc_imported_anonymous CHECK (NOT (imported AND provider_id IS NOT NULL)),
-    CONSTRAINT uq_asrc_track_declaration_origin
-        UNIQUE NULLS NOT DISTINCT (track_id, chromaprint_key, imported, duration_seconds)
+    CONSTRAINT uq_asrc_track_declaration_copy
+        UNIQUE NULLS NOT DISTINCT (track_id, chromaprint_key, duration_seconds, imported, copy_rank)
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_sources_media_file ON analysis_sources(media_file_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_sources_material

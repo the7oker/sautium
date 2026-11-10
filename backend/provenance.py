@@ -12,17 +12,17 @@ The fingerprint is the whole content address (2026-09-18; a BLAKE2b hash of
 the decoded PCM stood beside it before): a public recording identity that any
 node's decode of the same material reproduces, where the PCM hash changed
 with the decoder build and with every lossy decode. A row is one
-declaration of one origin — keyed on (track_id, chromaprint_key, imported,
-duration_seconds), chromaprint_key the database's digest of the fingerprint
-since ~3 KB of base64 is too long for a btree row: this module registers
-only the node's own (first-hand) row of a declaration, the sync import only
-the imported row of its record's declaration, nothing turns one into the
-other — the flag is what sign_audio signs by (since 2026-11-10; a
+declaration of one copy of one origin — keyed on (track_id, chromaprint_key,
+duration_seconds, imported, copy_rank), chromaprint_key the database's
+digest of the fingerprint since ~3 KB of base64 is too long for a btree row:
+this module registers only the node's own (first-hand) rows, the sync import
+only the imported row of its record's declaration, nothing turns one into
+the other — the flag is what sign_audio signs by (since 2026-11-10; a
 registration used to flip an imported row first-hand, and another author's
-records linked to it became this node's to sign) — and no declaration
-changes under the records sealed with it. Re-analyzing unchanged material
-reuses the row, a different master or another cut mints a new one, two rips
-of one master collapse. No fingerprint means no address, and an analysis with no
+records linked to it became this node's to sign) — and nothing rewrites a
+row's declaration or copy under the records made from it. Re-analyzing
+unchanged material reuses the row, a different master, another cut or a
+better copy mints a new one, two equal rips of one master collapse. No fingerprint means no address, and an analysis with no
 address is never saved — it could neither sign nor travel, and the pending
 predicates would re-derive it on every run.
 
@@ -100,15 +100,13 @@ def quality_score(bit_depth, is_lossless) -> int:
     return 10
 
 
-def _quality_sql(row: str) -> str:
-    return (f"CASE WHEN {row}.is_lossless AND {row}.bit_depth = 16 THEN 100 "
-            f"WHEN {row}.is_lossless THEN 50 ELSE 10 END")
-
-
-def _group_rank_sql(row: str) -> str:
-    """A row's place in its material group: the material rank, then the
-    quality score — the order _persist_analysis overwrites by."""
-    return f"ROW({_rank_sql(row)}, {_quality_sql(row)})"
+def copy_rank(provider_id, is_lossless, bit_depth, imported: bool = False) -> int:
+    """A copy's place among the copies of one material — the material rank,
+    then the quality score — as analysis_sources.copy_rank stores it for a
+    row: every imported row ranks as imported, whatever its author claims."""
+    if imported:
+        return -1000
+    return material_rank(provider_id, is_lossless) * 1000 + quality_score(bit_depth, is_lossless)
 
 
 def _group_sql(row: str) -> str:
@@ -127,7 +125,7 @@ def file_in_group_sql(source: str = "asrc", file: str = "mf") -> str:
     return f"""EXISTS (SELECT 1 FROM analysis_sources r
                         WHERE r.media_file_id = {file}.id
                           AND {_group_sql('r')} = {_group_sql(source)}
-                          AND {_group_rank_sql('r')} <= {_group_rank_sql(source)})"""
+                          AND r.copy_rank <= {source}.copy_rank)"""
 
 
 def held_in_group(db: Session, source_id: int, table: str, model_id=None) -> bool:
@@ -145,53 +143,51 @@ def held_in_group(db: Session, source_id: int, table: str, model_id=None) -> boo
               JOIN analysis_sources n ON n.id = :sid
              WHERE x.track_id = n.track_id {by_model}
                AND {_group_sql('a')} = {_group_sql('n')}
-               AND {_group_rank_sql('a')} >= {_group_rank_sql('n')})"""),
+               AND a.copy_rank >= n.copy_rank)"""),
         {"sid": source_id, "mid": str(model_id) if model_id is not None else None}).scalar())
 
 
+def outranked(db: Session, existing_id: Optional[int], source_id: int) -> bool:
+    """Whether a record linked to `existing_id` outranks one a pass is about
+    to save from `source_id`, so the save leaves it: a higher material rank
+    (own file > lossless stream > lossy stream > imported) always, and the
+    quality score only between copies of one material — the track's elected
+    file replaces another material's analysis, of whatever quality, rather
+    than being analysed and refused on every run. Each pass replaces its own
+    kind at its save by this rule; a record linked to no source is
+    outranked by every save."""
+    if existing_id is None:
+        return False
+    return bool(db.execute(sa_text(f"""
+        SELECT {_rank_sql('o')} > {_rank_sql('n')}
+               OR ({_group_sql('o')} = {_group_sql('n')} AND o.copy_rank > n.copy_rank)
+          FROM analysis_sources o, analysis_sources n
+         WHERE o.id = :old AND n.id = :new"""), {"old": existing_id, "new": source_id}).scalar())
+
+
 # The tables of analysis records, each row linked to an analysis_sources row
-# of its track: what a registration that raises a row's copy re-derives and
-# what the identity merge weighs kind by kind.
+# of its track: what the identity merge weighs kind by kind.
 ANALYSIS_KINDS = ("embeddings", "audio_features")
 
 _TRACK_ROWS_SQL = sa_text("""
     SELECT id, material_of, chromaprint, duration_seconds, imported,
-           provider_id, is_lossless, bit_depth
+           provider_id, is_lossless, media_file_id, copy_rank
       FROM analysis_sources WHERE track_id = :tid ORDER BY id""")
-
-_LOCK_ROW_SQL = sa_text("""
-    SELECT id, material_of, chromaprint, duration_seconds, imported,
-           provider_id, is_lossless, bit_depth
-      FROM analysis_sources WHERE id = :sid FOR UPDATE""")
 
 _LOCK_ROOT_SQL = sa_text("SELECT material_of FROM analysis_sources WHERE id = :sid FOR KEY SHARE")
 
-# A row per declaration (UNIQUE NULLS NOT DISTINCT (track_id, chromaprint_key,
-# imported, duration_seconds)): what this node registers is first-hand, and a
-# print or a duration another registration declared is a row of its own.
+# A row per declaration, copy and origin (UNIQUE NULLS NOT DISTINCT
+# (track_id, chromaprint_key, duration_seconds, imported, copy_rank)).
 _INSERT_SQL = sa_text("""
     INSERT INTO analysis_sources
         (track_id, provider_id, media_file_id, chromaprint,
          duration_seconds, sample_rate, bit_depth, is_lossless, material_of)
     VALUES (:tid, :pid, :mfid, :fp, :dur, :sr, :bd, :ll, :root)
-    ON CONFLICT (track_id, chromaprint_key, imported, duration_seconds) DO NOTHING
+    ON CONFLICT (track_id, chromaprint_key, duration_seconds, imported, copy_rank) DO NOTHING
     RETURNING id
 """)
 
-_COPY_SQL = sa_text("""
-    UPDATE analysis_sources
-       SET provider_id = :pid, media_file_id = :mfid, sample_rate = :sr,
-           bit_depth = :bd, is_lossless = :ll, computed_at = now()
-     WHERE id = :sid
-""")
-
 _FILE_SQL = sa_text("UPDATE analysis_sources SET media_file_id = :mfid WHERE id = :sid")
-
-
-def _copy_rank(provider_id, is_lossless, bit_depth, imported=False) -> tuple:
-    """A copy's place among the copies of one material: the material rank,
-    then the quality score (_group_rank_sql in Python)."""
-    return (material_rank(provider_id, is_lossless, imported), quality_score(bit_depth, is_lossless))
 
 
 def _held_root(db: Session, root: Optional[int]) -> Optional[int]:
@@ -212,63 +208,74 @@ def _held_root(db: Session, root: Optional[int]) -> Optional[int]:
 
 def _register(db: Session, track_id, fp: str, *, provider_id, media_file_id,
               duration, sample_rate, bit_depth, is_lossless) -> Optional[int]:
-    """The first-hand row of `fp` and `duration` on the track; None when the
-    material is already held here at a higher rank — under its own
-    declaration (only a stream can be outranked there) or, for a stream, by
-    a row of its material group.
+    """The first-hand row of `fp`, `duration` and this copy on the track;
+    None when a stream's material is already held here by a better copy in
+    its material group.
 
-    A declaration's row describes the copy its records were made from, and
-    a record is sealed with its row's declaration, so a declaration never
-    changes under a row: another print or another duration is a row of its
-    own, born in the group of the first row it is one material with
-    (material.root_among: within the duration bound, an edit with the
-    opening of the album version is another material).
-
-    A copy registered again under its declaration moves the row to it when
-    it is at least as good; when it is better (a lossy stream the owned
-    lossless file now holds, a CD rip after a 24-bit one), the records
-    linked to the row were made from the lesser copy and are deleted, so
-    the passes derive them from this one. A lesser own file only takes the
-    row's file: its records stay, made from the better copy."""
-    tid, mine = str(track_id), _copy_rank(provider_id, is_lossless, bit_depth)
+    A row describes the copy its records were made from, and a record is
+    sealed with its row's declaration, so nothing rewrites a row: another
+    print, another duration or another copy (a lossless stream after a
+    lossy one, the owned file after a stream, a CD rip after a 24-bit one)
+    is a row of its own, born in the group of the first row it is one
+    material with (material.root_among: within the duration bound, so an
+    edit with the opening of the album version is another material). The
+    passes then replace their own kind at their saves by the rank
+    (outranked), and until they do the group's ranks keep them pending
+    (file_in_group_sql) and their skip off (held_in_group). An equal copy
+    registered again only takes the row's file."""
+    tid, mine = str(track_id), copy_rank(provider_id, is_lossless, bit_depth)
     for _attempt in range(2):
         rows = db.execute(_TRACK_ROWS_SQL, {"tid": tid}).fetchall()
         own = next((r for r in rows if not r.imported and r.chromaprint == fp
-                    and r.duration_seconds == duration), None)
-        if own is None:
-            group = material.root_among(
-                fp, duration, [(r.id, r.material_of, r.chromaprint, r.duration_seconds)
-                               for r in rows])
-        else:
-            own = db.execute(_LOCK_ROW_SQL, {"sid": own.id}).first()
-            if own is None:
-                continue
-            group = own.material_of or own.id
+                    and r.duration_seconds == duration and r.copy_rank == mine), None)
+        if own is not None:
+            if media_file_id is not None and own.media_file_id != media_file_id:
+                db.execute(_FILE_SQL, {"mfid": media_file_id, "sid": own.id})
+            return own.id
+        group = material.root_among(
+            fp, duration, [(r.id, r.material_of, r.chromaprint, r.duration_seconds) for r in rows])
         if provider_id is not None and group is not None and any(
-                (r.material_of or r.id) == group and material_rank(
-                    r.provider_id, r.is_lossless, r.imported) > mine[0]
-                for r in rows if own is None or r.id != own.id):
+                (r.material_of or r.id) == group and r.copy_rank > mine for r in rows):
             return None
-        params = {"tid": tid, "pid": provider_id, "mfid": media_file_id, "fp": fp,
-                  "dur": duration, "sr": sample_rate, "bd": bit_depth, "ll": is_lossless}
-        if own is None:
-            sid = db.execute(_INSERT_SQL, {**params, "root": _held_root(db, group)}).scalar()
-            if sid is not None:
-                return sid
-            continue                  # a registration of the same declaration got there first
-        theirs = _copy_rank(own.provider_id, own.is_lossless, own.bit_depth)
-        if theirs[0] > mine[0]:
-            return None
-        if mine >= theirs:
-            db.execute(_COPY_SQL, {**params, "sid": own.id})
-            if mine > theirs:
-                for kind in ANALYSIS_KINDS:
-                    db.execute(sa_text(f"DELETE FROM {kind} WHERE analysis_source_id = :sid"),
-                               {"sid": own.id})
-        elif media_file_id is not None:
-            db.execute(_FILE_SQL, {"mfid": media_file_id, "sid": own.id})
-        return own.id
+        sid = db.execute(_INSERT_SQL, {
+            "tid": tid, "pid": provider_id, "mfid": media_file_id, "fp": fp, "dur": duration,
+            "sr": sample_rate, "bd": bit_depth, "ll": is_lossless,
+            "root": _held_root(db, group)}).scalar()
+        if sid is not None:
+            return sid
+        # a registration of the same declaration and copy got there first
     raise RuntimeError(f"the analysis source of track {tid} changed under two registrations")
+
+
+def join_existing_rows(db: Session, track_ids=None) -> int:
+    """Join the rows of each track that has two or more into their material
+    groups, as a registration would have: in id order, each root that holds
+    no members of its own joins the first earlier row it is one material
+    with (material.root_among — the declared durations filtered before any
+    print is decoded). For rows registered before the groups existed (delta
+    055): ANALYSIS-3's cutover calls it once over every track; `track_ids`
+    narrows it. Idempotent — a member is never compared again. Returns the
+    rows joined."""
+    scope = "" if track_ids is None else "WHERE track_id = ANY(CAST(:tids AS uuid[]))"
+    params = {} if track_ids is None else {"tids": [str(t) for t in track_ids]}
+    tracks = db.execute(sa_text(f"""
+        SELECT track_id::text FROM analysis_sources {scope}
+         GROUP BY track_id HAVING count(*) >= 2 ORDER BY 1"""), params).scalars().all()
+    joined = 0
+    for tid in tracks:
+        rows = [list(r) for r in db.execute(sa_text("""
+            SELECT id, material_of, chromaprint, duration_seconds FROM analysis_sources
+             WHERE track_id = :tid ORDER BY id"""), {"tid": tid}).fetchall()]
+        for me in rows:
+            if me[1] is not None or any(r[1] == me[0] for r in rows):
+                continue
+            root = material.root_among(me[2], me[3], [r for r in rows if r[0] < me[0]])
+            if root is not None:
+                db.execute(sa_text("UPDATE analysis_sources SET material_of = :root WHERE id = :sid"),
+                           {"root": root, "sid": me[0]})
+                me[1] = root
+                joined += 1
+    return joined
 
 
 # The fingerprinter's self-test (2026-11-09). The fingerprint is the content
@@ -672,12 +679,3 @@ def _probe_audio(local_path: str):
     raw_dur = stream.get("duration") or probed.get("format", {}).get("duration")
     duration = int(round(float(raw_dur))) if raw_dur else None
     return rate, bits, duration
-
-
-def material_rank_of(db: Session, analysis_source_id: Optional[int]) -> Optional[int]:
-    """Material rank of a linked source; None for unlinked (legacy) rows."""
-    if analysis_source_id is None:
-        return None
-    return db.execute(sa_text(
-        f"SELECT {MATERIAL_RANK_SQL} FROM analysis_sources s WHERE s.id = :sid"),
-        {"sid": analysis_source_id}).scalar()

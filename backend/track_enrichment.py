@@ -592,12 +592,14 @@ class TrackEnrichmentPipeline:
         return self._lastfm_service
 
     def _get_analysis_file(self, db: Session, track: Track) -> Optional[MediaFile]:
-        """Get the preferred media file for audio analysis (is_analysis_source=True),
-        never one of a copy that is away (nothing can read it)."""
-        present = db.query(MediaFile).join(AlbumVariant).filter(
-            MediaFile.track_id == track.id, AlbumVariant.absent_since.is_(None))
-        return (present.filter(MediaFile.is_analysis_source == True).first()
-                or present.first())
+        """The track's elected analysis source (is_analysis_source), never one
+        of a copy that is away (nothing can read it). No other file stands in
+        for an elected one that is away: the election keeps a file away only
+        while it carries the track's analysis (canon.identity.
+        ANALYSIS_SOURCE_ORDER), and another file's analysis would replace it."""
+        return db.query(MediaFile).join(AlbumVariant).filter(
+            MediaFile.track_id == track.id, AlbumVariant.absent_since.is_(None),
+            MediaFile.is_analysis_source == True).first()
 
     def _check_track_status(self, db: Session, track: Track) -> Dict[str, bool]:
         """

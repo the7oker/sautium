@@ -224,9 +224,18 @@ def root_among(fingerprint: str, duration: Optional[int], rows: Iterable) -> Opt
     joins among its track's other rows — each (id, material_of, chromaprint,
     duration_seconds), in id order: the root (material_of NULL marks one) of
     a row with the equal print, with no comparison, else of the first row
-    the rule matches — either only where the declared durations agree; None
-    when none is, and the new row is a root of its own."""
-    rows = [r for r in rows if _durations_agree(duration, r[3])]
+    the rule matches — either only where the declared duration agrees with
+    that row's and with its root's, so the bound never chains through a
+    member; None when none is, and the new row is a root of its own."""
+    rows = list(rows)
+    durations = {r[0]: r[3] for r in rows}
+
+    def agrees(r) -> bool:
+        root = r[1] or r[0]
+        return (_durations_agree(duration, r[3]) and root in durations
+                and _durations_agree(duration, durations[root]))
+
+    rows = [r for r in rows if agrees(r)]
     if not rows:
         return None
     for r in rows:

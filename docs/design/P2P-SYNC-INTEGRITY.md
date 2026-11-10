@@ -5,11 +5,12 @@
 > per-segment + audio_features author signatures, Merkle batches, Worker
 > `/timestamp` notary; **provenance refactor 2026-07-06** — content-address
 > captured AT ANALYSIS TIME into `analysis_sources` (one row per
-> track × declared material × origin: chromaprint + duration_seconds +
-> provider_id, NULL = own file — an origin enum until 2026-09-18; since
-> 2026-11-10 this node's own row and an imported twin of one declaration
-> never merge, so the `imported` flag says who made a record, no
-> declaration changes under the records sealed with it, and a track's
+> track × declared material × copy × origin: chromaprint +
+> duration_seconds + provider_id, NULL = own file — an origin enum until
+> 2026-09-18; since 2026-11-10 this node's own row and an imported twin of
+> one declaration never merge, so the `imported` flag says who made a
+> record, nothing rewrites a row's declaration or copy under its records
+> (a better copy is a row of its own), and a track's
 > rows of one material whose prints differ are grouped by FP-SIM's rule,
 > `material_of`; a
 > BLAKE2b PCM hash stood beside the fingerprint until 2026-09-18, when

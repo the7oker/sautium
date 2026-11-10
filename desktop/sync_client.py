@@ -127,12 +127,80 @@ def _names_its_model(item: dict) -> bool:
             and given.lower() == model_uuid(name))
 
 
-def _print_in_bounds(provenance: dict) -> bool:
-    """The fingerprint a record declares is no longer than fpcalc's window
-    can make (material.MAX_FINGERPRINT_CHARS): a print arrives from another
-    node, and every later registration on its track compares with it."""
-    fp = provenance.get("chromaprint")
-    return not isinstance(fp, str) or len(fp) <= material.MAX_FINGERPRINT_CHARS
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_uuid(value) -> bool:
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
+
+
+def _well_formed(item: dict, bundle: bool) -> Optional[str]:
+    """Why an analysis item is not one this node stores, or None — and then
+    its provenance is normalised in place to the declaration its row is
+    keyed by, exactly as the seal binds it: the fingerprint a string no
+    longer than fpcalc's window can make (material.MAX_FINGERPRINT_CHARS;
+    every later registration on its track compares with it), the duration
+    whole seconds within a day or none, the grid the one this build makes
+    (every segment seal binds it, no features seal does: a features item
+    must not move it). `is_lossless` is the author's unsigned claim, kept
+    when it is one. A field of another type drops its item, never the
+    batch."""
+    if not _is_uuid(item.get("track_uuid")):
+        return "no track uuid"
+    prov = item.get("provenance")
+    if not isinstance(prov, dict):
+        return "no material declaration"
+    fp, duration = prov.get("chromaprint"), prov.get("duration_seconds")
+    grid = prov.get("grid_version")
+    if not isinstance(fp, str) or not fp:
+        return "no fingerprint"
+    if len(fp) > material.MAX_FINGERPRINT_CHARS:
+        return "a fingerprint longer than fpcalc's window can make"
+    if duration is not None and not (_is_int(duration) and 0 < duration <= 24 * 3600):
+        return "a duration that is not whole seconds"
+    if grid is not None and not (_is_int(grid) and grid == rs.GRID_VERSION):
+        return "a grid this build does not make"
+    version = item.get("analysis_version", 1)
+    if not (_is_int(version) and 0 < version < 2 ** 15):
+        return "an analysis version that is not one"
+    if bundle and not (_is_uuid(item.get("model_uuid"))
+                       and isinstance(item.get("model_name", ""), str)):
+        return "no model"
+    lossless = prov.get("is_lossless")
+    item["provenance"] = {"chromaprint": fp, "duration_seconds": duration,
+                          "grid_version": rs.GRID_VERSION,
+                          "is_lossless": lossless if isinstance(lossless, bool) else None}
+    return None
+
+
+def _sealed(payload: bytes, signature, author, proof, root, batch_ok) -> bool:
+    """A record's seal checks out end to end — author signature, Merkle
+    proof, Worker timestamp — and every field of it is of its type."""
+    try:
+        return bool(rs.verify(payload, signature, author)
+                    and rs.verify_proof(rs.record_leaf(signature), proof or [], root)
+                    and batch_ok(root))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _item_write(cur, what: str, track: str, write: Callable[[], None]) -> bool:
+    """Run one item's writes under a savepoint: a value the database refuses
+    (a type, an enum, a check) drops that item, logged, never its batch."""
+    cur.execute("SAVEPOINT import_item")
+    try:
+        write()
+    except (psycopg2.DataError, psycopg2.IntegrityError) as e:
+        cur.execute("ROLLBACK TO SAVEPOINT import_item")
+        logger.warning("sync import: dropping %s %s — %s", what, track[:8],
+                       str(e).splitlines()[0])
+        return False
+    cur.execute("RELEASE SAVEPOINT import_item")
+    return True
 
 
 def batch_roots(item: dict) -> set:
@@ -799,12 +867,13 @@ class SyncClient:
         # Decode + verify outside the write path: (item, [(idx, floats, seal)])
         decoded = []
         for item in items:
-            prov = item.get("provenance") or {}
-            if not _print_in_bounds(prov):
-                logger.warning("sync import: dropping track %s — a fingerprint longer than "
-                               "fpcalc's window can make", str(item.get("track_uuid", "?"))[:8])
+            why = _well_formed(item, bundle=True)
+            if why:
+                logger.warning("sync import: dropping track %s — %s",
+                               str(item.get("track_uuid", "?"))[:8], why)
                 continue
-            if not _on_the_grid(item.get("segments"), prov.get("duration_seconds")):
+            prov = item["provenance"]
+            if not _on_the_grid(item.get("segments"), prov["duration_seconds"]):
                 logger.warning("sync import: dropping track %s — segments off the grid",
                                str(item.get("track_uuid", "?"))[:8])
                 continue
@@ -829,21 +898,14 @@ class SyncClient:
                 try:
                     payload = rs.segment_payload(
                         s.get("author_pubkey") or "", item["track_uuid"],
-                        prov.get("chromaprint"),
-                        prov.get("duration_seconds"),
-                        item.get("model_uuid") or "", s["i"],
-                        rs.vector_hash(raw),
-                        grid_version=prov.get("grid_version")
-                                     or rs.GRID_VERSION)
-                except ValueError:
+                        prov["chromaprint"], prov["duration_seconds"],
+                        item["model_uuid"], s["i"], rs.vector_hash(raw),
+                        grid_version=prov["grid_version"])
+                except (ValueError, TypeError, AttributeError):
                     payload = None
                 if not (payload
-                        and rs.verify(payload, s["signature"],
-                                      s.get("author_pubkey") or "")
-                        and rs.verify_proof(rs.record_leaf(s["signature"]),
-                                            s.get("proof") or [],
-                                            s.get("batch_root") or "")
-                        and batch_ok(s.get("batch_root"))):
+                        and _sealed(payload, s.get("signature"), s.get("author_pubkey"),
+                                    s.get("proof"), s.get("batch_root"), batch_ok)):
                     bad = f"segment {s['i']} seal invalid"
                     break
                 seal = (s["author_pubkey"], s["signature"], s["batch_root"],
@@ -907,41 +969,46 @@ class SyncClient:
             for item, segs in decoded:
                 if item["track_uuid"] not in kept_uuids:
                     continue
-                mean = self._portrait([floats for _, floats, _ in segs])
-                cur.execute(
-                    """INSERT INTO embeddings
-                       (track_id, model_id, vector, analysis_source_id,
-                        analysis_version)
-                       VALUES (%s, %s, %s::vector, %s, %s)
-                       ON CONFLICT (track_id, model_id) DO UPDATE SET
-                           vector = EXCLUDED.vector,
-                           analysis_source_id = EXCLUDED.analysis_source_id,
-                           analysis_version = EXCLUDED.analysis_version,
-                           updated_at = CURRENT_TIMESTAMP
-                       RETURNING id""",
-                    (item["track_uuid"], item["model_uuid"],
-                     self._vec_text(mean), self._source_id(source_map, item),
-                     item.get("analysis_version", 1)))
-                emb_id = cur.fetchone()[0]
-                # The grid is atomic — an upgraded imported-mean row never
-                # mixes leftover segments from another pull.
-                cur.execute(
-                    "DELETE FROM embedding_segments WHERE embedding_id = %s",
-                    (emb_id,))
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO embedding_segments
-                       (embedding_id, segment_index, vector,
-                        author_pubkey, signature, batch_root, merkle_proof)
-                       VALUES %s""",
-                    [(emb_id, idx, self._vec_text(floats),
-                      *(seal or (None, None, None, None)))
-                     for idx, floats, seal in segs],
-                    template="(%s, %s, %s::vector, %s, %s, %s, %s)",
-                    page_size=200,
-                )
-                imported += 1
+                if _item_write(cur, "track", item["track_uuid"],
+                               lambda: self._write_bundle(cur, item, segs, source_map)):
+                    imported += 1
         return imported
+
+    def _write_bundle(self, cur, item: dict, segs: list, source_map: dict) -> None:
+        """One bundle's mean and segments, replacing the track's grid."""
+        mean = self._portrait([floats for _, floats, _ in segs])
+        cur.execute(
+            """INSERT INTO embeddings
+               (track_id, model_id, vector, analysis_source_id,
+                analysis_version)
+               VALUES (%s, %s, %s::vector, %s, %s)
+               ON CONFLICT (track_id, model_id) DO UPDATE SET
+                   vector = EXCLUDED.vector,
+                   analysis_source_id = EXCLUDED.analysis_source_id,
+                   analysis_version = EXCLUDED.analysis_version,
+                   updated_at = CURRENT_TIMESTAMP
+               RETURNING id""",
+            (item["track_uuid"], item["model_uuid"],
+             self._vec_text(mean), self._source_id(source_map, item),
+             item.get("analysis_version", 1)))
+        emb_id = cur.fetchone()[0]
+        # The grid is atomic — an upgraded imported-mean row never
+        # mixes leftover segments from another pull.
+        cur.execute(
+            "DELETE FROM embedding_segments WHERE embedding_id = %s",
+            (emb_id,))
+        psycopg2.extras.execute_values(
+            cur,
+            """INSERT INTO embedding_segments
+               (embedding_id, segment_index, vector,
+                author_pubkey, signature, batch_root, merkle_proof)
+               VALUES %s""",
+            [(emb_id, idx, self._vec_text(floats),
+              *(seal or (None, None, None, None)))
+             for idx, floats, seal in segs],
+            template="(%s, %s, %s::vector, %s, %s, %s, %s)",
+            page_size=200,
+        )
 
     @staticmethod
     def _upsert_analysis_sources(cur, items: list[dict]) -> dict:
@@ -969,13 +1036,12 @@ class SyncClient:
         is in the alphabet the row key's decode() expects."""
         prov = {}
         for item in items:
-            p = item.get("provenance")
-            if p and p.get("chromaprint"):
-                prov[(item["track_uuid"], p["chromaprint"], p.get("duration_seconds"))] = p
+            p = item["provenance"]
+            prov[(item["track_uuid"], p["chromaprint"], p["duration_seconds"])] = p
         if not prov:
             return {}
         values = [
-            (tid, fp, duration, p.get("grid_version", 1), p.get("is_lossless"))
+            (tid, fp, duration, p["grid_version"], p["is_lossless"])
             for (tid, fp, duration), p in prov.items()
         ]
         rows = psycopg2.extras.execute_values(
@@ -984,8 +1050,10 @@ class SyncClient:
                (track_id, chromaprint, duration_seconds,
                 grid_version, is_lossless, imported)
                VALUES %s
-               ON CONFLICT (track_id, chromaprint_key, imported, duration_seconds)
-                   DO UPDATE SET imported = EXCLUDED.imported
+               ON CONFLICT (track_id, chromaprint_key, duration_seconds, imported, copy_rank)
+                   -- a write to no key column: the row lock it takes does not
+                   -- wait on a registration's hold of the row as a root
+                   DO UPDATE SET grid_version = analysis_sources.grid_version
                RETURNING id, track_id::text, chromaprint, duration_seconds, xmax = 0""",
             values,
             template="(%s::uuid, %s, %s, %s, %s, true)",
@@ -997,7 +1065,7 @@ class SyncClient:
     @staticmethod
     def _join_groups(cur, new_rows: list) -> None:
         """Put each new row — (id, track uuid), in id order — in its track's
-        material group, among the rows registered before it."""
+        material group."""
         if not new_rows:
             return
         cur.execute("""SELECT id, track_id::text, material_of, chromaprint, duration_seconds
@@ -1006,11 +1074,15 @@ class SyncClient:
         by_track: dict = {}
         for r in cur.fetchall():
             by_track.setdefault(r[1], []).append([r[0], r[2], r[3], r[4]])
+        new_ids = {sid for sid, _t in new_rows}
         joined = []
         for sid, track in new_rows:
             rows = by_track[track]
             me = next(r for r in rows if r[0] == sid)
-            root = material.root_among(me[2], me[3], [r for r in rows if r[0] < sid])
+            # among the rows before it: those here already, and the new
+            # ones that joined before it
+            root = material.root_among(me[2], me[3], [r for r in rows if r is not me and (
+                r[0] not in new_ids or r[0] < sid)])
             if root is not None:
                 me[1] = root
                 joined.append((sid, root))
@@ -1044,11 +1116,9 @@ class SyncClient:
         return [i for i in items if i["track_uuid"] not in protected]
 
     @staticmethod
-    def _source_id(source_map: dict, item: dict):
-        p = item.get("provenance")
-        if not p or not p.get("chromaprint"):
-            return None
-        return source_map.get((item["track_uuid"], p["chromaprint"], p.get("duration_seconds")))
+    def _source_id(source_map: dict, item: dict) -> int:
+        p = item["provenance"]
+        return source_map[(item["track_uuid"], p["chromaprint"], p["duration_seconds"])]
 
     def _import_audio_features(self, conn, items: list[dict],
                                batches: dict, authors: set) -> int:
@@ -1068,27 +1138,23 @@ class SyncClient:
                     "sync import: dropping unsigned features %s",
                     item.get("track_uuid", "?")[:8])
                 continue
-            prov = item.get("provenance") or {}
-            if not _print_in_bounds(prov):
-                logger.warning("sync import: dropping features %s — a fingerprint longer "
-                               "than fpcalc's window can make", item.get("track_uuid", "?")[:8])
+            why = _well_formed(item, bundle=False)
+            if why:
+                logger.warning("sync import: dropping features %s — %s",
+                               str(item.get("track_uuid", "?"))[:8], why)
                 continue
+            prov = item["provenance"]
             try:
                 payload = rs.features_payload(
                     item.get("author_pubkey") or "", item["track_uuid"],
-                    prov.get("chromaprint"),
-                    prov.get("duration_seconds"),
+                    prov["chromaprint"], prov["duration_seconds"],
                     item.get("analysis_version", 1),
                     rs.blake2b_hex(rs.canonical_features_blob(item)))
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, TypeError, AttributeError):
                 payload = None
             if not (payload
-                    and rs.verify(payload, item["signature"],
-                                  item.get("author_pubkey") or "")
-                    and rs.verify_proof(rs.record_leaf(item["signature"]),
-                                        item.get("merkle_proof") or [],
-                                        item.get("batch_root") or "")
-                    and batch_ok(item.get("batch_root"))):
+                    and _sealed(payload, item["signature"], item.get("author_pubkey"),
+                                item.get("merkle_proof"), item.get("batch_root"), batch_ok)):
                 logger.warning(
                     "sync import: dropping features %s — seal invalid",
                     item.get("track_uuid", "?")[:8])
@@ -1138,9 +1204,7 @@ class SyncClient:
                 )
                 for item in items
             ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO audio_features
+            upsert = """INSERT INTO audio_features
                    (track_id, bpm, key, mode, key_confidence,
                     energy, energy_db, brightness, dynamic_range_db,
                     zero_crossing_rate, instruments, moods,
@@ -1165,12 +1229,15 @@ class SyncClient:
                        signature = EXCLUDED.signature,
                        batch_root = EXCLUDED.batch_root,
                        merkle_proof = EXCLUDED.merkle_proof,
-                       updated_at = CURRENT_TIMESTAMP""",
-                values,
-                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                page_size=500,
-            )
-        return len(items)
+                       updated_at = CURRENT_TIMESTAMP"""
+            template = "(" + ", ".join(["%s"] * 21) + ")"
+            imported = 0
+            for item, value in zip(items, values):
+                if _item_write(cur, "features", item["track_uuid"],
+                               lambda v=value: psycopg2.extras.execute_values(
+                                   cur, upsert, [v], template=template)):
+                    imported += 1
+        return imported
 
     def _import_track_mbids(self, conn, items: list[dict]) -> int:
         """Sealed track↔recording bindings — same shape as artist_mbids:

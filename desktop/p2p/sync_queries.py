@@ -122,17 +122,21 @@ _SIGNED = "signature IS NOT NULL AND batch_root IS NOT NULL"
 # is served to no peer and signed by nobody here, so its author's sealed
 # version replaces it as it would fill a gap. A mean without segments under
 # no first-hand source is a gap too. A grid linked to no source on a track
-# this node owns is held: a legacy grid of its own, which the analysis pass
-# re-derives from the file (its pending predicate takes an unlinked
-# analysis) — a peer's grid in its place would stay there wherever
-# enrichment.reanalyze_imported is off. Row-level, over embeddings `e` and
+# with a present analysis-source file is held: a legacy grid of its own,
+# which the analysis pass re-derives from that file (its pending predicate
+# takes an unlinked analysis) — a peer's grid in its place would stay there
+# wherever enrichment.reanalyze_imported is off. A track held only at an
+# HQPlayer's library, or whose copy is away, has no file a pass reads. Row-level, over embeddings `e` and
 # audio_features `a`, each LEFT JOINed to analysis_sources `s`.
 HELD_EMBEDDING = """((s.id IS NOT NULL AND NOT s.imported)
      OR (EXISTS (SELECT 1 FROM embedding_segments es WHERE es.embedding_id = e.id)
          AND (NOT EXISTS (SELECT 1 FROM embedding_segments es
                            WHERE es.embedding_id = e.id AND es.signature IS NULL)
               OR (s.id IS NULL
-                  AND EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = e.track_id)))))"""
+                  AND EXISTS (SELECT 1 FROM media_files f
+                                JOIN album_variants v ON v.id = f.album_variant_id
+                               WHERE f.track_id = e.track_id AND f.is_analysis_source
+                                 AND v.absent_since IS NULL)))))"""
 HELD_FEATURES = "(a.signature IS NOT NULL OR (s.id IS NOT NULL AND NOT s.imported))"
 # The same per track, the track's uuid expression formatted in as {t}.
 HOLDS_SEGMENTS = f"""EXISTS (SELECT 1 FROM embeddings e
@@ -219,15 +223,18 @@ _HOLDINGS_TRACKS_SQL = f"""
 
 def holdings_version(conn) -> str:
     """Moves whenever a contributing table's row count or latest updated_at
-    moves — one scan per table, so it is checked on a timer, not per
-    request."""
+    moves, or the seals do — a grid held only while it is sealed (a shed
+    unseals segments and touches no embeddings row): the unsealed segments
+    are counted from their partial index. One scan per table, so it is
+    checked on a timer, not per request."""
     row = db_query(conn, f"""
         SELECT (SELECT count(*) FROM embeddings) AS e,
                (SELECT count(*) FROM audio_features WHERE {_SIGNED}) AS af,
+               (SELECT count(*) FROM embedding_segments WHERE signature IS NULL) AS unsealed,
                GREATEST((SELECT max(updated_at) FROM embeddings),
                         (SELECT max(updated_at) FROM audio_features)) AS latest
     """)[0]
-    counts = [int(row[k]) for k in ("e", "af")]
+    counts = [int(row[k]) for k in ("e", "af", "unsealed")]
     latest = int(row["latest"].timestamp()) if row["latest"] else 0
     return ".".join(str(n) for n in counts) + f".{latest}"
 

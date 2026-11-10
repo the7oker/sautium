@@ -260,8 +260,7 @@ class PreviewEnricher:
                     db, track_id, model, idxs, vecs, portrait, src_id,
                     provider_id=provider_id, is_lossless=lossless)
             if feats:
-                self._save_features(db, track_id, feats, src_id,
-                                    provider_id, lossless)
+                self._save_features(db, track_id, feats, src_id)
             db.commit()
 
         if saved or feats:
@@ -272,18 +271,15 @@ class PreviewEnricher:
                     track_id, saved, bool(feats))
 
     @staticmethod
-    def _save_features(db, track_id: str, feats: dict, src_id,
-                       provider_id: str, lossless: bool) -> None:
+    def _save_features(db, track_id: str, feats: dict, src_id) -> None:
         import provenance
         from audio_analysis import ANALYSIS_VERSION
         from models import AudioFeature
 
         existing = db.query(AudioFeature).filter(
             AudioFeature.track_id == track_id).first()
-        if existing and existing.analysis_source_id is not None:
-            old_rank = provenance.material_rank_of(db, existing.analysis_source_id)
-            if old_rank > provenance.material_rank(provider_id, lossless):
-                return   # never let a preview overwrite a better-material analysis
+        if existing and provenance.outranked(db, existing.analysis_source_id, src_id):
+            return   # never let a preview overwrite a better copy's analysis
 
         cols = ("bpm", "key", "mode", "key_confidence", "energy", "energy_db",
                 "brightness", "dynamic_range_db", "zero_crossing_rate",

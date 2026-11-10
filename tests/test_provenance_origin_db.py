@@ -2,11 +2,14 @@
 PostgreSQL built from the migrations — the module's scratch database
 (conftest.scratch_dsn), skipped without a cluster.
 
-analysis_sources is unique per origin (track, address, imported): this node's
-registrations work on the first-hand row of an address, the sync import on
-its imported twin, and nothing turns one into the other — so sign_audio,
-which signs by the flag, never signs another author's record, whatever shed
-its seal. A track's rows of one material whose prints differ are grouped
+analysis_sources holds a row per declaration (the print and the duration a
+seal binds), copy and origin, and nothing rewrites a row: this node's
+registrations are first-hand, the sync import's rows imported, nothing turns
+one into the other — so sign_audio, which signs by the flag, never signs
+another author's record, whatever shed its seal — and a better copy is a row
+of its own whose pass replaces the records at its save. The gate keys a
+record by the declaration as its seal binds it, and drops a wrongly typed
+item, never its batch. A track's rows of one material whose prints differ are grouped
 (material_of, desktop/p2p/material.py's rule): the passes skip what the group
 holds at a rank no lower, a stream the group holds higher is already held, a
 returned file finds its analysis by the rule, the merge moves rows into the
@@ -203,13 +206,17 @@ def test_a_fresh_database_takes_a_row_per_origin_and_declaration(conn):
     after 001, and 055 drops it by name — beside it, every twin insert would
     fail."""
     with conn.cursor() as cur:
-        assert _uniques(cur) == {"uq_asrc_track_declaration_origin"}
+        assert _uniques(cur) == {"uq_asrc_track_declaration_copy"}
         track = _track(cur)
         first = _source(cur, track, FP)
         twin = _source(cur, track, FP, imported=True)
         edit = _source(cur, track, FP, duration=205)
         undeclared = _source(cur, track, FP, duration=None)
-        assert len({first, twin, edit, undeclared}) == 4
+        hires = _source(cur, track, FP, bit_depth=24)
+        stream = _source(cur, track, FP, provider="lossless-test")
+        assert len({first, twin, edit, undeclared, hires, stream}) == 6
+        with pytest.raises(psycopg2.errors.UniqueViolation):      # an imported row: one copy
+            _source(cur, track, FP, imported=True, lossless=False)
         with pytest.raises(psycopg2.errors.UniqueViolation):
             _source(cur, track, FP, imported=True)
         with pytest.raises(psycopg2.errors.UniqueViolation):      # NULLS NOT DISTINCT
@@ -221,13 +228,16 @@ def test_the_delta_moves_an_earlier_node_to_the_per_origin_key_and_runs_again_as
     with conn.cursor() as cur:
         track = _track(cur)
         kept = _source(cur, track, FP, imported=True)
-        cur.execute("ALTER TABLE analysis_sources DROP CONSTRAINT uq_asrc_track_declaration_origin")
+        cur.execute("ALTER TABLE analysis_sources DROP CONSTRAINT uq_asrc_track_declaration_copy")
         cur.execute("ALTER TABLE analysis_sources DROP COLUMN material_of")
+        cur.execute("ALTER TABLE analysis_sources DROP COLUMN copy_rank")
         cur.execute("ALTER TABLE analysis_sources ADD CONSTRAINT uq_asrc_track_chromaprint "
                     "UNIQUE (track_id, chromaprint_key)")
         cur.execute(sql)
         cur.execute(sql)
-        assert _uniques(cur) == {"uq_asrc_track_declaration_origin"}
+        assert _uniques(cur) == {"uq_asrc_track_declaration_copy"}
+        cur.execute("SELECT copy_rank FROM analysis_sources WHERE id = %s", (kept,))
+        assert cur.fetchone() == (-1000,)
         cur.execute("SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_analysis_sources_material'")
         assert "WHERE (material_of IS NOT NULL)" in cur.fetchone()[0]
         _source(cur, track, FP, material_of=kept)                    # its twin, in its group
@@ -676,6 +686,18 @@ def _sign(scratch_dsn) -> int:
         stage.close()
 
 
+def _seal_own(cur, eid, track, fp, duration):
+    """This node's seal on each segment of `eid`, as sign_audio makes it."""
+    cur.execute("SELECT id, segment_index, vector::text FROM embedding_segments "
+                "WHERE embedding_id = %s", (eid,))
+    for sid, i, vec in cur.fetchall():
+        sig = rs.sign(rs.segment_payload(pub(NODE), track, fp, duration, MODEL, i,
+                                         rs.vector_hash(sign_audio._vector_bytes(vec)),
+                                         grid_version=rs.GRID_VERSION), NODE)
+        cur.execute("UPDATE embedding_segments SET author_pubkey = %s, signature = %s "
+                    "WHERE id = %s", (pub(NODE), sig, sid))
+
+
 def _verifies(cur, eid, track, fp) -> bool:
     """Every segment's seal verifies against its row's declaration, and the
     grid fits the duration a receiver reads off it."""
@@ -735,8 +757,7 @@ def test_another_duration_within_the_bound_joins_and_keeps_its_records_sealed(
         track = _track(cur)
         stream = _source(cur, track, FP, provider="lossless-test", duration=241)
         eid = _embedding(cur, track, stream)
-        cur.execute("UPDATE embedding_segments SET author_pubkey = %s, signature = %s "
-                    "WHERE embedding_id = %s", (pub(NODE), "cd" * 64, eid))
+        _seal_own(cur, eid, track, FP, 241)
         mf = _file(cur, track, "/music/a.flac", duration=240)
     prints["/music/a.flac"] = FP
     sid = _register(session, conn, track, mf)
@@ -745,8 +766,7 @@ def test_another_duration_within_the_bound_joins_and_keeps_its_records_sealed(
             (stream, None, None), (sid, stream, mf)]
         cur.execute("SELECT duration_seconds FROM analysis_sources WHERE id = %s", (stream,))
         assert cur.fetchone() == (241,)
-        cur.execute("SELECT signature FROM embedding_segments WHERE embedding_id = %s", (eid,))
-        assert cur.fetchall() == [("cd" * 64,)]
+        assert _verifies(cur, eid, track, FP)
     assert not provenance.held_in_group(session, sid, "embeddings", model_id=MODEL)
 
 
@@ -781,10 +801,12 @@ def test_a_duration_declared_where_none_was_is_another_row_and_the_old_seal_stil
     # a 24-bit file, then the CD rip of the equal print (hi-res→CD prints alike, FP-SIM)
     (dict(bit_depth=24), dict(bit_depth=16)),
 ])
-def test_a_better_copy_of_one_declaration_re_derives_its_records(conn, session, prints,
-                                                                 before, after):
-    """The row moves to the better copy, and the records made from the lesser
-    one go: both passes derive them again from the file."""
+def test_a_better_copy_of_one_declaration_is_a_row_of_its_own_and_its_passes_replace(
+        conn, session, prints, before, after):
+    """No registration deletes a record or rewrites a row's copy: the better
+    copy is a row of its own in the group, the lesser copy's records stay
+    linked to the row they were made from — never a gap the sync could fill
+    — and both passes are pending until they replace them at their saves."""
     with conn.cursor() as cur:
         track = _track(cur)
         if "provider" in before:
@@ -795,23 +817,30 @@ def test_a_better_copy_of_one_declaration_re_derives_its_records(conn, session, 
             first = _source(cur, track, FP, media_file=old, bit_depth=before["bit_depth"])
         _embedding(cur, track, first)
         _features(cur, track, first)
-        mf = _file(cur, track, "/music/a.flac", bit_depth=after["bit_depth"])
-    prints["/music/a.flac"] = FP
-    assert _register(session, conn, track, mf) == first
-    with conn.cursor() as cur:
         cur.execute("SELECT provider_id, media_file_id, is_lossless, bit_depth "
                     "FROM analysis_sources WHERE id = %s", (first,))
-        assert cur.fetchone() == (None, mf, True, after["bit_depth"])
-        assert _linked(cur, track) == {}
-    assert not provenance.held_in_group(session, first, "embeddings", model_id=MODEL)
+        claims = cur.fetchone()
+        mf = _file(cur, track, "/music/a.flac", bit_depth=after["bit_depth"])
+    prints["/music/a.flac"] = FP
+    second = _register(session, conn, track, mf)
+    with conn.cursor() as cur:
+        assert second != first
+        assert [(r[0], r[2]) for r in _rows(cur, track)] == [(first, None), (second, first)]
+        cur.execute("SELECT provider_id, media_file_id, is_lossless, bit_depth "
+                    "FROM analysis_sources WHERE id = %s", (first,))
+        assert cur.fetchone() == claims
+        assert _linked(cur, track) == {"embeddings": False, "features": False}
+    assert not provenance.held_in_group(session, second, "embeddings", model_id=MODEL)
     assert _pending(session, track, embeddings.PENDING_SQL)
     assert _pending(session, track, audio_analysis.PENDING_SQL)
+    assert not provenance.outranked(session, first, second)     # the passes' saves replace
+    assert provenance.outranked(session, second, first)
 
 
-def test_a_lesser_copy_of_one_declaration_takes_the_row_and_skips(conn, session, prints):
-    """The CD rip analysed, a 24-bit copy of the equal print elected: its
-    file is the row's now, the records made from the CD stay, nothing is
-    asked again."""
+def test_a_lesser_copy_of_one_declaration_is_a_row_of_its_own_and_skips(conn, session, prints):
+    """The CD rip analysed, a 24-bit copy of the equal print elected: a row
+    of its own in the CD's group, the CD's records stay where they are, the
+    pass has nothing to compute, nothing is asked again."""
     with conn.cursor() as cur:
         track = _track(cur)
         cd = _file(cur, track, "/music/cd.flac", bit_depth=16, source=False)
@@ -820,14 +849,28 @@ def test_a_lesser_copy_of_one_declaration_takes_the_row_and_skips(conn, session,
         _features(cur, track, first)
         hires = _file(cur, track, "/music/a.flac", bit_depth=24)
     prints["/music/a.flac"] = FP
-    assert _register(session, conn, track, hires) == first
+    second = _register(session, conn, track, hires)
     with conn.cursor() as cur:
-        cur.execute("SELECT media_file_id, bit_depth FROM analysis_sources WHERE id = %s", (first,))
-        assert cur.fetchone() == (hires, 16)
+        assert [(r[0], r[2], r[3]) for r in _rows(cur, track)] == [
+            (first, None, cd), (second, first, hires)]
         assert _linked(cur, track) == {"embeddings": False, "features": False}
-    assert provenance.held_in_group(session, first, "embeddings", model_id=MODEL)
+    assert provenance.held_in_group(session, second, "embeddings", model_id=MODEL)
     assert not _pending(session, track, embeddings.PENDING_SQL)
     assert not _pending(session, track, audio_analysis.PENDING_SQL)
+
+
+def test_an_equal_copy_registered_again_takes_only_the_rows_file(conn, session, prints):
+    with conn.cursor() as cur:
+        track = _track(cur)
+        a = _file(cur, track, "/music/a.flac", source=False)
+        first = _source(cur, track, FP, media_file=a)
+        _embedding(cur, track, first)
+        b = _file(cur, track, "/music/b.flac")
+    prints["/music/b.flac"] = FP
+    assert _register(session, conn, track, b) == first
+    with conn.cursor() as cur:
+        assert [(r[0], r[3]) for r in _rows(cur, track)] == [(first, b)]
+        assert _linked(cur, track) == {"embeddings": False}
 
 
 def test_a_second_authors_record_of_one_print_and_another_duration_has_a_row_of_its_own(
@@ -1052,3 +1095,326 @@ def test_a_root_held_for_a_new_row_follows_a_merge_that_moved_or_dropped_it(conn
     assert provenance._held_root(session, member) is None             # gone: a root of its own
     session.rollback()
 
+
+
+# -- The gate: a record keyed by the declaration its seal binds ------------------
+
+def _sealed_features(track, fp, duration, *, signer=AUTHOR, **values) -> dict:
+    """An author's sealed features item for `track`, in a pull answer of its
+    own, with whatever values the author signed."""
+    from tests.p2p.sealed_records import STAMPED_AT
+    from tests.p2p.test_witness import AUTHORITY
+    item = {c: None for c in rs.FEATURE_ORDER}
+    item.update(bpm=120.5, energy=0.25)
+    item.update(values)
+    author = pub(signer)
+    sig = rs.sign(rs.features_payload(author, track, fp, duration, 2,
+                                      rs.blake2b_hex(rs.canonical_features_blob(item))), signer)
+    root, [proof] = rs.merkle_tree([rs.record_leaf(sig)])
+    ip_hash = str(uuid.uuid4())
+    item.update(track_uuid=track, analysis_version=2, author_pubkey=author, signature=sig,
+                batch_root=root, merkle_proof=proof,
+                provenance={"chromaprint": fp, "duration_seconds": duration,
+                            "grid_version": rs.GRID_VERSION, "is_lossless": True})
+    return {"category": "audio_features", "items": [item], "batches": {root: {
+        "author_pubkey": author, "worker_date": STAMPED_AT, "ip_hash": ip_hash,
+        "worker_sig": AUTHORITY.sign(rs.timestamp_payload(root, STAMPED_AT, ip_hash)).hex(),
+        "authority": ISSUER, "timestamp_version": 2}}}
+
+
+def _merged(*payloads) -> dict:
+    out = {"category": payloads[0]["category"], "items": [], "batches": {}}
+    for p in payloads:
+        out["items"] += p["items"]
+        out["batches"].update(p["batches"])
+    return out
+
+
+@pytest.mark.parametrize("field,value", [
+    ("duration_seconds", "240"),          # a relay's text: the seal still reads it as 240
+    ("duration_seconds", 240.0),
+    ("duration_seconds", True),
+    ("grid_version", 2),                  # unsigned in features, bound by every segment seal
+    ("grid_version", "1"),
+    ("chromaprint", 123),
+    ("chromaprint", None),
+])
+def test_a_features_item_whose_declaration_is_mistyped_is_dropped_and_its_batch_kept(
+        conn, scratch_dsn, field, value):
+    with conn.cursor() as cur:
+        bad, good = _track(cur, "bad"), _track(cur, "good")
+    tampered = _sealed_features(bad, FP, 240)
+    tampered["items"][0]["provenance"][field] = value
+    assert _import(scratch_dsn, "audio_features",
+                   _merged(tampered, _sealed_features(good, FP, 240))) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT a.track_id::text, s.duration_seconds, s.grid_version "
+                    "FROM audio_features a JOIN analysis_sources s ON s.id = a.analysis_source_id")
+        assert cur.fetchall() == [(good, 240, rs.GRID_VERSION)]
+
+
+def test_a_grid_version_a_features_item_omits_is_this_builds(conn, scratch_dsn):
+    with conn.cursor() as cur:
+        track = _track(cur)
+    payload = _sealed_features(track, FP, 240)
+    payload["items"][0]["provenance"]["grid_version"] = None
+    assert _import(scratch_dsn, "audio_features", payload) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT grid_version FROM analysis_sources WHERE track_id = %s", (track,))
+        assert cur.fetchone() == (rs.GRID_VERSION,)
+
+
+def test_a_relay_cannot_move_an_honest_grid_onto_another_grid_version(conn, scratch_dsn):
+    """Probe P2: a features item set to grid 2 for a track this node lacks
+    would have made the imported row grid 2, and the author's honest
+    segments of the same declaration were then served at grid 2 and failed
+    at every receiver."""
+    with conn.cursor() as cur:
+        track = _track(cur)
+        segments, features = _payloads(conn, track, FP, duration=240)
+    features["items"][0]["provenance"]["grid_version"] = 2
+    assert _import(scratch_dsn, "audio_features", features) == 0
+    assert _import(scratch_dsn, "segments", segments) == 1
+    served = sync_queries.pull_segments(conn, [track])
+    assert served["items"][0]["provenance"]["grid_version"] == rs.GRID_VERSION
+    with conn.cursor() as cur:
+        for table in ("embeddings", "audio_features", "analysis_sources"):
+            cur.execute(f"DELETE FROM {table} WHERE track_id = %s", (track,))
+    assert _import(scratch_dsn, "segments", served) == 1          # the next node takes it
+
+
+def test_a_value_the_database_refuses_drops_its_item_not_its_batch(conn, scratch_dsn):
+    """A certified author's crafted features — a tempo that is text, a key
+    no scale has — seal and verify, then fail the row's types: that item
+    goes, the rest of the batch lands."""
+    with conn.cursor() as cur:
+        a, b, good = _track(cur, "a"), _track(cur, "b"), _track(cur, "good")
+    payload = _merged(_sealed_features(a, FP, 240, bpm="fast"),
+                      _sealed_features(b, FP, 240, key="H"),
+                      _sealed_features(good, FP, 240))
+    assert _import(scratch_dsn, "audio_features", payload) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id::text FROM audio_features")
+        assert cur.fetchall() == [(good,)]
+
+
+def test_a_bundle_whose_model_is_no_uuid_drops_alone(conn, scratch_dsn):
+    with conn.cursor() as cur:
+        bad, good = _track(cur, "bad"), _track(cur, "good")
+        bundles = {t: _payloads(conn, t, FP)[0] for t in (bad, good)}
+    item = bundles[bad]["items"][0]
+    item["model_uuid"] = "not a uuid"
+    assert _import(scratch_dsn, "segments", _merged(bundles[bad], bundles[good])) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id::text FROM embeddings")
+        assert cur.fetchall() == [(good,)]
+
+
+def test_the_importers_write_to_an_existing_row_takes_no_key_lock(conn, scratch_dsn):
+    """Probe P5: the no-op on a conflict writes no key column, so an import
+    never waits for a registration holding the row as a root."""
+    with conn.cursor() as cur:
+        track = _track(cur)
+        imported = _source(cur, track, FP, imported=True)
+    holder = psycopg2.connect(scratch_dsn)
+    other = psycopg2.connect(scratch_dsn)
+    try:
+        with holder.cursor() as hc:
+            hc.execute("SELECT material_of FROM analysis_sources WHERE id = %s FOR KEY SHARE",
+                       (imported,))
+        with other.cursor() as oc:
+            oc.execute("SET lock_timeout = '300ms'")
+            mapped = sync_client.SyncClient._upsert_analysis_sources(oc, [{
+                "track_uuid": track, "provenance": {"chromaprint": FP, "duration_seconds": 240,
+                                                    "grid_version": 1, "is_lossless": True}}])
+        assert mapped == {(track, FP, 240): imported}
+        other.rollback()
+    finally:
+        holder.rollback()
+        holder.close()
+        other.close()
+
+
+# -- Groups: the bound never chains, a merge keeps copies apart ----------------
+
+def test_a_registration_never_joins_a_root_beyond_the_duration_bound_through_a_member(
+        conn, session, prints):
+    """Probe P6: 244 s joined a 240 s root through a 242 s member and skipped
+    on the 240 s analysis."""
+    with conn.cursor() as cur:
+        track = _track(cur)
+        root = _source(cur, track, FP, duration=240)
+        _embedding(cur, track, root)
+        _source(cur, track, FP, imported=True, duration=242, material_of=root)
+        mf = _file(cur, track, "/music/a.flac", duration=244)
+    prints["/music/a.flac"] = FP
+    sid = _register(session, conn, track, mf)
+    with conn.cursor() as cur:
+        cur.execute("SELECT material_of FROM analysis_sources WHERE id = %s", (sid,))
+        assert cur.fetchone() == (None,)
+    assert not provenance.held_in_group(session, sid, "embeddings", model_id=MODEL)
+
+
+def test_a_merged_lossy_streams_features_never_stand_for_the_targets_cd(conn, session):
+    """Probe P9: the stream's row of the CD's declaration was a duplicate,
+    its features landed under the CD's row, and the features pass was never
+    pending for the CD."""
+    with conn.cursor() as cur:
+        old, new = _track(cur, "old"), _track(cur, "new")
+        stream = _source(cur, old, FP, provider="lossy-test", lossless=False, bit_depth=None)
+        _features(cur, old, stream)
+        cd = _file(cur, new, "/music/a.flac", bit_depth=16)
+        own = _source(cur, new, FP, media_file=cd)
+        _embedding(cur, new, own)
+    _merge(session, old, new)
+    with conn.cursor() as cur:
+        assert [(r[0], r[2]) for r in _rows(cur, new)] == [(stream, own), (own, None)]
+        cur.execute("SELECT analysis_source_id FROM audio_features WHERE track_id = %s", (new,))
+        assert cur.fetchone() == (stream,)
+    assert _pending(session, new, audio_analysis.PENDING_SQL)
+
+
+def test_the_join_of_rows_registered_before_the_groups(conn, session):
+    """For body 3's cutover: a track's existing rows join by the rule, in id
+    order; a track of one row is not read; a re-run joins nothing."""
+    with conn.cursor() as cur:
+        track, alone = _track(cur), _track(cur)
+        cd = _source(cur, track, FP)
+        mp3 = _source(cur, track, NEAR, bit_depth=None, lossless=False)
+        edit = _source(cur, track, FP, duration=205)
+        other = _source(cur, track, OTHER)
+        _source(cur, alone, FP)
+    assert provenance.join_existing_rows(session) == 1
+    assert provenance.join_existing_rows(session, track_ids=[track]) == 0
+    session.commit()
+    with conn.cursor() as cur:
+        assert {r[0]: r[2] for r in _rows(cur, track)} == {cd: None, mp3: cd, edit: None,
+                                                           other: None}
+
+
+def test_a_new_imported_row_follows_its_root_through_a_concurrent_merge(conn, scratch_dsn,
+                                                                        monkeypatch):
+    """The root the rule chose is re-read under a hold: one a merge dropped
+    leaves the new row a root of its own, one it re-rooted hands over its
+    root."""
+    with conn.cursor() as cur:
+        track = _track(cur)
+        gone = _source(cur, track, OTHER)
+        moved = _source(cur, track, NEAR)
+        root = _source(cur, track, encode(noise(950, 9)))
+        cur.execute("UPDATE analysis_sources SET material_of = %s WHERE id = %s", (root, moved))
+        cur.execute("DELETE FROM analysis_sources WHERE id = %s", (gone,))
+    for chosen, expected in ((gone, None), (moved, root)):
+        monkeypatch.setattr(sync_client.material, "root_among", lambda *a, c=chosen: c)
+        c = psycopg2.connect(scratch_dsn)
+        try:
+            with c.cursor() as cur:
+                cur.execute("INSERT INTO analysis_sources (track_id, chromaprint, imported, "
+                            "duration_seconds) VALUES (%s, %s, true, %s) RETURNING id",
+                            (track, FP, 200 + chosen))
+                sid = cur.fetchone()[0]
+                sync_client.SyncClient._join_groups(cur, [(sid, track)])
+                cur.execute("SELECT material_of FROM analysis_sources WHERE id = %s", (sid,))
+                assert cur.fetchone() == (expected,)
+            c.commit()
+        finally:
+            c.close()
+
+
+# -- Streams: rows of their own, replaced at the saves -------------------------
+
+def test_a_better_stream_of_one_declaration_deletes_nothing_and_its_save_replaces(
+        conn, session, prints):
+    """Probe P4: the registration commits alone (streaming/enrichment.py)
+    before the analysis runs; it used to delete the lesser stream's features
+    in that commit. Now it is a row of its own, the features stay until the
+    better stream's save replaces them, and a lesser stream's save never does."""
+    from streaming.enrichment import PreviewEnricher
+    with conn.cursor() as cur:
+        track = _track(cur)
+        lossy = _source(cur, track, FP, provider="lossy-test", lossless=False, bit_depth=None)
+        _features(cur, track, lossy)
+    prints.update(stream=FP, stream_dur=240)
+    better = provenance.create_stream_source(session, track, b"a", "lossless-test", True)
+    session.commit()
+    with conn.cursor() as cur:
+        assert better != lossy
+        assert _linked(cur, track) == {"features": False}
+    PreviewEnricher._save_features(session, track, {"bpm": 97.0}, better)
+    session.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT bpm, analysis_source_id FROM audio_features WHERE track_id = %s",
+                    (track,))
+        assert cur.fetchone() == (97.0, better)
+    PreviewEnricher._save_features(session, track, {"bpm": 96.0}, lossy)
+    session.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT bpm FROM audio_features WHERE track_id = %s", (track,))
+        assert cur.fetchone() == (97.0,)
+
+
+def test_a_lesser_lossless_stream_of_one_declaration_is_already_held(conn, session, prints,
+                                                                    monkeypatch):
+    """Probe P7: a 24-bit stream over a 16-bit stream's row got the row back
+    and went on to the GPU."""
+    with conn.cursor() as cur:
+        track = _track(cur)
+        cd = _source(cur, track, FP, provider="lossless-test", bit_depth=16)
+        _features(cur, track, cd)
+    monkeypatch.setattr(provenance, "_probe_audio", lambda path: (96000, 24, 240))
+    prints.update(stream=FP)
+    assert provenance.create_stream_source(session, track, b"a", "lossless-test", True) is None
+    session.rollback()
+
+
+# -- The registration's race ---------------------------------------------------
+
+def test_a_registration_that_loses_its_insert_to_another_takes_the_others_row(
+        conn, session, prints, monkeypatch):
+    real = provenance._INSERT_SQL
+    from sqlalchemy import text
+    raced = text("WITH ins AS (" + str(real).strip() + ") SELECT NULL::int")
+    with conn.cursor() as cur:
+        track = _track(cur)
+        mf = _file(cur, track, "/music/a.flac")
+    prints["/music/a.flac"] = FP
+    monkeypatch.setattr(provenance, "_INSERT_SQL", raced)      # it inserts, then says nothing
+    sid = _register(session, conn, track, mf)
+    with conn.cursor() as cur:
+        assert [r[0] for r in _rows(cur, track)] == [sid]
+    monkeypatch.setattr(provenance, "_INSERT_SQL", text("SELECT NULL::int"))
+    with conn.cursor() as cur:
+        other = _track(cur)
+        mf2 = _file(cur, other, "/music/b.flac")
+    prints["/music/b.flac"] = FP
+    with pytest.raises(RuntimeError, match="changed under two registrations"):
+        _register(session, conn, other, mf2)
+    session.rollback()
+
+
+# -- Held: the holdings version, a file no pass reads --------------------------
+
+def test_the_holdings_version_moves_with_a_shed(conn, scratch_dsn, session):
+    with conn.cursor() as cur:
+        track = _track(cur)
+        segments, _f = _payloads(conn, track, FP)
+    assert _import(scratch_dsn, "segments", segments) == 1
+    before = sync_queries.holdings_version(conn)
+    identity._shed_track_seals(session, track)
+    session.commit()
+    assert sync_queries.holdings_version(conn) != before
+
+
+def test_an_unlinked_grid_held_only_at_an_hqplayer_or_away_is_a_gap(conn):
+    with conn.cursor() as cur:
+        away, here = _track(cur, "away"), _track(cur, "here")
+        a = _file(cur, away, "/music/away.flac")
+        cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = "
+                    "(SELECT album_variant_id FROM media_files WHERE id = %s)", (a,))
+        _file(cur, here, "/music/here.flac")
+        for t in (away, here):
+            _embedding(cur, t, None)
+        cur.execute(f"""SELECT u::text FROM unnest(%s::uuid[]) u
+                         WHERE {sync_queries._LACKS['segments'].format(t='u')}""",
+                    ([away, here],))
+        assert cur.fetchall() == [(away,)]

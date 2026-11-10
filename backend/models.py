@@ -682,9 +682,9 @@ class AnalysisSource(Base):
     here; segments inherit it through their embeddings row. Record signatures
     bind the fingerprint and the duration. chromaprint_key is the database's
     digest of the fingerprint — ~3 KB of text is too long for a btree row.
-    A row is one declaration (the print and the duration) of one origin
-    (`imported`): this node's registrations and each imported declaration
-    keep a row of their own, and no declaration changes under its records.
+    A row is one declaration (the print and the duration) of one copy
+    (`copy_rank`) of one origin (`imported`), and nothing rewrites it: a
+    registration of another declaration or copy is a row of its own.
     material_of groups a track's rows of one material whose digests differ
     (desktop/p2p/material.py); NULL marks a group's root."""
     __tablename__ = "analysis_sources"
@@ -710,11 +710,17 @@ class AnalysisSource(Base):
     # node's own registration of the same declaration is the row's twin.
     imported = Column(Boolean, nullable=False, server_default="false")
     material_of = Column(Integer, ForeignKey("analysis_sources.id", ondelete="SET NULL"))
+    # The copy's place among the copies of one material (provenance.copy_rank).
+    copy_rank = Column(SmallInteger, Computed(
+        "CASE WHEN imported THEN -1000 "
+        "ELSE CASE WHEN provider_id IS NULL THEN 2000 WHEN is_lossless THEN 1000 ELSE 0 END "
+        "+ CASE WHEN is_lossless AND bit_depth = 16 THEN 100 WHEN is_lossless THEN 50 ELSE 10 END "
+        "END", persisted=True))
     computed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("track_id", "chromaprint_key", "imported", "duration_seconds",
-                         name="uq_asrc_track_declaration_origin",
+        UniqueConstraint("track_id", "chromaprint_key", "duration_seconds", "imported",
+                         "copy_rank", name="uq_asrc_track_declaration_copy",
                          postgresql_nulls_not_distinct=True),
         Index("idx_analysis_sources_media_file", "media_file_id"),
         Index("idx_analysis_sources_material", "material_of",

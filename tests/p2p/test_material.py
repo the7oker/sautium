@@ -238,3 +238,13 @@ def test_a_print_longer_than_fpcalcs_window_can_make_is_refused_before_it_is_rea
         material.MAX_ITEMS, material.MAX_FINGERPRINT_CHARS = bound, chars
     assert large < 8 * small + 0.05
     assert not material.same_material(longest + "AAAA" * 20000, 240, longest, 240)
+
+
+def test_the_duration_bound_holds_against_the_root_never_only_a_member():
+    """244 s is within 2 s of a 242 s member, not of its 240 s root."""
+    fp = encode(noise(950, 27))
+    near = encode(flip(material.decode(fp), 0.01, 28))
+    rows = [(1, None, fp, 240), (2, 1, near, 242)]
+    assert material.root_among(near, 244, rows) is None
+    assert material.root_among(fp, 244, rows) is None
+    assert material.root_among(near, 241, rows) == 1
