@@ -73,6 +73,12 @@ INVENTORY_CHUNK = 10_000
 # every segment it is given, so a bundle is bounded by its track's length.
 GRID_WINDOW_S = 10
 MAX_GRID_WINDOWS = 24 * 3600 // GRID_WINDOW_S
+# What the columns a bundle lands in hold: vector(512) for the mean and each
+# segment, VARCHAR(100) for its model's name. No node stores another, so
+# only a crafted answer carries one, and it drops at the gate rather than
+# failing the page in the database.
+VECTOR_DIM = 512
+MODEL_NAME_CHARS = 100
 
 
 def _on_the_grid(segments, duration) -> bool:
@@ -168,7 +174,8 @@ def _well_formed(item: dict, bundle: bool) -> Optional[str]:
     if not (_is_int(version) and 0 < version < 2 ** 15):
         return "an analysis version that is not one"
     if bundle and not (_is_uuid(item.get("model_uuid"))
-                       and isinstance(item.get("model_name", ""), str)):
+                       and isinstance(item.get("model_name", ""), str)
+                       and len(item.get("model_name", "")) <= MODEL_NAME_CHARS):
         return "no model"
     lossless = prov.get("is_lossless")
     item["provenance"] = {"chromaprint": fp, "duration_seconds": duration,
@@ -886,8 +893,11 @@ class SyncClient:
                 try:
                     raw = base64.b64decode(s["v"], validate=True)
                     floats = rs.vector_from_bytes(raw)
-                except (KeyError, ValueError, struct.error):
+                except (KeyError, ValueError, TypeError, struct.error):
                     bad = f"segment {s.get('i')} undecodable"
+                    break
+                if len(floats) != VECTOR_DIM:
+                    bad = f"segment {s.get('i')} of {len(floats)} dimensions"
                     break
                 if not _unit(floats):
                     bad = f"segment {s.get('i')} not a unit vector"

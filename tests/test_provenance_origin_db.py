@@ -48,8 +48,11 @@ from desktop.p2p import record_sig as rs  # noqa: E402
 from tests.p2p.fingerprints import encode, flip, noise  # noqa: E402
 from tests.p2p.sealed_records import pub, seal_track  # noqa: E402
 from tests.p2p.test_witness import ISSUER  # noqa: E402
+from uuid_utils import embedding_model_uuid  # noqa: E402
 
-MODEL = str(uuid.UUID(int=0xB2))
+# the id the backend gives the model of that name (uuid_utils), as the
+# importer checks it
+MODEL = str(embedding_model_uuid("clap"))
 AUTHOR = Ed25519PrivateKey.generate()          # another node, whose records travel
 NODE = Ed25519PrivateKey.generate()            # this node's own key
 MIGRATION = REPO / "desktop" / "migrations" / "055_analysis_sources_per_origin.sql"
@@ -1418,3 +1421,24 @@ def test_an_unlinked_grid_held_only_at_an_hqplayer_or_away_is_a_gap(conn):
                          WHERE {sync_queries._LACKS['segments'].format(t='u')}""",
                     ([away, here],))
         assert cur.fetchall() == [(away,)]
+
+
+@pytest.mark.parametrize("craft", ["vector", "model_name"])
+def test_a_bundle_no_column_can_hold_drops_alone(conn, scratch_dsn, craft):
+    """A segment of another dimension than vector(512), a model name longer
+    than its column: only a crafted answer carries either, and it drops at
+    the gate, not the page in the database."""
+    import base64
+    with conn.cursor() as cur:
+        bad, good = _track(cur, "bad"), _track(cur, "good")
+        bundles = {t: _payloads(conn, t, FP)[0] for t in (bad, good)}
+    item = bundles[bad]["items"][0]
+    if craft == "vector":
+        item["segments"][0]["v"] = base64.b64encode(rs.vector_to_bytes([0.5] * 256)).decode()
+    else:
+        item["model_name"] = "m" * 101
+    assert _import(scratch_dsn, "segments", _merged(bundles[bad], bundles[good])) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id::text FROM embeddings")
+        assert cur.fetchall() == [(good,)]
+
