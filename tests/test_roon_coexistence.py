@@ -3757,8 +3757,10 @@ def test_p6_roons_stop_after_its_pause_on_the_nodes_take_back_is_said_as_the_oth
         spot = mgr._latest_status.get("resume")
         fake.start_polls = 60                      # the take-back's entry builds longer than Roon's Stop takes
         stops = roon.sent.count("Stop")
-        roon.pause(stop_after=1.5)
+        roon.pause(stop_after=3.0)
         assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        k = len(fake.commands)
+        assert _wait(lambda: _statuses(fake, k) >= 2, timeout=2.5), "the node never read Roon's pause"
         assert b.play()
         assert _wait(lambda: roon.sent.count("Stop") > stops, timeout=10), "Roon's Stop never went"
         n = _mark(fake, roon)
@@ -3792,8 +3794,10 @@ def test_p6_a_new_queue_played_under_roons_pause_is_said_as_the_other_apps_stop(
         assert ticks is not None, "the node never said external"
         fake.start_polls = 60                      # the new queue's entry builds longer than Roon's Stop takes
         stops = roon.sent.count("Stop")
-        roon.pause(stop_after=1.5)
+        roon.pause(stop_after=3.0)
         assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        k = len(fake.commands)
+        assert _wait(lambda: _statuses(fake, k) >= 2, timeout=2.5), "the node never read Roon's pause"
         added, _ = mgr.replace_queue([_item("E:/Music/C/01.flac", 31), _item("E:/Music/C/02.flac", 32)],
                                      play=True)
         assert added == 2
@@ -4031,8 +4035,10 @@ def test_p6_a_cause_in_hqplayers_log_after_a_take_back_keeps_hqplayers_verdict(f
         _, _, ticks = _roon_takes_over(fake, mgr, roon)
         assert ticks is not None, "the node never said external"
         fake.start_polls = 60
-        roon.pause(stop_after=1.5)
+        roon.pause(stop_after=3.0)
         assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        k = len(fake.commands)
+        assert _wait(lambda: _statuses(fake, k) >= 2, timeout=2.5), "the node never read Roon's pause"
         seen = {a.id for a in diag.attempts()}
         assert b.play()
         _write(tmp_path / "HQPlayer6Desktop.log", "& 2026/11/10 12:53:46 No suitable output rate for 44100, stop")
@@ -4251,6 +4257,218 @@ def test_a_start_another_controller_takes_over_in_its_window_is_no_refusal(fake,
                   source=st.get("source"), resume=st.get("resume"))
         assert (tap.end, tap.verdict["code"]) == ("superseded", "played"), tap.verdict
         assert (st.get("diagnosis") or {}).get("code") != "rejected", st.get("diagnosis")
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p6_hqplayers_own_stop_after_one_playing_answer_from_a_playing_roon_is_hqplayers(fake, listens,
+                                                                                         monkeypatch):
+    """Review round 3's M1: Roon plays (no Pause: no Stop of its own is
+    due). The person's Play takes HQPlayer back at the spot; HQPlayer
+    answers PLAYING at 0 s once while it builds the start — the shape a
+    start HQPlayer refuses may take (_spot_played) — and then stops by
+    itself, nobody sending a Stop; its log is not readable here and the rate
+    check names nothing. HQPlayer's own refusal, as before the body — never
+    "Another app stopped HQPlayer"."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        assert _wait(lambda: fake.state == PLAYING, timeout=5)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=5)
+        sent = len(roon.sent)
+        seen = {a.id for a in diag.attempts()}
+        fake.start_polls = 100                     # the take-back's start: PLAYING at 0 s while it builds
+        assert b.play()
+        assert _wait(lambda: fake.playlist == MIRROR and fake.state == PLAYING and fake.track == 2, timeout=15)
+        k = len(fake.commands)
+        assert _wait(lambda: _statuses(fake, k) >= 1, timeout=5), "the poller never read the start PLAYING"
+        with fake._lock:                           # HQPlayer's own stop: no one sent one
+            fake.state, fake.position = int(PlaybackState.STOPPED), 0.0
+
+        def judged():
+            return next((a for a in diag.attempts() if a.id not in seen and a.intent == "rebuild" and a.verdict
+                         and a.hqp_log is not None), None)
+        assert _wait(judged, timeout=30), "the take-back was never judged"
+        a = judged()
+        _observed("P6-one-playing", code=a.verdict["code"], held_paused=a.facts.get("held_paused"),
+                  ticks=[(t["state"], t["track"], t["position"]) for t in a.facts["ticks"]][:6],
+                  roon_after=roon.sent[sent:])
+        assert "Stop" not in roon.sent[sent:] and a.facts.get("taken_back")
+        assert a.verdict["code"] == "not_played", a.verdict
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+@pytest.mark.parametrize("road", ["play", "new queue"])
+def test_p6_roons_stop_during_the_take_backs_build_is_its_stop(fake, listens, monkeypatch, road):
+    """P6 as met live (§12.1 `p6-1`: the person's Play 2 s after Roon's
+    Pause, so the node read that pause): Roon's own Stop lands while
+    HQPlayer still builds the take-back's start — stopped on no entry, its
+    take not moved (Desktop 6.2.4 on CUDA) — so no status ever says the
+    start played. Roon's pause, read before the take-back, explains the
+    Stop: the other app's stop, by a Play pressed and by a new queue played."""
+    monkeypatch.setattr(diag, "START_LIMIT_S", 14.0)
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        stops = roon.sent.count("Stop")
+        roon.pause(stop_after=3.0)
+        assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        k = len(fake.commands)
+        assert _wait(lambda: _statuses(fake, k) >= 2, timeout=2.5), "the node never read Roon's pause"
+        fake.cuda_polls = 1000                     # the take-back builds past Roon's Stop
+        seen = {a.id for a in diag.attempts()}
+        if road == "play":
+            assert b.play()
+        else:
+            added, _ = mgr.replace_queue([_item("E:/Music/C/01.flac", 31), _item("E:/Music/C/02.flac", 32)],
+                                         play=True)
+            assert added == 2
+        assert _wait(lambda: roon.sent.count("Stop") > stops, timeout=10), "Roon's Stop never went"
+
+        def judged():
+            return next((a for a in diag.attempts() if a.id not in seen and a.verdict
+                         and a.intent in ("rebuild", "replace") and a.hqp_log is not None), None)
+        assert _wait(judged, timeout=40), "the take-back was never judged"
+        a = judged()
+        _observed("P6-build", road=road, code=a.verdict["code"], held_paused=a.facts.get("held_paused"),
+                  ticks=[(t["state"], t["track"], t["serial"]) for t in a.facts["ticks"]][:6])
+        assert a.facts.get("held_paused") and a.verdict["code"] == "other_stopped", a.verdict
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p7_a_read_under_way_across_the_persons_seek_says_no_row_beside_the_moved_spot(fake, listens, monkeypatch,
+                                                                                       tmp_path):
+    """Review round 3's L1: F7 — Roon's track refused, HQPlayer's log read
+    for it (P7), slowly, as an Embedded box's log page answers. Before the
+    read answers, the person moves where Play resumes (a Seek at the spot,
+    nothing sent). The row is said beside the spot it was read under alone
+    (P12: the next word is the person's) — the read's refusal stays in the
+    Diagnostics list, and the reads for the next refused track go on."""
+    import threading
+    _logged(monkeypatch, tmp_path)
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    gate, held = threading.Event(), threading.Event()
+    real = diag.read_log
+
+    def slow(*a, **k):
+        read = real(*a, **k)
+        if sys._getframe(1).f_code.co_name == "_other_refusal":
+            held.set()
+            gate.wait(20)
+        return read
+    monkeypatch.setattr(diag, "read_log", slow)
+    try:
+        roon.play_track()
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        assert _wait(held.is_set, timeout=10), "F7's read never began"
+        assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("index") == 2
+                     and mgr._latest_status.get("state") == "stopped", timeout=10), "no F7 spot"
+        n = _mark(fake, roon)
+        assert b.seek(30)
+        assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("position") == 30, timeout=5)
+        gate.set()
+        assert _wait(lambda: any(a.intent == "other" for a in diag.attempts()), timeout=10), "no row recorded"
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=10)
+        st = mgr._latest_status
+        _observed("P7-seek-in-flight", now=st.get("other_refused"), resume=st.get("resume"),
+                  node_commands=_node_commands(fake, n, roon))
+        assert _node_commands(fake, n, roon) == []
+        assert not st.get("other_refused"), st.get("other_refused")
+        assert b._refusal_read is not None and b._refusal_read.final is not None, b._refusal_read
+    finally:
+        gate.set()
+        b.shutdown()
+        roon.close()
+
+
+def test_p13_the_reads_armed_at_a_played_takeover_wait_for_a_stopped_take_that_moved(fake, listens, monkeypatch,
+                                                                                     tmp_path):
+    """The reads armed at D3's verdict (review round 2's P-b): Roon took
+    HQPlayer with a track it plays. HQPlayer's log is read again only with
+    HQPlayer stopped and the take moved since — never at Roon's own pause
+    and Stop of the very track it took HQPlayer with (the take unmoved since
+    the takeover), nor while Roon's next track plays (HQPlayer not stopped)."""
+    _logged(monkeypatch, tmp_path)
+    reads = []
+    real = diag.read_log
+
+    def counted(*a, **k):
+        if sys._getframe(1).f_code.co_name == "_other_refusal":
+            reads.append(round(time.monotonic(), 2))
+        return real(*a, **k)
+    monkeypatch.setattr(diag, "read_log", counted)
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)       # D3: Roon's first pick plays
+        assert ticks is not None, "the node never said external"
+        assert _wait(lambda: b._refusal_read is not None, timeout=5), "no reads armed at D3's verdict"
+        monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 2)       # the canary reads the playlist every other tick
+        roon.pause(stop_after=1.0)                            # Roon's pause, its own Stop a second later
+        assert _wait(lambda: fake.state == int(PlaybackState.STOPPED), timeout=5)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3 and any(c == "PlaylistGet" for c, _ in fake.commands[k:]),
+              timeout=10)
+        at_stop = len(reads)
+        roon.resume()                                         # a new stream that plays: the take moves, playing
+        assert _wait(lambda: fake.state == PLAYING and fake.position >= 2, timeout=10)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=10)
+        _observed("P13-D3-reads", at_stop=at_stop, playing=len(reads) - at_stop)
+        assert at_stop == 0, "the log read at Roon's pause and Stop of the track it took HQPlayer with"
+        assert not reads, "the log read while Roon's next track plays"
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_a_start_cut_at_its_first_answer_by_roons_refused_takeover_is_no_refusal(fake, listens, monkeypatch):
+    """Review round 2's fix on F7's road: the node's tap on slot 3 says
+    PLAYING at 0 s while HQPlayer builds it (a listen of its own, nothing
+    moved yet: D3.2); Roon's start comes then — its stream refused at its
+    Play (A8) — so the tick that judges the takeover is also the one the tap
+    stopped at its start on, the close reads (Roon's playlist) taken there.
+    The tap is judged on what HQPlayer did with it before — the takeover cut
+    it — never on Roon's playlist ("HQPlayer refused the file: … did not
+    keep it")."""
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        assert b.stop()
+        assert _wait(lambda: mgr._latest_status.get("state") == "stopped" and b._attempt is None, timeout=15)
+        fake.start_polls = 100                     # the tap's start: PLAYING at 0 s while it builds
+        assert b.select(3)
+        tap = b._attempt
+        assert tap is not None and tap.intent == "select"
+        assert _wait(lambda: b._listen is not None and b._listen.item is mgr.queue.item_at(3), timeout=5), \
+            "the tap's start was never read playing"
+        roon.play_track()                          # Roon's start: refused at its Play
+        assert _wait(lambda: tap.verdict is not None, timeout=20), "the tap was never judged"
+        st = mgr._latest_status
+        _observed("tap-F7", verdict=(tap.end, tap.verdict["code"]), resume=st.get("resume"))
+        assert tap.verdict["code"] != "rejected", tap.verdict
+        assert (st.get("resume") or {}).get("index") == 3 and tap.ticks and not tap.moved()
     finally:
         b.shutdown()
         roon.close()

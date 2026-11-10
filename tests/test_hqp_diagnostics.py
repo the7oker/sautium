@@ -120,13 +120,21 @@ def test_a_take_back_hqplayer_stopped_at_once_from_a_playing_controller_is_no_on
     """Review round 2's L2: the other app's own Stop follows its Pause (Roon's,
     5 s after it). A take-back from a controller that held HQPlayer playing,
     which HQPlayer stopped before it ever played the start, is no Stop of
-    anyone's — HQPlayer's own verdict (not_played); from one that held it
-    paused, or one HQPlayer played before it stopped, the other app's."""
-    f = _trace("other_stopped_take_back")
+    anyone's — HQPlayer's own verdict (not_played), one PLAYING answer at
+    0 s among it (a start HQPlayer refuses may say it once); from one that
+    held it paused, or one whose audio left before it stopped, the other
+    app's."""
+    paused = _trace("other_stopped_take_back")                         # P6 live: Roon's Pause 2 s before
+    f = {k: v for k, v in paused.items() if k != "held_paused"}          # held playing
     never = {**f, "ticks": [t for t in f["ticks"] if t["state"] != "playing"]}
     assert diag.verdict(never)["code"] == "not_played"
     assert diag.verdict({**never, "held_paused": True})["code"] == "other_stopped"
-    assert diag.verdict(f)["code"] == "other_stopped"
+    assert diag.verdict(paused)["code"] == "other_stopped"
+    # review round 3's M1: one PLAYING answer at 0 s, then stopped, with no Stop due — a refused start's shape
+    assert diag.verdict(f)["code"] == "not_played"
+    played = {**f, "ticks": [*f["ticks"][:2], {**f["ticks"][1], "ts": f["ticks"][1]["ts"] + 0.5, "position": 1.5},
+                             *f["ticks"][2:]]}
+    assert diag.verdict(played)["code"] == "other_stopped"
 
 
 def test_a_start_another_controller_stopped_is_no_failure_of_the_output(fresh):

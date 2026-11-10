@@ -965,9 +965,9 @@ def _other_stopped(f: dict, log: Optional[dict], owner: bool) -> bool:
     """Was a take-back stopped by the controller it took HQPlayer from? A
     start asked for while another controller held HQPlayer (taken_back),
     HQPlayer stopped at its latest tick, a Stop to explain it — that
-    controller held HQPlayer paused (its own Stop due), or HQPlayer took the
-    start before it stopped — and nothing of the node's or HQPlayer's own
-    explains it: no newer intent of the node's (owner), no Stop of the node's
+    controller held HQPlayer paused (its own Stop due), or HQPlayer started
+    it (its audio left) before it stopped — and nothing of the node's or
+    HQPlayer's own explains it: no newer intent of the node's (owner), no Stop of the node's
     after its start, no refusal in HQPlayer's answers (the add, a transport
     command, an entry not kept), no cause in its log nor one the rate check
     names without a hedge — that controller's own Stop (Roon's, 5 s after its
@@ -976,7 +976,9 @@ def _other_stopped(f: dict, log: Optional[dict], owner: bool) -> bool:
     steps, ticks, pl = f.get("steps") or [], f.get("ticks") or [], f.get("playlist") or {}
     if not (f.get("taken_back") and ticks and ticks[-1]["state"] == "stopped") or owner:
         return False
-    if not f.get("held_paused") and not any(t["state"] == "playing" and t["track"] >= 1 for t in ticks):
+    if not f.get("held_paused") and not started(ticks, None, f.get("meter"), f.get("take"), f.get("seeks") or ()):
+        # One PLAYING answer at 0 s is how a start HQPlayer refuses may look
+        # (playback.hqp_backend._spot_played): only its audio leaving shows it took it
         return False
     starts = [s["ts"] for s in steps if s["command"] in TRANSPORT]
     if starts and any(s["command"] == "Stop" and s["ts"] > max(starts) for s in steps):

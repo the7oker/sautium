@@ -194,6 +194,7 @@
   "take": 1000.2,
   "serial_before": 2,
   "from_playing": false,
-  "taken_back": true
+  "taken_back": true,
+  "held_paused": true
  }
 }

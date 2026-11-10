@@ -3247,9 +3247,10 @@ class HqpBackend(PlayerBackend):
         # first refused one; again for each after it (_read_refusal_again)
         token = object() if edited and status.state == PlaybackState.STOPPED else None
         with self._spot_lock:
-            self._refusal_read = _RefusalReads(None, status.track_serial, self._spot_gen, token, None)
+            gen = self._spot_gen
+            self._refusal_read = _RefusalReads(None, status.track_serial, gen, token, None)
         if token is not None:
-            threading.Thread(target=self._other_refused_log, args=(status.uri, token, self._verdict_playlist),
+            threading.Thread(target=self._other_refused_log, args=(status.uri, token, gen, self._verdict_playlist),
                              daemon=True, name="hqp-log").start()
         return True
 
@@ -3279,12 +3280,12 @@ class HqpBackend(PlayerBackend):
             if (read.reading is not None or uris == read.final or not foreign or status.track_serial is None
                     or status.track_serial == read.take or self._take_by_node):
                 return
-            token = object()
+            token, gen = object(), read.gen
             self._refusal_read = read._replace(take=status.track_serial, reading=token)
-        threading.Thread(target=self._other_refused_log, args=(status.uri, token, list(uris)),
+        threading.Thread(target=self._other_refused_log, args=(status.uri, token, gen, list(uris)),
                          daemon=True, name="hqp-log").start()
 
-    def _other_refused_log(self, uri: Optional[str], token: object, playlist: list) -> None:
+    def _other_refused_log(self, uri: Optional[str], token: object, gen: int, playlist: list) -> None:
         """HQPlayer's log read at F7's verdict — the takeover judged on a
         playlist not the node's, HQPlayer stopped on the other app's entry
         (ROON-COEX §6.1 P7) — and again for each refused track of that app's
@@ -3294,7 +3295,9 @@ class HqpBackend(PlayerBackend):
         its words the node's, HQPlayer's own line in the Why sheet. The read
         (`token`) is over at its end, a row or none; the reads are over for
         its playlist with a row, or with none a second time; a spot gone or
-        set anew since it began takes neither."""
+        set anew since it began takes neither, and its row is said beside the
+        spot it was read under (`gen`) alone — one the person's Seek moved
+        since has the person's word as the newer (P12)."""
         found = None
         try:
             found = self._other_refusal(uri, playlist)
@@ -3308,7 +3311,7 @@ class HqpBackend(PlayerBackend):
                                                        reading=None, unnamed=None if over else list(playlist))
                 if kept and found:
                     att = diag.record_other_refused(*found)
-                    self._other_refused = (att.id, found[2], read.gen, playlist)
+                    self._other_refused = (att.id, found[2], gen, playlist)
         if kept and found:
             logger.info("HQPlayer refused the other app's track: %s", found[2])
             self.poke()

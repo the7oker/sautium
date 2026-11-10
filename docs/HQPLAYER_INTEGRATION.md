@@ -641,7 +641,8 @@ comes after the control port answers again — so neither can end the wait.
   P6; the words a draft): a Stop the node did not send while a start asked
   for under another controller's hold goes — a Play pressed, a new queue
   played — that controller holding HQPlayer paused (its own Stop due) or
-  HQPlayer having taken the start, with no refusal in HQPlayer's answers, no
+  HQPlayer having started it (its audio left: one playing answer at 0 s is
+  how a start it refuses may look), with no refusal in HQPlayer's answers, no
   cause in its log nor one the rate check names, and, for a stream, HQPlayer
   having asked for it in time (else it is `no_fetch`), is judged
   `other_stopped` — HQPlayer stopping a take-back from a playing controller
