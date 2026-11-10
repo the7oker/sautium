@@ -24,20 +24,38 @@ Chromaprint's compressed fingerprint (a base64url string: one algorithm byte,
 a 24-bit big-endian item count, then each 32-bit item XOR-ed with the one
 before it, written as the ascending positions of its set bits in 3-bit
 deltas — 0 ends an item, 7 continues in a 5-bit exception packed after the
-3-bit stream) and AcoustID's alignment (a histogram of offsets between items
-whose top bits agree, within a bounded window). THIRD_PARTY_NOTICES.md
-credits both.
+3-bit stream) and, after AcoustID's method, the alignment (a histogram of
+offsets between items whose top bits agree, within a bounded window; every
+such pair votes here, where AcoustID's own matcher keeps one position per
+value). THIRD_PARTY_NOTICES.md credits both.
+
+A print arrives from other nodes too, so its length is bounded before it is
+read (MAX_FINGERPRINT_CHARS, MAX_ITEMS — what fpcalc's window can produce,
+with headroom) and the decoder is linear in it.
 """
 
 import base64
 import binascii
+import math
 from bisect import bisect_left, bisect_right
 from collections import namedtuple
 from typing import Iterable, Optional
 
 RULE_VERSION = 1
 
+# The audio fpcalc fingerprints (backend/provenance.py passes it as -length):
+# the first 120 s, fpcalc's own default.
+FPCALC_SECONDS = 120
 ITEM_BITS = 32
+# One item per 4096/3 samples at 11 025 Hz. A print of FPCALC_SECONDS holds
+# about 20 items fewer than the window's (the first frame and the filters
+# take them); 64 items of headroom above the window.
+ITEMS_PER_SECOND = 11025 * 3 / 4096
+MAX_ITEMS = math.ceil(FPCALC_SECONDS * ITEMS_PER_SECOND) + 64
+# The longest string MAX_ITEMS can take: per item at most 33 3-bit values (32
+# set bits and the end) and 32 5-bit exceptions, base64 of it with the header.
+MAX_FINGERPRINT_CHARS = math.ceil(
+    (4 + math.ceil(MAX_ITEMS * 33 * 3 / 8) + math.ceil(MAX_ITEMS * 32 * 5 / 8)) * 4 / 3)
 # Items whose top bits agree vote for the offset between them.
 MATCH_BITS = 14
 # How far apart, in items (one item = 4096/3 samples at 11 025 Hz, 0.124 s),
@@ -62,7 +80,9 @@ Alignment = namedtuple("Alignment", "offset ber overlap")
 
 def _unpack(fingerprint: str) -> tuple:
     """(algorithm, items) of a compressed fingerprint; ValueError for
-    anything that is not one."""
+    anything that is not one, or longer than fpcalc's window can make."""
+    if len(fingerprint) > MAX_FINGERPRINT_CHARS:
+        raise ValueError("fingerprint longer than fpcalc's window can make")
     try:
         raw = base64.b64decode(fingerprint.encode("ascii") + b"=" * (-len(fingerprint) % 4),
                                altchars=b"-_", validate=True)
@@ -72,14 +92,20 @@ def _unpack(fingerprint: str) -> tuple:
         raise ValueError("not a compressed fingerprint: no header")
     algorithm = raw[0]
     count = int.from_bytes(raw[1:4], "big")
-    bits = int.from_bytes(raw[4:], "little")
+    if count > MAX_ITEMS:
+        raise ValueError("fingerprint holds more items than fpcalc's window can make")
+    body = raw[4:] + b"\0"                      # a byte past the end: every read takes two
     nbits = (len(raw) - 4) * 8
+
+    def read(pos: int, width: int) -> int:
+        byte = pos >> 3
+        return ((body[byte] | body[byte + 1] << 8) >> (pos & 7)) & ((1 << width) - 1)
 
     deltas, pos, ended = [], 0, 0
     while ended < count:
         if pos + 3 > nbits:
             raise ValueError("fingerprint truncated in its bit positions")
-        v = (bits >> pos) & 7
+        v = read(pos, 3)
         pos += 3
         deltas.append(v)
         ended += v == 0
@@ -90,7 +116,7 @@ def _unpack(fingerprint: str) -> tuple:
         if v == 7:
             if pos + 5 > nbits:
                 raise ValueError("fingerprint truncated in its exceptions")
-            v += (bits >> pos) & 31
+            v += read(pos, 5)
             pos += 5
         if v == 0:
             prev ^= cur
@@ -122,7 +148,7 @@ def _ber_at(a: list, b: list, offset: int) -> tuple:
 
 def align(a: list, b: list) -> Alignment:
     """The offset at which b lines up with a (a's item i against b's item
-    i - offset), found as AcoustID finds it: every pair of items within
+    i - offset), after AcoustID's method: every pair of items within
     MAX_OFFSET of each other whose top MATCH_BITS agree votes for its
     offset, and the most voted wins (the smaller shift on a tie, so a
     silent or repetitive print aligns at 0); then the bit error rate and the
@@ -194,14 +220,15 @@ def matches_probe(fingerprint: str, reference: str) -> bool:
 
 
 def root_among(fingerprint: str, duration: Optional[int], rows: Iterable) -> Optional[int]:
-    """The group a new analysis_sources row of `fingerprint` joins among its
-    track's other rows — each (id, material_of, chromaprint,
-    duration_seconds), in id order: the root (material_of NULL marks one)
-    of a row with the equal print, with no comparison — an equal digest is
-    the same material whoever registered it —, else of the first row the
-    rule matches; None when none does, and the new row is a root of its
-    own."""
-    rows = list(rows)
+    """The group a new analysis_sources row of `fingerprint` and `duration`
+    joins among its track's other rows — each (id, material_of, chromaprint,
+    duration_seconds), in id order: the root (material_of NULL marks one) of
+    a row with the equal print, with no comparison, else of the first row
+    the rule matches — either only where the declared durations agree; None
+    when none is, and the new row is a root of its own."""
+    rows = [r for r in rows if _durations_agree(duration, r[3])]
+    if not rows:
+        return None
     for r in rows:
         if r[2] == fingerprint:
             return r[1] or r[0]

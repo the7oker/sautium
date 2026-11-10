@@ -840,9 +840,12 @@ network's safety anchor.
 `sync.carry_limit` (2000 tracks ≈ 92 MB by default), counted honestly — only
 tracks with imported analysis and no file. It is now the second belt; the first
 is the phantom intersection itself. **Provenance is never erased**:
-`_drop_protected` keeps segments off tracks that already have a grid or a
-first-hand source (verified by pushing a node's own rows back to it — 0
-imported). **The announce tail means "I hold analysis"** (`ANNOUNCE_TAIL_SQL`):
+`_drop_protected` keeps segments off tracks that already hold a grid — a
+first-hand source, a sealed grid, or an unlinked one on an owned track
+(`sync_queries.HELD_EMBEDDING`, since 2026-11-10; an imported grid a shed
+unsealed is replaced by its author's sealed version) — verified by pushing a
+node's own rows back to it, 0 imported. **The announce tail means "I hold
+analysis"** (`ANNOUNCE_TAIL_SQL`, by the same held rule):
 the announce mirrors what a node can actually serve rather than file ownership
 — it covers carried rows (the author suppresses its own announces, so the
 carrier is its only DHT address), stream-derived analysis, and first-hand

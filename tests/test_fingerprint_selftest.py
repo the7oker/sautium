@@ -73,7 +73,7 @@ def test_the_reference_passes_and_the_verdict_is_kept_per_fpcalc_found(fake_fpca
                                                                       monkeypatch):
     reference = provenance.PROBE_REFERENCE.read_text(encoding="ascii").strip()
     runs = tmp_path / "runs"
-    fake_fpcalc(f'[ "$1 $2" = "-plain {provenance.PROBE}" ] || exit 9\n'
+    fake_fpcalc(f'[ "$1 $2 $3 $4" = "-plain -length 120 {provenance.PROBE}" ] || exit 9\n'
                 f"echo run >> {runs}\necho {reference}")
     assert provenance.fingerprinter().ok
     provenance.require_fingerprinter()
@@ -148,7 +148,7 @@ def test_a_file_is_refused_before_any_decode_while_the_fpcalc_fails(fake_fpcalc,
     ffmpeg = tmp_path / "bin" / "ffmpeg"
     ffmpeg.write_text(f"#!/bin/sh\necho decode >> {decodes}\nexit 1\n")
     ffmpeg.chmod(0o755)
-    fake_fpcalc(f'[ "$2" = "{provenance.PROBE}" ] && echo {reference} || echo AQAA_the_file')
+    fake_fpcalc(f'[ "$4" = "{provenance.PROBE}" ] && echo {reference} || echo AQAA_the_file')
     assert provenance.chromaprint_file("/music/a.flac") == "AQAA_the_file"
     fake_fpcalc("exit 3")
     assert provenance.chromaprint_file("/music/a.flac") is None

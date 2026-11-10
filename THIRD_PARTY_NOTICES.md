@@ -102,10 +102,10 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   one material. The decoder is Sautium's own, written from the format; no
   Chromaprint code is included.
 - **AcoustID's fingerprint alignment** (the AcoustID project, acoustid.org)
-  — the same module aligns two prints as AcoustID does: offsets voted for
-  by items whose top 14 bits agree, within 80 items of each other, and the
-  bit error rate at the winning offset. Written from the method; no AcoustID
-  code is included.
+  — the same module aligns two prints after AcoustID's method: offsets
+  voted for by items whose top 14 bits agree, within 80 items of each other,
+  and the bit error rate at the winning offset. Written from the method; no
+  AcoustID code is included.
 
 ## Services and data
 

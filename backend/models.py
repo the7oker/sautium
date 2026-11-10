@@ -681,9 +681,10 @@ class AnalysisSource(Base):
     chromaprint of what was decoded. embeddings / audio_features rows link
     here; segments inherit it through their embeddings row. Record signatures
     bind the fingerprint and the duration. chromaprint_key is the database's
-    digest of the fingerprint — ~3 KB of text is too long for a btree row —
-    and the content key with track_id and the origin (`imported`): this
-    node's registrations and the sync import each keep a row of their own.
+    digest of the fingerprint — ~3 KB of text is too long for a btree row.
+    A row is one declaration (the print and the duration) of one origin
+    (`imported`): this node's registrations and each imported declaration
+    keep a row of their own, and no declaration changes under its records.
     material_of groups a track's rows of one material whose digests differ
     (desktop/p2p/material.py); NULL marks a group's root."""
     __tablename__ = "analysis_sources"
@@ -706,14 +707,15 @@ class AnalysisSource(Base):
     is_lossless = Column(Boolean)
     # True = this row arrived over P2P sync (the sender's material, not ours).
     # Imported sources are never signable and never made first-hand: this
-    # node's own registration of the same address is the row's twin.
+    # node's own registration of the same declaration is the row's twin.
     imported = Column(Boolean, nullable=False, server_default="false")
     material_of = Column(Integer, ForeignKey("analysis_sources.id", ondelete="SET NULL"))
     computed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("track_id", "chromaprint_key", "imported",
-                         name="uq_asrc_track_chromaprint_origin"),
+        UniqueConstraint("track_id", "chromaprint_key", "imported", "duration_seconds",
+                         name="uq_asrc_track_declaration_origin",
+                         postgresql_nulls_not_distinct=True),
         Index("idx_analysis_sources_media_file", "media_file_id"),
         Index("idx_analysis_sources_material", "material_of",
               postgresql_where=text("material_of IS NOT NULL")),

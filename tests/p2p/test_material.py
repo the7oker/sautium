@@ -3,8 +3,8 @@ rule's edges, on real prints and on generated ones.
 
 The real prints are the synthetic lab library's 90 files under the release's
 FFmpeg 4.4 and Debian trixie's 7.1 (tests/fixtures/fingerprints/: 17 of them
-differ between the two decoders) — generated signals, nothing of anyone's
-music. The encoder (tests/p2p/fingerprints.py) is the format written the
+differ between the two decoders: 107 distinct strings) — generated signals,
+nothing of anyone's music. The encoder (tests/p2p/fingerprints.py) is the format written the
 other way: re-encoding every decoded print gives back fpcalc's own string, so
 the decoder reads each bit where fpcalc wrote it."""
 
@@ -195,8 +195,46 @@ def test_the_probe_passes_a_print_a_decoder_moved_and_refuses_another():
 def test_a_new_row_joins_an_equal_print_without_comparing_and_a_similar_one_by_the_rule():
     base = noise(950, 20)
     fp, near, far = encode(base), encode(flip(base, 0.01, 21)), encode(noise(950, 22))
-    rows = [(5, None, far, 240), (7, 5, near, 240), (9, None, "AQAA_kept_unread", 240)]
+    rows = [(5, None, far, 240), (7, 5, near, 240), (9, None, "AQAA_kept_unread", 241)]
     assert material.root_among(fp, 240, rows) == 5            # the member's root, never the member
-    assert material.root_among("AQAA_kept_unread", None, rows) == 9   # equal: no comparison, no duration
+    assert material.root_among("AQAA_kept_unread", 240, rows) == 9    # equal: no comparison
     assert material.root_among(fp, 250, rows) is None         # the duration is the second key
-    assert material.root_among(fp, 240, [(3, None, near, 240), (4, None, fp, 300)]) == 4
+    assert material.root_among(fp, 240, [(3, None, near, 240), (4, None, fp, 241)]) == 4
+    assert material.root_among(fp, 240, []) is None
+
+
+def test_an_equal_print_of_another_length_is_another_material():
+    """An album version and its single edit print alike (the 120 s window
+    sees only the opening): the declared duration keeps them apart even when
+    the digests are equal."""
+    fp = encode(noise(950, 23))
+    assert material.root_among(fp, 205, [(5, None, fp, 245)]) is None
+    assert material.root_among(fp, None, [(5, None, fp, 245)]) is None
+    assert material.root_among(fp, None, [(5, None, fp, None)]) == 5
+
+
+def test_a_print_longer_than_fpcalcs_window_can_make_is_refused_before_it_is_read():
+    """Prints arrive from other nodes: the length is bounded by what
+    FPCALC_SECONDS can produce, and a decode is linear in it."""
+    import time
+    longest = encode(noise(material.MAX_ITEMS, 24))
+    assert len(longest) <= material.MAX_FINGERPRINT_CHARS
+    t = time.perf_counter()
+    assert len(material.decode(longest)) == material.MAX_ITEMS
+    small = time.perf_counter() - t
+    with pytest.raises(ValueError, match="more items"):
+        material.decode(encode(noise(material.MAX_ITEMS + 1, 25)))
+    with pytest.raises(ValueError, match="longer than"):
+        material.decode("A" * (material.MAX_FINGERPRINT_CHARS + 1))
+    # linear: four windows' worth of items cost about four times one, not sixteen
+    bound, material.MAX_ITEMS = material.MAX_ITEMS, 8 * material.MAX_ITEMS
+    chars, material.MAX_FINGERPRINT_CHARS = material.MAX_FINGERPRINT_CHARS, 10 ** 9
+    try:
+        four = encode(noise(4 * bound, 26))
+        t = time.perf_counter()
+        material.decode(four)
+        large = time.perf_counter() - t
+    finally:
+        material.MAX_ITEMS, material.MAX_FINGERPRINT_CHARS = bound, chars
+    assert large < 8 * small + 0.05
+    assert not material.same_material(longest + "AAAA" * 20000, 240, longest, 240)

@@ -121,12 +121,18 @@ _SIGNED = "signature IS NOT NULL AND batch_root IS NOT NULL"
 # record whose seal a shed removed (a rename, a merge) is held by nobody: it
 # is served to no peer and signed by nobody here, so its author's sealed
 # version replaces it as it would fill a gap. A mean without segments under
-# no first-hand source is a gap too. Row-level, over embeddings `e` and
+# no first-hand source is a gap too. A grid linked to no source on a track
+# this node owns is held: a legacy grid of its own, which the analysis pass
+# re-derives from the file (its pending predicate takes an unlinked
+# analysis) — a peer's grid in its place would stay there wherever
+# enrichment.reanalyze_imported is off. Row-level, over embeddings `e` and
 # audio_features `a`, each LEFT JOINed to analysis_sources `s`.
 HELD_EMBEDDING = """((s.id IS NOT NULL AND NOT s.imported)
      OR (EXISTS (SELECT 1 FROM embedding_segments es WHERE es.embedding_id = e.id)
-         AND NOT EXISTS (SELECT 1 FROM embedding_segments es
-                          WHERE es.embedding_id = e.id AND es.signature IS NULL)))"""
+         AND (NOT EXISTS (SELECT 1 FROM embedding_segments es
+                           WHERE es.embedding_id = e.id AND es.signature IS NULL)
+              OR (s.id IS NULL
+                  AND EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = e.track_id)))))"""
 HELD_FEATURES = "(a.signature IS NOT NULL OR (s.id IS NOT NULL AND NOT s.imported))"
 # The same per track, the track's uuid expression formatted in as {t}.
 HOLDS_SEGMENTS = f"""EXISTS (SELECT 1 FROM embeddings e
@@ -205,7 +211,9 @@ _holdings: dict = {"checked_at": 0.0, "version": None, "payload": None,
                    "tracks_n": 0}
 
 _HOLDINGS_TRACKS_SQL = f"""
-    SELECT track_id::text FROM embeddings
+    SELECT e.track_id::text FROM embeddings e
+      LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+     WHERE {HELD_EMBEDDING}
     UNION SELECT track_id::text FROM audio_features WHERE {_SIGNED}"""
 
 
@@ -866,11 +874,15 @@ def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
     return out
 
 
-ANNOUNCE_TAIL_SQL = """
+ANNOUNCE_TAIL_SQL = f"""
     WITH analyzed AS (
-        SELECT track_id FROM embeddings
+        SELECT e.track_id FROM embeddings e
+          LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+         WHERE {HELD_EMBEDDING}
         UNION
-        SELECT track_id FROM audio_features
+        SELECT a.track_id FROM audio_features a
+          LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+         WHERE {HELD_FEATURES}
     )
     SELECT ta.artist_id::text AS artist_uuid
       FROM analyzed x

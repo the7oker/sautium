@@ -127,6 +127,14 @@ def _names_its_model(item: dict) -> bool:
             and given.lower() == model_uuid(name))
 
 
+def _print_in_bounds(provenance: dict) -> bool:
+    """The fingerprint a record declares is no longer than fpcalc's window
+    can make (material.MAX_FINGERPRINT_CHARS): a print arrives from another
+    node, and every later registration on its track compares with it."""
+    fp = provenance.get("chromaprint")
+    return not isinstance(fp, str) or len(fp) <= material.MAX_FINGERPRINT_CHARS
+
+
 def batch_roots(item: dict) -> set:
     """The Merkle roots an item's seals name — a bundle's per segment."""
     segments = item.get("segments")
@@ -792,6 +800,10 @@ class SyncClient:
         decoded = []
         for item in items:
             prov = item.get("provenance") or {}
+            if not _print_in_bounds(prov):
+                logger.warning("sync import: dropping track %s — a fingerprint longer than "
+                               "fpcalc's window can make", str(item.get("track_uuid", "?"))[:8])
+                continue
             if not _on_the_grid(item.get("segments"), prov.get("duration_seconds")):
                 logger.warning("sync import: dropping track %s — segments off the grid",
                                str(item.get("track_uuid", "?"))[:8])
@@ -934,19 +946,21 @@ class SyncClient:
     @staticmethod
     def _upsert_analysis_sources(cur, items: list[dict]) -> dict:
         """Upsert the distinct provenance rows carried by analysis items and
-        return {(track_uuid, chromaprint): analysis_sources.id}. media_file_id
+        return {(track_uuid, chromaprint, duration): analysis_sources.id}. media_file_id
         is always NULL and imported=true — the sender's material is not ours,
         so these sources are never signable here (sign_audio excludes
         imported).
 
-        Each item is linked to the IMPORTED row of its address only — its
-        own twin when this node registered the address first-hand too: an
-        author's records under this node's own row would read as this node's
-        (and be signed by it after the next shed of their seals). A twin
-        already here keeps its declaration; only a missing duration is
-        filled in. A row new here joins its track's material group
-        (material.root_among: a twin's group with no comparison, else the
-        first row the rule matches); one seen before is never compared again.
+        Each item is linked to the IMPORTED row of its own declaration only —
+        the print and the duration its seal binds: its own twin when this
+        node registered the declaration first-hand too (an author's records
+        under this node's own row would read as this node's, and be signed
+        by it after the next shed of their seals), and a row of its own when
+        another author declared another duration of the print (its records,
+        under that row, would no longer verify). A row new here joins its
+        track's material group (material.root_among: an equal print within
+        the duration bound with no comparison, else the first row the rule
+        matches); one seen before is never compared again.
 
         `provider_id` stays NULL for imported rows, and honestly so: the wire
         does not say whether the author analysed a file or a stream (see
@@ -957,13 +971,12 @@ class SyncClient:
         for item in items:
             p = item.get("provenance")
             if p and p.get("chromaprint"):
-                prov[(item["track_uuid"], p["chromaprint"])] = p
+                prov[(item["track_uuid"], p["chromaprint"], p.get("duration_seconds"))] = p
         if not prov:
             return {}
         values = [
-            (tid, p["chromaprint"], p.get("duration_seconds"),
-             p.get("grid_version", 1), p.get("is_lossless"))
-            for (tid, _), p in prov.items()
+            (tid, fp, duration, p.get("grid_version", 1), p.get("is_lossless"))
+            for (tid, fp, duration), p in prov.items()
         ]
         rows = psycopg2.extras.execute_values(
             cur,
@@ -971,16 +984,15 @@ class SyncClient:
                (track_id, chromaprint, duration_seconds,
                 grid_version, is_lossless, imported)
                VALUES %s
-               ON CONFLICT (track_id, chromaprint_key, imported) DO UPDATE SET
-                   duration_seconds = COALESCE(analysis_sources.duration_seconds,
-                                               EXCLUDED.duration_seconds)
-               RETURNING id, track_id::text, chromaprint, xmax = 0""",
+               ON CONFLICT (track_id, chromaprint_key, imported, duration_seconds)
+                   DO UPDATE SET imported = EXCLUDED.imported
+               RETURNING id, track_id::text, chromaprint, duration_seconds, xmax = 0""",
             values,
             template="(%s::uuid, %s, %s, %s, %s, true)",
             fetch=True,
         )
-        SyncClient._join_groups(cur, sorted((r[0], r[1]) for r in rows if r[3]))
-        return {(r[1], r[2]): r[0] for r in rows}
+        SyncClient._join_groups(cur, sorted((r[0], r[1]) for r in rows if r[4]))
+        return {(r[1], r[2], r[3]): r[0] for r in rows}
 
     @staticmethod
     def _join_groups(cur, new_rows: list) -> None:
@@ -1002,6 +1014,14 @@ class SyncClient:
             if root is not None:
                 me[1] = root
                 joined.append((sid, root))
+        if joined:
+            # held while the rows join them: a root a merge deleted meanwhile
+            # leaves its joiner a root of its own, one it re-rooted hands
+            # over its new root
+            cur.execute("SELECT id, material_of FROM analysis_sources WHERE id = ANY(%s) "
+                        "FOR KEY SHARE", [sorted({r for _s, r in joined})])
+            held = dict(cur.fetchall())
+            joined = [(sid, held[root] or root) for sid, root in joined if root in held]
         if joined:
             psycopg2.extras.execute_values(
                 cur, """UPDATE analysis_sources s SET material_of = v.root
@@ -1028,7 +1048,7 @@ class SyncClient:
         p = item.get("provenance")
         if not p or not p.get("chromaprint"):
             return None
-        return source_map.get((item["track_uuid"], p["chromaprint"]))
+        return source_map.get((item["track_uuid"], p["chromaprint"], p.get("duration_seconds")))
 
     def _import_audio_features(self, conn, items: list[dict],
                                batches: dict, authors: set) -> int:
@@ -1049,6 +1069,10 @@ class SyncClient:
                     item.get("track_uuid", "?")[:8])
                 continue
             prov = item.get("provenance") or {}
+            if not _print_in_bounds(prov):
+                logger.warning("sync import: dropping features %s — a fingerprint longer "
+                               "than fpcalc's window can make", item.get("track_uuid", "?")[:8])
+                continue
             try:
                 payload = rs.features_payload(
                     item.get("author_pubkey") or "", item["track_uuid"],

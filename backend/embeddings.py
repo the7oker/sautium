@@ -307,19 +307,25 @@ class AudioEmbeddingGenerator:
         transaction unit. The overwrite decision happens before anything is
         written — material rank first (own file > lossless stream > lossy
         stream; imported and unlinked legacy rows rank below everything),
-        source quality within the same rank — so a lower-ranked pass (e.g. a
+        source quality within the same rank between copies of one material
+        (one group, provenance.held_in_group) — so a lower-ranked pass (e.g. a
         stream preview racing an owned scan) can no longer clobber segments
-        while the mean survives. provider_id None = the node's own file.
+        while the mean survives, and the track's elected file replaces the
+        analysis of another material, of whatever quality, rather than being
+        analysed and refused on every run. provider_id None = the node's own file.
         Replaced segments are deleted, not updated: fresh rows are unsigned by
         construction, which is the seal-invalidation model for segments.
         Returns False when the existing row outranks the incoming analysis."""
         existing = db.execute(sa_text("""
             SELECT e.id, s.id AS source_id, s.imported, s.provider_id,
-                   s.bit_depth, s.is_lossless
+                   s.bit_depth, s.is_lossless,
+                   COALESCE(s.material_of, s.id) = (
+                       SELECT COALESCE(n.material_of, n.id) FROM analysis_sources n
+                        WHERE n.id = :sid) AS one_material
             FROM embeddings e
             LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
             WHERE e.track_id = :tid AND e.model_id = :mid
-        """), {"tid": str(track_id), "mid": str(model.id)}).first()
+        """), {"tid": str(track_id), "mid": str(model.id), "sid": analysis_source_id}).first()
         if existing and existing.source_id is not None:
             old_rank = (provenance.material_rank(existing.provider_id,
                                                  existing.is_lossless,
@@ -327,7 +333,7 @@ class AudioEmbeddingGenerator:
                         self._quality_score(existing.bit_depth, existing.is_lossless))
             new_rank = (provenance.material_rank(provider_id, is_lossless),
                         self._quality_score(bit_depth, is_lossless))
-            if new_rank < old_rank:
+            if new_rank[0] < old_rank[0] or (existing.one_material and new_rank < old_rank):
                 return False
 
         eid = db.execute(sa_text("""

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from desktop.p2p import material
 from uuid_utils import artist_uuid, track_uuid, album_uuid
 from play_stats import refresh_play_stats
-from provenance import MATERIAL_RANK_SQL
+from provenance import ANALYSIS_KINDS, MATERIAL_RANK_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -130,11 +130,6 @@ def elect_analysis_source(db: Session, track_id) -> None:
 _SEAL_NULL = "author_pubkey = NULL, signature = NULL, batch_root = NULL, merkle_proof = NULL"
 
 
-# The analysis kinds a merge weighs one by one, each a table of rows linked
-# to an analysis_sources row of their track.
-_ANALYSIS_KINDS = ("embeddings", "audio_features")
-
-
 def _analysis_rank(db: Session, table: str, track_id: str) -> int:
     """Best provenance rank among a track's rows of one analysis kind; -2 =
     none."""
@@ -145,24 +140,27 @@ def _analysis_rank(db: Session, table: str, track_id: str) -> int:
     return -2 if best is None else int(best)
 
 
-def _shed_track_seals(db: Session, track_id: str) -> None:
-    """Null the audio seals of a track whose uuid just changed (a rename;
-    a merge sheds the rows it moves, _merge_analysis).
+def _shed_track_seals(db: Session, track_id: str, kinds=ANALYSIS_KINDS) -> None:
+    """Null the audio seals of a track's analysis of ``kinds``: after a
+    rename every kind, after a merge the kinds it moved (_merge_analysis).
 
     Every seal payload binds the track uuid (segment_payload /
-    features_payload), so after a rename the stored signatures
+    features_payload), so after the uuid changed the stored signatures
     verify against a uuid the row no longer carries — the album_tracks /
     track_mbids guards shed theirs on the cascaded track_id change, these
     tables have no track_id in their guard. sign_audio re-seals on its next
     pass; nothing travels unsigned in between."""
-    db.execute(text(f"""
-        UPDATE embedding_segments es SET {_SEAL_NULL}
-        FROM embeddings e
-        WHERE e.id = es.embedding_id AND e.track_id = :tid
-          AND es.signature IS NOT NULL"""), {"tid": track_id})
-    db.execute(text(f"UPDATE audio_features SET {_SEAL_NULL} "
-                    "WHERE track_id = :tid AND signature IS NOT NULL"),
-               {"tid": track_id})
+    if "embeddings" in kinds:
+        db.execute(text(f"""
+            UPDATE embedding_segments es SET {_SEAL_NULL}
+            FROM embeddings e
+            WHERE e.id = es.embedding_id AND e.track_id = :tid
+              AND es.signature IS NOT NULL"""), {"tid": track_id})
+    for kind in kinds:
+        if kind != "embeddings":
+            db.execute(text(f"UPDATE {kind} SET {_SEAL_NULL} "
+                            "WHERE track_id = :tid AND signature IS NOT NULL"),
+                       {"tid": track_id})
 
 
 def _merge_analysis(db: Session, old: str, new: str) -> None:
@@ -173,19 +171,11 @@ def _merge_analysis(db: Session, old: str, new: str) -> None:
     The moved rows' seals are shed — every payload binds the track uuid —
     and only theirs: the target's rows of the kinds it kept stay sealed."""
     p = {"old": old, "new": new}
-    kinds = [k for k in _ANALYSIS_KINDS
+    kinds = [k for k in ANALYSIS_KINDS
              if _analysis_rank(db, k, old) > _analysis_rank(db, k, new)]
     if not kinds:
         return
-    if "embeddings" in kinds:
-        db.execute(text(f"""
-            UPDATE embedding_segments es SET {_SEAL_NULL}
-            FROM embeddings e
-            WHERE e.id = es.embedding_id AND e.track_id = :old
-              AND es.signature IS NOT NULL"""), p)
-    if "audio_features" in kinds:
-        db.execute(text(f"UPDATE audio_features SET {_SEAL_NULL} "
-                        "WHERE track_id = :old AND signature IS NOT NULL"), p)
+    _shed_track_seals(db, old, kinds)
     for kind in kinds:
         db.execute(text(f"DELETE FROM {kind} WHERE track_id = :new"), p)
     _move_analysis(db, old, new, kinds)
@@ -196,12 +186,14 @@ def _move_analysis(db: Session, old: str, new: str, kinds) -> None:
     segments) and the sources it is linked to onto ``new``, which holds none
     of those kinds.
 
-    A source the target already holds — the same address AND the same origin
-    (UNIQUE (track_id, chromaprint_key, imported)) — is the same row: the
-    moving records re-point at it, the source's group members re-point at
-    the target row's root, and the duplicate is dropped. An address the
-    target holds under the other origin is its twin, and stays a row of its
-    own: this node's records and another author's never share a row. Each
+    A source the target already holds — the same declaration (the print and
+    the duration the records' seals bind) AND the same origin (UNIQUE NULLS
+    NOT DISTINCT (track_id, chromaprint_key, imported, duration_seconds)) —
+    is the same row: the moving records re-point at it, the source's group
+    members re-point at the target row's root, and the duplicate is
+    dropped. A declaration the target holds under the other origin is its
+    twin, and one of another duration another row: this node's records and
+    another author's never share a row, nor do records of two declarations. Each
     source that moves joins the target's material group by the rule
     (material.root_among: a twin's group with no comparison, else the first
     row that is one material with it), a moving root bringing its members
@@ -221,6 +213,7 @@ def _move_analysis(db: Session, old: str, new: str, kinds) -> None:
           JOIN analysis_sources t ON t.track_id = :new
                                  AND t.chromaprint_key = o.chromaprint_key
                                  AND t.imported = o.imported
+                                 AND t.duration_seconds IS NOT DISTINCT FROM o.duration_seconds
          WHERE o.track_id = :old AND o.id = ANY(:ids)"""),
         {**p, "ids": list(moving)}).fetchall()
     for d in dups:
