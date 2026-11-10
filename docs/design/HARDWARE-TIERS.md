@@ -82,7 +82,7 @@ database derives them from the segments. Already well-guarded on VRAM: adaptive 
 OOM catch-and-skip, NaN guard, per-batch `empty_cache`.
 
 **Not guarded on CPU:** hardcoded 16-worker I/O pool (`embeddings.py`,
-comment says "for i9-14900HX"), CLAP batch 16 hardcoded (`audio_analysis.py`),
+comment says "for i9-14900HX"), the features pass's batch of 16 hardcoded (`audio_analysis.py`),
 and **no `torch.set_num_threads` anywhere** — torch grabs all cores. On a 4-core
 laptop this oversubscribes badly.
 

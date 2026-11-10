@@ -252,7 +252,7 @@ sync. This is a genuine network-effect moat.
 >   version of them. ListenBrainz counts replicate through a second,
 >   separate slice family on the same pattern.
 > - **The analysis rides sync and carry**, keyed on track UUIDs that already
->   exist locally: segments, audio features and recording bindings. Carry's
+>   exist locally: segments, audio features, instruments and recording bindings. Carry's
 >   answer rule states the invariant — *"structural categories are never
 >   asked for (the skeleton is already here, MB-canonical)"*
 >   (`sync_queries.wanted_tracks`) — and "a recording this node has no row

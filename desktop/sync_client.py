@@ -164,7 +164,9 @@ FEATURE_FIELDS = {
 # it with `->>` and a cast, so a label is a short text and a score a number
 # in 0..1 — anything else would fail a reader's query, not its own import —
 # and there are at most INSTRUMENT_LABELS of them (the tagger knows fewer
-# than a hundred and stores its top twenty). An empty map is a record.
+# than a hundred and stores its top twenty). A negative zero is no score:
+# JSONB's numeric keeps no sign of zero, so the row would be re-served under
+# a hash its seal does not bind. An empty map is a record.
 INSTRUMENT_FIELDS = {"instruments": _SCORES}
 INSTRUMENT_LABELS = 128
 INSTRUMENT_LABEL_CHARS = 64
@@ -191,6 +193,7 @@ def _of_kind(kind: str, value) -> bool:
         return (isinstance(value, dict) and len(value) <= INSTRUMENT_LABELS
                 and all(isinstance(label, str) and 0 < len(label) <= INSTRUMENT_LABEL_CHARS
                         and "\x00" not in label and _is_number(score) and 0 <= score <= 1
+                        and math.copysign(1, score) > 0
                         for label, score in value.items()))
     if value is None:
         return True
@@ -1276,17 +1279,18 @@ class SyncClient:
         one, as the planner asked for it."""
         if not items:
             return items
-        cur.execute(f"""SELECT i.track_id::text
+        cur.execute(f"""SELECT i.track_id::text, i.version
                           FROM unnest(%s::uuid[], %s::int[]) AS i(track_id, version)
                           JOIN {table} a ON a.track_id = i.track_id
                           LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
                          WHERE {sync_queries.KEPT_RECORD.format(v="i.version")}""",
                     ([i["track_uuid"] for i in items],
                      [i.get("analysis_version", 1) for i in items]))
-        kept = {r[0] for r in cur.fetchall()}
+        kept = {(r[0], r[1]) for r in cur.fetchall()}
         if kept:
-            logger.debug("sync import: %d %s rows kept (own or no older)", len(kept), what)
-        return [i for i in items if i["track_uuid"] not in kept]
+            logger.debug("sync import: %d %s items kept out (own or no older)", len(kept), what)
+        return [i for i in items
+                if (i["track_uuid"], i.get("analysis_version", 1)) not in kept]
 
     def _import_audio_features(self, conn, items: list[dict],
                                batches: dict, authors: set) -> int:

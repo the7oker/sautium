@@ -212,7 +212,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 - [auto] Peers are found on the BitTorrent DHT, on the LAN (launcher only) and through the Worker's directory — `desktop/p2p/dht_service.py: DHTService`; `desktop/p2p/lan_discovery.py`; `desktop/p2p/node_hints.py`
 - [auto][CLI] The router maps the peer port by UPnP; PCP only from the command line — `desktop/p2p/upnp_service.py`; `desktop/portmap.py` (`map --pcp`)
 - [auto] A node nobody can reach holds wake streams to relays; any reachable node can be a relay — `desktop/p2p/p2p_manager.py: _peer_relay_manager`; `GET /api/relay/wake-stream`
-- [auto] Sync pulls sealed analysis: CLAP segment bundles and audio features; the track vector is derived locally — `desktop/sync_client.py: CATEGORIES`, `_import_segments`
+- [auto] Sync pulls sealed analysis: CLAP segment bundles, audio features and instruments; the track vector is derived locally — `desktop/sync_client.py: CATEGORIES`, `_import_segments`
 - [auto] Carry pushes analysis nobody asked for yet, track ↔ recording bindings with it — `desktop/p2p/sync_walk.py: _push_to_carrier`; `desktop/p2p/sync_queries.py: CARRY_CATEGORIES`
 - [auto] A peer's holdings arrive as a Bloom filter — `desktop/p2p/bloom.py`; `GET /api/sync/holdings`
 - [auto] Sync runs on events and a timer; there is no sync button — `desktop/p2p/sync_walk.py: dispatch_loop`, `interval_loop`

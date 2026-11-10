@@ -194,7 +194,7 @@ def test_a_v3_features_record_is_refused_where_its_v4_twin_lands(conn, scratch_d
 @pytest.mark.parametrize("scores", [
     {"piano": "loud"}, {"piano": 1.5}, {"piano": -0.1}, {"piano": float("nan")}, {"": 0.5},
     {"x" * 65: 0.5}, {f"label {n}": 0.5 for n in range(129)}, {"pi\x00ano": 0.5},
-    [["piano", 0.6]], None, {"piano": True}])
+    [["piano", 0.6]], None, {"piano": True}, {"piano": -0.0}])
 def test_an_instruments_map_no_reader_could_threshold_is_refused_whatever_its_seal(
         conn, scratch_dsn, scores):
     """Sealed validly over what it carries where a map can be sealed at
@@ -250,10 +250,16 @@ def test_a_newer_methodology_replaces_an_imported_record_never_a_first_hand_one(
     assert _import(scratch_dsn, category, item(NEWER, first_hand, 3)) == 0    # never
     assert _import(scratch_dsn, category, item(NEWER, newer_here, 2)) == 0    # not older
     assert _import(scratch_dsn, category, item(NEWER, newer_here, 3)) == 0    # nor equal
+    # one payload naming a track twice: its older item kept out, its newer one taken
+    both = item(NEWER, newer_here, 4)
+    older = item(NEWER, newer_here, 2)
+    both["items"] = older["items"] + both["items"]
+    both["batches"].update(older["batches"])
+    assert _import(scratch_dsn, category, both) == 1
     with conn.cursor() as cur:
         assert _row(cur, table, imported) == (3, pub(NEWER), True)
         assert _row(cur, table, first_hand) == (1, None, False)
-        assert _row(cur, table, newer_here) == (3, pub(AUTHOR), True)
+        assert _row(cur, table, newer_here) == (4, pub(NEWER), True)
 
 
 def test_the_planner_asks_only_for_what_the_importer_would_take(conn, scratch_dsn):

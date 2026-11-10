@@ -52,7 +52,7 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 | **ListenBrainz statistics layer** | `lb_*` (counts + the slice ledgers) | no (re-load / slices) | no | no |
 | **Catalog** (identity graph, owned + phantom) | `artists`, `albums`, `tracks`, `album_tracks`, `track_artists`, `album_artists`, `artist_mbids`, `genres`, `embedding_models` | yes | yes — the structural rows the records hang off, in FK order (`seed_export.structural_sections`; `embedding_models` is minted by the import gate, not carried) | — |
 | **Catalog, node-local** | `media_files` (this node's files and their cue bounds), `album_variants` (local ones and, since 2026-09-27, the copies held at an HQPlayer — migration 026), `hqp_library_files`, `hqp_endpoints` (migration 030, 2026-09-28), `artist_name_aliases`, `artist_members`, `seed_picks`, `stream_providers` (the snapshot of every provider manifest this backend has loaded) | yes | no — nothing here means anything on another node | — |
-| **Analysis** (sealed, travels) | `embedding_segments`, `embeddings`, `analysis_sources`, `signing_batches`, `audio_features`, `track_mbids` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only). Analysis travels as segments with their provenance and batch map; the track-level mean is derived by the importer | — |
+| **Analysis** (sealed, travels) | `embedding_segments`, `embeddings`, `analysis_sources`, `signing_batches`, `audio_features`, `track_instruments` (since 2026-11-10), `track_mbids` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only). Analysis travels as segments with their provenance and batch map; the track-level mean is derived by the importer | — |
 | **Last.fm layer** (node-local) | `artist_bios`, `artist_tags` (and the `tags` it names), `similar_artists`, `genre_descriptions` | yes | no — Last.fm's API terms do not allow redistribution: out of the protocol, the share file (format v2) and the seed bundle since 2026-09-19; every node fetches its own by name | — |
 | **Album-grain enrichment** | `album_genres`, `album_descriptions` — outside the sync contour (albums never sync by UUID), but structural rows in a file, where albums do travel under their seal | yes | yes | — |
 | **Text vectors** (derived) | `text_embeddings`, `lyrics_embeddings`, `artist_bio_embeddings`, `genre_desc_embeddings` | yes | no — a BGE-M3 vector is a deterministic function of text the file already carries and of the local metadata composed around it; every node encodes its own in background enrichment, on every profile (`lite` on the CPU, smaller slices) | — |
@@ -256,9 +256,9 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   is more than "what I analysed" — the file carries every sealed record
   the node holds, own and received, each under its author's seal, exactly
   what the node serves on the network. The pull handlers are untouched.
-  "Every sealed record" is the seed bundle's three analysis categories —
-  `segments` / `audio_features` / `track_mbids` per track
-  (`seed_export.ANALYSIS_CATEGORIES`). Until 2026-09-19 the file also
+  "Every sealed record" is the seed bundle's analysis categories —
+  `segments` / `audio_features` / `instruments` (since 2026-11-10) /
+  `track_mbids` per track (`seed_export.ANALYSIS_CATEGORIES`). Until 2026-09-19 the file also
   carried `artist_bios` / `artist_tags` / `similar_artists` per artist;
   that layer is node-local now (Last.fm's terms), and the format moved to
   v2 so a file that carried it is refused rather than half-read.
