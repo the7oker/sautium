@@ -235,6 +235,10 @@ class Attempt:
     # and the second it starts at — its start's own, or the entry HQPlayer's
     # own advance moves on to, from 0
     target: Optional[tuple] = None
+    # A play press that took HQPlayer back from another controller, which
+    # held it as the press was made (playback.hqp_backend._press): a Stop the
+    # node did not send while it starts is that controller's (verdict)
+    taken_back: bool = False
 
     def record(self, o: CommandOutcome) -> None:
         """A command this intent sent, with HQPlayer's answer."""
@@ -442,6 +446,8 @@ class Attempt:
                    "from_playing": self.from_playing}
             if self.advance is not None:
                 out["advance"] = dict(self.advance)
+            if self.taken_back:
+                out["taken_back"] = True
             return out
 
     def moved(self) -> bool:
@@ -775,7 +781,7 @@ def attach_log(attempt: Attempt, log: dict) -> bool:
         attempt.hqp_log = log
         code = (attempt.verdict or {}).get("code")
         facts = attempt.facts
-    if facts is None or code not in ("not_played", "unknown", "rate_refused"):
+    if facts is None or code not in ("not_played", "unknown", "rate_refused", "other_stopped"):
         return False
     v = verdict(facts, log)
     with _lock:
@@ -877,13 +883,15 @@ def refused() -> Optional[dict]:
 def failing_run() -> Optional[dict]:
     """Three or more closed attempts in a row ending in the same failure — a
     dead output, as opposed to one track that would not play. Another
-    controller's refused track is none of the node's plays (record_other_refused)."""
+    controller's refused track is none of the node's plays (record_other_refused),
+    and a start another controller stopped (other_stopped) no failure of the
+    output: passed over, as one another action took over is."""
     with _lock:
         closed = [(a.verdict, a.started, a.cleared) for a in reversed(_ring)
                   if a.verdict and a.intent != "other"]
     run: list = []
     for v, started, cleared in closed:
-        if v["code"] == "interrupted":
+        if v["code"] in ("interrupted", "other_stopped"):
             continue
         if v["code"] == "played" or cleared or (run and v["code"] != run[0][0]["code"]):
             break
@@ -945,6 +953,28 @@ def _final_refusal(steps: list) -> Optional[dict]:
         if s["command"] in TRANSPORT:
             last[s["command"]] = s
     return next((s for s in last.values() if s["result"] == "Error"), None)
+
+
+def _other_stopped(f: dict, log: Optional[dict], owner: bool) -> bool:
+    """Was a take-back stopped by the controller it took HQPlayer from? A
+    play press made while another controller held HQPlayer (taken_back),
+    HQPlayer stopped at its latest tick, and nothing of the node's or
+    HQPlayer's own explains that stop: no newer intent of the node's (owner),
+    no Stop of the node's after its start, no refusal in HQPlayer's answers
+    (the add, a transport command, an entry not kept) nor a cause in its log
+    — that controller's own Stop (Roon's, 5 s after its Pause: ROON-COEX
+    §6.2 P6)."""
+    steps, ticks, pl = f.get("steps") or [], f.get("ticks") or [], f.get("playlist") or {}
+    if not (f.get("taken_back") and ticks and ticks[-1]["state"] == "stopped") or owner:
+        return False
+    starts = [s["ts"] for s in steps if s["command"] in TRANSPORT]
+    if starts and any(s["command"] == "Stop" and s["ts"] > max(starts) for s in steps):
+        return False
+    if (f.get("handover") or {}).get("ok") is False or _final_refusal(steps) is not None:
+        return False
+    if pl.get("read") and f.get("expected_uri") and pl.get("expected_present") is False:
+        return False
+    return not ((log or {}).get("cause") or {}).get("code")
 
 
 def _load(ticks: list) -> Optional[dict]:
@@ -1072,6 +1102,13 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
         bad = next((h for h in hits if (h.get("status") or 0) in PROXY_ERRORS), None)
         if bad:
             return _v("proxy_error", f, status=bad["status"])
+
+    # Before no_fetch: the other controller's Stop may come before HQPlayer
+    # asked for anything of the take-back's
+    if _other_stopped(f, log, owner):
+        return _v("other_stopped", f)
+
+    if hits is not None:
         add_failed = ho.get("ok") is False
         watched = f["closed"] >= fetch_by
         if not began and (add_failed or watched) and not any(h["ts"] <= fetch_by for h in hits):
@@ -1259,6 +1296,12 @@ def _v(code: str, f: dict, **detail) -> dict:
             sentence = (f"HQPlayer {got} but never started playing — a decoding problem, or "
                         "the output could not open at the required rate.")
         nxt = f"HQPlayer's log names the reason.{f' DSP: {dsp}.' if dsp else ''}"
+    elif code == "other_stopped":
+        # Draft words (ROON-COEX §6.2 P6, for the words review)
+        title = "Another app stopped HQPlayer"
+        sentence = ("Another app that also controls HQPlayer stopped it just after Sautium took it "
+                    "back — Roon sends its own Stop a few seconds after it pauses.")
+        nxt = "Press Play to resume where it was."
     elif code == "rate_refused":
         # hqp_rate_check's words (_rate_refused), its cause kind beside them
         title, sentence, nxt = detail.pop("title"), detail.pop("sentence"), detail.pop("next")

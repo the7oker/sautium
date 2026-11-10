@@ -65,7 +65,48 @@ def test_the_stop_after_a_dsp_change_elsewhere_is_the_owners():
 def test_every_cause_is_recorded():
     codes = {json.loads(p.read_text(encoding="utf-8"))["expect"] for p in TRACES}
     assert codes == {"unreachable", "played", "too_slow", "proxy_error", "no_fetch",
-                     "rejected", "external", "not_played", "rate_refused", "unknown", "interrupted"}
+                     "rejected", "external", "not_played", "rate_refused", "unknown", "interrupted",
+                     "other_stopped"}
+
+
+def test_a_take_back_another_controller_stopped_is_its_stop_not_hqplayers_refusal():
+    """ROON-COEX §6.2 P6: a play press made while another controller held
+    HQPlayer, stopped by a Stop the node did not send before its entry played
+    — that controller's Stop (Roon's, 5 s after its Pause), never "HQPlayer
+    could not play it". What explains the stop otherwise keeps its verdict: a
+    cause in HQPlayer's log, a newer intent of the node's, a Stop of the
+    node's own after its start, a refusal in HQPlayer's answers — and a press
+    made with no other controller holding HQPlayer is HQPlayer's stop as ever."""
+    f = _trace("other_stopped_take_back")
+    v = diag.verdict(f)
+    assert (v["code"], v["title"]) == ("other_stopped", "Another app stopped HQPlayer")
+    assert v["sentence"] and v["next"] and "dsp" not in v
+    named = {"cause": {"code": "no_output_rate", "sentence": "",
+                       "line": "& 2026/11/10 12:53:45 No suitable output rate for 44100, stop"}}
+    assert diag.verdict(f, named)["code"] != "other_stopped"
+    assert diag.verdict({**f, "end": "owner"})["code"] == "interrupted"
+    assert diag.verdict({k: v for k, v in f.items() if k != "taken_back"})["code"] == "not_played"
+    ours = {"ts": f["ticks"][-1]["ts"] - 0.5, "command": "Stop", "result": "OK", "message": "", "attributes": {}}
+    assert diag.verdict({**f, "steps": [*f["steps"], ours]})["code"] != "other_stopped"
+    refused = {**f["steps"][-1], "ts": 1000.35, "result": "Error", "message": "Empty transport"}
+    assert diag.verdict({**f, "steps": [*f["steps"], refused]})["code"] == "rejected"
+    # a log read that names no cause leaves it the other app's (the re-judging after the read)
+    assert diag.verdict(f, {"cause": None, "lines": ["& 2026/11/10 12:53:46 Stop..."]})["code"] == "other_stopped"
+
+
+def test_a_start_another_controller_stopped_is_no_failure_of_the_output(fresh):
+    """Three take-backs in a row that another controller stopped (other_stopped)
+    are no dead output: passed over as an interrupted attempt is, they make
+    no failing run, nor break one."""
+    f = _trace("other_stopped_take_back")
+    for _ in range(3):
+        diag.close(diag.Attempt(intent="rebuild", taken_back=True), f)
+    assert diag.failing_run() is None
+    played = _trace("not_played_stream")
+    for i in range(4):
+        diag.close(diag.Attempt(intent="select"), played if i != 2 else f)
+    run = diag.failing_run()
+    assert run is not None and (run["code"], run["count"]) == ("not_played", 3)
 
 
 def _case(name):

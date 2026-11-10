@@ -1369,8 +1369,11 @@
       // remote, a controller past UPnP): its pause, not Sautium's. A
       // renderer being attached again where it answers now (`connecting`,
       // its name): said while it lasts, so a press waiting on it is seen.
+      // A take-back the app it took the output from stopped (its own Stop
+      // after its Pause, ROON-COEX P6): that app's stop, at the same spot.
       const b = data.building, r = data.resume;
       const out = (data.output && data.output.label) || 'this output';
+      const stoppedBy = why && diag.code === 'other_stopped';
       const tag = data.connecting ? `Connecting to ${data.connecting}…`
         : b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
         : data.not_answering ? 'HQPlayer is not answering'
@@ -1380,7 +1383,8 @@
             : `Another app is playing through ${out} — Play takes it back`)
         : data.paused_on_device && data.state === 'paused' ? `Paused on ${out}`
         : r && r.position > 0 && data.state === 'stopped'
-          ? `Stopped at ${fmtDuration(r.position)} — Play resumes here` : '';
+          ? (stoppedBy ? `Another app stopped ${out} — Play resumes at ${fmtDuration(r.position)}`
+            : `Stopped at ${fmtDuration(r.position)} — Play resumes here`) : '';
       this.hqpTag.hidden = !tag;
       this.hqpTag.textContent = tag;
 

@@ -3341,6 +3341,21 @@ def test_b_a_removed_tracks_uri_played_again_is_ours_at_no_slot(tmp_path, proxy,
              what="the queue's slot loaded")
 
 
+def test_p13_next_at_no_slot_loads_the_slot_play_loads(tmp_path, proxy, renderers, nodes, quality):
+    """P13 (a) (ROON-COEX-DESIGN, 2026-11-10 morning): at no slot (P11) Next
+    and Previous count from the slot Play loads, as from a removal playing
+    out — Next loads that very slot (Track 2), never the one after it
+    (Track 3, the track Play would have loaded skipped)."""
+    r, n, q = _removed_tracks_uri_played_again(tmp_path, renderers, nodes)
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.state == "playing"
+             and n.last.queue_index == 0 and n.last.extra.get("song") == "Track 1", timeout=6,
+             what="ours at no slot, named")
+    assert n.backend.next()
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and "Track 2" in r.meta
+             and n.last.position >= 1, timeout=10, what="Next loaded the slot Play loads")
+    assert "Track 3" not in r.meta
+
+
 def test_b_ours_at_no_slot_keeps_no_listen_and_its_end_advances_nothing(tmp_path, proxy, renderers, manager,
                                                                          heard, quality):
     """Ours at no slot keeps no listen of it (only the listen the takeover
@@ -3663,6 +3678,84 @@ def test_p7_roons_next_refused_track_is_not_said_with_the_first_ones_reason(fake
         _observed("P7-second", first=first, now=st.get("other_refused"), state=st.get("state"),
                   hqplayer=(fake.state, fake.playlist[-1][-30:] if fake.playlist else None))
         assert "96 kHz" not in (st.get("other_refused") or ""), "the 192 kHz track said refused for 96 kHz"
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p13_each_refused_track_of_roons_gets_a_row_of_its_own(fake, listens, monkeypatch, tmp_path):
+    """P13 (a) (ROON-COEX-DESIGN, 2026-11-10 morning): A8's cycle as recorded
+    — Glass Harbours (96 kHz) refused, then Static Bloom (192 kHz) refused.
+    With the spot standing and HQPlayer stopped, its playlist other than at
+    the last read and holding an entry the node never gave, the take moved
+    with no command of the node's, HQPlayer's log is read again: one row per
+    refusal — the second one's said beside the spot, the first's kept in the
+    Diagnostics list — and the node sends nothing."""
+    _logged(monkeypatch, tmp_path)
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        roon.play_track()
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+        first = mgr._latest_status.get("other_refused")
+        with open(tmp_path / "HQPlayer6Desktop.log", "a") as log:
+            log.write("& 2026/11/02 18:00:30 No suitable output rate for 192000, stop\n")
+        n = _mark(fake, roon)
+        roon.play_track()                          # Static Bloom: refused too
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        rows = [a for a in diag.attempts() if a.intent == "other"]       # the newest first
+        st = mgr._latest_status
+        _observed("P13-second", first=first, now=st.get("other_refused"), rows=[a.verdict["sentence"] for a in rows],
+                  node_commands=_node_commands(fake, n, roon))
+        assert said, "the 192 kHz refusal got no row"
+        assert "96 kHz" in first and len(rows) == 2 and rows[0].id != rows[1].id
+        assert (st.get("diagnosis") or {}).get("id") == rows[0].id and st["resume"]["index"] == 2
+        assert _node_commands(fake, n, roon) == []
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p6_roons_stop_after_its_pause_on_the_nodes_take_back_is_said_as_the_other_apps(fake, listens,
+                                                                                         monkeypatch):
+    """P6 met live (ROON-COEX §12.1, `p6-1`; the answer in §6.2): Roon pauses;
+    a Play in the node right after it takes HQPlayer back from Roon; Roon's
+    own Stop — the one it sends a set time after its Pause — lands before
+    HQPlayer plays the take-back's entry. The node changes no behaviour: it
+    sends nothing more by itself, the spot stands, and its verdict is the
+    other app's stop — never "HQPlayer could not play it"."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        spot = mgr._latest_status.get("resume")
+        fake.start_polls = 60                      # the take-back's entry builds longer than Roon's Stop takes
+        stops = roon.sent.count("Stop")
+        roon.pause(stop_after=1.5)
+        assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        assert b.play()
+        assert _wait(lambda: roon.sent.count("Stop") > stops, timeout=10), "Roon's Stop never went"
+        n = _mark(fake, roon)
+        judged = _wait(lambda: (mgr._latest_status.get("diagnosis") or {}).get("code") is not None, timeout=30)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=10)
+        st = mgr._latest_status
+        _observed("P6-take-back", spot=spot, diagnosis=st.get("diagnosis"), resume=st.get("resume"),
+                  state=st.get("state"), node_commands=_node_commands(fake, n, roon))
+        assert judged, "the take-back was never judged"
+        assert (st["diagnosis"]["code"], st["diagnosis"]["title"]) == ("other_stopped", "Another app stopped HQPlayer")
+        assert st["state"] == "stopped" and st["resume"] == spot
+        assert _node_commands(fake, n, roon) == []
     finally:
         b.shutdown()
         roon.close()

@@ -2812,6 +2812,11 @@ class DlnaBackend(PlayerBackend):
     def next(self) -> bool:
         if self._held_with_no_spot():
             return False
+        if self._unslotted is not None:
+            # Ours at no slot: Next and Previous count from the slot Play
+            # loads, as from a removal playing out (§6.1 P13) — Next loads
+            # that very slot, Previous (below) the one before it
+            return self._call_async(self._load_and_play(self._index if self._index >= 1 else 1))
         if self._external and self._queue.item_at(self._index + 1) is None:
             # The queue's end: the spot — or the take-back waiting for its
             # stream — stays, as on HQPlayer

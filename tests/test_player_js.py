@@ -664,6 +664,29 @@ def test_another_apps_refused_track_is_a_row_of_its_own_that_opens_the_why_sheet
     assert rows[1][3:] == [None, False, ""]
 
 
+def test_a_take_back_the_other_app_stopped_says_so_at_its_spot():
+    """ROON-COEX §6.2 P6: Roon's own Stop, 5 s after its Pause, lands on the
+    node's take-back. Now Playing says another app stopped the output and
+    that Play resumes at the spot, the Why button beside it for the sheet —
+    never the plain "Stopped at … — Play resumes here" of a stop of the
+    node's own; a verdict about another track says nothing of the kind."""
+    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
+            "position_formatted": "0:00", "length_formatted": "5:00",
+            "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
+    stopped = {"id": 9, "code": "other_stopped", "title": "Another app stopped HQPlayer",
+               "next": "Press Play to resume where it was.", "track_id": "t", "failing": False}
+    spot = {"index": 2, "position": 46}
+    statuses = [{**base, "state": "stopped", "resume": spot, "diagnosis": stopped},
+                {**base, "state": "stopped", "resume": spot},
+                {**base, "state": "stopped", "resume": spot, "diagnosis": {**stopped, "track_id": "u"}}]
+    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
+                          input=json.dumps(statuses).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    rows = json.loads(proc.stdout)
+    assert rows[0][2:5] == ["Another app stopped HQPlayer Desktop — Play resumes at 0:46", None, False]
+    assert rows[1][2] == rows[2][2] == "Stopped at 0:46 — Play resumes here"
+
+
 def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():
     """N-20: while the play gate — or a scan that found the renderer
     elsewhere — attaches the renderer again where it answers now, Now
