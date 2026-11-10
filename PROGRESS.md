@@ -160,6 +160,27 @@ implementation details live in the code, DB and git history.
 - **Vocal detection thresholds**: >0.65 vocal, <0.35 instrumental, else mixed.
   Known unreliable — for vocal/instrumental queries use `artists.is_vocalist`
   (classified from Last.fm bio keywords).
+- **The zero-shot values are derived from the stored segments (2026-11-10).**
+  The analyser scored one random 10 s crop of the middle 30 s, so a re-run
+  of one file on one machine moved the vocal score by up to 0.33 and no two
+  nodes agreed. Now the database derives the scores from the segment
+  embeddings a node holds — per segment the softmax within each label set
+  of scale × (segment · label), per embedding the mean over its segments —
+  and two statement triggers on `embedding_segments` keep them, so every
+  writer of segments (the analysis pass, a stream, an import, a seed or
+  share file) gets them with no code of its own. Measured on 90 files
+  across CUDA bf16, x86 and ARM: the vocal score moves by at most 0.0043,
+  danceability 0.012, the moods 0.020 in L1. The label embeddings are made
+  once (`scripts/make_zero_shot_labels.py`) and shipped as a file with a
+  pinned digest: no node encodes a label, so no device or dtype enters the
+  constants. In SQL rather than Python because the launcher's P2P process
+  imports segments without numpy, and one derivation serves every write
+  path. Rows, not JSONB; no stored class — thresholds are read-time
+  constants (`backend/zero_shot.py`: the values above, a mood at 0.05,
+  danceable at 0.5, until a measurement on a real library sets them). The
+  full fill of 494 000 synthetic segments, the master's scale, takes 11 s. The bias of the vocal score is
+  the prompts', not the crop's: `artists.is_vocalist` stays the vocal
+  signal.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be

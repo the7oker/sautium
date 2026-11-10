@@ -257,8 +257,20 @@ See:
   ffmpeg `-ss/-t` locally, a cached FLAC cut (`flac_slice_path_for_file`)
   for HQPlayer/DLNA/browser. The chromaprint is per-slice. See
   `PROGRESS.md` § CUE images.
-- **`audio_features.vocal_instrumental` is unreliable.** For vocal/
-  instrumental queries, use `artists.is_vocalist` (classified from bio
+- **The zero-shot values are derived, not stored** (since 2026-11-10).
+  Moods, the vocal score and danceability are `zero_shot_scores` rows the
+  DATABASE derives from the segment embeddings a node holds — per segment
+  the softmax within each label set, per embedding the mean over its
+  segments (`zero_shot_derive`, kept by two statement triggers on
+  `embedding_segments`) — against label embeddings that ship with the
+  release (`backend/zero_shot_labels/labels.json`, its digest pinned in
+  `backend/zero_shot.py`). They never travel and are never signed. Presence
+  is a read-time threshold in `zero_shot.py`; gates read `zero_shot_scores`,
+  display reads the `track_zero_shot` view. Discovery, search, Now
+  Playing, the assistant and the CLI read these; the analysis still writes
+  the four old columns of `audio_features`, and the signed features record
+  still carries them. **The vocal score is unreliable as a class**: for
+  vocal/instrumental queries, use `artists.is_vocalist` (classified from bio
   keywords). See `PROGRESS.md` design decisions.
 - **A copy at the HQPlayer is a VARIANT, and "owned" means `owned_files`.**
   Since 2026-09-27 an album's copy in the library of the HQPlayer the node
@@ -663,6 +675,7 @@ toast takes no pointer events and never blocks the user (see
 | `desktop/p2p/mb_slice_cycle.py` + `desktop/p2p/slice_sources.py` | The MB slice requester shared by the launcher's P2PManager and the Docker backend (the pending tiers incl. imported-scrobble names, `mb.search_sources`, `mb_slice.status`) and the source finder both slice families share (every DHT holder; the directory and the master hint whenever no primary source is usable; the verified set kept between runs) |
 | `backend/track_similarity.py` | The ONE "similar tracks" scorer — recall by mean-KNN plus a kin arm, rank by segment chamfer minus a Last.fm tag bonus — behind radio, the Now Playing Similar shelf, `play-similar` and Discovery's seed (`_SEED_SCORE` imports its weights). Radio itself (the drifting batch fill, the refill observer on the status tick, `manager.radio_mode`) is `backend/routers/player.py` § "Radio mode"; the decisions are in PROGRESS.md § "Radio and track similarity" |
 | `backend/hqp_library.py` + `backend/playback/substitute.py` | An HQPlayer's own library as album variants (`<LibraryGet/>` → `scanner.import_metadata` with an HQPlayer `FileSink`; `hqp_endpoints` as the library's identity and the registry of chosen HQPlayers; a sync never removes rows) and what the ACTIVE output opens for each queue slot (`QueueItem.play`, re-read on an output switch: a rip here, that HQPlayer's copy, else a stream fetched lazily a lead window ahead of the playhead) |
+| `backend/zero_shot.py` + `backend/zero_shot_labels/labels.json` | The zero-shot values as readers see them: the release's label embeddings (made once by `scripts/make_zero_shot_labels.py`, loaded only under the pinned digest), the read-time thresholds (`MOOD_MIN`, `DANCEABLE_MIN`, `VOCAL_MIN`, `INSTRUMENTAL_MAX`) and the SQL fragments the gates share. The derivation itself is SQL — `zero_shot_derive` and the two triggers on `embedding_segments` in `001_initial.sql`; `db_migrate`'s `zero_shot_labels_v1` loads the labels and scores what a node already held |
 | `backend/streaming/demo.py` | The demo policy: the `demo_plays` ledger (one full demo-channel listen per track), the resolve's per-track provider order, the proxy's fetch-time gate (`link_admissible`), the status observer that spends the listen past 90 % and drops the spent buffer |
 | `backend/streaming/deezer_catalog.py` + `deezer_preview.py` | Deezer public API in core: the catalog resolve (barcode → album tracklist → track gate, one pacer + memo per process) shared as `DeezerCatalogProvider` by the BYO lossless module and the core 30 s excerpt provider (`deezer_preview`, `manifest.excerpt`, always last in `providers_preferred()`) |
 

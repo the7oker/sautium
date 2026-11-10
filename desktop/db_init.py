@@ -79,7 +79,8 @@ ASSISTANT_READS = (
     "mb_release_group_tag", "mb_release_label", "mb_release_unknown_country",
     "mb_tag", "mb_track", "mb_url", "media_files", "owned_files", "seed_picks",
     "session_tracks", "similar_artists", "tags", "text_embeddings",
-    "track_artists", "track_lyrics", "track_mbids", "tracks", "user_gear",
+    "track_artists", "track_lyrics", "track_mbids", "track_zero_shot", "tracks",
+    "user_gear", "zero_shot_labels", "zero_shot_scores",
 )
 
 

@@ -10,6 +10,7 @@ import time
 import click
 from sqlalchemy import text
 
+import zero_shot
 from config import settings, LOGGING_CONFIG
 from database import get_db_context, engine
 from api_cooldown import cooling_down
@@ -745,14 +746,16 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
         if stats['success'] > 0:
             try:
                 with get_db_context() as db:
-                    rows = db.execute(text("""
+                    rows = db.execute(text(f"""
                         SELECT t.title, a2.name as artist,
-                               af.bpm, af.key, af.mode, af.vocal_instrumental,
-                               af.danceability, af.instruments
+                               af.bpm, af.key, af.mode,
+                               {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental,
+                               round(z.danceability::numeric, 3) AS danceability, af.instruments
                         FROM audio_features af
                         JOIN tracks t ON af.track_id = t.id
                         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
                         JOIN artists a2 ON ta.artist_id = a2.id
+                        LEFT JOIN track_zero_shot z ON z.track_id = t.id
                         ORDER BY af.created_at DESC
                         LIMIT 5
                     """)).fetchall()
@@ -936,7 +939,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
 @click.option("--instrument", type=str, default=None, help="Instrument name (e.g. 'piano', 'saxophone')")
 @click.option("--vocal", is_flag=True, default=False, help="Only vocal tracks")
 @click.option("--instrumental", is_flag=True, default=False, help="Only instrumental tracks")
-@click.option("--danceable", is_flag=True, default=False, help="Only danceable tracks (danceability >= 0.5)")
+@click.option("--danceable", is_flag=True, default=False, help="Only danceable tracks")
 @click.option("--limit", "-l", type=int, default=20, help="Number of results")
 @click.option("--artist", type=str, default=None, help="Filter by artist name")
 @click.option("--genre", type=str, default=None, help="Filter by genre")

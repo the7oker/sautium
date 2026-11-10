@@ -395,6 +395,7 @@ sautium/
 │   ├── lb_dump_load.py             # ListenBrainz statistics dump loader
 │   ├── audio_analysis.py           # librosa features + CLAP embeddings
 │   ├── ensemble_instruments.py     # AST + PaSST instrument tagger
+│   ├── zero_shot.py                # moods, vocal score, danceability: derived in SQL from the segments
 │   ├── notary.py / sign_audio.py   # sealing: author signature + Merkle timestamp
 │   ├── hqplayer_client.py          # HQPlayer XML control client
 │   ├── hqp_library.py              # an HQPlayer's own library as album variants

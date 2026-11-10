@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import track_similarity
+import zero_shot
 from config import settings
 from db_pool import (
     db_query as _db_query,
@@ -1489,7 +1490,7 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str],
                al.id::text AS album_id, al.title AS album_title,
                al.release_year AS year, al.cover_url,
                af.bpm, af.key, af.mode, af.energy, af.energy_db,
-               af.danceability, af.instruments, af.moods
+               af.instruments
         FROM tracks t
         JOIN album_tracks atr ON atr.track_id = t.id
         JOIN albums al ON al.id = atr.album_id
@@ -1508,6 +1509,7 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str],
     row["media_file_id"] = None
     row["cover_id"] = None
     row["instruments"] = present_instruments(row.get("instruments"))
+    row.update(_zero_shot_detail(track_id))
     row["genres"] = _db_query("""
         SELECT g.id::text, g.name
         FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
@@ -1533,6 +1535,17 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str],
         row["quality"] = _stream_quality(provider)
     row["provider_cover_url"] = _resolved_artwork.get(track_id)
     return row
+
+
+def _zero_shot_detail(track_id: str) -> dict:
+    """The Now Playing fields derived from the track's segments: the moods
+    present and the danceability — null until the track has segments."""
+    z = _db_query_one("""
+        SELECT moods, round(danceability::numeric, 3)::float8 AS danceability
+        FROM track_zero_shot WHERE track_id = %(t)s::uuid
+    """, {"t": track_id}) or {}
+    return {"danceability": z.get("danceability"),
+            "moods": zero_shot.present_moods(z.get("moods")) or None}
 
 
 def _held_copy(track_id: str) -> Optional[dict]:
@@ -1639,9 +1652,7 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
                af.mode,
                af.energy,
                af.energy_db,
-               af.danceability,
                af.instruments,
-               af.moods,
                av.album_id::text AS album_id,
                al.title AS album_title,
                al.release_year AS year
@@ -1657,6 +1668,7 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
         raise HTTPException(status_code=404, detail="media_file not found")
 
     row["instruments"] = present_instruments(row.get("instruments"))
+    row.update(_zero_shot_detail(row["track_id"]))
     row["genres"] = _db_query("""
         SELECT g.id::text, g.name
         FROM album_genres ag

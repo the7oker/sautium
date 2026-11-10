@@ -37,6 +37,7 @@ Skipped without a cluster."""
 
 import asyncio
 import json
+import math
 import sys
 import threading
 import time
@@ -64,7 +65,7 @@ from desktop.api_client import BackendAPIClient  # noqa: E402
 from desktop.p2p import (birth_cert, identity_proof, identity_registry,  # noqa: E402
                          sync_queries, sync_walk, witness)
 from desktop.p2p.sync_server import SyncServer  # noqa: E402
-from tests.p2p.sealed_records import pub, seal_track  # noqa: E402
+from tests.p2p.sealed_records import pub, seal_track, vector  # noqa: E402
 from tests.p2p.test_witness import ISSUER, certificate  # noqa: E402
 from tests.p2p.test_witness_launcher import Served, _tls_context  # noqa: E402
 
@@ -179,6 +180,39 @@ def _registered(conn, subject) -> bool:
         return cur.fetchone() is not None
 
 
+# Two zero-shot labels for the test's model, in values float32 keeps exactly.
+SCALE = 4.0
+LABELS = {"low": [2 / 1024] * 512, "high": [v / 1024 for v in vector(7)]}
+
+
+def _label(cur) -> None:
+    """The model's labels on a node: from here on the segments' trigger
+    scores every bundle that lands, whoever wrote it."""
+    cur.execute("UPDATE embedding_models SET logit_scale = %s WHERE id = %s", (SCALE, MODEL))
+    for key, values in LABELS.items():
+        cur.execute("""INSERT INTO zero_shot_labels (model_id, label_set, key, prompt, vector)
+                       VALUES (%s, 'vocal', %s, %s, %s::vector)""",
+                    (MODEL, key, f"This is {key}", str(values)))
+
+
+def _scored(conn, track) -> dict:
+    with conn.cursor() as cur:
+        cur.execute("""SELECT l.key, s.score FROM embeddings e
+                       JOIN zero_shot_scores s ON s.embedding_id = e.id
+                       JOIN zero_shot_labels l ON l.id = s.label_id WHERE e.track_id = %s""", (track,))
+        return dict(cur.fetchall())
+
+
+def _sealed_scores() -> dict:
+    """What a sealed track's three segments (seal_track) derive to."""
+    shares = []
+    for i in range(3):
+        weights = {key: math.exp(SCALE * math.fsum(a * b for a, b in zip(vector(i), values)))
+                   for key, values in LABELS.items()}
+        shares.append({key: w / math.fsum(weights.values()) for key, w in weights.items()})
+    return {key: math.fsum(s[key] for s in shares) / 3 for key in LABELS}
+
+
 def _holds(conn, track) -> dict:
     with conn.cursor() as cur:
         cur.execute("""SELECT (SELECT count(*) FROM embeddings e JOIN embedding_segments es
@@ -247,6 +281,7 @@ def world(scratch_dsn, launcher_dsn, monkeypatch, tmp_path):
             cur.execute("TRUNCATE tracks, albums, artists, embedding_models, signing_batches CASCADE")
             cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)",
                         (MODEL,))
+            _label(cur)
             for n, track in tracks.items():
                 cur.execute("INSERT INTO tracks (id, title) VALUES (%s, %s)", (track, f"track {n}"))
     docker_record = p2p_identity.witness_recorder(settings)
@@ -330,6 +365,13 @@ def test_two_nodes_witness_the_authors_of_what_they_pull_and_carry(world, scratc
     to_launcher = BackendAPIClient(w["launcher"].url, peer=p2p_identity.peer_identity(settings))
     assert to_launcher.get_health()["node_id"] == L.pub
     assert _push_by_hand(to_launcher, ddb, "audio_features", t["G"]) == 1
+
+    # Every bundle a node holds was scored by the segments' trigger — its own,
+    # and what the walk pulled, the other node carried to it, a hand pushed.
+    for db, held in ((ldb, "CDEFL"), (ddb, "CDEFGL")):
+        for n in held:
+            assert _scored(db, t[n]) == pytest.approx(_sealed_scores(), abs=1e-5), n
+    assert _scored(ldb, t["G"]) == {}                           # its features alone were pushed
 
     # What each node witnessed: the other by its probe and its introduction.
     assert sorted(_rows(ldb, D.pub)) == [("introduced", None), ("probe", None)]

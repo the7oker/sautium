@@ -46,7 +46,13 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      slices it keeps, under the import's rules of that day — a slice's own
      subtree only, its rows of their columns' kinds, an artist or a group one
      row per MBID — and indexes the slices kept before the subject index, on
-     a node without the dump (2026-11-07).
+     a node without the dump (2026-11-07). The labels step
+     (`zero_shot_labels_v1`) loads the release's zero-shot label embeddings
+     (backend/zero_shot.py) and scores every bundle of segments the node
+     holds, its own and imported, the day moods, the vocal score and
+     danceability came to be derived from the segments instead of analysed
+     (2026-11-10); from then on the triggers on embedding_segments keep the
+     scores.
 
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
@@ -245,6 +251,57 @@ def _bind_master_stub(conn) -> int:
     return bound
 
 
+def _load_zero_shot_labels(conn) -> dict:
+    """The release's label embeddings into zero_shot_labels, and the scores
+    of every embedding that has segments (zero_shot_derive — the triggers'
+    own derivation). The labels' model row is made here when the node has
+    none yet: a fresh node gets it at its first analysis or import, and the
+    labels reference it now. The lock keeps segment writers out from before
+    the labels exist until they are committed with the scores: an import
+    committing in between would have run its trigger with no labels, after
+    this step's snapshot. One transaction; run again, it writes the same
+    rows."""
+    import base64
+
+    from psycopg2.extras import execute_values
+
+    import zero_shot
+    from record_sig import vector_from_bytes
+    from uuid_utils import embedding_model_uuid
+
+    doc = zero_shot.load_labels()
+    model_id = str(embedding_model_uuid(doc["model"]))
+    labels = [(model_id, label_set, label["key"], label["prompt"],
+               str(vector_from_bytes(base64.b64decode(label["vector"]))))
+              for label_set, members in doc["sets"].items() for label in members]
+    started = time.monotonic()
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO embedding_models (id, name, description, dimension, logit_scale)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET logit_scale = EXCLUDED.logit_scale
+        """, (model_id, doc["model"], f"CLAP audio embedding model ({doc['dimension']}d)",
+              doc["dimension"], doc["logit_scale"]))
+        cur.execute("LOCK TABLE embedding_segments IN SHARE ROW EXCLUSIVE MODE")
+        execute_values(cur, """
+            INSERT INTO zero_shot_labels (model_id, label_set, key, prompt, vector) VALUES %s
+            ON CONFLICT (model_id, key) DO UPDATE
+               SET label_set = EXCLUDED.label_set, prompt = EXCLUDED.prompt,
+                   vector = EXCLUDED.vector
+        """, labels, template="(%s, %s::zero_shot_set, %s, %s, %s::vector)")
+        cur.execute("""
+            INSERT INTO zero_shot_scores (embedding_id, label_id, score)
+            SELECT d.embedding_id, d.label_id, d.score
+              FROM zero_shot_derive(ARRAY(SELECT e.id FROM embeddings e
+                                           WHERE e.model_id = %s)) d
+            ON CONFLICT (embedding_id, label_id) DO UPDATE SET score = EXCLUDED.score
+        """, (model_id,))
+        scores = cur.rowcount
+    conn.commit()
+    return {"labels": len(labels), "scores": scores,
+            "seconds": round(time.monotonic() - started, 1)}
+
+
 def _assistant_role(conn) -> None:
     """The cluster administrator's part of the assistant's login
     (desktop/db_init.ASSISTANT_ROLE): the login itself, and large objects
@@ -309,6 +366,11 @@ def apply_pending() -> dict:
         if not _marked(conn, "master_stub_bound_v1"):
             out["master_stub_bound"] = _bind_master_stub(conn)
             _mark(conn, "master_stub_bound_v1")
+
+        # Before the seed: its segments get their scores as they land.
+        if not _marked(conn, "zero_shot_labels_v1"):
+            out["zero_shot"] = _load_zero_shot_labels(conn)
+            _mark(conn, "zero_shot_labels_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker

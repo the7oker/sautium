@@ -348,11 +348,14 @@ class AudioEmbeddingGenerator:
         db.execute(sa_text(
             "DELETE FROM embedding_segments WHERE embedding_id = :eid"),
             {"eid": eid})
-        for i, v in zip(idxs, vecs):
-            db.execute(sa_text("""
-                INSERT INTO embedding_segments (embedding_id, segment_index, vector)
-                VALUES (:eid, :idx, CAST(:vec AS vector))
-            """), {"eid": eid, "idx": int(i), "vec": str(v.tolist())})
+        # One statement: the trigger that keeps the bundle's zero-shot scores
+        # (zero_shot_scores_refresh) recomputes it once per INSERT
+        db.execute(sa_text("""
+            INSERT INTO embedding_segments (embedding_id, segment_index, vector)
+            SELECT :eid, s.idx, CAST(s.vec AS vector)
+              FROM unnest(CAST(:idxs AS smallint[]), CAST(:vecs AS text[])) AS s(idx, vec)
+        """), {"eid": eid, "idxs": [int(i) for i in idxs],
+               "vecs": [str(v.tolist()) for v in vecs]})
         return True
 
     def embed_track(self, db: Session, track_id, media_file,

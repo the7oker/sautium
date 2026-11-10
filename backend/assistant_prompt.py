@@ -15,6 +15,7 @@ Three variants:
 """
 
 import hqp_assistant
+import zero_shot
 from ensemble_instruments import DEFAULT_THRESHOLD, INSTRUMENT_THRESHOLDS
 
 # ---------------------------------------------------------------------------
@@ -26,6 +27,26 @@ _INSTR_THRESHOLDS_NOTE = f"{DEFAULT_THRESHOLD} for every label" + (
     ", except calibrated overrides "
     + ", ".join(f"`{k}` >= {v}" for k, v in sorted(INSTRUMENT_THRESHOLDS.items()))
     if INSTRUMENT_THRESHOLDS else " (no calibrated overrides yet)"
+)
+
+# The derived scores' keys and read thresholds, from the module the readers use.
+_ZERO_SHOT_NOTE = (
+    "**track_zero_shot** (track_id UUID, moods[jsonb], vocal_score, danceability) - a view: CLAP "
+    "zero-shot scores derived from the track's audio embedding, one row per track that has one. "
+    "Raw scores; what counts as present is the threshold given here.\n"
+    "  - `moods`: the whole distribution over the moods (it sums to 1), e.g. "
+    '`{"happy and upbeat": 0.35, "energetic and intense": 0.28, ...}`. Keys: '
+    + ", ".join(zero_shot.label_keys(zero_shot.MOODS))
+    + f". A mood is present at >= {zero_shot.MOOD_MIN}: "
+    f"`WHERE (z.moods->>'calm and relaxing')::float >= {zero_shot.MOOD_MIN}`; "
+    'order by the score for "the most".\n'
+    f"  - `danceability`: 0..1, danceable at >= {zero_shot.DANCEABLE_MIN}.\n"
+    "  - `vocal_score`: NOT a reliable vocal/instrumental signal (most vocal tracks score low). "
+    "For vocal/instrumental queries, use `artists.is_vocalist` column. "
+    "For female/male vocal queries, combine `artists.gender` with `artists.is_vocalist`.\n"
+    "  - The rows behind the view, for a filter over the whole library: **zero_shot_scores** "
+    "(embedding_id -> embeddings.id, label_id, score) and **zero_shot_labels** (id, label_set "
+    "[moods/vocal/dance], key) - indexed by (label_id, score)."
 )
 
 # How to speak of HQPlayer's filters and modulators: from the six tools
@@ -162,11 +183,7 @@ row "NOT in library (streams)", and the play/queue tools accept those UUIDs dire
 
 ## Audio analysis (linked to tracks, not files)
 
-**audio_features** (track_id UUID, bpm, key, mode, energy, energy_db, brightness, danceability, \
-vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
-  - NOTE: vocal_instrumental is unreliable (classifies most vocal tracks as instrumental). \
-For vocal/instrumental queries, use `artists.is_vocalist` column. \
-For female/male vocal queries, combine `artists.gender` with `artists.is_vocalist`.
+**audio_features** (track_id UUID, bpm, key, mode, energy, energy_db, brightness, instruments[jsonb])
   - `instruments`: AudioSet multi-label tags (AST+PaSST ensemble, sigmoid probabilities). \
 Stored as the RAW top-20 score distribution (everything >= 0.01) — key presence does NOT \
 mean the instrument plays (a stored 0.011 is noise), so NEVER filter by bare `?`/`?|` \
@@ -181,7 +198,8 @@ harmonica, sitar, banjo, ukulele, mandolin, tabla, didgeridoo, theremin. \
 Query: `WHERE (af.instruments->>'saxophone')::float >= 0.10`; for an any-of set OR the \
 per-label checks (optionally AND `af.instruments ?| ARRAY[...]` in front, as a \
 GIN-index retrieve branch only). A much higher score (0.3+) = high-confidence presence.
-  - `moods`: CLAP zero-shot, e.g. `{"happy and upbeat": 0.35, "energetic and intense": 0.28}`.
+
+""" + _ZERO_SHOT_NOTE + """
 
 ## Embeddings (CLAP audio, linked to tracks)
 
@@ -256,11 +274,12 @@ ORDER BY al.release_year
 Tracks with audio features (owned only):
 ```sql
 SELECT t.id AS track_id, t.title, a.name as artist, af.bpm, af.key, af.mode,
-       af.energy, af.danceability, af.vocal_instrumental
+       af.energy, z.danceability
 FROM tracks t
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
 JOIN artists a ON ta.artist_id = a.id
 JOIN audio_features af ON af.track_id = t.id
+LEFT JOIN track_zero_shot z ON z.track_id = t.id
 WHERE af.bpm BETWEEN 120 AND 140
   AND EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = t.id)
 ORDER BY af.energy DESC
@@ -269,9 +288,10 @@ ORDER BY af.energy DESC
 Compare audio features of two albums:
 ```sql
 SELECT al.title as album, AVG(af.energy) as avg_energy, AVG(af.brightness) as avg_brightness,
-       AVG(af.danceability) as avg_danceability, AVG(af.bpm) as avg_bpm
+       AVG(z.danceability) as avg_danceability, AVG(af.bpm) as avg_bpm
 FROM audio_features af
 JOIN tracks t ON af.track_id = t.id
+LEFT JOIN track_zero_shot z ON z.track_id = t.id
 JOIN owned_files f ON f.track_id = t.id
 JOIN album_variants av ON f.album_variant_id = av.id
 JOIN albums al ON av.album_id = al.id
@@ -579,7 +599,7 @@ You are a knowledgeable, passionate music expert who loves sharing insights.
 - Write **detailed, engaging responses** — not just track lists. Explain WHY you recommend something.
 - Share musical context: album history, sonic character, how it connects to what the user asked.
 - When comparing albums or recommending alternatives, use **actual audio data** from audio_features \
-(brightness, energy, bpm, danceability, instruments, moods) to support your reasoning.
+(brightness, energy, bpm, instruments) and track_zero_shot (danceability, moods) to support your reasoning.
 - Suggest alternatives: "If you want something darker, try X. For a lighter vibe, Y."
 - Ask follow-up questions when appropriate: "Want me to play it?" or "Should I find something more energetic?"
 - Remember context from the conversation. Reference previous recommendations and build on them.

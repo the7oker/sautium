@@ -46,7 +46,7 @@ code disagree, the code is what this file records and § 14 names the doc.
 - [API][AI] Lyrics are served parsed (`synced_lyrics` as time + text) for owned files and read by the assistant; the Web UI shows none — `GET /api/player/lyrics/{media_file_id}`; `mcp/assistant_server.py: get_lyrics`
 - [auto] Audio analysis per track: CLAP 512-d on 10 s windows (12 / 16 / 24 by duration), the track vector their normalized mean — `embeddings.py: balanced_k`, `EMBEDDING_ANALYSIS_VERSION`
 - [auto] Stored features: bpm, key, mode, key_confidence, energy, energy_db, brightness, dynamic_range_db, zero_crossing_rate — `models.py: AudioFeature`
-- [auto] Zero-shot labels: 8 moods, vocal / instrumental, danceability — `audio_analysis.py: MOOD_LABELS`, `VOCAL_LABELS`, `DANCE_LABELS`
+- [auto] Zero-shot scores: 8 moods, the vocal score, danceability — derived in the database from the segments a node holds, against label embeddings shipped with the release — `zero_shot.py`; `001_initial.sql: zero_shot_derive`
 - [auto] Instruments: AST + PaSST ensemble over the whole track — `ensemble_instruments.py: InstrumentEnsembleTagger`
 - [auto] Text embeddings (BGE-M3, 1024-d) of track metadata, lyrics, artist bios, genre descriptions — `text_embeddings.py`, `lyrics_embeddings.py`, `enrichment_embeddings.py`
 - [UI] "Analyse library": audio analysis, then the text encoders; Lite skips the audio phase — `POST /api/settings/library/enrich`, `/enrich/cancel`

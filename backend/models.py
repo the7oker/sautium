@@ -127,6 +127,8 @@ class EmbeddingModel(Base):
     name = Column(String(100), nullable=False, unique=True)
     description = Column(Text)
     dimension = Column(Integer, nullable=False)
+    # exp(logit_scale_a), set with the model's zero-shot labels (zero_shot.py)
+    logit_scale = Column(Float)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())

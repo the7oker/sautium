@@ -100,13 +100,13 @@ level — typically `EXISTS`).
 
 | Dimension | Level | Notes |
 |---|---|---|
-| `vocalist` | artist | `artists.is_vocalist`. **The only reliable vocal signal** — `audio_features.vocal_instrumental` is broken (35 848/37 515 = "instrumental"). |
+| `vocalist` | artist | `artists.is_vocalist`. **The only reliable vocal signal** — the zero-shot vocal class read "instrumental" for 35 848 of 37 515 tracks while it was stored; since 2026-11-10 no class is stored, and the derived vocal score (`zero_shot_scores`) carries the same prompts' bias. |
 | `gender` | artist | `artists.gender` |
 | `bpm_min/max` | track | `audio_features.bpm` (99.8% populated) |
 | `key`, `mode` | track | 100% populated |
 | `energy` | track | `energy_db` buckets low/mid/high (100%) |
-| `danceable` | track | `danceability >= 0.5` (100%) |
-| `moods` | track | `audio_features.moods` JSONB, **100% populated**, fixed 8-label set ("happy and upbeat", "sad and melancholic", "energetic and intense", "calm and relaxing", "dark and ominous", "romantic and dreamy", "aggressive and angry", "mysterious and atmospheric"). A tool in the engine registry; not exposed by the endpoint or the UI. |
+| `danceable` | track | `zero_shot_scores`, the `danceable` label at `zero_shot.DANCEABLE_MIN` — derived from the track's segments since 2026-11-10, so present wherever segments are |
+| `moods` | track | `zero_shot_scores` (derived from the track's segments since 2026-11-10; a mood is present at `zero_shot.MOOD_MIN`), fixed 8-label set ("happy and upbeat", "sad and melancholic", "energetic and intense", "calm and relaxing", "dark and ominous", "romantic and dreamy", "aggressive and angry", "mysterious and atmospheric"). A tool in the engine registry; not exposed by the endpoint or the UI. |
 | `instruments` | track | `audio_features.instruments` JSONB `?|`. **Sparse by catalog nature** (54% empty — ambient). Valid filter where present; pair with `clap` for recall. |
 | `genre` | **album** | **album-grain now** via `album_genres` (track_genres dropped). `EXISTS (album_genres ⋈ genres)`. Present on phantoms too (mb source). |
 | `year` | album | `albums.release_year` |
@@ -308,7 +308,9 @@ still built and still read by nothing.
   (it's normalization, not matching; matching stays in SQL).
 - **No third filter implementation** — the dimension registry is the single
   source of truth; `_filter_clauses` and `_apply_filters` both die.
-- **Don't migrate the JSONB** (`instruments`/`moods`) — `?|` already works.
+- **Don't migrate the JSONB** (`instruments`) — `?|` already works. The moods
+  left it on 2026-11-10: they are derived rows now (`zero_shot_scores`), not
+  stored analysis.
 - Browse mode (no relevance source) must stay useful — default ordering per
   entity lives in the entity registry.
 

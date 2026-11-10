@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+import zero_shot
 from config import settings
 from ensemble_instruments import present_instruments, threshold_for
 from sql_queries import (
@@ -118,10 +119,12 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         params["f_gender"] = filters["gender"]
 
     if filters.get("danceable"):
-        clauses.append("af.danceability >= 0.5")
+        clauses.append(zero_shot.track_gate_sql("t.id", zero_shot.DANCEABLE, ">= :f_danceable_min"))
+        params["f_danceable_min"] = zero_shot.DANCEABLE_MIN
 
     if filters.get("not_danceable"):
-        clauses.append("af.danceability < 0.5")
+        clauses.append(zero_shot.track_gate_sql("t.id", zero_shot.DANCEABLE, "< :f_danceable_min"))
+        params["f_danceable_min"] = zero_shot.DANCEABLE_MIN
 
     if filters.get("energy_min"):
         clauses.append("af.energy_db >= :f_energy_min")
@@ -147,7 +150,7 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
 
 def _needs_audio_features_join(filters: Dict[str, Any]) -> bool:
     """Check if any audio feature filters are present."""
-    af_keys = {"bpm_min", "bpm_max", "key", "mode", "instrument", "danceable", "not_danceable", "energy_min", "energy_max"}
+    af_keys = {"bpm_min", "bpm_max", "key", "mode", "instrument", "energy_min", "energy_max"}
     return bool(af_keys & set(filters.keys()))
 
 
@@ -331,7 +334,7 @@ def _build_feature_result(row) -> Dict[str, Any]:
         "key": row.key,
         "mode": row.mode,
         "vocal_instrumental": row.vocal_instrumental,
-        "danceability": float(row.danceability) if row.danceability else None,
+        "danceability": row.danceability,
         "instruments": present_instruments(row.instruments) if hasattr(row, "instruments") else None,
     }
 
@@ -366,11 +369,13 @@ def search_by_features(
                 WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
                mf.is_lossless,
                mf.duration_seconds,
-               af.bpm, af.key, af.mode, af.vocal_instrumental,
-               af.danceability, af.instruments
+               af.bpm, af.key, af.mode,
+               {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental,
+               round(z.danceability::numeric, 3)::float8 AS danceability, af.instruments
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
         JOIN audio_features af ON t.id = af.track_id
+        LEFT JOIN track_zero_shot z ON z.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
         JOIN artists a ON ta.artist_id = a.id
         JOIN album_variants av ON mf.album_variant_id = av.id

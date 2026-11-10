@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import track_similarity
+import zero_shot
 from sql_queries import best_rip_order, owned_rank
 from uuid_utils import artist_uuid
 
@@ -290,8 +291,15 @@ TOOLS: dict[str, Tool] = {
                "WHERE (af.instruments->>th.key)::float >= th.value::float))",
                is_gate=True,
                expand=lambda v: _expand_instruments(v)),)),
+    # moods and danceable are DERIVED scores (zero_shot_scores, by the
+    # embedding's segments); presence is a read-time threshold (zero_shot.py),
+    # and (label_id, score) is the index both gates ride.
     "moods": Tool("moods", sources=(
-        Source("moods", "audio_features", "af.moods ?| :moods", is_gate=True),)),
+        Source("moods", "zero_shot_scores",
+               "(zs.score >= :mood_min AND zs.label_id IN "
+               "(SELECT zl.id FROM zero_shot_labels zl "
+               f"WHERE zl.label_set = '{zero_shot.MOODS}' AND zl.key = ANY(:moods)))",
+               is_gate=True),)),
     "bpm": Tool("bpm", sources=(
         Source("bpm", "audio_features", "af.bpm BETWEEN :bpm_min AND :bpm_max",
                is_gate=True),)),
@@ -300,7 +308,10 @@ TOOLS: dict[str, Tool] = {
     "mode": Tool("mode", broad=True, sources=(
         Source("mode", "audio_features", "af.mode = :mode", is_gate=True),)),
     "danceable": Tool("danceable", broad=True, sources=(
-        Source("danceable", "audio_features", "af.danceability >= 0.5", is_gate=True),)),
+        Source("danceable", "zero_shot_scores",
+               "(zs.score >= :danceable_min AND zs.label_id IN "
+               f"(SELECT zl.id FROM zero_shot_labels zl WHERE zl.key = '{zero_shot.DANCEABLE}'))",
+               is_gate=True),)),
     # Album-level.
     "genre": Tool("genre", sources=(
         Source("genre", "genres", "g.name = ANY(:genre)", is_gate=True),)),
@@ -387,6 +398,7 @@ EDGES: tuple = (
     Edge("tracks", "audio_features", "af.track_id = t.id"),
     Edge("tracks", "embeddings", "e.track_id = t.id"),
     Edge("embeddings", "embedding_segments", "es.embedding_id = e.id"),
+    Edge("embeddings", "zero_shot_scores", "zs.embedding_id = e.id"),
     Edge("tracks", "lyrics_embeddings", "le.track_id = t.id"),
     Edge("artists", "artist_bio_embeddings", "abe.artist_id = a.id"),
     Edge("artists", "artist_name_aliases", "ana.artist_id = a.id"),
@@ -408,7 +420,7 @@ _ALIAS = {
     "audio_features": "af", "embeddings": "e", "artist_bio_embeddings": "abe",
     "owned_files": "f", "album_variants": "av", "album_genres": "ag", "genres": "g",
     "artist_name_aliases": "ana", "lyrics_embeddings": "le",
-    "embedding_segments": "es",
+    "embedding_segments": "es", "zero_shot_scores": "zs",
     "genre_desc_embeddings": "gde",
 }
 
@@ -549,7 +561,7 @@ _TABLE_LEVEL = {
     "artists": "artist", "artist_name_aliases": "artist", "artist_bio_embeddings": "artist",
     "albums": "album", "album_artists": "album", "album_genres": "album", "genres": "album",
     "tracks": "track", "audio_features": "track", "embeddings": "track",
-    "embedding_segments": "track",
+    "embedding_segments": "track", "zero_shot_scores": "track",
     "lyrics_embeddings": "track", "album_tracks": "track", "owned_files": "track",
     "track_artists": "track",
 }
@@ -851,7 +863,7 @@ def _build_higher(atom, L, tools, active, corpus, limit, offset, K=RETRIEVE_K):
             f"SELECT id AS lid FROM ({b}) ob{i}" for i, b in enumerate(own_branches))
     rollup = f"{_ROLLUP_W} * GREATEST(COALESCE(r.s, 0), COALESCE(r.lex, 0))"
     score = (" + ".join(own_terms + [rollup])
-             if (at_terms or own_terms) else "NULL")
+             if (at_terms or own_terms) else "NULL::float")
     where = (" WHERE " + " AND ".join(gates_L)) if gates_L else ""
     # A matched atom enters the roll-up if it serves either channel; the FILTER
     # keeps the shrink denominator at the characteristic count alone, so a
@@ -1064,6 +1076,9 @@ def _bind_params(tools, active: dict) -> dict:
             p["genre"] = list(v) if isinstance(v, (list, tuple)) else [v]
         elif tool.key == "moods":
             p["moods"] = list(v) if isinstance(v, (list, tuple)) else [v]
+            p["mood_min"] = zero_shot.MOOD_MIN
+        elif tool.key == "danceable":
+            p["danceable_min"] = zero_shot.DANCEABLE_MIN
         elif tool.key == "instruments":
             import json
 

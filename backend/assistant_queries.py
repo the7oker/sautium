@@ -16,6 +16,7 @@ the id of a FILE and appears only where a file is the subject.
 import os
 import uuid as _uuid
 
+import zero_shot
 from ensemble_instruments import present_instruments
 from hqplayer_client import format_time
 from sql_queries import best_rip_order, owned_rank
@@ -348,9 +349,16 @@ def track_info(q, track_uuid: str):
 
 
 def track_features(q, track_uuid: str):
-    rows = q("""
-        SELECT bpm, key, mode, energy_db, danceability, vocal_instrumental, instruments
-        FROM audio_features WHERE track_id = %(track_id)s::uuid
+    """The track's analysis for display: the stored features, with the
+    danceability and vocal class derived from its segments (zero_shot.py) —
+    either half may be missing."""
+    rows = q(f"""
+        SELECT af.bpm, af.key, af.mode, af.energy_db, af.instruments,
+               z.danceability, {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental
+        FROM tracks t
+        LEFT JOIN audio_features af ON af.track_id = t.id
+        LEFT JOIN track_zero_shot z ON z.track_id = t.id
+        WHERE t.id = %(track_id)s::uuid AND (af.id IS NOT NULL OR z.track_id IS NOT NULL)
     """, {"track_id": track_uuid})
     return rows[0] if rows else None
 
