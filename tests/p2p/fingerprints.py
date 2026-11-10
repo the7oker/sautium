@@ -1,4 +1,4 @@
-"""Chromaprint fingerprints made by hand, for the tests of FP-SIM's rule
+"""Chromaprint fingerprints made by hand, for the tests of the material rule
 (desktop/p2p/material.py) and its users: the compressed format written the
 other way — the decoder's tests encode every real print back to fpcalc's own
 string with it — and generated items. Not a test module."""

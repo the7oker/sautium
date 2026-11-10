@@ -1,5 +1,5 @@
 -- 055 — a source row per declaration, copy and origin, and the material
--- groups (ANALYSIS-3 body 2, 2026-11-10). analysis_sources was unique on
+-- groups (2026-11-10). analysis_sources was unique on
 -- (track_id, chromaprint_key): one row per address whoever held it and
 -- whatever copy it was made from. A first-hand registration of an address
 -- flipped an imported row to first-hand — the other author's records linked
@@ -14,8 +14,8 @@
 -- of one material (desktop/p2p/material.py). The same DDL as the
 -- analysis_sources block of 001_initial.sql, for nodes that ran the earlier
 -- files: every existing row has one address of its track, so it is unique
--- under the new key too; its group is joined by ANALYSIS-3's cutover
--- (provenance.join_existing_rows).
+-- under the new key too; its group is joined by the analysis records'
+-- cutover (db_migrate's analysis_records_v4, provenance.join_existing_rows).
 --
 -- The two-column constraint goes by name, unconditionally: 018's tail adds
 -- it again after 001 on a fresh install, and beside the new one every row

@@ -1,4 +1,4 @@
-"""FP-SIM's rule (desktop/p2p/material.py): the decoder, the alignment and the
+"""The material rule (desktop/p2p/material.py): the decoder, the alignment and the
 rule's edges, on real prints and on generated ones.
 
 The real prints are the synthetic lab library's 90 files under the release's

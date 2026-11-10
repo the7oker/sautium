@@ -12,8 +12,8 @@
 > one declaration never merge, so the `imported` flag says who made a
 > record, nothing rewrites a row's declaration or copy under its records
 > (a better copy is a row of its own), and a track's
-> rows of one material whose prints differ are grouped by FP-SIM's rule,
-> `material_of`; a
+> rows of one material whose prints differ are grouped by the material
+> rule (`desktop/p2p/material.py`), `material_of`; a
 > BLAKE2b PCM hash stood beside the fingerprint until 2026-09-18, when
 > the fingerprint became the only address and the audio payload went to
 > **v3**; whole owned library backfilled), records
@@ -24,8 +24,9 @@
 > duration_seconds to the material declaration (cheap no-decode import
 > gate; tamper-evident); tier-3 stream signing live for every first-hand
 > stream (any provider tier and YouTube since 2026-09-02 — lossless-only
-> before); **Tier-0 lite on import** — signed/first-hand rows never
-> overwritten by sync, `analysis_sources.imported` excludes synced-in
+> before); **Tier-0 lite on import** — first-hand rows never overwritten
+> by sync, a sealed one only by a sealed record of a newer methodology no
+> newer than the release computes (2026-11-10), `analysis_sources.imported` excludes synced-in
 > provenance from signing; **signed records on the wire, verify-on-import
 > and segment sync (2026-07-11)** — a record without a valid seal is
 > dropped at the one import gate; identity certificates, the registry and
@@ -224,7 +225,8 @@ exposure) and pulling (poisoning exposure) may later split into two flags.
 The first sketch (2026-07). The shipped payloads are under "The signed
 segment record" below and carry no per-record `version`: a record is bound
 to its content address and its Worker-stamped batch, and an import never
-overwrites a signed or first-hand row.
+overwrites a first-hand row — nor a sealed one, but by a sealed record of a
+newer methodology no newer than the release computes (2026-11-10).
 
 ```
 {
@@ -1884,8 +1886,12 @@ making version-replay and split-view (serving different people different
 data) detectable via gossip — with zero consensus machinery. The shipped
 records carry no replay counter (the `version` field of the first sketch
 was not built): a record is bound to its content address and its
-Worker-stamped batch, and an import never overwrites a signed or
-first-hand row.
+Worker-stamped batch, and an import never overwrites a first-hand row. A
+sealed imported record gives way only to a sealed one of a newer methodology,
+and the gate refuses a methodology newer than the release computes
+(2026-11-10): a replay of an older version replaces nothing, and a seal over
+the release's own methodology replaces an imported record of an older one
+once, never one of its own methodology.
 
 ## Rollout and open questions
 

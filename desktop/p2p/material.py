@@ -6,7 +6,7 @@ decoder change moves a print by a few bits (FFmpeg 4.4 against 7.1: 17 of 90
 synthetic files, at a bit error rate under 0.0001; a fifth of a real
 library, under 0.0043), and a lossy copy moves it a little more (MP3 128
 against AAC 256 at most 0.0145), while two different recordings never come
-closer than 0.347 (FP-SIM, 2026-11-09: 1 000 random pairs). So two prints of
+closer than 0.347 (measured 2026-11-09 over 1 000 random pairs). So two prints of
 one track are the same material when, aligned, they differ in at most one
 bit in twenty — and their declared durations agree within two seconds,
 because the print covers only fpcalc's first 120 s and an edit that differs

@@ -532,7 +532,7 @@ def test_a_prune_of_its_own_keeps_what_it_could_not_read(cur, library, monkeypat
 
 
 # ── ROOT-1: a part of the library that goes missing loses nothing ──────────
-# PI5-4A § Q2's demonstration on the Pi: a Rescan with a folder moved out
+# The demonstration on a Raspberry Pi 5 node: a Rescan with a folder moved out
 # deleted, unasked, every album whose files were all there and the tracks
 # nobody had played or analysed, and when the folder came back its analysis
 # stayed unlinked, so the next pass recomputed it in full.
@@ -782,7 +782,7 @@ def _sources(cur, track_id):
 
 @pytest.fixture
 def scanned_library(cur, library, main_module, monkeypatch):
-    """PI5-4A § Q2's set-up on a real scan: an analysed album (Pulse
+    """That demonstration's set-up on a real scan: an analysed album (Pulse
     Archive, two tracks) and a probe EP nobody analysed or played."""
     _flac(library / "Ostrava Unit" / "Pulse Archive" / "01.flac", 1, "Carrier", track=1)
     _flac(library / "Ostrava Unit" / "Pulse Archive" / "02.flac", 2, "Relay", track=2)
@@ -813,7 +813,7 @@ def _remove_away(main_module):
 
 def test_a_folder_that_goes_and_comes_back_loses_nothing(
         cur, library, main_module, monkeypatch, tmp_path, scanned_library):
-    """Q2's steps 5b–6 (PI5-4A): two folders moved out, Rescan; the folders
+    """That demonstration's last steps: two folders moved out, Rescan; the folders
     back, "Scan for new". Before ROOT-1 the Rescan deleted, unasked, both
     albums with their own rows and the probe nobody had played or analysed,
     and the return re-analysed the album."""

@@ -159,10 +159,14 @@ LAN Discovery (UDP broadcast on 19002 + localhost Docker probe)
 Internet tiers, only for what the LAN left behind:
    A. discovery-key nodes + directory volunteers → health-probed 8 at a
       time, drained ONE at a time (each inventory answers for the whole
-      library); the master hint when no other node answered (seen
-      addresses that never answer do not count)
+      library) about every gap of any kind — since 2026-11-10 a features-
+      or instruments-only gap too, which before reached only manual and
+      LAN peers; the master hint when no other node answered (seen
+      addresses that never answer do not count). Each peer pulled from is
+      offered this node's own analysis (carry), internet peers included
    B. only past the network-size threshold: ENGAGED artists (an owned file
-      or a completed listen) still missing analysis, rarest first → their
+      or a completed listen) with a track holding neither segments nor
+      features — a partial gap costs no DHT traffic — rarest first → their
       exact keys, a ROTATING slice of 50 through the traversal lane (cursor
       in user_settings, so the same unfindable names are not asked for
       every run while the rest never is)
@@ -178,7 +182,8 @@ outlives its node by up to 30 min, so every lookup keeps returning it; one
 record since 2026-10-07, `sync_walk.DeadAddresses`, fed by the walk's connect
 and skipped by the walk and both slice finders — a node that refused, a 429
 or a 503, is busy, not dead), and a reachable peer that answered with nothing
-for us is left alone until our gap set grows (a scan, a LAN peer). A peer
+for us is left alone until our gap set grows (a scan, a LAN peer) or 6 h pass
+(`EMPTY_PEER_TTL`) — what bounds a gap no peer fills. A peer
 whose channel-proved key is refused here (a ban row, or a proof that failed
 here) is probed like any other — only the channel names the key, and its
 `/health` counts towards the network's size — but nothing is pulled from it
@@ -227,13 +232,14 @@ sync now splits its gaps:
   **holdings filter**, `GET /api/sync/holdings` — a Bloom filter
   (`desktop/p2p/bloom.py`, 1% false positives, 9.6 bits per element, seven
   positions from the uuid's own SHA-1 bits, no hash functions) over the track
-  uuids the peer HOLDS segments or features for, and since 2026-11-10 a
-  second one, `instruments`, over those it holds instruments for. The asker
-  tests its bulk locally — a miss is final, a hit is a reason to ask — and
-  sends the exact inventory only the hits; a track whose segments and
-  features it holds and whose instruments it lacks is tested against the
-  instruments filter alone, so a gap no peer can fill costs a test, not a
-  request every run. (A filter over artists with sealed bios/tags/similars,
+  uuids the peer HOLDS segments or sealed features for, and since 2026-11-10
+  a second one, `instruments`, over those it holds sealed instruments for —
+  what its inventory serves. The asker tests its bulk locally — a miss is
+  final, a hit is a reason to ask — and sends the exact inventory only the
+  hits; a track whose one want is its instruments (its segments held, a
+  features record no pull would replace) is tested against the instruments
+  filter alone, so a gap no peer can fill costs a test, not a request every
+  run. (A filter over artists with sealed bios/tags/similars,
   and the `artist_uuids` axis of the inventory that went with it, left with
   the Last.fm layer on 2026-09-19.)
 
@@ -244,7 +250,7 @@ held element to fetch): a small node keeps sending its gaps, a big node fetches
 the small node's filter. Filters are cached per peer key for the process
 lifetime and refreshed by version (`?have=<version>` answers with a stub when
 nothing moved); the peer rebuilds its filters in memory when its holdings
-version — row counts + latest `updated_at` of the two contributing tables,
+version — row counts + latest `updated_at` of the contributing tables,
 checked at most every 5 min — moves. Adds only, so a delta update (uuids
 since version N) is a plain append when it is needed.
 
@@ -525,7 +531,12 @@ labels, each a short text with a score in 0..1). An older format of a kind
 is refused at the gate: a v3 features record's rebuilt v4 payload does not
 verify. An imported record of a newer methodology (`analysis_version`)
 replaces an imported one of an older — never a first-hand one — and the
-planner asks for nothing the importer would drop (`sync_queries.KEPT_RECORD`).
+planner asks for nothing the importer would drop (`sync_queries.KEPT_RECORD`);
+the newest a record may carry is the methodology this release computes
+(`record_sig.FEATURES_ANALYSIS_VERSION`, `INSTRUMENTS_ANALYSIS_VERSION`), and
+the gate refuses a newer one — a seal over a version no release makes would
+replace every imported record of its kind and keep the honest ones out. A
+newer release's records reach a node when the node updates.
 The Docker peer surface serves the inventory and every pull category from
 the same shared handlers as the launcher's sync server.
 
@@ -537,7 +548,7 @@ left behind — counts as a gap that sealed segments replace.
 
 ### Exchange
 ```
-GET  /api/sync/holdings          Bloom filter of the tracks a peer holds sealed analysis for
+GET  /api/sync/holdings          Bloom filters: the tracks a peer holds segments or sealed features for, and sealed instruments for
 POST /api/sync/inventory         track uuids → what the peer holds for them
 POST /api/sync/pull/{category}   segments | audio-features | instruments | tracks | track-mbids
 POST /api/sync/offer, /push/{…}  carry: segments, audio_features, instruments, track_mbids

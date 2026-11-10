@@ -116,7 +116,7 @@ def test_the_stream_enrichment_accepts_nothing_from_a_failing_fpcalc(fake_fpcalc
 @shell
 def test_a_print_a_decoder_moved_a_little_passes_and_one_moved_more_is_refused(fake_fpcalc,
                                                                             monkeypatch):
-    """The comparison is FP-SIM's probe bound (material.matches_probe): the
+    """The comparison is the material rule's probe bound (material.matches_probe): the
     same item count, offset 0, at most one bit in a hundred — an FFmpeg that
     moves a print by a bit or so fingerprints the same material."""
     from desktop.p2p import material

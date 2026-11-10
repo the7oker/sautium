@@ -27,7 +27,7 @@ address is never saved — it could neither sign nor travel, and the pending
 predicates would re-derive it on every run.
 
 A digest that differs can still be the same material — a decoder that moved
-the print, a lossy copy (desktop/p2p/material.py, FP-SIM's rule). A track's
+the print, a lossy copy (desktop/p2p/material.py, the material rule). A track's
 rows of one material form a group (analysis_sources.material_of → the
 group's root): a registration joins its group, a pass skips the compute the
 group already holds at a rank no lower (held_in_group, file_in_group_sql),
@@ -253,9 +253,9 @@ def join_existing_rows(db: Session, track_ids=None) -> int:
     no members of its own joins the first earlier row it is one material
     with (material.root_among — the declared durations filtered before any
     print is decoded). For rows registered before the groups existed (delta
-    055): ANALYSIS-3's cutover calls it once over every track; `track_ids`
-    narrows it. Idempotent — a member is never compared again. Returns the
-    rows joined."""
+    055): the analysis records' cutover (db_migrate) calls it once over
+    every track; `track_ids` narrows it. Idempotent — a member is never
+    compared again. Returns the rows joined."""
     scope = "" if track_ids is None else "WHERE track_id = ANY(CAST(:tids AS uuid[]))"
     params = {} if track_ids is None else {"tids": [str(t) for t in track_ids]}
     tracks = db.execute(sa_text(f"""

@@ -287,7 +287,10 @@ See:
   their authors), the grids a registration had flipped split back onto
   their imported twins; it fails closed while no key of the node resolves.
   An imported record of a newer methodology replaces an imported one of an
-  older, never a first-hand one (`sync_queries.KEPT_RECORD`).
+  older, never a first-hand one (`sync_queries.KEPT_RECORD`), and only up to
+  the methodology this release computes (`record_sig.FEATURES_ANALYSIS_VERSION`,
+  `INSTRUMENTS_ANALYSIS_VERSION`): the gate refuses a newer one, so no seal
+  over a version no release makes replaces every imported record of its kind.
 - **A copy at the HQPlayer is a VARIANT, and "owned" means `owned_files`.**
   Since 2026-09-27 an album's copy in the library of the HQPlayer the node
   drives (a disk on an Embedded box, a mounted share, a hi-res subset copied

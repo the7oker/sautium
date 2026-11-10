@@ -126,8 +126,9 @@ Frontend is clean — SSE-driven, zero `setInterval` polling.
 A weak node **can** import from peers: `embedding_segments` with their seals
 (the node derives the track-level mean itself), `audio_features`,
 `track_instruments` (a record of their own since 2026-11-10),
-`analysis_sources` (marked `imported=true`). Local first-hand/signed analysis always outranks
-peer copies. Last.fm rows are NOT among them — that layer is node-local since
+`analysis_sources` (marked `imported=true`). Local first-hand analysis always outranks
+peer copies; a sealed imported record gives way only to a sealed one of a
+newer methodology, no newer than the release computes. Last.fm rows are NOT among them — that layer is node-local since
 2026-09-19 and every node fetches its own by name. State of the world for an
 import-only node:
 - HNSW similarity, radio, home shelves, Discovery mean-vector channels: **work**.

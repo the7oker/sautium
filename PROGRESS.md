@@ -217,7 +217,14 @@ implementation details live in the code, DB and git history.
   version (`ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION`), and an
   imported record of a newer methodology replaces an imported one of an
   older, never a first-hand one — before, the planner pulled it and the
-  importer dropped it, every run.
+  importer dropped it, every run — and only up to the methodology the
+  release computes (`record_sig.FEATURES_ANALYSIS_VERSION`,
+  `INSTRUMENTS_ANALYSIS_VERSION`): without that ceiling a certified key
+  sealing a version no release makes replaced every imported record of its
+  kind and kept the honest ones out for good (the first review of the
+  cutover). A record's seal binds the declaration of the row it links to,
+  so the guards shed it on a new link too, and read a value in the form its
+  hash does (a float bit for bit, the instruments map as its text).
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be
@@ -3850,7 +3857,7 @@ device on the network; none of them may hold for it more than a bound.
   the release image's (`provenance.fingerprinter`): a failed fpcalc or
   another print raises the `tools.fingerprint` notice, and the analysis
   passes and the stream enrichment refuse while it lasts. Equality until
-  2026-11-10; since then FP-SIM's probe bound (`material.matches_probe`: the
+  2026-11-10; since then the material rule's probe bound (`material.matches_probe`: the
   same item count, offset 0, at most one bit in a hundred). The probe is not
   a canary of every FFmpeg move — 7.1 prints it as 4.4 does, as it does most
   files — and catches a fingerprinter that is broken or another, not one
