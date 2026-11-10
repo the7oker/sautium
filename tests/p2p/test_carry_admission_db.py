@@ -118,6 +118,25 @@ def test_a_carried_tracks_features_and_binding_follow_its_segments_whatever_the_
     assert _wanted(conn, budget=budget, category="track_mbids") == {OWNED, PHANTOM}
 
 
+def test_every_carried_kind_spends_the_room(conn):
+    """A phantom whose grid is this node's own holds nothing another author
+    made until a push brings its features or instruments alone: from then
+    it is carried, it spends the room, and what follows for it is taken
+    whatever the room — not the imported grids alone."""
+    assert sync_queries.count_carried_tracks(conn) == 0
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO analysis_sources (track_id, chromaprint, imported) "
+                    "VALUES (%s, 'AQAA', true) RETURNING id", (ANALYSED,))
+        cur.execute("""INSERT INTO track_instruments (track_id, instruments, analysis_source_id,
+                                                      analysis_version)
+                       VALUES (%s, '{}', %s, 2)""", (ANALYSED, cur.fetchone()[0]))
+    assert sync_queries.count_carried_tracks(conn) == 1
+    assert _wanted(conn, budget=1) == {OWNED}                               # the room is spent
+    assert _wanted(conn, budget=1, category="audio_features") == {OWNED, ANALYSED}
+    wanted = sync_queries.wanted_tracks(conn, [_recording(conn, t) for t in (PHANTOM, ANALYSED)], 1)
+    assert set(wanted["audio_features"]) == {ANALYSED}
+
+
 def test_an_offer_wants_a_carried_tracks_gaps_whatever_the_room(conn):
     with conn.cursor() as cur:
         cur.execute("INSERT INTO analysis_sources (track_id, chromaprint, imported) "

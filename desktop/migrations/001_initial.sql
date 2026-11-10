@@ -1176,13 +1176,23 @@ CREATE INDEX IF NOT EXISTS idx_audio_features_unstamped
     ON audio_features (id) INCLUDE (signature)
     WHERE signature IS NOT NULL AND batch_root IS NULL;
 
--- Seal invalidation at the data layer: any UPDATE that changes a signed
--- payload column without presenting a new signature loses the seal. This is
--- the invariant, not a convenience — writers (ORM, raw scripts, sync imports)
--- need no seal awareness and cannot silently break a sealed record. Linking
--- columns (embedding_id, analysis_source_id) are deliberately NOT payload:
--- re-keying/linking migrations must not shed seals. sign_audio.py's UPDATE
--- sets a new signature explicitly, so the guard leaves it alone.
+-- Seal invalidation at the data layer: any UPDATE that changes what a seal
+-- binds without presenting a new signature loses the seal. This is the
+-- invariant, not a convenience — writers (ORM, raw scripts, sync imports)
+-- need no seal awareness and cannot silently break a sealed record.
+-- sign_audio.py's UPDATE sets a new signature explicitly, so the guard leaves
+-- it alone. A segment's link (embedding_id) is not payload: a segment is
+-- replaced, never re-linked, and its bundle's material is its embedding's
+-- source. A record's link is (since 2026-11-10): the features and the
+-- instruments seals are over the declaration of the source row the record
+-- links to, so a save from another copy, or the SET NULL of a deleted
+-- source, sheds them — nothing moves a sealed record to another row while
+-- its seal must hold (the identity merge sheds what it moves; the records'
+-- cutover moves embeddings, never a record). A record's value counts in the
+-- form its hash reads it: a float bit for bit (float8send — its shortest
+-- repr tells -0.0 from 0.0, which float8's equality does not), the
+-- instruments map as its text (JSONB's equality takes 1 and 1.0 for one
+-- number).
 CREATE OR REPLACE FUNCTION seal_guard_embedding_segments() RETURNS trigger AS $$
 BEGIN
     IF (NEW.vector IS DISTINCT FROM OLD.vector
@@ -1203,16 +1213,17 @@ FOR EACH ROW EXECUTE FUNCTION seal_guard_embedding_segments();
 
 CREATE OR REPLACE FUNCTION seal_guard_audio_features() RETURNS trigger AS $$
 BEGIN
-    IF (NEW.bpm IS DISTINCT FROM OLD.bpm
+    IF (float8send(NEW.bpm) IS DISTINCT FROM float8send(OLD.bpm)
         OR NEW.key IS DISTINCT FROM OLD.key
         OR NEW.mode IS DISTINCT FROM OLD.mode
-        OR NEW.key_confidence IS DISTINCT FROM OLD.key_confidence
-        OR NEW.energy IS DISTINCT FROM OLD.energy
-        OR NEW.energy_db IS DISTINCT FROM OLD.energy_db
-        OR NEW.brightness IS DISTINCT FROM OLD.brightness
-        OR NEW.dynamic_range_db IS DISTINCT FROM OLD.dynamic_range_db
-        OR NEW.zero_crossing_rate IS DISTINCT FROM OLD.zero_crossing_rate
-        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version)
+        OR float8send(NEW.key_confidence) IS DISTINCT FROM float8send(OLD.key_confidence)
+        OR float8send(NEW.energy) IS DISTINCT FROM float8send(OLD.energy)
+        OR float8send(NEW.energy_db) IS DISTINCT FROM float8send(OLD.energy_db)
+        OR float8send(NEW.brightness) IS DISTINCT FROM float8send(OLD.brightness)
+        OR float8send(NEW.dynamic_range_db) IS DISTINCT FROM float8send(OLD.dynamic_range_db)
+        OR float8send(NEW.zero_crossing_rate) IS DISTINCT FROM float8send(OLD.zero_crossing_rate)
+        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version
+        OR NEW.analysis_source_id IS DISTINCT FROM OLD.analysis_source_id)
        AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
         NEW.author_pubkey := NULL;
         NEW.signature     := NULL;
@@ -1262,8 +1273,9 @@ CREATE INDEX IF NOT EXISTS idx_track_instruments_unstamped
 
 CREATE OR REPLACE FUNCTION seal_guard_track_instruments() RETURNS trigger AS $$
 BEGIN
-    IF (NEW.instruments IS DISTINCT FROM OLD.instruments
-        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version)
+    IF (NEW.instruments::text IS DISTINCT FROM OLD.instruments::text
+        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version
+        OR NEW.analysis_source_id IS DISTINCT FROM OLD.analysis_source_id)
        AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
         NEW.author_pubkey := NULL;
         NEW.signature     := NULL;

@@ -1,4 +1,4 @@
-"""Who made a record, and joins by similarity (ANALYSIS-3 body 2), on a real
+"""Who made a record, and joins by similarity (2026-11-10), on a real
 PostgreSQL built from the migrations — the module's scratch database
 (conftest.scratch_dsn), skipped without a cluster.
 
@@ -421,7 +421,6 @@ def test_an_imported_record_a_shed_unsealed_is_a_gap_its_authors_sealed_version_
     session.commit()
 
     # the gap sets and the carry see the gap ...
-    assert sync_queries.get_unenriched_artist_uuids(conn) == [artist]
     assert sync_queries.get_incomplete_artist_uuids(conn) == [artist]
     with conn.cursor() as cur:
         cur.execute(f"""SELECT u::text FROM unnest(%s::uuid[]) u
@@ -804,7 +803,7 @@ def test_a_duration_declared_where_none_was_is_another_row_and_the_old_seal_stil
 @pytest.mark.parametrize("before,after", [
     # a lossy stream, then the owned lossless file of the equal print
     (dict(provider="lossy-test", lossless=False, bit_depth=None), dict(bit_depth=16)),
-    # a 24-bit file, then the CD rip of the equal print (hi-res→CD prints alike, FP-SIM)
+    # a 24-bit file, then the CD rip of the equal print (hi-res→CD prints alike, as measured)
     (dict(bit_depth=24), dict(bit_depth=16)),
 ])
 def test_a_better_copy_of_one_declaration_is_a_row_of_its_own_and_its_passes_replace(
@@ -1320,7 +1319,7 @@ def test_a_merged_lossy_streams_features_never_stand_for_the_targets_cd(conn, se
 
 
 def test_the_join_of_rows_registered_before_the_groups(conn, session):
-    """For body 3's cutover: a track's existing rows join by the rule, in id
+    """For the analysis records' cutover: a track's existing rows join by the rule, in id
     order; a track of one row is not read; a re-run joins nothing."""
     with conn.cursor() as cur:
         track, alone = _track(cur), _track(cur)
@@ -1684,3 +1683,177 @@ def test_the_features_pass_keeps_a_better_copys_features_as_the_embedding_save_d
                     {"t": track})
         assert cur.fetchone() == (cd_row, cd_row, 99.0)
 
+
+
+# -- Both records' saves, and the seal a save from another copy sheds ---------
+
+_FEATURES = {"bpm": 120.5, "key": "A", "mode": "minor", "key_confidence": 0.81, "energy": 0.25,
+             "energy_db": -14.2, "brightness": 0.1234, "dynamic_range_db": 11.0,
+             "zero_crossing_rate": 0.051234}
+
+
+def _record_payload(kind, track, duration, values):
+    if kind == "instruments":
+        return rs.instruments_payload(pub(NODE), track, FP, duration, 2, rs.blake2b_hex(
+            rs.canonical_instruments_blob(values)))
+    return rs.features_payload(pub(NODE), track, FP, duration, 2, rs.blake2b_hex(
+        rs.canonical_features_blob(values)))
+
+
+@pytest.mark.parametrize("kind,values", [("instruments", {"piano": 0.62}), ("instruments", {}),
+                                         ("features", _FEATURES)])
+def test_a_record_saved_unchanged_from_another_copy_takes_a_seal_of_its_new_row(
+        conn, session, scratch_dsn, monkeypatch, kind, values):
+    """Probe P1 of the first review: a lossless stream's record, sealed
+    under the stream's row (240 s), saved again unchanged from the owned
+    file's row (241 s), kept the stream's seal — served under the file's
+    declaration it verified nowhere, and sign() never took it again. The link
+    is part of what the seal binds (the guards): it goes, no peer is served
+    the record unsealed, and sign() seals it under the row it links to."""
+    monkeypatch.setattr(p2p_identity, "_signing_key_cache", NODE)
+    table = "track_instruments" if kind == "instruments" else "audio_features"
+    with conn.cursor() as cur:
+        track = _track(cur)
+        stream = _source(cur, track, FP, provider="lossless-test", duration=240)
+        owned = _source(cur, track, FP, duration=241)
+        sig = rs.sign(_record_payload(kind, track, 240, values), NODE)
+        if kind == "instruments":
+            cur.execute("""INSERT INTO track_instruments (track_id, instruments, analysis_source_id,
+                                                          analysis_version, author_pubkey, signature)
+                           VALUES (%s, %s, %s, 2, %s, %s)""",
+                        (track, psycopg2.extras.Json(values), stream, pub(NODE), sig))
+        else:
+            cur.execute(f"""INSERT INTO audio_features (track_id, {", ".join(rs.FEATURE_ORDER)},
+                                                        analysis_source_id, analysis_version,
+                                                        author_pubkey, signature)
+                            VALUES (%s, {", ".join(["%s"] * len(rs.FEATURE_ORDER))}, %s, 2, %s, %s)""",
+                        (track, *(values[k] for k in rs.FEATURE_ORDER), stream, pub(NODE), sig))
+    save = audio_analysis.save_instruments if kind == "instruments" else audio_analysis.save_features
+    assert save(session, track, dict(values), owned)
+    session.commit()
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT analysis_source_id, signature FROM {table} WHERE track_id = %s",
+                    (track,))
+        assert cur.fetchone() == (owned, None)
+    pull = sync_queries.pull_instruments if kind == "instruments" else sync_queries.pull_audio_features
+    assert pull(conn, [track])["items"] == []
+    assert _sign(scratch_dsn) == 1
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT author_pubkey, signature FROM {table} WHERE track_id = %s", (track,))
+        author, signed = cur.fetchone()
+    assert author == pub(NODE) and rs.verify(_record_payload(kind, track, 241, values), signed, author)
+
+
+class _Tagger:
+    """The instrument tagger, its scores stated; None, it fails on the track."""
+
+    def __init__(self, scores):
+        self.scores = scores
+
+    def tag_full_track(self, audio):
+        if self.scores is None:
+            raise RuntimeError("the tagger failed on this track")
+        return dict(self.scores)
+
+
+def _run_both_records(monkeypatch, track, tagger, librosa_only=False, force=False):
+    import numpy as np
+    monkeypatch.setattr(provenance, "fingerprinter",
+                        lambda: provenance.Fingerprinter("ok", "/usr/bin/fpcalc"))
+    monkeypatch.setattr(embeddings, "_reanalyze_imported", lambda: False)
+    monkeypatch.setattr(
+        audio_analysis.AudioAnalyzer, "_load_and_extract_librosa",
+        lambda self, path, *a: {"audio_48k": np.zeros(48000, dtype=np.float32),
+                                "librosa_features": {"bpm": 77.0, "energy": 0.5}})
+    monkeypatch.setattr(audio_analysis.AudioAnalyzer, "load_model",
+                        lambda self: setattr(self, "ensemble", tagger))
+    return audio_analysis.AudioAnalyzer(device="cpu").analyze_all(
+        force=force, librosa_only=librosa_only, track_ids=[uuid.UUID(track)])
+
+
+@pytest.mark.parametrize("scores,librosa_only", [({"piano": 0.62, "organ": 0.011}, False),
+                                                 ({}, False), (None, False),
+                                                 ({"piano": 0.62}, True)])
+def test_the_pass_saves_the_instruments_beside_the_features_under_one_row(
+        conn, prints, monkeypatch, scores, librosa_only):
+    """The tagger's scores are a record of their own, saved beside the
+    features under the file's row at the tagger's methodology; a tagger that
+    fails on a track, or a pass without it, leaves the features saved and
+    no instruments."""
+    import ensemble_instruments
+    with conn.cursor() as cur:
+        track = _track(cur)
+        _file(cur, track, "/music/a.flac")
+    prints["/music/a.flac"] = FP
+    stats = _run_both_records(monkeypatch, track, _Tagger(scores), librosa_only=librosa_only)
+    tagged = scores is not None and not librosa_only
+    assert (stats["success"], stats["instruments"]) == (1, int(tagged))
+    with conn.cursor() as cur:
+        cur.execute("""SELECT a.analysis_source_id, a.bpm, a.analysis_version, s.media_file_id
+                         FROM audio_features a JOIN analysis_sources s ON s.id = a.analysis_source_id
+                        WHERE a.track_id = %s""", (track,))
+        row, bpm, version, mf = cur.fetchone()
+        assert (bpm, version) == (77.0, audio_analysis.ANALYSIS_VERSION) and mf is not None
+        cur.execute("""SELECT instruments, analysis_source_id, analysis_version
+                         FROM track_instruments WHERE track_id = %s""", (track,))
+        assert cur.fetchall() == ([(scores, row, ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION)]
+                                  if tagged else [])
+
+
+def test_the_pass_keeps_a_better_copys_instruments_as_its_features(conn, session, prints,
+                                                                     monkeypatch):
+    """Each save replaces its own kind by the rank: a lesser copy's pass
+    replaces neither record of the better copy."""
+    with conn.cursor() as cur:
+        track = _track(cur)
+        better = _source(cur, track, FP, duration=240, bit_depth=16)
+        _features(cur, track, better)
+        cur.execute("""INSERT INTO track_instruments (track_id, instruments, analysis_source_id,
+                                                      analysis_version)
+                       VALUES (%s, '{"piano": 0.5}', %s, 2)""", (track, better))
+        _file(cur, track, "/music/lossy.mp3", lossless=False, bit_depth=None)
+    prints["/music/lossy.mp3"] = FP
+    stats = _run_both_records(monkeypatch, track, _Tagger({"kazoo": 0.9}), force=True)
+    assert (stats["success"], stats["skipped"], stats["instruments"]) == (0, 1, 0)
+    with conn.cursor() as cur:
+        cur.execute("SELECT instruments, analysis_source_id FROM track_instruments WHERE track_id = %s",
+                    (track,))
+        assert cur.fetchone() == ({"piano": 0.5}, better)
+
+
+def test_a_streams_analysis_saves_both_records_under_the_streams_row(conn, monkeypatch):
+    import ensemble_instruments
+    import librosa
+    import notary
+    import numpy as np
+    from streaming import enrichment
+
+    class Analyzer:
+        def analyze_from_array(self, audio, sr):
+            return {"bpm": 101.0, "energy": 0.4, "instruments": {"piano": 0.7}}
+
+    class Embedder:
+        def _compute_segments(self, audio):
+            return None
+
+        def _get_or_create_embedding_model(self, db):
+            return None
+
+    with conn.cursor() as cur:
+        track = _track(cur)
+        stream = _source(cur, track, FP, provider="lossless-test", duration=60)
+    monkeypatch.setattr(librosa, "load",
+                        lambda f, sr, mono: (np.zeros(48000 * 60, dtype=np.float32), sr))
+    monkeypatch.setattr(provenance, "create_stream_source", lambda *a: stream)
+    monkeypatch.setattr(notary, "wake", lambda reason: None)
+    enricher = enrichment.PreviewEnricher()
+    monkeypatch.setattr(enricher, "_models", lambda: (Embedder(), Analyzer()))
+    enricher._enrich(track, b"stream", (60.0,), True, "lossless-test")
+    with conn.cursor() as cur:
+        cur.execute("""SELECT instruments, analysis_source_id, analysis_version
+                         FROM track_instruments WHERE track_id = %s""", (track,))
+        assert cur.fetchone() == ({"piano": 0.7}, stream,
+                                  ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION)
+        cur.execute("SELECT bpm, analysis_source_id FROM audio_features WHERE track_id = %s",
+                    (track,))
+        assert cur.fetchone() == (101.0, stream)

@@ -117,7 +117,7 @@ class _Walked:
             walk._empty_peers[addr] = 1e18
 
         async def db(fn, *args):
-            return {"incomplete_artist_uuids": ["a1"], "unenriched_artist_uuids": ["a1"],
+            return {"incomplete_artist_uuids": ["a1"],
                     "core_and_bulk": (["t1"], [])}.get(fn.__name__, [])
 
         async def lookup():

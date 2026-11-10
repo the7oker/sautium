@@ -53,11 +53,15 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      node's keys it keeps the features no other key sealed and no imported
      source holds, deletes the rest with their instruments, sheds every
      features seal left for the notary to sign them anew, splits the grids
-     another key sealed under a first-hand row back onto its imported twin,
+     another key sealed whole under a first-hand row back onto its imported
+     twin (one with a segment of this node's or an unsealed one deleted),
      joins the source rows from before the material groups, and deletes the
      unsealed grids under imported rows of tracks with a file here; it fails
      closed — no marker — while no key resolves and seals stand on records
-     no imported source holds, and the seed waits for it. The labels step
+     no imported source holds, and the seed waits for it. It runs first of
+     the data steps: the seals are how it tells this node's records from
+     another author's, and the identity re-normalization sheds every one.
+     The labels step
      (`zero_shot_labels_v1`) loads the release's zero-shot label embeddings
      (backend/zero_shot.py) and scores every bundle of segments the node
      holds, its own and imported, the day moods, the vocal score and
@@ -302,24 +306,35 @@ def _split_flipped(db, keys: list) -> dict:
     """The grids another author sealed under this node's own source row — a
     registration flipped an imported row first-hand until 2026-11-10
     (provenance) — moved to that row's imported twin: the same declaration,
-    imported, put in the first-hand row's group. The flip wrote this node's
-    duration over the author's, and a seal binds the author's: a bundle
-    whose seals do not verify under the twin's declaration is deleted, and
-    its next pull brings it under its author's."""
+    imported, put in the first-hand row's group. Only a bundle every segment
+    of which another key sealed moves: one holding a segment of this node's
+    key or an unsealed one is no author's whole record, and is deleted — the
+    passes derive it again from a file here, or a pull brings it back (a
+    stream row's, which nothing here re-derives). The flip wrote this node's
+    duration over the author's, and a seal binds the author's: a bundle whose
+    seals do not verify under the twin's declaration is deleted too, and its
+    next pull brings it under its author's."""
     from sqlalchemy import text
 
     import record_sig as rs
     from sign_audio import _vector_bytes
+    others = _OTHERS.format(t="es")
     flipped = db.execute(text(f"""
         SELECT e.id, e.track_id::text AS track, e.model_id::text AS model, s.chromaprint,
-               s.duration_seconds, s.grid_version, COALESCE(s.material_of, s.id) AS root
+               s.duration_seconds, s.grid_version, COALESCE(s.material_of, s.id) AS root,
+               bool_and({others}) AS whole
           FROM embeddings e JOIN analysis_sources s ON s.id = e.analysis_source_id
+          JOIN embedding_segments es ON es.embedding_id = e.id
          WHERE NOT s.imported
-           AND EXISTS (SELECT 1 FROM embedding_segments es
-                        WHERE es.embedding_id = e.id AND {_OTHERS.format(t='es')})
+         GROUP BY e.id, s.id
+        HAVING bool_or({others})
          ORDER BY e.id"""), {"keys": keys}).fetchall()
-    moved = failed = 0
+    moved = failed = mixed = 0
     for f in flipped:
+        if not f.whole:
+            db.execute(text("DELETE FROM embeddings WHERE id = :e"), {"e": f.id})
+            mixed += 1
+            continue
         twin = db.execute(text("""
             INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds, grid_version,
                                           imported, material_of)
@@ -347,7 +362,8 @@ def _split_flipped(db, keys: list) -> dict:
         else:
             db.execute(text("DELETE FROM embeddings WHERE id = :e"), {"e": f.id})
             failed += 1
-    return {"bundles_split": moved, "bundles_failing_the_twin": failed}
+    return {"bundles_split": moved, "bundles_failing_the_twin": failed,
+            "bundles_mixed_deleted": mixed}
 
 
 def _reseal_analysis_records() -> dict:
@@ -369,8 +385,10 @@ def _reseal_analysis_records() -> dict:
       - every seal left on a features row is shed (a v3 seal), for the
         notary's startup wake to sign the features in v4 and the instruments
         in v1 (sign_audio);
-      - the grids another key sealed under a first-hand row are split back
-        onto that row's imported twin (_split_flipped);
+      - the grids another key sealed whole under a first-hand row are split
+        back onto that row's imported twin, and one that also holds a
+        segment of this node's or an unsealed one is deleted
+        (_split_flipped);
       - the source rows from before the material groups are joined
         (provenance.join_existing_rows);
       - a grid all unsealed under an imported row, on a track with an
@@ -547,8 +565,24 @@ def apply_pending() -> dict:
         _assistant_role(conn)
         out["sql_applied"] = db_init.apply_migrations(conn, logger.info)
 
+        # First: it reads the seals to tell this node's records from another
+        # author's, and the identity re-normalization below sheds every seal
+        # (a node from before 2026-08-25, or its backup, runs both at once) —
+        # so while it fails closed, the re-normalization waits for it too: a
+        # rule's duplicates merge at its later run, a foreign grid signed as
+        # this node's never comes back.
+        if not _marked(conn, "analysis_records_v4"):
+            out["analysis_records_v4"] = _reseal_analysis_records()
+            logger.info("analysis records v4: %s", out["analysis_records_v4"])
+            if out["analysis_records_v4"]["done"]:
+                _mark(conn, "analysis_records_v4")
+
         mark = _IDENTITY_MARK.format(IDENTITY_RULE)
-        if not _marked(conn, mark):
+        if not _marked(conn, mark) and not _marked(conn, "analysis_records_v4"):
+            logger.warning("identity rule v%d not recorded — the re-normalization waits for the "
+                           "analysis records' cutover, which reads the seals it sheds",
+                           IDENTITY_RULE)
+        elif not _marked(conn, mark):
             logger.info("identity rule v%d not recorded — re-normalizing identities", IDENTITY_RULE)
             stats = _renormalize_identities()
             logger.info("identity re-normalization: %s", stats)
@@ -586,12 +620,6 @@ def apply_pending() -> dict:
         if not _marked(conn, "master_stub_bound_v1"):
             out["master_stub_bound"] = _bind_master_stub(conn)
             _mark(conn, "master_stub_bound_v1")
-
-        if not _marked(conn, "analysis_records_v4"):
-            out["analysis_records_v4"] = _reseal_analysis_records()
-            logger.info("analysis records v4: %s", out["analysis_records_v4"])
-            if out["analysis_records_v4"]["done"]:
-                _mark(conn, "analysis_records_v4")
 
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):

@@ -245,21 +245,11 @@ def announce_tail_uuids(dsn: str) -> list[str]:
         conn.close()
 
 
-def unenriched_artist_uuids(dsn: str) -> list[str]:
-    """The audio gap set between drains (partial gaps are
-    incomplete_artist_uuids' job at the start of a run)."""
-    conn = _connect(dsn)
-    try:
-        return sync_queries.get_unenriched_artist_uuids(conn)
-    finally:
-        conn.close()
-
-
 def incomplete_artist_uuids(dsn: str) -> list[str]:
     """Artists with a track missing analysis in ANY category — the run's
-    trigger set. Catches partial states (segments landed but the features
-    didn't, an author's instruments came after its sonic records) that the
-    AND-logic of unenriched_artist_uuids skips."""
+    trigger set, and what every tier but the DHT's exact keys asks about:
+    partial states too (segments landed but the features didn't, an
+    author's instruments came after its sonic records)."""
     conn = _connect(dsn)
     try:
         return sync_queries.get_incomplete_artist_uuids(conn)
@@ -454,6 +444,7 @@ class SyncWalk:
         self._on_enriched_count = on_enriched_count
         self.dead = DeadAddresses()                            # shared with the slice finders
         self._holdings_cache: dict = {}                        # peer pubkey -> published holdings filters
+        self._run_cache: dict = {}                             # the run's reads of what this node holds
         self._empty_peers: dict[str, float] = {}               # addr -> ignore until
         # Reachable peers met in the current run, (pubkey, host, port): the
         # capture side of the network-size estimate (network_size).
@@ -584,6 +575,7 @@ class SyncWalk:
                 progress_cb(msg)
 
         self._run_deadline = time.monotonic() + RUN_MAX_S
+        self._run_cache = {}
 
         # Step 1: the gap set — artists missing data in ANY category.
         # Inventory + _compute_needed inside the peer sync handle the
@@ -696,12 +688,14 @@ class SyncWalk:
             return out
 
         async def _drain(reachable) -> None:
-            """Ask each reachable peer about everything still missing, one
-            at a time: the inventory call does the matching, and the gap set
-            shrinks after every peer, so parallel pulls would only
-            duplicate."""
+            """Ask each reachable peer about everything still missing — the
+            trigger set, a partial gap too — one at a time: the inventory
+            call does the matching, and the gap set shrinks after every
+            peer, so parallel pulls would only duplicate. A peer that had
+            nothing for us is left alone for EMPTY_PEER_TTL, which bounds
+            what a gap no peer fills costs."""
             for addr, api in reachable:
-                remaining = await self.db(unenriched_artist_uuids)
+                remaining = await self.db(incomplete_artist_uuids)
                 if not remaining:
                     return
                 gaps = await self.db(core_and_bulk, remaining)
@@ -730,7 +724,7 @@ class SyncWalk:
             volunteers = []
         sample = [(ip, port) for ip, port in nodes
                   if fmt_addr(ip, port) not in skip_dht_addrs]
-        remaining = await self.db(unenriched_artist_uuids)
+        remaining = await self.db(incomplete_artist_uuids)
         candidates = _fresh(
             list(nodes) + [(h, p) for h, p, _ in (volunteers or [])])
         if not remaining:
@@ -1004,6 +998,7 @@ class SyncWalk:
             batch_size=500,
             progress_cb=progress_cb,
             holdings_cache=self._holdings_cache,
+            run_cache=self._run_cache,
         )
 
         try:

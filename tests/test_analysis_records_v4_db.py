@@ -55,6 +55,7 @@ from tests.p2p.test_witness import AUTHORITY, ISSUER  # noqa: E402
 MIGRATIONS = REPO / "desktop" / "migrations"
 DELTA = MIGRATIONS / "056_analysis_records_v4.sql"
 MODEL = sync_client.model_uuid("clap")
+SECOND_MODEL = sync_client.model_uuid("clap-second")
 OWN, RETIRED, OTHER = (Ed25519PrivateKey.generate() for _ in range(3))
 FP = "AQAAcutover"
 SCORES = {"piano": 0.62, "drum kit": 0.45}
@@ -116,7 +117,8 @@ _OLD_SCHEMA = """
 
 
 def _old_node(name: str):
-    """A database as the files before 056 left it, the model's row in it."""
+    """A database as the files before 056 left it, the models' rows and a
+    lossless provider's in it."""
     if not conftest._recreate(name, create=True):
         pytest.skip("no PostgreSQL for a scratch database")
     build = _connect(name, autocommit=False)
@@ -126,8 +128,10 @@ def _old_node(name: str):
     c = _connect(name)
     with c.cursor() as cur:
         cur.execute(_OLD_SCHEMA)
-        cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)",
-                    (MODEL,))
+        cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512), "
+                    "(%s, 'clap-second', 512)", (MODEL, SECOND_MODEL))
+        cur.execute("INSERT INTO stream_providers (id, name, lossless) "
+                    "VALUES ('lossless-test', 'A lossless provider', true)")
     return c
 
 
@@ -171,11 +175,12 @@ def _track(cur) -> str:
     return tid
 
 
-def _source(cur, track, *, imported=False, fp=FP, duration=240) -> int:
+def _source(cur, track, *, imported=False, fp=FP, duration=240, provider=None) -> int:
     cur.execute("""INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds,
-                                                 grid_version, imported, is_lossless)
-                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-                (track, fp, duration, rs.GRID_VERSION, imported, None if imported else True))
+                                                 grid_version, imported, is_lossless, provider_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                (track, fp, duration, rs.GRID_VERSION, imported, None if imported else True,
+                 provider))
     return cur.fetchone()[0]
 
 
@@ -197,21 +202,23 @@ def _old_features(cur, track, source, *, author=None, instruments=SCORES, versio
                  *_seal(author)))
 
 
-def _bundle(cur, track, source, *, author=None, declared=240, segments=2) -> int:
-    """A grid under `source`, sealed by `author` over FP and the `declared`
+def _bundle(cur, track, source, *, author=None, declared=240, segments=2, authors=None,
+            model=MODEL) -> int:
+    """A grid of `model` under `source`, sealed by `author` — or segment by
+    segment by `authors`, None an unsealed one — over FP and the `declared`
     duration (its source's, unless a flip rewrote that), or unsealed."""
     cur.execute("""INSERT INTO embeddings (track_id, model_id, vector, analysis_source_id,
                                            analysis_version)
                    VALUES (%s, %s, %s::vector, %s, 2) RETURNING id""",
-                (track, MODEL, str(vector(99)), source))
+                (track, model, str(vector(99)), source))
     eid = cur.fetchone()[0]
-    for i in range(segments):
+    for i, by in enumerate(authors or [author] * segments):
         values = vector(i)
         seal = (None, None)
-        if author is not None:
-            payload = rs.segment_payload(pub(author), track, FP, declared, MODEL, i,
+        if by is not None:
+            payload = rs.segment_payload(pub(by), track, FP, declared, model, i,
                                          rs.vector_hash(rs.vector_to_bytes(values)))
-            seal = (pub(author), rs.sign(payload, author))
+            seal = (pub(by), rs.sign(payload, by))
         cur.execute("""INSERT INTO embedding_segments (embedding_id, segment_index, vector,
                                                        author_pubkey, signature)
                        VALUES (%s, %s, %s::vector, %s, %s)""", (eid, i, str(values), *seal))
@@ -275,6 +282,19 @@ def cutover():
         _bundle(cur, t["twinned"], _source(cur, t["twinned"]), author=OTHER)
         t["own_grid"] = _track(cur)                              # this node's own: untouched
         _bundle(cur, t["own_grid"], _source(cur, t["own_grid"]), author=OWN)
+        t["mixed_own"] = _track(cur)                             # another's and this node's
+        _bundle(cur, t["mixed_own"], _source(cur, t["mixed_own"]), authors=[OTHER, OWN])
+        t["mixed_unsealed"] = _track(cur)                        # another's and an unsealed one
+        _bundle(cur, t["mixed_unsealed"], _source(cur, t["mixed_unsealed"]),
+                authors=[OTHER, None])
+        t["stream_flipped"] = _track(cur)                        # another's, under a stream's row
+        t["stream_grid"] = _bundle(cur, t["stream_flipped"],
+                                   _source(cur, t["stream_flipped"], provider="lossless-test"),
+                                   author=OTHER)
+        t["two_models"] = _track(cur)                            # another's of one model, own of another
+        two = _source(cur, t["two_models"])
+        t["foreign_model"] = _bundle(cur, t["two_models"], two, author=OTHER)
+        t["own_model"] = _bundle(cur, t["two_models"], two, author=OWN, model=SECOND_MODEL)
         t["remainder"] = _track(cur)                             # unsealed, imported, a file here
         _bundle(cur, t["remainder"], _source(cur, t["remainder"], imported=True))
         _elected_file(cur, t["remainder"])
@@ -402,10 +422,6 @@ def test_the_delta_moves_the_instruments_unsigned_and_drops_the_five_columns():
             assert cur.fetchone() == (None,)
             cur.execute("""UPDATE track_instruments SET author_pubkey = %s, signature = %s
                             WHERE track_id = %s""", (pub(OWN), "5e" * 64, track))
-            cur.execute("UPDATE track_instruments SET analysis_source_id = NULL WHERE track_id = %s",
-                        (track,))
-            cur.execute("SELECT signature FROM track_instruments WHERE track_id = %s", (track,))
-            assert cur.fetchone() == ("5e" * 64,)                 # a link is no payload
             cur.execute("""UPDATE track_instruments SET instruments = '{"piano": 0.6}'
                             WHERE track_id = %s""", (track,))
             cur.execute("SELECT signature FROM track_instruments WHERE track_id = %s", (track,))
@@ -416,6 +432,52 @@ def test_the_delta_moves_the_instruments_unsigned_and_drops_the_five_columns():
     finally:
         c.close()
         conftest._recreate(name, create=False)
+
+
+def test_a_seal_goes_with_a_new_link_and_with_a_change_in_the_form_its_hash_reads(scratch_dsn):
+    """Probes P1 and P4 of the first review, at the guards: a record's seal
+    binds the declaration of the source row it links to, and its values in
+    the form its hash reads them — a float bit for bit (-0.0 is not 0.0), the
+    instruments map as its text (1.0 is not 1). A new link sheds the seal as
+    a value change does, the SET NULL of a deleted source included; a new
+    link presented with a new signature (an import's upsert) keeps it."""
+    c = psycopg2.connect(scratch_dsn)
+    c.autocommit = True
+    try:
+        with c.cursor() as cur:
+            track = _track(cur)
+            one, other = _source(cur, track), _source(cur, track, duration=241)
+            cur.execute("""INSERT INTO track_instruments (track_id, instruments, analysis_source_id,
+                                                          analysis_version)
+                           VALUES (%s, '{"piano": 1}', %s, 2)""", (track, one))
+            cur.execute("""INSERT INTO audio_features (track_id, energy, analysis_source_id,
+                                                       analysis_version)
+                           VALUES (%s, 0, %s, 2)""", (track, one))
+
+            def update(table, change) -> bool:
+                """`change` made to the sealed record: whether its seal held."""
+                cur.execute(f"UPDATE {table} SET author_pubkey = %s, signature = %s "
+                            "WHERE track_id = %s AND signature IS NULL", (pub(OWN), "5e" * 64, track))
+                cur.execute(f"UPDATE {table} SET {change} WHERE track_id = %s", (track,))
+                cur.execute(f"SELECT signature IS NOT NULL FROM {table} WHERE track_id = %s", (track,))
+                return cur.fetchone()[0]
+
+            assert update("track_instruments", "instruments = '{\"piano\": 1}'")
+            assert not update("track_instruments", "instruments = '{\"piano\": 1.0}'")
+            assert update("audio_features", "energy = 0")
+            assert not update("audio_features", "energy = '-0'")
+            assert update("audio_features", "energy = '-0', analysis_version = 2")
+            for table in ("track_instruments", "audio_features"):
+                assert not update(table, f"analysis_source_id = {other}")
+                assert update(table, f"analysis_source_id = {one}, signature = '{'7a' * 64}'")
+                assert update(table, f"analysis_source_id = {other}, signature = '{'6b' * 64}'")
+            cur.execute("DELETE FROM analysis_sources WHERE id = %s", (other,))
+            for table in ("track_instruments", "audio_features"):
+                cur.execute(f"SELECT analysis_source_id, signature FROM {table} WHERE track_id = %s",
+                            (track,))
+                assert cur.fetchone() == (None, None)
+    finally:
+        c.close()
 
 
 def test_a_failure_inside_the_delta_rolls_it_back_whole():
@@ -454,7 +516,8 @@ def test_the_step_counts_what_it_did(cutover):
     assert (r["features_deleted"], r["instruments_deleted"]) == (4, 4)
     assert r["features_kept"] == 5
     assert r["feature_seals_shed"] == 2
-    assert (r["bundles_split"], r["bundles_failing_the_twin"]) == (2, 1)
+    assert (r["bundles_split"], r["bundles_failing_the_twin"], r["bundles_mixed_deleted"]) == (
+        4, 1, 2)
     assert r["unsealed_under_imported_deleted"] == 1
     assert r["own_embeddings_without_segments"] == 1
     assert r["sources_joined"] >= 1
@@ -509,6 +572,30 @@ def test_a_flipped_grid_moves_to_its_imported_twin_in_the_rows_group(cutover):
         assert cur.fetchone() == (False,)                         # this node's own stays
 
 
+def test_only_a_bundle_another_key_sealed_whole_moves_to_the_twin(cutover):
+    """A bundle holding a segment of this node's key or an unsealed one is
+    no author's whole record: deleted, for a file here to derive again or a
+    pull to bring back. A stream row's grid moves to a twin with no
+    provider (an imported row names none); of two models' grids under one
+    row, the foreign one moves and this node's own stays."""
+    c, t = cutover["conn"], cutover["tracks"]
+    with c.cursor() as cur:
+        assert _holds(cur, t["mixed_own"])["embeddings"] == 0
+        assert _holds(cur, t["mixed_unsealed"])["embeddings"] == 0
+
+        def source_of(eid):
+            cur.execute("""SELECT s.imported, s.provider_id, s.duration_seconds, s.id
+                             FROM embeddings e JOIN analysis_sources s ON s.id = e.analysis_source_id
+                            WHERE e.id = %s""", (eid,))
+            return cur.fetchone()
+
+        assert source_of(t["stream_grid"])[:3] == (True, None, 240)
+        foreign, own = source_of(t["foreign_model"]), source_of(t["own_model"])
+        assert foreign[0] and not own[0]
+        cur.execute("""SELECT material_of FROM analysis_sources WHERE id = %s""", (foreign[3],))
+        assert cur.fetchone() == (own[3],)                        # the twin in the row's group
+
+
 def test_the_unsealed_remainder_goes_where_a_file_can_derive_it_again(cutover):
     c, t = cutover["conn"], cutover["tracks"]
     with c.cursor() as cur:
@@ -529,11 +616,10 @@ def test_rows_from_before_the_groups_are_joined(cutover):
 def test_a_second_run_finds_nothing_more_to_do(cutover):
     again = db_migrate._reseal_analysis_records()
     assert again["done"]
-    assert {k: again[k] for k in ("features_deleted", "instruments_deleted", "feature_seals_shed",
-                                  "bundles_split", "bundles_failing_the_twin", "sources_joined",
-                                  "unsealed_under_imported_deleted")} == dict.fromkeys(
-        ("features_deleted", "instruments_deleted", "feature_seals_shed", "bundles_split",
-         "bundles_failing_the_twin", "sources_joined", "unsealed_under_imported_deleted"), 0)
+    counted = ("features_deleted", "instruments_deleted", "feature_seals_shed", "bundles_split",
+               "bundles_failing_the_twin", "bundles_mixed_deleted", "sources_joined",
+               "unsealed_under_imported_deleted")
+    assert {k: again[k] for k in counted} == dict.fromkeys(counted, 0)
 
 
 def test_sign_signs_the_kept_records_as_features_v4_and_instruments_v1():
@@ -636,6 +722,34 @@ def test_no_key_resolving_beside_seals_of_its_own_fails_closed_until_one_does():
         conftest._recreate(name, create=False)
 
 
+def test_seals_of_its_own_on_segments_alone_fail_closed_too():
+    """A node whose features carry no seal — never signed, or shed — and
+    whose own grids do: deciding without its key would take its grids for
+    another's and move them off its rows."""
+    name = "sautium_test_records_v4_keyless_grids"
+    c = _old_node(name)
+    on = _On(name, ())
+    try:
+        with c.cursor() as cur:
+            own = _track(cur)
+            row = _source(cur, own)
+            _old_features(cur, own, row)
+            grid = _bundle(cur, own, row, author=OWN)
+        _apply_delta(name)
+        assert db_migrate._reseal_analysis_records() == {"done": False, "keys": 0}
+        on.keys((OWN,))
+        assert db_migrate._reseal_analysis_records()["bundles_split"] == 0
+        with c.cursor() as cur:
+            cur.execute("""SELECT s.imported FROM embeddings e
+                             JOIN analysis_sources s ON s.id = e.analysis_source_id
+                            WHERE e.id = %s""", (grid,))
+            assert cur.fetchone() == (False,)
+    finally:
+        on.close()
+        c.close()
+        conftest._recreate(name, create=False)
+
+
 def test_a_node_that_never_had_a_key_runs_keyless():
     name = "sautium_test_records_v4_never_keyed"
     c = _old_node(name)
@@ -687,6 +801,67 @@ def test_a_failure_inside_the_step_rolls_it_back_whole(monkeypatch):
 
 
 # -- the start --------------------------------------------------------------------
+
+def test_the_records_step_reads_the_seals_before_an_identity_pass_sheds_them(monkeypatch):
+    """A node that re-normalizes its identities at the same start (one from
+    before 2026-08-25, or its backup) sheds every seal there
+    (canon.migrations._shed_all_seals): the records step runs first, so
+    another author's grid under the node's own row goes to its imported twin
+    and is never signed as this node's — and while the step fails closed,
+    the re-normalization waits for it."""
+    import seed_import
+    from canon.migrations import _shed_all_seals
+    name = "sautium_test_records_v4_identity"
+    c = _old_node(name)
+    on = _On(name, ())
+    try:
+        with c.cursor() as cur:
+            track = _track(cur)
+            grid = _bundle(cur, track, _source(cur, track), author=OTHER)
+        identity = db_migrate._IDENTITY_MARK.format(db_migrate.IDENTITY_RULE)
+        order = []
+        marked = db_migrate._marked
+        monkeypatch.setattr(db_migrate, "_marked", lambda conn, step: (
+            False if step == identity else marked(conn, step)
+            if step in ("analysis_records_v4", "zero_shot_labels_v1") or step.startswith("seed_v")
+            else True))
+
+        def renormalize():
+            order.append("identity")
+            db = database.SessionLocal()
+            try:
+                return _shed_all_seals(db)
+            finally:
+                db.close()
+
+        monkeypatch.setattr(db_migrate, "_renormalize_identities", renormalize)
+        real = db_migrate._reseal_analysis_records
+        monkeypatch.setattr(db_migrate, "_reseal_analysis_records",
+                            lambda: order.append("records") or real())
+        monkeypatch.setattr(db_migrate, "_load_zero_shot_labels", lambda conn: {"loaded": False})
+        monkeypatch.setattr(seed_import, "bundle_info", lambda: None)
+
+        def grid_source():
+            with c.cursor() as cur:
+                cur.execute("""SELECT s.imported, count(es.signature)
+                                 FROM embeddings e
+                                 JOIN analysis_sources s ON s.id = e.analysis_source_id
+                                 JOIN embedding_segments es ON es.embedding_id = e.id
+                                WHERE e.id = %s GROUP BY s.imported""", (grid,))
+                return cur.fetchone()
+
+        db_migrate.apply_pending()                       # no key: the step fails closed
+        assert order == ["records"] and grid_source() == (False, 2)
+        on.keys((OWN,))
+        order.clear()
+        db_migrate.apply_pending()
+        assert order == ["records", "identity"]
+        assert grid_source() == (True, 0)              # on the twin, its seals shed after
+    finally:
+        on.close()
+        c.close()
+        conftest._recreate(name, create=False)
+
 
 def test_apply_pending_runs_the_step_once_before_the_labels_and_the_seed_waits_for_it(monkeypatch):
     """apply_pending with every other step taken as done: the records step

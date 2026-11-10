@@ -200,10 +200,11 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
             waivable.append(f"{label}: {analysis['no_features']}/{analysis['n']} tracks "
                             "without sealed audio_features"
                             + (" (waived)" if p["analysis_waiver"] else ""))
+        # The instruments are no pick's requirement: a track the master's
+        # instrument pass has not reached ships without them, said.
         if analysis["no_instruments"]:
-            waivable.append(f"{label}: {analysis['no_instruments']}/{analysis['n']} tracks "
-                            "without sealed instruments"
-                            + (" (waived)" if p["analysis_waiver"] else ""))
+            warns.append(f"{label}: {analysis['no_instruments']}/{analysis['n']} tracks "
+                         "without sealed instruments (informational)")
 
         manifest_owned = next(
             e["owned_on_master"] for e in _manifest_cache["picks"]

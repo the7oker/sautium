@@ -143,9 +143,9 @@ def _v3_features(author, track) -> dict:
                                "provenance": _provenance()}, payload)
 
 
-def _v4_features(author, track, version=2) -> dict:
+def _v4_features(author, track, version=2, **values) -> dict:
     fields = dict.fromkeys(rs.FEATURE_ORDER)
-    fields.update(bpm=120.5, energy=0.25)
+    fields.update({"bpm": 120.5, "energy": 0.25, **values})
     return _own_batch(author, {"track_uuid": track, **fields, "analysis_version": version,
                                "provenance": _provenance()},
                       rs.features_payload(pub(author), track, FP, 95, version, rs.blake2b_hex(
@@ -180,6 +180,37 @@ def test_an_instruments_record_travels_sealed_and_lands_as_its_authors(conn, scr
     assert again["authors"].keys() <= {pub(AUTHOR)}
 
 
+@pytest.mark.parametrize("category", ["tracks", "track-mbids", "track_mbids", "segments",
+                                      "audio-features", "audio_features", "instruments"])
+def test_the_docker_router_answers_every_pull_category_as_the_shared_handler(
+        conn, scratch_dsn, monkeypatch, category):
+    """The Docker node's /pull/{category} serves the launcher's handlers
+    (sync_queries.PULL_HANDLERS) — the track rows and the recording bindings
+    too, which the router's own copies served before."""
+    import asyncio
+    import contextlib
+    import json
+
+    pytest.importorskip("fastapi")
+    from starlette.requests import Request
+
+    from routers import sync as router
+    with conn.cursor() as cur:
+        track = _track(cur, "Through the router")
+        seal_track(cur, AUTHOR, track, MODEL, recording=str(uuid.uuid4()), instruments=SCORES)
+    monkeypatch.setattr(router, "_require_sharing", lambda: None)
+    monkeypatch.setattr(router, "_own_slice_cert", lambda: None)
+    monkeypatch.setattr(router, "get_conn",
+                        lambda: contextlib.closing(psycopg2.connect(scratch_dsn)))
+    answer = asyncio.run(router.pull(category, router.PullRequest(uuids=[track]),
+                                     Request({"type": "http", "headers": []})))
+    handler = sync_queries.PULL_HANDLERS[category]
+    direct = handler(conn, [track]) if category == "tracks" else handler(conn, [track], own=None)
+    served = json.loads(answer.body)
+    assert served == json.loads(json.dumps(direct))
+    assert [it["track_uuid"] for it in served["items"]] == [track]
+
+
 def test_a_v3_features_record_is_refused_where_its_v4_twin_lands(conn, scratch_dsn):
     """No compatibility with the old format: a v3 features record, sealed,
     stamped and whole, is rebuilt as v4 at the gate and does not verify."""
@@ -212,6 +243,35 @@ def test_an_instruments_map_no_reader_could_threshold_is_refused_whatever_its_se
     assert _import(scratch_dsn, "instruments", payload) == 0
 
 
+def test_a_map_at_the_bounds_is_a_record(conn, scratch_dsn):
+    with conn.cursor() as cur:
+        many, long = _track(cur), _track(cur)
+    labels = {f"label {n}": 0.5 for n in range(sync_client.INSTRUMENT_LABELS)}
+    assert _import(scratch_dsn, "instruments", _instruments_item(AUTHOR, many, labels)) == 1
+    named = {"x" * sync_client.INSTRUMENT_LABEL_CHARS: 0.5, "y": 1, "z": 0}
+    assert _import(scratch_dsn, "instruments", _instruments_item(AUTHOR, long, named)) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT instruments FROM track_instruments WHERE track_id = %s", (long,))
+        assert cur.fetchone() == (named,)
+
+
+@pytest.mark.parametrize("values,lands", [
+    (dict(bpm=120.0, key_confidence=1.0), True),
+    (dict(bpm=120), False),                  # float8 hands back 120.0: another hash
+    (dict(energy_db=-14), False),
+    (dict(bpm=True), False)])
+def test_a_feature_is_a_float_where_its_column_is_float8(conn, scratch_dsn, values, lands):
+    """The honest serializer sends a float8 column's value as a float: an
+    int sealed in its place verifies here and would be re-served as the
+    float its column holds, under a hash its seal does not bind."""
+    with conn.cursor() as cur:
+        track = _track(cur)
+    assert _import(scratch_dsn, "audio_features", _v4_features(AUTHOR, track, **values)) == lands
+    if lands:
+        served = sync_queries.pull_audio_features(conn, [track])["items"][0]
+        assert all(isinstance(served[f], float) for f in ("bpm", "energy", "key_confidence"))
+
+
 def test_an_empty_map_is_a_record_and_an_unsealed_one_is_none(conn, scratch_dsn):
     with conn.cursor() as cur:
         empty, unsealed = _track(cur), _track(cur)
@@ -237,44 +297,91 @@ def _first_hand(cur, track, table, version) -> None:
                     (track, source, version))
 
 
-@pytest.mark.parametrize("category,table,item", [
-    ("instruments", "track_instruments", lambda a, t, v: _instruments_item(a, t, SCORES, v)),
-    ("audio_features", "audio_features", lambda a, t, v: _v4_features(a, t, v))])
+_KINDS = [
+    ("instruments", "track_instruments", lambda a, t, v: _instruments_item(a, t, SCORES, v),
+     rs.INSTRUMENTS_ANALYSIS_VERSION),
+    ("audio_features", "audio_features", lambda a, t, v: _v4_features(a, t, v),
+     rs.FEATURES_ANALYSIS_VERSION)]
+
+
+def test_the_newest_methodology_is_the_one_this_release_computes():
+    import audio_analysis
+    import ensemble_instruments
+    assert rs.FEATURES_ANALYSIS_VERSION == audio_analysis.ANALYSIS_VERSION
+    assert rs.INSTRUMENTS_ANALYSIS_VERSION == ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION
+
+
+@pytest.mark.parametrize("category,table,item,newest", _KINDS)
 def test_a_newer_methodology_replaces_an_imported_record_never_a_first_hand_one(
-        conn, scratch_dsn, category, table, item):
+        conn, scratch_dsn, category, table, item, newest):
+    older = newest - 1
     with conn.cursor() as cur:
-        imported, first_hand, newer_here = _track(cur), _track(cur), _track(cur)
-        _first_hand(cur, first_hand, table, 1)
-    assert _import(scratch_dsn, category, item(AUTHOR, imported, 2)) == 1
-    assert _import(scratch_dsn, category, item(AUTHOR, newer_here, 3)) == 1
-    assert _import(scratch_dsn, category, item(NEWER, imported, 3)) == 1      # replaced
-    assert _import(scratch_dsn, category, item(NEWER, first_hand, 3)) == 0    # never
-    assert _import(scratch_dsn, category, item(NEWER, newer_here, 2)) == 0    # not older
-    assert _import(scratch_dsn, category, item(NEWER, newer_here, 3)) == 0    # nor equal
-    # one payload naming a track twice: its older item kept out, its newer one taken
-    both = item(NEWER, newer_here, 4)
-    older = item(NEWER, newer_here, 2)
-    both["items"] = older["items"] + both["items"]
-    both["batches"].update(older["batches"])
-    assert _import(scratch_dsn, category, both) == 1
+        imported, first_hand, newer_here, twice, twice_held = (_track(cur) for _ in range(5))
+        _first_hand(cur, first_hand, table, older)
+    assert _import(scratch_dsn, category, item(AUTHOR, imported, older)) == 1
+    assert _import(scratch_dsn, category, item(AUTHOR, newer_here, newest)) == 1
+    assert _import(scratch_dsn, category, item(AUTHOR, twice_held, older)) == 1
+    assert _import(scratch_dsn, category, item(NEWER, imported, newest)) == 1      # replaced
+    assert _import(scratch_dsn, category, item(NEWER, first_hand, newest)) == 0    # never
+    assert _import(scratch_dsn, category, item(NEWER, newer_here, older)) == 0     # not older
+    assert _import(scratch_dsn, category, item(NEWER, newer_here, newest)) == 0    # nor equal
+    # one payload naming a track twice lands its newest methodology, held
+    # here before or not, whatever the order
+    for track, order in ((twice, (newest, older)), (twice_held, (older, newest))):
+        payloads = [item(NEWER, track, v) for v in order]
+        both = {"items": [i for p in payloads for i in p["items"]], "authors": {},
+                "batches": {r: b for p in payloads for r, b in p["batches"].items()}}
+        assert _import(scratch_dsn, category, both) == 1
     with conn.cursor() as cur:
-        assert _row(cur, table, imported) == (3, pub(NEWER), True)
-        assert _row(cur, table, first_hand) == (1, None, False)
-        assert _row(cur, table, newer_here) == (4, pub(NEWER), True)
+        assert _row(cur, table, imported) == (newest, pub(NEWER), True)
+        assert _row(cur, table, first_hand) == (older, None, False)
+        assert _row(cur, table, newer_here) == (newest, pub(AUTHOR), True)
+        assert _row(cur, table, twice) == (newest, pub(NEWER), True)
+        assert _row(cur, table, twice_held) == (newest, pub(NEWER), True)
+
+
+@pytest.mark.parametrize("category,table,item,newest", _KINDS)
+def test_a_methodology_no_release_computes_is_refused_and_pins_nothing(
+        conn, scratch_dsn, category, table, item, newest):
+    """Probe P2 of the first review: a certified key sealing a version no
+    release makes replaced every imported record of its kind and kept the
+    honest ones out for good. The gate holds a record to the newest
+    methodology this release computes, and the planner asks for none above
+    it."""
+    with conn.cursor() as cur:
+        honest, gap = _track(cur), _track(cur)
+    assert _import(scratch_dsn, category, item(AUTHOR, honest, newest - 1)) == 1
+    for version in (newest + 1, 2 ** 15 - 1):
+        assert _import(scratch_dsn, category, item(NEWER, honest, version)) == 0
+        assert _import(scratch_dsn, category, item(NEWER, gap, version)) == 0
+    assert _import(scratch_dsn, category, item(AUTHOR, honest, newest)) == 1      # the honest bump
+    client = sync_client.SyncClient(api_client=None, db_dsn=scratch_dsn)
+    try:
+        needed = client._compute_needed(dict(
+            sync_queries.EMPTY_INVENTORY, **{category: [[honest, 2 ** 15 - 1], [gap, newest + 1]]}),
+            use_segments=False)
+    finally:
+        client._close_conn()
+    assert needed == {}
+    with conn.cursor() as cur:
+        assert _row(cur, table, honest) == (newest, pub(AUTHOR), True)
+        assert _row(cur, table, gap) is None
 
 
 def test_the_planner_asks_only_for_what_the_importer_would_take(conn, scratch_dsn):
+    newest = rs.INSTRUMENTS_ANALYSIS_VERSION
     with conn.cursor() as cur:
         imported, first_hand, newer_here, absent = (_track(cur) for _ in range(4))
-        _first_hand(cur, first_hand, "track_instruments", 1)
-    _import(scratch_dsn, "instruments", _instruments_item(AUTHOR, imported, SCORES, 2))
-    _import(scratch_dsn, "instruments", _instruments_item(AUTHOR, newer_here, SCORES, 3))
+        _first_hand(cur, first_hand, "track_instruments", newest - 1)
+    _import(scratch_dsn, "instruments", _instruments_item(AUTHOR, imported, SCORES, newest - 1))
+    _import(scratch_dsn, "instruments", _instruments_item(AUTHOR, newer_here, SCORES, newest))
     client = sync_client.SyncClient(api_client=None, db_dsn=scratch_dsn)
     try:
         needed = client._compute_needed(dict(
             sync_queries.EMPTY_INVENTORY,
-            instruments=[[imported, 3], [first_hand, 3], [newer_here, 3], [absent, 2],
-                         [absent, "2"]]), use_segments=False)
+            instruments=[[imported, newest], [first_hand, newest], [newer_here, newest],
+                         [absent, newest], [absent, str(newest)], [absent, 0]]),
+            use_segments=False)
     finally:
         client._close_conn()
     assert sorted(needed["instruments"]) == sorted([absent, imported])
@@ -288,37 +395,56 @@ def test_the_holdings_name_the_tracks_with_instruments_in_a_filter_of_their_own(
                                                     "payload": None, "tracks_n": 0,
                                                     "instruments_n": 0})
     with conn.cursor() as cur:
-        tagged, sonic, only_tagged = _track(cur), _track(cur), _track(cur)
+        tagged, sonic, only_tagged, unsealed = (_track(cur) for _ in range(4))
         seal_track(cur, AUTHOR, tagged, MODEL, recording=str(uuid.uuid4()), instruments=SCORES)
         seal_track(cur, AUTHOR, sonic, MODEL, recording=str(uuid.uuid4()))
-        _first_hand(cur, only_tagged, "track_instruments", 2)
+        seal_track(cur, AUTHOR, only_tagged, MODEL, recording=str(uuid.uuid4()),
+                   instruments=SCORES)
+        for table in ("embeddings", "audio_features"):       # its instruments alone stay
+            cur.execute(f"DELETE FROM {table} WHERE track_id = %s", (only_tagged,))
+        _first_hand(cur, unsealed, "track_instruments", 2)   # nothing the inventory serves
     version = sync_queries.holdings_version(conn)
     payload = sync_queries.get_holdings(conn)
     tracks = BloomFilter.from_dict(payload["tracks"])
     instruments = BloomFilter.from_dict(payload["instruments"])
-    assert set(tracks.hits([tagged, sonic, only_tagged])) == {tagged, sonic}
-    assert set(instruments.hits([tagged, sonic, only_tagged])) == {tagged, only_tagged}
+    every = [tagged, sonic, only_tagged, unsealed]
+    assert set(tracks.hits(every)) == {tagged, sonic}
+    assert set(instruments.hits(every)) == {tagged, only_tagged}
+    assert {r[0] for r in sync_queries.get_inventory(conn, every)["instruments"]} == {
+        tagged, only_tagged}                                 # the filter's population
     assert sync_queries.holdings_summary() == {"version": version, "tracks": 2, "instruments": 2}
     with conn.cursor() as cur:
-        _first_hand(cur, _track(cur), "track_instruments", 2)
+        seal_track(cur, AUTHOR, _track(cur), MODEL, recording=str(uuid.uuid4()),
+                   instruments=SCORES)
     assert sync_queries.holdings_version(conn) != version
 
 
 def test_the_client_tests_a_gap_of_instruments_alone_against_the_second_filter(conn, scratch_dsn):
     """What _holdings_inventory tests against a peer's instruments filter
-    alone: the tracks whose segments and features are held here and whose
-    instruments are not — no track missing its segments or its features."""
+    alone: the tracks whose one want is their instruments — segments held,
+    features no pull would replace, no instruments. A features record of an
+    older methodology keeps its track on the tracks filter, where a peer's
+    newer one is found. Read once per walk run."""
     with conn.cursor() as cur:
-        tagged, sonic, only_tagged, unsegmented = (_track(cur) for _ in range(4))
+        tagged, sonic, older, only_tagged, unsegmented = (_track(cur) for _ in range(5))
         seal_track(cur, AUTHOR, tagged, MODEL, recording=str(uuid.uuid4()), instruments=SCORES)
         seal_track(cur, AUTHOR, sonic, MODEL, recording=str(uuid.uuid4()))
+        seal_track(cur, AUTHOR, older, MODEL, recording=str(uuid.uuid4()), analysis_version=1)
         _first_hand(cur, only_tagged, "track_instruments", 2)
         _first_hand(cur, unsegmented, "audio_features", 2)
-    client = sync_client.SyncClient(api_client=None, db_dsn=scratch_dsn)
+    run: dict = {}
+    client = sync_client.SyncClient(api_client=None, db_dsn=scratch_dsn, run_cache=run)
     try:
         assert client._lacking_only_instruments() == {sonic}
     finally:
         client._close_conn()
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM embeddings WHERE track_id = %s", (sonic,))
+    later = sync_client.SyncClient(api_client=None, db_dsn=scratch_dsn, run_cache=run)
+    try:
+        assert later._lacking_only_instruments() == {sonic}      # the run's read, not another
+    finally:
+        later._close_conn()
 
 
 def test_an_instruments_gap_triggers_a_run_and_costs_no_dht_traffic(conn):
@@ -332,7 +458,6 @@ def test_an_instruments_gap_triggers_a_run_and_costs_no_dht_traffic(conn):
         cur.execute("INSERT INTO listening_history (track_id, started_at, completed, skipped) "
                     "VALUES (%s, now(), true, false)", (track,))         # engaged
     assert artist in sync_queries.get_incomplete_artist_uuids(conn)
-    assert artist not in sync_queries.get_unenriched_artist_uuids(conn)
     assert artist not in sync_queries.get_rare_search_uuids(conn)
     with conn.cursor() as cur:
         _first_hand(cur, track, "track_instruments", 2)

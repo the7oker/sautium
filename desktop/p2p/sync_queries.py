@@ -212,9 +212,10 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
 # A node with millions of phantom gaps cannot ask every peer about all of
 # them (306 inventory requests per peer per run at the master's size). The
 # peer publishes instead: Bloom filters over the track uuids it HOLDS
-# analysis for — `tracks` its segments or features, `instruments` its
-# instruments — sized by its holdings, never by anyone's gaps. The asker
-# tests its gaps locally, each against the filter of what it lacks, and asks
+# analysis for — `tracks` its segments or sealed features, `instruments` its
+# sealed instruments, what its inventory serves — sized by its holdings,
+# never by anyone's gaps. The asker
+# tests its gaps locally, each against the filter of what it wants, and asks
 # the exact inventory only about the hits: a track whose one gap is its
 # instruments, which most peers holding its segments never made, costs a
 # test of the second filter, not an inventory request every run. Built in
@@ -237,9 +238,7 @@ _HOLDINGS_TRACKS_SQL = f"""
      WHERE {HELD_EMBEDDING}
     UNION SELECT track_id::text FROM audio_features WHERE {_SIGNED}"""
 _HOLDINGS_INSTRUMENTS_SQL = f"""
-    SELECT a.track_id::text FROM track_instruments a
-      LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-     WHERE {HELD_RECORD}"""
+    SELECT track_id::text FROM track_instruments WHERE {_SIGNED}"""
 
 
 def holdings_version(conn) -> str:
@@ -253,7 +252,7 @@ def holdings_version(conn) -> str:
         SELECT (SELECT count(*) FROM embeddings) AS e,
                (SELECT count(*) FROM audio_features WHERE {_SIGNED}) AS af,
                (SELECT count(*) FROM embedding_segments WHERE signature IS NULL) AS unsealed,
-               (SELECT count(*) FROM track_instruments) AS ti,
+               (SELECT count(*) FROM track_instruments WHERE {_SIGNED}) AS ti,
                GREATEST((SELECT max(updated_at) FROM embeddings),
                         (SELECT max(updated_at) FROM audio_features),
                         (SELECT max(updated_at) FROM track_instruments)) AS latest
@@ -750,19 +749,31 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# The tables of per-track analysis records, each row linked to its source.
+_ANALYSIS_TABLES = ("embeddings", "audio_features", "track_instruments")
+
+# A track this node CARRIES: it holds another author's analysis of it, of any
+# kind — a phantom it streamed itself and was pushed the features or the
+# instruments of included. Formatted with the track's uuid expression as {t}.
+_CARRIED = "(" + " OR ".join(
+    f"""EXISTS (SELECT 1 FROM {table} c_x
+                  JOIN analysis_sources c_s ON c_s.id = c_x.analysis_source_id
+                 WHERE c_x.track_id = {{t}} AND c_s.imported)"""
+    for table in _ANALYSIS_TABLES) + ")"
+
+
 def count_carried_tracks(conn) -> int:
-    """How many tracks this node holds imported analysis for while owning
-    no file — the honest meter for "disk spent on someone else's behalf".
-    Analysis of tracks we DO own is not carrying, it is our own library,
-    however it arrived."""
+    """How many tracks this node holds imported analysis for, of any kind,
+    while owning no file — the honest meter for "disk spent on someone
+    else's behalf". Analysis of tracks we DO own is not carrying, it is our
+    own library, however it arrived."""
     rows = db_query(
         conn,
-        """SELECT count(DISTINCT e.track_id) AS n
-             FROM embeddings e
-             JOIN analysis_sources s ON s.id = e.analysis_source_id
-            WHERE s.imported
-              AND NOT EXISTS (SELECT 1 FROM owned_files f
-                               WHERE f.track_id = e.track_id)""",
+        "SELECT count(DISTINCT x.track_id) AS n FROM ("
+        + " UNION ALL ".join(f"""SELECT r.track_id FROM {table} r
+                                   JOIN analysis_sources s ON s.id = r.analysis_source_id
+                                  WHERE s.imported""" for table in _ANALYSIS_TABLES)
+        + """) x WHERE NOT EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = x.track_id)""",
     )
     return int(rows[0]["n"]) if rows else 0
 
@@ -802,10 +813,11 @@ def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
     answer to an offer (wanted_tracks) would have named: a track on its
     tracklist with a recording MBID — for a binding, that very recording —,
     lacking the category, owned or, with the phantom layer on, phantom: one
-    carried here already (its features or binding following its segments
-    adds nothing to carry), or one more within the room the carry limit
-    leaves (an owned track's gap-fill is never carrying). One item per track
-    (per track and recording for a binding). No offer state is kept: the
+    carried here already (_CARRIED: another author's analysis of it, of any
+    kind, is here — what follows adds nothing to carry), or one more within
+    the room the carry limit leaves (an owned track's gap-fill is never
+    carrying; every carried kind spends the room, count_carried_tracks). One
+    item per track (per track and recording for a binding). No offer state is kept: the
     push is judged by the same rules as the offer. The room is read per
     push, and pushes in flight at once may each spend it: the limit is
     exceeded by at most what they carry together, a part each (900 KiB) —
@@ -824,9 +836,7 @@ def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
         WITH cand AS (
             SELECT p.id, p.rec,
                    EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = p.id) AS owned,
-                   EXISTS (SELECT 1 FROM embeddings e
-                             JOIN analysis_sources s ON s.id = e.analysis_source_id
-                            WHERE e.track_id = p.id AND s.imported) AS carried
+                   {_CARRIED.format(t="p.id")} AS carried
               FROM unnest(%(ids)s::uuid[], %(recs)s::uuid[]) AS p(id, rec)
              WHERE EXISTS (SELECT 1 FROM album_tracks at2
                             WHERE at2.track_id = p.id AND at2.recording_mbid IS NOT NULL
@@ -873,15 +883,13 @@ def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
     # phantoms not carried yet.
     matched = db_query(
         conn,
-        """WITH m AS (SELECT DISTINCT at2.track_id
+        f"""WITH m AS (SELECT DISTINCT at2.track_id
                         FROM unnest(%(m)s::uuid[]) AS o(mbid)
                         JOIN album_tracks at2 ON at2.recording_mbid = o.mbid),
                 c AS (SELECT m.track_id,
                              EXISTS (SELECT 1 FROM owned_files f
                                       WHERE f.track_id = m.track_id) AS owned,
-                             EXISTS (SELECT 1 FROM embeddings e
-                                       JOIN analysis_sources s ON s.id = e.analysis_source_id
-                                      WHERE e.track_id = m.track_id AND s.imported) AS carried
+                             {_CARRIED.format(t="m.track_id")} AS carried
                         FROM m)
            SELECT track_id::text AS track_uuid FROM c WHERE owned OR (carried AND %(p)s)
            UNION ALL
@@ -983,26 +991,6 @@ _FEATURED = HOLDS_FEATURES.format(t="ta.track_id")
 _INSTRUMENTED = HOLDS_INSTRUMENTS.format(t="ta.track_id")
 
 
-def get_unenriched_artist_uuids(conn) -> list[str]:
-    """
-    Artists with at least one track that holds neither an embedding nor
-    audio_features (_ANALYSED, _FEATURED) — the audio gap set the sync walk asks each peer's
-    inventory about between drains. Per track, not per artist: one
-    unanalysed track is a reason to ask, a fully analysed discography is
-    not. Partial-category gaps (a bio missing on an analysed artist) are
-    get_incomplete_artist_uuids' job.
-    """
-    rows = db_query(
-        conn,
-        f"""SELECT DISTINCT ta.artist_id::text AS artist_uuid
-           FROM track_artists ta
-           WHERE NOT {_ANALYSED}
-           AND NOT {_FEATURED}
-           ORDER BY 1""",
-    )
-    return [r["artist_uuid"] for r in rows]
-
-
 RARE_SEARCH_SQL = f"""
     WITH engaged AS (
         SELECT DISTINCT ta.artist_id
@@ -1042,18 +1030,19 @@ def get_rare_search_uuids(conn) -> list[str]:
 def get_incomplete_artist_uuids(conn) -> list[str]:
     """
     Artist UUIDs with at least one track missing analysis in ANY category —
-    segments, features, instruments — the trigger set for a sync run.
-
-    Why broader than get_unenriched_artist_uuids: that one is the audio gap
-    set between drains and uses AND-of-audio to keep DHT traffic down. At
-    the start of a run we want to catch partial states — embeddings landed
-    but features didn't (a transient pull failure), or an author's
-    instrument pass came days after its sonic one: a track lacking only its
-    instruments is a trigger here and never in the DHT sets (it costs no DHT
-    traffic). Inventory + _compute_needed at the peer/category level filter
-    out anything we already have, and the peers' instruments filters keep an
-    instruments gap no peer can fill a local test, so even a wide trigger
-    here is cheap when there's nothing new to pull.
+    segments, features, instruments — the trigger set for a sync run, and
+    what every peer of it is asked about (since 2026-11-10 the internet
+    tier's drain and the master hint too, not only the manual and LAN
+    peers): partial states as well — embeddings landed but features didn't
+    (a transient pull failure, an imported track whose features the records'
+    cutover deleted), or an author's instrument pass came days after its
+    sonic one. Only the DHT's exact keys keep to a track holding neither
+    (get_rare_search_uuids): a partial gap costs no DHT traffic. Inventory +
+    _compute_needed at the peer/category level filter out anything we
+    already have, the peers' instruments filters keep an instruments gap no
+    peer can fill a local test, and a peer that had nothing for us is left
+    alone for the walk's EMPTY_PEER_TTL, so even a wide set here is cheap
+    when there's nothing new to pull.
 
     Until 2026-09-19 a missing bio, tag list, similars or track stats was a
     trigger too; that layer is node-local now (Last.fm's API terms) and no

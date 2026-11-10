@@ -564,8 +564,9 @@ async def get_inventory(req: InventoryRequest, request: Request) -> Response:
 @router.get("/holdings")
 async def get_holdings(request: Request, have: Optional[str] = None) -> Response:
     """The holdings filters — what this node holds, compressed (Bloom
-    filters over sealed track and artist uuids), so a peer with millions
-    of gaps tests them locally and asks /inventory only about the hits.
+    filters over the tracks it holds segments or sealed features for, and
+    those it holds sealed instruments for), so a peer with millions of gaps
+    tests them locally and asks /inventory only about the hits.
     `have` = the version the caller already holds; unchanged answers with
     a stub. Logic in desktop/p2p/sync_queries.get_holdings, shared with
     the launcher surface."""

@@ -20,6 +20,9 @@
 --      their checks, their indexes, the columns and the vocal_class type
 --      dropped.
 --
+-- Both guards watch the record's source link and read a value in the form
+-- its hash does (001_initial.sql's seal invalidation).
+--
 -- It touches no seal: which seals are this node's own and which another
 -- author's needs the node's keys, so the re-seal is the data step
 -- analysis_records_v4 (backend/db_migrate.py), right after the deltas.
@@ -48,8 +51,9 @@ CREATE INDEX IF NOT EXISTS idx_track_instruments_unstamped
 
 CREATE OR REPLACE FUNCTION seal_guard_track_instruments() RETURNS trigger AS $$
 BEGIN
-    IF (NEW.instruments IS DISTINCT FROM OLD.instruments
-        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version)
+    IF (NEW.instruments::text IS DISTINCT FROM OLD.instruments::text
+        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version
+        OR NEW.analysis_source_id IS DISTINCT FROM OLD.analysis_source_id)
        AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
         NEW.author_pubkey := NULL;
         NEW.signature     := NULL;
@@ -86,16 +90,17 @@ END $$;
 
 CREATE OR REPLACE FUNCTION seal_guard_audio_features() RETURNS trigger AS $$
 BEGIN
-    IF (NEW.bpm IS DISTINCT FROM OLD.bpm
+    IF (float8send(NEW.bpm) IS DISTINCT FROM float8send(OLD.bpm)
         OR NEW.key IS DISTINCT FROM OLD.key
         OR NEW.mode IS DISTINCT FROM OLD.mode
-        OR NEW.key_confidence IS DISTINCT FROM OLD.key_confidence
-        OR NEW.energy IS DISTINCT FROM OLD.energy
-        OR NEW.energy_db IS DISTINCT FROM OLD.energy_db
-        OR NEW.brightness IS DISTINCT FROM OLD.brightness
-        OR NEW.dynamic_range_db IS DISTINCT FROM OLD.dynamic_range_db
-        OR NEW.zero_crossing_rate IS DISTINCT FROM OLD.zero_crossing_rate
-        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version)
+        OR float8send(NEW.key_confidence) IS DISTINCT FROM float8send(OLD.key_confidence)
+        OR float8send(NEW.energy) IS DISTINCT FROM float8send(OLD.energy)
+        OR float8send(NEW.energy_db) IS DISTINCT FROM float8send(OLD.energy_db)
+        OR float8send(NEW.brightness) IS DISTINCT FROM float8send(OLD.brightness)
+        OR float8send(NEW.dynamic_range_db) IS DISTINCT FROM float8send(OLD.dynamic_range_db)
+        OR float8send(NEW.zero_crossing_rate) IS DISTINCT FROM float8send(OLD.zero_crossing_rate)
+        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version
+        OR NEW.analysis_source_id IS DISTINCT FROM OLD.analysis_source_id)
        AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
         NEW.author_pubkey := NULL;
         NEW.signature     := NULL;

@@ -64,6 +64,18 @@ FEATURES_RECORD_VERSION = 4
 INSTRUMENTS_RECORD_VERSION = 1
 ENRICHMENT_RECORD_VERSION = 2
 
+# The newest analysis methodology of each per-track record kind this release
+# computes — audio_analysis.ANALYSIS_VERSION and ensemble_instruments.
+# INSTRUMENTS_ANALYSIS_VERSION, pinned to them by test. A sealed imported
+# record of an older methodology is replaced by one of a newer
+# (sync_queries.KEPT_RECORD), so the newest is the ceiling the import gate
+# holds a record to, as it holds a bundle to GRID_VERSION: a seal over a
+# methodology no release computes would replace every imported record of its
+# kind and keep the honest ones out for good. A newer release's records reach
+# a node when the node updates.
+FEATURES_ANALYSIS_VERSION = 2
+INSTRUMENTS_ANALYSIS_VERSION = 2
+
 # The Worker timestamp string format. v2 (2026-07-10) appends the submitter's
 # ip_hash (uuid5(NAMESPACE, "ip:"+ip), computed by the Worker) after the date —
 # accountability for who notarized a batch. MIRRORS worker/verify.js

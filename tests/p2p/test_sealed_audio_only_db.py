@@ -92,7 +92,6 @@ def test_a_mean_without_segments_is_a_gap_in_the_plan_and_the_gap_sets(conn, scr
     sync_client.SyncClient(peer, scratch_dsn).run_sync([TRACK])
     assert peer.pulls == ["segments"]
     assert peer.asked == [TRACK]                              # the inventory's word on OTHER: no answer
-    assert sync_queries.get_unenriched_artist_uuids(conn) == [ARTIST]
     assert sync_queries.get_incomplete_artist_uuids(conn) == [ARTIST]
     unsealed = _Peer(capabilities=["segments"], segments=0)       # nothing sealed to give
     sync_client.SyncClient(unsealed, scratch_dsn).run_sync([TRACK])

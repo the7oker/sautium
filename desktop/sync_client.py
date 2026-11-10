@@ -152,12 +152,15 @@ def _is_uuid(value) -> bool:
 # The fields of a features record and the kind of value each holds: the
 # gate's one table of them, in the order the record's seal hashes them
 # (record_sig.FEATURE_ORDER), which the features import also writes its
-# columns from. A field of another kind drops its item at the gate.
-_NUMBER, _TEXT, _SCORES = "number", "text", "scores"
+# columns from. A field of another kind drops its item at the gate. A number
+# is a float: its column is float8, which hands every value back as one, so
+# a record sealed over an int (120 where the column gives 120.0) would verify
+# here and be re-served under a hash its seal does not bind.
+_FLOAT, _TEXT, _SCORES = "float", "text", "scores"
 FEATURE_FIELDS = {
-    "bpm": _NUMBER, "key": _TEXT, "mode": _TEXT, "key_confidence": _NUMBER,
-    "energy": _NUMBER, "energy_db": _NUMBER, "brightness": _NUMBER,
-    "dynamic_range_db": _NUMBER, "zero_crossing_rate": _NUMBER,
+    "bpm": _FLOAT, "key": _TEXT, "mode": _TEXT, "key_confidence": _FLOAT,
+    "energy": _FLOAT, "energy_db": _FLOAT, "brightness": _FLOAT,
+    "dynamic_range_db": _FLOAT, "zero_crossing_rate": _FLOAT,
 }
 # The instruments record's one field, the same way: the tagger's raw score
 # per label (record_sig.canonical_instruments_blob). The readers threshold
@@ -171,6 +174,10 @@ INSTRUMENT_FIELDS = {"instruments": _SCORES}
 INSTRUMENT_LABELS = 128
 INSTRUMENT_LABEL_CHARS = 64
 _RECORD_FIELDS = {"features": FEATURE_FIELDS, "instruments": INSTRUMENT_FIELDS}
+# The newest methodology a record of each kind may carry: the one this
+# release computes (record_sig).
+_NEWEST_ANALYSIS = {"features": rs.FEATURES_ANALYSIS_VERSION,
+                    "instruments": rs.INSTRUMENTS_ANALYSIS_VERSION}
 # The per-track record kinds the import gate takes: their table, their
 # fields, the bytes their seal hashes and the payload it signs.
 _RECORD_KINDS = {
@@ -187,7 +194,7 @@ def _is_number(value) -> bool:
 
 
 def _of_kind(kind: str, value) -> bool:
-    """A value the column of its field's kind takes: a finite number, a text
+    """A value the column of its field's kind takes: a finite float, a text
     with no NUL, or none; for the scores, a map of label to score."""
     if kind == _SCORES:
         return (isinstance(value, dict) and len(value) <= INSTRUMENT_LABELS
@@ -197,8 +204,8 @@ def _of_kind(kind: str, value) -> bool:
                         for label, score in value.items()))
     if value is None:
         return True
-    if kind == _NUMBER:
-        return _is_number(value)
+    if kind == _FLOAT:
+        return isinstance(value, float) and math.isfinite(value)
     return isinstance(value, str) and "\x00" not in value
 
 
@@ -213,9 +220,10 @@ def _well_formed(item: dict, kind: str) -> Optional[str]:
     bundle of another is refused (every segment seal binds it), a record's
     is ignored (no features or instruments seal binds it, so it must not
     move the row). `is_lossless` is the author's unsigned claim, kept when
-    it is one. A record's fields are typed by its table (FEATURE_FIELDS,
-    INSTRUMENT_FIELDS). A field of another type drops its item, never the
-    batch."""
+    it is one. A record's methodology is no newer than this release computes
+    (_NEWEST_ANALYSIS), and its fields are typed by its table
+    (FEATURE_FIELDS, INSTRUMENT_FIELDS). A field of another type drops its
+    item, never the batch."""
     bundle = kind == "segments"
     if not _is_uuid(item.get("track_uuid")):
         return "no track uuid"
@@ -235,6 +243,8 @@ def _well_formed(item: dict, kind: str) -> Optional[str]:
     version = item.get("analysis_version", 1)
     if not (_is_int(version) and 0 < version < 2 ** 15):
         return "an analysis version that is not one"
+    if version > _NEWEST_ANALYSIS.get(kind, version):
+        return "a methodology this release does not compute"
     if bundle and not (_is_uuid(item.get("model_uuid"))
                        and isinstance(item.get("model_name", ""), str)
                        and len(item.get("model_name", "")) <= MODEL_NAME_CHARS):
@@ -357,6 +367,7 @@ class SyncClient:
         holdings_cache: Optional[dict] = None,
         deliverer: Optional[str] = None,
         carried: Optional[Callable[[dict, str, str], None]] = None,
+        run_cache: Optional[dict] = None,
     ):
         # api_client is None on the receiving side of a push: the payload
         # arrives instead of being fetched, but it goes through the same
@@ -373,6 +384,11 @@ class SyncClient:
         # published holdings, kept by the manager across runs (process
         # lifetime) and refreshed by version.
         self.holdings_cache = holdings_cache if holdings_cache is not None else {}
+        # What a walk run reads of this node's holdings once for all the
+        # peers it asks (the walk passes one per run): the peers are asked
+        # one at a time, and a read gone stale meanwhile only routes a track
+        # by the broader test.
+        self.run_cache = run_cache if run_cache is not None else {}
         self._conn: Optional[psycopg2.extensions.connection] = None
         # Filled by run_sync's capability probe; the caller reads it to
         # decide whether this peer can also be pushed to.
@@ -426,21 +442,27 @@ class SyncClient:
             return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
 
     def _lacking_only_instruments(self) -> set:
-        """The tracks whose segments and features this node holds and whose
-        instruments it lacks, by the HELD rules — read from what is held,
-        never from an asked list the phantom bulk makes millions long."""
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            # HOLDS_INSTRUMENTS names its own `a` and `s`: the track is read
-            # from the CTE, never from an alias the subquery shadows.
-            cur.execute(f"""WITH sonic AS (
-                                SELECT a.track_id FROM audio_features a
-                                  LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                                 WHERE {sync_queries.HELD_RECORD}
-                                   AND {sync_queries.HOLDS_SEGMENTS.format(t="a.track_id")})
-                            SELECT x.track_id::text FROM sonic x
-                             WHERE NOT {sync_queries.HOLDS_INSTRUMENTS.format(t="x.track_id")}""")
-            return {row[0] for row in cur.fetchall()}
+        """The tracks whose one want from a peer is their instruments: their
+        segments held (a held grid is never replaced), a features record no
+        pull would replace — first-hand, or sealed at the newest methodology
+        (sync_queries.KEPT_RECORD) — and no instruments. Read from what is
+        held, never from an asked list the phantom bulk makes millions long,
+        once per walk run (run_cache)."""
+        if "lacking_only_instruments" not in self.run_cache:
+            conn = self._get_conn()
+            with conn.cursor() as cur:
+                # HOLDS_INSTRUMENTS names its own `a` and `s`: the track is
+                # read from the CTE, never from an alias the subquery shadows.
+                kept = sync_queries.KEPT_RECORD.format(v=_NEWEST_ANALYSIS["features"])
+                cur.execute(f"""WITH sonic AS (
+                                    SELECT a.track_id FROM audio_features a
+                                      LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                                     WHERE {kept}
+                                       AND {sync_queries.HOLDS_SEGMENTS.format(t="a.track_id")})
+                                SELECT x.track_id::text FROM sonic x
+                                 WHERE NOT {sync_queries.HOLDS_INSTRUMENTS.format(t="x.track_id")}""")
+                self.run_cache["lacking_only_instruments"] = {row[0] for row in cur.fetchall()}
+        return self.run_cache["lacking_only_instruments"]
 
     def run_sync(self, track_uuids: list[str] = None,
                  bulk_track_uuids: Optional[list[str]] = None) -> dict:
@@ -571,16 +593,17 @@ class SyncClient:
         """Inventory for our gaps by the cheaper direction: the peer's
         holdings filters (one download, cached by version, tested locally)
         when the ask is bigger than the filters, the exact inventory
-        otherwise or when the peer has none. A track whose segments and
-        features this node holds and whose instruments it lacks is tested
-        against the peer's instruments filter alone — the peer holding its
-        segments says nothing of its instruments, and such a gap no peer can
-        fill would otherwise be an inventory request every run; every other
-        track against the tracks filter, as before: a peer that holds its
-        segments or features is asked about it, and its instruments come in
-        the same inventory. A peer that publishes no instruments filter
-        holds no instruments this node can verify. An empty inventory when
-        nothing is worth asking; None when a request failed."""
+        otherwise or when the peer has none. A track whose one want is its
+        instruments (_lacking_only_instruments) is tested against the peer's
+        instruments filter alone — the peer holding its segments says nothing
+        of its instruments, and such a gap no peer can fill would otherwise
+        be an inventory request every run; every other track against the
+        tracks filter, as before: a peer that holds its segments or features
+        is asked about it, and its instruments come in the same inventory —
+        so a features record a newer methodology would replace keeps its
+        track on the tracks filter. A peer that publishes no instruments
+        filter holds no instruments this node can verify. An empty inventory
+        when nothing is worth asking; None when a request failed."""
         if "holdings" not in self.peer_capabilities:
             self._progress(
                 f"  peer has no holdings filter — asking about "
@@ -590,7 +613,8 @@ class SyncClient:
         key = self.api.peer_pubkey or self.api.base_url
         cached = self.holdings_cache.get(key)
         summary = health.get("holdings")
-        if not (isinstance(summary, dict) and isinstance(summary.get("tracks", 0), int)):
+        if not (isinstance(summary, dict)
+                and all(_is_int(summary.get(k, 0)) for k in ("tracks", "instruments"))):
             summary = None
         fresh = cached and time.time() - cached["fetched_at"] < HOLDINGS_MAX_AGE_S
         if fresh or (cached and summary
@@ -690,20 +714,24 @@ class SyncClient:
         and the record is not this node's own — an imported record of a
         newer methodology replaces an imported one of an older, never a
         first-hand one (sync_queries.KEPT_RECORD, which the importers keep
-        by), so nothing is pulled only to be dropped. Existence alone never
-        delivers upgrades."""
+        by), so nothing is pulled only to be dropped; and a methodology newer
+        than this release computes is none at all (_NEWEST_ANALYSIS: the gate
+        refuses it). Existence alone never delivers upgrades."""
         needed = {}
         checks = [("audio_features", "audio_features",
-                   partial(self._held_records, "audio_features")),
-                  ("instruments", "instruments", partial(self._held_records, "track_instruments"))]
+                   partial(self._held_records, "audio_features"), _NEWEST_ANALYSIS["features"]),
+                  ("instruments", "instruments", partial(self._held_records, "track_instruments"),
+                   _NEWEST_ANALYSIS["instruments"])]
         if use_segments:
-            checks.insert(0, ("segments", "embeddings", self._local_segment_versions))
-        for cat_key, inv_key, local_versions in checks:
+            checks.insert(0, ("segments", "embeddings", self._local_segment_versions,
+                              2 ** 15 - 1))
+        for cat_key, inv_key, local_versions, newest in checks:
             t0 = time.monotonic()
             rows = inventory.get(inv_key) or []
             available_versions = {
                 row[0]: row[1] for row in rows
                 if isinstance(row, list) and len(row) >= 2 and _is_int(row[1])
+                and 0 < row[1] <= newest
                 and (cat_key != "segments" or (len(row) > 2 and row[2]))}
             if not available_versions:
                 continue
@@ -1271,25 +1299,24 @@ class SyncClient:
 
     @staticmethod
     def _drop_kept(cur, items: list[dict], table: str, what: str) -> list[dict]:
-        """Filter out the items whose track's record of `table` this node
-        keeps against them (sync_queries.KEPT_RECORD): its own first-hand
-        record, or a sealed one of a methodology no older than the item's —
-        an imported record of an older methodology is replaced by a newer
-        one, as the planner asked for it."""
+        """Filter out the items — one per track — whose track's record of
+        `table` this node keeps against them (sync_queries.KEPT_RECORD): its
+        own first-hand record, or a sealed one of a methodology no older than
+        the item's — an imported record of an older methodology is replaced
+        by a newer one, as the planner asked for it."""
         if not items:
             return items
-        cur.execute(f"""SELECT i.track_id::text, i.version
+        cur.execute(f"""SELECT i.track_id::text
                           FROM unnest(%s::uuid[], %s::int[]) AS i(track_id, version)
                           JOIN {table} a ON a.track_id = i.track_id
                           LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
                          WHERE {sync_queries.KEPT_RECORD.format(v="i.version")}""",
                     ([i["track_uuid"] for i in items],
                      [i.get("analysis_version", 1) for i in items]))
-        kept = {(r[0], r[1]) for r in cur.fetchall()}
+        kept = {r[0] for r in cur.fetchall()}
         if kept:
             logger.debug("sync import: %d %s items kept out (own or no older)", len(kept), what)
-        return [i for i in items
-                if (i["track_uuid"], i.get("analysis_version", 1)) not in kept]
+        return [i for i in items if i["track_uuid"] not in kept]
 
     def _import_audio_features(self, conn, items: list[dict],
                                batches: dict, authors: set) -> int:
@@ -1342,7 +1369,14 @@ class SyncClient:
                 continue
             verified.append(item)
             authors.add(item["author_pubkey"].lower())
-        items = verified
+        # One record per track: of a track named twice, its newest
+        # methodology (the first of equals), as a later pull of it would land.
+        newest: dict = {}
+        for item in verified:
+            held = newest.get(item["track_uuid"])
+            if held is None or item.get("analysis_version", 1) > held.get("analysis_version", 1):
+                newest[item["track_uuid"]] = item
+        items = list(newest.values())
         if not items:
             return 0
 
@@ -1367,10 +1401,6 @@ class SyncClient:
                        {", ".join(f"{c} = EXCLUDED.{c}" for c in columns)},
                        updated_at = CURRENT_TIMESTAMP"""
             template = "(" + ", ".join(["%s"] * (len(columns) + 1)) + ")"
-            first: dict = {}                 # one row per track: the first item of it
-            for item in items:
-                first.setdefault(item["track_uuid"], item)
-            items = list(first.values())
             values = {
                 item["track_uuid"]: (
                     item["track_uuid"],
