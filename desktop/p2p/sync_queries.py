@@ -114,6 +114,28 @@ EMPTY_INVENTORY = {"tracks": [], "embeddings": [], "audio_features": []}
 # be a promise the inventory then breaks.
 _SIGNED = "signature IS NOT NULL AND batch_root IS NOT NULL"
 
+# What this node HOLDS of a track's analysis: its own (a first-hand source),
+# or what an author sealed. The sync's planner asks for no held record, its
+# importers replace none, the carry admits none and the gap sets count none
+# as a gap — one rule, so nothing is pulled only to be dropped. An imported
+# record whose seal a shed removed (a rename, a merge) is held by nobody: it
+# is served to no peer and signed by nobody here, so its author's sealed
+# version replaces it as it would fill a gap. A mean without segments under
+# no first-hand source is a gap too. Row-level, over embeddings `e` and
+# audio_features `a`, each LEFT JOINed to analysis_sources `s`.
+HELD_EMBEDDING = """((s.id IS NOT NULL AND NOT s.imported)
+     OR (EXISTS (SELECT 1 FROM embedding_segments es WHERE es.embedding_id = e.id)
+         AND NOT EXISTS (SELECT 1 FROM embedding_segments es
+                          WHERE es.embedding_id = e.id AND es.signature IS NULL)))"""
+HELD_FEATURES = "(a.signature IS NOT NULL OR (s.id IS NOT NULL AND NOT s.imported))"
+# The same per track, the track's uuid expression formatted in as {t}.
+HOLDS_SEGMENTS = f"""EXISTS (SELECT 1 FROM embeddings e
+                        LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                        WHERE e.track_id = {{t}} AND {HELD_EMBEDDING})"""
+HOLDS_FEATURES = f"""EXISTS (SELECT 1 FROM audio_features a
+                        LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                        WHERE a.track_id = {{t}} AND {HELD_FEATURES})"""
+
 
 def get_inventory(conn, track_uuids: list[str]) -> dict:
     """
@@ -711,12 +733,10 @@ def phantom_layer_on(conn) -> bool:
 
 
 # What a track lacks, per carry category — the test both the offer's answer
-# and a push's admission make.
+# and a push's admission make: no held record of it (HOLDS_*).
 _LACKS = {
-    "segments": """NOT EXISTS (SELECT 1 FROM embeddings e
-                               JOIN embedding_segments es ON es.embedding_id = e.id
-                              WHERE e.track_id = {t})""",
-    "audio_features": "NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = {t})",
+    "segments": "NOT " + HOLDS_SEGMENTS,
+    "audio_features": "NOT " + HOLDS_FEATURES,
     "track_mbids": "NOT EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = {t})",
 }
 
@@ -819,20 +839,16 @@ def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
 
     no_segments = db_query(
         conn,
-        """SELECT u.id::text AS track_uuid
-             FROM unnest(%s::uuid[]) AS u(id)
-            WHERE NOT EXISTS (
-                SELECT 1 FROM embeddings e
-                  JOIN embedding_segments es ON es.embedding_id = e.id
-                 WHERE e.track_id = u.id)""",
+        f"""SELECT u.id::text AS track_uuid
+              FROM unnest(%s::uuid[]) AS u(id)
+             WHERE {_LACKS["segments"].format(t="u.id")}""",
         [uuids],
     )
     no_features = db_query(
         conn,
-        """SELECT u.id::text AS track_uuid
-             FROM unnest(%s::uuid[]) AS u(id)
-            WHERE NOT EXISTS (SELECT 1 FROM audio_features af
-                               WHERE af.track_id = u.id)""",
+        f"""SELECT u.id::text AS track_uuid
+              FROM unnest(%s::uuid[]) AS u(id)
+             WHERE {_LACKS["audio_features"].format(t="u.id")}""",
         [uuids],
     )
     no_recording = db_query(
@@ -916,23 +932,18 @@ def get_track_uuids_for_artist(conn, artist_uuid: str) -> list[str]:
     return [r["track_id"] for r in rows]
 
 
-# A track's audio analysis, as the gap sets count it: a row with segments,
-# or this node's own (a first-hand source). A mean without either — what
-# the unsealed mean pull once left behind — is a gap: sealed segments
-# replace it at the next pull.
-_ANALYSED = """EXISTS (SELECT 1 FROM embeddings e
-                       WHERE e.track_id = {t}.track_id
-                         AND (EXISTS (SELECT 1 FROM embedding_segments es
-                                      WHERE es.embedding_id = e.id)
-                              OR EXISTS (SELECT 1 FROM analysis_sources s
-                                         WHERE s.id = e.analysis_source_id
-                                           AND NOT s.imported)))"""
+# A track's audio analysis, as the gap sets count it: what this node holds
+# (HOLDS_SEGMENTS, HOLDS_FEATURES). A mean without sealed segments — what the
+# unsealed mean pull once left behind, or an imported grid a shed unsealed —
+# is a gap: sealed segments replace it at the next pull.
+_ANALYSED = HOLDS_SEGMENTS.format(t="ta.track_id")
+_FEATURED = HOLDS_FEATURES.format(t="ta.track_id")
 
 
 def get_unenriched_artist_uuids(conn) -> list[str]:
     """
-    Artists with at least one track that has neither an embedding nor
-    audio_features — the audio gap set the sync walk asks each peer's
+    Artists with at least one track that holds neither an embedding nor
+    audio_features (_ANALYSED, _FEATURED) — the audio gap set the sync walk asks each peer's
     inventory about between drains. Per track, not per artist: one
     unanalysed track is a reason to ask, a fully analysed discography is
     not. Partial-category gaps (a bio missing on an analysed artist) are
@@ -942,10 +953,8 @@ def get_unenriched_artist_uuids(conn) -> list[str]:
         conn,
         f"""SELECT DISTINCT ta.artist_id::text AS artist_uuid
            FROM track_artists ta
-           WHERE NOT {_ANALYSED.format(t="ta")}
-           AND NOT EXISTS (
-               SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id
-           )
+           WHERE NOT {_ANALYSED}
+           AND NOT {_FEATURED}
            ORDER BY 1""",
     )
     return [r["artist_uuid"] for r in rows]
@@ -965,9 +974,8 @@ RARE_SEARCH_SQL = f"""
       FROM engaged e
       JOIN track_artists ta ON ta.artist_id = e.artist_id
       LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
-     WHERE NOT {_ANALYSED.format(t="ta")}
-       AND NOT EXISTS (SELECT 1 FROM audio_features af
-                        WHERE af.track_id = ta.track_id)
+     WHERE NOT {_ANALYSED}
+       AND NOT {_FEATURED}
      GROUP BY ta.artist_id
      ORDER BY MAX(ab.listeners) ASC NULLS FIRST, ta.artist_id
 """
@@ -1009,7 +1017,6 @@ def get_incomplete_artist_uuids(conn) -> list[str]:
         conn,
         f"""SELECT DISTINCT ta.artist_id::text AS artist_uuid
            FROM track_artists ta
-           WHERE NOT {_ANALYSED.format(t="ta")}
-              OR NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)""",
+           WHERE NOT {_ANALYSED} OR NOT {_FEATURED}""",
     )
     return [r["artist_uuid"] for r in rows]

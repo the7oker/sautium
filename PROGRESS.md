@@ -3819,11 +3819,12 @@ device on the network; none of them may hold for it more than a bound.
   made by `scripts/make_fingerprint_probe.py`) and compares the print with
   the release image's (`provenance.fingerprinter`): a failed fpcalc or
   another print raises the `tools.fingerprint` notice, and the analysis
-  passes and the stream enrichment refuse while it lasts. Equality for now;
-  the comparison is one function (`same_as_reference`) for a similarity
-  bound later. The probe is not a canary of every FFmpeg move — 7.1 prints
-  it as 4.4 does, as it does most files — and catches a fingerprinter that
-  is broken or another, not one that differs a bit in one file of five.
+  passes and the stream enrichment refuse while it lasts. Equality until
+  2026-11-10; since then FP-SIM's probe bound (`material.matches_probe`: the
+  same item count, offset 0, at most one bit in a hundred). The probe is not
+  a canary of every FFmpeg move — 7.1 prints it as 4.4 does, as it does most
+  files — and catches a fingerprinter that is broken or another, not one
+  that differs a bit in one file of five.
 - **The node's user takes the host user's uid.** Native Docker keeps uids
   across a bind, so the image's fixed uid 1000 was a Pi's first account,
   and the user running the node lost its own folders to it. At start the

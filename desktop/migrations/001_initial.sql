@@ -792,13 +792,27 @@ CREATE TABLE IF NOT EXISTS stream_providers (
 -- beside it until 2026-09-18 and changed with every decoder build and lossy
 -- decode). Registered AT ANALYSIS TIME by the analysis passes / stream
 -- enricher; never recomputed after the fact. Keyed on (track_id,
--- chromaprint_key), the database's digest of the ~3 KB fingerprint (too long
--- for a btree row): unchanged material reuses its row, a different master
--- mints a new one, two rips of one master collapse. The row describes the
+-- chromaprint_key, imported) — chromaprint_key the database's digest of the
+-- ~3 KB fingerprint (too long for a btree row) — so a row has one origin:
+-- this node's own registrations share the first-hand row of their address,
+-- the sync import its imported twin, and nothing ever turns one into the
+-- other (since 2026-11-10: a registration used to flip an imported row
+-- first-hand, and the other author's records linked to it became signable
+-- here). Unchanged material reuses its row, a different master mints a new
+-- one, two rips of one master collapse. The first-hand row describes the
 -- best material this node registered under the address (own file > lossless
 -- stream > lossy stream); media_file_id survives file deletion as NULL — the
 -- row remains the durable statement of WHAT was analyzed. No fingerprint = no
 -- row = no analysis saved.
+--
+-- material_of groups a track's rows that are one material without one
+-- digest (desktop/p2p/material.py: a decoder that moved the print, a lossy
+-- copy): NULL marks a group's root, a member points at its root, never at
+-- another member, and twins of one address are one group. A registration
+-- joins its track's group; the passes skip what a row of the group already
+-- holds at a rank no lower; never on the wire — each row keeps its own print
+-- and its records their own seals. SET NULL on the root's delete makes its
+-- members roots of their own: a split group costs at most another analysis.
 CREATE TABLE IF NOT EXISTS analysis_sources (
     id            SERIAL PRIMARY KEY,
     track_id      UUID NOT NULL REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE CASCADE,
@@ -832,14 +846,19 @@ CREATE TABLE IF NOT EXISTS analysis_sources (
     is_lossless   BOOLEAN,
     imported      BOOLEAN NOT NULL DEFAULT false,  -- arrived over P2P sync:
                                           -- the sender's material, never
-                                          -- signable here; a first-hand
-                                          -- registration flips it back
+                                          -- signable here, and never made
+                                          -- first-hand: this node's own
+                                          -- registration of the address is
+                                          -- its twin
+    material_of   INTEGER REFERENCES analysis_sources(id) ON DELETE SET NULL,
     computed_at   TIMESTAMPTZ DEFAULT now(),
     CONSTRAINT chk_asrc_stream_no_file CHECK (provider_id IS NULL OR media_file_id IS NULL),
     CONSTRAINT chk_asrc_imported_anonymous CHECK (NOT (imported AND provider_id IS NOT NULL)),
-    CONSTRAINT uq_asrc_track_chromaprint UNIQUE (track_id, chromaprint_key)
+    CONSTRAINT uq_asrc_track_chromaprint_origin UNIQUE (track_id, chromaprint_key, imported)
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_sources_media_file ON analysis_sources(media_file_id);
+CREATE INDEX IF NOT EXISTS idx_analysis_sources_material
+    ON analysis_sources(material_of) WHERE material_of IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS embeddings (
     id SERIAL PRIMARY KEY,

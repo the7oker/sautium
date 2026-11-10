@@ -114,12 +114,20 @@ def test_the_stream_enrichment_accepts_nothing_from_a_failing_fpcalc(fake_fpcalc
 
 
 @shell
-def test_the_verdict_compares_through_one_function(fake_fpcalc, monkeypatch):
-    """A similarity rule will turn equality into a bound on the bit error
-    rate: what same_as_reference accepts, the self-test passes."""
-    fake_fpcalc("echo AQAAZFMUJq0U4VaOkhRC_close_enough")
-    monkeypatch.setattr(provenance, "same_as_reference", lambda fingerprint, reference: True)
+def test_a_print_a_decoder_moved_a_little_passes_and_one_moved_more_is_refused(fake_fpcalc,
+                                                                            monkeypatch):
+    """The comparison is FP-SIM's probe bound (material.matches_probe): the
+    same item count, offset 0, at most one bit in a hundred — an FFmpeg that
+    moves a print by a bit or so fingerprints the same material."""
+    from desktop.p2p import material
+    from tests.p2p.fingerprints import encode, flip
+    reference = provenance.PROBE_REFERENCE.read_text(encoding="ascii").strip()
+    items = material.decode(reference)
+    fake_fpcalc(f"echo {encode(flip(items, 0.005, 1))}")
     assert provenance.fingerprinter().ok
+    monkeypatch.setattr(provenance, "_verdicts", {})
+    fake_fpcalc(f"echo {encode(flip(items, 0.02, 1))}")
+    assert provenance.fingerprinter().state == "mismatch"
 
 
 @shell

@@ -35,6 +35,7 @@ import psycopg2
 import psycopg2.extras
 
 from desktop.api_client import BackendAPIClient
+from desktop.p2p import material
 from desktop.p2p import record_sig as rs
 from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES
 from desktop.p2p.bloom import BloomFilter
@@ -238,22 +239,21 @@ class SyncClient:
     # asks about a few thousand — reading the whole table per category,
     # per peer, per run was seconds of pure waste on every sync.
 
-    def _get_existing_versions(self, table: str, uuid_col: str,
-                               candidates) -> dict[str, int]:
-        """Of `candidates`, uuid -> local analysis_version."""
+    def _held_feature_versions(self, candidates) -> dict[str, int]:
+        """Of `candidates`, uuid -> local analysis_version of the features
+        this node holds (sync_queries.HELD_FEATURES): its own, or sealed. An
+        imported row whose seal a shed removed is a gap."""
         candidates = list(candidates)
         if not candidates:
             return {}
         conn = self._get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT {uuid_col}::text, MAX(analysis_version) "
-                            f"FROM {table} WHERE {uuid_col} = ANY(%s::uuid[]) "
-                            f"GROUP BY {uuid_col}", [candidates])
-                return {row[0]: row[1] for row in cur.fetchall()}
-        except psycopg2.errors.UndefinedTable:
-            conn.rollback()
-            return {}
+        with conn.cursor() as cur:
+            cur.execute(f"""SELECT a.track_id::text, a.analysis_version
+                              FROM audio_features a
+                              LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                             WHERE a.track_id = ANY(%s::uuid[])
+                               AND {sync_queries.HELD_FEATURES}""", [candidates])
+            return {row[0]: row[1] for row in cur.fetchall()}
 
     def run_sync(self, track_uuids: list[str] = None,
                  bulk_track_uuids: Optional[list[str]] = None) -> dict:
@@ -443,39 +443,37 @@ class SyncClient:
         return self._fetch_inventory(hits)
 
     def _protected_analysis_tracks(self, uuids: list[str]) -> set:
-        """Tracks whose local analysis a peer import must never replace:
-        first-hand (my own decode) or already carrying segments. Gap-fill
-        only — densification / version upgrades of imported grids are the
-        deferred "deepen analysis" path."""
+        """Tracks whose local analysis a peer import must never replace: what
+        this node holds (sync_queries.HELD_EMBEDDING) — first-hand (my own
+        decode) or a sealed grid. Gap-fill only — densification / version
+        upgrades of held grids are the deferred "deepen analysis" path."""
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT e.track_id::text FROM embeddings e
-                   LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
-                   WHERE e.track_id = ANY(%s::uuid[])
-                     AND (EXISTS (SELECT 1 FROM embedding_segments es
-                                  WHERE es.embedding_id = e.id)
-                          OR (s.id IS NOT NULL AND NOT s.imported))""",
+                f"""SELECT e.track_id::text FROM embeddings e
+                    LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                    WHERE e.track_id = ANY(%s::uuid[])
+                      AND {sync_queries.HELD_EMBEDDING}""",
                 [uuids],
             )
             return {row[0] for row in cur.fetchall()}
 
     def _local_segment_versions(self, candidates) -> dict[str, int]:
         """Of `candidates`, uuid -> local analysis_version for the tracks
-        whose analysis carries segments here. A mean without segments is a
-        gap: nothing seals it, so sealed segments are pulled to replace it
-        (first-hand analysis is protected separately)."""
+        whose analysis this node holds (sync_queries.HELD_EMBEDDING). A mean
+        without segments, or an imported grid a shed unsealed, is a gap:
+        nothing seals it, so sealed segments are pulled to replace it."""
         candidates = list(candidates)
         if not candidates:
             return {}
         conn = self._get_conn()
         with conn.cursor() as cur:
-            cur.execute("""SELECT e.track_id::text, MAX(e.analysis_version)
-                             FROM embeddings e
-                            WHERE e.track_id = ANY(%s::uuid[])
-                              AND EXISTS (SELECT 1 FROM embedding_segments es
-                                          WHERE es.embedding_id = e.id)
-                            GROUP BY e.track_id""", [candidates])
+            cur.execute(f"""SELECT e.track_id::text, MAX(e.analysis_version)
+                              FROM embeddings e
+                              LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                             WHERE e.track_id = ANY(%s::uuid[])
+                               AND {sync_queries.HELD_EMBEDDING}
+                             GROUP BY e.track_id""", [candidates])
             return {row[0]: row[1] for row in cur.fetchall()}
 
     def _compute_needed(self, inventory: dict, use_segments: bool) -> dict:
@@ -483,13 +481,12 @@ class SyncClient:
 
         Segments are planned from the `embeddings` inventory key, whose rows
         are [uuid, analysis_version, sealed segment count] — a row with no
-        sealed segment offers nothing to pull — against the local rows that
-        carry segments. A locally-present row is still pulled when the
-        source's methodology is newer: existence alone never delivers
-        upgrades."""
+        sealed segment offers nothing to pull — against the local rows this
+        node holds (sync_queries.HELD_*: its own, or sealed). A held row is
+        still pulled when the source's methodology is newer: existence alone
+        never delivers upgrades."""
         needed = {}
-        checks = [("audio_features", "audio_features",
-                   lambda c: self._get_existing_versions("audio_features", "track_id", c))]
+        checks = [("audio_features", "audio_features", self._held_feature_versions)]
         if use_segments:
             checks.insert(0, ("segments", "embeddings", self._local_segment_versions))
         for cat_key, inv_key, local_versions in checks:
@@ -872,24 +869,22 @@ class SyncClient:
                     template="(%s, %s, %s)",
                 )
 
-            source_items = [item for item, _ in decoded]
-            source_map = self._upsert_analysis_sources(cur, source_items)
-
             # Import-side guard (the planner prefilters, the importer
-            # enforces): never replace first-hand analysis or a grid already
-            # present locally.
+            # enforces): never replace what this node holds — first-hand
+            # analysis or a sealed grid. Dropped first, so provenance is
+            # registered only for what is kept: a dropped item leaves no
+            # imported row that nothing links to.
             kept = self._drop_protected(
-                cur, source_items,
-                """SELECT e.track_id::text FROM embeddings e
-                   LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
-                   WHERE e.track_id = ANY(%s::uuid[])
-                     AND (EXISTS (SELECT 1 FROM embedding_segments es
-                                  WHERE es.embedding_id = e.id)
-                          OR (s.id IS NOT NULL AND NOT s.imported))""",
+                cur, [item for item, _ in decoded],
+                f"""SELECT e.track_id::text FROM embeddings e
+                    LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                    WHERE e.track_id = ANY(%s::uuid[])
+                      AND {sync_queries.HELD_EMBEDDING}""",
                 "segments")
             kept_uuids = {i["track_uuid"] for i in kept}
             if not kept_uuids:
                 return 0
+            source_map = self._upsert_analysis_sources(cur, kept)
 
             self._insert_batches(cur, batches, {
                 seal[2]
@@ -944,12 +939,20 @@ class SyncClient:
         so these sources are never signable here (sign_audio excludes
         imported).
 
+        Each item is linked to the IMPORTED row of its address only — its
+        own twin when this node registered the address first-hand too: an
+        author's records under this node's own row would read as this node's
+        (and be signed by it after the next shed of their seals). A twin
+        already here keeps its declaration; only a missing duration is
+        filled in. A row new here joins its track's material group
+        (material.root_among: a twin's group with no comparison, else the
+        first row the rule matches); one seen before is never compared again.
+
         `provider_id` stays NULL for imported rows, and honestly so: the wire
         does not say whether the author analysed a file or a stream (see
         _provenance_item), and the column exists only to rank OUR OWN
-        analysis. Local knowledge always wins on conflict; only a missing
-        duration is filled in. Every item here passed its seal check, so the
-        fingerprint is in the alphabet the row key's decode() expects."""
+        analysis. Every item here passed its seal check, so the fingerprint
+        is in the alphabet the row key's decode() expects."""
         prov = {}
         for item in items:
             p = item.get("provenance")
@@ -968,15 +971,42 @@ class SyncClient:
                (track_id, chromaprint, duration_seconds,
                 grid_version, is_lossless, imported)
                VALUES %s
-               ON CONFLICT (track_id, chromaprint_key) DO UPDATE SET
+               ON CONFLICT (track_id, chromaprint_key, imported) DO UPDATE SET
                    duration_seconds = COALESCE(analysis_sources.duration_seconds,
                                                EXCLUDED.duration_seconds)
-               RETURNING id, track_id::text, chromaprint""",
+               RETURNING id, track_id::text, chromaprint, xmax = 0""",
             values,
             template="(%s::uuid, %s, %s, %s, %s, true)",
             fetch=True,
         )
+        SyncClient._join_groups(cur, sorted((r[0], r[1]) for r in rows if r[3]))
         return {(r[1], r[2]): r[0] for r in rows}
+
+    @staticmethod
+    def _join_groups(cur, new_rows: list) -> None:
+        """Put each new row — (id, track uuid), in id order — in its track's
+        material group, among the rows registered before it."""
+        if not new_rows:
+            return
+        cur.execute("""SELECT id, track_id::text, material_of, chromaprint, duration_seconds
+                         FROM analysis_sources WHERE track_id = ANY(%s::uuid[])
+                        ORDER BY id""", [sorted({t for _i, t in new_rows})])
+        by_track: dict = {}
+        for r in cur.fetchall():
+            by_track.setdefault(r[1], []).append([r[0], r[2], r[3], r[4]])
+        joined = []
+        for sid, track in new_rows:
+            rows = by_track[track]
+            me = next(r for r in rows if r[0] == sid)
+            root = material.root_among(me[2], me[3], [r for r in rows if r[0] < sid])
+            if root is not None:
+                me[1] = root
+                joined.append((sid, root))
+        if joined:
+            psycopg2.extras.execute_values(
+                cur, """UPDATE analysis_sources s SET material_of = v.root
+                          FROM (VALUES %s) AS v(id, root) WHERE s.id = v.id""",
+                joined, template="(%s, %s)")
 
     @staticmethod
     def _drop_protected(cur, items: list[dict], protected_sql: str,
@@ -1046,21 +1076,21 @@ class SyncClient:
             return 0
 
         with conn.cursor() as cur:
-            # Provenance registers for ALL items; the data write never
-            # replaces a SIGNED row (overwriting would strip my seal via the
-            # guard trigger) nor my own first-hand analysis — file or stream,
-            # the same line the segments importer draws.
-            source_map = self._upsert_analysis_sources(cur, items)
+            # The data write never replaces what this node holds: a SIGNED
+            # row (overwriting would strip its seal via the guard trigger)
+            # or my own first-hand analysis — file or stream, the same line
+            # the segments importer draws. Provenance registers for the kept
+            # items only.
             items = self._drop_protected(
                 cur, items,
-                """SELECT a.track_id::text FROM audio_features a
-                   LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                   WHERE a.track_id = ANY(%s::uuid[])
-                     AND (a.signature IS NOT NULL
-                          OR (s.id IS NOT NULL AND NOT s.imported))""",
+                f"""SELECT a.track_id::text FROM audio_features a
+                    LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                    WHERE a.track_id = ANY(%s::uuid[])
+                      AND {sync_queries.HELD_FEATURES}""",
                 "audio_features")
             if not items:
                 return 0
+            source_map = self._upsert_analysis_sources(cur, items)
             self._insert_batches(
                 cur, batches,
                 {i["batch_root"] for i in items if i.get("signature")})

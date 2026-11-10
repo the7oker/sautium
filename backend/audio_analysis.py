@@ -135,17 +135,20 @@ def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
 
 
 
-# Pending = no features yet, OR unlinked provenance (legacy rows), OR linked
-# to material other than the current analysis source (source moved to a
-# better rip, or a stream preview awaiting its owned upgrade). Material under
-# one grid window is never pending (provenance.MIN_MATERIAL_SECONDS), nor is
-# a file of a copy that is away (album_variants.absent_since).
+# Pending = no features yet, OR unlinked provenance (legacy rows), OR made
+# from material other than the current analysis source holds at its rank
+# (provenance.file_in_group_sql: source moved to a better rip, or a stream
+# preview awaiting its owned upgrade — see embeddings.PENDING_SQL). Material
+# under one grid window is never pending (provenance.MIN_MATERIAL_SECONDS),
+# nor is a file of a copy that is away (album_variants.absent_since).
 # P2P-imported analysis re-enters only when the enrichment.reanalyze_imported
 # toggle says so — see the policy comment in embeddings.py, which owns the
 # flag. A file that returned after a prune is linked back to its analysis
 # (provenance.relink_returned_files) after the import's canon and again before
-# each pass reads this queue, so it is not pending here.
-PENDING_SQL = """
+# each pass reads this queue, so it is not pending here. This pass registers
+# only at its save, after the compute, so it has no compute to skip by the
+# group (provenance.held_in_group, asked by a pass that registers first).
+PENDING_SQL = f"""
     SELECT t.id as track_id, mf.id as media_file_id,
            mf.file_path, mf.bit_depth,
            mf.sample_rate as mf_sample_rate, mf.is_lossless,
@@ -162,7 +165,7 @@ PENDING_SQL = """
            OR mf.duration_seconds >= :min_seconds)
       AND (af.id IS NULL
            OR af.analysis_source_id IS NULL
-           OR (asrc.media_file_id IS DISTINCT FROM mf.id
+           OR (NOT {provenance.file_in_group_sql()}
                AND (:reanalyze OR NOT asrc.imported)))
 """
 

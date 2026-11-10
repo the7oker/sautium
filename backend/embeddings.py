@@ -119,20 +119,24 @@ SOURCE_FILES_SQL = """
 """
 
 # Pending = no embedding yet, OR unlinked provenance (legacy rows —
-# re-analysis links them), OR linked to material other than the current
-# analysis source (source moved to a better rip, or a stream preview awaiting
-# its owned upgrade). Analysis that arrived over P2P (asrc.imported) also
-# matches that third arm — its source has no media_file — but re-deriving it
-# from the owned file is a POLICY, not a repair: first-hand matches this
-# node's actual rip and is the network's poison detector, yet it re-spends GPU
-# on tracks that already work. enrichment.reanalyze_imported picks the
-# policy; default off. A file that returned after a prune is linked back to
-# its analysis (provenance.relink_returned_files) after the import's canon and
-# again before each pass reads this queue, so it is not pending here.
-PENDING_SQL = SOURCE_FILES_SQL + """
+# re-analysis links them), OR made from material other than the current
+# analysis source holds at its rank: no row of this file in the material
+# group of the analysis's row ranks no higher than it (provenance.
+# file_in_group_sql — the source moved to a better rip, or a stream preview
+# awaits its owned upgrade; a file that is the same material at a rank no
+# higher, which the pass registered and skipped, is not asked again).
+# Analysis that arrived over P2P (asrc.imported) also matches that third arm
+# — it ranks below every file — but re-deriving it from the owned file is a
+# POLICY, not a repair: first-hand matches this node's actual rip and is the
+# network's poison detector, yet it re-spends GPU on tracks that already
+# work. enrichment.reanalyze_imported picks the policy; default off. A file
+# that returned after a prune is linked back to its analysis
+# (provenance.relink_returned_files) after the import's canon and again
+# before each pass reads this queue, so it is not pending here.
+PENDING_SQL = SOURCE_FILES_SQL + f"""
       AND (e.id IS NULL
            OR e.analysis_source_id IS NULL
-           OR (asrc.media_file_id IS DISTINCT FROM mf.id
+           OR (NOT {provenance.file_in_group_sql()}
                AND (:reanalyze OR NOT asrc.imported)))
 """
 
@@ -291,14 +295,7 @@ class AudioEmbeddingGenerator:
         mean = vecs.mean(axis=0)
         return idxs, vecs, mean / np.linalg.norm(mean)
 
-    @staticmethod
-    def _quality_score(bit_depth, is_lossless) -> int:
-        """Quality priority: CD (16bit lossless) = 100 > other lossless = 50 > lossy = 10."""
-        if is_lossless and bit_depth == 16:
-            return 100  # CD — ideal for analysis
-        if is_lossless:
-            return 50   # Hi-Res / DSD / Vinyl
-        return 10       # MP3, OGG, M4A
+    _quality_score = staticmethod(provenance.quality_score)
 
     def _persist_analysis(
         self, db: Session, track_id, model: EmbeddingModel,
@@ -549,6 +546,11 @@ class AudioEmbeddingGenerator:
                             stats["failed"] += 1
                             logger.warning(f"Skipping track {row.track_id}: "
                                            "no content address (fingerprint)")
+                            continue
+                        if not force and provenance.held_in_group(
+                                db, src_id, "embeddings", model_id=embedding_model.id):
+                            # the same material, analysed at a rank no lower
+                            stats["skipped"] += 1
                             continue
                         computed = self._compute_segments(audio)
                         if computed is None:

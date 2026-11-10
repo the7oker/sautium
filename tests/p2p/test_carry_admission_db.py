@@ -49,8 +49,14 @@ def conn(scratch_dsn):
         variant = cur.fetchone()[0]
         cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path) VALUES (%s, %s, '/m/1.flac')",
                     (OWNED, variant))
-        cur.execute("""INSERT INTO embeddings (track_id, model_id, vector) VALUES (%s, %s, %s::vector)
-                       RETURNING id""", (ANALYSED, MODEL, "[" + ",".join(["0.01"] * 512) + "]"))
+        # analysed here: a record this node holds (an unsealed grid under no
+        # first-hand source would be a gap — sync_queries.HELD_EMBEDDING)
+        cur.execute("INSERT INTO analysis_sources (track_id, chromaprint) VALUES (%s, 'AQAA') "
+                    "RETURNING id", (ANALYSED,))
+        own = cur.fetchone()[0]
+        cur.execute("""INSERT INTO embeddings (track_id, model_id, vector, analysis_source_id)
+                       VALUES (%s, %s, %s::vector, %s)
+                       RETURNING id""", (ANALYSED, MODEL, "[" + ",".join(["0.01"] * 512) + "]", own))
         emb = cur.fetchone()[0]
         cur.execute("""INSERT INTO embedding_segments (embedding_id, segment_index, vector)
                        VALUES (%s, 0, %s::vector)""", (emb, "[" + ",".join(["0.01"] * 512) + "]"))
