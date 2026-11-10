@@ -393,7 +393,7 @@ sautium/
 │   ├── lastfm.py / covers.py       # enrichment + artist/album artwork
 │   ├── lastfm_history.py           # the owner's Last.fm scrobble history import
 │   ├── lb_dump_load.py             # ListenBrainz statistics dump loader
-│   ├── audio_analysis.py           # librosa features + CLAP embeddings
+│   ├── audio_analysis.py           # librosa features + the instruments record
 │   ├── ensemble_instruments.py     # AST + PaSST instrument tagger
 │   ├── zero_shot.py                # moods, vocal score, danceability: derived in SQL from the segments
 │   ├── notary.py / sign_audio.py   # sealing: author signature + Merkle timestamp

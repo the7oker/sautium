@@ -188,6 +188,36 @@ implementation details live in the code, DB and git history.
   bf16, x86 and ARM). The bias of the vocal score is
   the prompts', not the crop's: `artists.is_vocalist` stays the vocal
   signal.
+- **A record version per kind, and the cutover that made it (2026-11-10).**
+  One audio version governed the segment and the features record, so a
+  change to the features would have re-signed every segment (~497 000 on
+  the master, half an hour of seal shedding) and made every node pull them
+  again. Each kind has its own now: the segments stay v3 untouched, the
+  features are v4 without the five fields that were not theirs, and the
+  instruments are a v1 record of their own in `track_instruments` — the
+  expensive pass, often another node's, which a later change of the
+  features' format must not leave without a verifier. No compatibility with
+  the old format: the gate refuses a v3 features record. At a node's first
+  start on that release, delta 056 copies every features row's instruments,
+  unsigned, and the data step `analysis_records_v4` tells the node's own
+  records from another author's by the seal and the node's keys (the one
+  it signs with and the ones it retired): kept is what no other key sealed
+  and no imported source holds, every features seal left is shed for the
+  notary to sign anew (~80 000 records on the master, one batch), the rest
+  goes and comes again from its author. A row under an imported source goes
+  even when this node's key sealed it — a node of the same account shares
+  the key, and sign() never re-signs under an imported source. It fails
+  closed: with seals on records no imported source holds and no key
+  resolving, deciding would delete the node's own as another's, so it waits
+  for a start that finds the key. The grids a registration had flipped
+  first-hand (before rows became per origin) move back to their imported
+  twin, verified against its declaration; this node's own grids an old merge
+  re-pointed onto an imported row, unsealed since, are deleted where a file
+  can derive them again. The instruments' methodology is the tagger's own
+  version (`ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION`), and an
+  imported record of a newer methodology replaces an imported one of an
+  older, never a first-hand one — before, the planner pulled it and the
+  importer dropped it, every run.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be

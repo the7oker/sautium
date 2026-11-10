@@ -13,8 +13,8 @@ features, find kindred listeners and talk to each other — with no central
 server (public bootstrap resources only).
 
 **Shared** (the pull categories — `sync_queries.PULL_HANDLERS`): sealed CLAP
-segment bundles with their provenance, audio features, track↔recording
-bindings, with the birth certificates of their authors (the `authors` map,
+segment bundles with their provenance, audio features, instruments (a record
+of their own since 2026-11-10), track↔recording bindings, with the birth certificates of their authors (the `authors` map,
 § "Segment bundle"), chat (P4). Carry — the push channel — is narrower on
 purpose: audio analysis only (§ "Only audio analysis travels").
 
@@ -227,9 +227,13 @@ sync now splits its gaps:
   **holdings filter**, `GET /api/sync/holdings` — a Bloom filter
   (`desktop/p2p/bloom.py`, 1% false positives, 9.6 bits per element, seven
   positions from the uuid's own SHA-1 bits, no hash functions) over the track
-  uuids the peer HOLDS sealed analysis for. The asker tests its bulk locally —
-  a miss is final, a hit is a reason to ask — and sends the exact inventory
-  only the hits. (A second filter over artists with sealed bios/tags/similars,
+  uuids the peer HOLDS segments or features for, and since 2026-11-10 a
+  second one, `instruments`, over those it holds instruments for. The asker
+  tests its bulk locally — a miss is final, a hit is a reason to ask — and
+  sends the exact inventory only the hits; a track whose segments and
+  features it holds and whose instruments it lacks is tested against the
+  instruments filter alone, so a gap no peer can fill costs a test, not a
+  request every run. (A filter over artists with sealed bios/tags/similars,
   and the `artist_uuids` axis of the inventory that went with it, left with
   the Last.fm layer on 2026-09-19.)
 
@@ -509,6 +513,22 @@ witnessed, the newest in the current format, alone. It names no author it
 banned or whose proof failed there. The receiver reads only the certificate,
 for its witness record (below); older peers ignore the field.
 
+The features and the instruments travel as per-track records
+(`POST /api/sync/pull/audio-features`, `/pull/instruments`), each item its
+record's fields, `analysis_version`, its seal and the same `provenance`.
+Since 2026-11-10 every record kind has a format version of its own
+(`record_sig.py`): segments v3, features v4 (the nine fields of
+`FEATURE_ORDER` — the zero-shot values are derived by each node from its
+segments, and no record carries them), instruments v1 (the tagger's label →
+score map; the gate takes only a map a reader can threshold — at most 128
+labels, each a short text with a score in 0..1). An older format of a kind
+is refused at the gate: a v3 features record's rebuilt v4 payload does not
+verify. An imported record of a newer methodology (`analysis_version`)
+replaces an imported one of an older — never a first-hand one — and the
+planner asks for nothing the importer would drop (`sync_queries.KEPT_RECORD`).
+The Docker peer surface serves the inventory and every pull category from
+the same shared handlers as the launcher's sync server.
+
 The unsealed mean-vector pull (`embeddings`, for peers without `segments`)
 was removed 2026-11-03: its rows carried no seal, so the peer chose a
 track's vectors and nothing named who. A peer without `segments` is asked
@@ -519,8 +539,8 @@ left behind — counts as a gap that sealed segments replace.
 ```
 GET  /api/sync/holdings          Bloom filter of the tracks a peer holds sealed analysis for
 POST /api/sync/inventory         track uuids → what the peer holds for them
-POST /api/sync/pull/{category}   segments | audio-features | tracks | track-mbids
-POST /api/sync/offer, /push/{…}  carry: segments, audio_features, track_mbids
+POST /api/sync/pull/{category}   segments | audio-features | instruments | tracks | track-mbids
+POST /api/sync/offer, /push/{…}  carry: segments, audio_features, instruments, track_mbids
 ```
 
 ---
@@ -661,8 +681,8 @@ relay-selection criteria (no data source); the taste profile for finding nodes w
 turned out not to need it — the phantom catalogue materializes it); the
 phase-A wake channel that grows linearly with the network ("alive only while a
 support thread is"); the mbid bridge for the "recording matches, uuid does not"
-class (price: a new seal format — v3 is the chromaprint-only payload of
-2026-09-18 — and re-signing the corpus).
+class (price: a new seal format — segment v3 is the chromaprint-only payload
+of 2026-09-18 — and re-signing the corpus).
 
 ---
 ## Shipped network phases (2026-08)
@@ -1488,11 +1508,12 @@ answers, so all of that stopped at once:
   unchanged — the remaining kinds' bytes did not move.
 - **Protocol**: the five pull categories, their inventory keys and the
   `artist_uuids` axis of `/api/sync/inventory` are gone on both surfaces; the
-  holdings filter is one filter over tracks with sealed analysis; the sync
+  holdings filter became one filter over tracks with sealed analysis (a
+  second, over the tracks with instruments, joined it on 2026-11-10); the sync
   client's gap set is analysis-only; the post-import gender/vocalist
   classifiers went with the bios they read.
 - **Files**: the share export is format v2 (a v1 file carried the layer and
-  is refused); the seed bundle is v3 (`seed-v3` release,
+  is refused); the seed bundle went to v3 (`seed-v3` release,
   `backend/seed/bundle.json`) with the analysis half only — a fresh node's own
   enrichment fetches the picks' bios and tags on its first background pass,
   as for any artist.

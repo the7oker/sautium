@@ -75,8 +75,9 @@ plus user-facing minimum/recommended configurations.
 ### 2.1 One-time/incremental: audio analysis (the big one)
 Per track: ffmpeg full decode to 48kHz mono f32 (**11.5 MB/min RAM**), CLAP over
 K segment windows (balanced K = 12/16/24 by duration), librosa amplitude pass
-(whole track, CPU), CLAP zero-shot + AST+PaSST windowed instruments (10s window
-/ 30s stride, batch 12). Already well-guarded on VRAM: adaptive duration budget
+(whole track, CPU), AST+PaSST windowed instruments (10s window / 30s stride,
+batch 12). CLAP's zero-shot values left the analysis on 2026-11-10: the
+database derives them from the segments. Already well-guarded on VRAM: adaptive duration budget
 (`device.py`, env `SAUTIUM_ACCEL_MEMORY_GB`, `SAUTIUM_AUDIO_BUDGET_MIN`),
 OOM catch-and-skip, NaN guard, per-batch `empty_cache`.
 
@@ -122,9 +123,10 @@ Frontend is clean — SSE-driven, zero `setInterval` polling.
   `mb_slice_client`), phantoms, text-embedding stack.
 
 ### 2.4 P2P as the weak-node escape hatch (verified)
-A weak node **can** import from peers: `embeddings` (track-level mean vector),
-`embedding_segments` with their seals, `audio_features`, `analysis_sources`
-(marked `imported=true`). Local first-hand/signed analysis always outranks
+A weak node **can** import from peers: `embedding_segments` with their seals
+(the node derives the track-level mean itself), `audio_features`,
+`track_instruments` (a record of their own since 2026-11-10),
+`analysis_sources` (marked `imported=true`). Local first-hand/signed analysis always outranks
 peer copies. Last.fm rows are NOT among them — that layer is node-local since
 2026-09-19 and every node fetches its own by name. State of the world for an
 import-only node:

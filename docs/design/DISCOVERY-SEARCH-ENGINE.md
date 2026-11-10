@@ -107,7 +107,7 @@ level — typically `EXISTS`).
 | `energy` | track | `energy_db` buckets low/mid/high (100%) |
 | `danceable` | track | `zero_shot_scores`, the `danceable` label at `zero_shot.DANCEABLE_MIN` — derived from the track's segments since 2026-11-10, so present wherever segments are |
 | `moods` | track | `zero_shot_scores` (derived from the track's segments since 2026-11-10; a mood is present at `zero_shot.MOOD_MIN`), fixed 8-label set ("happy and upbeat", "sad and melancholic", "energetic and intense", "calm and relaxing", "dark and ominous", "romantic and dreamy", "aggressive and angry", "mysterious and atmospheric"). A tool in the engine registry; not exposed by the endpoint or the UI. |
-| `instruments` | track | `audio_features.instruments` JSONB `?|`. **Sparse by catalog nature** (54% empty — ambient). Valid filter where present; pair with `clap` for recall. |
+| `instruments` | track | `track_instruments.instruments` JSONB `?|` (the instruments record, apart from the features since 2026-11-10). **Sparse by catalog nature** (54% empty — ambient). Valid filter where present; pair with `clap` for recall. |
 | `genre` | **album** | **album-grain now** via `album_genres` (track_genres dropped). `EXISTS (album_genres ⋈ genres)`. Present on phantoms too (mb source). |
 | `year` | album | `albums.release_year` |
 | `quality` | file | `media_files.is_lossless` + `sample_rate` + `bit_depth` (lossy/lossless/hi-res) |

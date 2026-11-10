@@ -2,7 +2,8 @@
 
 > **Status: sealing, the wire and the import gate are SHIPPED; the trust
 > fabric is design.** Shipped:
-> per-segment + audio_features author signatures, Merkle batches, Worker
+> per-segment, audio_features and instruments author signatures (a record
+> version per kind since 2026-11-10), Merkle batches, Worker
 > `/timestamp` notary; **provenance refactor 2026-07-06** — content-address
 > captured AT ANALYSIS TIME into `analysis_sources` (one row per
 > track × declared material × copy × origin: chromaprint +
@@ -186,7 +187,7 @@ identity exceeds the payoff of the fakes it can push before it burns.**
 
 | Class | Examples | Verifier | Defense |
 |---|---|---|---|
-| Verifiable by recompute | CLAP embeddings, audio features, BPM, duration | Any node owning the same material | Recompute ladder (below) |
+| Verifiable by recompute | CLAP segment embeddings — the features (BPM, key, the amplitude block) and the instruments are signed records, attributable, never compared (§ "Verification ladder") | Any node owning the same material | Recompute ladder (below) |
 | Verifiable by authority | MBIDs, canonical names, aliases, album existence | Local MB dump, or MusicBrainz's own answers by MBID on a node without it (since 2026-11-07) / owned-album overlap | Hint + local re-verify; never peer-driven merges |
 | Subjective | similar-artist opinions, tags, curatorial notes | none (no ground truth) | Trust-based: friends-only, reputation, local flags — the Last.fm-fetched ones never travel since 2026-09-19 (below) |
 | Self-reported | play stats | none | Trust-based; low blast radius, provenance-labeled — Last.fm track stats never travelled after 2026-09-19 and were replaced by ListenBrainz slices on 2026-09-20 |
@@ -264,9 +265,11 @@ overwrites a signed or first-hand row.
 
 ### Signing rollout & privacy (phase 1: audio-derived only)
 
-Phase 1 signs **audio-derived records only** (embeddings, audio
-features) — the deterministic, content-addressed class where a mismatch
-is evidence. Source-fetched classes are excluded by the mutable-source
+Phase 1 signs **audio-derived records only** — the segments, the class
+where a mismatch is evidence (deterministic and content-addressed), and the
+features and the instruments, signed for attribution: who made them, from
+what material, no later than when (§ "Verification ladder" says why they are
+never compared). Source-fetched classes are excluded by the mutable-source
 caveat above.
 
 **Non-repudiation cuts both ways (Valerii, 2026-07-05).** An author
@@ -340,7 +343,8 @@ decode, so two nodes analysing the same stream addressed two materials,
 and a seal over it was a possession proof of those bytes; the fingerprint
 is a public recording identity that any decode of the material
 reproduces. The resample non-determinism stays confined to the segment
-*recompute*, where step-2 tolerance already lives. The 48k-mono analysis
+*recompute*, where the recompute's tolerances live — step 1's bound on an
+equal print among them (§ "Verification ladder"). The 48k-mono analysis
 frame is a derivation defined by `grid_version`. It stays whole-track
 *even though we sign segments*, because `segment_index` is only definable
 in the whole-track frame. Per-slice hashing was rejected — a 10s
@@ -360,27 +364,48 @@ provenance row, no analysis saved. (It is safe for grey material — an
 AcoustID fingerprint is a public fuzzy recording ID, not a possession
 proof of specific bytes; streamed signing uses the stream's fingerprint.)
 
-The signed segment record (audio payload v3, 2026-09-18):
+The signed segment record (segment payload v3, 2026-09-18):
 
 ```
 sautium-record:v3:segment:{author_pubkey}:{track_uuid}:{chromaprint}:{duration_seconds}
   :{model_uuid}:{grid_version}:{segment_index}:{vector_hash}
 ```
 
-`audio_features` (per-track deterministic scalars) is a parallel signed
-record under the same content-address:
+`audio_features` (per-track scalars: tempo, key, the amplitude block) is a
+parallel signed record under the same content-address — v4 since 2026-11-10,
+its hash over the nine fields of `record_sig.FEATURE_ORDER`:
 
 ```
-sautium-record:v3:features:{author_pubkey}:{track_uuid}:{chromaprint}:{duration_seconds}
+sautium-record:v4:features:{author_pubkey}:{track_uuid}:{chromaprint}:{duration_seconds}
   :{analysis_version}:{features_hash}
 ```
 
-Audio records and enrichment records are versioned separately
-(`AUDIO_RECORD_VERSION`, `ENRICHMENT_RECORD_VERSION` — the latter still
+`track_instruments` (the instrument tagger's raw score per label) is a
+record of its own since 2026-11-10 — the expensive pass, often another
+node's, so a change of the features' format never takes its seals with it;
+its hash is over the label → score map as sorted compact JSON, and its
+`analysis_version` is the tagger's methodology
+(`ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION`):
+
+```
+sautium-record:v1:instruments:{author_pubkey}:{track_uuid}:{chromaprint}:{duration_seconds}
+  :{analysis_version}:{instruments_hash}
+```
+
+Until 2026-11-10 the features record (v3) carried the instruments and
+CLAP's zero-shot values beside the nine; moods, the vocal score and
+danceability are no record at all since — each node derives them from the
+segments it holds. Every record kind has a version of its own
+(`SEGMENT_RECORD_VERSION`, `FEATURES_RECORD_VERSION`,
+`INSTRUMENTS_RECORD_VERSION`, `ENRICHMENT_RECORD_VERSION` — the last still
 v2, its grammar carries no material hash; since 2026-09-19 it names only
 the carry canon layer, the Last.fm kinds having left it), so a change to one never
-invalidates the other's seals. No record carries its version: a bump is a
-corpus re-sign, and an older format has no verifier.
+invalidates another's seals. No record carries its version: a bump is a
+re-sign of that kind, and an older format of it has no verifier — the
+import gate refuses a v3 features record, whose rebuilt v4 payload does not
+verify, and a node's first start on the release of 2026-11-10 re-sealed its
+own features in v4 and its instruments in v1 (`db_migrate`'s
+`analysis_records_v4`), segments untouched.
 
 **`author_pubkey` is bound INTO the payload (2026-07-05, Valerii)**, not
 left as an external column, so a signature is an intrinsic statement by a
@@ -441,22 +466,49 @@ superseded row is retained, and sync-time conflict resolution are TBD.
 
 ## Verification ladder (recompute path)
 
+**What is compared (2026-11-10).** The segment embedding alone. The
+features (bpm, key, the amplitude block) and the instruments are signed
+records — attributable, never compared: a DSD decode moves between FFmpeg
+versions at −46 dB, `key` flips on test signals, and bf16 moves instrument
+scores by up to 0.56 in L1, so a check on them would frame honest authors.
+Moods, the vocal score and danceability are no record at all: each node
+derives them from the segments it holds.
+
+**Step 1 is the equal digest; step 2 is what the material rule joins**
+(`desktop/p2p/material.py`: BER ≤ 0.05, the duration and the offset within
+2 s) — a decoder that moves the print, a lossy encoding, and the other
+masters and carriers it joins (a CD against its 24-bit or vinyl issue, a
+compilation's copy: BER 0.016–0.043 measured); its mismatch is a weak,
+cross-material report, never a ban. What the rule does not join is step 3,
+another material.
+
+**The bounds** are cosine bounds per segment, one per step, set when the
+ladder is built from samples of the honest differences each step admits:
+step 1's the compute classes (CUDA bf16 against bf16 and against fp32, MPS,
+ARM and x86) and the decoders that keep the print; step 2's the decoders
+that move it, the lossy encodings (MP3 128 and 320, AAC 256 against FLAC),
+DSD decodes, and the masters and carriers the rule joins. One decode has
+been measured across devices only (cosine ≥ 0.999), so no number is set
+here. An unsigned or absent compute class never selects a bound; the class,
+when it is built, is signed as a record kind of its own, and a pair whose
+two classes are signed takes its like-with-like bound.
+
 When a node holding the audio checks a foreign record:
 
 1. **My fingerprint == record's fingerprint** (the same recording; a
    bit-identical decode reproduces the result exactly, any other honest
-   decode of the same material lands within the step-2 tolerance) →
-   recompute with `model_uuid` → a mismatch beyond that tolerance is a
+   decode of the same material lands within step 1's own bound) →
+   recompute with `model_uuid` → a mismatch beyond that bound is a
    **proven lie**. Strongest evidence; generates a flag report.
-2. **Fingerprints similar, not equal** (a different rip or master of the
-   same recording) → tolerance compare: cosine ≥ ~0.99 for embeddings
-   (empirically stable across lossless→lossy transcodes), exact or
-   ±tolerance for discrete features. Mismatch → weak, cross-rip-labeled
-   report.
-3. **Fingerprint differs** → different edition/remaster → **not a
+2. **Fingerprints joined by the material rule, not equal** (a decoder that
+   moved the print, a lossy copy, another master or carrier the rule joins)
+   → compare the embedding alone against step 2's bound. Mismatch → weak,
+   cross-material report, never a ban.
+3. **What the rule does not join** → another material → **not a
    conflict**. Parallel records for different material coexist; no
-   report. An honest author analyzing a remaster can never be framed as
-   a poisoner by owners of the original.
+   report. A remaster the rule joins falls under step 2's weak report; one
+   it does not join can never be framed as a poisoner by owners of the
+   original.
 
 **Sampling policy:** verification costs GPU-seconds per track, so it is
 selective — a random ~1% of imported foreign records, plus **mandatory**

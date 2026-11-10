@@ -284,7 +284,7 @@ Priority order for the first DS iteration:
    component vocab (buttons, chips, cards, sliders, tables).
 2. **Discovery tab** — stress-test of density. Most active development
    area; carries the instrument filter (built on AST+PaSST data in
-   `audio_features.instruments`) alongside the other dimensions.
+   `track_instruments.instruments`) alongside the other dimensions.
 3. **Now Playing / HQPlayer remote** — the defining mobile flow. The
    proof that "phone from the couch" actually works.
 4. **Library / Artist / Album pages** — the reading-heavy surfaces.

@@ -268,12 +268,26 @@ See:
   is a read-time threshold in `zero_shot.py`; gates read `zero_shot_scores`,
   display reads the `track_zero_shot` view. A bundle holding a segment
   that is not a unit vector (norm outside 0.99..1.01) derives none, and the
-  import gate refuses one. As of 2026-11-10 Discovery, search, Now Playing,
-  the assistant and the CLI read these, while the analysis still writes the
-  four old columns of `audio_features` and the signed features record still
-  carries them. **The vocal score is unreliable as a class**: for
-  vocal/instrumental queries, use `artists.is_vocalist` (classified from bio
-  keywords). See `PROGRESS.md` design decisions.
+  import gate refuses one. Discovery, search, Now Playing, the assistant and
+  the CLI read these; no analysis writes them and no record carries them
+  (since 2026-11-10, the records' cutover below). **The vocal score is
+  unreliable as a class**: for vocal/instrumental queries, use
+  `artists.is_vocalist` (classified from bio keywords). See `PROGRESS.md`
+  design decisions.
+- **A record version per kind** (since 2026-11-10, `record_sig.py`): the
+  segments v3, the features v4 (`audio_features`: tempo, key, the amplitude
+  block — the nine fields of `FEATURE_ORDER`), the instruments v1, a record
+  of their own in `track_instruments` (the AST+PaSST tagger's raw score per
+  label, `analysis_version` the tagger's methodology). A kind's format
+  changes without touching another's seals; an older format of a kind is
+  refused at the import gate, never shimmed. A node's first start on that
+  release ran the cutover (`db_migrate`'s `analysis_records_v4`): its own
+  features re-sealed in v4 and instruments in v1 with no audio decoded,
+  other authors' features and instruments deleted (they come again from
+  their authors), the grids a registration had flipped split back onto
+  their imported twins; it fails closed while no key of the node resolves.
+  An imported record of a newer methodology replaces an imported one of an
+  older, never a first-hand one (`sync_queries.KEPT_RECORD`).
 - **A copy at the HQPlayer is a VARIANT, and "owned" means `owned_files`.**
   Since 2026-09-27 an album's copy in the library of the HQPlayer the node
   drives (a disk on an Embedded box, a mounted share, a hi-res subset copied

@@ -264,9 +264,10 @@ AND EXISTS (
 ## Future Considerations
 
 Audio features are derived here, not bought: `audio_features` comes from
-librosa + CLAP over the file itself (`backend/audio_analysis.py`), and
-instruments from the AST + PaSST ensemble — no catalog API is in that path,
-and none is planned.
+librosa over the file itself (`backend/audio_analysis.py`), the instruments
+(`track_instruments`) from the AST + PaSST ensemble, and the zero-shot values
+from the CLAP segments in SQL (`zero_shot_scores`) — no catalog API is in
+that path, and none is planned.
 
 Sources still open:
 - MusicBrainz as a source of prose and credits: it already anchors identity
