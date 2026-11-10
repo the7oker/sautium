@@ -491,7 +491,11 @@ The response's `batches` map carries each root's Worker timestamp, so the
 whole chain travels with the records and survives a relay. The provenance
 is the material declaration the signature commits to — no format, sample
 rate, bit depth or provider. The importer derives the track-level mean
-itself.
+itself. Beside the seals and the grid, since 2026-11-10 the import gate
+refuses a bundle holding a segment that is not a unit vector (norm outside
+0.99..1.01 — the band of the scores a node derives from its segments) and a
+bundle whose `model_uuid` is not the uuid of its `model_name`
+(`desktop/sync_client.py`: `UNIT_NORM`, `model_uuid`).
 
 Beside `batches`, every sealed payload (the three pulls and every carry
 push) carries an `authors` map, since 2026-11-09 (BIRTH-SYNC slice 2):

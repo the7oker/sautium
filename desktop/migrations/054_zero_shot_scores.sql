@@ -64,6 +64,12 @@ LANGUAGE sql STABLE AS $$
     HAVING bool_and(p.unit)
 $$;
 
+-- The removal reads the scores as its statement finds them, so it relies
+-- on one bundle's writers running one after another — and they do: every
+-- writer of segments upserts the bundle's embeddings row first and holds
+-- its row lock to its commit. Two transactions writing one bundle's
+-- segments WITHOUT that lock could leave scores on a bundle that holds a
+-- segment outside the unit band (neither sees the other's rows).
 CREATE OR REPLACE FUNCTION zero_shot_scores_refresh() RETURNS trigger AS $$
 DECLARE
     touched INTEGER[] := ARRAY(SELECT DISTINCT embedding_id FROM changed);
