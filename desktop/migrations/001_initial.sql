@@ -886,7 +886,7 @@ CREATE INDEX IF NOT EXISTS idx_embedding_segments_vector
     WITH (m = 16, ef_construction = 64);
 
 -- ============================================================
--- Zero-shot scores (ANALYSIS-3, 2026-11-10): CLAP's moods, vocal score and
+-- Zero-shot scores (2026-11-10): CLAP's moods, vocal score and
 -- danceability are DERIVED from the segment embeddings a node holds, never
 -- analysed or stored as analysis. Per segment: the softmax, within each label
 -- set, of logit_scale × (segment · label); per embedding: the mean of those
@@ -930,42 +930,59 @@ CREATE TABLE IF NOT EXISTS zero_shot_scores (
 CREATE INDEX IF NOT EXISTS idx_zero_shot_scores_label_score
     ON zero_shot_scores (label_id, score);
 
--- The one derivation: the triggers below and the data step call it.
+-- The one derivation: the triggers below and the data step call it. It is
+-- TOTAL over what a node may hold: a segment arrives from a peer under a
+-- seal that says who made it, never that it is a unit vector, and exp()
+-- raises on overflow and on underflow — a single vector of norm 40 would
+-- abort its importer's transaction, and at the cutover the node's start. So
+-- a bundle holding a segment whose norm is outside 0.99..1.01 derives NO
+-- scores (the CASE keeps exp() from it, the HAVING drops the bundle), and so
+-- does a model whose scale is not set. Inside the band |segment · label| is
+-- at most 1.01 for the release's unit labels and the logit at most 19. The
+-- band: every analyser normalizes in float32 (measured: within 1.5e-7 of 1
+-- on CUDA bf16, x86 and ARM), and one that normalized in bf16 would stay
+-- within 0.8 %; the import gate refuses what is outside it
+-- (desktop/sync_client.py UNIT_NORM).
 -- subvector() is a copy in memory: a stored segment vector is out of line,
 -- and every `<#>` on the stored value would fetch it again, twelve times a
 -- segment (the full fill of 494 000 segments: 35 s without the copy, 9 s
--- with it). The two OFFSET 0 keep the planner from folding the copy back
--- into each use, and from carrying the vectors through the window's sort.
--- |segment · label| <= 1 and CLAP's scale is at most 100, so exp() needs
--- no shift by the set's maximum.
+-- with it). The OFFSET 0 keep the planner from folding the copy, or its
+-- norm, back into each use, and from carrying the vectors through the
+-- window's sort.
 CREATE OR REPLACE FUNCTION zero_shot_derive(ids INTEGER[])
 RETURNS TABLE (embedding_id INTEGER, label_id SMALLINT, score DOUBLE PRECISION)
 LANGUAGE sql STABLE AS $$
     SELECT p.embedding_id, p.label_id, avg(p.p)
     FROM (
-        SELECT x.embedding_id, x.label_id,
+        SELECT x.embedding_id, x.label_id, x.unit,
                x.w / sum(x.w) OVER (PARTITION BY x.segment_id, x.label_set) AS p
         FROM (
-            SELECT s.segment_id, s.embedding_id, l.id AS label_id, l.label_set,
-                   exp(s.logit_scale * -(s.vector <#> l.vector)) AS w
-            FROM (SELECT es.id AS segment_id, es.embedding_id, e.model_id, m.logit_scale,
-                         subvector(es.vector, 1, 512) AS vector
-                  FROM embedding_segments es
-                  JOIN embeddings e ON e.id = es.embedding_id
-                  JOIN embedding_models m ON m.id = e.model_id
-                  WHERE es.embedding_id = ANY(ids)
+            SELECT s.segment_id, s.embedding_id, s.unit, l.id AS label_id, l.label_set,
+                   CASE WHEN s.unit
+                        THEN exp(s.logit_scale * -(s.vector <#> l.vector)) END AS w
+            FROM (SELECT c.*, vector_norm(c.vector) BETWEEN 0.99 AND 1.01 AS unit
+                  FROM (SELECT es.id AS segment_id, es.embedding_id, e.model_id, m.logit_scale,
+                               subvector(es.vector, 1, 512) AS vector
+                        FROM embedding_segments es
+                        JOIN embeddings e ON e.id = es.embedding_id
+                        JOIN embedding_models m ON m.id = e.model_id
+                        WHERE es.embedding_id = ANY(ids) AND m.logit_scale IS NOT NULL
+                        OFFSET 0) c
                   OFFSET 0) s
             JOIN zero_shot_labels l ON l.model_id = s.model_id
             OFFSET 0
         ) x
     ) p
     GROUP BY p.embedding_id, p.label_id
+    HAVING bool_and(p.unit)
 $$;
 
 -- Whatever writes or removes segments — the analysis pass, a stream's
 -- enrichment, an import on either surface, a seed or share file, a cascade
 -- from embeddings — leaves each bundle it touched with the scores of the
--- segments it now has, with no code of its own. One statement, one
+-- segments it now has, with no code of its own: what the bundle derives to
+-- is upserted, and a score it no longer derives (its last segment gone, a
+-- segment outside the unit band added) is removed. One statement, one
 -- recomputation: a bundle written in one INSERT is scored once. An embedding
 -- already gone (the cascade) derives nothing. Only INSERT and DELETE fire:
 -- a segment's vector is replaced, never updated, and the sealing UPDATEs
@@ -974,14 +991,16 @@ CREATE OR REPLACE FUNCTION zero_shot_scores_refresh() RETURNS trigger AS $$
 DECLARE
     touched INTEGER[] := ARRAY(SELECT DISTINCT embedding_id FROM changed);
 BEGIN
-    IF TG_OP = 'DELETE' THEN
+    WITH derived AS MATERIALIZED (
+        SELECT d.embedding_id, d.label_id, d.score FROM zero_shot_derive(touched) d
+    ), gone AS (
         DELETE FROM zero_shot_scores s
          WHERE s.embedding_id = ANY(touched)
-           AND NOT EXISTS (SELECT 1 FROM embedding_segments es
-                            WHERE es.embedding_id = s.embedding_id);
-    END IF;
+           AND NOT EXISTS (SELECT 1 FROM derived d
+                            WHERE d.embedding_id = s.embedding_id AND d.label_id = s.label_id)
+    )
     INSERT INTO zero_shot_scores (embedding_id, label_id, score)
-    SELECT d.embedding_id, d.label_id, d.score FROM zero_shot_derive(touched) d
+    SELECT embedding_id, label_id, score FROM derived
     ON CONFLICT (embedding_id, label_id) DO UPDATE SET score = EXCLUDED.score;
     RETURN NULL;
 END $$ LANGUAGE plpgsql;
@@ -1002,7 +1021,10 @@ FOR EACH STATEMENT EXECUTE FUNCTION zero_shot_scores_refresh();
 -- the assistant: the raw distribution, every mood included. Scalar
 -- subqueries, not a GROUP BY, so a join on track_id reads only the rows and
 -- the columns it asks for. The gates read zero_shot_scores itself, by
--- (label_id, score).
+-- (label_id, score). One row per labelled embedding: per track while one
+-- audio model has labels, as every reader that joins it by track_id alone
+-- assumes (as the readers of embeddings do) — labels for a second model
+-- make those readers name the model.
 CREATE OR REPLACE VIEW track_zero_shot AS
 SELECT e.track_id, e.model_id,
        (SELECT jsonb_object_agg(l.key, s.score)

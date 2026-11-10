@@ -95,3 +95,29 @@ def test_the_moods_present_are_those_at_the_threshold_strongest_first():
         ("calm and relaxing", 0.612), ("sad and melancholic", 0.3),
         ("dark and ominous", round(zero_shot.MOOD_MIN, 3))]
     assert zero_shot.present_moods(None) == {} == zero_shot.present_moods({})
+
+
+def test_the_importers_model_id_is_the_backends():
+    """desktop/sync_client.py carries its own copy of the rule (the launcher
+    imports no backend module): the two agree, spelling by spelling."""
+    from desktop import sync_client
+    from uuid_utils import embedding_model_uuid
+    for name in (zero_shot.load_labels()["model"], "  Laion/CLAP-htsat-unfused ", "clap",
+                 "a  model\twith   spaces", "Mode\u0301le"):
+        assert sync_client.model_uuid(name) == str(embedding_model_uuid(name)), name
+    good = {"model_name": "clap", "model_uuid": sync_client.model_uuid("clap").upper()}
+    assert sync_client._names_its_model(good)
+    for item in ({**good, "model_uuid": "00000000-0000-0000-0000-000000000b22"},
+                 {**good, "model_name": "another"}, {"model_uuid": good["model_uuid"]},
+                 {"model_name": "clap"}, {**good, "model_name": None}, {**good, "model_uuid": 7}):
+        assert not sync_client._names_its_model(item), item
+
+
+def test_a_unit_vector_is_one_within_the_band_the_derivation_scores():
+    from desktop import sync_client
+    low, high = sync_client.UNIT_NORM
+    assert (low, high) == (0.99, 1.01)                      # the literals of zero_shot_derive
+    axis = [1.0] + [0.0] * 511
+    for norm, unit in ((1.0, True), (low, True), (high, True), (0.98, False), (1.02, False),
+                       (0.0, False), (40.0, False), (-1.0, True)):
+        assert sync_client._unit([norm * x for x in axis]) is unit, norm

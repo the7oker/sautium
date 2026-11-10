@@ -1,10 +1,10 @@
--- The zero-shot values derived, not analysed (ANALYSIS-3 body 1, 2026-11-10):
--- CLAP's moods, vocal score and danceability become scores the database
--- derives from the segment embeddings a node holds, kept by two statement
--- triggers on embedding_segments, against label embeddings that ship with
--- the release (backend/zero_shot_labels/labels.json — loaded, and every held
--- bundle scored, by db_migrate's zero_shot_labels_v1 step). The same DDL as
--- the "Zero-shot scores" block of 001_initial.sql and its
+-- The zero-shot values derived, not analysed (2026-11-10): CLAP's moods,
+-- vocal score and danceability become scores the database derives from the
+-- segment embeddings a node holds, kept by two statement triggers on
+-- embedding_segments, against label embeddings that ship with the release
+-- (backend/zero_shot_labels/labels.json — loaded, and every held bundle
+-- scored, by db_migrate's zero_shot_labels_v1 step). The same DDL as the
+-- "Zero-shot scores" block of 001_initial.sql and its
 -- embedding_models.logit_scale, where the why of each object is; for nodes
 -- that ran the earlier files. Idempotent: a no-op on the schema 001 just
 -- created.
@@ -41,37 +41,43 @@ RETURNS TABLE (embedding_id INTEGER, label_id SMALLINT, score DOUBLE PRECISION)
 LANGUAGE sql STABLE AS $$
     SELECT p.embedding_id, p.label_id, avg(p.p)
     FROM (
-        SELECT x.embedding_id, x.label_id,
+        SELECT x.embedding_id, x.label_id, x.unit,
                x.w / sum(x.w) OVER (PARTITION BY x.segment_id, x.label_set) AS p
         FROM (
-            SELECT s.segment_id, s.embedding_id, l.id AS label_id, l.label_set,
-                   exp(s.logit_scale * -(s.vector <#> l.vector)) AS w
-            FROM (SELECT es.id AS segment_id, es.embedding_id, e.model_id, m.logit_scale,
-                         subvector(es.vector, 1, 512) AS vector
-                  FROM embedding_segments es
-                  JOIN embeddings e ON e.id = es.embedding_id
-                  JOIN embedding_models m ON m.id = e.model_id
-                  WHERE es.embedding_id = ANY(ids)
+            SELECT s.segment_id, s.embedding_id, s.unit, l.id AS label_id, l.label_set,
+                   CASE WHEN s.unit
+                        THEN exp(s.logit_scale * -(s.vector <#> l.vector)) END AS w
+            FROM (SELECT c.*, vector_norm(c.vector) BETWEEN 0.99 AND 1.01 AS unit
+                  FROM (SELECT es.id AS segment_id, es.embedding_id, e.model_id, m.logit_scale,
+                               subvector(es.vector, 1, 512) AS vector
+                        FROM embedding_segments es
+                        JOIN embeddings e ON e.id = es.embedding_id
+                        JOIN embedding_models m ON m.id = e.model_id
+                        WHERE es.embedding_id = ANY(ids) AND m.logit_scale IS NOT NULL
+                        OFFSET 0) c
                   OFFSET 0) s
             JOIN zero_shot_labels l ON l.model_id = s.model_id
             OFFSET 0
         ) x
     ) p
     GROUP BY p.embedding_id, p.label_id
+    HAVING bool_and(p.unit)
 $$;
 
 CREATE OR REPLACE FUNCTION zero_shot_scores_refresh() RETURNS trigger AS $$
 DECLARE
     touched INTEGER[] := ARRAY(SELECT DISTINCT embedding_id FROM changed);
 BEGIN
-    IF TG_OP = 'DELETE' THEN
+    WITH derived AS MATERIALIZED (
+        SELECT d.embedding_id, d.label_id, d.score FROM zero_shot_derive(touched) d
+    ), gone AS (
         DELETE FROM zero_shot_scores s
          WHERE s.embedding_id = ANY(touched)
-           AND NOT EXISTS (SELECT 1 FROM embedding_segments es
-                            WHERE es.embedding_id = s.embedding_id);
-    END IF;
+           AND NOT EXISTS (SELECT 1 FROM derived d
+                            WHERE d.embedding_id = s.embedding_id AND d.label_id = s.label_id)
+    )
     INSERT INTO zero_shot_scores (embedding_id, label_id, score)
-    SELECT d.embedding_id, d.label_id, d.score FROM zero_shot_derive(touched) d
+    SELECT embedding_id, label_id, score FROM derived
     ON CONFLICT (embedding_id, label_id) DO UPDATE SET score = EXCLUDED.score;
     RETURN NULL;
 END $$ LANGUAGE plpgsql;

@@ -27,6 +27,8 @@ import logging
 import math
 import struct
 import time
+import unicodedata
+import uuid
 from typing import Optional, Callable
 
 import psycopg2
@@ -90,6 +92,38 @@ def _on_the_grid(segments, duration) -> bool:
     return (len(idx) <= windows and len(set(idx)) == len(idx)
             and all(isinstance(i, int) and not isinstance(i, bool) and 0 <= i < windows
                     for i in idx))
+
+
+# A segment is a unit vector: what the scores derived from it assume
+# (zero_shot_derive in 001_initial.sql, whose band this mirrors — a bundle
+# outside it derives none there). Every analyser normalizes in float32,
+# within 1.5e-7 of 1 as measured on CUDA bf16, x86 and ARM; one normalizing
+# in bf16 would stay within 0.8 %. A seal says who made a vector, not that
+# it is one a node can use.
+UNIT_NORM = (0.99, 1.01)
+
+
+def _unit(values: list) -> bool:
+    return UNIT_NORM[0] <= math.sqrt(math.fsum(x * x for x in values)) <= UNIT_NORM[1]
+
+
+# Mirrors backend/uuid_utils.embedding_model_uuid (desktop must not import
+# the backend package): a model's id is the uuid5 of its name alone.
+_NAMESPACE = uuid.UUID("adc1ec0b-2c81-5e26-9938-a369c6f7a5e1")
+
+
+def model_uuid(name: str) -> str:
+    key = " ".join(unicodedata.normalize("NFC", name.strip().lower()).split())
+    return str(uuid.uuid5(_NAMESPACE, f"embedding_model:{key}"))
+
+
+def _names_its_model(item: dict) -> bool:
+    """The bundle's model id is its model name's: the importer makes the
+    embedding_models row from the pair, and a name under another id would
+    hold that name against the node's own model."""
+    name, given = item.get("model_name"), item.get("model_uuid")
+    return (isinstance(name, str) and isinstance(given, str)
+            and given.lower() == model_uuid(name))
 
 
 def batch_roots(item: dict) -> set:
@@ -765,6 +799,10 @@ class SyncClient:
                 logger.warning("sync import: dropping track %s — segments off the grid",
                                str(item.get("track_uuid", "?"))[:8])
                 continue
+            if not _names_its_model(item):
+                logger.warning("sync import: dropping track %s — its model id is not its "
+                               "model name's", str(item.get("track_uuid", "?"))[:8])
+                continue
             segs, bad = [], None
             for s in item.get("segments", []):
                 try:
@@ -772,6 +810,9 @@ class SyncClient:
                     floats = rs.vector_from_bytes(raw)
                 except (KeyError, ValueError, struct.error):
                     bad = f"segment {s.get('i')} undecodable"
+                    break
+                if not _unit(floats):
+                    bad = f"segment {s.get('i')} not a unit vector"
                     break
                 if not s.get("signature"):
                     bad = f"segment {s.get('i')} unsigned"

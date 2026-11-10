@@ -260,7 +260,14 @@ def _load_zero_shot_labels(conn) -> dict:
     the labels exist until they are committed with the scores: an import
     committing in between would have run its trigger with no labels, after
     this step's snapshot. One transaction; run again, it writes the same
-    rows."""
+    rows.
+
+    `unscored` counts the bundles the derivation gave nothing: those holding
+    a segment that is not a unit vector, which no later write will score
+    either. A row holding the model's name under another id (an import of a
+    release that took a peer's word for the pair) leaves the step undone —
+    `loaded` False, no marker, the next start tries again — and the node
+    without derived scores, not without its start."""
     import base64
 
     from psycopg2.extras import execute_values
@@ -276,6 +283,16 @@ def _load_zero_shot_labels(conn) -> dict:
               for label_set, members in doc["sets"].items() for label in members]
     started = time.monotonic()
     with conn.cursor() as cur:
+        cur.execute("SELECT id::text FROM embedding_models WHERE name = %s AND id <> %s",
+                    (doc["model"], model_id))
+        other = cur.fetchone()
+        if other:
+            conn.rollback()
+            logger.error("the zero-shot labels are not loaded: embedding_models holds the name %s "
+                         "under %s, not under the id of that name (%s); moods, the vocal score and "
+                         "danceability stay underived until that row is gone",
+                         doc["model"], other[0], model_id)
+            return {"loaded": False, "model_named_under": other[0]}
         cur.execute("""
             INSERT INTO embedding_models (id, name, description, dimension, logit_scale)
             VALUES (%s, %s, %s, %s, %s)
@@ -297,8 +314,18 @@ def _load_zero_shot_labels(conn) -> dict:
             ON CONFLICT (embedding_id, label_id) DO UPDATE SET score = EXCLUDED.score
         """, (model_id,))
         scores = cur.rowcount
+        cur.execute("""
+            SELECT count(*) FROM embeddings e
+             WHERE e.model_id = %s
+               AND EXISTS (SELECT 1 FROM embedding_segments es WHERE es.embedding_id = e.id)
+               AND NOT EXISTS (SELECT 1 FROM zero_shot_scores s WHERE s.embedding_id = e.id)
+        """, (model_id,))
+        unscored = cur.fetchone()[0]
     conn.commit()
-    return {"labels": len(labels), "scores": scores,
+    if unscored:
+        logger.warning("%d bundles hold a segment that is not a unit vector: they have no "
+                       "derived scores", unscored)
+    return {"loaded": True, "labels": len(labels), "scores": scores, "unscored": unscored,
             "seconds": round(time.monotonic() - started, 1)}
 
 
@@ -370,7 +397,8 @@ def apply_pending() -> dict:
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):
             out["zero_shot"] = _load_zero_shot_labels(conn)
-            _mark(conn, "zero_shot_labels_v1")
+            if out["zero_shot"]["loaded"]:
+                _mark(conn, "zero_shot_labels_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker

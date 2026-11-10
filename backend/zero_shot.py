@@ -5,7 +5,8 @@ A node holds no zero-shot analysis of its own. The database derives the
 scores from the segment embeddings it holds (zero_shot_scores, kept by the
 triggers on embedding_segments — desktop/migrations/001_initial.sql): per
 segment the softmax within each label set of scale × (segment · label), per
-embedding the mean of those over its segments. The label embeddings are
+embedding the mean of those over its segments (a bundle holding a segment
+that is not a unit vector derives none). The label embeddings are
 constants of the release (zero_shot_labels/labels.json, made once by
 scripts/make_zero_shot_labels.py); db_migrate's `zero_shot_labels_v1` step
 loads them. Two nodes holding the same signed segments derive the same
@@ -30,9 +31,9 @@ LABELS_DIGEST = "8dddc91e69bc9f16a65a521a55ec89e41a0b9cc3e4abcdf8b226c2b5606a3af
 MOODS = "moods"
 DANCEABLE = "danceable"
 
-# Provisional: today's semantics (a mood was stored above 0.05; danceable at
-# 0.5; the class by 0.65 / 0.35), carried over until the measurement on a
-# real library sets them (ANALYSIS-3's M2).
+# Provisional: the semantics of the stored values they replace (a mood was
+# stored above 0.05; danceable at 0.5; the class by 0.65 / 0.35), carried
+# over until a measurement on a real library sets them.
 MOOD_MIN = 0.05
 DANCEABLE_MIN = 0.5
 VOCAL_MIN = 0.65

@@ -178,7 +178,14 @@ implementation details live in the code, DB and git history.
   path. Rows, not JSONB; no stored class — thresholds are read-time
   constants (`backend/zero_shot.py`: the values above, a mood at 0.05,
   danceable at 0.5, until a measurement on a real library sets them). The
-  full fill of 494 000 synthetic segments, the master's scale, takes 11 s. The bias of the vocal score is
+  full fill of 494 000 synthetic segments, the master's scale, takes 11 s
+  in memory (the segments already in the page cache; a cold start adds the
+  read of ~1.4 GB). The derivation is total: a seal says who made a vector,
+  not that it is a unit one, and PostgreSQL's `exp()` raises on overflow —
+  so a bundle holding a segment whose norm is outside 0.99..1.01 derives no
+  scores instead of failing its writer, and the import gate refuses such a
+  bundle (every analyser normalizes in float32: within 1.5e-7 of 1 on CUDA
+  bf16, x86 and ARM). The bias of the vocal score is
   the prompts', not the crop's: `artists.is_vocalist` stays the vocal
   signal.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,

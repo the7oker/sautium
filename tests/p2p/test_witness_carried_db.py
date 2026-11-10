@@ -26,7 +26,7 @@ from desktop.p2p import (birth_cert, identity_proof, identity_registry, peer_aut
 from tests.p2p.sealed_records import pub, seal_track  # noqa: E402
 from tests.p2p.test_witness import ISSUER, certificate  # noqa: E402
 
-MODEL = str(uuid.UUID(int=0xB2))
+MODEL = sync_client.model_uuid("clap")     # the id the importer takes for that name
 OWN_KEY = Ed25519PrivateKey.generate()
 OWN = pub(OWN_KEY)
 

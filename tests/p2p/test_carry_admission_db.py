@@ -27,7 +27,7 @@ from desktop.p2p import sync_queries, sync_walk  # noqa: E402
 
 ALBUM = str(uuid.UUID(int=500))
 OWNED, PHANTOM, OFFLIST, ANALYSED = (str(uuid.UUID(int=n)) for n in (501, 502, 503, 504))
-MODEL = str(uuid.UUID(int=600))
+MODEL = sync_client.model_uuid("clap")     # the id the importer takes for that name
 
 
 @pytest.fixture

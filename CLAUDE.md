@@ -266,10 +266,12 @@ See:
   release (`backend/zero_shot_labels/labels.json`, its digest pinned in
   `backend/zero_shot.py`). They never travel and are never signed. Presence
   is a read-time threshold in `zero_shot.py`; gates read `zero_shot_scores`,
-  display reads the `track_zero_shot` view. Discovery, search, Now
-  Playing, the assistant and the CLI read these; the analysis still writes
-  the four old columns of `audio_features`, and the signed features record
-  still carries them. **The vocal score is unreliable as a class**: for
+  display reads the `track_zero_shot` view. A bundle holding a segment
+  that is not a unit vector (norm outside 0.99..1.01) derives none, and the
+  import gate refuses one. As of 2026-11-10 Discovery, search, Now Playing,
+  the assistant and the CLI read these, while the analysis still writes the
+  four old columns of `audio_features` and the signed features record still
+  carries them. **The vocal score is unreliable as a class**: for
   vocal/instrumental queries, use `artists.is_vocalist` (classified from bio
   keywords). See `PROGRESS.md` design decisions.
 - **A copy at the HQPlayer is a VARIANT, and "owned" means `owned_files`.**

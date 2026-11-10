@@ -69,7 +69,7 @@ from tests.p2p.sealed_records import pub, seal_track, vector  # noqa: E402
 from tests.p2p.test_witness import ISSUER, certificate  # noqa: E402
 from tests.p2p.test_witness_launcher import Served, _tls_context  # noqa: E402
 
-MODEL = str(uuid.UUID(int=0xB22))
+MODEL = sync_client.model_uuid("clap")     # the id the importer takes for that name
 
 
 class _Node:

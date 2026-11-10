@@ -32,7 +32,8 @@ _INSTR_THRESHOLDS_NOTE = f"{DEFAULT_THRESHOLD} for every label" + (
 # The derived scores' keys and read thresholds, from the module the readers use.
 _ZERO_SHOT_NOTE = (
     "**track_zero_shot** (track_id UUID, moods[jsonb], vocal_score, danceability) - a view: CLAP "
-    "zero-shot scores derived from the track's audio embedding, one row per track that has one. "
+    "zero-shot scores derived from the track's audio embedding, one row per track that has one "
+    "(per audio model, and one model has labels). "
     "Raw scores; what counts as present is the threshold given here.\n"
     "  - `moods`: the whole distribution over the moods (it sums to 1), e.g. "
     '`{"happy and upbeat": 0.35, "energetic and intense": 0.28, ...}`. Keys: '
