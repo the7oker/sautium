@@ -679,6 +679,13 @@ class AudioAnalyzer:
                             existing = db.query(AudioFeature).filter(
                                 AudioFeature.track_id == row.track_id
                             ).first()
+                            if existing and provenance.outranked(
+                                    db, existing.analysis_source_id, src_id):
+                                # a better copy's features, as the embedding
+                                # save keeps a better copy's embedding
+                                savepoint.commit()
+                                stats["skipped"] += 1
+                                continue
                             if existing:
                                 for k, v in features.items():
                                     setattr(existing, k, v)

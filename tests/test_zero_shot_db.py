@@ -624,7 +624,7 @@ def test_the_analysis_pass_writes_a_bundle_in_one_statement_and_it_is_scored(cur
         for segments in (first, again):                     # an analysis, then a re-analysis
             vectors = np.array(segments, dtype=np.float32)
             assert generator._persist_analysis(db, track, model, list(range(len(segments))),
-                                               vectors, vectors.mean(axis=0), None, None)
+                                               vectors, vectors.mean(axis=0), None)
             db.commit()
     engine.dispose()
     assert len(inserts) == 2

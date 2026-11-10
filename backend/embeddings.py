@@ -298,8 +298,7 @@ class AudioEmbeddingGenerator:
     def _persist_analysis(
         self, db: Session, track_id, model: EmbeddingModel,
         idxs, vecs, portrait: np.ndarray,
-        analysis_source_id: Optional[int], provider_id: Optional[str],
-        bit_depth: Optional[int] = None, is_lossless: Optional[bool] = None,
+        analysis_source_id: Optional[int],
     ) -> bool:
         """Upsert the track's embedding row and REPLACE its segments, in one
         transaction unit. The overwrite decision happens before anything is
@@ -372,10 +371,7 @@ class AudioEmbeddingGenerator:
         if computed is None:
             return False
         idxs, vecs, portrait = computed
-        return self._persist_analysis(
-            db, track_id, model, idxs, vecs, portrait, src_id,
-            provider_id=None, bit_depth=media_file.bit_depth,
-            is_lossless=media_file.is_lossless)
+        return self._persist_analysis(db, track_id, model, idxs, vecs, portrait, src_id)
 
     def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None, cancel_flag=None, force: bool = False) -> Dict[str, int]:
         """
@@ -553,9 +549,7 @@ class AudioEmbeddingGenerator:
                         idxs, vecs, portrait = computed
                         if self._persist_analysis(
                                 db, row.track_id, embedding_model, idxs, vecs,
-                                portrait, src_id, provider_id=None,
-                                bit_depth=row.bit_depth,
-                                is_lossless=row.is_lossless):
+                                portrait, src_id):
                             stats["success"] += 1
                         else:
                             stats["skipped"] += 1

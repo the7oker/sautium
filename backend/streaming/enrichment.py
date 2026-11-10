@@ -257,8 +257,7 @@ class PreviewEnricher:
             if computed is not None:
                 idxs, vecs, portrait = computed
                 saved = embedder._persist_analysis(
-                    db, track_id, model, idxs, vecs, portrait, src_id,
-                    provider_id=provider_id, is_lossless=lossless)
+                    db, track_id, model, idxs, vecs, portrait, src_id)
             if feats:
                 self._save_features(db, track_id, feats, src_id)
             db.commit()

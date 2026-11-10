@@ -989,17 +989,48 @@ def test_a_better_file_of_the_material_is_not_relinked_to_a_lesser_copys_analysi
     assert not provenance.held_in_group(session, second, "embeddings", model_id=MODEL)
 
 
-def test_a_returned_file_of_a_copy_no_better_than_the_analysis_is_relinked(
-        conn, prints, monkeypatch):
+def test_a_returned_file_of_the_rows_own_copy_is_relinked(conn, prints, monkeypatch):
     _relinking(monkeypatch)
     with conn.cursor() as cur:
         track = _track(cur)
         row = _source(cur, track, FP, bit_depth=16)
-        mf = _file(cur, track, "/music/a.mp3", bit_depth=None, lossless=False)
-    prints["/music/a.mp3"] = NEAR
+        mf = _file(cur, track, "/music/a.flac", bit_depth=16)
+    prints["/music/a.flac"] = NEAR                 # another decoder's print of the same copy
     assert provenance.relink_returned_files([track]) == 1
     with conn.cursor() as cur:
         assert _rows(cur, track)[0][:4] == (row, False, None, mf)
+
+
+def test_a_lesser_file_is_never_relinked_to_a_better_copys_row(conn, session, prints,
+                                                              monkeypatch):
+    """Probe P2 (round 3): the CD rip analysed, its features not yet made,
+    the CD file removed, an MP3 of the material elected. Relinked, the MP3
+    took the CD's row, its features were saved under the CD's claims, and
+    the CD's return took that row as an equal copy — the MP3's features
+    stood for the CD for good. Now the MP3 registers a row of its own; the
+    CD's row keeps its claims for the CD's return."""
+    _relinking(monkeypatch)
+    with conn.cursor() as cur:
+        track = _track(cur)
+        cd = _file(cur, track, "/music/cd.flac", bit_depth=16)
+    prints.update({"/music/cd.flac": FP, "/music/a.mp3": NEAR, "/music/cd2.flac": FP})
+    row = _register(session, conn, track, cd)
+    with conn.cursor() as cur:
+        _embedding(cur, track, row)
+        cur.execute("DELETE FROM media_files WHERE id = %s", (cd,))
+        mp3 = _file(cur, track, "/music/a.mp3", bit_depth=None, lossless=False)
+    assert provenance.relink_returned_files([track]) == 0
+    src = provenance.get_or_create_local(session, track, mp3, "/music/a.mp3", 44100, None,
+                                         False, 240)
+    session.commit()
+    assert src != row
+    with conn.cursor() as cur:
+        _features(cur, track, src)                     # the features pass's save of the MP3
+        cur.execute("UPDATE media_files SET is_analysis_source = false WHERE id = %s", (mp3,))
+        cd2 = _file(cur, track, "/music/cd2.flac", bit_depth=16)
+    assert _register(session, conn, track, cd2) == row     # the CD back: its own row
+    assert _pending(session, track, audio_analysis.PENDING_SQL)   # the CD's features
+    assert not provenance.outranked(session, src, row)
 
 
 def test_the_elected_file_replaces_another_materials_analysis_whatever_its_quality(
@@ -1021,8 +1052,7 @@ def test_the_elected_file_replaces_another_materials_analysis_whatever_its_quali
         other = _source(cur, track, FP, bit_depth=None, lossless=False, duration=300)
         cur.execute("UPDATE analysis_sources SET material_of = %s WHERE id = %s", (cd, same))
     def persist(sid):
-        ok = generator._persist_analysis(session, track, model, [0], vec, vec[0], sid,
-                                         provider_id=None, bit_depth=None, is_lossless=False)
+        ok = generator._persist_analysis(session, track, model, [0], vec, vec[0], sid)
         session.commit()
         return ok
     assert persist(same) is False                         # one material: the CD's stays
@@ -1137,8 +1167,6 @@ def _merged(*payloads) -> dict:
     ("duration_seconds", "240"),          # a relay's text: the seal still reads it as 240
     ("duration_seconds", 240.0),
     ("duration_seconds", True),
-    ("grid_version", 2),                  # unsigned in features, bound by every segment seal
-    ("grid_version", "1"),
     ("chromaprint", 123),
     ("chromaprint", None),
 ])
@@ -1156,15 +1184,26 @@ def test_a_features_item_whose_declaration_is_mistyped_is_dropped_and_its_batch_
         assert cur.fetchall() == [(good, 240, rs.GRID_VERSION)]
 
 
-def test_a_grid_version_a_features_item_omits_is_this_builds(conn, scratch_dsn):
+@pytest.mark.parametrize("grid", [None, 2, "1"])
+def test_a_features_items_grid_is_ignored_and_the_row_takes_this_builds(conn, scratch_dsn, grid):
+    """No features seal binds the grid: a newer node's features land here,
+    and none can move the row a segment seal binds."""
     with conn.cursor() as cur:
         track = _track(cur)
     payload = _sealed_features(track, FP, 240)
-    payload["items"][0]["provenance"]["grid_version"] = None
+    payload["items"][0]["provenance"]["grid_version"] = grid
     assert _import(scratch_dsn, "audio_features", payload) == 1
     with conn.cursor() as cur:
         cur.execute("SELECT grid_version FROM analysis_sources WHERE track_id = %s", (track,))
         assert cur.fetchone() == (rs.GRID_VERSION,)
+
+
+def test_a_bundle_of_another_grid_is_refused(conn, scratch_dsn):
+    with conn.cursor() as cur:
+        track = _track(cur)
+        segments, _f = _payloads(conn, track, FP)
+    segments["items"][0]["provenance"]["grid_version"] = 2
+    assert _import(scratch_dsn, "segments", segments) == 0
 
 
 def test_a_relay_cannot_move_an_honest_grid_onto_another_grid_version(conn, scratch_dsn):
@@ -1176,7 +1215,7 @@ def test_a_relay_cannot_move_an_honest_grid_onto_another_grid_version(conn, scra
         track = _track(cur)
         segments, features = _payloads(conn, track, FP, duration=240)
     features["items"][0]["provenance"]["grid_version"] = 2
-    assert _import(scratch_dsn, "audio_features", features) == 0
+    assert _import(scratch_dsn, "audio_features", features) == 1    # its grid ignored
     assert _import(scratch_dsn, "segments", segments) == 1
     served = sync_queries.pull_segments(conn, [track])
     assert served["items"][0]["provenance"]["grid_version"] == rs.GRID_VERSION
@@ -1408,37 +1447,237 @@ def test_the_holdings_version_moves_with_a_shed(conn, scratch_dsn, session):
     assert sync_queries.holdings_version(conn) != before
 
 
-def test_an_unlinked_grid_held_only_at_an_hqplayer_or_away_is_a_gap(conn):
+def test_an_unlinked_grid_is_held_beside_an_elected_file_away_or_not_and_a_gap_at_an_hqplayer(
+        conn):
+    """Away is never gone (ROOT-1): the pass reads the file once it is back.
+    A track only an HQPlayer's library holds has no file a pass reads."""
     with conn.cursor() as cur:
-        away, here = _track(cur, "away"), _track(cur, "here")
+        away, here, hqp = _track(cur, "away"), _track(cur, "here"), _track(cur, "hqp")
         a = _file(cur, away, "/music/away.flac")
         cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = "
                     "(SELECT album_variant_id FROM media_files WHERE id = %s)", (a,))
         _file(cur, here, "/music/here.flac")
-        for t in (away, here):
+        cur.execute("INSERT INTO hqp_endpoints (name) VALUES ('box') RETURNING id")
+        endpoint = cur.fetchone()[0]
+        album = str(uuid.uuid4())
+        cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'LP')", (album,))
+        cur.execute("INSERT INTO album_variants (album_id, directory_path, location, "
+                    "hqp_endpoint_id) VALUES (%s, '/hqp', 'hqplayer', %s) RETURNING id",
+                    (album, endpoint))
+        cur.execute("INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path) "
+                    "VALUES (%s, %s, '/hqp/a.flac')", (hqp, cur.fetchone()[0]))
+        for t in (away, here, hqp):
             _embedding(cur, t, None)
         cur.execute(f"""SELECT u::text FROM unnest(%s::uuid[]) u
                          WHERE {sync_queries._LACKS['segments'].format(t='u')}""",
-                    ([away, here],))
-        assert cur.fetchall() == [(away,)]
+                    ([away, here, hqp],))
+        assert cur.fetchall() == [(hqp,)]
+        cur.execute("TRUNCATE hqp_endpoints CASCADE")
 
 
-@pytest.mark.parametrize("craft", ["vector", "model_name"])
-def test_a_bundle_no_column_can_hold_drops_alone(conn, scratch_dsn, craft):
-    """A segment of another dimension than vector(512), a model name longer
-    than its column: only a crafted answer carries either, and it drops at
-    the gate, not the page in the database."""
+def _crafted_bundle(track, model_uuid, model_name, vectors, signer=AUTHOR, fp=FP, duration=240):
+    """A certified author's bundle, sealed as it is: whatever the vectors and
+    the model, the seal verifies."""
     import base64
+    from tests.p2p.sealed_records import STAMPED_AT
+    from tests.p2p.test_witness import AUTHORITY
+    author = pub(signer)
+    raws = [rs.vector_to_bytes(v) for v in vectors]
+    sigs = [rs.sign(rs.segment_payload(author, track, fp, duration, model_uuid, i,
+                                       rs.vector_hash(raw), grid_version=rs.GRID_VERSION), signer)
+            for i, raw in enumerate(raws)]
+    root, proofs = rs.merkle_tree([rs.record_leaf(sig) for sig in sigs])
+    ip_hash = str(uuid.uuid4())
+    item = {"track_uuid": track, "model_uuid": model_uuid, "model_name": model_name,
+            "analysis_version": 2,
+            "provenance": {"chromaprint": fp, "duration_seconds": duration,
+                           "grid_version": rs.GRID_VERSION, "is_lossless": True},
+            "segments": [{"i": i, "v": base64.b64encode(raw).decode(), "signature": sig,
+                          "author_pubkey": author, "batch_root": root, "proof": proof}
+                         for i, (raw, sig, proof) in enumerate(zip(raws, sigs, proofs))]}
+    return {"category": "segments", "items": [item], "batches": {root: {
+        "author_pubkey": author, "worker_date": STAMPED_AT, "ip_hash": ip_hash,
+        "worker_sig": AUTHORITY.sign(rs.timestamp_payload(root, STAMPED_AT, ip_hash)).hex(),
+        "authority": ISSUER, "timestamp_version": 2}}}
+
+
+def _unit_vector(dim, seed) -> list:
+    """A unit vector float32 keeps a unit vector."""
+    import numpy as np
+    v = np.array([(seed * 31 + i) % 101 + 1 for i in range(dim)], dtype=np.float64)
+    return [float(x) for x in np.asarray(v / np.linalg.norm(v), dtype=np.float32)]
+
+
+@pytest.mark.parametrize("craft", ["long_name", "mixed_dims"])
+def test_a_bundle_no_column_can_hold_drops_alone(conn, scratch_dsn, craft):
+    """A model name longer than its column (its model id the name's), a
+    segment of another dimension than vector(512) beside a unit one: sealed
+    as they are, so neither the model-id rule, the unit norm nor the seal
+    stops them first — only the gate's bounds, before the model upsert and
+    the mean, which run for the page."""
     with conn.cursor() as cur:
         bad, good = _track(cur, "bad"), _track(cur, "good")
-        bundles = {t: _payloads(conn, t, FP)[0] for t in (bad, good)}
-    item = bundles[bad]["items"][0]
-    if craft == "vector":
-        item["segments"][0]["v"] = base64.b64encode(rs.vector_to_bytes([0.5] * 256)).decode()
+        good_bundle = _payloads(conn, good, FP)[0]
+    if craft == "long_name":
+        name = "m" * (sync_client.MODEL_NAME_CHARS + 1)
+        crafted = _crafted_bundle(bad, sync_client.model_uuid(name), name, [_unit_vector(512, 1)])
     else:
-        item["model_name"] = "m" * 101
-    assert _import(scratch_dsn, "segments", _merged(bundles[bad], bundles[good])) == 1
+        crafted = _crafted_bundle(bad, MODEL, "clap", [_unit_vector(512, 1), _unit_vector(256, 2)])
+    assert _import(scratch_dsn, "segments", _merged(crafted, good_bundle)) == 1
     with conn.cursor() as cur:
         cur.execute("SELECT track_id::text FROM embeddings")
         assert cur.fetchall() == [(good,)]
+
+
+@pytest.mark.parametrize("category", ["segments", "audio_features"])
+def test_an_upper_case_track_uuid_drops_its_item_alone(conn, scratch_dsn, category):
+    """Probe P5: it passed the gate, missed the source map and rolled back
+    the whole envelope, honest items with it."""
+    with conn.cursor() as cur:
+        bad, good = _track(cur, "bad"), _track(cur, "good")
+    if category == "segments":
+        payloads = [_payloads(conn, t, FP)[0] for t in (bad, good)]
+    else:
+        payloads = [_sealed_features(t, FP, 240) for t in (bad, good)]
+    payloads[0]["items"][0]["track_uuid"] = bad.upper()
+    assert _import(scratch_dsn, category, _merged(*payloads)) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id::text FROM embeddings UNION ALL "
+                    "SELECT track_id::text FROM audio_features")
+        assert cur.fetchall() == [(good,)]
+
+
+@pytest.mark.parametrize("values", [dict(key="C\x00"), dict(bpm=[120]), dict(bpm={"a": 1}),
+                                    dict(moods={"calm": "\x00"}), dict(energy=float("inf"))])
+def test_a_sealed_value_its_column_cannot_take_drops_its_item_alone(conn, scratch_dsn, values):
+    """Probe P7: a NUL, a list or an object where a number goes raised past
+    the savepoints and failed the batch; the gate types every field from
+    FEATURE_FIELDS."""
+    with conn.cursor() as cur:
+        bad, good = _track(cur, "bad"), _track(cur, "good")
+    payload = _merged(_sealed_features(bad, FP, 240, **values), _sealed_features(good, FP, 240))
+    assert _import(scratch_dsn, "audio_features", payload) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id::text FROM audio_features")
+        assert cur.fetchall() == [(good,)]
+
+
+def test_the_gates_field_table_is_the_features_records_own():
+    assert list(sync_client.FEATURE_FIELDS) == rs.FEATURE_ORDER
+
+
+@pytest.mark.parametrize("broken", ["worker_date", "ip_hash"])
+def test_a_malformed_batch_entry_is_no_valid_batch(conn, scratch_dsn, broken):
+    with conn.cursor() as cur:
+        bad, good = _track(cur, "bad"), _track(cur, "good")
+    crafted = _sealed_features(bad, FP, 240)
+    del next(iter(crafted["batches"].values()))[broken]
+    assert _import(scratch_dsn, "audio_features",
+                   _merged(crafted, _sealed_features(good, FP, 240))) == 1
+
+
+def test_a_dropped_items_savepoint_is_released(scratch_dsn):
+    """Probe P6: a rolled-back savepoint stayed on the stack, one per drop."""
+    c = psycopg2.connect(scratch_dsn)
+    try:
+        with c.cursor() as cur:
+            for _ in range(3):
+                assert not sync_client._item_write(cur, "probe", "x" * 8,
+                                                   lambda: cur.execute("SELECT 1/0"))
+            with pytest.raises(psycopg2.errors.InvalidSavepointSpecification):
+                cur.execute("RELEASE SAVEPOINT import_item")
+    finally:
+        c.rollback()
+        c.close()
+
+
+class _Counting(psycopg2.extensions.cursor):
+    """A cursor that counts the savepoints it is asked to open."""
+    savepoints = 0
+
+    def execute(self, sql, params=None):
+        if isinstance(sql, str) and sql.startswith("SAVEPOINT"):
+            type(self).savepoints += 1
+        return super().execute(sql, params)
+
+
+def test_a_page_is_written_under_one_savepoint_and_item_by_item_only_when_refused(scratch_dsn):
+    """Not one subtransaction per item: past 64 in one transaction the
+    session's cache of them overflows and every concurrent snapshot pays."""
+    c = psycopg2.connect(scratch_dsn)
+    try:
+        with c.cursor(cursor_factory=_Counting) as cur:
+            cur.execute("CREATE TEMP TABLE page_probe (v int CHECK (v > 0))")
+            items = [{"track_uuid": f"{n:08d}", "v": n + 1} for n in range(100)]
+
+            def one(it):
+                cur.execute("INSERT INTO page_probe VALUES (%s)", (it["v"],))
+
+            def page():
+                for it in items:
+                    one(it)
+            _Counting.savepoints = 0
+            assert sync_client._page_write(cur, "probe", items, page, one) == 100
+            assert _Counting.savepoints == 1
+            items[50]["v"] = -1
+            cur.execute("DELETE FROM page_probe")
+            _Counting.savepoints = 0
+            assert sync_client._page_write(cur, "probe", items, page, one) == 99
+            assert _Counting.savepoints == 1 + 100
+            cur.execute("SELECT count(*) FROM page_probe")
+            assert cur.fetchone() == (99,)
+    finally:
+        c.rollback()
+        c.close()
+
+
+# -- The features saves keep a better copy's features (round 3) ---------------
+
+def _run_features_pass(monkeypatch, track, force):
+    monkeypatch.setattr(provenance, "fingerprinter",
+                        lambda: provenance.Fingerprinter("ok", "/usr/bin/fpcalc"))
+    monkeypatch.setattr(embeddings, "_reanalyze_imported", lambda: False)
+    monkeypatch.setattr(
+        audio_analysis.AudioAnalyzer, "_load_and_extract_librosa",
+        lambda self, path, *a: {"audio_48k": None,
+                                "librosa_features": {"bpm": 77.0, "energy": 0.5}})
+    return audio_analysis.AudioAnalyzer(device="cpu").analyze_all(
+        force=force, librosa_only=True, track_ids=[uuid.UUID(track)])
+
+
+def _cd_analysed_then_a_24_bit_copy_elected(conn, session, prints):
+    with conn.cursor() as cur:
+        track = _track(cur)
+        cd = _file(cur, track, "/music/cd.flac", bit_depth=16)
+    prints.update({"/music/cd.flac": FP, "/music/hr.flac": NEAR})
+    row = _register(session, conn, track, cd)
+    with conn.cursor() as cur:
+        _embedding(cur, track, row)
+        _features(cur, track, row)
+        cur.execute("DELETE FROM media_files WHERE id = %s", (cd,))
+        _file(cur, track, "/music/hr.flac", bit_depth=24)
+    return track, row
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_the_features_pass_keeps_a_better_copys_features_as_the_embedding_save_does(
+        conn, session, prints, monkeypatch, force):
+    """Probes P3 and P3b: the CD's analysis, the CD gone, a 24-bit copy
+    elected (unforced: once a relink's fpcalc missed it). The features pass
+    replaced the CD's features while the embedding save refused the same
+    replacement — the two kinds described two copies. Now both keep the CD's."""
+    track, cd_row = _cd_analysed_then_a_24_bit_copy_elected(conn, session, prints)
+    if not force:
+        _relinking(monkeypatch)
+        prints.pop("/music/hr.flac")
+        assert provenance.relink_returned_files([track]) == 0      # cached as unmatched
+        prints["/music/hr.flac"] = NEAR
+    stats = _run_features_pass(monkeypatch, track, force=force)
+    assert (stats["success"], stats["skipped"]) == (0, 1)
+    with conn.cursor() as cur:
+        cur.execute("""SELECT (SELECT analysis_source_id FROM embeddings WHERE track_id = %(t)s),
+                              (SELECT analysis_source_id FROM audio_features WHERE track_id = %(t)s),
+                              (SELECT bpm FROM audio_features WHERE track_id = %(t)s)""",
+                    {"t": track})
+        assert cur.fetchone() == (cd_row, cd_row, 99.0)
 

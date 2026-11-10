@@ -122,11 +122,12 @@ _SIGNED = "signature IS NOT NULL AND batch_root IS NOT NULL"
 # is served to no peer and signed by nobody here, so its author's sealed
 # version replaces it as it would fill a gap. A mean without segments under
 # no first-hand source is a gap too. A grid linked to no source on a track
-# with a present analysis-source file is held: a legacy grid of its own,
+# with an elected analysis-source file is held: a legacy grid of its own,
 # which the analysis pass re-derives from that file (its pending predicate
 # takes an unlinked analysis) — a peer's grid in its place would stay there
-# wherever enrichment.reanalyze_imported is off. A track held only at an
-# HQPlayer's library, or whose copy is away, has no file a pass reads. Row-level, over embeddings `e` and
+# wherever enrichment.reanalyze_imported is off. A copy that is away counts:
+# away is never gone (ROOT-1), and its pass reads the file once it is back.
+# A track held only at an HQPlayer's library has no file a pass reads. Row-level, over embeddings `e` and
 # audio_features `a`, each LEFT JOINed to analysis_sources `s`.
 HELD_EMBEDDING = """((s.id IS NOT NULL AND NOT s.imported)
      OR (EXISTS (SELECT 1 FROM embedding_segments es WHERE es.embedding_id = e.id)
@@ -134,9 +135,7 @@ HELD_EMBEDDING = """((s.id IS NOT NULL AND NOT s.imported)
                            WHERE es.embedding_id = e.id AND es.signature IS NULL)
               OR (s.id IS NULL
                   AND EXISTS (SELECT 1 FROM media_files f
-                                JOIN album_variants v ON v.id = f.album_variant_id
-                               WHERE f.track_id = e.track_id AND f.is_analysis_source
-                                 AND v.absent_since IS NULL)))))"""
+                               WHERE f.track_id = e.track_id AND f.is_analysis_source)))))"""
 HELD_FEATURES = "(a.signature IS NOT NULL OR (s.id IS NOT NULL AND NOT s.imported))"
 # The same per track, the track's uuid expression formatted in as {t}.
 HOLDS_SEGMENTS = f"""EXISTS (SELECT 1 FROM embeddings e

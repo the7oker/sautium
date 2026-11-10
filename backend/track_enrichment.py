@@ -777,13 +777,17 @@ class TrackEnrichmentPipeline:
                     existing_af = db.query(AudioFeature).filter(
                         AudioFeature.track_id == track.id
                     ).first()
-                    if existing_af:
+                    # a better copy's features stay, as the embedding save
+                    # keeps a better copy's embedding
+                    kept = existing_af is not None and provenance.outranked(
+                        db, existing_af.analysis_source_id, src_id)
+                    if existing_af and not kept:
                         for k, v in features.items():
                             if hasattr(existing_af, k):
                                 setattr(existing_af, k, v)
                         existing_af.analysis_source_id = src_id
                         existing_af.analysis_version = ANALYSIS_VERSION
-                    else:
+                    elif not kept:
                         af = AudioFeature(
                             track_id=track.id,
                             bpm=features.get("bpm"),
@@ -805,7 +809,7 @@ class TrackEnrichmentPipeline:
                         )
                         db.add(af)
                     db.commit()
-                    results['audio_features'] = 'success'
+                    results['audio_features'] = 'skipped' if kept else 'success'
                 else:
                     results['audio_features'] = 'failed'
             except Exception as e:

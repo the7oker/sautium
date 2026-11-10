@@ -23,6 +23,7 @@ node-local and every node fetches its own by name.
 """
 
 import base64
+import json
 import logging
 import math
 import struct
@@ -138,10 +139,37 @@ def _is_int(value) -> bool:
 
 
 def _is_uuid(value) -> bool:
+    """A uuid in its one canonical text, lower case: every lookup the import
+    makes by it is by that text."""
     try:
-        return isinstance(value, str) and str(uuid.UUID(value)) == value.lower()
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
     except ValueError:
         return False
+
+
+# The fields of a features record and the kind of value each holds: the
+# gate's one table of them, in the order the record's seal hashes them
+# (record_sig.FEATURE_ORDER), which the features import also writes its
+# columns from. A field of another kind drops its item at the gate.
+_NUMBER, _TEXT, _JSON = "number", "text", "json"
+FEATURE_FIELDS = {
+    "bpm": _NUMBER, "key": _TEXT, "mode": _TEXT, "key_confidence": _NUMBER,
+    "energy": _NUMBER, "energy_db": _NUMBER, "brightness": _NUMBER,
+    "dynamic_range_db": _NUMBER, "zero_crossing_rate": _NUMBER, "danceability": _NUMBER,
+    "vocal_instrumental": _TEXT, "vocal_score": _NUMBER, "instruments": _JSON, "moods": _JSON,
+}
+
+
+def _of_kind(kind: str, value) -> bool:
+    """A value the column of its field's kind takes, or none: a finite
+    number, a text with no NUL, a JSON object or array with no NUL."""
+    if value is None:
+        return True
+    if kind == _NUMBER:
+        return _is_int(value) or (isinstance(value, float) and math.isfinite(value))
+    if kind == _TEXT:
+        return isinstance(value, str) and "\x00" not in value
+    return isinstance(value, (dict, list)) and "\\u0000" not in json.dumps(value)
 
 
 def _well_formed(item: dict, bundle: bool) -> Optional[str]:
@@ -150,11 +178,12 @@ def _well_formed(item: dict, bundle: bool) -> Optional[str]:
     keyed by, exactly as the seal binds it: the fingerprint a string no
     longer than fpcalc's window can make (material.MAX_FINGERPRINT_CHARS;
     every later registration on its track compares with it), the duration
-    whole seconds within a day or none, the grid the one this build makes
-    (every segment seal binds it, no features seal does: a features item
-    must not move it). `is_lossless` is the author's unsigned claim, kept
-    when it is one. A field of another type drops its item, never the
-    batch."""
+    whole seconds within a day or none, the grid the one this build makes —
+    a bundle of another is refused (every segment seal binds it), a features
+    item's is ignored (no features seal binds it, so it must not move the
+    row). `is_lossless` is the author's unsigned claim, kept when it is one.
+    A features item's fields are typed by FEATURE_FIELDS. A field of
+    another type drops its item, never the batch."""
     if not _is_uuid(item.get("track_uuid")):
         return "no track uuid"
     prov = item.get("provenance")
@@ -168,7 +197,7 @@ def _well_formed(item: dict, bundle: bool) -> Optional[str]:
         return "a fingerprint longer than fpcalc's window can make"
     if duration is not None and not (_is_int(duration) and 0 < duration <= 24 * 3600):
         return "a duration that is not whole seconds"
-    if grid is not None and not (_is_int(grid) and grid == rs.GRID_VERSION):
+    if bundle and grid is not None and not (_is_int(grid) and grid == rs.GRID_VERSION):
         return "a grid this build does not make"
     version = item.get("analysis_version", 1)
     if not (_is_int(version) and 0 < version < 2 ** 15):
@@ -177,6 +206,10 @@ def _well_formed(item: dict, bundle: bool) -> Optional[str]:
                        and isinstance(item.get("model_name", ""), str)
                        and len(item.get("model_name", "")) <= MODEL_NAME_CHARS):
         return "no model"
+    if not bundle:
+        for field, kind in FEATURE_FIELDS.items():
+            if not _of_kind(kind, item.get(field)):
+                return f"a {field} that is not one"
     lossless = prov.get("is_lossless")
     item["provenance"] = {"chromaprint": fp, "duration_seconds": duration,
                           "grid_version": rs.GRID_VERSION,
@@ -197,17 +230,37 @@ def _sealed(payload: bytes, signature, author, proof, root, batch_ok) -> bool:
 
 def _item_write(cur, what: str, track: str, write: Callable[[], None]) -> bool:
     """Run one item's writes under a savepoint: a value the database refuses
-    (a type, an enum, a check) drops that item, logged, never its batch."""
+    (an enum, a check, a range) drops that item, logged, never its batch."""
     cur.execute("SAVEPOINT import_item")
     try:
         write()
     except (psycopg2.DataError, psycopg2.IntegrityError) as e:
         cur.execute("ROLLBACK TO SAVEPOINT import_item")
+        cur.execute("RELEASE SAVEPOINT import_item")
         logger.warning("sync import: dropping %s %s — %s", what, track[:8],
                        str(e).splitlines()[0])
         return False
     cur.execute("RELEASE SAVEPOINT import_item")
     return True
+
+
+def _page_write(cur, what: str, items: list, page: Callable[[], None],
+                one: Callable[[dict], None]) -> int:
+    """Write a page of items under one savepoint; only when the database
+    refuses a value in it, write the page again item by item, each under its
+    own (_item_write). A page is one subtransaction, not one per item —
+    beyond 64 in one transaction PostgreSQL's per-session cache of them
+    overflows and every concurrent snapshot pays. Returns the items written."""
+    cur.execute("SAVEPOINT import_page")
+    try:
+        page()
+    except (psycopg2.DataError, psycopg2.IntegrityError):
+        cur.execute("ROLLBACK TO SAVEPOINT import_page")
+        cur.execute("RELEASE SAVEPOINT import_page")
+        return sum(_item_write(cur, what, it["track_uuid"], lambda it=it: one(it))
+                   for it in items)
+    cur.execute("RELEASE SAVEPOINT import_page")
+    return len(items)
 
 
 def batch_roots(item: dict) -> set:
@@ -811,12 +864,15 @@ class SyncClient:
                 return False
             if root not in cache:
                 b = batches.get(root)
-                cache[root] = bool(
-                    b and b.get("authority") in TRUSTED_AUTHORITIES
-                    and rs.verify_timestamp(
-                        root, b["worker_date"], b["ip_hash"],
-                        b["worker_sig"], b["authority"],
-                        int(b.get("timestamp_version") or rs.TIMESTAMP_VERSION)))
+                try:
+                    cache[root] = bool(
+                        isinstance(b, dict) and b.get("authority") in TRUSTED_AUTHORITIES
+                        and rs.verify_timestamp(
+                            root, b["worker_date"], b["ip_hash"],
+                            b["worker_sig"], b["authority"],
+                            int(b.get("timestamp_version") or rs.TIMESTAMP_VERSION)))
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    cache[root] = False     # a malformed entry is no valid batch
             return cache[root]
 
         return ok
@@ -975,14 +1031,20 @@ class SyncClient:
                 for item, segs in decoded if item["track_uuid"] in kept_uuids
                 for _, _, seal in segs if seal})
 
-            imported = 0
+            # one bundle per track, the first: a track's grid is one author's
+            bundles: dict = {}
             for item, segs in decoded:
-                if item["track_uuid"] not in kept_uuids:
-                    continue
-                if _item_write(cur, "track", item["track_uuid"],
-                               lambda: self._write_bundle(cur, item, segs, source_map)):
-                    imported += 1
-        return imported
+                if item["track_uuid"] in kept_uuids:
+                    bundles.setdefault(item["track_uuid"], (item, segs))
+            writing = [item for item, _segs in bundles.values()]
+
+            def one(item):
+                self._write_bundle(cur, item, bundles[item["track_uuid"]][1], source_map)
+
+            def page():
+                for item in writing:
+                    one(item)
+            return _page_write(cur, "track", writing, page, one)
 
     def _write_bundle(self, cur, item: dict, segs: list, source_map: dict) -> None:
         """One bundle's mean and segments, replacing the track's grid."""
@@ -1194,60 +1256,35 @@ class SyncClient:
             self._insert_batches(
                 cur, batches,
                 {i["batch_root"] for i in items if i.get("signature")})
-            values = [
-                (
-                    item["track_uuid"], item.get("bpm"), item.get("key"),
-                    item.get("mode"), item.get("key_confidence"),
-                    item.get("energy"), item.get("energy_db"),
-                    item.get("brightness"), item.get("dynamic_range_db"),
-                    item.get("zero_crossing_rate"),
-                    psycopg2.extras.Json(item.get("instruments")),
-                    psycopg2.extras.Json(item.get("moods")),
-                    item.get("vocal_instrumental"), item.get("vocal_score"),
-                    item.get("danceability"),
-                    self._source_id(source_map, item),
-                    item.get("analysis_version", 1),
-                    item.get("author_pubkey"), item.get("signature"),
-                    item.get("batch_root"),
-                    psycopg2.extras.Json(item["merkle_proof"])
-                    if item.get("signature") else None,
-                )
-                for item in items
-            ]
-            upsert = """INSERT INTO audio_features
-                   (track_id, bpm, key, mode, key_confidence,
-                    energy, energy_db, brightness, dynamic_range_db,
-                    zero_crossing_rate, instruments, moods,
-                    vocal_instrumental, vocal_score, danceability,
-                    analysis_source_id, analysis_version,
-                    author_pubkey, signature, batch_root, merkle_proof)
+            fields = list(FEATURE_FIELDS)
+            columns = fields + ["analysis_source_id", "analysis_version",
+                                "author_pubkey", "signature", "batch_root", "merkle_proof"]
+            upsert = f"""INSERT INTO audio_features (track_id, {", ".join(columns)})
                    VALUES %s
                    ON CONFLICT (track_id) DO UPDATE SET
-                       bpm = EXCLUDED.bpm, key = EXCLUDED.key,
-                       mode = EXCLUDED.mode, key_confidence = EXCLUDED.key_confidence,
-                       energy = EXCLUDED.energy, energy_db = EXCLUDED.energy_db,
-                       brightness = EXCLUDED.brightness,
-                       dynamic_range_db = EXCLUDED.dynamic_range_db,
-                       zero_crossing_rate = EXCLUDED.zero_crossing_rate,
-                       instruments = EXCLUDED.instruments, moods = EXCLUDED.moods,
-                       vocal_instrumental = EXCLUDED.vocal_instrumental,
-                       vocal_score = EXCLUDED.vocal_score,
-                       danceability = EXCLUDED.danceability,
-                       analysis_source_id = EXCLUDED.analysis_source_id,
-                       analysis_version = EXCLUDED.analysis_version,
-                       author_pubkey = EXCLUDED.author_pubkey,
-                       signature = EXCLUDED.signature,
-                       batch_root = EXCLUDED.batch_root,
-                       merkle_proof = EXCLUDED.merkle_proof,
+                       {", ".join(f"{c} = EXCLUDED.{c}" for c in columns)},
                        updated_at = CURRENT_TIMESTAMP"""
-            template = "(" + ", ".join(["%s"] * 21) + ")"
-            imported = 0
-            for item, value in zip(items, values):
-                if _item_write(cur, "features", item["track_uuid"],
-                               lambda v=value: psycopg2.extras.execute_values(
-                                   cur, upsert, [v], template=template)):
-                    imported += 1
-        return imported
+            template = "(" + ", ".join(["%s"] * (len(columns) + 1)) + ")"
+            first: dict = {}                 # one row per track: the first item of it
+            for item in items:
+                first.setdefault(item["track_uuid"], item)
+            items = list(first.values())
+            values = {
+                item["track_uuid"]: (
+                    item["track_uuid"],
+                    *(psycopg2.extras.Json(item.get(f)) if FEATURE_FIELDS[f] == _JSON
+                      else item.get(f) for f in fields),
+                    self._source_id(source_map, item), item.get("analysis_version", 1),
+                    item["author_pubkey"], item["signature"], item["batch_root"],
+                    psycopg2.extras.Json(item["merkle_proof"]))
+                for item in items
+            }
+            return _page_write(
+                cur, "features", items,
+                lambda: psycopg2.extras.execute_values(cur, upsert, list(values.values()),
+                                                       template=template, page_size=500),
+                lambda item: psycopg2.extras.execute_values(cur, upsert, [values[item["track_uuid"]]],
+                                                            template=template))
 
     def _import_track_mbids(self, conn, items: list[dict]) -> int:
         """Sealed track↔recording bindings — same shape as artist_mbids:

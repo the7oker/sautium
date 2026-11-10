@@ -453,7 +453,7 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
                           cue_start, cue_end)
     if fp is None:
         return None
-    # An own-file registration ranks above every row, so it always gets an id.
+    # Only a stream is ever "already held": an own-file registration always gets an id.
     return _register(db, track_id, fp, provider_id=None, media_file_id=media_file_id,
                      duration=int(round(float(duration_seconds))) if duration_seconds else None,
                      sample_rate=sample_rate, bit_depth=bit_depth, is_lossless=is_lossless)
@@ -498,16 +498,18 @@ _RETURNED_SQL = f"""
 # Its candidates: the track's unlinked rows, the equal print first. The rule
 # decides (material.same_material), not the equal digest: a library moved to
 # a node whose fpcalc prints some of it a bit otherwise (another FFmpeg)
-# keeps its analysis. A row made from a lesser copy than the file (an MP3 the
-# FLAC replaced, its copy removed or away) is not the file's analysis: the
-# file stays pending, and its pass registers it in the row's group and
-# derives the better version. The fingerprint covers fpcalc's first 120 s; the
+# keeps its analysis. Only a row of the file's own copy (copy_rank) is the
+# file's: one made from a lesser copy (an MP3 the FLAC replaced, its copy
+# removed or away) leaves the file pending, so its pass registers it in the
+# row's group and derives the better version; one made from a better copy
+# (a CD rip an MP3 now stands in for) keeps its claims for the better copy's
+# return, while the lesser file registers a row of its own. The fingerprint covers fpcalc's first 120 s; the
 # duration is the other half of the material declaration a seal binds
 # (record_sig.segment_payload), so a longer or shorter cut of the same
 # opening is another material, and a file of unknown length matches only a
 # row that declares none either.
 _RELINK_CANDIDATES_SQL = sa_text(f"""
-    SELECT s.id, s.chromaprint, s.duration_seconds, s.bit_depth, s.is_lossless
+    SELECT s.id, s.chromaprint, s.duration_seconds, s.copy_rank
       FROM analysis_sources s
      WHERE s.track_id = :tid AND {_UNLINKED}
      ORDER BY s.chromaprint = :fp DESC, s.id
@@ -614,11 +616,11 @@ def _relink(files, cancel_check, progress_cb) -> int:
 
 def _relink_one(db: Session, f, fp: str) -> bool:
     """Link the first of the file's track's unlinked rows that is its
-    material to it; whether one was."""
+    material and its copy to it; whether one was."""
     duration = int(round(float(f.duration_seconds))) if f.duration_seconds else None   # as declared
-    quality = quality_score(f.bit_depth, f.is_lossless)
+    mine = copy_rank(None, f.is_lossless, f.bit_depth)
     for row in db.execute(_RELINK_CANDIDATES_SQL, {"tid": f.track_id, "fp": fp}).fetchall():
-        if (quality_score(row.bit_depth, row.is_lossless) >= quality
+        if (row.copy_rank == mine
                 and material.same_material(fp, duration, row.chromaprint, row.duration_seconds)):
             return bool(db.execute(_RELINK_SQL, {"mfid": f.id, "sid": row.id}).rowcount)
     return False
