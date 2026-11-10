@@ -133,4 +133,4 @@ def test_keep_existing_filters_rows_and_items_by_local_entities():
     # every structural link table and every category has a reference rule
     assert set(share._ROW_REFS) >= {"album_tracks", "track_artists", "album_artists",
                                     "artist_mbids", "album_genres", "album_descriptions"}
-    assert set(share._ITEM_REFS) == {"segments", "audio_features", "track_mbids"}
+    assert set(share._ITEM_REFS) == {"segments", "audio_features", "instruments", "track_mbids"}

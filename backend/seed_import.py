@@ -10,9 +10,13 @@ whose digest does not match is discarded, and the import waits for the
 next start like any other transient failure here.
 
 Runs once per node from db_migrate.apply_pending, keyed by the `seed_v{N}`
-marker row (N from bundle.json) — the marker is written only after a
-COMPLETE import, so a partial landing (killed boot, transient DB error, no
-network yet) retries on the next start. Every statement is idempotent:
+marker row (N from bundle.json), once the node is past the analysis
+records' cutover (`analysis_records_v4`) — the marker is written only after
+a COMPLETE import, so a partial landing (killed boot, transient DB error, no
+network yet) retries on the next start. A bundle of an older record format
+lands what this release still takes: seed v3's structure and segments land,
+its v3 features fail the gate, it has no instruments envelope, and the node
+holds less than it names — no marker, and a later bundle completes it. Every statement is idempotent:
 structural rows land with
 ON CONFLICT DO NOTHING (a node that already holds a row keeps its own —
 the master and any owning node are no-ops by construction), and the
@@ -46,7 +50,7 @@ logger = logging.getLogger(__name__)
 BUNDLE_INFO_PATH = Path(__file__).resolve().parent / "seed" / "bundle.json"
 DOWNLOAD_TIMEOUT_S = 60
 
-_ANALYSIS_CATEGORIES = ("segments", "audio_features", "track_mbids")
+_ANALYSIS_CATEGORIES = ("segments", "audio_features", "instruments", "track_mbids")
 
 # (bundle section, INSERT statement, VALUES template, columns) in FK order.
 # Sealed rows are inserted whole with imported=TRUE — the seal-guard
@@ -221,6 +225,8 @@ _PRESENCE_SQL = {
                  "track_uuid"),
     "audio_features": ("SELECT COUNT(DISTINCT track_id) FROM audio_features WHERE track_id = ANY(%s::uuid[])",
                        "track_uuid"),
+    "instruments": ("SELECT COUNT(DISTINCT track_id) FROM track_instruments WHERE track_id = ANY(%s::uuid[])",
+                    "track_uuid"),
     "track_mbids": ("SELECT COUNT(DISTINCT track_id) FROM track_mbids WHERE track_id = ANY(%s::uuid[])",
                     "track_uuid"),
 }
@@ -280,7 +286,8 @@ def apply_seed(conn, db_dsn: str, info: dict) -> dict:
         out["error"] = str(e)[:500]
         return out
 
-    envelopes = {c: bundle["analysis"][c] for c in _ANALYSIS_CATEGORIES}
+    envelopes = {c: bundle["analysis"][c] for c in _ANALYSIS_CATEGORIES
+                 if c in bundle["analysis"]}
 
     from desktop.sync_client import SyncClient
     client = SyncClient(api_client=None, db_dsn=db_dsn)

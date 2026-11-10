@@ -29,8 +29,11 @@ so nothing is applied from a file that has not passed whole.
 Content: the structural rows the records need (like the seed: albums,
 tracklists, credits, genres, descriptions), then EVERY sealed analysis
 record the node holds per sync category — segments, audio features,
-track↔recording bindings; its own and what it received, each under its
-author's seal, exactly what the node serves on the network. "What I
+instruments, track↔recording bindings; its own and what it received, each
+under its author's seal, exactly what the node serves on the network. The
+envelopes carry their records in each kind's format (record_sig), so a file
+written before the records' cutover of 2026-11-10 still reads: its segments
+import, its v3 features fail the gate. "What I
 know" is more than "what I analysed", and the seals keep authorship
 straight whoever carries the file (Valerii, 2026-09-14). Nothing Last.fm
 answered is in the file (bios, tags, similars, stats, genre descriptions):
@@ -248,7 +251,9 @@ _ANALYSED_ALBUMS = """
                  JOIN embedding_segments es ON es.embedding_id = e.id
                 WHERE es.signature IS NOT NULL
                UNION
-               SELECT af.track_id FROM audio_features af WHERE af.signature IS NOT NULL)"""
+               SELECT af.track_id FROM audio_features af WHERE af.signature IS NOT NULL
+               UNION
+               SELECT ti.track_id FROM track_instruments ti WHERE ti.signature IS NOT NULL)"""
 
 _BROAD_SCOPES = {"analysed": _ANALYSED_ALBUMS, "engaged": _ENGAGED_ALBUMS, "owned": _OWNED_ALBUMS}
 
@@ -427,6 +432,7 @@ _ROW_REFS = {
 _ITEM_REFS = {
     "segments": (("track_uuid", "tracks"),),
     "audio_features": (("track_uuid", "tracks"),),
+    "instruments": (("track_uuid", "tracks"),),
     "track_mbids": (("track_uuid", "tracks"),),
 }
 

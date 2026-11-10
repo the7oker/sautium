@@ -6,7 +6,9 @@ normalization, which cannot reproduce the identity rule's punctuation
 folding — and exported as <seed_dir>/seed_v{N}.json.gz for every node's
 first-start import (backend/seed_import.py). The bundle version moves with
 its content: v2 (2026-09-18) shipped seals made under audio payload v3, v3
-(2026-09-19) dropped the Last.fm layer.
+(2026-09-19) dropped the Last.fm layer, v4 (2026-11-10) the records of a
+version per kind — features v4, the instruments a v1 record of their own —
+exported after the master's re-seal is stamped.
 
 The bundle never enters the tree (17 MB per version, for ever, in every
 clone): it is published as the asset of the GitHub release `seed-v{N}` by
@@ -18,7 +20,7 @@ The bundle has two halves. The structural half (albums, tracklists,
 artists, descriptions, picks) has no P2P wire representation — the v3
 structural transport is deleted — so plain row dumps travel here, seals
 included where the master holds them. The analysis half (segments, audio
-features, track↔recording bindings) is the VERBATIM output of the pull
+features, instruments, track↔recording bindings) is the VERBATIM output of the pull
 handlers in desktop/p2p/sync_queries.py, so the importer replays it
 through the ordinary verify-and-import gate with zero format drift.
 Nothing Last.fm answered ships — bios, tags, similars are node-local since
@@ -66,7 +68,7 @@ MANIFEST_PATH = SEED_DIR / "manifest_v1.json"
 BUNDLE_INFO_PATH = SEED_DIR / "bundle.json"
 
 BUNDLE_FORMAT = "sautium-seed"
-BUNDLE_VERSION = 3
+BUNDLE_VERSION = 4
 BUNDLE_PATH = Path(settings.seed_dir) / f"seed_v{BUNDLE_VERSION}.json.gz"
 RELEASE_URL = ("https://github.com/the7oker/sautium/releases/download/"
                f"seed-v{BUNDLE_VERSION}/{BUNDLE_PATH.name}")
@@ -182,7 +184,12 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
                           SELECT 1 FROM audio_features af
                           WHERE af.track_id = at2.track_id
                             AND af.signature IS NOT NULL AND af.batch_root IS NOT NULL
-                      )) AS no_features
+                      )) AS no_features,
+                      COUNT(*) FILTER (WHERE NOT EXISTS (
+                          SELECT 1 FROM track_instruments ti
+                          WHERE ti.track_id = at2.track_id
+                            AND ti.signature IS NOT NULL AND ti.batch_root IS NOT NULL
+                      )) AS no_instruments
                FROM album_tracks at2 WHERE at2.album_id = %s::uuid""",
             [p["album_id"]])[0]
         if analysis["no_segments"]:
@@ -192,6 +199,10 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
         if analysis["no_features"]:
             waivable.append(f"{label}: {analysis['no_features']}/{analysis['n']} tracks "
                             "without sealed audio_features"
+                            + (" (waived)" if p["analysis_waiver"] else ""))
+        if analysis["no_instruments"]:
+            waivable.append(f"{label}: {analysis['no_instruments']}/{analysis['n']} tracks "
+                            "without sealed instruments"
                             + (" (waived)" if p["analysis_waiver"] else ""))
 
         manifest_owned = next(
@@ -300,11 +311,13 @@ def structural_sections(conn, album_ids: list[str], track_ids: list[str],
 _ENVELOPE_SORT_KEYS = {
     "segments": lambda i: i["track_uuid"],
     "audio_features": lambda i: i["track_uuid"],
+    "instruments": lambda i: i["track_uuid"],
     "track_mbids": lambda i: (i["track_uuid"], i["recording_mbid"]),
 }
 
 ANALYSIS_CATEGORIES = (("segments", sq.pull_segments),
                        ("audio_features", sq.pull_audio_features),
+                       ("instruments", sq.pull_instruments),
                        ("track_mbids", sq.pull_track_mbids))
 
 
