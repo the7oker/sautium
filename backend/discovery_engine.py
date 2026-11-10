@@ -279,16 +279,16 @@ TOOLS: dict[str, Tool] = {
     "energy": Tool("energy", broad=True, sources=(
         Source("energy", "audio_features", "af.energy_db BETWEEN :energy_lo AND :energy_hi",
                is_gate=True),)),
-    # instruments stores the RAW top-20 score distribution (no write-time
-    # cutoff) — presence is a read-time decision against per-label thresholds
-    # (ensemble_instruments.INSTRUMENT_THRESHOLDS). `?|` alone would match
-    # noise-level scores; it stays only as the GIN-indexed retrieve branch in
-    # front of the score check.
+    # The instruments record stores the RAW top-20 score distribution (no
+    # write-time cutoff) — presence is a read-time decision against per-label
+    # thresholds (ensemble_instruments.INSTRUMENT_THRESHOLDS). `?|` alone would
+    # match noise-level scores; it stays only as the GIN-indexed retrieve
+    # branch in front of the score check.
     "instruments": Tool("instruments", sources=(
-        Source("instruments", "audio_features",
-               "(af.instruments ?| :instruments AND EXISTS "
+        Source("instruments", "track_instruments",
+               "(ti.instruments ?| :instruments AND EXISTS "
                "(SELECT 1 FROM jsonb_each_text(CAST(:instruments_thr AS jsonb)) th "
-               "WHERE (af.instruments->>th.key)::float >= th.value::float))",
+               "WHERE (ti.instruments->>th.key)::float >= th.value::float))",
                is_gate=True,
                expand=lambda v: _expand_instruments(v)),)),
     # moods and danceable are DERIVED scores (zero_shot_scores, by the
@@ -396,6 +396,7 @@ EDGES: tuple = (
     Edge("artists", "album_artists", "aa.artist_id = a.id"),
     Edge("album_artists", "albums", "aa.album_id = al.id"),
     Edge("tracks", "audio_features", "af.track_id = t.id"),
+    Edge("tracks", "track_instruments", "ti.track_id = t.id"),
     Edge("tracks", "embeddings", "e.track_id = t.id"),
     Edge("embeddings", "embedding_segments", "es.embedding_id = e.id"),
     Edge("embeddings", "zero_shot_scores", "zs.embedding_id = e.id"),
@@ -417,7 +418,8 @@ EDGES: tuple = (
 _ALIAS = {
     "artists": "a", "albums": "al", "tracks": "t",
     "track_artists": "ta", "album_artists": "aa", "album_tracks": "atr",
-    "audio_features": "af", "embeddings": "e", "artist_bio_embeddings": "abe",
+    "audio_features": "af", "track_instruments": "ti", "embeddings": "e",
+    "artist_bio_embeddings": "abe",
     "owned_files": "f", "album_variants": "av", "album_genres": "ag", "genres": "g",
     "artist_name_aliases": "ana", "lyrics_embeddings": "le",
     "embedding_segments": "es", "zero_shot_scores": "zs",
@@ -560,7 +562,8 @@ def _norm_expr(src: Source) -> str:
 _TABLE_LEVEL = {
     "artists": "artist", "artist_name_aliases": "artist", "artist_bio_embeddings": "artist",
     "albums": "album", "album_artists": "album", "album_genres": "album", "genres": "album",
-    "tracks": "track", "audio_features": "track", "embeddings": "track",
+    "tracks": "track", "audio_features": "track", "track_instruments": "track",
+    "embeddings": "track",
     "embedding_segments": "track", "zero_shot_scores": "track",
     "lyrics_embeddings": "track", "album_tracks": "track", "owned_files": "track",
     "track_artists": "track",

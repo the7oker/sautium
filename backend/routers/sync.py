@@ -16,14 +16,14 @@ similars, track stats, genre descriptions (since 2026-09-19): its API terms
 do not allow redistribution, so that layer is node-local and every node
 fetches its own by name. Audio analysis travels as SEGMENTS with their seals
 (pull category `segments`), the only way it travels; the track-level mean is
-derived locally by the importer.
+derived locally by the importer. The inventory and the pulls are the shared
+handlers of desktop/p2p/sync_queries.py, which the launcher's sync server
+serves too — one copy of what the two surfaces answer.
 """
 
-import base64
-import json
 import logging
 import os
-from datetime import timezone
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -31,9 +31,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-import record_sig
 from config import settings
-from db_pool import db_query as _db_query, db_query_one as _db_query_one, get_conn, in_peer_lane
+from db_pool import get_conn, in_peer_lane
 from desktop.p2p import wire
 
 logger = logging.getLogger(__name__)
@@ -43,10 +42,6 @@ router = APIRouter(prefix="/api/sync", tags=["sync"])
 # Sync-protocol capabilities advertised on /health. Mirrors the launcher
 # server's list (desktop/p2p/sync_queries.py CAPABILITIES) — keep in step.
 SYNC_CAPABILITIES = ["segments"]
-
-# A track bundle is K=12..24 vectors, each ~2.7KB base64 + ~1.3KB proof —
-# segments pulls get a tighter per-request cap than plain-row categories.
-SEGMENTS_MAX_UUIDS = 500
 
 # "P2P sharing" in Settings. Until now nothing read it: the switch was
 # written to user_settings and never consulted, so a node kept serving its
@@ -541,9 +536,6 @@ class PullRequest(BaseModel):
 # Inventory endpoint
 # ---------------------------------------------------------------------------
 
-_EMPTY_INVENTORY = {"tracks": [], "embeddings": [], "audio_features": []}
-
-
 @router.post("/inventory")
 async def get_inventory(req: InventoryRequest, request: Request) -> Response:
     """
@@ -551,35 +543,16 @@ async def get_inventory(req: InventoryRequest, request: Request) -> Response:
 
     The requester sends track UUIDs from their library; the response
     carries, per category, what this node holds sealed for them — one
-    round trip. Mirrors desktop/p2p/sync_queries.get_inventory.
+    round trip. desktop/p2p/sync_queries.get_inventory, as the launcher
+    answers it.
     """
     _require_sharing()
-    if not req.track_uuids:
-        return dict(_EMPTY_INVENTORY)
+    if carry_queries is None:
+        raise HTTPException(status_code=404, detail="sync unavailable")
 
     def _run():
-        row = _db_query_one("""
-            WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id)
-            SELECT
-                ARRAY(SELECT t.id::text FROM tracks t
-                      WHERE t.id IN (SELECT id FROM uuids)) AS tracks,
-                (SELECT COALESCE(json_agg(json_build_array(x.tid, x.v, x.segs)), '[]'::json)
-                 FROM (SELECT e.track_id::text AS tid, MAX(e.analysis_version) AS v,
-                              COUNT(es.id) AS segs
-                       FROM embeddings e
-                       LEFT JOIN embedding_segments es ON es.embedding_id = e.id
-                             AND es.signature IS NOT NULL
-                             AND es.batch_root IS NOT NULL
-                       WHERE e.track_id IN (SELECT id FROM uuids)
-                       GROUP BY e.track_id) x) AS embeddings,
-                (SELECT COALESCE(json_agg(json_build_array(af.track_id::text, af.analysis_version)), '[]'::json)
-                 FROM audio_features af
-                 WHERE af.track_id IN (SELECT id FROM uuids)
-                   AND af.signature IS NOT NULL
-                   AND af.batch_root IS NOT NULL) AS audio_features
-        """, {"u": req.track_uuids})
-        return {"tracks": row["tracks"], "embeddings": row["embeddings"],
-                "audio_features": row["audio_features"]}
+        with get_conn() as conn:
+            return carry_queries.get_inventory(conn, req.track_uuids)
 
     try:
         return await _answer(request, _run)
@@ -612,246 +585,37 @@ async def get_holdings(request: Request, have: Optional[str] = None) -> Response
 
 
 # ---------------------------------------------------------------------------
-# Helpers for pull endpoints
-# ---------------------------------------------------------------------------
-
-def _parse_vector(vec_text: str) -> list[float]:
-    """Parse pgvector text representation '[0.1,0.2,...]' to list of floats."""
-    return json.loads(vec_text)
-
-
-# ---------------------------------------------------------------------------
 # Pull endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/pull/tracks")
-async def pull_tracks(req: PullRequest, request: Request) -> Response:
-    """Pull track metadata with associated artists."""
+@router.post("/pull/{category}")
+async def pull(category: str, req: PullRequest, request: Request) -> Response:
+    """A pull category's records — desktop/p2p/sync_queries.PULL_HANDLERS,
+    as the launcher's sync server serves them: track metadata, and the
+    sealed analysis (segment bundles, features, instruments, recording
+    bindings) with the `batches` map of their Worker timestamps and the
+    `authors` map of their authors' certificates, this node's own for the
+    records it authored."""
     _require_sharing()
-    if not req.uuids:
-        return {"category": "tracks", "items": []}
-
-    def _run():
-        # Get tracks
-        tracks = _db_query(
-            "SELECT id::text AS track_uuid, title FROM tracks WHERE id = ANY(%s::uuid[])",
-            [req.uuids],
-        )
-
-        # Get artists for these tracks
-        artists = _db_query(
-            """SELECT ta.track_id::text, ta.role,
-                      a.id::text AS artist_uuid, a.name AS artist_name
-               FROM track_artists ta
-               INNER JOIN artists a ON a.id = ta.artist_id
-               WHERE ta.track_id = ANY(%s::uuid[])
-               ORDER BY ta.track_id, ta.role""",
-            [req.uuids],
-        )
-
-        # Group artists by track
-        artists_by_track: dict[str, list] = {}
-        for a in artists:
-            tid = str(a["track_id"])
-            artists_by_track.setdefault(tid, []).append({
-                "artist_uuid": a["artist_uuid"],
-                "name": a["artist_name"],
-                "role": a["role"],
-            })
-
-        items = []
-        for t in tracks:
-            uuid = t["track_uuid"]
-            items.append({
-                "track_uuid": uuid,
-                "title": t["title"],
-                "artists": artists_by_track.get(uuid, []),
-            })
-
-        return {"category": "tracks", "items": items}
-
-    try:
-        return await _answer(request, _run)
-    except Exception as e:
-        logger.error(f"Pull tracks failed: {e}")
-        raise HTTPException(status_code=500, detail="internal error")
-
-
-def _provenance_item(r: dict) -> Optional[dict]:
-    """Nested provenance payload from p_-prefixed LEFT JOIN columns; None for
-    rows not linked to an analysis_sources row (unlinked legacy rows).
-
-    Carries the material declaration the signature commits to, and nothing
-    that describes the author's copy of it. `provider_id`, `sample_rate` and
-    `bit_depth` are deliberately NOT sent: a signature already says "I had
-    this audio", and those three would turn it into "I hold this FILE" — a
-    NULL provider_id says so outright, and a 96kHz/24-bit source says it just as
-    plainly, since no streaming tier serves hi-res. Withholding them leaves
-    a local rip and a lossless stream indistinguishable on the wire, which
-    is the same possession-privacy line the three-tier signing policy draws.
-    None of the three is part of the signed payload, so seals are unaffected.
-    `is_lossless` stays: a lossless stream fetch is lossless too, so it grades analysis
-    quality without implying a file."""
-    if r.get("p_chromaprint") is None:
-        return None
-    return {
-        "chromaprint": r["p_chromaprint"],
-        "duration_seconds": r["p_duration_seconds"],
-        "grid_version": r["p_grid_version"],
-        "is_lossless": r["p_is_lossless"],
-    }
-
-
-_PROVENANCE_COLS = """s.chromaprint AS p_chromaprint,
-                      s.duration_seconds AS p_duration_seconds,
-                      s.grid_version AS p_grid_version,
-                      s.is_lossless AS p_is_lossless"""
-
-
-def _batches_map(roots: set) -> dict:
-    """signing_batches rows for the referenced Merkle roots, serialized so the
-    importer can verify the Worker timestamp: worker_date is re-rendered as the
-    exact seconds-precision UTC string the Worker signed."""
-    if not roots:
-        return {}
-    rows = _db_query(
-        """SELECT batch_root, author_pubkey, worker_date, ip_hash::text AS ip_hash,
-                  worker_sig, authority, timestamp_version
-           FROM signing_batches WHERE batch_root = ANY(%s)""",
-        [list(roots)],
-    )
-    return {
-        r["batch_root"]: {
-            "author_pubkey": r["author_pubkey"],
-            "worker_date": r["worker_date"].astimezone(timezone.utc)
-                                           .strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "ip_hash": r["ip_hash"],
-            "worker_sig": r["worker_sig"],
-            "authority": r["authority"],
-            "timestamp_version": r["timestamp_version"],
-        }
-        for r in rows
-    }
-
-
-def _authors_map(authors: set) -> dict:
-    """The `authors` map beside `batches`: each author's certificate, this
-    node's own for the records it authored (desktop/p2p/sync_queries.py
-    builds the same for the launcher's pulls)."""
-    from desktop.p2p import slice_trust
-    with get_conn() as conn:
-        return slice_trust.author_entries(conn, authors, _own_slice_cert())
-
-
-@router.post("/pull/segments")
-async def pull_segments(req: PullRequest, request: Request) -> Response:
-    """Per-track CLAP segment bundles with their seals — the signed, synced
-    unit (the importer derives the mean locally; see record_sig.py). Vectors
-    travel as base64 of the canonical float32-LE bytes so vector_hash verifies
-    over the received bytes; the `batches` map carries the Worker timestamps.
-    Mirrors desktop/p2p/sync_queries.pull_segments."""
-    _require_sharing()
-    if not req.uuids:
-        return {"category": "segments", "items": [], "batches": {}, "authors": {}}
-    if len(req.uuids) > SEGMENTS_MAX_UUIDS:
+    if carry_queries is None:
+        raise HTTPException(status_code=404, detail="sync unavailable")
+    handler = carry_queries.PULL_HANDLERS.get(category)
+    if handler is None:
+        raise HTTPException(status_code=404, detail=f"unknown category: {category}")
+    if category == "segments" and len(req.uuids) > carry_queries.SEGMENTS_MAX_UUIDS:
         raise HTTPException(
             status_code=400,
-            detail=f"segments pull is capped at {SEGMENTS_MAX_UUIDS} tracks per request")
+            detail=f"segments pull is capped at {carry_queries.SEGMENTS_MAX_UUIDS} tracks per request")
 
     def _run():
-        rows = _db_query(
-            f"""SELECT e.track_id::text AS track_uuid,
-                       em.id::text AS model_uuid, em.name AS model_name,
-                       e.analysis_version,
-                       es.segment_index, es.vector::text AS vec,
-                       es.author_pubkey, es.signature, es.batch_root, es.merkle_proof,
-                       {_PROVENANCE_COLS}
-                FROM embeddings e
-                INNER JOIN embedding_models em ON em.id = e.model_id
-                INNER JOIN embedding_segments es ON es.embedding_id = e.id
-                LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
-                WHERE e.track_id = ANY(%s::uuid[])
-                  AND es.signature IS NOT NULL AND es.batch_root IS NOT NULL
-                ORDER BY e.track_id, es.segment_index""",
-            [req.uuids],
-        )
-
-        items_by_track: dict[str, dict] = {}
-        roots: set = set()
-        authors: set = set()
-        for r in rows:
-            bundle = items_by_track.get(r["track_uuid"])
-            if bundle is None:
-                bundle = items_by_track[r["track_uuid"]] = {
-                    "track_uuid": r["track_uuid"],
-                    "model_uuid": r["model_uuid"],
-                    "model_name": r["model_name"],
-                    "analysis_version": r["analysis_version"],
-                    "provenance": _provenance_item(r),
-                    "segments": [],
-                }
-            seg = {
-                "i": r["segment_index"],
-                "v": base64.b64encode(
-                    record_sig.vector_to_bytes(_parse_vector(r["vec"]))
-                ).decode("ascii"),
-            }
-            if r["signature"]:
-                seg["author_pubkey"] = r["author_pubkey"]
-                seg["signature"] = r["signature"]
-                seg["batch_root"] = r["batch_root"]
-                seg["proof"] = r["merkle_proof"]
-                roots.add(r["batch_root"])
-                authors.add(r["author_pubkey"])
-            bundle["segments"].append(seg)
-
-        return {"category": "segments", "items": list(items_by_track.values()),
-                "batches": _batches_map(roots), "authors": _authors_map(authors)}
+        # A sealed category: its `authors` map carries this node's own
+        # certificate for the records it authored.
+        serve = handler if category == "tracks" else partial(handler, own=_own_slice_cert())
+        with get_conn() as conn:
+            return serve(conn, req.uuids)
 
     try:
         return await _answer(request, _run)
     except Exception as e:
-        logger.error(f"Pull segments failed: {e}")
-        raise HTTPException(status_code=500, detail="internal error")
-
-
-@router.post("/pull/audio-features")
-async def pull_audio_features(req: PullRequest, request: Request) -> Response:
-    """Pull audio analysis features with their provenance. Rows travel WITH
-    their seals + a `batches` map (Worker timestamps) — imported rows stay
-    verifiable and re-servable with authorship intact."""
-    _require_sharing()
-    if not req.uuids:
-        return {"category": "audio_features", "items": [], "batches": {}, "authors": {}}
-
-    def _run():
-        rows = _db_query(
-            f"""SELECT a.track_id::text AS track_uuid,
-                       a.bpm, a.key, a.mode, a.key_confidence,
-                       a.energy, a.energy_db, a.brightness, a.dynamic_range_db,
-                       a.zero_crossing_rate, a.instruments, a.moods,
-                       a.vocal_instrumental, a.vocal_score, a.danceability,
-                       a.analysis_version,
-                       a.author_pubkey, a.signature, a.batch_root, a.merkle_proof,
-                       {_PROVENANCE_COLS}
-                FROM audio_features a
-                LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                WHERE a.track_id = ANY(%s::uuid[])
-                  AND a.signature IS NOT NULL AND a.batch_root IS NOT NULL""",
-            [req.uuids],
-        )
-        items, roots = [], set()
-        for r in rows:
-            item = {k: v for k, v in r.items() if not k.startswith("p_")}
-            item["provenance"] = _provenance_item(r)
-            roots.add(item["batch_root"])
-            items.append(item)
-        return {"category": "audio_features", "items": items,
-                "batches": _batches_map(roots),
-                "authors": _authors_map({i["author_pubkey"] for i in items})}
-
-    try:
-        return await _answer(request, _run)
-    except Exception as e:
-        logger.error(f"Pull audio features failed: {e}")
+        logger.error(f"Pull {category} failed: {e}")
         raise HTTPException(status_code=500, detail="internal error")

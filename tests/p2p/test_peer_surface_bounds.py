@@ -15,6 +15,7 @@ holds a few connections at most.
 The full ASGI app is driven in-process; nothing here needs a database."""
 
 import asyncio
+import contextlib
 import json
 import socket
 import sys
@@ -229,9 +230,9 @@ def test_a_wait_for_a_slot_cancelled_with_its_request_gives_its_place_back():
 def test_a_peers_sql_and_its_answer_run_on_the_peer_lane_never_on_the_loop(monkeypatch):
     threads = []
 
-    def query_one(sql, params=None):
+    def inventory(conn, track_uuids):
         threads.append(threading.current_thread().name)
-        return {"tracks": [], "embeddings": [], "audio_features": []}
+        return dict(sync.carry_queries.EMPTY_INVENTORY)
 
     real = sync.wire.render
 
@@ -240,12 +241,14 @@ def test_a_peers_sql_and_its_answer_run_on_the_peer_lane_never_on_the_loop(monke
         return real(answer, gzip_ok)
 
     monkeypatch.setattr(sync, "_require_sharing", lambda: None)
-    monkeypatch.setattr(sync, "_db_query_one", query_one)
+    monkeypatch.setattr(sync, "get_conn", contextlib.nullcontext)
+    monkeypatch.setattr(sync.carry_queries, "get_inventory", inventory)
     monkeypatch.setattr(sync.wire, "render", render)
     answer = asyncio.run(sync.get_inventory(sync.InventoryRequest(
         track_uuids=["00000000-0000-0000-0000-000000000001"]), _request()))
     assert len(threads) == 2 and all(t.startswith("peer-lane") for t in threads)
-    assert json.loads(answer.body) == {"tracks": [], "embeddings": [], "audio_features": []}
+    assert json.loads(answer.body) == {"tracks": [], "embeddings": [], "audio_features": [],
+                                       "instruments": []}
 
 
 def test_a_lane_takes_its_connections_from_its_own_pool(monkeypatch):
@@ -311,11 +314,12 @@ def test_health_reads_its_counts_once_a_minute_one_refresh_at_a_time(monkeypatch
 
 
 def test_a_failed_query_answers_500_with_no_word_of_its_cause(monkeypatch):
-    def failing(sql, params=None):
+    def failing(conn, track_uuids):
         raise RuntimeError("could not connect to server at 192.0.2.7:5432 as musicai")
 
     monkeypatch.setattr(sync, "_require_sharing", lambda: None)
-    monkeypatch.setattr(sync, "_db_query_one", failing)
+    monkeypatch.setattr(sync, "get_conn", contextlib.nullcontext)
+    monkeypatch.setattr(sync.carry_queries, "get_inventory", failing)
     with pytest.raises(HTTPException) as refused:
         asyncio.run(sync.get_inventory(sync.InventoryRequest(
             track_uuids=["00000000-0000-0000-0000-000000000001"]), _request()))

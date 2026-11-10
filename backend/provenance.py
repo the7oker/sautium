@@ -129,8 +129,8 @@ def file_in_group_sql(source: str = "asrc", file: str = "mf") -> str:
 
 
 def held_in_group(db: Session, source_id: int, table: str, model_id=None) -> bool:
-    """Whether the analysis of `table` (embeddings, audio_features; the
-    instrument pass's table when its pass registers before it computes) on
+    """Whether the analysis of `table` (embeddings, audio_features,
+    track_instruments — for a pass that registers before it computes) on
     the source's track is linked to a row of the source's material group
     that ranks at least as high — the pass that just registered `source_id`
     then has nothing to compute: the better version replaces the worse,
@@ -166,8 +166,8 @@ def outranked(db: Session, existing_id: Optional[int], source_id: int) -> bool:
 
 
 # The tables of analysis records, each row linked to an analysis_sources row
-# of its track: what the identity merge weighs kind by kind.
-ANALYSIS_KINDS = ("embeddings", "audio_features")
+# of its track: what the identity merge weighs kind by kind, and its shed.
+ANALYSIS_KINDS = ("embeddings", "audio_features", "track_instruments")
 
 _TRACK_ROWS_SQL = sa_text("""
     SELECT id, material_of, chromaprint, duration_seconds, imported,

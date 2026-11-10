@@ -256,9 +256,10 @@ def unenriched_artist_uuids(dsn: str) -> list[str]:
 
 
 def incomplete_artist_uuids(dsn: str) -> list[str]:
-    """Artists with a track missing analysis in EITHER category — the
-    run's trigger set. Catches partial states (segments landed but the
-    features didn't) that the AND-logic of unenriched_artist_uuids skips."""
+    """Artists with a track missing analysis in ANY category — the run's
+    trigger set. Catches partial states (segments landed but the features
+    didn't, an author's instruments came after its sonic records) that the
+    AND-logic of unenriched_artist_uuids skips."""
     conn = _connect(dsn)
     try:
         return sync_queries.get_incomplete_artist_uuids(conn)
@@ -1076,6 +1077,7 @@ class SyncWalk:
 
             for category, batch in (("segments", SEGMENT_PULL_BATCH),
                                     ("audio_features", 500),
+                                    ("instruments", 500),
                                     ("track_mbids", 500)):
                 uuids = wanted.get(category) or []
                 # No own entry in the `authors` map: the carrier never counts

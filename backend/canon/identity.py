@@ -145,11 +145,11 @@ def _shed_track_seals(db: Session, track_id: str, kinds=ANALYSIS_KINDS) -> None:
     rename every kind, after a merge the kinds it moved (_merge_analysis).
 
     Every seal payload binds the track uuid (segment_payload /
-    features_payload), so after the uuid changed the stored signatures
-    verify against a uuid the row no longer carries — the album_tracks /
-    track_mbids guards shed theirs on the cascaded track_id change, these
-    tables have no track_id in their guard. sign_audio re-seals on its next
-    pass; nothing travels unsigned in between."""
+    features_payload / instruments_payload), so after the uuid changed the
+    stored signatures verify against a uuid the row no longer carries — the
+    album_tracks / track_mbids guards shed theirs on the cascaded track_id
+    change, these tables have no track_id in their guard. sign_audio
+    re-seals on its next pass; nothing travels unsigned in between."""
     if "embeddings" in kinds:
         db.execute(text(f"""
             UPDATE embedding_segments es SET {_SEAL_NULL}
@@ -493,6 +493,7 @@ ORPHAN_TRACK_SQL = """
     AND NOT EXISTS (SELECT 1 FROM album_tracks o_at WHERE o_at.track_id = {t}.id)
     AND NOT EXISTS (SELECT 1 FROM embeddings o_e WHERE o_e.track_id = {t}.id)
     AND NOT EXISTS (SELECT 1 FROM audio_features o_af WHERE o_af.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM track_instruments o_ti WHERE o_ti.track_id = {t}.id)
     AND NOT EXISTS (SELECT 1 FROM listening_history o_lh WHERE o_lh.track_id = {t}.id)
     AND NOT EXISTS (SELECT 1 FROM local_play_stats o_lp WHERE o_lp.track_id = {t}.id)
     AND NOT EXISTS (SELECT 1 FROM session_tracks o_st WHERE o_st.track_id = {t}.id)

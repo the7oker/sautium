@@ -9,8 +9,9 @@ push of a third author's records goes over each carrier's route too. The
 records are sealed by their authors under the test authority
 (tests/p2p/sealed_records.py) and verified by the import gate end to end.
 
-Checked: each node witnesses the other by its probe and by its
-introduction; an author whose analysis the other node carried is witnessed
+Checked: each kind of record — segments, features, instruments, bindings —
+moves both ways, pulled and carried, over both surfaces' routes; each node
+witnesses the other by its probe and by its introduction; an author whose analysis the other node carried is witnessed
 `carried`, delivered by that node — pulled (its certificate alone when that
 node only witnessed it, with its proof when it verified it) or pushed — and
 the pusher of its own analysis never is; the sync writes no identity row for
@@ -53,6 +54,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 psycopg2 = pytest.importorskip("psycopg2")
+import psycopg2.extras  # noqa: E402
 pytest.importorskip("fastapi")
 pytest.importorskip("uvicorn")
 
@@ -70,6 +72,7 @@ from tests.p2p.test_witness import ISSUER, certificate  # noqa: E402
 from tests.p2p.test_witness_launcher import Served, _tls_context  # noqa: E402
 
 MODEL = sync_client.model_uuid("clap")     # the id the importer takes for that name
+INSTRUMENTS = {"piano": 0.62, "drum kit": 0.45, "violin, fiddle": 0.011}
 
 
 class _Node:
@@ -218,9 +221,13 @@ def _holds(conn, track) -> dict:
         cur.execute("""SELECT (SELECT count(*) FROM embeddings e JOIN embedding_segments es
                                   ON es.embedding_id = e.id WHERE e.track_id = %(t)s),
                               (SELECT count(*) FROM audio_features WHERE track_id = %(t)s),
-                              (SELECT count(*) FROM track_mbids WHERE track_id = %(t)s)""", {"t": track})
-        segments, features, bindings = cur.fetchone()
-    return {"segments": segments, "features": features, "bindings": bindings}
+                              (SELECT count(*) FROM track_instruments
+                                WHERE track_id = %(t)s AND instruments = %(i)s),
+                              (SELECT count(*) FROM track_mbids WHERE track_id = %(t)s)""",
+                    {"t": track, "i": psycopg2.extras.Json(INSTRUMENTS)})
+        segments, features, instruments, bindings = cur.fetchone()
+    return {"segments": segments, "features": features, "instruments": instruments,
+            "bindings": bindings}
 
 
 @pytest.fixture
@@ -288,8 +295,10 @@ def world(scratch_dsn, launcher_dsn, monkeypatch, tmp_path):
     with docker_db.cursor() as cur:
         for author in (C, G):                       # the Docker node met them; never verified
             assert docker_record.record(author.cert, "introduced", author.pub)
-            seal_track(cur, author.key, tracks[author.name], MODEL, recording=recordings[author.name])
-        seal_track(cur, D.key, tracks["D"], MODEL, recording=recordings["D"], first_hand=True)
+            seal_track(cur, author.key, tracks[author.name], MODEL, recording=recordings[author.name],
+                       instruments=INSTRUMENTS)
+        seal_track(cur, D.key, tracks["D"], MODEL, recording=recordings["D"], first_hand=True,
+                   instruments=INSTRUMENTS)
         _snapshot(cur, D, tracks["D"], recordings["D"])
         for n in ("L", "F"):                         # what it would take from the launcher
             _wanted(cur, tracks[n], recordings[n])
@@ -298,8 +307,10 @@ def world(scratch_dsn, launcher_dsn, monkeypatch, tmp_path):
         identity_registry.mark_verified(launcher_db, E.pub, E.proof["nonce"])
         assert srv.witness.record(F.cert, "introduced", F.pub)
         for author in (E, F):
-            seal_track(cur, author.key, tracks[author.name], MODEL, recording=recordings[author.name])
-        seal_track(cur, L.key, tracks["L"], MODEL, recording=recordings["L"], first_hand=True)
+            seal_track(cur, author.key, tracks[author.name], MODEL, recording=recordings[author.name],
+                       instruments=INSTRUMENTS)
+        seal_track(cur, L.key, tracks["L"], MODEL, recording=recordings["L"], first_hand=True,
+                   instruments=INSTRUMENTS)
         _snapshot(cur, L, tracks["L"], recordings["L"])
         for n in ("D", "G"):
             _wanted(cur, tracks[n], recordings[n])
@@ -324,7 +335,8 @@ def _walk(dsn, identity, monkeypatch) -> sync_walk.SyncWalk:
     """A node's walk, the process's holdings filter emptied first: the node
     it asks builds its own (the module doc)."""
     monkeypatch.setattr(sync_queries, "_holdings",
-                        {"checked_at": 0.0, "version": None, "payload": None, "tracks_n": 0})
+                        {"checked_at": 0.0, "version": None, "payload": None, "tracks_n": 0,
+                         "instruments_n": 0})
     return sync_walk.SyncWalk(dsn, identity=identity, sharing_enabled=lambda: True)
 
 
@@ -346,17 +358,18 @@ def test_two_nodes_witness_the_authors_of_what_they_pull_and_carry(world, scratc
     # The launcher's walk: its gap from the Docker node, then its own carried there.
     launcher_walk = _walk(launcher_dsn, w["manager"]._peer_identity, monkeypatch)
     stats = asyncio.run(launcher_walk._sync_from_peer(w["docker"].url, ([t["C"]], []), say, None))
-    assert stats == {"segments": 1, "audio_features": 1}, stats
+    assert stats == {"segments": 1, "audio_features": 1, "instruments": 1}, stats
     # The Docker node's walk: its gap from the launcher, then its own carried there.
     docker_walk = _walk(scratch_dsn, lambda: p2p_identity.peer_identity(settings), monkeypatch)
     stats = asyncio.run(docker_walk._sync_from_peer(w["launcher"].url, ([t["E"]], []), say, None))
-    assert stats == {"segments": 1, "audio_features": 1}, stats
+    assert stats == {"segments": 1, "audio_features": 1, "instruments": 1}, stats
 
     ldb, ddb = w["launcher_db"], w["docker_db"]
-    assert _holds(ldb, t["C"]) == {"segments": 3, "features": 1, "bindings": 0}      # pulled
-    assert _holds(ldb, t["D"]) == {"segments": 3, "features": 1, "bindings": 1}      # carried to it
-    assert _holds(ddb, t["E"]) == {"segments": 3, "features": 1, "bindings": 0}
-    assert _holds(ddb, t["L"]) == {"segments": 3, "features": 1, "bindings": 1}
+    every = {"segments": 3, "features": 1, "instruments": 1}
+    assert _holds(ldb, t["C"]) == {**every, "bindings": 0}      # pulled
+    assert _holds(ldb, t["D"]) == {**every, "bindings": 1}      # carried to it
+    assert _holds(ddb, t["E"]) == {**every, "bindings": 0}
+    assert _holds(ddb, t["L"]) == {**every, "bindings": 1}
 
     # A third author's records pushed by hand over each carrier's route.
     to_docker = BackendAPIClient(w["docker"].url, peer=w["manager"]._peer_identity())
@@ -365,6 +378,8 @@ def test_two_nodes_witness_the_authors_of_what_they_pull_and_carry(world, scratc
     to_launcher = BackendAPIClient(w["launcher"].url, peer=p2p_identity.peer_identity(settings))
     assert to_launcher.get_health()["node_id"] == L.pub
     assert _push_by_hand(to_launcher, ddb, "audio_features", t["G"]) == 1
+    assert _push_by_hand(to_launcher, ddb, "instruments", t["G"]) == 1
+    assert _holds(ldb, t["G"]) == {"segments": 0, "features": 1, "instruments": 1, "bindings": 0}
 
     # Every bundle a node holds was scored by the segments' trigger — its own,
     # and what the walk pulled, the other node carried to it, a hand pushed.
@@ -391,12 +406,13 @@ def test_two_nodes_witness_the_authors_of_what_they_pull_and_carry(world, scratc
     served = {D.pub: {"author_cert": D.cert, "author_proof": D.travels[1]},
               C.pub: {"author_cert": C.cert, "author_proof": None}}
     for route, handler in (("segments", sync_queries.pull_segments),
-                           ("audio-features", sync_queries.pull_audio_features)):
+                           ("audio-features", sync_queries.pull_audio_features),
+                           ("instruments", sync_queries.pull_instruments)):
         from_docker = to_docker.sync_pull(route, [t["C"], t["D"]])
         assert from_docker["authors"] == handler(ddb, [t["C"], t["D"]], own=D.travels)["authors"]
         assert from_docker["authors"] == served, route
         assert "mined_at" not in json.dumps(from_docker)
-    for route in ("segments", "audio-features", "track-mbids"):
+    for route in ("segments", "audio-features", "instruments", "track-mbids"):
         from_launcher = to_launcher.sync_pull(route, [t["E"], t["L"]])
         assert from_launcher["authors"][L.pub] == {"author_cert": L.cert, "author_proof": L.travels[1]}
         assert from_launcher["authors"][E.pub]["author_cert"] == E.cert, route

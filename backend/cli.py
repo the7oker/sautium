@@ -750,9 +750,10 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
                         SELECT t.title, a2.name as artist,
                                af.bpm, af.key, af.mode,
                                {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental,
-                               round(z.danceability::numeric, 3) AS danceability, af.instruments
+                               round(z.danceability::numeric, 3) AS danceability, ti.instruments
                         FROM audio_features af
                         JOIN tracks t ON af.track_id = t.id
+                        LEFT JOIN track_instruments ti ON ti.track_id = t.id
                         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
                         JOIN artists a2 ON ta.artist_id = a2.id
                         LEFT JOIN track_zero_shot z ON z.track_id = t.id

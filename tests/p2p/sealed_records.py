@@ -1,8 +1,9 @@
 """Sealed analysis records for tests that move them between nodes: one
-author's segments, audio features and track binding for a track, signed as
-backend/sign_audio.py signs them, in one Merkle batch, its root stamped by
-the test authority (tests/p2p/test_witness.AUTHORITY) — what the import gate
-verifies end to end. Not a test module."""
+author's segments, audio features, instruments (when asked) and track
+binding for a track, signed as backend/sign_audio.py signs them, in one
+Merkle batch, its root stamped by the test authority
+(tests/p2p/test_witness.AUTHORITY) — what the import gate verifies end to
+end. Not a test module."""
 
 import math
 import struct
@@ -39,13 +40,15 @@ def _vec(values: list) -> str:
 def seal_track(cur, author_key, track: str, model: str, *, recording: str,
                first_hand: bool = False, chromaprint: str = "AQAAsealed",
                duration: int = 95, segments: int = 3, analysis_version: int = 2,
-               stretch: float = 1.0) -> str:
+               stretch: float = 1.0, instruments: dict = None,
+               instruments_version: int = 2) -> str:
     """An author's whole analysis of `track` on this node: its source (the
     author's own file when `first_hand`, else imported), the mean and
-    `segments` sealed segments, sealed features and a sealed binding to
-    `recording`. `stretch` (a power of two, so float32 keeps the values)
-    scales the segment vectors off the unit sphere, validly sealed all the
-    same. Returns the batch root."""
+    `segments` sealed segments, sealed features, sealed `instruments` (at
+    `instruments_version`) when given, and a sealed binding to `recording`.
+    `stretch` (a power of two, so float32 keeps the values) scales the
+    segment vectors off the unit sphere, validly sealed all the same.
+    Returns the batch root."""
     author = pub(author_key)
     cur.execute("""INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds,
                                                  grid_version, imported)
@@ -70,6 +73,10 @@ def seal_track(cur, author_key, track: str, model: str, *, recording: str,
     signed.append(("features", None, rs.sign(rs.features_payload(
         author, track, chromaprint, duration, analysis_version,
         rs.blake2b_hex(rs.canonical_features_blob(features))), author_key)))
+    if instruments is not None:
+        signed.append(("instruments", None, rs.sign(rs.instruments_payload(
+            author, track, chromaprint, duration, instruments_version,
+            rs.blake2b_hex(rs.canonical_instruments_blob(instruments))), author_key)))
     binding = {"recording_mbid": recording, "confidence": "name_exact"}
     signed.append(("binding", None, rs.sign(rs.enrichment_payload(
         author, "track_mbid", track, "",
@@ -96,6 +103,13 @@ def seal_track(cur, author_key, track: str, model: str, *, recording: str,
                                                        batch_root, merkle_proof)
                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         (track, features["bpm"], features["energy"], source, analysis_version,
+                         *seal))
+        elif kind == "instruments":
+            cur.execute("""INSERT INTO track_instruments (track_id, instruments, analysis_source_id,
+                                                          analysis_version, author_pubkey, signature,
+                                                          batch_root, merkle_proof)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (track, psycopg2.extras.Json(instruments), source, instruments_version,
                          *seal))
         else:
             cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, created_at,

@@ -184,7 +184,8 @@ row "NOT in library (streams)", and the play/queue tools accept those UUIDs dire
 
 ## Audio analysis (linked to tracks, not files)
 
-**audio_features** (track_id UUID, bpm, key, mode, energy, energy_db, brightness, instruments[jsonb])
+**audio_features** (track_id UUID, bpm, key, mode, energy, energy_db, brightness)
+**track_instruments** (track_id UUID, instruments[jsonb]) - one row per track that has been tagged
   - `instruments`: AudioSet multi-label tags (AST+PaSST ensemble, sigmoid probabilities). \
 Stored as the RAW top-20 score distribution (everything >= 0.01) — key presence does NOT \
 mean the instrument plays (a stored 0.011 is noise), so NEVER filter by bare `?`/`?|` \
@@ -196,9 +197,9 @@ percussion, hi-hat, cymbal, acoustic guitar, electric guitar, bass guitar, \
 `violin, fiddle` (one key, comma inside), cello, double bass, string section, \
 trumpet, trombone, saxophone, flute, clarinet, harp, choir, orchestra, accordion, \
 harmonica, sitar, banjo, ukulele, mandolin, tabla, didgeridoo, theremin. \
-Query: `WHERE (af.instruments->>'saxophone')::float >= 0.10`; for an any-of set OR the \
-per-label checks (optionally AND `af.instruments ?| ARRAY[...]` in front, as a \
-GIN-index retrieve branch only). A much higher score (0.3+) = high-confidence presence.
+Query: `JOIN track_instruments ti ON ti.track_id = t.id WHERE (ti.instruments->>'saxophone')::float >= 0.10`; \
+for an any-of set OR the per-label checks (optionally AND `ti.instruments ?| ARRAY[...]` in front, \
+as a GIN-index retrieve branch only). A much higher score (0.3+) = high-confidence presence.
 
 """ + _ZERO_SHOT_NOTE + """
 
@@ -600,7 +601,8 @@ You are a knowledgeable, passionate music expert who loves sharing insights.
 - Write **detailed, engaging responses** — not just track lists. Explain WHY you recommend something.
 - Share musical context: album history, sonic character, how it connects to what the user asked.
 - When comparing albums or recommending alternatives, use **actual audio data** from audio_features \
-(brightness, energy, bpm, instruments) and track_zero_shot (danceability, moods) to support your reasoning.
+(brightness, energy, bpm), track_instruments (instruments) and track_zero_shot (danceability, moods) \
+to support your reasoning.
 - Suggest alternatives: "If you want something darker, try X. For a lighter vibe, Y."
 - Ask follow-up questions when appropriate: "Want me to play it?" or "Should I find something more energetic?"
 - Remember context from the conversation. Reference previous recommendations and build on them.

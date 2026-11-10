@@ -4,7 +4,7 @@ Comprehensive track enrichment pipeline.
 Orchestrates all data aggregation steps in the correct order:
 1. Audio Embedding (CLAP) - base audio feature
 2. Last.fm Artist Info - artist metadata
-3. Audio Analysis - DSP features + CLAP classification
+3. Audio Analysis - DSP features + the instrument tagger
 
 Each step is conditional - only runs if data is missing.
 Supports filters, limits, time constraints, and graceful error handling.
@@ -28,7 +28,7 @@ from config import settings
 from database import get_db_context
 from sql_queries import ARTIST_ENGAGED
 from models import (
-    Track, MediaFile, Album, AlbumVariant, Artist, TrackArtist,
+    Track, MediaFile, Album, Artist, TrackArtist,
     AudioFeature, Embedding, SimilarArtist, ArtistBio,
     ExternalMetadata,
 )
@@ -562,27 +562,32 @@ class TrackEnrichmentPipeline:
         self.force_embeddings = force_embeddings
         self.force_audio_analysis = force_audio_analysis
 
-        # Lazy-loaded components
+        # Lazy-loaded components: the run's own audio stages (each loads its
+        # models on first use) and Last.fm
         self._audio_embedding_generator = None
         self._audio_analyzer = None
         self._lastfm_service = None
 
     def _get_audio_embedding_generator(self) -> "AudioEmbeddingGenerator":
-        """Lazy-load audio embedding generator."""
         if self._audio_embedding_generator is None:
             from embeddings import AudioEmbeddingGenerator
             self._audio_embedding_generator = AudioEmbeddingGenerator()
-            self._audio_embedding_generator.load_model()
         return self._audio_embedding_generator
 
     def _get_audio_analyzer(self) -> "AudioAnalyzer":
-        """Lazy-load audio analyzer."""
         if self._audio_analyzer is None:
             from audio_analysis import AudioAnalyzer
             self._audio_analyzer = AudioAnalyzer()
-            if not self.skip_audio_analysis:
-                self._audio_analyzer.load_model()
         return self._audio_analyzer
+
+    @staticmethod
+    def _stage_result(stats: Dict[str, int]) -> str:
+        """A stage's statistics for one track as the pipeline's step result:
+        nothing pending (no file to analyse, a better copy's records stand)
+        is a skip."""
+        if stats.get("success"):
+            return 'success'
+        return 'failed' if stats.get("failed") else 'skipped'
 
     def _get_lastfm_service(self):
         """Lazy-load Last.fm service."""
@@ -590,16 +595,6 @@ class TrackEnrichmentPipeline:
             from lastfm import LastFmService
             self._lastfm_service = LastFmService()
         return self._lastfm_service
-
-    def _get_analysis_file(self, db: Session, track: Track) -> Optional[MediaFile]:
-        """The track's elected analysis source (is_analysis_source), never one
-        of a copy that is away (nothing can read it). No other file stands in
-        for an elected one that is away: the election keeps a file away only
-        while it carries the track's analysis (canon.identity.
-        ANALYSIS_SOURCE_ORDER), and another file's analysis would replace it."""
-        return db.query(MediaFile).join(AlbumVariant).filter(
-            MediaFile.track_id == track.id, AlbumVariant.absent_since.is_(None),
-            MediaFile.is_analysis_source == True).first()
 
     def _check_track_status(self, db: Session, track: Track) -> Dict[str, bool]:
         """
@@ -665,72 +660,30 @@ class TrackEnrichmentPipeline:
         """
         Enrich a single track with missing data.
 
+        The audio steps are the run's own stages scoped to this track
+        (embeddings.generate_embeddings, audio_analysis.AudioAnalyzer.
+        analyze_all): the elected analysis-source file, its decode, its
+        registration, the rank every save replaces by and both records'
+        saves are theirs, so this per-track path writes exactly what the bulk
+        run writes.
+
         Returns dict with step results (success/failed/skipped).
         """
-        import provenance
-
-        track_id = track.id
         results = {}
 
-        # Get analysis source file (needed for embedding and audio analysis)
-        needs_audio = status['needs_audio_embedding'] or status['needs_audio_features']
-        analysis_file = None
-        audio_48k = None
-
-        if needs_audio:
-            analysis_file = self._get_analysis_file(db, track)
-            if not analysis_file:
-                logger.warning(f"No media file found for track {track_id}")
-                if status['needs_audio_embedding']:
-                    results['audio_embedding'] = 'failed'
-                if status['needs_audio_features']:
-                    results['audio_features'] = 'failed'
-                status['needs_audio_embedding'] = False
-                status['needs_audio_features'] = False
-            elif (analysis_file.duration_seconds is not None
-                  and analysis_file.duration_seconds < provenance.MIN_MATERIAL_SECONDS):
-                # Under one grid window: no fingerprint, no address, no
-                # analysis — the bulk passes exclude such material the same way.
-                results['audio_embedding'] = 'skipped'
-                results['audio_features'] = 'skipped'
-                status['needs_audio_embedding'] = False
-                status['needs_audio_features'] = False
-            else:
-                # Decode the WHOLE track ONCE at 48kHz (shared scanner decode)
-                # — reused for the segment embeddings and the feature pass, so
-                # this per-track path produces the same full-track v2 analysis
-                # as the bulk scanner, not a middle-30s approximation.
-                from audio_analysis import load_full_track_48k
-                local_path = settings.translate_to_local_path(analysis_file.file_path)
-                try:
-                    audio_48k = load_full_track_48k(
-                        local_path, analysis_file.cue_start_seconds,
-                        analysis_file.cue_end_seconds)
-                except Exception as e:
-                    logger.error(f"Failed to load audio {local_path}: {e}")
-                    audio_48k = None
-
-        # Step 1: Audio Embedding (reuse loaded audio)
+        # Step 1: Audio Embedding
         if status['needs_audio_embedding']:
             if progress_callback:
                 progress_callback("Audio embedding")
             try:
-                if audio_48k is not None:
-                    generator = self._get_audio_embedding_generator()
-                    if generator.embed_track(db, track.id, analysis_file,
-                                             audio_full=audio_48k):
-                        db.commit()
-                        results['audio_embedding'] = 'success'
-                    else:
-                        results['audio_embedding'] = 'failed'
-                else:
-                    results['audio_embedding'] = 'failed'
+                results['audio_embedding'] = self._stage_result(
+                    self._get_audio_embedding_generator().generate_embeddings(
+                        track_ids=[track.id], force=self.force_embeddings))
             except Exception as e:
-                logger.error(f"Audio embedding failed for track {track_id}: {e}")
+                logger.error(f"Audio embedding failed for track {track.id}: {e}")
                 results['audio_embedding'] = 'failed'
-                db.rollback()
         else:
-            results.setdefault('audio_embedding', 'skipped')
+            results['audio_embedding'] = 'skipped'
 
         # Step 2-4: Last.fm enrichment (if not skipping)
         if not self.skip_lastfm:
@@ -753,71 +706,19 @@ class TrackEnrichmentPipeline:
             else:
                 results['lastfm_artist'] = 'skipped'
 
-        # Step 5: Audio Analysis (reuse loaded audio — no second file read)
+        # Step 5: Audio Analysis — the features and the instruments
         if status['needs_audio_features']:
             if progress_callback:
                 progress_callback("Audio analysis")
             try:
-                analyzer = self._get_audio_analyzer()
-                if audio_48k is not None:
-                    features = analyzer.analyze_from_array(audio_48k, sr=48000)
-                else:
-                    features = None
-                if features is not None:
-                    from audio_analysis import ANALYSIS_VERSION
-                    src_id = provenance.get_or_create_local(
-                        db, track.id, analysis_file.id,
-                        analysis_file.file_path, analysis_file.sample_rate,
-                        analysis_file.bit_depth, analysis_file.is_lossless,
-                        analysis_file.duration_seconds,
-                        analysis_file.cue_start_seconds,
-                        analysis_file.cue_end_seconds)
-                    if src_id is None:
-                        raise RuntimeError("no content address (fingerprint)")
-                    existing_af = db.query(AudioFeature).filter(
-                        AudioFeature.track_id == track.id
-                    ).first()
-                    # a better copy's features stay, as the embedding save
-                    # keeps a better copy's embedding
-                    kept = existing_af is not None and provenance.outranked(
-                        db, existing_af.analysis_source_id, src_id)
-                    if existing_af and not kept:
-                        for k, v in features.items():
-                            if hasattr(existing_af, k):
-                                setattr(existing_af, k, v)
-                        existing_af.analysis_source_id = src_id
-                        existing_af.analysis_version = ANALYSIS_VERSION
-                    elif not kept:
-                        af = AudioFeature(
-                            track_id=track.id,
-                            bpm=features.get("bpm"),
-                            key=features.get("key"),
-                            mode=features.get("mode"),
-                            key_confidence=features.get("key_confidence"),
-                            energy=features.get("energy"),
-                            energy_db=features.get("energy_db"),
-                            brightness=features.get("brightness"),
-                            dynamic_range_db=features.get("dynamic_range_db"),
-                            zero_crossing_rate=features.get("zero_crossing_rate"),
-                            instruments=features.get("instruments"),
-                            moods=features.get("moods"),
-                            vocal_instrumental=features.get("vocal_instrumental"),
-                            vocal_score=features.get("vocal_score"),
-                            danceability=features.get("danceability"),
-                            analysis_source_id=src_id,
-                            analysis_version=ANALYSIS_VERSION,
-                        )
-                        db.add(af)
-                    db.commit()
-                    results['audio_features'] = 'skipped' if kept else 'success'
-                else:
-                    results['audio_features'] = 'failed'
+                results['audio_features'] = self._stage_result(
+                    self._get_audio_analyzer().analyze_all(
+                        track_ids=[track.id], force=self.force_audio_analysis))
             except Exception as e:
-                logger.error(f"Audio analysis failed for track {track_id}: {e}")
+                logger.error(f"Audio analysis failed for track {track.id}: {e}")
                 results['audio_features'] = 'failed'
-                db.rollback()
         else:
-            results.setdefault('audio_features', 'skipped')
+            results['audio_features'] = 'skipped'
 
         return results
 

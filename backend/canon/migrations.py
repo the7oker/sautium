@@ -483,7 +483,7 @@ def normalize_artists(
 # for; and its guard refuses the UPDATE. Its rows keep their own copy of the
 # stamp, so _shed_all_seals' DELETE FROM signing_batches leaves them
 # verifiable.
-_SEALED_TABLES = ("embedding_segments", "audio_features", "albums",
+_SEALED_TABLES = ("embedding_segments", "audio_features", "track_instruments", "albums",
                   "album_tracks", "track_mbids")
 _TRACK_BATCH = 100_000
 

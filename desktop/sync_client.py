@@ -23,13 +23,13 @@ node-local and every node fetches its own by name.
 """
 
 import base64
-import json
 import logging
 import math
 import struct
 import time
 import unicodedata
 import uuid
+from functools import partial
 from typing import Optional, Callable
 
 import psycopg2
@@ -49,11 +49,13 @@ logger = logging.getLogger(__name__)
 # sealed `segments` only, from a peer that advertises the capability; a peer
 # without it is asked for none (the unsealed mean-vector pull is gone,
 # 2026-11-03: its rows took no seal, so a peer chose the vectors a track
-# got and nothing named who) — its sealed audio features still.
+# got and nothing named who) — its sealed audio features and instruments
+# still.
 CATEGORIES = [
     # (category_key_in_inventory, pull_endpoint, uuid_column_hint)
     ("segments", "segments", "track"),
     ("audio_features", "audio-features", "track"),
+    ("instruments", "instruments", "track"),
 ]
 
 # Pull category -> record kind. Membership in this map is what makes a category
@@ -151,39 +153,67 @@ def _is_uuid(value) -> bool:
 # gate's one table of them, in the order the record's seal hashes them
 # (record_sig.FEATURE_ORDER), which the features import also writes its
 # columns from. A field of another kind drops its item at the gate.
-_NUMBER, _TEXT, _JSON = "number", "text", "json"
+_NUMBER, _TEXT, _SCORES = "number", "text", "scores"
 FEATURE_FIELDS = {
     "bpm": _NUMBER, "key": _TEXT, "mode": _TEXT, "key_confidence": _NUMBER,
     "energy": _NUMBER, "energy_db": _NUMBER, "brightness": _NUMBER,
-    "dynamic_range_db": _NUMBER, "zero_crossing_rate": _NUMBER, "danceability": _NUMBER,
-    "vocal_instrumental": _TEXT, "vocal_score": _NUMBER, "instruments": _JSON, "moods": _JSON,
+    "dynamic_range_db": _NUMBER, "zero_crossing_rate": _NUMBER,
+}
+# The instruments record's one field, the same way: the tagger's raw score
+# per label (record_sig.canonical_instruments_blob). The readers threshold
+# it with `->>` and a cast, so a label is a short text and a score a number
+# in 0..1 — anything else would fail a reader's query, not its own import —
+# and there are at most INSTRUMENT_LABELS of them (the tagger knows fewer
+# than a hundred and stores its top twenty). An empty map is a record.
+INSTRUMENT_FIELDS = {"instruments": _SCORES}
+INSTRUMENT_LABELS = 128
+INSTRUMENT_LABEL_CHARS = 64
+_RECORD_FIELDS = {"features": FEATURE_FIELDS, "instruments": INSTRUMENT_FIELDS}
+# The per-track record kinds the import gate takes: their table, their
+# fields, the bytes their seal hashes and the payload it signs.
+_RECORD_KINDS = {
+    "features": ("audio_features", FEATURE_FIELDS, rs.canonical_features_blob,
+                 rs.features_payload),
+    "instruments": ("track_instruments", INSTRUMENT_FIELDS,
+                    lambda item: rs.canonical_instruments_blob(item["instruments"]),
+                    rs.instruments_payload),
 }
 
 
+def _is_number(value) -> bool:
+    return _is_int(value) or (isinstance(value, float) and math.isfinite(value))
+
+
 def _of_kind(kind: str, value) -> bool:
-    """A value the column of its field's kind takes, or none: a finite
-    number, a text with no NUL, a JSON object or array with no NUL."""
+    """A value the column of its field's kind takes: a finite number, a text
+    with no NUL, or none; for the scores, a map of label to score."""
+    if kind == _SCORES:
+        return (isinstance(value, dict) and len(value) <= INSTRUMENT_LABELS
+                and all(isinstance(label, str) and 0 < len(label) <= INSTRUMENT_LABEL_CHARS
+                        and "\x00" not in label and _is_number(score) and 0 <= score <= 1
+                        for label, score in value.items()))
     if value is None:
         return True
     if kind == _NUMBER:
-        return _is_int(value) or (isinstance(value, float) and math.isfinite(value))
-    if kind == _TEXT:
-        return isinstance(value, str) and "\x00" not in value
-    return isinstance(value, (dict, list)) and "\\u0000" not in json.dumps(value)
+        return _is_number(value)
+    return isinstance(value, str) and "\x00" not in value
 
 
-def _well_formed(item: dict, bundle: bool) -> Optional[str]:
-    """Why an analysis item is not one this node stores, or None — and then
-    its provenance is normalised in place to the declaration its row is
-    keyed by, exactly as the seal binds it: the fingerprint a string no
-    longer than fpcalc's window can make (material.MAX_FINGERPRINT_CHARS;
-    every later registration on its track compares with it), the duration
-    whole seconds within a day or none, the grid the one this build makes —
-    a bundle of another is refused (every segment seal binds it), a features
-    item's is ignored (no features seal binds it, so it must not move the
-    row). `is_lossless` is the author's unsigned claim, kept when it is one.
-    A features item's fields are typed by FEATURE_FIELDS. A field of
-    another type drops its item, never the batch."""
+def _well_formed(item: dict, kind: str) -> Optional[str]:
+    """Why an analysis item of `kind` (segments — a bundle —, features,
+    instruments) is not one this node stores, or None — and then its
+    provenance is normalised in place to the declaration its row is keyed
+    by, exactly as the seal binds it: the fingerprint a string no longer
+    than fpcalc's window can make (material.MAX_FINGERPRINT_CHARS; every
+    later registration on its track compares with it), the duration whole
+    seconds within a day or none, the grid the one this build makes — a
+    bundle of another is refused (every segment seal binds it), a record's
+    is ignored (no features or instruments seal binds it, so it must not
+    move the row). `is_lossless` is the author's unsigned claim, kept when
+    it is one. A record's fields are typed by its table (FEATURE_FIELDS,
+    INSTRUMENT_FIELDS). A field of another type drops its item, never the
+    batch."""
+    bundle = kind == "segments"
     if not _is_uuid(item.get("track_uuid")):
         return "no track uuid"
     prov = item.get("provenance")
@@ -206,10 +236,9 @@ def _well_formed(item: dict, bundle: bool) -> Optional[str]:
                        and isinstance(item.get("model_name", ""), str)
                        and len(item.get("model_name", "")) <= MODEL_NAME_CHARS):
         return "no model"
-    if not bundle:
-        for field, kind in FEATURE_FIELDS.items():
-            if not _of_kind(kind, item.get(field)):
-                return f"a {field} that is not one"
+    for field, of in _RECORD_FIELDS.get(kind, {}).items():
+        if not _of_kind(of, item.get(field)):
+            return f"a {field} that is not one"
     lossless = prov.get("is_lossless")
     item["provenance"] = {"chromaprint": fp, "duration_seconds": duration,
                           "grid_version": rs.GRID_VERSION,
@@ -375,21 +404,40 @@ class SyncClient:
     # asks about a few thousand — reading the whole table per category,
     # per peer, per run was seconds of pure waste on every sync.
 
-    def _held_feature_versions(self, candidates) -> dict[str, int]:
-        """Of `candidates`, uuid -> local analysis_version of the features
-        this node holds (sync_queries.HELD_FEATURES): its own, or sealed. An
-        imported row whose seal a shed removed is a gap."""
+    def _held_records(self, table: str, candidates) -> dict[str, tuple[int, bool]]:
+        """Of `candidates`, uuid -> (local analysis_version, first-hand) of
+        the record of `table` (audio_features, track_instruments) this node
+        holds (sync_queries.HELD_RECORD): its own, or sealed. An imported
+        row whose seal a shed removed is a gap."""
         candidates = list(candidates)
         if not candidates:
             return {}
         conn = self._get_conn()
         with conn.cursor() as cur:
-            cur.execute(f"""SELECT a.track_id::text, a.analysis_version
-                              FROM audio_features a
+            cur.execute(f"""SELECT a.track_id::text, a.analysis_version,
+                                   s.id IS NOT NULL AND NOT s.imported
+                              FROM {table} a
                               LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
                              WHERE a.track_id = ANY(%s::uuid[])
-                               AND {sync_queries.HELD_FEATURES}""", [candidates])
-            return {row[0]: row[1] for row in cur.fetchall()}
+                               AND {sync_queries.HELD_RECORD}""", [candidates])
+            return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+
+    def _held_here(self) -> tuple[set, set]:
+        """(the tracks whose segments and features this node both holds, the
+        tracks whose instruments it holds), by the HELD rules — read from
+        what is held, never from an asked list the phantom bulk makes
+        millions long."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(f"""SELECT a.track_id::text FROM audio_features a
+                              LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                             WHERE {sync_queries.HELD_RECORD}
+                               AND {sync_queries.HOLDS_SEGMENTS.format(t="a.track_id")}""")
+            sonic = {row[0] for row in cur.fetchall()}
+            cur.execute(f"""SELECT a.track_id::text FROM track_instruments a
+                              LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                             WHERE {sync_queries.HELD_RECORD}""")
+            return sonic, {row[0] for row in cur.fetchall()}
 
     def run_sync(self, track_uuids: list[str] = None,
                  bulk_track_uuids: Optional[list[str]] = None) -> dict:
@@ -518,9 +566,17 @@ class SyncClient:
 
     def _holdings_inventory(self, health: dict, tracks: list[str]) -> Optional[dict]:
         """Inventory for our gaps by the cheaper direction: the peer's
-        holdings filter (one download, cached by version, tested locally)
-        when the ask is bigger than the filter, the exact inventory
-        otherwise or when the peer has no filter. An empty inventory when
+        holdings filters (one download, cached by version, tested locally)
+        when the ask is bigger than the filters, the exact inventory
+        otherwise or when the peer has none. A track whose segments and
+        features this node holds and whose instruments it lacks is tested
+        against the peer's instruments filter alone — the peer holding its
+        segments says nothing of its instruments, and such a gap no peer can
+        fill would otherwise be an inventory request every run; every other
+        track against the tracks filter, as before: a peer that holds its
+        segments or features is asked about it, and its instruments come in
+        the same inventory. A peer that publishes no instruments filter
+        holds no instruments this node can verify. An empty inventory when
         nothing is worth asking; None when a request failed."""
         if "holdings" not in self.peer_capabilities:
             self._progress(
@@ -542,7 +598,7 @@ class SyncClient:
             # against ~1.2 bytes per held element in the filter.
             ask_cost = len(tracks) * 40
             if summary:
-                fetch_cost = summary.get("tracks", 0) * 1.2
+                fetch_cost = (summary.get("tracks", 0) + summary.get("instruments", 0)) * 1.2
                 if fetch_cost > ask_cost:
                     self._progress(
                         f"  {len(tracks)} track gaps weigh less than the "
@@ -560,18 +616,25 @@ class SyncClient:
             else:
                 try:
                     held = BloomFilter.from_dict(payload.get("tracks"))
+                    instruments = (BloomFilter.from_dict(payload["instruments"])
+                                   if "instruments" in payload else None)
                 except ValueError as e:
                     self._progress(f"  holdings filter refused: {e}")
                     return None
                 filters = {"version": payload["version"],
                            "fetched_at": time.time(),
-                           "tracks": held}
+                           "tracks": held, "instruments": instruments}
                 self.holdings_cache[key] = filters
                 self._progress(
                     f"  holdings filter fetched: {filters['tracks'].n} tracks "
-                    f"held by the peer")
+                    f"held by the peer"
+                    + (f", {instruments.n} with instruments" if instruments else ""))
 
-        hits = filters["tracks"].hits(tracks)
+        sonic, instrumented = self._held_here()
+        only_instruments = sonic - instrumented
+        hits = filters["tracks"].hits([t for t in tracks if t not in only_instruments])
+        if filters.get("instruments") is not None:
+            hits += filters["instruments"].hits([t for t in tracks if t in only_instruments])
         self._progress(
             f"  holdings filter: {len(hits)} of {len(tracks)} tracks worth asking")
         if not hits:
@@ -618,11 +681,19 @@ class SyncClient:
         Segments are planned from the `embeddings` inventory key, whose rows
         are [uuid, analysis_version, sealed segment count] — a row with no
         sealed segment offers nothing to pull — against the local rows this
-        node holds (sync_queries.HELD_*: its own, or sealed). A held row is
-        still pulled when the source's methodology is newer: existence alone
-        never delivers upgrades."""
+        node holds (sync_queries.HELD_*: its own, or sealed); a held grid is
+        never replaced (_protected_analysis_tracks). The features and the
+        instruments, [uuid, analysis_version], against the records held: a
+        held record is still pulled when the source's methodology is newer
+        and the record is not this node's own — an imported record of a
+        newer methodology replaces an imported one of an older, never a
+        first-hand one (sync_queries.KEPT_RECORD, which the importers keep
+        by), so nothing is pulled only to be dropped. Existence alone never
+        delivers upgrades."""
         needed = {}
-        checks = [("audio_features", "audio_features", self._held_feature_versions)]
+        checks = [("audio_features", "audio_features",
+                   partial(self._held_records, "audio_features")),
+                  ("instruments", "instruments", partial(self._held_records, "track_instruments"))]
         if use_segments:
             checks.insert(0, ("segments", "embeddings", self._local_segment_versions))
         for cat_key, inv_key, local_versions in checks:
@@ -630,14 +701,18 @@ class SyncClient:
             rows = inventory.get(inv_key) or []
             available_versions = {
                 row[0]: row[1] for row in rows
-                if isinstance(row, list) and len(row) >= 2
+                if isinstance(row, list) and len(row) >= 2 and _is_int(row[1])
                 and (cat_key != "segments" or (len(row) > 2 and row[2]))}
             if not available_versions:
                 continue
             local = local_versions(available_versions)
             new = [u for u in available_versions if u not in local]
-            outdated = [u for u, v in available_versions.items()
-                        if u in local and local[u] < v]
+            if cat_key == "segments":
+                outdated = [u for u, v in available_versions.items()
+                            if u in local and local[u] < v]
+            else:
+                outdated = [u for u, v in available_versions.items()
+                            if u in local and not local[u][1] and local[u][0] < v]
             candidates = new + outdated
             if cat_key == "segments" and candidates:
                 protected = self._protected_analysis_tracks(candidates)
@@ -718,7 +793,7 @@ class SyncClient:
         try:
             # Sealed categories also need the response-level Worker-timestamp
             # map to verify (and re-serve) the full chain.
-            if category in ("segments", "audio_features"):
+            if category in ("segments", "audio_features", "instruments"):
                 count = importer(conn, result["items"],
                                  result.get("batches") or {}, authors)
             else:
@@ -930,7 +1005,7 @@ class SyncClient:
         # Decode + verify outside the write path: (item, [(idx, floats, seal)])
         decoded = []
         for item in items:
-            why = _well_formed(item, bundle=True)
+            why = _well_formed(item, "segments")
             if why:
                 logger.warning("sync import: dropping track %s — %s",
                                str(item.get("track_uuid", "?"))[:8], why)
@@ -1192,43 +1267,74 @@ class SyncClient:
         p = item["provenance"]
         return source_map[(item["track_uuid"], p["chromaprint"], p["duration_seconds"])]
 
+    @staticmethod
+    def _drop_kept(cur, items: list[dict], table: str, what: str) -> list[dict]:
+        """Filter out the items whose track's record of `table` this node
+        keeps against them (sync_queries.KEPT_RECORD): its own first-hand
+        record, or a sealed one of a methodology no older than the item's —
+        an imported record of an older methodology is replaced by a newer
+        one, as the planner asked for it."""
+        if not items:
+            return items
+        cur.execute(f"""SELECT i.track_id::text
+                          FROM unnest(%s::uuid[], %s::int[]) AS i(track_id, version)
+                          JOIN {table} a ON a.track_id = i.track_id
+                          LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                         WHERE {sync_queries.KEPT_RECORD.format(v="i.version")}""",
+                    ([i["track_uuid"] for i in items],
+                     [i.get("analysis_version", 1) for i in items]))
+        kept = {r[0] for r in cur.fetchall()}
+        if kept:
+            logger.debug("sync import: %d %s rows kept (own or no older)", len(kept), what)
+        return [i for i in items if i["track_uuid"] not in kept]
+
     def _import_audio_features(self, conn, items: list[dict],
                                batches: dict, authors: set) -> int:
-        """Import feature rows whose seal verifies; `authors` gains the
-        author of each."""
+        return self._import_records(conn, items, batches, authors, "features")
+
+    def _import_instruments(self, conn, items: list[dict],
+                            batches: dict, authors: set) -> int:
+        return self._import_records(conn, items, batches, authors, "instruments")
+
+    def _import_records(self, conn, items: list[dict], batches: dict, authors: set,
+                        kind: str) -> int:
+        """Import the per-track records of `kind` (_RECORD_KINDS: features,
+        instruments) whose seal verifies; `authors` gains the author of
+        each."""
+        table, fields, digest, payload_of = _RECORD_KINDS[kind]
         batch_ok = self._batch_verifier(batches)
 
         # Verify-on-import: a row must verify end-to-end (author sig → Merkle
         # proof → Worker timestamp over the transmitted values) or it drops.
         # Unsigned rows drop too — see _verify_enrichment for why: we would
         # redistribute them, and an unattributable claim must not travel with
-        # our address on it.
+        # our address on it. A record of an older format of its kind (a v3
+        # features record) is rebuilt in this one and fails here.
         verified = []
         for item in items:
             if not item.get("signature"):
                 logger.warning(
-                    "sync import: dropping unsigned features %s",
+                    "sync import: dropping unsigned %s %s", kind,
                     item.get("track_uuid", "?")[:8])
                 continue
-            why = _well_formed(item, bundle=False)
+            why = _well_formed(item, kind)
             if why:
-                logger.warning("sync import: dropping features %s — %s",
-                               str(item.get("track_uuid", "?"))[:8], why)
+                logger.warning("sync import: dropping %s %s — %s",
+                               kind, str(item.get("track_uuid", "?"))[:8], why)
                 continue
             prov = item["provenance"]
             try:
-                payload = rs.features_payload(
+                payload = payload_of(
                     item.get("author_pubkey") or "", item["track_uuid"],
                     prov["chromaprint"], prov["duration_seconds"],
-                    item.get("analysis_version", 1),
-                    rs.blake2b_hex(rs.canonical_features_blob(item)))
+                    item.get("analysis_version", 1), rs.blake2b_hex(digest(item)))
             except (KeyError, ValueError, TypeError, AttributeError):
                 payload = None
             if not (payload
                     and _sealed(payload, item["signature"], item.get("author_pubkey"),
                                 item.get("merkle_proof"), item.get("batch_root"), batch_ok)):
                 logger.warning(
-                    "sync import: dropping features %s — seal invalid",
+                    "sync import: dropping %s %s — seal invalid", kind,
                     item.get("track_uuid", "?")[:8])
                 continue
             verified.append(item)
@@ -1238,28 +1344,21 @@ class SyncClient:
             return 0
 
         with conn.cursor() as cur:
-            # The data write never replaces what this node holds: a SIGNED
-            # row (overwriting would strip its seal via the guard trigger)
-            # or my own first-hand analysis — file or stream, the same line
-            # the segments importer draws. Provenance registers for the kept
-            # items only.
-            items = self._drop_protected(
-                cur, items,
-                f"""SELECT a.track_id::text FROM audio_features a
-                    LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                    WHERE a.track_id = ANY(%s::uuid[])
-                      AND {sync_queries.HELD_FEATURES}""",
-                "audio_features")
+            # The data write never replaces what this node keeps: its own
+            # first-hand analysis — file or stream, the line the segments
+            # importer draws — or a SEALED row of a methodology no older
+            # (overwriting would strip its seal via the guard trigger).
+            # Provenance registers for the kept items only.
+            items = self._drop_kept(cur, items, table, kind)
             if not items:
                 return 0
             source_map = self._upsert_analysis_sources(cur, items)
             self._insert_batches(
                 cur, batches,
                 {i["batch_root"] for i in items if i.get("signature")})
-            fields = list(FEATURE_FIELDS)
-            columns = fields + ["analysis_source_id", "analysis_version",
-                                "author_pubkey", "signature", "batch_root", "merkle_proof"]
-            upsert = f"""INSERT INTO audio_features (track_id, {", ".join(columns)})
+            columns = list(fields) + ["analysis_source_id", "analysis_version",
+                                      "author_pubkey", "signature", "batch_root", "merkle_proof"]
+            upsert = f"""INSERT INTO {table} (track_id, {", ".join(columns)})
                    VALUES %s
                    ON CONFLICT (track_id) DO UPDATE SET
                        {", ".join(f"{c} = EXCLUDED.{c}" for c in columns)},
@@ -1272,15 +1371,15 @@ class SyncClient:
             values = {
                 item["track_uuid"]: (
                     item["track_uuid"],
-                    *(psycopg2.extras.Json(item.get(f)) if FEATURE_FIELDS[f] == _JSON
-                      else item.get(f) for f in fields),
+                    *(psycopg2.extras.Json(item[f]) if of == _SCORES else item.get(f)
+                      for f, of in fields.items()),
                     self._source_id(source_map, item), item.get("analysis_version", 1),
                     item["author_pubkey"], item["signature"], item["batch_root"],
                     psycopg2.extras.Json(item["merkle_proof"]))
                 for item in items
             }
             return _page_write(
-                cur, "features", items,
+                cur, kind, items,
                 lambda: psycopg2.extras.execute_values(cur, upsert, list(values.values()),
                                                        template=template, page_size=500),
                 lambda item: psycopg2.extras.execute_values(cur, upsert, [values[item["track_uuid"]]],
@@ -1322,6 +1421,7 @@ class SyncClient:
     _IMPORTERS = {
         "segments": _import_segments,
         "audio_features": _import_audio_features,
+        "instruments": _import_instruments,
         "track_mbids": _import_track_mbids,
     }
 

@@ -371,7 +371,7 @@ def instrument_options(q: str = Query("", max_length=50), limit: int = Query(8, 
     from ensemble_instruments import DEFAULT_THRESHOLD
     rows = db_query("""
         SELECT e.k AS name, COUNT(*) AS track_count
-        FROM audio_features af, LATERAL jsonb_each_text(af.instruments) AS e(k, v)
+        FROM track_instruments ti, LATERAL jsonb_each_text(ti.instruments) AS e(k, v)
         WHERE (e.v)::float >= %(thr)s AND e.k ILIKE %(pat)s
         GROUP BY e.k ORDER BY COUNT(*) DESC
         LIMIT %(limit)s

@@ -69,10 +69,6 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-    CREATE TYPE vocal_class AS ENUM ('vocal', 'instrumental', 'mixed');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
     CREATE TYPE audio_file_format AS ENUM ('FLAC', 'APE', 'WAV', 'AIFF', 'WV', 'TTA', 'DSF', 'DFF', 'MP3', 'OGG', 'M4A');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -1104,22 +1100,18 @@ CREATE TABLE IF NOT EXISTS audio_features (
     brightness DOUBLE PRECISION,
     dynamic_range_db DOUBLE PRECISION,
     zero_crossing_rate DOUBLE PRECISION,
-    instruments JSONB,
-    moods JSONB,
-    vocal_instrumental vocal_class,
-    vocal_score DOUBLE PRECISION,
-    danceability DOUBLE PRECISION,
     analysis_source_id INTEGER REFERENCES analysis_sources(id) ON DELETE SET NULL,
-    -- Analysis methodology version (v1 = middle-30s features + single-window
-    -- instruments; v2 = whole-track amplitude + windowed-max instruments,
-    -- 2026-07-03). Synced so peers re-pull methodology upgrades.
+    -- Analysis methodology version (v1 = middle-30s features; v2 = the
+    -- whole-track amplitude block, tempo and key from the middle 30 s,
+    -- 2026-07-03). Synced so peers re-pull methodology upgrades. Until
+    -- 2026-11-10 the row also held the zero-shot values (derived from the
+    -- segments now, zero_shot_scores) and the instruments (a record of their
+    -- own now, track_instruments).
     analysis_version SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_af_bpm CHECK (bpm IS NULL OR bpm > 0),
-    CONSTRAINT chk_af_key_confidence CHECK (key_confidence IS NULL OR (key_confidence >= 0 AND key_confidence <= 1)),
-    CONSTRAINT chk_af_danceability CHECK (danceability IS NULL OR (danceability >= 0 AND danceability <= 1)),
-    CONSTRAINT chk_af_vocal_score CHECK (vocal_score IS NULL OR (vocal_score >= 0 AND vocal_score <= 1))
+    CONSTRAINT chk_af_key_confidence CHECK (key_confidence IS NULL OR (key_confidence >= 0 AND key_confidence <= 1))
 );
 
 -- ============================================================
@@ -1220,11 +1212,6 @@ BEGIN
         OR NEW.brightness IS DISTINCT FROM OLD.brightness
         OR NEW.dynamic_range_db IS DISTINCT FROM OLD.dynamic_range_db
         OR NEW.zero_crossing_rate IS DISTINCT FROM OLD.zero_crossing_rate
-        OR NEW.danceability IS DISTINCT FROM OLD.danceability
-        OR NEW.vocal_instrumental IS DISTINCT FROM OLD.vocal_instrumental
-        OR NEW.vocal_score IS DISTINCT FROM OLD.vocal_score
-        OR NEW.instruments IS DISTINCT FROM OLD.instruments
-        OR NEW.moods IS DISTINCT FROM OLD.moods
         OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version)
        AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
         NEW.author_pubkey := NULL;
@@ -1239,6 +1226,56 @@ DROP TRIGGER IF EXISTS trg_audio_features_seal_guard ON audio_features;
 CREATE TRIGGER trg_audio_features_seal_guard
 BEFORE UPDATE ON audio_features
 FOR EACH ROW EXECUTE FUNCTION seal_guard_audio_features();
+
+-- The instruments record (2026-11-10): the instrument tagger's raw score per
+-- label (backend/ensemble_instruments.py), one row per track, signed as a
+-- record of its own (record_sig.instruments_payload) under the same
+-- whole-track content address as the features — the expensive pass, often
+-- authored by another node, so a change of the features' format never takes
+-- its seals with it. The whole map under one seal: readers threshold its
+-- values per label (`?|`, `->>`), rows would need a parent row for the seal
+-- anyway. analysis_version is the tagger's methodology
+-- (ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION), not the features'.
+-- Until 2026-11-10 the map was a column of audio_features, inside the
+-- features seal (delta 056 moved it).
+CREATE TABLE IF NOT EXISTS track_instruments (
+    id SERIAL PRIMARY KEY,
+    track_id UUID NOT NULL UNIQUE REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    instruments JSONB NOT NULL,
+    analysis_source_id INTEGER REFERENCES analysis_sources(id) ON DELETE SET NULL,
+    analysis_version SMALLINT NOT NULL,
+    author_pubkey CHAR(64),
+    signature     CHAR(128),
+    batch_root    CHAR(64) REFERENCES signing_batches(batch_root),
+    merkle_proof  JSONB,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_track_instruments_instruments
+    ON track_instruments USING gin (instruments);
+CREATE INDEX IF NOT EXISTS idx_track_instruments_analysis_source
+    ON track_instruments (analysis_source_id);
+CREATE INDEX IF NOT EXISTS idx_track_instruments_unstamped
+    ON track_instruments (id) INCLUDE (signature)
+    WHERE signature IS NOT NULL AND batch_root IS NULL;
+
+CREATE OR REPLACE FUNCTION seal_guard_track_instruments() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.instruments IS DISTINCT FROM OLD.instruments
+        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL;
+        NEW.signature     := NULL;
+        NEW.batch_root    := NULL;
+        NEW.merkle_proof  := NULL;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_track_instruments_seal_guard ON track_instruments;
+CREATE TRIGGER trg_track_instruments_seal_guard
+BEFORE UPDATE ON track_instruments
+FOR EACH ROW EXECUTE FUNCTION seal_guard_track_instruments();
 
 -- -- Enrichment seals (Phase B) --------------------------------------------
 --
@@ -1789,10 +1826,6 @@ CREATE INDEX IF NOT EXISTS idx_audio_features_analysis_source ON audio_features(
 CREATE INDEX IF NOT EXISTS idx_audio_features_bpm ON audio_features(bpm);
 CREATE INDEX IF NOT EXISTS idx_audio_features_key ON audio_features(key, mode);
 CREATE INDEX IF NOT EXISTS idx_audio_features_energy ON audio_features(energy_db);
-CREATE INDEX IF NOT EXISTS idx_audio_features_danceability ON audio_features(danceability);
-CREATE INDEX IF NOT EXISTS idx_audio_features_vocal ON audio_features(vocal_instrumental);
-CREATE INDEX IF NOT EXISTS idx_audio_features_instruments ON audio_features USING gin (instruments);
-CREATE INDEX IF NOT EXISTS idx_audio_features_moods ON audio_features USING gin (moods);
 
 -- Metadata indexes
 CREATE INDEX IF NOT EXISTS idx_artist_bios_source ON artist_bios(source);
@@ -2042,6 +2075,10 @@ DO $$ BEGIN CREATE TRIGGER trg_tags_updated_at BEFORE UPDATE ON tags
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER trigger_audio_features_updated_at BEFORE UPDATE ON audio_features
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trigger_track_instruments_updated_at BEFORE UPDATE ON track_instruments
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 

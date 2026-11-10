@@ -10,6 +10,7 @@ Schema overview:
     albums ←── album_genres ──→ genres   (genre is album-grain, not track)
     embeddings ──→ track_id
     audio_features ──→ track_id
+    track_instruments ──→ track_id
     text_embeddings ──→ track_id
     artist_bio_embeddings ──→ artist_id
     genre_desc_embeddings ──→ genre_id
@@ -81,11 +82,6 @@ MusicalKeyEnum = ENUM(
 MusicalModeEnum = ENUM(
     "major", "minor",
     name="musical_mode",
-    create_type=False,
-)
-VocalClassEnum = ENUM(
-    "vocal", "instrumental", "mixed",
-    name="vocal_class",
     create_type=False,
 )
 AudioFileFormatEnum = ENUM(
@@ -738,7 +734,8 @@ class AnalysisSource(Base):
 class Embedding(Base):
     """Audio embedding (512-dimensional vectors for CLAP). One per track.
     Seal columns (author_pubkey/signature/...) live only on the signed tables
-    (embedding_segments, audio_features) and stay raw-SQL — see 001_initial.sql."""
+    (embedding_segments, audio_features, track_instruments) and stay raw-SQL —
+    see 001_initial.sql."""
     __tablename__ = "embeddings"
 
     id = Column(Integer, primary_key=True)
@@ -910,13 +907,16 @@ class GenreDescEmbedding(Base):
 
 
 class AudioFeature(Base):
-    """Audio features extracted from FLAC files using librosa DSP and CLAP zero-shot classification."""
+    """A track's features record (record_sig.features_payload, v4): librosa's
+    tempo, key and amplitude block. The zero-shot values are derived from the
+    segments (zero_shot_scores) and the instruments are a record of their own
+    (TrackInstruments), both since 2026-11-10."""
     __tablename__ = "audio_features"
 
     id = Column(Integer, primary_key=True)
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), unique=True, nullable=False)
 
-    # librosa DSP features
+    # librosa DSP features — record_sig.FEATURE_ORDER
     bpm = Column(Float)
     key = Column(MusicalKeyEnum)
     mode = Column(MusicalModeEnum)
@@ -927,17 +927,10 @@ class AudioFeature(Base):
     dynamic_range_db = Column(Float)
     zero_crossing_rate = Column(Float)
 
-    # CLAP zero-shot classifications
-    instruments = Column(JSONB)
-    moods = Column(JSONB)
-    vocal_instrumental = Column(VocalClassEnum)
-    vocal_score = Column(Float)
-    danceability = Column(Float)
-
     analysis_source_id = Column(Integer, ForeignKey("analysis_sources.id", ondelete="SET NULL"))
 
-    # Analysis methodology version (v2 = whole-track amplitude + windowed
-    # instruments) — synced so peers re-pull methodology upgrades; see
+    # Analysis methodology version (v2 = whole-track amplitude block) —
+    # synced so peers re-pull methodology upgrades; see
     # audio_analysis.ANALYSIS_VERSION. Seal columns are raw-SQL only (written
     # by sign_audio.py, cleared by the seal-guard trigger) — see 001_initial.sql.
     analysis_version = Column(SmallInteger, nullable=False, server_default="1")
@@ -951,17 +944,38 @@ class AudioFeature(Base):
         Index("idx_audio_features_bpm", "bpm"),
         Index("idx_audio_features_key", "key", "mode"),
         Index("idx_audio_features_energy", "energy_db"),
-        Index("idx_audio_features_danceability", "danceability"),
-        Index("idx_audio_features_vocal", "vocal_instrumental"),
         Index("idx_audio_features_analysis_source", "analysis_source_id"),
         CheckConstraint("bpm IS NULL OR bpm > 0", name="chk_af_bpm"),
         CheckConstraint("key_confidence IS NULL OR (key_confidence >= 0 AND key_confidence <= 1)", name="chk_af_key_confidence"),
-        CheckConstraint("danceability IS NULL OR (danceability >= 0 AND danceability <= 1)", name="chk_af_danceability"),
-        CheckConstraint("vocal_score IS NULL OR (vocal_score >= 0 AND vocal_score <= 1)", name="chk_af_vocal_score"),
     )
 
     def __repr__(self):
         return f"<AudioFeature(track_id={self.track_id}, bpm={self.bpm}, key={self.key} {self.mode})>"
+
+
+class TrackInstruments(Base):
+    """A track's instruments record (record_sig.instruments_payload, v1): the
+    AST+PaSST tagger's raw score per label (ensemble_instruments), read
+    against its per-label thresholds. analysis_version is the tagger's
+    methodology (ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION). Seal
+    columns are raw-SQL only, as on audio_features."""
+    __tablename__ = "track_instruments"
+
+    id = Column(Integer, primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), unique=True, nullable=False)
+    instruments = Column(JSONB, nullable=False)
+    analysis_source_id = Column(Integer, ForeignKey("analysis_sources.id", ondelete="SET NULL"))
+    analysis_version = Column(SmallInteger, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_track_instruments_instruments", "instruments", postgresql_using="gin"),
+        Index("idx_track_instruments_analysis_source", "analysis_source_id"),
+    )
+
+    def __repr__(self):
+        return f"<TrackInstruments(track_id={self.track_id}, labels={len(self.instruments or {})})>"
 
 
 # ───────────────────────────────────────────────────────────────────────────

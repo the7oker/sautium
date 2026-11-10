@@ -1490,11 +1490,12 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str],
                al.id::text AS album_id, al.title AS album_title,
                al.release_year AS year, al.cover_url,
                af.bpm, af.key, af.mode, af.energy, af.energy_db,
-               af.instruments
+               ti.instruments
         FROM tracks t
         JOIN album_tracks atr ON atr.track_id = t.id
         JOIN albums al ON al.id = atr.album_id
         LEFT JOIN audio_features af ON af.track_id = t.id
+        LEFT JOIN track_instruments ti ON ti.track_id = t.id
         WHERE t.id = %(tid)s::uuid
           AND (%(aid)s::uuid IS NULL OR al.id = %(aid)s::uuid)
         ORDER BY (al.cover_url IS NOT NULL) DESC, al.id
@@ -1652,13 +1653,14 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
                af.mode,
                af.energy,
                af.energy_db,
-               af.instruments,
+               ti.instruments,
                av.album_id::text AS album_id,
                al.title AS album_title,
                al.release_year AS year
         FROM media_files mf
         JOIN tracks t ON t.id = mf.track_id
         LEFT JOIN audio_features af ON af.track_id = t.id
+        LEFT JOIN track_instruments ti ON ti.track_id = t.id
         JOIN album_variants av ON av.id = mf.album_variant_id
         JOIN albums al ON al.id = av.album_id
         WHERE mf.id = %(id)s

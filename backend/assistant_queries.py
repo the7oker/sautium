@@ -349,16 +349,18 @@ def track_info(q, track_uuid: str):
 
 
 def track_features(q, track_uuid: str):
-    """The track's analysis for display: the stored features, with the
-    danceability and vocal class derived from its segments (zero_shot.py) —
-    either half may be missing."""
+    """The track's analysis for display: the features and the instruments
+    records, with the danceability and vocal class derived from its segments
+    (zero_shot.py) — any of the three may be missing."""
     rows = q(f"""
-        SELECT af.bpm, af.key, af.mode, af.energy_db, af.instruments,
+        SELECT af.bpm, af.key, af.mode, af.energy_db, ti.instruments,
                z.danceability, {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental
         FROM tracks t
         LEFT JOIN audio_features af ON af.track_id = t.id
+        LEFT JOIN track_instruments ti ON ti.track_id = t.id
         LEFT JOIN track_zero_shot z ON z.track_id = t.id
-        WHERE t.id = %(track_id)s::uuid AND (af.id IS NOT NULL OR z.track_id IS NOT NULL)
+        WHERE t.id = %(track_id)s::uuid
+          AND (af.id IS NOT NULL OR ti.id IS NOT NULL OR z.track_id IS NOT NULL)
     """, {"track_id": track_uuid})
     return rows[0] if rows else None
 

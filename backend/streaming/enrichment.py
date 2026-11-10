@@ -250,16 +250,19 @@ class PreviewEnricher:
 
         with SessionLocal() as db:
             model = embedder._get_or_create_embedding_model(db)
-            # _persist_analysis decides the overwrite by material rank BEFORE
-            # writing, so a preview never touches a real-file analysis
-            # (segments included).
+            # Each save decides the overwrite by material rank BEFORE writing
+            # (provenance.outranked), so a preview never touches a real-file
+            # analysis of any kind (segments included).
             saved = False
             if computed is not None:
                 idxs, vecs, portrait = computed
                 saved = embedder._persist_analysis(
                     db, track_id, model, idxs, vecs, portrait, src_id)
             if feats:
-                self._save_features(db, track_id, feats, src_id)
+                from audio_analysis import save_features, save_instruments
+                save_features(db, track_id, feats, src_id)
+                if feats.get("instruments") is not None:
+                    save_instruments(db, track_id, feats["instruments"], src_id)
             db.commit()
 
         if saved or feats:
@@ -268,35 +271,6 @@ class PreviewEnricher:
         preview_events.ping()   # features committed → open album page re-fetches key·bpm
         logger.info("preview enriched %s (embedding=%s features=%s)",
                     track_id, saved, bool(feats))
-
-    @staticmethod
-    def _save_features(db, track_id: str, feats: dict, src_id) -> None:
-        import provenance
-        from audio_analysis import ANALYSIS_VERSION
-        from models import AudioFeature
-
-        existing = db.query(AudioFeature).filter(
-            AudioFeature.track_id == track_id).first()
-        if existing and provenance.outranked(db, existing.analysis_source_id, src_id):
-            return   # never let a preview overwrite a better copy's analysis
-
-        cols = ("bpm", "key", "mode", "key_confidence", "energy", "energy_db",
-                "brightness", "dynamic_range_db", "zero_crossing_rate",
-                "instruments", "moods", "vocal_instrumental", "vocal_score",
-                "danceability")
-        if existing:
-            for k in cols:
-                if k in feats:
-                    setattr(existing, k, feats[k])
-            existing.analysis_source_id = src_id
-            existing.analysis_version = ANALYSIS_VERSION
-        else:
-            db.add(AudioFeature(
-                track_id=track_id,
-                analysis_source_id=src_id,
-                analysis_version=ANALYSIS_VERSION,
-                **{k: feats.get(k) for k in cols},
-            ))
 
     def _models(self):
         # Lazy: load the singletons on first preview (CLAP + AST/PaSST). Reused

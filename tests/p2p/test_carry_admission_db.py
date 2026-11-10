@@ -94,6 +94,7 @@ def _wanted(conn, budget=100, category="segments"):
 def test_a_push_is_taken_only_where_the_offer_would_have_asked(conn):
     assert _wanted(conn) == {OWNED, PHANTOM}                 # off the tracklist / analysed: no
     assert _wanted(conn, category="track_mbids") == {OWNED, PHANTOM, ANALYSED}
+    assert _wanted(conn, category="instruments") == {OWNED, PHANTOM, ANALYSED}   # a gap of its own
 
 
 def test_the_carry_limit_is_the_room_left_and_an_owned_gap_is_not_carrying(conn):
@@ -127,6 +128,7 @@ def test_an_offer_wants_a_carried_tracks_gaps_whatever_the_room(conn):
     mbids = [_recording(conn, t) for t in (OWNED, PHANTOM)]
     wanted = sync_queries.wanted_tracks(conn, mbids, 1)            # the room is spent
     assert set(wanted["audio_features"]) == {OWNED, PHANTOM}
+    assert set(wanted["instruments"]) == {OWNED, PHANTOM}
 
 
 def test_with_the_phantom_layer_off_the_walk_asks_engaged_tracks_alone(conn, scratch_dsn):

@@ -410,6 +410,9 @@ def test_an_imported_record_a_shed_unsealed_is_a_gap_its_authors_sealed_version_
                     (shed, artist))
         payloads = {t: dict(zip(("segments", "audio_features"), _payloads(conn, t, FP)))
                     for t in (shed, sealed)}
+        for t in (shed, sealed):                          # its instruments its own: no gap there
+            cur.execute("INSERT INTO track_instruments (track_id, instruments, analysis_source_id, "
+                        "analysis_version) VALUES (%s, '{}', %s, 2)", (t, _source(cur, t, OTHER)))
     for t in (shed, sealed):
         assert _import(scratch_dsn, "segments", payloads[t]["segments"]) == 1
         assert _import(scratch_dsn, "audio_features", payloads[t]["audio_features"]) == 1
@@ -430,7 +433,7 @@ def test_an_imported_record_a_shed_unsealed_is_a_gap_its_authors_sealed_version_
     peer = _Peer(payloads)
     stats = sync_client.SyncClient(peer, scratch_dsn).run_sync([shed, sealed])
     assert peer.pulls == [("segments", [shed]), ("audio-features", [shed])]
-    assert stats == {"segments": 1, "audio_features": 1}
+    assert stats == {"segments": 1, "audio_features": 1, "instruments": 0}
     # ... and the import replaces it with the author's sealed records
     with conn.cursor() as cur:
         cur.execute("""SELECT count(*) FILTER (WHERE es.signature IS NULL), count(*)
@@ -1371,7 +1374,7 @@ def test_a_better_stream_of_one_declaration_deletes_nothing_and_its_save_replace
     before the analysis runs; it used to delete the lesser stream's features
     in that commit. Now it is a row of its own, the features stay until the
     better stream's save replaces them, and a lesser stream's save never does."""
-    from streaming.enrichment import PreviewEnricher
+    from audio_analysis import save_features
     with conn.cursor() as cur:
         track = _track(cur)
         lossy = _source(cur, track, FP, provider="lossy-test", lossless=False, bit_depth=None)
@@ -1382,13 +1385,13 @@ def test_a_better_stream_of_one_declaration_deletes_nothing_and_its_save_replace
     with conn.cursor() as cur:
         assert better != lossy
         assert _linked(cur, track) == {"features": False}
-    PreviewEnricher._save_features(session, track, {"bpm": 97.0}, better)
+    save_features(session, track, {"bpm": 97.0}, better)
     session.commit()
     with conn.cursor() as cur:
         cur.execute("SELECT bpm, analysis_source_id FROM audio_features WHERE track_id = %s",
                     (track,))
         assert cur.fetchone() == (97.0, better)
-    PreviewEnricher._save_features(session, track, {"bpm": 96.0}, lossy)
+    save_features(session, track, {"bpm": 96.0}, lossy)
     session.commit()
     with conn.cursor() as cur:
         cur.execute("SELECT bpm FROM audio_features WHERE track_id = %s", (track,))
@@ -1548,7 +1551,7 @@ def test_an_upper_case_track_uuid_drops_its_item_alone(conn, scratch_dsn, catego
 
 
 @pytest.mark.parametrize("values", [dict(key="C\x00"), dict(bpm=[120]), dict(bpm={"a": 1}),
-                                    dict(moods={"calm": "\x00"}), dict(energy=float("inf"))])
+                                    dict(mode="minor\x00"), dict(energy=float("inf"))])
 def test_a_sealed_value_its_column_cannot_take_drops_its_item_alone(conn, scratch_dsn, values):
     """Probe P7: a NUL, a list or an object where a number goes raised past
     the savepoints and failed the batch; the gate types every field from

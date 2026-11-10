@@ -105,8 +105,9 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         # raw top-20 storage: key presence alone matches noise-level scores;
         # `?` stays only as the GIN retrieve branch in front of the score check
         lbl = filters["instrument"].lower()
-        clauses.append("(af.instruments ? :f_instrument"
-                       " AND (af.instruments->>:f_instrument)::float >= :f_instrument_thr)")
+        clauses.append("EXISTS (SELECT 1 FROM track_instruments ti WHERE ti.track_id = t.id"
+                       " AND ti.instruments ? :f_instrument"
+                       " AND (ti.instruments->>:f_instrument)::float >= :f_instrument_thr)")
         params["f_instrument"] = lbl
         params["f_instrument_thr"] = threshold_for(lbl)
 
@@ -150,7 +151,7 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
 
 def _needs_audio_features_join(filters: Dict[str, Any]) -> bool:
     """Check if any audio feature filters are present."""
-    af_keys = {"bpm_min", "bpm_max", "key", "mode", "instrument", "energy_min", "energy_max"}
+    af_keys = {"bpm_min", "bpm_max", "key", "mode", "energy_min", "energy_max"}
     return bool(af_keys & set(filters.keys()))
 
 
@@ -371,10 +372,11 @@ def search_by_features(
                mf.duration_seconds,
                af.bpm, af.key, af.mode,
                {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental,
-               round(z.danceability::numeric, 3)::float8 AS danceability, af.instruments
+               round(z.danceability::numeric, 3)::float8 AS danceability, ti.instruments
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
         JOIN audio_features af ON t.id = af.track_id
+        LEFT JOIN track_instruments ti ON ti.track_id = t.id
         LEFT JOIN track_zero_shot z ON z.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
         JOIN artists a ON ta.artist_id = a.id

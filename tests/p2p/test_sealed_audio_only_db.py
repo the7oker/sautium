@@ -114,7 +114,12 @@ def test_an_import_takes_only_the_categories_it_knows(conn, scratch_dsn):
 
 
 def test_no_surface_serves_an_unsealed_mean():
+    """Both surfaces serve the pull categories of the shared handlers alone:
+    the launcher's sync server and the Docker router route one category
+    path to sync_queries.PULL_HANDLERS, which has no unsealed mean."""
     assert "embeddings" not in sync_queries.PULL_HANDLERS
+    assert {"segments", "audio_features", "instruments"} <= set(sync_queries.PULL_HANDLERS)
     routers_sync = pytest.importorskip("routers.sync")
     paths = {r.path for r in routers_sync.router.routes}
-    assert "/api/sync/pull/embeddings" not in paths and "/api/sync/pull/segments" in paths
+    assert "/api/sync/pull/{category}" in paths
+    assert not any(p.startswith("/api/sync/pull/") and "{" not in p for p in paths)

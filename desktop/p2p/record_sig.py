@@ -29,7 +29,8 @@ each segment is signed independently and travels self-contained.
 
 Only hashes and IDs enter the signed string — never raw floats — so the
 payload is byte-stable across signer and verifier. Float determinism lives
-only in vector_hash / features_hash, taken over fixed-layout bytes.
+only in vector_hash / features_hash / instruments_hash, taken over
+fixed-layout bytes.
 
 Producer (signing) AND verifier (import) contract in one file. MIRRORED at
 desktop/p2p/record_sig.py — the launcher build cannot import backend modules;
@@ -43,17 +44,24 @@ import re
 import struct
 from typing import Optional
 
-# Record payload formats. Audio records (segment, features) and enrichment
-# records are separate grammars under separate versions, so a change to one
-# never invalidates the other's seals. No record carries its version — every
-# verifier rebuilds the payload at the current constant, so a bump is a
-# corpus re-sign and an older format has no verifier.
-#   audio v2 (2026-07-06): duration_seconds joined the content-address section
-#   (the receiver's cheap import gate must be tamper-evident);
-#   audio v3 (2026-09-18): pcm_hash left it — the chromaprint alone is the
+# Record payload formats, one version per record kind, so a change to one
+# kind never invalidates another's seals. No record carries its version —
+# every verifier rebuilds the payload at the current constant, so a bump is a
+# re-sign of that kind and an older format of it has no verifier.
+#   segment v2 (2026-07-06): duration_seconds joined the content-address
+#   section (the receiver's cheap import gate must be tamper-evident);
+#   segment v3 (2026-09-18): pcm_hash left it — the chromaprint alone is the
 #   material address (module docstring); every audio seal was re-made.
+#   features v3: the segments' grammar of 2026-09-18, under their version.
+#   features v4 (2026-11-10): the five zero-shot and instrument fields left
+#   the record (FEATURE_ORDER) — moods, the vocal score and danceability are
+#   derived from the segments a node holds and are no record at all, and the
+#   instruments are a record of their own.
+#   instruments v1 (2026-11-10): the instrument tagger's raw score per label.
 #   enrichment v2: unchanged since the v2 re-sign — no material hash in it.
-AUDIO_RECORD_VERSION = 3
+SEGMENT_RECORD_VERSION = 3
+FEATURES_RECORD_VERSION = 4
+INSTRUMENTS_RECORD_VERSION = 1
 ENRICHMENT_RECORD_VERSION = 2
 
 # The Worker timestamp string format. v2 (2026-07-10) appends the submitter's
@@ -133,7 +141,7 @@ def segment_payload(
     public content; authorship theft is caught by timestamp priority.)
     chromaprint + duration form the material declaration."""
     return ":".join([
-        "sautium-record", f"v{AUDIO_RECORD_VERSION}", "segment", author_pubkey_hex.lower(),
+        "sautium-record", f"v{SEGMENT_RECORD_VERSION}", "segment", author_pubkey_hex.lower(),
         track_uuid.lower(), _guard_chromaprint(chromaprint),
         _fmt_duration(duration_seconds),
         model_uuid.lower(), str(grid_version), str(segment_index),
@@ -152,10 +160,30 @@ def features_payload(
     """The bytes the author signs for a track's audio_features row — a
     parallel per-track record under the same whole-track content-address."""
     return ":".join([
-        "sautium-record", f"v{AUDIO_RECORD_VERSION}", "features", author_pubkey_hex.lower(),
+        "sautium-record", f"v{FEATURES_RECORD_VERSION}", "features", author_pubkey_hex.lower(),
         track_uuid.lower(), _guard_chromaprint(chromaprint),
         _fmt_duration(duration_seconds),
         str(analysis_version), features_hash_hex.lower(),
+    ]).encode("utf-8")
+
+
+def instruments_payload(
+    author_pubkey_hex: str,
+    track_uuid: str,
+    chromaprint: Optional[str],
+    duration_seconds: Optional[int],
+    analysis_version: int,
+    instruments_hash_hex: str,
+) -> bytes:
+    """The bytes the author signs for a track's track_instruments row — the
+    instrument tagger's output, a per-track record of its own under the same
+    whole-track content-address. analysis_version is the tagger's
+    methodology, not the features'."""
+    return ":".join([
+        "sautium-record", f"v{INSTRUMENTS_RECORD_VERSION}", "instruments",
+        author_pubkey_hex.lower(), track_uuid.lower(), _guard_chromaprint(chromaprint),
+        _fmt_duration(duration_seconds),
+        str(analysis_version), instruments_hash_hex.lower(),
     ]).encode("utf-8")
 
 
@@ -163,8 +191,7 @@ def features_payload(
 # agree byte-for-byte. analysis_version rides in the payload, not the blob.
 FEATURE_ORDER = [
     "bpm", "key", "mode", "key_confidence", "energy", "energy_db", "brightness",
-    "dynamic_range_db", "zero_crossing_rate", "danceability",
-    "vocal_instrumental", "vocal_score", "instruments", "moods",
+    "dynamic_range_db", "zero_crossing_rate",
 ]
 
 
@@ -181,9 +208,20 @@ def _fmt_feature(v) -> str:
 def canonical_features_blob(row: dict) -> bytes:
     """Byte-stable serialization whose hash enters the features payload. `row`
     may be a DB row or a sync wire item — FEATURE_ORDER values survive the
-    JSON round-trip exactly (floats keep their shortest repr, JSONB dicts are
-    re-dumped with sorted keys), so signer and verifier hash the same bytes."""
+    JSON round-trip exactly (floats keep their shortest repr), so signer and
+    verifier hash the same bytes."""
     return "|".join(_fmt_feature(row[c]) for c in FEATURE_ORDER).encode("utf-8")
+
+
+def canonical_instruments_blob(instruments: dict) -> bytes:
+    """Byte-stable serialization whose hash enters the instruments payload:
+    the label → score map as sorted compact JSON, the form a JSONB map was
+    re-dumped in inside every features seal before v4, so a DB row and a
+    wire item hash the same bytes. An empty map is a record (audio the
+    tagger finds nothing in)."""
+    if not isinstance(instruments, dict):
+        raise ValueError("an instruments record is a map of label to score")
+    return _fmt_feature(instruments).encode("utf-8")
 
 
 # -- Enrichment records --------------------------------------------------------

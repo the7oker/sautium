@@ -10,9 +10,11 @@ PaSST have complementary blind spots — AST catches choir/gong, PaSST
 is stronger on synths and percussion detail.
 
 Output keys are lowercased AudioSet labels (e.g. "piano",
-"acoustic guitar", "drum kit") stored in audio_features.instruments
-JSONB. Storage keeps the RAW top-N score distribution (like moods and
-embeddings do) — "is this instrument present" is decided at READ time
+"acoustic guitar", "drum kit") stored in track_instruments.instruments
+JSONB — a signed record of its own (record_sig.instruments_payload), whose
+methodology is INSTRUMENTS_ANALYSIS_VERSION. Storage keeps the RAW top-N
+score distribution (as the zero-shot scores do) — "is this instrument
+present" is decided at READ time
 against INSTRUMENT_THRESHOLDS below, so thresholds are tunable without
 re-running the GPU ensemble. Vocals mask instruments (a saxophone
 scoring 0.35 on an instrumental mix scores ~0.11 on the vocal version
@@ -80,9 +82,18 @@ STORE_TOP_N = 20
 STORE_MIN_SCORE = 0.01
 
 # Full-track tagging: 10s windows tiled every STRIDE_SECONDS, max-aggregated
-# per label. Shared by the scanner and backfills so both produce comparable
-# scores.
+# per label — every writer of an instruments record tags this way, so the
+# scores stay comparable.
 STRIDE_SECONDS = 30
+
+# Methodology version stamped on track_instruments rows and bound into their
+# seal (the record format is record_sig.INSTRUMENTS_RECORD_VERSION, apart):
+#   1 — a single 10 s window of the middle 30 s
+#   2 — 10 s windows every STRIDE_SECONDS plus a tail window, max over the
+#       two models and the windows, the top STORE_TOP_N at or above
+#       STORE_MIN_SCORE (2026-07-03, as audio_features v2 named it)
+# Bumped with a model, the windows, the stride or the storage cut.
+INSTRUMENTS_ANALYSIS_VERSION = 2
 
 DEFAULT_THRESHOLD = 0.10
 

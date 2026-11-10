@@ -56,7 +56,7 @@ SEGMENTS_MAX_UUIDS = 500
 # full-snapshot gate reads them); the artist_mbids seal layer is gone
 # with its transport — the canon-primary gate reads confidence, not a
 # signature.
-CARRY_CATEGORIES = ("segments", "audio_features", "track_mbids")
+CARRY_CATEGORIES = ("segments", "audio_features", "instruments", "track_mbids")
 # Recordings per offer request — an offer is 16 bytes per recording
 # against ~46 KB to push one track blind.
 CARRY_MAX_TRACKS = 500
@@ -106,7 +106,7 @@ def _parse_vector(vec_text: str) -> list[float]:
 # Inventory
 # ---------------------------------------------------------------------------
 
-EMPTY_INVENTORY = {"tracks": [], "embeddings": [], "audio_features": []}
+EMPTY_INVENTORY = {"tracks": [], "embeddings": [], "audio_features": [], "instruments": []}
 
 
 # Rows the sync protocol will hand out: sealed ones. The inventory and the
@@ -117,7 +117,9 @@ _SIGNED = "signature IS NOT NULL AND batch_root IS NOT NULL"
 # What this node HOLDS of a track's analysis: its own (a first-hand source),
 # or what an author sealed. The sync's planner asks for no held record, its
 # importers replace none, the carry admits none and the gap sets count none
-# as a gap — one rule, so nothing is pulled only to be dropped. An imported
+# as a gap — one rule, so nothing is pulled only to be dropped; the one
+# exception, a record of a newer methodology over an imported one of an
+# older, is KEPT_RECORD's, read by the planner and the importers alike. An imported
 # record whose seal a shed removed (a rename, a merge) is held by nobody: it
 # is served to no peer and signed by nobody here, so its author's sealed
 # version replaces it as it would fill a gap. A mean without segments under
@@ -128,7 +130,7 @@ _SIGNED = "signature IS NOT NULL AND batch_root IS NOT NULL"
 # wherever enrichment.reanalyze_imported is off. A copy that is away counts:
 # away is never gone (ROOT-1), and its pass reads the file once it is back.
 # A track held only at an HQPlayer's library has no file a pass reads. Row-level, over embeddings `e` and
-# audio_features `a`, each LEFT JOINed to analysis_sources `s`.
+# a record table `a` (audio_features, track_instruments), each LEFT JOINed to analysis_sources `s`.
 HELD_EMBEDDING = """((s.id IS NOT NULL AND NOT s.imported)
      OR (EXISTS (SELECT 1 FROM embedding_segments es WHERE es.embedding_id = e.id)
          AND (NOT EXISTS (SELECT 1 FROM embedding_segments es
@@ -136,14 +138,24 @@ HELD_EMBEDDING = """((s.id IS NOT NULL AND NOT s.imported)
               OR (s.id IS NULL
                   AND EXISTS (SELECT 1 FROM media_files f
                                WHERE f.track_id = e.track_id AND f.is_analysis_source)))))"""
-HELD_FEATURES = "(a.signature IS NOT NULL OR (s.id IS NOT NULL AND NOT s.imported))"
+HELD_RECORD = "(a.signature IS NOT NULL OR (s.id IS NOT NULL AND NOT s.imported))"
+# What an import of a record of methodology {v} never replaces: this node's
+# own record, or a sealed one of a methodology no older. So an imported
+# record of a newer methodology replaces an imported one of an older —
+# never a first-hand one — and the planner asks for no record the importer
+# would drop. Row-level, as HELD_RECORD.
+KEPT_RECORD = ("((s.id IS NOT NULL AND NOT s.imported)"
+               " OR (a.signature IS NOT NULL AND a.analysis_version >= {v}))")
 # The same per track, the track's uuid expression formatted in as {t}.
 HOLDS_SEGMENTS = f"""EXISTS (SELECT 1 FROM embeddings e
                         LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
                         WHERE e.track_id = {{t}} AND {HELD_EMBEDDING})"""
 HOLDS_FEATURES = f"""EXISTS (SELECT 1 FROM audio_features a
                         LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                        WHERE a.track_id = {{t}} AND {HELD_FEATURES})"""
+                        WHERE a.track_id = {{t}} AND {HELD_RECORD})"""
+HOLDS_INSTRUMENTS = f"""EXISTS (SELECT 1 FROM track_instruments a
+                        LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                        WHERE a.track_id = {{t}} AND {HELD_RECORD})"""
 
 
 def get_inventory(conn, track_uuids: list[str]) -> dict:
@@ -152,11 +164,11 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
 
     Returns category -> list. `tracks` is plain uuids; the versioned
     categories return [uuid, analysis_version, segment_count] triples
-    (embeddings) and [uuid, analysis_version] pairs (audio_features), so
-    peers can re-pull rows produced by an older analysis methodology —
-    existence alone never delivers upgrades. segment_count lets a peer see
-    how dense this node's grid is (densification / "deepen analysis"
-    planning).
+    (embeddings) and [uuid, analysis_version] pairs (audio_features,
+    instruments), so peers can re-pull rows produced by an older analysis
+    methodology — existence alone never delivers upgrades. segment_count
+    lets a peer see how dense this node's grid is (densification / "deepen
+    analysis" planning).
 
     Lyrics are deliberately NOT part of the protocol (2026-07-11): the one
     category that is verbatim copyrighted text — every node fetches its own
@@ -182,14 +194,16 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
              WHERE e.track_id = ANY(%s::uuid[])
              GROUP BY e.track_id""")
     ]
-    audio_features = [
-        [r["track_id"], r["analysis_version"]] for r in
-        q(f"""SELECT track_id::text AS track_id, analysis_version
-              FROM audio_features WHERE track_id = ANY(%s::uuid[])
-                AND {_SIGNED}""")
-    ]
-    return {"tracks": tracks, "embeddings": embeddings,
-            "audio_features": audio_features}
+    records = {}
+    for category, table in (("audio_features", "audio_features"),
+                            ("instruments", "track_instruments")):
+        records[category] = [
+            [r["track_id"], r["analysis_version"]] for r in
+            q(f"""SELECT track_id::text AS track_id, analysis_version
+                  FROM {table} WHERE track_id = ANY(%s::uuid[])
+                    AND {_SIGNED}""")
+        ]
+    return {"tracks": tracks, "embeddings": embeddings, **records}
 
 
 # ---------------------------------------------------------------------------
@@ -197,43 +211,54 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 # A node with millions of phantom gaps cannot ask every peer about all of
 # them (306 inventory requests per peer per run at the master's size). The
-# peer publishes instead: a Bloom filter over the track uuids it HOLDS
-# sealed analysis for — sized by its holdings, never by anyone's gaps. The
-# asker tests its gaps locally and asks the exact inventory only about the
-# hits. Built in memory when the holdings version moved (checked at most
-# every _HOLDINGS_RECHECK_S), served from memory otherwise; a caller that
-# already has the current version gets a stub, no bits. (Until 2026-09-19 a
-# second filter named the artists with sealed bios/tags/similars — that
-# layer is node-local now.)
+# peer publishes instead: Bloom filters over the track uuids it HOLDS
+# analysis for — `tracks` its segments or features, `instruments` its
+# instruments — sized by its holdings, never by anyone's gaps. The asker
+# tests its gaps locally, each against the filter of what it lacks, and asks
+# the exact inventory only about the hits: a track whose one gap is its
+# instruments, which most peers holding its segments never made, costs a
+# test of the second filter, not an inventory request every run. Built in
+# memory when the holdings version moved (checked at most every
+# _HOLDINGS_RECHECK_S), served from memory otherwise; a caller that already
+# has the current version gets a stub, no bits. (Until 2026-09-19 a second
+# filter named the artists with sealed bios/tags/similars — that layer is
+# node-local now.)
 
 HOLDINGS_FPR = 0.01
 _HOLDINGS_RECHECK_S = 300
 
 _holdings_lock = threading.Lock()
 _holdings: dict = {"checked_at": 0.0, "version": None, "payload": None,
-                   "tracks_n": 0}
+                   "tracks_n": 0, "instruments_n": 0}
 
 _HOLDINGS_TRACKS_SQL = f"""
     SELECT e.track_id::text FROM embeddings e
       LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
      WHERE {HELD_EMBEDDING}
     UNION SELECT track_id::text FROM audio_features WHERE {_SIGNED}"""
+_HOLDINGS_INSTRUMENTS_SQL = f"""
+    SELECT a.track_id::text FROM track_instruments a
+      LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+     WHERE {HELD_RECORD}"""
 
 
 def holdings_version(conn) -> str:
     """Moves whenever a contributing table's row count or latest updated_at
     moves, or the seals do — a grid held only while it is sealed (a shed
     unseals segments and touches no embeddings row): the unsealed segments
-    are counted from their partial index. One scan per table, so it is
-    checked on a timer, not per request."""
+    are counted from their partial index; a shed of a record's seal moves
+    its row's updated_at. One scan per table, so it is checked on a timer,
+    not per request."""
     row = db_query(conn, f"""
         SELECT (SELECT count(*) FROM embeddings) AS e,
                (SELECT count(*) FROM audio_features WHERE {_SIGNED}) AS af,
                (SELECT count(*) FROM embedding_segments WHERE signature IS NULL) AS unsealed,
+               (SELECT count(*) FROM track_instruments) AS ti,
                GREATEST((SELECT max(updated_at) FROM embeddings),
-                        (SELECT max(updated_at) FROM audio_features)) AS latest
+                        (SELECT max(updated_at) FROM audio_features),
+                        (SELECT max(updated_at) FROM track_instruments)) AS latest
     """)[0]
-    counts = [int(row[k]) for k in ("e", "af", "unsealed")]
+    counts = [int(row[k]) for k in ("e", "af", "unsealed", "ti")]
     latest = int(row["latest"].timestamp()) if row["latest"] else 0
     return ".".join(str(n) for n in counts) + f".{latest}"
 
@@ -261,9 +286,9 @@ def _build_filter(conn, sql: str) -> BloomFilter:
 
 
 def get_holdings(conn, have: Optional[str] = None) -> dict:
-    """The holdings payload: {"version", "tracks": filter}. `have` is the
-    version the caller already holds — an unchanged one answers {"version",
-    "unchanged": true}."""
+    """The holdings payload: {"version", "tracks": filter, "instruments":
+    filter}. `have` is the version the caller already holds — an unchanged
+    one answers {"version", "unchanged": true}."""
     with _holdings_lock:
         now = time.monotonic()
         if (_holdings["payload"] is None
@@ -272,13 +297,16 @@ def get_holdings(conn, have: Optional[str] = None) -> dict:
             if version != _holdings["version"]:
                 t0 = time.monotonic()
                 tracks = _build_filter(conn, _HOLDINGS_TRACKS_SQL)
+                instruments = _build_filter(conn, _HOLDINGS_INSTRUMENTS_SQL)
                 _holdings.update(
-                    version=version, tracks_n=tracks.n,
-                    payload={"version": version, "tracks": tracks.to_dict()},
+                    version=version, tracks_n=tracks.n, instruments_n=instruments.n,
+                    payload={"version": version, "tracks": tracks.to_dict(),
+                             "instruments": instruments.to_dict()},
                 )
                 logger.info(
-                    f"Holdings filter rebuilt: {tracks.n} tracks, "
-                    f"{len(tracks.bits) // 1024} KB, "
+                    f"Holdings filter rebuilt: {tracks.n} tracks + "
+                    f"{instruments.n} with instruments, "
+                    f"{(len(tracks.bits) + len(instruments.bits)) // 1024} KB, "
                     f"{time.monotonic() - t0:.1f}s"
                 )
             _holdings["checked_at"] = now
@@ -293,7 +321,8 @@ def holdings_summary() -> Optional[dict]:
     None until the first holdings request built the filter."""
     if _holdings["payload"] is None:
         return None
-    return {"version": _holdings["version"], "tracks": _holdings["tracks_n"]}
+    return {"version": _holdings["version"], "tracks": _holdings["tracks_n"],
+            "instruments": _holdings["instruments_n"]}
 
 
 def split_engaged(conn, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
@@ -520,25 +549,24 @@ def pull_segments(conn, uuids: list[str], own=None) -> dict:
             "authors": slice_trust.author_entries(conn, authors, own)}
 
 
-def pull_audio_features(conn, uuids: list[str], own=None) -> dict:
-    """Feature rows travel WITH their seals (author sig + Merkle proof) and a
-    `batches` map for the Worker timestamps — imported rows stay verifiable
-    and re-servable with authorship intact; `authors`, each author's
-    certificate."""
+def _pull_records(conn, category: str, table: str, fields: list, uuids: list[str],
+                  own) -> dict:
+    """A per-track record kind (audio_features, track_instruments): its
+    record's fields, its methodology version and its seal, the material
+    declaration the seal binds as `provenance`, a `batches` map for the
+    Worker timestamps and `authors` for each author's certificate — rows
+    travel sealed or not at all, and an imported row is re-served with its
+    authorship intact."""
     if not uuids:
-        return {"category": "audio_features", "items": [], "batches": {}, "authors": {}}
-
+        return {"category": category, "items": [], "batches": {}, "authors": {}}
     rows = db_query(
         conn,
         f"""SELECT a.track_id::text AS track_uuid,
-                   a.bpm, a.key, a.mode, a.key_confidence,
-                   a.energy, a.energy_db, a.brightness, a.dynamic_range_db,
-                   a.zero_crossing_rate, a.instruments, a.moods,
-                   a.vocal_instrumental, a.vocal_score, a.danceability,
+                   {", ".join(f"a.{c}" for c in fields)},
                    a.analysis_version,
                    a.author_pubkey, a.signature, a.batch_root, a.merkle_proof,
                    {_PROVENANCE_COLS}
-            FROM audio_features a
+            FROM {table} a
             LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
             WHERE a.track_id = ANY(%s::uuid[])
               AND a.signature IS NOT NULL AND a.batch_root IS NOT NULL""",
@@ -550,10 +578,22 @@ def pull_audio_features(conn, uuids: list[str], own=None) -> dict:
         item["provenance"] = _provenance_item(r)
         roots.add(item["batch_root"])
         items.append(item)
-    return {"category": "audio_features", "items": items,
+    return {"category": category, "items": items,
             "batches": _batches_map(conn, roots),
             "authors": slice_trust.author_entries(
                 conn, {i["author_pubkey"] for i in items}, own)}
+
+
+def pull_audio_features(conn, uuids: list[str], own=None) -> dict:
+    """The features records (record_sig.features_payload)."""
+    return _pull_records(conn, "audio_features", "audio_features",
+                         record_sig.FEATURE_ORDER, uuids, own)
+
+
+def pull_instruments(conn, uuids: list[str], own=None) -> dict:
+    """The instruments records (record_sig.instruments_payload)."""
+    return _pull_records(conn, "instruments", "track_instruments", ["instruments"],
+                         uuids, own)
 
 
 def pull_track_mbids(conn, track_uuids: list[str], own=None) -> dict:
@@ -578,6 +618,7 @@ PULL_HANDLERS = {
     "segments": pull_segments,
     "audio-features": pull_audio_features,
     "audio_features": pull_audio_features,
+    "instruments": pull_instruments,
     "track-mbids": pull_track_mbids,
     "track_mbids": pull_track_mbids,
 }
@@ -751,6 +792,7 @@ def phantom_layer_on(conn) -> bool:
 _LACKS = {
     "segments": "NOT " + HOLDS_SEGMENTS,
     "audio_features": "NOT " + HOLDS_FEATURES,
+    "instruments": "NOT " + HOLDS_INSTRUMENTS,
     "track_mbids": "NOT EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = {t})",
 }
 
@@ -851,32 +893,14 @@ def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
     if not uuids:
         return empty
 
-    no_segments = db_query(
-        conn,
-        f"""SELECT u.id::text AS track_uuid
-              FROM unnest(%s::uuid[]) AS u(id)
-             WHERE {_LACKS["segments"].format(t="u.id")}""",
-        [uuids],
-    )
-    no_features = db_query(
-        conn,
-        f"""SELECT u.id::text AS track_uuid
-              FROM unnest(%s::uuid[]) AS u(id)
-             WHERE {_LACKS["audio_features"].format(t="u.id")}""",
-        [uuids],
-    )
-    no_recording = db_query(
-        conn,
-        """SELECT u.id::text AS track_uuid
-             FROM unnest(%s::uuid[]) AS u(id)
-            WHERE NOT EXISTS (SELECT 1 FROM track_mbids tm
-                               WHERE tm.track_id = u.id)""",
-        [uuids],
-    )
     out = dict(empty)
-    out["segments"] = [r["track_uuid"] for r in no_segments]
-    out["audio_features"] = [r["track_uuid"] for r in no_features]
-    out["track_mbids"] = [r["track_uuid"] for r in no_recording]
+    for category in CARRY_CATEGORIES:
+        out[category] = [r["track_uuid"] for r in db_query(
+            conn,
+            f"""SELECT u.id::text AS track_uuid
+                  FROM unnest(%s::uuid[]) AS u(id)
+                 WHERE {_LACKS[category].format(t="u.id")}""",
+            [uuids])]
     return out
 
 
@@ -888,7 +912,7 @@ ANNOUNCE_TAIL_SQL = f"""
         UNION
         SELECT a.track_id FROM audio_features a
           LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-         WHERE {HELD_FEATURES}
+         WHERE {HELD_RECORD}
     )
     SELECT ta.artist_id::text AS artist_uuid
       FROM analyzed x
@@ -951,11 +975,12 @@ def get_track_uuids_for_artist(conn, artist_uuid: str) -> list[str]:
 
 
 # A track's audio analysis, as the gap sets count it: what this node holds
-# (HOLDS_SEGMENTS, HOLDS_FEATURES). A mean without sealed segments — what the
-# unsealed mean pull once left behind, or an imported grid a shed unsealed —
-# is a gap: sealed segments replace it at the next pull.
+# (HOLDS_SEGMENTS, HOLDS_FEATURES, HOLDS_INSTRUMENTS). A mean without sealed
+# segments — what the unsealed mean pull once left behind, or an imported grid
+# a shed unsealed — is a gap: sealed segments replace it at the next pull.
 _ANALYSED = HOLDS_SEGMENTS.format(t="ta.track_id")
 _FEATURED = HOLDS_FEATURES.format(t="ta.track_id")
+_INSTRUMENTED = HOLDS_INSTRUMENTS.format(t="ta.track_id")
 
 
 def get_unenriched_artist_uuids(conn) -> list[str]:
@@ -1016,16 +1041,19 @@ def get_rare_search_uuids(conn) -> list[str]:
 
 def get_incomplete_artist_uuids(conn) -> list[str]:
     """
-    Artist UUIDs with at least one track missing analysis in EITHER
-    category — the trigger set for a sync run.
+    Artist UUIDs with at least one track missing analysis in ANY category —
+    segments, features, instruments — the trigger set for a sync run.
 
     Why broader than get_unenriched_artist_uuids: that one is the audio gap
     set between drains and uses AND-of-audio to keep DHT traffic down. At
     the start of a run we want to catch partial states — embeddings landed
-    but features didn't (a transient pull failure). Inventory +
-    _compute_needed at the peer/category level filter out anything we
-    already have, so even a wide trigger here is cheap when there's
-    nothing new to pull.
+    but features didn't (a transient pull failure), or an author's
+    instrument pass came days after its sonic one: a track lacking only its
+    instruments is a trigger here and never in the DHT sets (it costs no DHT
+    traffic). Inventory + _compute_needed at the peer/category level filter
+    out anything we already have, and the peers' instruments filters keep an
+    instruments gap no peer can fill a local test, so even a wide trigger
+    here is cheap when there's nothing new to pull.
 
     Until 2026-09-19 a missing bio, tag list, similars or track stats was a
     trigger too; that layer is node-local now (Last.fm's API terms) and no
@@ -1035,6 +1063,6 @@ def get_incomplete_artist_uuids(conn) -> list[str]:
         conn,
         f"""SELECT DISTINCT ta.artist_id::text AS artist_uuid
            FROM track_artists ta
-           WHERE NOT {_ANALYSED} OR NOT {_FEATURED}""",
+           WHERE NOT {_ANALYSED} OR NOT {_FEATURED} OR NOT {_INSTRUMENTED}""",
     )
     return [r["artist_uuid"] for r in rows]

@@ -46,7 +46,18 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      slices it keeps, under the import's rules of that day — a slice's own
      subtree only, its rows of their columns' kinds, an artist or a group one
      row per MBID — and indexes the slices kept before the subject index, on
-     a node without the dump (2026-11-07). The labels step
+     a node without the dump (2026-11-07). The records step
+     (`analysis_records_v4`) is the cutover to a record version per kind —
+     features v4 without the zero-shot and instrument fields, instruments a
+     v1 record of their own, segments untouched (2026-11-10): with the
+     node's keys it keeps the features no other key sealed and no imported
+     source holds, deletes the rest with their instruments, sheds every
+     features seal left for the notary to sign them anew, splits the grids
+     another key sealed under a first-hand row back onto its imported twin,
+     joins the source rows from before the material groups, and deletes the
+     unsealed grids under imported rows of tracks with a file here; it fails
+     closed — no marker — while no key resolves and seals stand on records
+     no imported source holds, and the seed waits for it. The labels step
      (`zero_shot_labels_v1`) loads the release's zero-shot label embeddings
      (backend/zero_shot.py) and scores every bundle of segments the node
      holds, its own and imported, the day moods, the vocal score and
@@ -138,7 +149,7 @@ def _drop_sub_floor_analysis(conn) -> dict:
     legacy rows go — an imported row describes a peer's material, a stream
     row its own. Deleting sealed rows is fine: a seal is per row, and a
     signing batch stays valid for its other leaves."""
-    from provenance import MIN_MATERIAL_SECONDS
+    from provenance import ANALYSIS_KINDS, MIN_MATERIAL_SECONDS
     own_file = """(x.analysis_source_id IS NULL
                    OR EXISTS (SELECT 1 FROM analysis_sources src
                                WHERE src.id = x.analysis_source_id
@@ -151,7 +162,7 @@ def _drop_sub_floor_analysis(conn) -> dict:
             SELECT DISTINCT mf.track_id FROM media_files mf
              WHERE mf.is_analysis_source AND mf.duration_seconds < %(min)s
         """, {"min": MIN_MATERIAL_SECONDS})
-        for table in ("embeddings", "audio_features"):
+        for table in ANALYSIS_KINDS:
             cur.execute(f"""
                 DELETE FROM {table} x USING sub_floor s
                  WHERE x.track_id = s.track_id AND {own_file}""")
@@ -249,6 +260,195 @@ def _bind_master_stub(conn) -> int:
         bound = cur.rowcount
     conn.commit()
     return bound
+
+
+def _own_keys() -> frozenset:
+    """This node's keys, lower-case hex: the one sign() signs with
+    (p2p_identity.load_signing_key) and every key it retired (node_info.json's
+    `previous`, witness.own_keys); empty when no identity resolves. No
+    certificate is read for a key: one left in the identity folder from an
+    earlier identity names that identity's key, and the folder's certificate
+    counts only when it names the key that signs."""
+    from pathlib import Path
+
+    from cryptography.hazmat.primitives import serialization
+
+    from desktop.p2p import witness
+    from p2p_identity import load_signing_key
+    key = load_signing_key(settings)
+    if key is None:
+        return frozenset()
+    current = key.public_key().public_bytes(encoding=serialization.Encoding.Raw,
+                                            format=serialization.PublicFormat.Raw).hex()
+    folder = Path(settings.p2p_identity_dir) if settings.p2p_identity_dir else None
+    return witness.own_keys(current, folder)
+
+
+# A record's seal names its author: one of the node's keys, or another's.
+_OTHERS = ("({t}.signature IS NOT NULL"
+           " AND NOT lower({t}.author_pubkey) = ANY(CAST(:keys AS text[])))")
+
+# Seals on records no imported source holds — the node's own, unless it
+# never had a key: what deciding without the node's keys would take for
+# another author's.
+_SEALED_NOT_IMPORTED = """
+    SELECT EXISTS (SELECT 1 FROM audio_features a
+                     LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                    WHERE a.signature IS NOT NULL AND s.imported IS NOT TRUE)
+        OR EXISTS (SELECT 1 FROM embedding_segments es
+                     JOIN embeddings e ON e.id = es.embedding_id
+                     LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                    WHERE es.signature IS NOT NULL AND s.imported IS NOT TRUE)"""
+
+
+def _vector_bytes(text_value: str) -> bytes:
+    from record_sig import vector_to_bytes
+    return vector_to_bytes([float(x) for x in text_value.strip("[]").split(",")])
+
+
+def _split_flipped(db, keys: list) -> dict:
+    """The grids another author sealed under this node's own source row — a
+    registration flipped an imported row first-hand until 2026-11-10
+    (provenance) — moved to that row's imported twin: the same declaration,
+    imported, put in the first-hand row's group. The flip wrote this node's
+    duration over the author's, and a seal binds the author's: a bundle
+    whose seals do not verify under the twin's declaration is deleted, and
+    its next pull brings it under its author's."""
+    from sqlalchemy import text
+
+    import record_sig as rs
+    flipped = db.execute(text(f"""
+        SELECT e.id, e.track_id::text AS track, e.model_id::text AS model, s.chromaprint,
+               s.duration_seconds, s.grid_version, COALESCE(s.material_of, s.id) AS root
+          FROM embeddings e JOIN analysis_sources s ON s.id = e.analysis_source_id
+         WHERE NOT s.imported
+           AND EXISTS (SELECT 1 FROM embedding_segments es
+                        WHERE es.embedding_id = e.id AND {_OTHERS.format(t='es')})
+         ORDER BY e.id"""), {"keys": keys}).fetchall()
+    moved = failed = 0
+    for f in flipped:
+        twin = db.execute(text("""
+            INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds, grid_version,
+                                          imported, material_of)
+            VALUES (CAST(:t AS uuid), :fp, :dur, :grid, true, :root)
+            ON CONFLICT (track_id, chromaprint_key, duration_seconds, imported, copy_rank) DO NOTHING
+            RETURNING id"""), {"t": f.track, "fp": f.chromaprint, "dur": f.duration_seconds,
+                               "grid": f.grid_version, "root": f.root}).scalar()
+        if twin is None:
+            twin = db.execute(text("""
+                SELECT id FROM analysis_sources
+                 WHERE track_id = CAST(:t AS uuid) AND chromaprint = :fp AND imported
+                   AND duration_seconds IS NOT DISTINCT FROM :dur"""),
+                {"t": f.track, "fp": f.chromaprint, "dur": f.duration_seconds}).scalar()
+        db.execute(text("UPDATE embeddings SET analysis_source_id = :twin WHERE id = :e"),
+                   {"twin": twin, "e": f.id})
+        segments = db.execute(text("""
+            SELECT segment_index, vector::text AS vec, author_pubkey, signature
+              FROM embedding_segments WHERE embedding_id = :e AND signature IS NOT NULL"""),
+            {"e": f.id}).fetchall()
+        if all(rs.verify(rs.segment_payload(
+                s.author_pubkey, f.track, f.chromaprint, f.duration_seconds, f.model,
+                s.segment_index, rs.vector_hash(_vector_bytes(s.vec)),
+                grid_version=f.grid_version), s.signature, s.author_pubkey) for s in segments):
+            moved += 1
+        else:
+            db.execute(text("DELETE FROM embeddings WHERE id = :e"), {"e": f.id})
+            failed += 1
+    return {"bundles_split": moved, "bundles_failing_the_twin": failed}
+
+
+def _reseal_analysis_records() -> dict:
+    """The cutover to the per-kind records (record_sig: features v4,
+    instruments v1), at the node's first start on that release, in one
+    transaction; no audio decoded. Delta 056 copied every features row's
+    instruments into track_instruments, unsigned; this step tells the node's
+    own records from another author's by the seal, with the node's keys:
+
+      - kept is a features row no other key sealed and no imported source
+        holds — unsealed, or sealed by one of this node's keys, under a
+        first-hand source or under none; every other row goes, with the
+        instruments copied from it (and any instruments row another key
+        sealed or an imported source holds): a row under an imported source
+        goes even when this node's key sealed it — a node of the same
+        account shares the key, and sign() never re-signs under an imported
+        source. Deleted, a row is either the node's own pass's work (it holds
+        the file) or comes again from its author;
+      - every seal left on a features row is shed (a v3 seal), for the
+        notary's startup wake to sign the features in v4 and the instruments
+        in v1 (sign_audio);
+      - the grids another key sealed under a first-hand row are split back
+        onto that row's imported twin (_split_flipped);
+      - the source rows from before the material groups are joined
+        (provenance.join_existing_rows);
+      - a grid all unsealed under an imported row, on a track with an
+        analysis-source file here, goes: an import arrives sealed, so it is
+        this node's own analysis an identity merge re-pointed onto the
+        imported row before a shed unsealed it (or a foreign one a shed
+        unsealed — the two cannot be told apart), never re-signed and never
+        re-derived as it stood; deleted, the passes derive it again.
+
+    It fails closed: with no key resolving while records no imported source
+    holds carry seals, the node had an identity the step cannot see (an
+    environment not where it looks), and deciding would delete the node's
+    own sealed records as another's — `done` False, an error logged, no
+    marker, and the next start tries again. A node whose records carry no
+    such seal never had a key, and the step runs. Counts what it did, and
+    the first-hand embeddings without segments (no segment, no derived
+    zero-shot values)."""
+    from sqlalchemy import text
+
+    import provenance
+    from database import SessionLocal
+
+    keys = sorted(_own_keys())
+    started = time.monotonic()
+    db = SessionLocal()
+    try:
+        if not keys and db.execute(text(_SEALED_NOT_IMPORTED)).scalar():
+            logger.error("the analysis records are not re-sealed: records no imported source holds "
+                         "carry seals, and no key of this node resolves (P2P_USERNAME/P2P_PASSWORD, "
+                         "or the identity folder) — the node's own would go as another's; the next "
+                         "start tries again")
+            return {"done": False, "keys": 0}
+        p = {"keys": keys}
+        db.execute(text(f"""
+            CREATE TEMP TABLE records_v4_gone ON COMMIT DROP AS
+            SELECT a.id, a.track_id FROM audio_features a
+              LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+             WHERE {_OTHERS.format(t='a')} OR s.imported"""), p)
+        counts = {"keys": len(keys)}
+        counts["features_deleted"] = db.execute(text(
+            "DELETE FROM audio_features a USING records_v4_gone g WHERE a.id = g.id")).rowcount
+        counts["instruments_deleted"] = db.execute(text(f"""
+            DELETE FROM track_instruments t
+             WHERE t.track_id IN (SELECT track_id FROM records_v4_gone)
+                OR {_OTHERS.format(t='t')}
+                OR EXISTS (SELECT 1 FROM analysis_sources s
+                            WHERE s.id = t.analysis_source_id AND s.imported)"""), p).rowcount
+        counts["features_kept"] = db.execute(text("SELECT count(*) FROM audio_features")).scalar()
+        counts["feature_seals_shed"] = db.execute(text("""
+            UPDATE audio_features
+               SET author_pubkey = NULL, signature = NULL, batch_root = NULL, merkle_proof = NULL
+             WHERE signature IS NOT NULL""")).rowcount
+        counts.update(_split_flipped(db, keys))
+        counts["sources_joined"] = provenance.join_existing_rows(db)
+        counts["unsealed_under_imported_deleted"] = db.execute(text("""
+            DELETE FROM embeddings e USING analysis_sources s
+             WHERE s.id = e.analysis_source_id AND s.imported
+               AND EXISTS (SELECT 1 FROM embedding_segments es WHERE es.embedding_id = e.id)
+               AND NOT EXISTS (SELECT 1 FROM embedding_segments es
+                                WHERE es.embedding_id = e.id AND es.signature IS NOT NULL)
+               AND EXISTS (SELECT 1 FROM media_files f
+                            WHERE f.track_id = e.track_id AND f.is_analysis_source)""")).rowcount
+        counts["own_embeddings_without_segments"] = db.execute(text("""
+            SELECT count(*) FROM embeddings e JOIN analysis_sources s ON s.id = e.analysis_source_id
+             WHERE NOT s.imported
+               AND NOT EXISTS (SELECT 1 FROM embedding_segments es
+                                WHERE es.embedding_id = e.id)""")).scalar()
+        db.commit()
+    finally:
+        db.close()
+    return {"done": True, **counts, "seconds": round(time.monotonic() - started, 1)}
 
 
 def _load_zero_shot_labels(conn) -> dict:
@@ -394,6 +594,12 @@ def apply_pending() -> dict:
             out["master_stub_bound"] = _bind_master_stub(conn)
             _mark(conn, "master_stub_bound_v1")
 
+        if not _marked(conn, "analysis_records_v4"):
+            out["analysis_records_v4"] = _reseal_analysis_records()
+            logger.info("analysis records v4: %s", out["analysis_records_v4"])
+            if out["analysis_records_v4"]["done"]:
+                _mark(conn, "analysis_records_v4")
+
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):
             out["zero_shot"] = _load_zero_shot_labels(conn)
@@ -408,10 +614,15 @@ def apply_pending() -> dict:
         # new bundle is a new import with no code change: seed_v2
         # (2026-09-18) carries the audio records under payload v3, and a node
         # that imported v1 lost those rows to migration 018 and takes them
-        # again here.
+        # again here; seed_v4 (2026-11-10) the records of features v4 and
+        # instruments v1, and a node that imported v3 lost its features to
+        # the records' cutover. Only on a node past that cutover: a seed
+        # landed before a cutover that failed closed would be deleted by it,
+        # its imported sources' records being another author's.
         import seed_import
         info = seed_import.bundle_info()
-        if info is not None and not _marked(conn, f"seed_v{info['version']}"):
+        if (info is not None and _marked(conn, "analysis_records_v4")
+                and not _marked(conn, f"seed_v{info['version']}")):
             out["seed"] = seed_import.apply_seed(conn, settings.database_url, info)
             if out["seed"].get("complete"):
                 _mark(conn, f"seed_v{info['version']}")

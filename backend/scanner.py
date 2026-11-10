@@ -34,7 +34,7 @@ from db_pool import db_execute, db_query, db_query_one
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
-from provenance import relink_returned_files
+from provenance import ANALYSIS_KINDS, relink_returned_files
 import cue_sheet
 
 logger = logging.getLogger(__name__)
@@ -1162,7 +1162,7 @@ class LibraryScanner:
         if superseded_tracks:
             with get_db_context() as db:
                 tids = list(superseded_tracks)
-                for table in ("embeddings", "audio_features", "analysis_sources"):
+                for table in (*ANALYSIS_KINDS, "analysis_sources"):
                     db.execute(text(f"""
                         DELETE FROM {table} x WHERE x.track_id = ANY(CAST(:tids AS uuid[]))
                           AND NOT EXISTS (SELECT 1 FROM media_files mf

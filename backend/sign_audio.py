@@ -20,9 +20,11 @@ the scanner / stream enricher — never recomputed here) is signable material:
     decode; is_lossless rides in the provenance so a peer can still rank
     sources.
 
-Each unsigned CLAP segment (via its embeddings row) and audio_features row is
-author-signed against that source's content-address; all new signatures batch
-into one Merkle tree and the Worker timestamps the root. Authorship priority =
+Each unsigned CLAP segment (via its embeddings row), audio_features row and
+track_instruments row is author-signed against that source's content-address,
+each in its kind's record format (record_sig: segment v3, features v4,
+instruments v1); all new signatures batch into one Merkle tree and the Worker
+timestamps the root. Authorship priority =
 the Worker date. Records not yet linked to a source are skipped, not hashed
 lazily — the link is the statement of WHAT was analyzed, and only the analysis
 pass itself can make it.
@@ -80,7 +82,7 @@ import record_sig as rs
 from config import settings
 from desktop.p2p import witness
 from p2p_identity import load_signing_key
-from record_sig import FEATURE_ORDER, canonical_features_blob
+from record_sig import FEATURE_ORDER, canonical_features_blob, canonical_instruments_blob
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("sign_audio")
@@ -184,7 +186,12 @@ def _pending_tracks(cur) -> list:
         SELECT a.track_id::text
           FROM audio_features a
           JOIN analysis_sources src ON src.id = a.analysis_source_id
-         WHERE a.signature IS NULL AND {_SIGNABLE_SRC}""")
+         WHERE a.signature IS NULL AND {_SIGNABLE_SRC}
+        UNION
+        SELECT i.track_id::text
+          FROM track_instruments i
+          JOIN analysis_sources src ON src.id = i.analysis_source_id
+         WHERE i.signature IS NULL AND {_SIGNABLE_SRC}""")
     return [r["tid"] for r in cur.fetchall()]
 
 
@@ -265,7 +272,7 @@ _TABLE_PK = {"track_mbids": ("recording_mbid", "uuid"),
 # trip (52 segments of tracks split mid-batch verified invalid, 2026-08-25);
 # signing no longer waits on the network, so it is the seconds of one pass.
 _TABLE_ENTITY = {"embedding_segments": None,       # via embeddings.track_id, see below
-                 "audio_features": "track_id",
+                 "audio_features": "track_id", "track_instruments": "track_id",
                  "album_tracks": "track_id", "track_mbids": "track_id",
                  "albums": "id"}
 
@@ -468,6 +475,21 @@ def sign(conn, full=False, limit=None, dry_run=False,
                                           feat["analysis_version"], fh)
             pending.append(("audio_features", feat["id"], rs.sign(payload, key), tid))
 
+        cur.execute(f"""
+            SELECT i.id, i.analysis_version, i.instruments,
+                   src.chromaprint, src.duration_seconds
+            FROM track_instruments i
+            JOIN analysis_sources src ON src.id = i.analysis_source_id
+            WHERE i.track_id = %(tid)s AND i.signature IS NULL
+              AND {_SIGNABLE_SRC}""", params)
+        inst = cur.fetchone()
+        if inst:
+            ih = rs.blake2b_hex(canonical_instruments_blob(inst["instruments"]))
+            payload = rs.instruments_payload(author, tid, inst["chromaprint"],
+                                             inst["duration_seconds"],
+                                             inst["analysis_version"], ih)
+            pending.append(("track_instruments", inst["id"], rs.sign(payload, key), tid))
+
     budget = max(0, max_records - len(pending)) if max_records else None
     scope = None if full else sorted(set(track_ids) | set(minted))
     enriched = _collect_enrichment(cur, author, key, pending, budget=budget,
@@ -535,7 +557,7 @@ def sign(conn, full=False, limit=None, dry_run=False,
 # allows them alone) — a quiet node's week of sightings is not read on every
 # pass only to wait again.
 _WITNESS_TABLE = "p2p_witness"
-_STAMP_TABLES = ("embedding_segments", "audio_features", "albums",
+_STAMP_TABLES = ("embedding_segments", "audio_features", "track_instruments", "albums",
                  "album_tracks", "track_mbids", _WITNESS_TABLE)
 _TABLE_PK[_WITNESS_TABLE] = ("id", "bigint")
 
@@ -720,10 +742,11 @@ def run(stage="both", limit=None, dry_run=False, until_done=False,
 def verify_all() -> bool:
     """Re-verify the seal of every signed record against the stored content.
 
-    For each signed segment / audio_features row it rebuilds the exact signed
-    payload FROM the stored data — the content hashes are recomputed from the
-    actual vector / feature values, so this also proves the stored data is what
-    was sealed — then runs the full chain (author signature → Merkle inclusion
+    For each signed segment / audio_features / track_instruments row it
+    rebuilds the exact signed payload FROM the stored data — the content
+    hashes are recomputed from the actual vector / feature / instrument
+    values, so this also proves the stored data is what was sealed — then
+    runs the full chain (author signature → Merkle inclusion
     → Worker timestamp by a trusted authority). A signed row whose provenance
     link is missing counts as INVALID: the seal asserts a content-address the
     row no longer carries. Witness records are checked the same way against
@@ -818,6 +841,33 @@ def verify_all() -> bool:
             if len(bad_samples) < 5:
                 bad_samples.append(f"features {r['tid'][:8]}")
     feat_cur.close()
+
+    inst_cur = conn.cursor(name="verify_instruments",
+                           cursor_factory=psycopg2.extras.RealDictCursor)
+    inst_cur.itersize = 2000
+    inst_cur.execute("""SELECT i.author_pubkey, i.signature, i.merkle_proof, i.batch_root,
+                           i.track_id::text tid, i.analysis_version, i.instruments,
+                           p.chromaprint, p.duration_seconds
+                    FROM track_instruments i
+                    LEFT JOIN analysis_sources p ON p.id = i.analysis_source_id
+                    WHERE i.signature IS NOT NULL""")
+    for r in inst_cur:
+        if r["chromaprint"] is None:
+            bad += 1
+            if len(bad_samples) < 5:
+                bad_samples.append(f"instruments {r['tid'][:8]} UNLINKED")
+            continue
+        ih = rs.blake2b_hex(canonical_instruments_blob(r["instruments"]))
+        payload = rs.instruments_payload(r["author_pubkey"], r["tid"],
+                                         r["chromaprint"], r["duration_seconds"],
+                                         r["analysis_version"], ih)
+        if _seal_ok(payload, r):
+            ok += 1
+        else:
+            bad += 1
+            if len(bad_samples) < 5:
+                bad_samples.append(f"instruments {r['tid'][:8]}")
+    inst_cur.close()
 
     # Witness records carry their own copy of the stamp (signing_batches is
     # not theirs to rely on), and a signed row without one is waiting for an
