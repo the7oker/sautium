@@ -271,17 +271,14 @@ def _own_keys() -> frozenset:
     counts only when it names the key that signs."""
     from pathlib import Path
 
-    from cryptography.hazmat.primitives import serialization
-
     from desktop.p2p import witness
     from p2p_identity import load_signing_key
+    from sign_audio import _pubkey_hex
     key = load_signing_key(settings)
     if key is None:
         return frozenset()
-    current = key.public_key().public_bytes(encoding=serialization.Encoding.Raw,
-                                            format=serialization.PublicFormat.Raw).hex()
     folder = Path(settings.p2p_identity_dir) if settings.p2p_identity_dir else None
-    return witness.own_keys(current, folder)
+    return witness.own_keys(_pubkey_hex(key), folder)
 
 
 # A record's seal names its author: one of the node's keys, or another's.
@@ -301,11 +298,6 @@ _SEALED_NOT_IMPORTED = """
                     WHERE es.signature IS NOT NULL AND s.imported IS NOT TRUE)"""
 
 
-def _vector_bytes(text_value: str) -> bytes:
-    from record_sig import vector_to_bytes
-    return vector_to_bytes([float(x) for x in text_value.strip("[]").split(",")])
-
-
 def _split_flipped(db, keys: list) -> dict:
     """The grids another author sealed under this node's own source row — a
     registration flipped an imported row first-hand until 2026-11-10
@@ -317,6 +309,7 @@ def _split_flipped(db, keys: list) -> dict:
     from sqlalchemy import text
 
     import record_sig as rs
+    from sign_audio import _vector_bytes
     flipped = db.execute(text(f"""
         SELECT e.id, e.track_id::text AS track, e.model_id::text AS model, s.chromaprint,
                s.duration_seconds, s.grid_version, COALESCE(s.material_of, s.id) AS root

@@ -5,9 +5,9 @@ its five fields, delta 056), the data step analysis_records_v4
 
 - 001 alone and 001 with its deltas hold the same objects, once;
 - an old node through 056: the instruments moved, unsigned, with their row's
-  source link, version and dates; the five columns, their checks, indexes and
-  type gone; no seal touched; 056 again a no-op; a failure inside it rolls it
-  back whole;
+  source link, version and dates, a map only (a JSON null is none); the five
+  columns, their checks, indexes and type gone; no seal touched; 056 again a
+  no-op; a failure inside it rolls it back whole;
 - the data step on an old node's rows — own sealed (the current key and a
   retired one), own unsealed, under no source, foreign, same-account under an
   imported source, flipped (features; grids split onto their imported twin,
@@ -370,10 +370,16 @@ def test_the_delta_moves_the_instruments_unsigned_and_drops_the_five_columns():
     c = _old_node(name)
     try:
         with c.cursor() as cur:
-            track, bare = _track(cur), _track(cur)
+            track, bare, null, listed = (_track(cur) for _ in range(4))
             source = _source(cur, track)
             _old_features(cur, track, source, author=OWN)
             _old_features(cur, bare, _source(cur, bare), instruments=None, version=1)
+            # what the ORM and the importer wrote for no instruments, and a
+            # value of no record's shape: no map, no record
+            for t, value in ((null, "null"), (listed, '["piano"]')):
+                _old_features(cur, t, _source(cur, t), instruments=None)
+                cur.execute("UPDATE audio_features SET instruments = %s::jsonb WHERE track_id = %s",
+                            (value, t))
         assert _apply_delta(name) == 1
         assert _apply_delta(name) == 0
         with c.cursor() as cur:
@@ -404,6 +410,9 @@ def test_the_delta_moves_the_instruments_unsigned_and_drops_the_five_columns():
                             WHERE track_id = %s""", (track,))
             cur.execute("SELECT signature FROM track_instruments WHERE track_id = %s", (track,))
             assert cur.fetchone() == (None,)
+            with pytest.raises(psycopg2.IntegrityError, match="chk_ti_map"):
+                cur.execute("UPDATE track_instruments SET instruments = 'null' WHERE track_id = %s",
+                            (track,))
     finally:
         c.close()
         conftest._recreate(name, create=False)

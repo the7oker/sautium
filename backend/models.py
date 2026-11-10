@@ -972,6 +972,7 @@ class TrackInstruments(Base):
     __table_args__ = (
         Index("idx_track_instruments_instruments", "instruments", postgresql_using="gin"),
         Index("idx_track_instruments_analysis_source", "analysis_source_id"),
+        CheckConstraint("jsonb_typeof(instruments) = 'object'", name="chk_ti_map"),
     )
 
     def __repr__(self):

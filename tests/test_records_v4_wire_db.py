@@ -8,7 +8,8 @@ readers (2026-11-10), on a real PostgreSQL built from the migrations:
   an imported one of an older, never a first-hand one, and the planner asks
   for no record the importer would drop;
 - the holdings payload's second filter names the tracks with instruments, and
-  its version moves with them;
+  its version moves with them; the client tests against it alone the tracks
+  whose segments and features it holds and whose instruments it lacks;
 - an instruments gap is in the run's trigger set and in no DHT set;
 - the identity canon carries the instruments record (a merge's per-kind
   move, a rename's shed) and keeps a track holding only instruments;
@@ -301,6 +302,23 @@ def test_the_holdings_name_the_tracks_with_instruments_in_a_filter_of_their_own(
     with conn.cursor() as cur:
         _first_hand(cur, _track(cur), "track_instruments", 2)
     assert sync_queries.holdings_version(conn) != version
+
+
+def test_the_client_tests_a_gap_of_instruments_alone_against_the_second_filter(conn, scratch_dsn):
+    """What _holdings_inventory tests against a peer's instruments filter
+    alone: the tracks whose segments and features are held here and whose
+    instruments are not — no track missing its segments or its features."""
+    with conn.cursor() as cur:
+        tagged, sonic, only_tagged, unsegmented = (_track(cur) for _ in range(4))
+        seal_track(cur, AUTHOR, tagged, MODEL, recording=str(uuid.uuid4()), instruments=SCORES)
+        seal_track(cur, AUTHOR, sonic, MODEL, recording=str(uuid.uuid4()))
+        _first_hand(cur, only_tagged, "track_instruments", 2)
+        _first_hand(cur, unsegmented, "audio_features", 2)
+    client = sync_client.SyncClient(api_client=None, db_dsn=scratch_dsn)
+    try:
+        assert client._lacking_only_instruments() == {sonic}
+    finally:
+        client._close_conn()
 
 
 def test_an_instruments_gap_triggers_a_run_and_costs_no_dht_traffic(conn):

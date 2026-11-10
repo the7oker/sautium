@@ -1249,7 +1249,8 @@ CREATE TABLE IF NOT EXISTS track_instruments (
     batch_root    CHAR(64) REFERENCES signing_batches(batch_root),
     merkle_proof  JSONB,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_ti_map CHECK (jsonb_typeof(instruments) = 'object')
 );
 CREATE INDEX IF NOT EXISTS idx_track_instruments_instruments
     ON track_instruments USING gin (instruments);

@@ -16,14 +16,13 @@ a COMPLETE import, so a partial landing (killed boot, transient DB error, no
 network yet) retries on the next start. A bundle of an older record format
 lands what this release still takes: seed v3's structure and segments land,
 its v3 features fail the gate, it has no instruments envelope, and the node
-holds less than it names — no marker, and a later bundle completes it. Every statement is idempotent:
-structural rows land with
-ON CONFLICT DO NOTHING (a node that already holds a row keeps its own —
-the master and any owning node are no-ops by construction), and the
-analysis half replays the bundle's verbatim pull envelopes
-through SyncClient._import_items — the same verify-and-import gate a P2P
-pull uses, so seals are checked and first-hand rows are protected
-identically.
+holds less than it names — no marker, and a later bundle completes it.
+Every statement is idempotent: structural rows land with ON CONFLICT DO
+NOTHING (a node that already holds a row keeps its own — the master and any
+owning node are no-ops by construction), and the analysis half replays the
+bundle's verbatim pull envelopes through SyncClient._import_items — the
+same verify-and-import gate a P2P pull uses, so seals are checked and
+first-hand rows are protected identically.
 
 A failure here never gates the service: the node without the seed is a
 fully functional pre-seed node, so errors are logged loudly and retried

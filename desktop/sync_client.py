@@ -425,22 +425,22 @@ class SyncClient:
                                AND {sync_queries.HELD_RECORD}""", [candidates])
             return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
 
-    def _held_here(self) -> tuple[set, set]:
-        """(the tracks whose segments and features this node both holds, the
-        tracks whose instruments it holds), by the HELD rules — read from
-        what is held, never from an asked list the phantom bulk makes
-        millions long."""
+    def _lacking_only_instruments(self) -> set:
+        """The tracks whose segments and features this node holds and whose
+        instruments it lacks, by the HELD rules — read from what is held,
+        never from an asked list the phantom bulk makes millions long."""
         conn = self._get_conn()
         with conn.cursor() as cur:
-            cur.execute(f"""SELECT a.track_id::text FROM audio_features a
-                              LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                             WHERE {sync_queries.HELD_RECORD}
-                               AND {sync_queries.HOLDS_SEGMENTS.format(t="a.track_id")}""")
-            sonic = {row[0] for row in cur.fetchall()}
-            cur.execute(f"""SELECT a.track_id::text FROM track_instruments a
-                              LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                             WHERE {sync_queries.HELD_RECORD}""")
-            return sonic, {row[0] for row in cur.fetchall()}
+            # HOLDS_INSTRUMENTS names its own `a` and `s`: the track is read
+            # from the CTE, never from an alias the subquery shadows.
+            cur.execute(f"""WITH sonic AS (
+                                SELECT a.track_id FROM audio_features a
+                                  LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                                 WHERE {sync_queries.HELD_RECORD}
+                                   AND {sync_queries.HOLDS_SEGMENTS.format(t="a.track_id")})
+                            SELECT x.track_id::text FROM sonic x
+                             WHERE NOT {sync_queries.HOLDS_INSTRUMENTS.format(t="x.track_id")}""")
+            return {row[0] for row in cur.fetchall()}
 
     def run_sync(self, track_uuids: list[str] = None,
                  bulk_track_uuids: Optional[list[str]] = None) -> dict:
@@ -633,8 +633,7 @@ class SyncClient:
                     f"held by the peer"
                     + (f", {instruments.n} with instruments" if instruments else ""))
 
-        sonic, instrumented = self._held_here()
-        only_instruments = sonic - instrumented
+        only_instruments = self._lacking_only_instruments()
         hits = filters["tracks"].hits([t for t in tracks if t not in only_instruments])
         if filters.get("instruments") is not None:
             hits += filters["instruments"].hits([t for t in tracks if t in only_instruments])

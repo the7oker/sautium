@@ -46,12 +46,12 @@ class _Api:
         return dict(EMPTY_INVENTORY, tracks=list(track_uuids))
 
 
-def _client(api, sonic=(), instrumented=()):
+def _client(api, only_instruments=()):
     """The client, what this node holds stated: the tracks whose segments
-    and features it holds, and those whose instruments it holds."""
+    and features it holds and whose instruments it lacks."""
     c = SyncClient(api_client=api, db_dsn="postgresql://unused", holdings_cache={})
     c.peer_capabilities = set(api.capabilities)
-    c._held_here = lambda: (set(sonic), set(instrumented))
+    c._lacking_only_instruments = lambda: set(only_instruments)
     return c
 
 
@@ -79,7 +79,7 @@ def test_an_instruments_gap_is_asked_only_where_the_peers_instruments_filter_hol
     noise = _uuids(3000)                # the ask outweighs the filters
     peer_sonic = only_instruments + lacking + complete
     api = _Api(peer_sonic, instrumented=only_instruments[:1] + lacking[1:])
-    _client(api, sonic=only_instruments + complete, instrumented=complete)._holdings_inventory(
+    _client(api, only_instruments=only_instruments)._holdings_inventory(
         api.get_health(), only_instruments + lacking + complete + noise)
     asked = {u for tracks in api.asked for u in tracks}
     assert only_instruments[0] in asked and not set(only_instruments[1:]) & asked
@@ -87,7 +87,7 @@ def test_an_instruments_gap_is_asked_only_where_the_peers_instruments_filter_hol
     assert len(asked) < 100
 
     old = _Api(peer_sonic)              # a peer that publishes no instruments filter
-    _client(old, sonic=only_instruments, instrumented=())._holdings_inventory(
+    _client(old, only_instruments=only_instruments)._holdings_inventory(
         old.get_health(), only_instruments + lacking + noise)
     asked = {u for tracks in old.asked for u in tracks}
     assert not set(only_instruments) & asked and set(lacking) <= asked

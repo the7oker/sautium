@@ -8,10 +8,14 @@
 -- that ran the earlier files:
 --
 --   1. track_instruments and its guard;
---   2. the instruments of every audio_features row that has them copied
---      into it, unsigned, with the row's source link, methodology version
---      and dates — only while audio_features.instruments exists (018's
---      pattern), so the delta is a no-op on the schema 001 creates;
+--   2. the instruments of every audio_features row whose instruments are a
+--      map copied into it, unsigned, with the row's source link, methodology
+--      version and dates — only while audio_features.instruments exists
+--      (018's pattern), so the delta is a no-op on the schema 001 creates. A
+--      row without instruments held SQL NULL or, written through the ORM or
+--      the importer, a JSON null: neither is a record (chk_ti_map — the
+--      record's hash is over a map), and the track's instruments are derived
+--      anew;
 --   3. the features guard restated without the five columns first, then
 --      their checks, their indexes, the columns and the vocal_class type
 --      dropped.
@@ -31,7 +35,8 @@ CREATE TABLE IF NOT EXISTS track_instruments (
     batch_root    CHAR(64) REFERENCES signing_batches(batch_root),
     merkle_proof  JSONB,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_ti_map CHECK (jsonb_typeof(instruments) = 'object')
 );
 CREATE INDEX IF NOT EXISTS idx_track_instruments_instruments
     ON track_instruments USING gin (instruments);
@@ -75,7 +80,7 @@ DO $$ BEGIN
         SELECT track_id, instruments, analysis_source_id, analysis_version,
                created_at, updated_at
           FROM audio_features
-         WHERE instruments IS NOT NULL;
+         WHERE jsonb_typeof(instruments) = 'object';
     END IF;
 END $$;
 
