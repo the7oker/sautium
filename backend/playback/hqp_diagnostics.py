@@ -238,8 +238,11 @@ class Attempt:
     # A start that took HQPlayer back from another controller, which held it
     # as the start was asked for — a play press, a new queue played
     # (playback.hqp_backend._press, replace_queue): a Stop the node did not
-    # send while it starts is that controller's (verdict)
+    # send while it starts is that controller's (verdict); and whether that
+    # controller held it paused (its own Stop follows its Pause: Roon's, 5 s
+    # after it)
     taken_back: bool = False
+    held_paused: bool = False
 
     def record(self, o: CommandOutcome) -> None:
         """A command this intent sent, with HQPlayer's answer."""
@@ -449,6 +452,8 @@ class Attempt:
                 out["advance"] = dict(self.advance)
             if self.taken_back:
                 out["taken_back"] = True
+            if self.held_paused:
+                out["held_paused"] = True
             return out
 
     def moved(self) -> bool:
@@ -959,14 +964,19 @@ def _final_refusal(steps: list) -> Optional[dict]:
 def _other_stopped(f: dict, log: Optional[dict], owner: bool) -> bool:
     """Was a take-back stopped by the controller it took HQPlayer from? A
     start asked for while another controller held HQPlayer (taken_back),
-    HQPlayer stopped at its latest tick, and nothing of the node's or
-    HQPlayer's own explains that stop: no newer intent of the node's (owner),
-    no Stop of the node's after its start, no refusal in HQPlayer's answers
-    (the add, a transport command, an entry not kept), no cause in its log
-    nor one the rate check names without a hedge — that controller's own
-    Stop (Roon's, 5 s after its Pause: ROON-COEX §6.2 P6)."""
+    HQPlayer stopped at its latest tick, a Stop to explain it — that
+    controller held HQPlayer paused (its own Stop due), or HQPlayer took the
+    start before it stopped — and nothing of the node's or HQPlayer's own
+    explains it: no newer intent of the node's (owner), no Stop of the node's
+    after its start, no refusal in HQPlayer's answers (the add, a transport
+    command, an entry not kept), no cause in its log nor one the rate check
+    names without a hedge — that controller's own Stop (Roon's, 5 s after its
+    Pause: ROON-COEX §6.2 P6). HQPlayer stopping a take-back from a playing
+    controller at once is no Stop of anyone's."""
     steps, ticks, pl = f.get("steps") or [], f.get("ticks") or [], f.get("playlist") or {}
     if not (f.get("taken_back") and ticks and ticks[-1]["state"] == "stopped") or owner:
+        return False
+    if not f.get("held_paused") and not any(t["state"] == "playing" and t["track"] >= 1 for t in ticks):
         return False
     starts = [s["ts"] for s in steps if s["command"] in TRANSPORT]
     if starts and any(s["command"] == "Stop" and s["ts"] > max(starts) for s in steps):

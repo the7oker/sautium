@@ -3835,16 +3835,17 @@ def test_p6_hqplayers_rate_refusal_of_a_take_back_stays_hqplayers(fake, listens,
         fake.refuse_play.add("A/02.flac")
         seen = {a.id for a in diag.attempts()}
 
-        def judged():
-            fresh = [a for a in diag.attempts() if a.id not in seen and a.verdict and a.hqp_log is not None]
+        def judged(intent):
+            fresh = [a for a in diag.attempts()
+                     if a.id not in seen and a.intent == intent and a.verdict and a.hqp_log is not None]
             return fresh[0] if fresh else None
         assert b.play()
-        assert _wait(judged, timeout=30), "the take-back was never judged"
-        taken = judged()
+        assert _wait(lambda: judged("rebuild"), timeout=30), "the take-back was never judged"
+        taken = judged("rebuild")
         seen |= {a.id for a in diag.attempts()}
         assert b.play()                                   # the same start, pressed again: no other controller now
-        assert _wait(judged, timeout=30), "the second start was never judged"
-        again = judged()
+        assert _wait(lambda: judged("play"), timeout=30), "the second start was never judged"
+        again = judged("play")
         _observed("P6-rate", taken=(taken.intent, taken.facts.get("taken_back"), taken.verdict["code"]),
                   again=(again.intent, again.verdict["code"]), roon_sent=roon.sent)
         assert "Stop" not in roon.sent[roon.sent.index("Pause"):]
@@ -3898,7 +3899,7 @@ def test_p13_a_read_between_roons_add_and_its_play_leaves_the_next_refusal_its_r
                    "& 2026/11/02 18:00:06 Playlist clear", "& 2026/11/02 18:00:06 Playlist add URI: http://127.0.0.1:30000")
         roon.start_before_its_play()               # Static Bloom added, its Play to follow
         k = len(fake.commands)
-        assert _wait(lambda: sum(1 for c, _ in fake.commands[k:] if c == "PlaylistGet") >= 2, timeout=10), \
+        assert _wait(lambda: any(c == "PlaylistGet" for c, _ in fake.commands[k:]), timeout=10), \
             "no tick read the playlist between Roon's add and its Play"
         early = mgr._latest_status.get("other_refused")
         _write(log, "& 2026/11/02 18:00:30 No suitable output rate for 192000, stop")     # at Roon's Play
@@ -3909,7 +3910,7 @@ def test_p13_a_read_between_roons_add_and_its_play_leaves_the_next_refusal_its_r
         rows = [a.verdict["sentence"] for a in diag.attempts() if a.intent == "other"]
         _observed("P13-add-play", first=first, early=early, now=mgr._latest_status.get("other_refused"), rows=rows)
         assert said, "Static Bloom's refusal got no row of its own"
-        assert early is None and len(rows) == 2 and "96 kHz" in rows[1]
+        assert len(rows) == 2 and "96 kHz" in rows[1], "a row for Static Bloom said with another track's reason"
     finally:
         b.shutdown()
         roon.close()
@@ -3949,13 +3950,15 @@ def test_p13_a_dsp_change_in_f7s_state_leaves_the_next_refused_track_its_row(fak
 
 
 @pytest.mark.parametrize("track", ["the first", "the next"])
-def test_p13_roons_play_sent_again_on_one_refused_track_makes_one_row(fake, listens, monkeypatch, tmp_path, track):
-    """Roon's Play sent again and again on one refused track, HQPlayer
-    writing its refusal for each (day 1's A8: 4–5 a second): one row — the
-    playlist a row named is read no more (P13 reads again only for another).
-    The next track's: its first read waits on a slow log (an Embedded box's
-    log page) while Roon's Plays move the take — one read at a time, each
-    from where the one before left, so none reads it twice."""
+def test_p13_one_read_of_hqplayers_log_at_a_time_makes_one_row_per_refused_track(fake, listens, monkeypatch,
+                                                                                  tmp_path, track):
+    """Roon's Play sent again and again on a refused track, HQPlayer writing
+    its refusal for each (day 1's A8: 4–5 a second), while its log is slow
+    to answer (an Embedded box's log page: each read as of its start,
+    answered late): one read under way at a time — F7's own first read among
+    them — each from where the one before left, so one row per refused
+    track, never one per read; and Roon's Play sent again on a playlist a row
+    named reads nothing more."""
     import threading
     _logged(monkeypatch, tmp_path)
     log = tmp_path / "HQPlayer6Desktop.log"
@@ -3963,28 +3966,49 @@ def test_p13_roons_play_sent_again_on_one_refused_track_makes_one_row(fake, list
     fake.refuse_play.add("stream.raw")
     roon = FakeRoon(fake.port)
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
-    gate = threading.Event()
+    gate, lock = threading.Event(), threading.Lock()
+    flight = {"now": 0, "peak": 0}
+    real = diag.read_log
+
+    def slow(*a, **k):
+        read = real(*a, **k)
+        if sys._getframe(1).f_code.co_name != "_other_refusal":
+            return read
+        with lock:
+            flight["now"] += 1
+            flight["peak"] = max(flight["peak"], flight["now"])
+        try:
+            gate.wait(20)
+            return read
+        finally:
+            with lock:
+                flight["now"] -= 1
     try:
-        _a8s_first_refusal(fake, mgr, roon)
         rate = "96000"
         if track == "the next":
+            _a8s_first_refusal(fake, mgr, roon)
             rate = "192000"
-            real = diag.read_log
-            monkeypatch.setattr(diag, "read_log", lambda *a, **k: (gate.wait(20), real(*a, **k))[1])
-            _write(log, "& 2026/11/02 18:00:20 Playlist clear", "& 2026/11/02 18:00:20 Playlist add URI: http://127.0.0.1:30000",
+            _write(log, "& 2026/11/02 18:00:20 Playlist clear",
+                   "& 2026/11/02 18:00:20 Playlist add URI: http://127.0.0.1:30000",
                    "& 2026/11/02 18:00:20 No suitable output rate for 192000, stop")
-            roon.play_track()                      # Static Bloom: refused, its read held
-        for i in range(8):
+        monkeypatch.setattr(diag, "read_log", slow)
+        roon.play_track()                          # refused, its read held
+        for i in range(10):
             _write(log, f"& 2026/11/02 18:00:{30 + i:02d} No suitable output rate for {rate}, stop")
             roon.play_again()
             time.sleep(0.4)
         gate.set()
-        if track == "the next":
-            assert _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        said = f"{rate[:-3]} kHz"
+        assert _wait(lambda: said in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        for i in range(4):                         # Roon's Play sent again on the playlist a row named
+            _write(log, f"& 2026/11/02 18:00:{50 + i:02d} No suitable output rate for {rate}, stop")
+            roon.play_again()
+            time.sleep(0.4)
         k = len(fake.commands)
-        _wait(lambda: _statuses(fake, k) >= 3, timeout=10)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=10)
         rows = [a.verdict["sentence"] for a in diag.attempts() if a.intent == "other"]
-        _observed("P13-one-row", track=track, rows=rows)
+        _observed("P13-one-read", track=track, peak=flight["peak"], rows=rows)
+        assert flight["peak"] == 1, flight
         assert len(rows) == (1 if track == "the first" else 2), rows
     finally:
         gate.set()
@@ -4020,6 +4044,213 @@ def test_p6_a_cause_in_hqplayers_log_after_a_take_back_keeps_hqplayers_verdict(f
         a = judged()
         _observed("P6-log", code=a.verdict["code"], cause=(a.hqp_log.get("cause") or {}).get("code"))
         assert a.verdict["code"] != "other_stopped" and a.hqp_log["cause"]["code"] == "no_output_rate", a.verdict
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p12_the_row_stays_while_roon_sends_its_play_again(fake, listens, monkeypatch, tmp_path):
+    """P12: the row is said in F7's state — HQPlayer stopped on the other
+    app's refused entry, its playlist the one the refusal was read on — for
+    as long as Roon sends its Play again on it (A8: 4–5 a second), each Play
+    a take read against that playlist: never said for a tick and gone."""
+    _logged(monkeypatch, tmp_path)
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _a8s_first_refusal(fake, mgr, roon)
+        said = []
+        for _ in range(16):                        # 4 s more of Roon's Play sent again
+            roon.play_again()
+            time.sleep(0.25)
+            said.append(bool(mgr._latest_status.get("other_refused")))
+        _observed("P12-row-stays", said=said)
+        assert all(said), said
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+@pytest.mark.parametrize("cause", ["no-words-for-it", "no-log-line"])
+def test_p13_a_refusal_the_log_names_no_words_for_is_read_twice_at_most(fake, listens, monkeypatch, tmp_path,
+                                                                        cause):
+    """Review round 2's M1: F7 — Roon's track refused for a cause the node
+    has no words for (the output takes none of the formats offered, a line
+    for each Play sent again), or with nothing in the log; Roon sends its
+    Play again and again on that one entry (A8: 4–5 a second, until its zone
+    is stopped), its playlist unchanged. HQPlayer's log is read for it twice
+    at most — at F7's verdict and once more (the read a tick between an add
+    and its Play may take) — never once a second for as long as Roon keeps
+    sending Play (an Embedded box's whole log page each time)."""
+    _logged(monkeypatch, tmp_path)
+    log = tmp_path / "HQPlayer6Desktop.log"
+    log.write_text("& 2026/11/02 18:00:00 Playlist add URI: http://127.0.0.1:30000\n")
+    reads = []
+    real = diag.read_log
+
+    def counted(*a, **k):
+        if sys._getframe(1).f_code.co_name == "_other_refusal":
+            reads.append(time.monotonic())
+        return real(*a, **k)
+    monkeypatch.setattr(diag, "read_log", counted)
+    fake.raw_streams = "uri"
+    fake.rests_nowhere = True
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        roon.play_track()
+        assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("index") == 2
+                     and mgr._latest_status.get("state") == "stopped", timeout=10), "no spot at F7's verdict"
+        for i in range(36):                        # 9 s of Roon's Play sent again, 4 a second
+            if cause == "no-words-for-it":
+                _write(log, f"& 2026/11/02 18:00:{i:02d} StartAudioClient(): no formats available")
+            roon.play_again()
+            time.sleep(0.25)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=5)
+        rows = [a for a in diag.attempts() if a.intent == "other"]
+        _observed("P13-cost", cause=cause, reads=len(reads), roon_plays=roon.sent.count("Play"), rows=len(rows))
+        assert 1 <= len(reads) <= 2 and not rows, (len(reads), len(rows))
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p13_a_seek_in_f7s_state_leaves_the_next_refused_track_its_row(fake, listens, monkeypatch, tmp_path):
+    """Review round 2's L1: F7 with its row (96 kHz); the person moves where
+    Play resumes — a Seek at the spot, nothing sent, the spot still standing
+    at its new second (the row read under it goes: P12). Roon then plays its
+    next track, refused too, the take moved by Roon's Play: the spot stands
+    and HQPlayer is stopped, so the log is read again (P13 (a)) — a row of
+    its own — and the node sends nothing."""
+    _logged(monkeypatch, tmp_path)
+    log = tmp_path / "HQPlayer6Desktop.log"
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        first = _a8s_first_refusal(fake, mgr, roon)
+        n = _mark(fake, roon)
+        assert b.seek(30)
+        assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("position") == 30, timeout=5)
+        _write(log, "& 2026/11/02 18:00:30 Playlist add URI: http://127.0.0.1:30000",
+               "& 2026/11/02 18:00:30 No suitable output rate for 192000, stop")
+        roon.play_track()                          # Static Bloom: refused too
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=10)
+        st = mgr._latest_status
+        _observed("P13-seek", first=first, now=st.get("other_refused"), resume=st.get("resume"),
+                  node_commands=_node_commands(fake, n, roon))
+        assert said, "the next refused track got no row after the person's Seek"
+        assert st["resume"]["position"] == 30 and _node_commands(fake, n, roon) == []
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p13_roons_refused_track_after_a_takeover_it_played_gets_its_row(fake, listens, monkeypatch, tmp_path):
+    """Review round 2's P-b: D3's road into F7's state — Roon takes HQPlayer
+    with a track it plays (the takeover's spot), then its next pick (or Roon
+    Radio's: day 1's Static Bloom, 192 kHz) is a track HQPlayer refuses, Roon's
+    Play sent again. HQPlayer stopped on the other app's entry, the spot
+    standing, the take moved by Roon's Plays: F7's answer says a refusal
+    during another controller's playback is said — a row of its own."""
+    _logged(monkeypatch, tmp_path)
+    log = tmp_path / "HQPlayer6Desktop.log"
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)       # Roon's first pick plays
+        assert ticks is not None, "the node never said external"
+        assert _wait(lambda: fake.state == PLAYING and fake.position >= 2, timeout=10)
+        n = _mark(fake, roon)
+        fake.refuse_play.add(f"{2:032x}")                       # its next pick: refused
+        _write(log, "& 2026/11/02 18:00:30 Playlist add URI: http://127.0.0.1:30000",
+               "& 2026/11/02 18:00:30 No suitable output rate for 192000, stop")
+        roon.play_track()
+        for _ in range(8):
+            roon.play_again()
+            time.sleep(0.2)
+        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=10)
+        st = mgr._latest_status
+        _observed("P13-after-D3", state=st.get("state"), resume=st.get("resume"), now=st.get("other_refused"),
+                  node_commands=_node_commands(fake, n, roon))
+        assert said, "Roon's refused track got no row after a takeover it played"
+        assert st["resume"]["index"] == 2 and _node_commands(fake, n, roon) == []
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p6_hqplayers_refusal_of_a_take_back_from_a_playing_roon_is_hqplayers(fake, listens, monkeypatch):
+    """Review round 2's L2: Roon plays (no Pause, so no Stop of its own is
+    due — it sends that one only after its Pause, and its control ends at a
+    take-back from a playing zone: A2). The person's Play takes HQPlayer
+    back at the spot and HQPlayer stops the start at once (an entry it
+    refuses at Play), its log not readable here and the rate check naming
+    nothing. No Stop of anyone's: never "Another app stopped HQPlayer" —
+    HQPlayer's own verdict, as before the body."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        assert _wait(lambda: fake.state == PLAYING, timeout=5)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=5)
+        sent = len(roon.sent)
+        fake.refuse_play.add("A/02.flac")
+        seen = {a.id for a in diag.attempts()}
+
+        def judged():
+            return next((a for a in diag.attempts() if a.id not in seen and a.intent == "rebuild" and a.verdict),
+                        None)
+        assert b.play()
+        assert _wait(judged, timeout=30), "the take-back was never judged"
+        a = judged()
+        _observed("P6-from-playing", code=a.verdict["code"], taken_back=(a.facts or {}).get("taken_back"),
+                  held_paused=(a.facts or {}).get("held_paused"), roon_after=roon.sent[sent:])
+        assert "Stop" not in roon.sent[sent:] and (a.facts or {}).get("taken_back")
+        assert a.verdict["code"] == "not_played", a.verdict
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_a_start_another_controller_takes_over_in_its_window_is_no_refusal(fake, listens, monkeypatch):
+    """Review round 2's P-a: the node's tap on slot 2 plays (its position
+    moving, a listen kept); Roon starts its own track 3 s into it — inside
+    the tap's watch window (10 s): the takeover's spot left. The tap's
+    attempt is judged on what HQPlayer did with it before Roon came — it
+    played — never on Roon's playlist ("HQPlayer refused the file: accepted
+    the file but did not keep it"), and Now Playing offers no such sheet
+    beside the takeover's spot once Roon pauses."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        tap = b._attempt
+        assert tap is not None and tap.intent == "select"
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        assert _wait(lambda: tap.verdict is not None, timeout=20), "the tap was never judged"
+        roon.pause(stop_after=600)
+        assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=5)
+        st = mgr._latest_status
+        _observed("tap-in-window", verdict=(tap.end, tap.verdict["code"]), diagnosis=st.get("diagnosis"),
+                  source=st.get("source"), resume=st.get("resume"))
+        assert (tap.end, tap.verdict["code"]) == ("superseded", "played"), tap.verdict
+        assert (st.get("diagnosis") or {}).get("code") != "rejected", st.get("diagnosis")
     finally:
         b.shutdown()
         roon.close()

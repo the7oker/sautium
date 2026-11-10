@@ -102,10 +102,11 @@ def test_a_take_back_keeps_the_verdict_the_nodes_own_evidence_gives():
     hedge, is HQPlayer's refusal (rate_refused); an add HQPlayer refused, an
     entry it did not keep, HQPlayer playing at the latest tick — each keeps
     its own verdict."""
+    held = {"taken_back": True, "held_paused": True}
     fetch = _trace("no_fetch_stream")
-    assert diag.verdict(fetch)["code"] == diag.verdict({**fetch, "taken_back": True})["code"] == "no_fetch"
+    assert diag.verdict(fetch)["code"] == diag.verdict({**fetch, **held})["code"] == "no_fetch"
     rate = _trace("rate_refused_filter")
-    assert diag.verdict(rate)["code"] == diag.verdict({**rate, "taken_back": True})["code"] == "rate_refused"
+    assert diag.verdict(rate)["code"] == diag.verdict({**rate, **held})["code"] == "rate_refused"
     f = _trace("other_stopped_take_back")
     refused_add = {**f, "handover": {**f["handover"], "ok": False, "result": "Error",
                                      "message": "Unable to open file"}, "playlist": None}
@@ -113,6 +114,19 @@ def test_a_take_back_keeps_the_verdict_the_nodes_own_evidence_gives():
     assert diag.verdict({**f, "playlist": {**f["playlist"], "expected_present": False}})["code"] == "rejected"
     playing = {**f, "ticks": [*f["ticks"], {**f["ticks"][1], "ts": f["ticks"][-1]["ts"] + 1.0}]}
     assert diag.verdict(playing)["code"] != "other_stopped"
+
+
+def test_a_take_back_hqplayer_stopped_at_once_from_a_playing_controller_is_no_ones_stop():
+    """Review round 2's L2: the other app's own Stop follows its Pause (Roon's,
+    5 s after it). A take-back from a controller that held HQPlayer playing,
+    which HQPlayer stopped before it ever played the start, is no Stop of
+    anyone's — HQPlayer's own verdict (not_played); from one that held it
+    paused, or one HQPlayer played before it stopped, the other app's."""
+    f = _trace("other_stopped_take_back")
+    never = {**f, "ticks": [t for t in f["ticks"] if t["state"] != "playing"]}
+    assert diag.verdict(never)["code"] == "not_played"
+    assert diag.verdict({**never, "held_paused": True})["code"] == "other_stopped"
+    assert diag.verdict(f)["code"] == "other_stopped"
 
 
 def test_a_start_another_controller_stopped_is_no_failure_of_the_output(fresh):

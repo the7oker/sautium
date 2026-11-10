@@ -626,7 +626,11 @@ comes after the control port answers again — so neither can end the wait.
   ROON-COEX F7: Roon's stream at a rate the output family refuses, its Play
   sent again and again — nothing of it ever plays; before, no spot was
   left); where HQPlayer names no take (HQPlayer 5), only for a listen read
-  while the playlist was the queue's mirror. Now Playing keeps that track,
+  while the playlist was the queue's mirror. A start of the node's still in
+  its watch window when the other controller cuts it is judged on what
+  HQPlayer did with it before — it played — never on that controller's
+  playlist (since 2026-11-10; before, "HQPlayer refused the file" stood
+  beside the takeover's spot). Now Playing keeps that track,
   stopped there — external while the other controller plays ("Another app
   took HQPlayer — Play takes it back at …"), "Stopped at … — Play resumes
   here" once HQPlayer rests stopped on what it refused — and Play takes
@@ -636,9 +640,12 @@ comes after the control port answers again — so neither can end the wait.
   controller's stop, not HQPlayer's refusal (since 2026-11-10, ROON-COEX §6.2
   P6; the words a draft): a Stop the node did not send while a start asked
   for under another controller's hold goes — a Play pressed, a new queue
-  played — with no refusal in HQPlayer's answers, no cause in its log nor one
-  the rate check names, and, for a stream, HQPlayer having asked for it in
-  time (else it is `no_fetch`), is judged `other_stopped`; the node sends
+  played — that controller holding HQPlayer paused (its own Stop due) or
+  HQPlayer having taken the start, with no refusal in HQPlayer's answers, no
+  cause in its log nor one the rate check names, and, for a stream, HQPlayer
+  having asked for it in time (else it is `no_fetch`), is judged
+  `other_stopped` — HQPlayer stopping a take-back from a playing controller
+  at once is its own refusal, as before; the node sends
   nothing more, the spot stays at the take-back's second, and Now Playing
   says "Another app stopped HQPlayer — Play resumes at …". Where HQPlayer stopped
   on the other app's track at that verdict, its
@@ -648,13 +655,16 @@ comes after the control port answers again — so neither can end the wait.
   2026-11-09, ROON-COEX §6.1 P7 and P12; the words a draft) — which opens the
   Why sheet with HQPlayer's own line: an attempt of its own (the Diagnostics
   list's "Another app's track"), never one of the node's plays. Each refused
-  track of that app's gets its own: with the spot standing and HQPlayer
-  stopped, a playlist other than the last one a row named that holds an
-  entry the node never gave, the take moved since the last read by no
-  command of the node's, the log is read again — one read at a time, and
-  only what HQPlayer logged after its newest add, so a read between the
-  other app's add and its Play names nothing and the next take is read
-  (since 2026-11-10, ROON-COEX §6.1 P13). A known limit (since
+  track of that app's gets its own, and so does one after a takeover whose
+  first track played: with the spot standing (a Seek moving it among the
+  person's words) and HQPlayer stopped, a playlist that holds an entry the
+  node never gave, the take moved since the last read by no command of the
+  node's, the log is read again — one read at a time, only what HQPlayer
+  logged after its newest add, so a read between the other app's add and
+  its Play names nothing and the next take is read; a playlist is read for
+  no more once a row names its refusal or a second read finds none (a cause
+  the node has no words for: the other app's Play sent again costs two
+  reads, not one a second) (since 2026-11-10, ROON-COEX §6.1 P13). A known limit (since
   2026-11-10, ROON-COEX F9): after the node takes HQPlayer back from a Roon
   that had stopped itself, Roon keeps its link, and its next Play Now sends no
   Stop — HQPlayer keeps playing the node's track, Roon's stream waiting behind
