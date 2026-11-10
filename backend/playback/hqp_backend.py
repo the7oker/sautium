@@ -1316,10 +1316,11 @@ class HqpBackend(PlayerBackend):
         # the takeover's spot while that spot stands (_status)
         self._other_refused: Optional[tuple] = None
         self._verdict_playlist: list = []
-        # Where HQPlayer's log was last read for that refusal: (the playlist,
-        # the take, the spot's generation, when) — the other app's next refused
-        # track in that state is read for again (_read_refusal_again, §6.1
-        # P13). The poller's alone
+        # Where HQPlayer's log was read for that refusal: (the playlist whose
+        # refusal a row last named — None before one does —, the take at the
+        # last read, the spot's generation, whether a read is under way) — the
+        # other app's next refused track in that state is read for again, one
+        # read at a time (_read_refusal_again, §6.1 P13). Under _spot_lock
         self._refusal_read: Optional[tuple] = None
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
@@ -2646,7 +2647,7 @@ class HqpBackend(PlayerBackend):
                         self._other_refused = None
                     if (self._refusal_read is not None and status.state == PlaybackState.STOPPED
                             and hqp_playlist is not None and hqp.last_error is None):
-                        self._read_refusal_again(status, [t.get("uri") for t in hqp_playlist], read_at)
+                        self._read_refusal_again(status, [t.get("uri") for t in hqp_playlist])
                     self._judge_start(status, playing)
                     if self._reconverge_due and link.owed is None:
                         # Once per loss: HQPlayer answers again — the add it
@@ -3217,28 +3218,38 @@ class HqpBackend(PlayerBackend):
             # Stopped on the other controller's entry (F7): why, from HQPlayer's
             # log — off the poller, as a failed attempt's log is read; again for
             # each refused track of that controller's after it (_read_refusal_again)
-            self._refusal_read = (list(self._verdict_playlist), status.track_serial, self._spot_gen, read_at)
-            threading.Thread(target=self._other_refused_log,
-                             args=(status.uri, self._spot_gen, self._verdict_playlist),
+            with self._spot_lock:
+                gen = self._spot_gen
+                self._refusal_read = (None, status.track_serial, gen, True)
+            threading.Thread(target=self._other_refused_log, args=(status.uri, gen, self._verdict_playlist),
                              daemon=True, name="hqp-log").start()
         return True
 
-    def _read_refusal_again(self, status, uris: list, read_at: float) -> None:
+    def _read_refusal_again(self, status, uris: list) -> None:
         """The other controller's next refused track in F7's state (ROON-COEX
         §6.1 P13 (a)): the spot its takeover left still standing, HQPlayer
-        stopped, its playlist other than at the last read of its log and
-        holding an entry the node never gave, the take moved since with no
-        command of the node's — HQPlayer's log is read again, off the
+        stopped, its playlist other than the last one a row named and holding
+        an entry the node never gave, the take moved since the last read and
+        by no command of the node's — HQPlayer's log is read again, off the
         poller: one row per refusal (_other_refused_log), the first one's
-        alone hiding the next. Called on the poller with HQPlayer stopped."""
-        playlist, take, gen, at = self._refusal_read
-        if self._spot is None or self._spot_gen != gen:
-            self._refusal_read = None           # that spot went: its reads are over
-            return
-        if (uris == playlist or not any(u and not self.gave(u) for u in uris)
-                or status.track_serial is None or status.track_serial == take or self._took_at > at):
-            return
-        self._refusal_read = (list(uris), status.track_serial, gen, read_at)
+        alone hiding the next. One read at a time, each from where the one
+        before it left: a read that names nothing (a tick between the other
+        app's add and its Play) moves on only the take, so the refusal
+        HQPlayer logs at that Play is read at the take it moves — and one
+        that names it is the last for that playlist, whatever the other app's
+        Play sent again logs after it. Called on the poller with HQPlayer
+        stopped."""
+        layout = self._layout()
+        foreign = any(u and not self.gave(u, layout) for u in uris)
+        with self._spot_lock:
+            named, take, gen, reading = self._refusal_read
+            if self._spot is None or self._spot_gen != gen:
+                self._refusal_read = None           # that spot went: its reads are over
+                return
+            if (reading or uris == named or not foreign or status.track_serial is None
+                    or status.track_serial == take or self._take_by_node):
+                return
+            self._refusal_read = (named, status.track_serial, gen, True)
         threading.Thread(target=self._other_refused_log, args=(status.uri, gen, list(uris)),
                          daemon=True, name="hqp-log").start()
 
@@ -3249,10 +3260,33 @@ class HqpBackend(PlayerBackend):
         after it (_read_refusal_again, §6.1 P13): the refusal it names is
         kept as an attempt of its own (diag.record_other_refused) and said
         beside the takeover's spot while the spot it was read under stands —
-        its words the node's, HQPlayer's own line in the Why sheet."""
+        its words the node's, HQPlayer's own line in the Why sheet. The read
+        is over at its end, a row or none, and its playlist the last named
+        only with a row; a spot gone or set anew since it began takes
+        neither."""
+        found = None
+        try:
+            found = self._other_refusal(uri, playlist)
+        finally:
+            with self._spot_lock:
+                read = self._refusal_read
+                kept = read is not None and read[2] == gen == self._spot_gen
+                if kept:
+                    self._refusal_read = (list(playlist) if found else read[0], read[1], gen, False)
+                if kept and found:
+                    att = diag.record_other_refused(*found)
+                    self._other_refused = (att.id, found[2], gen, playlist)
+        if kept and found:
+            logger.info("HQPlayer refused the other app's track: %s", found[2])
+            self.poke()
+
+    def _other_refusal(self, uri: Optional[str], playlist: list) -> Optional[tuple]:
+        """The refusal HQPlayer's log names for the other app's track:
+        (its URI, the log, the node's sentence), or None."""
         # Desktop 6 rests on no entry at the refused stop (A8): the entry is
         # the one the verdict's playlist holds that the node never gave
-        uri = uri or next((u for u in playlist if u and not self.gave(u)), None)
+        layout = self._layout()
+        uri = uri or next((u for u in playlist if u and not self.gave(u, layout)), None)
         source = diag.log_source(self._link.host, self._info)
         log = diag.read_log(source, self._info, uri)
         # Only what HQPlayer logged after the last line naming an entry the node
@@ -3261,20 +3295,16 @@ class HqpBackend(PlayerBackend):
         lines = log.get("lines") or []
         # ...nor at or before a line an attempt already took for its cause — the
         # node's own refused start (Desktop 6 names an entry at its add, never
-        # at a Play), the other app's track refused before this one
+        # at a Play), the other app's track refused before this one — nor
+        # before HQPlayer's newest add, whoever made it: a track is refused at
+        # its Play, after its add, and what was logged before is an earlier
+        # track's (the one before it, its Play sent again)
         judged = {((a.hqp_log or {}).get("cause") or {}).get("line") for a in diag.attempts()}
-        last = max((i for i, line in enumerate(lines) if line in judged or any(n in line for n in ours)),
-                   default=-1)
+        last = max((i for i, line in enumerate(lines)
+                    if line in judged or diag.ADD_LINE in line or any(n in line for n in ours)), default=-1)
         log["cause"] = diag.classify(lines[last + 1:], uri)
         reason = diag.other_reason(log)
-        if reason is None:
-            return
-        att = diag.record_other_refused(uri, log, reason)
-        with self._spot_lock:
-            if self._spot_gen == gen:
-                self._other_refused = (att.id, reason, gen, playlist)
-        logger.info("HQPlayer refused the other app's track: %s", reason)
-        self.poke()
+        return (uri, log, reason) if reason is not None else None
 
     def _ended(self, listen: _Listen, read_at: float, take: Optional[int]) -> bool:
         """Had the node's own listen ended, by a tick asked at `read_at` that
@@ -5346,7 +5376,7 @@ class HqpBackend(PlayerBackend):
         else:
             layout, _ = taking
             uris = [self._uri_for(it) for it in layout.handed]
-            att = self._watch("rebuild", uris=uris)
+            att = self._watch("rebuild", uris=uris, items=list(layout.handed))
             att.taken_back = press.taken_back
             with self._steps(att):
                 with self._link.command(item=press.item):
@@ -6123,6 +6153,10 @@ class HqpBackend(PlayerBackend):
         uris = [self._uri_for(it) for it in layout.handed]
         att = (self._watch("replace", slot=1, uris=uris, items=list(layout.handed))
                if play and uris else None)
+        if att is not None:
+            # Played while another controller holds HQPlayer, as a play press
+            # made then (_press): read before its hand-over clears the playlist
+            att.taken_back = self._taken()
         with self._handing(layout.items, stops=True,
                            base=(layout.handed[0], 0) if layout.handed else None, owes=play,
                            intent="queue") as n, self._steps(att):

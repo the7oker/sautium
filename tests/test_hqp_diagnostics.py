@@ -94,6 +94,27 @@ def test_a_take_back_another_controller_stopped_is_its_stop_not_hqplayers_refusa
     assert diag.verdict(f, {"cause": None, "lines": ["& 2026/11/10 12:53:46 Stop..."]})["code"] == "other_stopped"
 
 
+def test_a_take_back_keeps_the_verdict_the_nodes_own_evidence_gives():
+    """Review round 1's L1 and pins: the other app's Stop is said only where
+    nothing the node holds explains the stop. HQPlayer never asked the media
+    server for the stream in the whole window watched — it asks at the Play —
+    is no_fetch still; the rate check naming why the start stopped, without a
+    hedge, is HQPlayer's refusal (rate_refused); an add HQPlayer refused, an
+    entry it did not keep, HQPlayer playing at the latest tick — each keeps
+    its own verdict."""
+    fetch = _trace("no_fetch_stream")
+    assert diag.verdict(fetch)["code"] == diag.verdict({**fetch, "taken_back": True})["code"] == "no_fetch"
+    rate = _trace("rate_refused_filter")
+    assert diag.verdict(rate)["code"] == diag.verdict({**rate, "taken_back": True})["code"] == "rate_refused"
+    f = _trace("other_stopped_take_back")
+    refused_add = {**f, "handover": {**f["handover"], "ok": False, "result": "Error",
+                                     "message": "Unable to open file"}, "playlist": None}
+    assert diag.verdict(refused_add)["code"] == "rejected"
+    assert diag.verdict({**f, "playlist": {**f["playlist"], "expected_present": False}})["code"] == "rejected"
+    playing = {**f, "ticks": [*f["ticks"], {**f["ticks"][1], "ts": f["ticks"][-1]["ts"] + 1.0}]}
+    assert diag.verdict(playing)["code"] != "other_stopped"
+
+
 def test_a_start_another_controller_stopped_is_no_failure_of_the_output(fresh):
     """Three take-backs in a row that another controller stopped (other_stopped)
     are no dead output: passed over as an interrupted attempt is, they make

@@ -41,8 +41,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_hqp_backend import (_QUESTIONS, _GatedStream, _album, _attach, _item, _link, _polls,  # noqa: E402,F401
-                              _queue_stays_in_memory, _routes_on, _stopped_at_spot, _streams_on_hqplayer, _wait,
-                              fake, listens, output)
+                              _queue_stays_in_memory, _refusing, _routes_on, _stopped_at_spot, _streams_on_hqplayer,
+                              _wait, fake, listens, output)
 from test_dlna_backend import (PHONE_SINK, FakeRenderer, _gena_port, _on_renderer, _playing_at,  # noqa: E402,F401
                                _seconds, heard, manager, nodes, proxy, quality, renderers, stored, streamed, track,
                                wait_for)
@@ -3297,22 +3297,23 @@ def test_b_ours_again_on_a_uri_of_another_tier_follows_its_track_through_a_queue
     wait_for(lambda: n.last.queue_index == 2, timeout=5, what="the slot following its track")
 
 
-def _removed_tracks_uri_played_again(tmp_path, renderers, nodes):
-    """Slot 1 (Track 1) plays; another controller takes the renderer; the
-    person removes Track 1 from the queue meanwhile; then the renderer plays
-    Track 1's URI again by itself. Returns (renderer, node, queue)."""
+def _removed_tracks_uri_played_again(tmp_path, renderers, nodes, count=3, slot=1):
+    """Slot `slot` of `count` (Track 1 of three) plays; another controller
+    takes the renderer; the person removes that track from the queue
+    meanwhile; then the renderer plays its URI again by itself. Returns
+    (renderer, node, queue)."""
     r = renderers()
     q = CanonicalQueue()
-    tracks = [track(tmp_path, i, seconds=60.0) for i in (1, 2, 3)]
+    tracks = [track(tmp_path, i, seconds=60.0) for i in range(1, count + 1)]
     q.replace(tracks)
     n = nodes(q, r)
-    assert n.backend.select(1)
-    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and n.last.position >= 3,
-             timeout=15, what="slot 1 playing")
+    assert n.backend.select(slot)
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == slot and n.last.position >= 3,
+             timeout=15, what=f"slot {slot} playing")
     ours, meta = r.uri, r.meta
     r.taken_by_another("playing")
     wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
-    assert q.remove(1) is tracks[0]
+    assert q.remove(slot) is tracks[slot - 1]
     n.backend.queue_changed("remove")
     time.sleep(0.5)
     r.uri, r.meta, r.state = ours, meta, "PLAYING"
@@ -3354,6 +3355,21 @@ def test_p13_next_at_no_slot_loads_the_slot_play_loads(tmp_path, proxy, renderer
     wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 1 and "Track 2" in r.meta
              and n.last.position >= 1, timeout=10, what="Next loaded the slot Play loads")
     assert "Track 3" not in r.meta
+
+
+def test_p13_previous_at_no_slot_loads_the_slot_before_the_one_play_loads(tmp_path, proxy, renderers, nodes,
+                                                                          quality):
+    """P13 (a): at no slot Previous counts from the slot Play loads, as from
+    a removal playing out — Track 3 of four removed while the renderer
+    plays it again by itself: Play loads slot 3 (Track 4 now), Previous the
+    one before it (Track 2), never two back."""
+    r, n, q = _removed_tracks_uri_played_again(tmp_path, renderers, nodes, count=4, slot=3)
+    wait_for(lambda: n.last.extra.get("source") != "external" and n.last.state == "playing"
+             and n.last.queue_index == 0 and n.last.extra.get("song") == "Track 3", timeout=6,
+             what="ours at no slot, named")
+    assert n.backend.previous()
+    wait_for(lambda: n.last.state == "playing" and n.last.queue_index == 2 and "Track 2" in r.meta
+             and n.last.position >= 1, timeout=10, what="Previous loaded the slot before the one Play loads")
 
 
 def test_b_ours_at_no_slot_keeps_no_listen_and_its_end_advances_nothing(tmp_path, proxy, renderers, manager,
@@ -3756,6 +3772,254 @@ def test_p6_roons_stop_after_its_pause_on_the_nodes_take_back_is_said_as_the_oth
         assert (st["diagnosis"]["code"], st["diagnosis"]["title"]) == ("other_stopped", "Another app stopped HQPlayer")
         assert st["state"] == "stopped" and st["resume"] == spot
         assert _node_commands(fake, n, roon) == []
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p6_a_new_queue_played_under_roons_pause_is_said_as_the_other_apps_stop(fake, listens, monkeypatch):
+    """P6 by the other road a take-back takes (review round 1's M1): Roon
+    pauses; within its 5 s the person plays an album in the node — a new
+    queue played under Roon's hold takes HQPlayer back as a Play pressed
+    does; Roon's own Stop lands before HQPlayer plays its first entry. The
+    other app's stop, at the new queue's head, never "HQPlayer could not
+    play it" — and the node sends nothing more."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        fake.start_polls = 60                      # the new queue's entry builds longer than Roon's Stop takes
+        stops = roon.sent.count("Stop")
+        roon.pause(stop_after=1.5)
+        assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        added, _ = mgr.replace_queue([_item("E:/Music/C/01.flac", 31), _item("E:/Music/C/02.flac", 32)],
+                                     play=True)
+        assert added == 2
+        assert _wait(lambda: roon.sent.count("Stop") > stops, timeout=10), "Roon's Stop never went"
+        n = _mark(fake, roon)
+        judged = _wait(lambda: (mgr._latest_status.get("diagnosis") or {}).get("code") is not None, timeout=30)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 4, timeout=10)
+        st = mgr._latest_status
+        _observed("P6-new-queue", diagnosis=st.get("diagnosis"), resume=st.get("resume"), state=st.get("state"),
+                  node_commands=_node_commands(fake, n, roon))
+        assert judged, "the new queue's start was never judged"
+        assert st["diagnosis"]["code"] == "other_stopped", st["diagnosis"]
+        assert st["state"] == "stopped" and (st["resume"]["index"], st["resume"]["position"]) == (1, 0)
+        assert _node_commands(fake, n, roon) == []
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p6_hqplayers_rate_refusal_of_a_take_back_stays_hqplayers(fake, listens, monkeypatch, tmp_path):
+    """Review round 1's L1: Roon holds HQPlayer, paused, its own Stop not
+    due; the person's Play takes HQPlayer back at the spot and HQPlayer
+    refuses the slot's rate at once (a 48 kHz file, demo-sinc-a 2^x up at a
+    fixed 705.6 kHz), its log naming no cause. Nobody but the take-back sent
+    a Stop: the rate check says why, as it does for the same start pressed
+    again with no other controller — never "Another app stopped HQPlayer"."""
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _refusing(b, fake, monkeypatch, tmp_path, refused=None)
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        roon.pause(stop_after=600)
+        assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=5)
+        fake.refuse_play.add("A/02.flac")
+        seen = {a.id for a in diag.attempts()}
+
+        def judged():
+            fresh = [a for a in diag.attempts() if a.id not in seen and a.verdict and a.hqp_log is not None]
+            return fresh[0] if fresh else None
+        assert b.play()
+        assert _wait(judged, timeout=30), "the take-back was never judged"
+        taken = judged()
+        seen |= {a.id for a in diag.attempts()}
+        assert b.play()                                   # the same start, pressed again: no other controller now
+        assert _wait(judged, timeout=30), "the second start was never judged"
+        again = judged()
+        _observed("P6-rate", taken=(taken.intent, taken.facts.get("taken_back"), taken.verdict["code"]),
+                  again=(again.intent, again.verdict["code"]), roon_sent=roon.sent)
+        assert "Stop" not in roon.sent[roon.sent.index("Pause"):]
+        assert taken.facts.get("taken_back") and taken.verdict["code"] == again.verdict["code"] == "rate_refused"
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def _a8s_first_refusal(fake, mgr, roon):
+    """A8's first refused track (Glass Harbours, 96 kHz), Roon's Play sent
+    again on it, its row said at F7's verdict; returns that row's words."""
+    roon.play_track()
+    for _ in range(6):
+        roon.play_again()
+        time.sleep(0.15)
+    assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+    return mgr._latest_status.get("other_refused")
+
+
+def _write(log, *lines):
+    with open(log, "a") as f:
+        f.writelines(line + "\n" for line in lines)
+
+
+@pytest.mark.parametrize("hqp_log", ["refusals-only", "as-hqplayer-logs"])
+def test_p13_a_read_between_roons_add_and_its_play_leaves_the_next_refusal_its_row(fake, listens, monkeypatch,
+                                                                                   tmp_path, hqp_log):
+    """Review round 1's M3: after Glass Harbours' row Roon moves on to
+    Static Bloom — Stop, Clear, its add, and its Play once its Core has the
+    stream ready. A tick between the add and the Play reads the new playlist
+    (stopped, an entry the node never gave, the take moved since the last
+    read by Roon's Plays of Glass Harbours); HQPlayer refuses Static Bloom
+    only at that Play. P13 (a): Static Bloom gets a row of its own, never
+    none nor the 96 kHz of the track before it. `hqp_log`: the log holds the
+    refusals alone, or what HQPlayer writes besides (recorded on day 1: a
+    refusal for each Play sent again, each add "Playlist add URI: …")."""
+    _logged(monkeypatch, tmp_path)
+    log = tmp_path / "HQPlayer6Desktop.log"
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        first = _a8s_first_refusal(fake, mgr, roon)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 1, timeout=5)
+        roon.play_again()
+        if hqp_log == "as-hqplayer-logs":
+            _write(log, "& 2026/11/02 18:00:05 No suitable output rate for 96000, stop",
+                   "& 2026/11/02 18:00:06 Playlist clear", "& 2026/11/02 18:00:06 Playlist add URI: http://127.0.0.1:30000")
+        roon.start_before_its_play()               # Static Bloom added, its Play to follow
+        k = len(fake.commands)
+        assert _wait(lambda: sum(1 for c, _ in fake.commands[k:] if c == "PlaylistGet") >= 2, timeout=10), \
+            "no tick read the playlist between Roon's add and its Play"
+        early = mgr._latest_status.get("other_refused")
+        _write(log, "& 2026/11/02 18:00:30 No suitable output rate for 192000, stop")     # at Roon's Play
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        rows = [a.verdict["sentence"] for a in diag.attempts() if a.intent == "other"]
+        _observed("P13-add-play", first=first, early=early, now=mgr._latest_status.get("other_refused"), rows=rows)
+        assert said, "Static Bloom's refusal got no row of its own"
+        assert early is None and len(rows) == 2 and "96 kHz" in rows[1]
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def test_p13_a_dsp_change_in_f7s_state_leaves_the_next_refused_track_its_row(fake, listens, monkeypatch, tmp_path):
+    """Review round 1's M2: F7 with its row; the person, told why, tries
+    another filter on the node's HQPlayer screen (one DSP change of the
+    node's, nothing else sent); Roon then plays its next track, refused too.
+    Its take moved by Roon's Play, no command of the node's: the log is read
+    again, a row of its own — a DSP change never ends the reads."""
+    _logged(monkeypatch, tmp_path)
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        first = _a8s_first_refusal(fake, mgr, roon)
+        out = hb.change_dsp({"filter": "f5", "filter1x": "f5"})
+        assert _wait(lambda: any(c == "SetFilter" for c, _ in fake.commands), timeout=5), out
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=5)
+        _write(tmp_path / "HQPlayer6Desktop.log", "& 2026/11/02 18:00:30 No suitable output rate for 192000, stop")
+        n = _mark(fake, roon)
+        roon.play_track()                          # Static Bloom: refused too
+        for _ in range(6):
+            roon.play_again()
+            time.sleep(0.15)
+        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        _observed("P13-dsp", first=first, change=out, now=mgr._latest_status.get("other_refused"),
+                  node_commands=_node_commands(fake, n, roon))
+        assert said, "Static Bloom's refusal got no row after the person's DSP change"
+        assert _node_commands(fake, n, roon) == []
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+@pytest.mark.parametrize("track", ["the first", "the next"])
+def test_p13_roons_play_sent_again_on_one_refused_track_makes_one_row(fake, listens, monkeypatch, tmp_path, track):
+    """Roon's Play sent again and again on one refused track, HQPlayer
+    writing its refusal for each (day 1's A8: 4–5 a second): one row — the
+    playlist a row named is read no more (P13 reads again only for another).
+    The next track's: its first read waits on a slow log (an Embedded box's
+    log page) while Roon's Plays move the take — one read at a time, each
+    from where the one before left, so none reads it twice."""
+    import threading
+    _logged(monkeypatch, tmp_path)
+    log = tmp_path / "HQPlayer6Desktop.log"
+    fake.raw_streams = "uri"
+    fake.refuse_play.add("stream.raw")
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    gate = threading.Event()
+    try:
+        _a8s_first_refusal(fake, mgr, roon)
+        rate = "96000"
+        if track == "the next":
+            rate = "192000"
+            real = diag.read_log
+            monkeypatch.setattr(diag, "read_log", lambda *a, **k: (gate.wait(20), real(*a, **k))[1])
+            _write(log, "& 2026/11/02 18:00:20 Playlist clear", "& 2026/11/02 18:00:20 Playlist add URI: http://127.0.0.1:30000",
+                   "& 2026/11/02 18:00:20 No suitable output rate for 192000, stop")
+            roon.play_track()                      # Static Bloom: refused, its read held
+        for i in range(8):
+            _write(log, f"& 2026/11/02 18:00:{30 + i:02d} No suitable output rate for {rate}, stop")
+            roon.play_again()
+            time.sleep(0.4)
+        gate.set()
+        if track == "the next":
+            assert _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3, timeout=10)
+        rows = [a.verdict["sentence"] for a in diag.attempts() if a.intent == "other"]
+        _observed("P13-one-row", track=track, rows=rows)
+        assert len(rows) == (1 if track == "the first" else 2), rows
+    finally:
+        gate.set()
+        b.shutdown()
+        roon.close()
+
+
+def test_p6_a_cause_in_hqplayers_log_after_a_take_back_keeps_hqplayers_verdict(fake, listens, monkeypatch, tmp_path):
+    """P6's take-back, stopped as Roon's Stop lands — and HQPlayer's log,
+    read after the close, names why it stopped: HQPlayer's own verdict,
+    never the other app's Stop (a cause in the log keeps it)."""
+    from config import settings
+    monkeypatch.setattr(settings, "hqplayer_data_dir", str(tmp_path))
+    (tmp_path / "settings.xml").write_text('<?xml version="1.0"?><hqplayer><log enabled="1"/></hqplayer>')
+    (tmp_path / "HQPlayer6Desktop.log").write_text("& 2026/11/10 12:53:40 Play (1/0)\n")
+    fake.raw_streams = "uri"
+    roon = FakeRoon(fake.port)
+    mgr, b = _node_plays_slot_2(fake, monkeypatch)
+    try:
+        _, _, ticks = _roon_takes_over(fake, mgr, roon)
+        assert ticks is not None, "the node never said external"
+        fake.start_polls = 60
+        roon.pause(stop_after=1.5)
+        assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), timeout=5)
+        seen = {a.id for a in diag.attempts()}
+        assert b.play()
+        _write(tmp_path / "HQPlayer6Desktop.log", "& 2026/11/10 12:53:46 No suitable output rate for 44100, stop")
+
+        def judged():
+            return next((a for a in diag.attempts() if a.id not in seen and (a.facts or {}).get("taken_back")
+                         and a.hqp_log), None)
+        assert _wait(judged, timeout=30), "the take-back was never judged with its log"
+        a = judged()
+        _observed("P6-log", code=a.verdict["code"], cause=(a.hqp_log.get("cause") or {}).get("code"))
+        assert a.verdict["code"] != "other_stopped" and a.hqp_log["cause"]["code"] == "no_output_rate", a.verdict
     finally:
         b.shutdown()
         roon.close()

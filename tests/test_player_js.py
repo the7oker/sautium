@@ -687,6 +687,28 @@ def test_a_take_back_the_other_app_stopped_says_so_at_its_spot():
     assert rows[1][2] == rows[2][2] == "Stopped at 0:46 — Play resumes here"
 
 
+def test_a_take_back_the_other_app_stopped_at_its_start_says_so_too():
+    """Review round 1's L2: a take-back by a tap, Next or Previous under
+    another controller's hold starts its slot from 0 (L11), as a new queue
+    does; Roon's Stop on it leaves the spot at 0:00. Now Playing says that
+    another app stopped the output there too — a plain stop at 0:00 still
+    says nothing."""
+    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
+            "position_formatted": "0:00", "length_formatted": "5:00",
+            "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
+    stopped = {"id": 9, "code": "other_stopped", "title": "Another app stopped HQPlayer",
+               "next": "Press Play to resume where it was.", "track_id": "t", "failing": False}
+    spot = {"index": 3, "position": 0}
+    statuses = [{**base, "state": "stopped", "resume": spot, "diagnosis": stopped},
+                {**base, "state": "stopped", "resume": spot}]
+    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
+                          input=json.dumps(statuses).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    rows = json.loads(proc.stdout)
+    assert rows[0][2] == "Another app stopped HQPlayer Desktop — Play resumes at 0:00"
+    assert rows[1][2] == ""
+
+
 def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():
     """N-20: while the play gate — or a scan that found the renderer
     elsewhere — attaches the renderer again where it answers now, Now

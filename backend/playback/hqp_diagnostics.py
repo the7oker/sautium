@@ -235,9 +235,10 @@ class Attempt:
     # and the second it starts at — its start's own, or the entry HQPlayer's
     # own advance moves on to, from 0
     target: Optional[tuple] = None
-    # A play press that took HQPlayer back from another controller, which
-    # held it as the press was made (playback.hqp_backend._press): a Stop the
-    # node did not send while it starts is that controller's (verdict)
+    # A start that took HQPlayer back from another controller, which held it
+    # as the start was asked for — a play press, a new queue played
+    # (playback.hqp_backend._press, replace_queue): a Stop the node did not
+    # send while it starts is that controller's (verdict)
     taken_back: bool = False
 
     def record(self, o: CommandOutcome) -> None:
@@ -957,13 +958,13 @@ def _final_refusal(steps: list) -> Optional[dict]:
 
 def _other_stopped(f: dict, log: Optional[dict], owner: bool) -> bool:
     """Was a take-back stopped by the controller it took HQPlayer from? A
-    play press made while another controller held HQPlayer (taken_back),
+    start asked for while another controller held HQPlayer (taken_back),
     HQPlayer stopped at its latest tick, and nothing of the node's or
     HQPlayer's own explains that stop: no newer intent of the node's (owner),
     no Stop of the node's after its start, no refusal in HQPlayer's answers
-    (the add, a transport command, an entry not kept) nor a cause in its log
-    — that controller's own Stop (Roon's, 5 s after its Pause: ROON-COEX
-    §6.2 P6)."""
+    (the add, a transport command, an entry not kept), no cause in its log
+    nor one the rate check names without a hedge — that controller's own
+    Stop (Roon's, 5 s after its Pause: ROON-COEX §6.2 P6)."""
     steps, ticks, pl = f.get("steps") or [], f.get("ticks") or [], f.get("playlist") or {}
     if not (f.get("taken_back") and ticks and ticks[-1]["state"] == "stopped") or owner:
         return False
@@ -973,6 +974,8 @@ def _other_stopped(f: dict, log: Optional[dict], owner: bool) -> bool:
     if (f.get("handover") or {}).get("ok") is False or _final_refusal(steps) is not None:
         return False
     if pl.get("read") and f.get("expected_uri") and pl.get("expected_present") is False:
+        return False
+    if names_cause(f.get("rate")):
         return False
     return not ((log or {}).get("cause") or {}).get("code")
 
@@ -1103,16 +1106,16 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
         if bad:
             return _v("proxy_error", f, status=bad["status"])
 
-    # Before no_fetch: the other controller's Stop may come before HQPlayer
-    # asked for anything of the take-back's
-    if _other_stopped(f, log, owner):
-        return _v("other_stopped", f)
-
     if hits is not None:
         add_failed = ho.get("ok") is False
         watched = f["closed"] >= fetch_by
         if not began and (add_failed or watched) and not any(h["ts"] <= fetch_by for h in hits):
             return _v("no_fetch", f)
+
+    # After no_fetch: HQPlayer asks for a stream at its Play, so one it never
+    # asked for in the whole window watched is no other app's Stop
+    if _other_stopped(f, log, owner):
+        return _v("other_stopped", f)
 
     if ho.get("ok") is False:
         if ho.get("result") in ("refused", "lost"):
@@ -1414,6 +1417,12 @@ _CAUSES = [
     ("open_failed", re.compile(r"SetTransport\(\): failed"),
      "HQPlayer could not open the file."),
 ]
+
+
+# HQPlayer's line at every add to its playlist, whoever made it (Desktop 6:
+# "Playlist add URI: <the URI>", recorded 2026-11-02 and 11-10) — a track it
+# refuses is refused at its Play, after that line
+ADD_LINE = "Playlist add URI"
 
 
 def _noise(line: str) -> bool:

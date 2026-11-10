@@ -1370,7 +1370,8 @@
       // renderer being attached again where it answers now (`connecting`,
       // its name): said while it lasts, so a press waiting on it is seen.
       // A take-back the app it took the output from stopped (its own Stop
-      // after its Pause, ROON-COEX P6): that app's stop, at the same spot.
+      // after its Pause, ROON-COEX P6): that app's stop, at the same spot —
+      // its start too (a tap, Next, a new queue: 0:00).
       const b = data.building, r = data.resume;
       const out = (data.output && data.output.label) || 'this output';
       const stoppedBy = why && diag.code === 'other_stopped';
@@ -1382,9 +1383,10 @@
           ? (r ? `Another app took ${out} — Play takes it back at ${fmtDuration(r.position)}`
             : `Another app is playing through ${out} — Play takes it back`)
         : data.paused_on_device && data.state === 'paused' ? `Paused on ${out}`
+        : r && stoppedBy && data.state === 'stopped'
+          ? `Another app stopped ${out} — Play resumes at ${fmtDuration(r.position)}`
         : r && r.position > 0 && data.state === 'stopped'
-          ? (stoppedBy ? `Another app stopped ${out} — Play resumes at ${fmtDuration(r.position)}`
-            : `Stopped at ${fmtDuration(r.position)} — Play resumes here`) : '';
+          ? `Stopped at ${fmtDuration(r.position)} — Play resumes here` : '';
       this.hqpTag.hidden = !tag;
       this.hqpTag.textContent = tag;
 
