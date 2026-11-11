@@ -254,9 +254,9 @@ grep "setup code"` — the last one is the live one) and to `setup_code.txt` in
 the node's identity folder: `data/node_identity` (under
 `docker-compose.wsl.yml`, `backend/data/node_identity`). The code dies with the account's creation. To
 start over, stop the stack, empty that folder and start it again: the node
-writes a new code. A node whose database holds records it signed then asks
-for that identity's nickname and password, which bring it back, and makes
-another identity only when told to.
+writes a new code. A node whose database names the key it signed with —
+every node that started with one — then asks for that identity's nickname and
+password, which bring it back, and makes another identity only when told to.
 
 (`/openapi.json` sits behind the request signing like the rest of the API,
 so a bare browser tab gets 401 there. FastAPI's interactive `/docs` pages

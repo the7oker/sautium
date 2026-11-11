@@ -280,8 +280,11 @@ interface's account setup, a backup's restore — and a new identity only on the
 owner's choice, which leaves those records another author's. The web
 interface's account setup on such a node takes back only its signing key of
 record (`identity.signing_key`, the key it signed with: recorded at each start
-with a key, at the setup, at a rotation and at the launcher's new identity)
-and makes another only on the owner's word (`new_identity`).
+with a key, at the setup, at a rotation and at the launcher's new identity,
+each once the key is in place) and makes another only on the owner's word
+(`new_identity`). A node that lost its folder before its first start on this
+release has none on record: the setup then takes the key its launcher's last
+P2P run held (`p2p.bound_identity`), else a key that sealed its records.
 
 ```
 username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed25519 keypair

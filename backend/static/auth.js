@@ -542,14 +542,15 @@
         // nickname and password derive the same key. The nickname the
         // identity folder still names, if it does, is filled in.
         msg.innerHTML =
-          "This node has no identity, while its database says it had one: records it signed, " +
-          "or the key its network last ran on. " +
+          "This node has no identity, while its database says it had one: the key it signed " +
+          "with is on record (or records it signed, or the key its network last ran on). " +
           "Type that identity's nickname and password: the same pair makes the same identity, " +
           "and the node signs as before. If you changed the nickname or password before, the " +
           "record of the identities it replaced comes back only with a copy of the node's " +
           "identity folder or a backup; without it, what they signed is another author's here. " +
-          "If Sautium chose the password, when the account was made without one, " +
-          "only a copy of the identity folder brings the identity back.<br><br>" +
+          "If Sautium chose the password (an account made without one), or the identity had " +
+          "no nickname and password at all (a new identity made in Sautium's window), only a " +
+          "copy of the identity folder brings it back.<br><br>" +
           "The setup code proves you run this node. " + setupCodePlace();
         fields.innerHTML = input("auth-user", "text", "nickname",
                                  /^[A-Za-z0-9_-]{3,32}$/.test(username) ? username : "") +
@@ -675,8 +676,10 @@
             const yes = await window.confirmDestructive({
               title: "Another identity",
               message: "That nickname and password make an identity other than the one this " +
-                "node signed its records with — a typo, another nickname, or a password changed " +
-                "since.<br><br>" + NEW_IDENTITY_COSTS,
+                "node signed with: a typo, another nickname, or a password changed since — or " +
+                "that identity never had a nickname and password (a new identity made in " +
+                "Sautium's window), and only a copy of its folder brings it back.<br><br>" +
+                NEW_IDENTITY_COSTS,
               confirmText: "Make a new identity", cancelText: "Check them again",
               focusCancel: true,
             });

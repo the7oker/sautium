@@ -46,9 +46,10 @@ WINDOW_SIZE = f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}"
 # database says this node had one (node_identity.ensure_identity). Draft
 # words, for the words review.
 IDENTITY_MISSING = (
-    "There is no identity in {folder}, but this node's database says it had one: records it "
-    "signed, or the key its network last ran on. So no new identity was made, and the network "
-    "stays off until the identity is back or you choose a new one.\n\n"
+    "There is no identity in {folder}, but this node's database says it had one: the key it "
+    "signed with is on record (or records it signed, or the key its network last ran on). So no "
+    "new identity was made, and the network stays off until the identity is back or you choose "
+    "a new one.\n\n"
     "To bring it back:\n"
     "•  put a copy of that folder back, then restart Sautium;\n"
     "•  or, if you chose this node's nickname and password, give the same pair in the web "

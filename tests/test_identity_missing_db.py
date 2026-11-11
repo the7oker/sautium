@@ -13,7 +13,9 @@ P2P. The analysis arms are the check the records' cutover fails closed on
 skipped without a cluster."""
 
 import json
+import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -109,7 +111,44 @@ def test_the_identity_on_disk_is_the_one_a_start_takes(conn, scratch_dsn, folder
     node = node_identity.generate_identity()
     assert node_identity.ensure_identity(scratch_dsn) == "present"
     assert json.loads((folder / "node_info.json").read_text())["node_id"] == node
-    assert node_identity.ensure_identity(UNREACHABLE) == "present"   # the database is not read
+    assert _recorded(conn) == node                     # the key found is the one on record
+    with pytest.raises(psycopg2.OperationalError):     # unrecorded, it decides nothing
+        node_identity.ensure_identity(UNREACHABLE)
+    assert (folder / "node_ed25519.key").exists() and _key_on_disk(folder) == node
+
+
+def test_a_key_placed_and_not_yet_recorded_is_recorded_at_the_next_check(conn, scratch_dsn, folder):
+    """A crash between placing the key and recording it: the next check
+    records the key it finds."""
+    node = node_identity.generate_identity()           # placed, never recorded
+    assert _recorded(conn) is None
+    assert node_identity.ensure_identity(scratch_dsn) == "present" and _recorded(conn) == node
+
+
+def test_a_fresh_nodes_mint_that_fails_at_its_placement_leaves_no_record(conn, scratch_dsn, folder,
+                                                                         monkeypatch):
+    """Where the record went first, it named a key that never came into
+    being, and every later start said the node had one."""
+    real = node_identity._link_exclusive
+
+    def disk_full(*_a):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(node_identity, "_link_exclusive", disk_full)
+    with pytest.raises(OSError):
+        node_identity.ensure_identity(scratch_dsn)
+    assert _recorded(conn) is None and not (folder / "node_ed25519.key").exists()
+    monkeypatch.setattr(node_identity, "_link_exclusive", real)
+    assert node_identity.ensure_identity(scratch_dsn) == "minted"
+
+
+def test_a_full_disk_at_the_temporary_write_leaves_neither_it_nor_a_record(
+        conn, scratch_dsn, folder, monkeypatch):
+    def full(_fd):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(node_identity, "_sync", full)
+    with pytest.raises(OSError):
+        node_identity.ensure_identity(scratch_dsn)
+    assert [p.name for p in folder.iterdir()] == [] and _recorded(conn) is None
 
 
 def test_a_key_without_its_info_is_the_identity_and_gets_the_info_again(conn, scratch_dsn, folder):
@@ -120,7 +159,7 @@ def test_a_key_without_its_info_is_the_identity_and_gets_the_info_again(conn, sc
     (folder / "node_info.json").unlink()
     key = (folder / "node_ed25519.key").read_bytes()
     for _ in range(2):
-        assert node_identity.ensure_identity(UNREACHABLE) == "present"
+        assert node_identity.ensure_identity(scratch_dsn) == "present"
     with pytest.raises(FileExistsError):
         node_identity.generate_identity()
     assert (folder / "node_ed25519.key").read_bytes() == key
@@ -382,17 +421,36 @@ def test_a_new_identity_that_could_not_be_made_is_said_and_can_be_chosen_again(
     assert node.said[-1] == "ready" and (folder / "node_ed25519.key").exists()
 
 
-def test_the_owners_new_identity_is_on_record_before_it_is_placed(conn, scratch_dsn, folder):
-    node = _Launcher(UNREACHABLE)                      # the database away: nothing is placed
-    node.settling.make_new()
-    node.thread()
-    node.drain()
-    assert node.said == [("failed", "OperationalError")] and not (folder / "node_ed25519.key").exists()
+def test_the_owners_new_identity_is_recorded_once_placed(conn, scratch_dsn, folder):
     node = _Launcher(scratch_dsn)
     node.settling.make_new()
     node.thread()
     node.drain()
     assert node.said == ["ready"] and _recorded(conn) == _key_on_disk(folder)
+
+
+def test_the_owners_new_identity_that_fails_at_its_placement_keeps_the_lost_keys_record(
+        conn, scratch_dsn, folder, monkeypatch):
+    """The lost key on record and its seals here: a choice of a new identity
+    whose placement fails leaves the record naming the lost key, so the
+    notice's own way back — the same pair — still takes it."""
+    lost = SEAL[0]
+    with conn.cursor() as cur:
+        _record(cur, "features", _source(cur, _track(cur)), SEAL)
+        cur.execute(node_identity.RECORD_SIGNING_KEY_SQL, {"key": json.dumps(lost)})
+    node = _Launcher(scratch_dsn)
+    node.settling.check()
+    node.thread()
+    node.drain()
+
+    def disk_full(*_a):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(node_identity, "_link_exclusive", disk_full)
+    node.settling.make_new()
+    node.thread()
+    node.drain()
+    assert node.said == ["missing", ("failed", "OSError")]
+    assert _recorded(conn) == lost and not (folder / "node_ed25519.key").exists()
 
 
 def test_a_crash_before_the_key_is_linked_leaves_no_key_beside_another_identitys_info(
@@ -454,6 +512,62 @@ def test_a_key_whose_info_cannot_be_moved_aside_is_not_placed(folder, monkeypatc
         node_identity.generate_identity()
     assert not (folder / "node_ed25519.key").exists()
     assert json.loads((folder / "node_info.json").read_text()) == {"username": "gone"}
+    assert sorted(p.name for p in folder.iterdir()) == ["node_info.json"]   # no folder, no temporary
+
+
+def test_a_temporary_key_an_earlier_placement_left_is_swept(folder):
+    """A crash after the temporary write left a private key under a
+    dot-name: the next placement removes it."""
+    folder.mkdir(parents=True)
+    (folder / ".node_ed25519.key.0123456789ab").write_bytes(b"-----BEGIN PRIVATE KEY-----")
+    node_identity.generate_identity()
+    assert [p.name for p in folder.iterdir() if p.name.startswith(".")] == []
+
+
+def test_a_temporary_name_that_cannot_be_removed_after_the_link_fails_nothing(
+        folder, monkeypatch, caplog):
+    """Windows refuses to remove a name of a file held open elsewhere: once
+    the key is placed that is a warning, and the info is written."""
+    folder.mkdir(parents=True)
+    real_unlink = type(folder).unlink
+
+    def sharing_violation(self, *a, **k):
+        if self.name.startswith(".node_ed25519.key."):
+            raise PermissionError(13, "being used by another process")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(type(folder), "unlink", sharing_violation)
+    with caplog.at_level("WARNING", logger="desktop.node_identity"):
+        node = node_identity.generate_identity()
+    assert _key_on_disk(folder) == node and "the next placement sweeps it" in caplog.text
+
+
+def test_a_fallback_write_that_fails_leaves_no_partial_key(folder, monkeypatch):
+    def no_links(_src, _dst):
+        raise PermissionError(1, "Operation not permitted")
+    calls = []
+
+    def full_at_the_second(fd):
+        calls.append(fd)
+        if len(calls) > 1:                         # the temporary synced, the fallback's not
+            raise OSError(28, "No space left on device")
+    monkeypatch.setattr(node_identity.os, "link", no_links)
+    monkeypatch.setattr(node_identity, "_sync", full_at_the_second)
+    with pytest.raises(OSError):
+        node_identity.generate_identity()
+    assert [p.name for p in folder.iterdir()] == []
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="names a descriptor through /proc")
+def test_the_placed_name_is_synced_with_its_folder(folder, monkeypatch):
+    synced = []
+    real = node_identity.os.fsync
+
+    def fsync(fd):
+        synced.append(os.readlink(f"/proc/self/fd/{fd}"))
+        real(fd)
+    monkeypatch.setattr(node_identity.os, "fsync", fsync)
+    node_identity.generate_identity()
+    assert str(folder) in synced
 
 
 # ---------------------------------------------------------------------------
@@ -605,16 +719,17 @@ def test_a_check_that_could_not_read_the_database_leaves_the_notice_and_its_choi
     app.dsn = UNREACHABLE                              # a restart's check, the database away
     _checked(node)
     assert app._status_text.cget("text") == app.words["IDENTITY_UNCHECKED_STATUS"] and notice.alive
-    notice.make.options["command"]()                   # nothing is made off the record
+    notice.make.options["command"]()                   # placed, not recorded: said, P2P off
     node.thread()
     node.drain()
     assert "could not be made" in notice.caption.cget("text") and app.p2p_starts == 0
-    assert not (folder / "node_ed25519.key").exists()
-    app.dsn = scratch_dsn                              # the database back
+    assert (folder / "node_ed25519.key").exists() and _recorded(conn) is None
+    app.dsn = scratch_dsn                              # the database back: the key is taken
     notice.make.options["command"]()
     node.thread()
     node.drain()
     assert app._status_text.cget("text") == "All services running" and app.p2p_starts == 1
+    assert _recorded(conn) == _key_on_disk(folder)
 
 
 def test_the_launcher_says_a_new_identity_that_could_not_be_made_in_the_notice(

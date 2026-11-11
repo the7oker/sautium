@@ -26,6 +26,11 @@ from typing import Optional
 
 import psycopg2
 
+try:
+    import fcntl
+except ImportError:                  # Windows: os.fsync is its sync
+    fcntl = None
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -71,8 +76,35 @@ def _move_info_aside(d: Path) -> Optional[Path]:
     aside = d / ("replaced-" + datetime.datetime.now(datetime.timezone.utc)
                  .strftime("%Y%m%dT%H%M%S%fZ"))
     aside.mkdir()
-    info.rename(aside / info.name)
+    try:
+        info.rename(aside / info.name)
+    except OSError:
+        aside.rmdir()
+        raise
     return aside
+
+
+def _sync(fd: int) -> None:
+    """A file's bytes onto the disk: F_FULLFSYNC where the platform has it —
+    macOS's fsync stops at the drive's cache."""
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+    else:
+        os.fsync(fd)
+
+
+def _write_exclusive(path: Path, pem: bytes) -> None:
+    """`pem` at `path`, created exclusively (FileExistsError) and synced; a
+    write that fails takes its file away — no partial key stays."""
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(pem)
+            f.flush()
+            _sync(f.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _link_exclusive(tmp: Path, key: Path, pem: bytes) -> None:
@@ -85,9 +117,7 @@ def _link_exclusive(tmp: Path, key: Path, pem: bytes) -> None:
     except FileExistsError:
         raise
     except OSError:
-        fd = os.open(key, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(pem)
+        _write_exclusive(key, pem)
 
 
 def place_key(d: Path, pem: bytes, *, keep_info: bool = False) -> None:
@@ -96,17 +126,19 @@ def place_key(d: Path, pem: bytes, *, keep_info: bool = False) -> None:
     under a temporary name and linked into place, so no reader meets half a
     key, and the info of an identity whose key is gone is moved aside first
     (unless `keep_info`: the info names this same key), so no crash leaves
-    a new key beside it; moved back when the key is not placed."""
+    a new key beside it; moved back when the key is not placed. A temporary
+    key an earlier placement left (a crash, a name Windows would not remove)
+    is swept first; once the key is placed, a temporary name that cannot be
+    removed is a warning, never a failure."""
+    for stale in d.glob(".node_ed25519.key.*"):
+        stale.unlink()
     key = d / "node_ed25519.key"
     if key.exists():
         raise FileExistsError(str(key))
     tmp = d / f".node_ed25519.key.{secrets.token_hex(6)}"
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(pem)
-        f.flush()
-        os.fsync(f.fileno())
+    aside = None
     try:
+        _write_exclusive(tmp, pem)
         aside = None if keep_info else _move_info_aside(d)
         try:
             _link_exclusive(tmp, key, pem)
@@ -115,8 +147,20 @@ def place_key(d: Path, pem: bytes, *, keep_info: bool = False) -> None:
                 (aside / "node_info.json").rename(d / "node_info.json")
                 aside.rmdir()
             raise
+        if os.name == "posix":
+            # The new name onto the disk with the bytes: a power cut after
+            # this keeps the key that was placed
+            fd = os.open(d, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     finally:
-        tmp.unlink()
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("The temporary key %s could not be removed (%s): the next placement "
+                           "sweeps it", tmp.name, e)
     if aside is not None:
         logger.warning("An identity's info without its key moved to %s", aside.name)
 
@@ -199,10 +243,12 @@ _RECORD_ARMS = _ANALYSIS_ARMS + (
     "p2p_witness x WHERE x.signature IS NOT NULL",
 )
 # The node's signing key of record: the key this node signs with, recorded
-# by whoever puts it in place or picks it up — the backend at each start with
-# a key (device_auth.prepare_setup), the web interface's account setup and a
-# rotation (device_auth), the launcher's new identity (generate_identity).
-# What the web interface's account setup takes back over a lost key.
+# by whoever puts it in place or finds it — the backend at each start with a
+# key (device_auth.record_identity_state), the web interface's account setup
+# and a rotation (device_auth), the launcher's new identity
+# (generate_identity) and its check that finds one (ensure_identity), each
+# after the key is in place. What the web interface's account setup takes
+# back over a lost key.
 SIGNING_KEY_SETTING = "identity.signing_key"
 SIGNING_KEY_SQL = ("(SELECT value #>> '{}' FROM user_settings"
                    " WHERE key = 'identity.signing_key')")
@@ -272,19 +318,23 @@ def _rebuild_info(d: Path) -> None:
 
 def ensure_identity(dsn: str) -> str:
     """This node's identity as a start finds it, before anything P2P runs:
-    "present" — the identity folder holds its key (the database is not
-    read; a key left without its info gets the info again from the key);
-    "minted" — it holds none and nothing in the database says the node had
-    one (OWN_SEALS_SQL), so a new one is generated and recorded; "missing" —
-    it holds none and the database does say so: nothing is generated, and
-    only the owner's choice makes a new one (generate_identity), which makes
-    the records the lost one signed another author's. A database that cannot
-    be read raises (psycopg2.Error) and nothing is generated. A key that
-    lands meanwhile (a restore, the web interface's account setup) is the
-    identity: generating never writes over one."""
+    "present" — the identity folder holds its key, which is put on record
+    as the node's signing key (a placement whose recording a crash cut
+    short heals here; a key left without its info gets the info again from
+    the key); "minted" — it holds none and nothing in the database says the
+    node had one (OWN_SEALS_SQL), so a new one is generated and recorded;
+    "missing" — it holds none and the database does say so: nothing is
+    generated, and only the owner's choice makes a new one
+    (generate_identity), which makes the records the lost one signed another
+    author's. A database that cannot be read or written raises
+    (psycopg2.Error) and nothing is generated. A key that lands meanwhile (a
+    restore, the web interface's account setup) is the identity: generating
+    never writes over one."""
     if has_identity():
-        if not (_identity_dir() / "node_info.json").exists():
-            _rebuild_info(_identity_dir())
+        d = _identity_dir()
+        if not (d / "node_info.json").exists():
+            _rebuild_info(d)
+        record_signing_key(dsn, pubkey_on_disk(d))
         return "present"
     conn = psycopg2.connect(dsn, connect_timeout=10)
     try:
@@ -307,7 +357,9 @@ def ensure_identity(dsn: str) -> str:
 def generate_identity(dsn: Optional[str] = None) -> str:
     """Generate a new random Ed25519 keypair and write it to disk — never
     over a key (place_key: FileExistsError says one is there). With `dsn`,
-    the new key is first recorded there as the node's signing key of record.
+    the key placed is recorded there as the node's signing key of record —
+    after it is placed: a placement that fails leaves the record as it was;
+    a crash before the record leaves the key, which the next check records.
     The info of an identity whose key is gone is moved aside
     (replaced-<when>/), not written over."""
     if not HAS_CRYPTO:
@@ -325,8 +377,6 @@ def generate_identity(dsn: Optional[str] = None) -> str:
         "public_key_hex": node_id,
         "algorithm": "Ed25519",
     }
-    if dsn is not None:
-        record_signing_key(dsn, node_id)
     try:
         _save_keypair(private_key, info, exclusive=True)
     except FileExistsError:
@@ -334,6 +384,8 @@ def generate_identity(dsn: Optional[str] = None) -> str:
             # The identity that came back is the one on record
             record_signing_key(dsn, pubkey_on_disk(_identity_dir()))
         raise
+    if dsn is not None:
+        record_signing_key(dsn, node_id)
     logger.info(f"Generated node identity: {node_id[:16]}...")
     return node_id
 
@@ -387,9 +439,8 @@ class IdentitySettling:
         try:
             state = ensure_identity(self._dsn())
         except psycopg2.Error as e:
-            logger.error("No node identity, and the database could not be read to tell whether "
-                         "this node signed records with one: %s — none made, P2P off until the "
-                         "next start", e)
+            logger.error("The node identity could not be settled, the database neither read nor "
+                         "written: %s — none made, P2P off until the next start", e)
             self._end(self._unsettled, e)
             return
         except Exception as e:

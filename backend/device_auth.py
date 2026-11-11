@@ -281,8 +281,9 @@ class AnotherIdentity(Exception):
 
 
 # Set at start (record_identity_state): no key, while the database says this
-# node had one. It cannot change before a key is placed, which ends the
-# onboarding it is asked for in.
+# node had one. Nothing it reads changes while no key is in place — the
+# signing key of record is written only after a key is placed, and nothing
+# seals without one — and placing one ends the onboarding it is asked for in.
 _identity_missing = False
 
 
@@ -525,9 +526,6 @@ def _write_identity(d, username: str, password: str, new_identity: bool = False)
     # Only the key was lost: the info names this identity, with what the
     # pair does not derive — the keys it retired, its email — and stays
     kept = left is not None and str(left.get("public_key_hex", "")).lower() == pubkey
-    # On record before it is placed: a key placed and not on record would,
-    # lost before the next start, have its own pair refused
-    _record_signing_key(pubkey)
     # Placed, never over a key: an identity already on disk must never be
     # overwritten, and the filesystem enforces that even against a second
     # process that never saw our lock (place_key). A half-written
@@ -547,11 +545,16 @@ def _write_identity(d, username: str, password: str, new_identity: bool = False)
     if kept:
         logger.info("identity brought back: %s (invite %s), its info kept",
                     left.get("username"), left.get("invite_code"))
-        return left
-    (d / "node_info.json").write_text(json.dumps(info, indent=2),
-                                      encoding="utf-8")
-    logger.info("account created: %s (invite %s)",
-                info.get("username"), info.get("invite_code"))
+        info = left
+    else:
+        (d / "node_info.json").write_text(json.dumps(info, indent=2),
+                                          encoding="utf-8")
+        logger.info("account created: %s (invite %s)",
+                    info.get("username"), info.get("invite_code"))
+    # On record once it is in place: a placement that failed leaves the
+    # record as it was; a crash before this leaves the key, which the next
+    # start records
+    _record_signing_key(pubkey)
     return info
 
 

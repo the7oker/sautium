@@ -1101,6 +1101,84 @@ def test_the_door_names_another_identity(lost_key, fresh_node, doors):
     assert not (fresh_node / "node_ed25519.key").exists()
 
 
+def _disk_full(*_a):
+    raise OSError(28, "No space left on device")
+
+
+def test_a_fresh_nodes_setup_that_fails_at_its_placement_leaves_no_record(lost_key, fresh_node,
+                                                                          monkeypatch):
+    """Where the record went first, the typed pair's key stayed on record:
+    the next start said the identity was missing, and another nickname was
+    refused as another identity."""
+    from desktop import node_identity
+    real = node_identity._link_exclusive
+    monkeypatch.setattr(node_identity, "_link_exclusive", _disk_full)
+    with pytest.raises(OSError):
+        _bring_back(lost_key, "first", "a first password")
+    assert lost_key.record() is None and not (fresh_node / "node_ed25519.key").exists()
+    monkeypatch.setattr(node_identity, "_link_exclusive", real)
+    device_auth.record_identity_state()                 # the owner frees the disk and restarts
+    assert device_auth.identity_missing() is False
+    assert _bring_back(lost_key, "chosen", "another password")["username"] == "chosen"
+
+
+def test_another_identity_that_fails_at_its_placement_keeps_the_lost_keys_record(lost_key,
+                                                                                 fresh_node,
+                                                                                 monkeypatch):
+    """The owner's word for another identity, and its placement fails: the
+    lost key stays on record, and its own pair still brings it back."""
+    from desktop import node_identity
+    lost = _key_of("owner", "the right one")
+    lost_key.signed_by(lost)
+    lost_key.recorded(lost)
+    real = node_identity._link_exclusive
+    monkeypatch.setattr(node_identity, "_link_exclusive", _disk_full)
+    with pytest.raises(OSError):
+        _bring_back(lost_key, "owner", "a typo", new_identity=True)
+    assert lost_key.record() == lost
+    monkeypatch.setattr(node_identity, "_link_exclusive", real)
+    assert _bring_back(lost_key, "owner", "the right one")["public_key_hex"] == lost
+
+
+def test_a_key_that_lands_meanwhile_is_the_one_on_record(lost_key, fresh_node, monkeypatch):
+    """A key placed by another process between the setup's check and its
+    link: the setup refuses (an account exists) and the key that landed is
+    the one on record, not the typed pair's."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from desktop import node_identity
+    landed = Ed25519PrivateKey.generate()
+    landed_pub = landed.public_key().public_bytes(serialization.Encoding.Raw,
+                                                  serialization.PublicFormat.Raw).hex()
+    real = node_identity._link_exclusive
+
+    def another_process_first(tmp, key, pem):
+        key.write_bytes(landed.private_bytes(serialization.Encoding.PEM,
+                                             serialization.PrivateFormat.PKCS8,
+                                             serialization.NoEncryption()))
+        real(tmp, key, pem)
+    monkeypatch.setattr(node_identity, "_link_exclusive", another_process_first)
+    with pytest.raises(device_auth.AccountExists):
+        _bring_back(lost_key, "first", "a first password")
+    assert lost_key.record() == landed_pub
+
+
+def test_a_temporary_name_that_cannot_be_removed_leaves_the_setup_made(lost_key, fresh_node,
+                                                                       monkeypatch):
+    """Windows refuses to remove a name of a file held open elsewhere: the
+    key is placed, so the setup answers with its account, not an error."""
+    real_unlink = Path.unlink
+
+    def sharing_violation(self, *a, **k):
+        if self.name.startswith(".node_ed25519.key."):
+            raise PermissionError(13, "being used by another process")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", sharing_violation)
+    info = _bring_back(lost_key, "first", "a first password")
+    assert json.loads((fresh_node / "node_info.json").read_text())["username"] == "first"
+    assert lost_key.record() == info["public_key_hex"]
+
+
 def test_the_signing_key_of_record_stays_out_of_the_life_merge():
     """A merged backup's settings never name the key this node signs with."""
     import life_merge
