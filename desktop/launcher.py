@@ -22,6 +22,7 @@ import customtkinter as ctk
 
 from desktop.api_client import BackendAPIClient
 from desktop.config_manager import load_config, save_config, update_config
+from desktop.node_identity import IdentitySettling
 from desktop.service_manager import ServiceManager
 from desktop.utils import (get_local_ip, get_project_root, get_tailscale_ip,
                            generate_qr_ctk, watch_session_end, watch_signals)
@@ -41,20 +42,45 @@ QR_SIZE = 150
 QR_BLOCK_HEIGHT = QR_SIZE + 28
 WINDOW_SIZE = f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}"
 
-# What _show_identity_missing says: the identity folder holds none while the
-# database holds this node's seals (node_identity.ensure_identity).
+# What the identity notice says: the identity folder holds none while the
+# database says this node had one (node_identity.ensure_identity). Draft
+# words, for the words review.
 IDENTITY_MISSING = (
-    "There is no identity in {folder}, but this node's database holds analysis it signed "
-    "with one. So no new identity was made, and the network stays off until you choose.\n\n"
+    "There is no identity in {folder}, but this node's database says it had one: records it "
+    "signed, or the key its network last ran on. So no new identity was made, and the network "
+    "stays off until the identity is back or you choose a new one.\n\n"
     "To bring it back:\n"
     "•  put a copy of that folder back, then restart Sautium;\n"
-    "•  or, if the node had a nickname and password, create the account again in the web "
-    "interface with the same nickname and password: the same pair is the same identity. It "
-    "asks for the setup code in setup_code.txt in that folder. Then restart Sautium;\n"
-    "•  or restore a backup (Settings & Tools › Backup & Restore). This also replaces the "
-    "database with the one in the backup; the current one is kept beside it.\n\n"
-    "A new identity makes everything this node has signed so far another author's: it keeps "
-    "the signatures of the identity that is gone.")
+    "•  or, if you chose this node's nickname and password, give the same pair in the web "
+    "interface (Open Web UI): the same pair is the same identity. If you changed the nickname "
+    "or password before, the record of the identities it replaced comes back only with a copy "
+    "of the folder or a backup; without it, what they signed is another author's here. It asks "
+    "for the setup code, in setup_code.txt in that folder. Then restart Sautium;\n"
+    "•  or restore a backup (Settings & Tools › Backup & Restore), which is made only "
+    "for a node whose password you chose. It also replaces the database with the one in the "
+    "backup; the current one is kept beside it.\n"
+    "Without a password you chose, only the copy of the folder brings it back.\n\n"
+    "A new identity made here has no nickname or password: a browser signs in to it only "
+    "through Open Web UI or a QR code here, and chat, friends, the invite code, support "
+    "requests and backups are off with it. {costs}")
+# What a new identity does to the records the lost one signed, in both states
+# of a node: started on this release before its identity went (the records'
+# cutover ran with it), or not (its next start runs the cutover with the new
+# key — backend/db_migrate). auth.js says the same at the web setup.
+NEW_IDENTITY_COSTS = (
+    "It makes the records this node signed with the one that is gone another author's. If the "
+    "node started on this version of Sautium while it still had its identity, they stay as they "
+    "are, under that identity's signatures, and what is analysed or changed from now on is "
+    "signed with the new one. If the identity went before that, the next start deletes the "
+    "features and instruments it signed — analysed again where the music file is here; a "
+    "streamed track's come back only if a pull from the network brings them back — and of its "
+    "embeddings keeps the ones it signed whole, as another author's, and deletes the ones mixed "
+    "with unsigned parts, analysed again where the file is here.")
+# The status line until the identity is back or the owner chose: asked once a
+# start, the progress line says where the choice is.
+IDENTITY_MISSING_STATUS = "Network off: this node's identity is missing"
+IDENTITY_UNCHECKED_STATUS = "Network off: the identity could not be checked"
+IDENTITY_MISSING_HINT = "Bring it back and restart Sautium; a start shows how, and the choice"
 
 # Appearance
 ctk.set_appearance_mode("dark")
@@ -82,14 +108,21 @@ class LauncherApp(ctk.CTk):
         # in it and the browser asked for a password instead.
         self.api_client.set_port(self.config.get("ports", {}).get("web", 8000))
         self.p2p_manager = None
-        # Set while the identity P2P starts on is settled
-        # (_ensure_node_identity), and while _start_p2p's background thread
-        # is between "thread launched" and "self.p2p_manager assigned".
-        # Prevents a second _on_services_ready call (from a Scan-driven
-        # backend restart) from settling the identity twice — two keys
-        # minted — or launching a parallel P2PManager that races on the same
-        # listen port.
+        # Set while _start_p2p's background thread is between "thread
+        # launched" and "self.p2p_manager assigned". Prevents a second
+        # _on_services_ready call (from a Scan-driven backend restart) from
+        # launching a parallel P2PManager that races on the same listen port.
         self._p2p_starting = False
+        # The identity P2P starts on, settled one operation at a time — a
+        # check at a backend start, or the owner's choice of a new one — and
+        # P2P starts on its "ready" alone (node_identity.IdentitySettling).
+        # Not while quitting: a completion then shows nothing and starts nothing.
+        self._identity = IdentitySettling(
+            self._get_local_db_dsn,
+            lambda work: threading.Thread(target=work, daemon=True, name="node-identity").start(),
+            self.ui_call, lambda: self._shutting_down,
+            ready=self._identity_ready, missing=self._identity_missing,
+            unsettled=self._identity_unsettled, failed=self._identity_failed)
         # Held by a P2P start from "not quitting?" through P2PManager.start(),
         # and by the quit's P2P stop: the start either finished before the
         # stop and is stopped, or sees the quit and does not begin.
@@ -113,7 +146,7 @@ class LauncherApp(ctk.CTk):
         self._jobs: dict = {}         # kind ("backup" | "export" | "import") -> desktop/backup_task.CliRun
         self._job_listeners: list = []  # Settings & Tools windows watching those jobs (Tk thread)
         self._settings_dialog = None
-        self._identity_notice = None  # _show_identity_missing's window while it is up
+        self._identity_notice = None  # _show_identity_notice's window while it is up
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -482,7 +515,8 @@ class LauncherApp(ctk.CTk):
         self._refresh_pairing_qr()
 
         # Start P2P services only if not already running, and only on an
-        # identity — _ensure_node_identity starts them once one is on disk.
+        # identity — the check starts them once one is on disk (_identity_ready);
+        # one already running refuses a second.
         # _on_services_ready is also called from the Scan flow's
         # `restart_backend_and_tracker`, but P2P is independent of the backend
         # process — its only DB-side dependency (postgres password / port)
@@ -493,7 +527,7 @@ class LauncherApp(ctk.CTk):
         # path explicitly nulls p2p_manager itself before calling
         # _on_services_ready.
         if self.p2p_manager is None and not self._p2p_starting:
-            self._ensure_node_identity()
+            self._identity.check()
 
         # Auto-trigger Last.fm auth if pending from wizard
         self._check_lastfm_pending_auth()
@@ -650,100 +684,89 @@ class LauncherApp(ctk.CTk):
             targets.append((ts, "From anywhere (Tailscale)"))
         return targets
 
-    def _ensure_node_identity(self):
-        """The identity P2P starts on, off the Tk thread: the one on disk, or
-        a new one when there is none and the database holds no seal of this
-        node's own analysis (node_identity.ensure_identity). Over such seals
-        nothing is made on its own — the owner is told, and P2P stays off
-        until the identity is back or he chooses a new one
-        (_show_identity_missing). A database that cannot be read decides
-        nothing either."""
-        def _check():
-            import psycopg2
-            from desktop.node_identity import ensure_identity
-            try:
-                state = ensure_identity(self._get_local_db_dsn())
-            except psycopg2.Error as e:
-                logger.error("No node identity, and the database could not be read to tell "
-                             "whether this node signed records with one: %s — none made, P2P "
-                             "off until the next start", e)
-                self.ui_call(self._identity_unsettled)
-                return
-            except Exception:
-                # Logged by the thread's hook; the next start settles it again
-                self.ui_call(self._identity_unsettled)
-                raise
-            if state == "missing":
-                logger.warning("No node identity, and the database holds records this node "
-                               "signed with the one that is gone — none made, P2P off until "
-                               "the owner decides")
-                self.ui_call(self._show_identity_missing)
-                return
-            if state == "minted":
-                logger.info("Node identity generated")
-            self.ui_call(self._identity_ready)
-
-        self._p2p_starting = True
-        threading.Thread(target=_check, daemon=True, name="node-identity").start()
-
-    def _identity_unsettled(self):
-        """No identity to start P2P on: the start is over until the next."""
-        self._p2p_starting = False
-
     def _identity_ready(self):
-        """An identity is on disk: the notice, when one is up, has nothing
-        left to say, and P2P starts on it."""
-        self._p2p_starting = False
+        """An identity is on disk: the notice has nothing left to say, the
+        status line drops what it said of the network, and P2P starts on it."""
         notice, self._identity_notice = self._identity_notice, None
         if notice is not None and notice.winfo_exists():
             notice.destroy()
+        said = (IDENTITY_MISSING_STATUS, IDENTITY_UNCHECKED_STATUS)
+        if self._status_text.cget("text") in said and not self._node_down:
+            self._set_status("running", "All services running")
+            self._progress_text.configure(text="")
         self._start_p2p()
 
-    def _show_identity_missing(self):
-        """The identity folder holds no identity while the database holds
-        records this node signed with the one that was there. Nothing is made
-        on its own: the window says how to bring it back, and offers the one
-        way to a new identity, which makes those records another author's."""
-        self._identity_unsettled()
-        if self._identity_notice is not None and self._identity_notice.winfo_exists():
-            self._identity_notice.lift()
-            return
+    def _identity_missing(self, first: bool):
+        """No identity, while the database says this node had one: nothing is
+        made on its own. The owner is asked once a start; until he chooses,
+        the status line says the network is off and why."""
+        self._set_status("error", IDENTITY_MISSING_STATUS)
+        self._progress_text.configure(text=IDENTITY_MISSING_HINT)
+        if first:
+            self._show_identity_notice()
+
+    def _identity_unsettled(self, error):
+        """The check decided nothing (its error is logged): P2P stays off
+        until the next backend start checks again."""
+        self._set_status("error", IDENTITY_UNCHECKED_STATUS)
+        self._progress_text.configure(text=str(error)[:200])
+
+    def _identity_failed(self, error):
+        """The owner's new identity could not be made (logged): the notice
+        says so and offers the choice again."""
+        self._show_identity_notice(f"A new identity could not be made: {error}")
+
+    def _show_identity_notice(self, caption: str = ""):
+        """How to bring the identity back, and the one way to a new one, which
+        makes the records the lost one signed another author's. Out of the
+        tray: this is the start's one question."""
+        notice = self._identity_notice
+        if notice is None or not notice.winfo_exists():
+            notice = self._identity_notice = self._build_identity_notice()
+            self.deiconify()
+            self.lift()
+        notice.lift()
+        notice.caption.configure(text=caption)
+        notice.make.configure(state="normal")
+
+    def _build_identity_notice(self):
         from desktop.node_identity import _identity_dir
         dialog = ctk.CTkToplevel(self)
-        self._identity_notice = dialog
         dialog.title("Identity missing")
-        dialog.geometry("560x540")
+        dialog.geometry("600x640")
         dialog.resizable(False, False)
         dialog.transient(self)
-        ctk.CTkLabel(dialog, text="This node's identity is missing",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
-        ctk.CTkLabel(dialog, text=IDENTITY_MISSING.format(folder=_identity_dir()), justify="left",
-                     wraplength=490, text_color="gray").pack(padx=24, anchor="w")
+        # The buttons first: what does not fit is the text's to scroll
         btns = ctk.CTkFrame(dialog, fg_color="transparent")
         btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
+        caption = ctk.CTkLabel(dialog, text="", text_color="gray", wraplength=550, justify="left")
+        caption.pack(padx=24, anchor="w", side="bottom")
+        ctk.CTkLabel(dialog, text="This node's identity is missing",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 8))
+        body = ctk.CTkTextbox(dialog, wrap="word")
+        body.pack(fill="both", expand=True, padx=18)
+        body.insert("1.0", IDENTITY_MISSING.format(folder=_identity_dir(), costs=NEW_IDENTITY_COSTS))
+        body.configure(state="disabled")
 
         def later():
             self._identity_notice = None
             dialog.destroy()
 
         def make_new():
-            later()
-            threading.Thread(target=self._make_new_identity, daemon=True,
-                             name="node-identity").start()
+            if self._identity.make_new():
+                make.configure(state="disabled")
+                caption.configure(text="Making a new identity…")
+            else:
+                caption.configure(text="A check of this node's identity is running — "
+                                       "try again in a moment.")
 
         dialog.protocol("WM_DELETE_WINDOW", later)
         ctk.CTkButton(btns, text="Not now", width=110, command=later).pack(side="right")
-        ctk.CTkButton(btns, text="Make a new identity", width=170, command=make_new,
-                      fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
-
-    def _make_new_identity(self):
-        """The owner's choice at the notice: a new identity whatever the
-        database holds, and P2P on it."""
-        from desktop.node_identity import generate_identity
-        generate_identity()
-        logger.warning("Node identity generated on the owner's choice, over records the "
-                       "identity that is gone signed")
-        self.ui_call(self._identity_ready)
+        make = ctk.CTkButton(btns, text="Make a new identity", width=170, command=make_new,
+                             fg_color="transparent", border_width=1)
+        make.pack(side="right", padx=(0, 8))
+        dialog.caption, dialog.make = caption, make
+        return dialog
 
     def _on_identity_rotated(self):
         """The backend rotated this node's key (Profile → name / password).

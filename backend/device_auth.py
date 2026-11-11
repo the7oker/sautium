@@ -274,6 +274,42 @@ class WrongSetupCode(Exception):
     """The setup code given is not the one this node wrote at its start."""
 
 
+class AnotherIdentity(Exception):
+    """The nickname and password make an identity other than the one this
+    node's database names as its own (_another_identity): a typo, another
+    nickname, a password changed since. Made only on the owner's word."""
+
+
+def own_seals() -> bool:
+    """Whether this node's database says it had an identity: the key its
+    launcher's last P2P run held, or any seal of its own
+    (desktop/node_identity.OWN_SEALS_SQL)."""
+    from db_pool import db_query_one
+    from desktop.node_identity import OWN_SEALS_SQL
+    return db_query_one(OWN_SEALS_SQL)["found"]
+
+
+def _another_identity(pubkey: str) -> bool:
+    """Whether the identity `pubkey` (lower-case hex) is not the one this
+    node's database names as its own. Where the launcher's P2P ran, it names
+    the key that run held (p2p.bound_identity): only that one is this node's
+    — an older pair of the same node made the key the node then retired, and
+    its friends know the newer. Else any key that sealed records here as the
+    node's own is; with no such seal, any identity is the node's first."""
+    from db_pool import get_conn
+    from desktop.node_identity import BOUND_IDENTITY_SQL, OWN_SEALS_BY_SQL, OWN_SEALS_SQL
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT {BOUND_IDENTITY_SQL}")
+        bound = cur.fetchone()[0]
+        if bound is not None:
+            return bound.lower() != pubkey
+        cur.execute(OWN_SEALS_SQL)
+        if not cur.fetchone()[0]:
+            return False
+        cur.execute(OWN_SEALS_BY_SQL, {"key": pubkey})
+        return not cur.fetchone()[0]
+
+
 def _code(groups: int) -> str:
     return "-".join("".join(secrets.choice(_PIN_ALPHABET) for _ in range(PIN_GROUP_LEN))
                     for _ in range(groups))
@@ -311,7 +347,8 @@ class Busy(Exception):
     """DERIVE_QUEUE derivations are already in flight."""
 
 
-async def create_account(username: str, password: str, setup_code: str) -> dict:
+async def create_account(username: str, password: str, setup_code: str,
+                         new_identity: bool = False) -> dict:
     """Create the node's identity from username+password and persist it.
 
     Mirrors desktop/node_identity._save_keypair so a Docker node and a
@@ -323,7 +360,13 @@ async def create_account(username: str, password: str, setup_code: str) -> dict:
     lock, the account test is repeated inside it, and the key file is opened
     O_EXCL. Setup is the one moment this node has no owner, and it must
     produce exactly one — its owner's, who alone reads the setup code
-    (prepare_setup; WrongSetupCode, checked before anything is derived)."""
+    (prepare_setup; WrongSetupCode, checked before anything is derived).
+
+    A node whose database says it had an identity (own_seals) has lost its
+    key: the setup brings that identity back, from the same nickname and
+    password, and refuses a pair that makes another (AnotherIdentity)
+    unless `new_identity` — the owner's word, given after he was told that
+    a new identity makes his records another author's."""
     global _setup_code
     d = _identity_dir()
     if d is None:
@@ -336,7 +379,8 @@ async def create_account(username: str, password: str, setup_code: str) -> dict:
         if _setup_code is None or found is None or not hmac.compare_digest(
                 _setup_code.encode(), found.group().encode()):
             raise WrongSetupCode()
-        info = await asyncio.to_thread(_write_identity, d, username, password)
+        info = await asyncio.to_thread(_write_identity, d, username, password,
+                                       new_identity=new_identity)
         _setup_code = None
         (d / SETUP_CODE_FILE).unlink(missing_ok=True)
         return info
@@ -423,7 +467,7 @@ def _after_rotation() -> None:
     db_execute("NOTIFY sautium_identity_rotated")
 
 
-def _write_identity(d, username: str, password: str) -> dict:
+def _write_identity(d, username: str, password: str, new_identity: bool = False) -> dict:
     import json
     import os
     import stat
@@ -434,6 +478,8 @@ def _write_identity(d, username: str, password: str) -> dict:
     from p2p_identity import derive_identity, derive_private_key
 
     info = derive_identity(username, password)          # validates the name
+    if not new_identity and _another_identity(info["public_key_hex"]):
+        raise AnotherIdentity()
     # Said, not left to account_anonymous's reading of the name's shape: the
     # owner chose this password, whatever the nickname looks like
     info["anonymous"] = False

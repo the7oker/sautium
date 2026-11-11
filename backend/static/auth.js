@@ -302,9 +302,33 @@
   }
 
   const BUSY = "The node is busy — try again in a moment.";
-  const SETUP_CODE_PLACE = "It is in the node's log (docker logs sautium-backend; the node " +
-    "writes a new one at each start) or in setup_code.txt in its identity folder — data/node_identity, " +
-    "or backend/data/node_identity under the WSL and Mac compose files.";
+  // Where the node wrote its setup code: a node whose host shows pairing
+  // codes (the launcher, `pin_door`) has its identity folder there, a Docker
+  // node its log. The status says which; the gate reads it before any form.
+  let hostShowsCodes = false;
+  const setupCodePlace = () => hostShowsCodes
+    ? "On the computer that runs Sautium it is in setup_code.txt, in the identity folder that " +
+      "Sautium's window names (a new one at each start)."
+    : "It is in the node's log (docker logs sautium-backend; the node " +
+      "writes a new one at each start) or in setup_code.txt in its identity folder — data/node_identity, " +
+      "or backend/data/node_identity under the WSL and Mac compose files.";
+  // What createAccount answers when the nickname and password make another
+  // identity than the one the node's records were signed with: the gate
+  // says what a new one costs, and sends it again only on the person's word.
+  const ANOTHER_IDENTITY = Object.freeze({ anotherIdentity: true });
+  // What a new identity does to the records the lost one signed, in both
+  // states of a node: started on this version before its identity went
+  // (the records' cutover ran with it), or not (the next start runs the
+  // cutover with the new key, desktop/node_identity, backend/db_migrate).
+  const NEW_IDENTITY_COSTS =
+    "A new identity makes the records this node signed with the one that is gone another " +
+    "author's. If the node started on this version of Sautium while it still had its identity, " +
+    "they stay as they are, under that identity's signatures, and what is analysed or changed " +
+    "from now on is signed with the new one. If the identity went before that, the next start " +
+    "deletes the features and instruments it signed — analysed again where the music file is " +
+    "here; a streamed track's come back only if a pull from the network brings them back — and of " +
+    "its embeddings keeps the ones it signed whole, as another author's, and deletes the ones " +
+    "mixed with unsigned parts, analysed again where the file is here.";
   // Only a 401 says the password or the code was wrong; a 429 is the door
   // shut by wrong passwords, its wait named; anything else is the exchange
   // that did not finish, said as such.
@@ -340,7 +364,11 @@
   window.Sautium.auth = {
     hasToken: () => !!storedToken(),
     forget: () => setToken(""),
-    status: async () => (await _origFetch("/api/auth/status")).json(),
+    status: async () => {
+      const st = await (await _origFetch("/api/auth/status")).json();
+      hostShowsCodes = st.pin_door === true;
+      return st;
+    },
     // The gate's answer to NodeChanged: this is the node from now on — or,
     // for a node not set up yet, set it up: the pin stays until the account
     // made replaces it.
@@ -354,16 +382,23 @@
       pinNode(r.nodePubkey);
       return true;
     },
-    async createAccount(username, password, setupCode) {
+    // `newIdentity`: the person's word that the pair is to make an identity
+    // other than the one this node's records were signed with — sent only
+    // after ANOTHER_IDENTITY came back and he was told what it costs.
+    async createAccount(username, password, setupCode, newIdentity = false) {
       const r = await boxedPost("/api/auth/create-account",
-                                { username, password, setup_code: setupCode });
+                                { username, password, setup_code: setupCode,
+                                  new_identity: newIdentity });
       if (r.ok) {
         setToken(r.data.token);
         pinNode(r.data.public_key_hex);
         return true;
       }
+      if (r.status === 409 && r.resp.headers.get("X-Sautium-Auth-Error") === "another-identity") {
+        return ANOTHER_IDENTITY;
+      }
       if (r.status === 409) return "This node already has an account — reload.";
-      if (r.status === 403) return `That is not this node's setup code. ${SETUP_CODE_PLACE}`;
+      if (r.status === 403) return `That is not this node's setup code. ${setupCodePlace()}`;
       if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: 8+ characters.";
       return errorDetail(r, "Could not create the account.");
     },
@@ -474,7 +509,8 @@
     let username = "";
 
     function showForm() {
-      title.textContent = mode === "create" ? "Set up Sautium" : "Sign in";
+      title.textContent = mode === "create" ? "Set up Sautium"
+        : mode === "restore" ? "Bring this node's identity back" : "Sign in";
       fields.hidden = false;
       formActions.hidden = mode === "none";
       nodeActions.hidden = true;
@@ -494,11 +530,30 @@
           "<b>The password is never stored</b> — it derives your keys. If you " +
           "lose it you get a new identity, and your invite code and friends " +
           "with it.<br><br>" +
-          "The setup code proves you run this node. " + SETUP_CODE_PLACE;
+          "The setup code proves you run this node. " + setupCodePlace();
         fields.innerHTML = input("auth-user", "text", "nickname") +
                            input("auth-pass", "password", "password (8+ characters)") +
                            input("auth-setup", "text", "setup code");
         submit.textContent = "Create account";
+      } else if (mode === "restore") {
+        // No key, while the database says the node had one: the same
+        // nickname and password derive the same key. The nickname the
+        // identity folder still names, if it does, is filled in.
+        msg.innerHTML =
+          "This node has no identity, while its database says it had one: records it signed, " +
+          "or the key its network last ran on. " +
+          "Type that identity's nickname and password: the same pair makes the same identity, " +
+          "and the node signs as before. If you changed the nickname or password before, the " +
+          "record of the identities it replaced comes back only with a copy of the node's " +
+          "identity folder or a backup; without it, what they signed is another author's here. " +
+          "If Sautium chose the password, when the account was made without one, " +
+          "only a copy of the identity folder brings the identity back.<br><br>" +
+          "The setup code proves you run this node. " + setupCodePlace();
+        fields.innerHTML = input("auth-user", "text", "nickname",
+                                 /^[A-Za-z0-9_-]{3,32}$/.test(username) ? username : "") +
+                           input("auth-pass", "password", "password") +
+                           input("auth-setup", "text", "setup code");
+        submit.textContent = "Bring it back";
       } else if (mode === "password") {
         // The username is shown, not asked for — a node has one account.
         msg.textContent = username
@@ -562,13 +617,13 @@
 
     window.Sautium.auth.status().then((st) => {
       unnamedKey = !!st.unnamed_key;
-      mode = st.onboarding ? "create" : st.password_login ? "password"
+      mode = st.onboarding ? (st.identity_missing ? "restore" : "create") : st.password_login ? "password"
         : (unnamedKey || st.pin_door === false) ? "none" : "pin";
       username = st.username || "";
       buildForm();
       // The create form says itself what a node not set up yet needs, and
       // no notice stands over what a node no browser can sign in to says
-      if (notice && mode !== "create" && mode !== "none") msg.textContent = notice;
+      if (notice && mode !== "create" && mode !== "restore" && mode !== "none") msg.textContent = notice;
       if (changed) askNodeChanged(changed, redeem);
     }).catch(() => {
       msg.textContent = "Cannot reach the server.";
@@ -599,11 +654,23 @@
       submit.textContent = "Checking…";
       let ok = false, why = "";
       try {
-        if (mode === "create") {
-          const res = await window.Sautium.auth.createAccount(
-            overlay.querySelector("#auth-user").value.trim(),
-            overlay.querySelector("#auth-pass").value,
-            overlay.querySelector("#auth-setup").value.trim());
+        if (mode === "create" || mode === "restore") {
+          const given = [overlay.querySelector("#auth-user").value.trim(),
+                         overlay.querySelector("#auth-pass").value,
+                         overlay.querySelector("#auth-setup").value.trim()];
+          let res = await window.Sautium.auth.createAccount(...given);
+          if (res === ANOTHER_IDENTITY) {
+            const yes = await window.confirmDestructive({
+              title: "Another identity",
+              message: "That nickname and password make an identity other than the one this " +
+                "node signed its records with — a typo, another nickname, or a password changed " +
+                "since.<br><br>" + NEW_IDENTITY_COSTS,
+              confirmText: "Make a new identity", cancelText: "Check them again",
+              focusCancel: true,
+            });
+            res = yes ? await window.Sautium.auth.createAccount(...given, true)
+              : "Nothing was made. Check the nickname and password, then try again.";
+          }
           ok = res === true;
           why = typeof res === "string" ? res : "Could not create the account.";
         } else if (mode === "password") {

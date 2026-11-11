@@ -317,16 +317,38 @@ implementation details live in the code, DB and git history.
 - **No identity is made over a node's own seals (2026-11-11).** A launcher
   whose identity folder held none made a new one at its start, silently —
   and the database's seals were the lost identity's: its next start's
-  cutover would have taken the node's own records for another author's. A
-  start that finds no identity now reads the database first
-  (`node_identity.ensure_identity`, the check the cutover fails closed on):
-  with no seal of the node's own analysis it makes one as before; with such
-  seals it makes none, P2P stays off, and the window says how to bring the
-  identity back (the folder from a copy; the same nickname and password at
-  the web interface's account setup — the pair is the key; a backup's
-  restore, which replaces the database too) and offers the one way to a new
-  identity, the owner's choice, which turns those records into another
-  author's: they keep the lost identity's seals.
+  cutover would have taken the node's own records for another author's. The
+  identity is the key file (`node_identity.has_identity`): a start that finds
+  none reads the database first (`ensure_identity`, `OWN_SEALS_SQL` — the key
+  the launcher's last P2P run held, `p2p.bound_identity`, or any seal of the
+  node's own: its analysis, the arms the records' cutover fails closed on,
+  its canon rows, its witness statements). With none of that it makes one as
+  before; with any it makes none, P2P stays off, the status line says so,
+  and the window says once a start how to bring the identity back (the
+  folder from a copy; the same nickname and password at the web interface's
+  account setup — the pair is the key, though not the record of the keys it
+  retired, which only a folder copy or a backup brings back, and without
+  which their records are another author's; a backup's restore, which
+  replaces the database too and exists only for a password the owner chose)
+  and offers a new identity on the owner's choice. That one is random,
+  without a nickname: browsers reach it only through Open Web UI or a QR
+  code, and chat, friends, the invite code, support requests and backups are
+  off with it. The web interface's account setup on such a node brings the
+  identity back from the pair that signed its records — where the launcher's
+  P2P ran, only the key that run held — and makes another only on the
+  owner's word, after it said what that costs (`device_auth.create_account`,
+  `new_identity`). A new identity is written exclusively, never over a key,
+  and one operation settles it at a time (`IdentitySettling`): two keys and
+  two P2P starts came of a restart during the owner's choice. What a new
+  identity costs depends on the cutover: on a node that started on this
+  release with its identity, its records stay under the lost identity's
+  seals, and what is analysed or changed from then on (a canon pass shedding
+  a seal included) is signed with the new key; on one whose identity went
+  before, the next start's cutover runs with the new key — the lost key's
+  features and instruments are deleted (analysed again where a file is here;
+  a stream's come back only if a pull brings them), its whole embedding
+  grids are kept as another author's imported twins, and grids mixed with
+  unsigned segments are deleted.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be

@@ -23,6 +23,8 @@ import stat
 from pathlib import Path
 from typing import Optional
 
+import psycopg2
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -58,8 +60,11 @@ def _identity_dir() -> Path:
     return d
 
 
-def _save_keypair(private_key, info: dict, identity_dir: Optional[Path] = None) -> str:
-    """Save Ed25519 keypair and info to disk. Returns node_id."""
+def _save_keypair(private_key, info: dict, identity_dir: Optional[Path] = None,
+                  exclusive: bool = False) -> str:
+    """Save Ed25519 keypair and info to disk. Returns node_id. `exclusive`:
+    the key file is created, never written over (FileExistsError), and an
+    info file found without it is moved aside first (replaced-<when>/)."""
     d = identity_dir or _identity_dir()
     public_key = private_key.public_key()
 
@@ -74,7 +79,24 @@ def _save_keypair(private_key, info: dict, identity_dir: Optional[Path] = None) 
     )
 
     priv_path = d / "node_ed25519.key"
-    priv_path.write_bytes(priv_pem)
+    if exclusive:
+        fd = os.open(priv_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(priv_pem)
+        stale = d / "node_info.json"
+        if stale.exists():
+            # Beside a new key it would name the identity that is gone
+            aside = d / ("replaced-" + datetime.datetime.now(datetime.timezone.utc)
+                         .strftime("%Y%m%dT%H%M%S%fZ"))
+            try:
+                aside.mkdir()
+                stale.rename(aside / stale.name)
+            except OSError:
+                priv_path.unlink()
+                raise
+            logger.warning("An identity's info without its key moved to %s", aside.name)
+    else:
+        priv_path.write_bytes(priv_pem)
     try:
         os.chmod(priv_path, stat.S_IRUSR | stat.S_IWUSR)  # 600
     except OSError:
@@ -101,55 +123,91 @@ def _save_keypair(private_key, info: dict, identity_dir: Optional[Path] = None) 
 # ---------------------------------------------------------------------------
 
 def has_identity() -> bool:
-    """Check whether a node identity already exists."""
-    return (_identity_dir() / "node_info.json").exists()
+    """Whether the identity folder holds this node's identity: its key, which
+    is what every reader signs with (p2p_identity.load_signing_key) and what
+    the web interface's account setup refuses to write over. node_info.json
+    alone is no identity — a key left without it still is one."""
+    return (_identity_dir() / "node_ed25519.key").exists()
 
 
-# Seals on this node's own analysis: segments, features and instruments under a
-# source that is not imported (or under none). Each names the key that signed
-# it, which was this node's — so with no identity in sight they say the node
-# had one: the analysis records' cutover (backend/db_migrate) decides nothing
-# without it, and no start mints a new identity over them (ensure_identity).
-SEALED_FIRST_HAND_SQL = """
-    SELECT EXISTS (SELECT 1 FROM embedding_segments es
-                     JOIN embeddings e ON e.id = es.embedding_id
-                     LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
-                    WHERE es.signature IS NOT NULL AND s.imported IS NOT TRUE)
-        OR EXISTS (SELECT 1 FROM audio_features a
-                     LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                    WHERE a.signature IS NOT NULL AND s.imported IS NOT TRUE)
-        OR EXISTS (SELECT 1 FROM track_instruments i
-                     LEFT JOIN analysis_sources s ON s.id = i.analysis_source_id
-                    WHERE i.signature IS NOT NULL AND s.imported IS NOT TRUE)"""
+# Where a node's own seals sit: arms over tables whose sealed rows carry
+# author_pubkey and signature as `x`. First its own analysis — segments,
+# features, instruments under a source that is not imported, or under none —
+# then its own canon rows (the album layer and the recording bindings, none
+# imported) and its witness statements. Each seal names the key that made it,
+# which was this node's: with no identity in sight they say the node had one.
+_ANALYSIS_ARMS = (
+    "embedding_segments x JOIN embeddings e ON e.id = x.embedding_id"
+    " LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id"
+    " WHERE x.signature IS NOT NULL AND s.imported IS NOT TRUE",
+    "audio_features x LEFT JOIN analysis_sources s ON s.id = x.analysis_source_id"
+    " WHERE x.signature IS NOT NULL AND s.imported IS NOT TRUE",
+    "track_instruments x LEFT JOIN analysis_sources s ON s.id = x.analysis_source_id"
+    " WHERE x.signature IS NOT NULL AND s.imported IS NOT TRUE",
+)
+_RECORD_ARMS = _ANALYSIS_ARMS + (
+    "albums x WHERE x.signature IS NOT NULL AND NOT x.imported",
+    "album_tracks x WHERE x.signature IS NOT NULL AND NOT x.imported",
+    "track_mbids x WHERE x.signature IS NOT NULL AND NOT x.imported",
+    "p2p_witness x WHERE x.signature IS NOT NULL",
+)
+# The account key the launcher's last P2P run held (P2PManager
+# _reintroduce_after_identity_change writes it; a Docker node keeps none).
+BOUND_IDENTITY_SQL = ("(SELECT value #>> '{}' FROM user_settings"
+                      " WHERE key = 'p2p.bound_identity')")
+
+
+def _any(arms, by_key: bool = False) -> str:
+    named = " AND lower(x.author_pubkey) = %(key)s" if by_key else ""
+    return " OR ".join(f"EXISTS (SELECT 1 FROM {arm}{named})" for arm in arms)
+
+
+# The analysis records' cutover (backend/db_migrate) decides nothing without
+# the node's keys over these.
+SEALED_FIRST_HAND_SQL = f"SELECT ({_any(_ANALYSIS_ARMS)}) AS found"
+# What says this node had an identity: the key its last P2P run held, or any
+# seal of its own. No start makes a new identity over it (ensure_identity),
+# and the web interface's account setup makes another only on the owner's
+# word (backend/device_auth.create_account).
+OWN_SEALS_SQL = f"SELECT ({BOUND_IDENTITY_SQL} IS NOT NULL OR {_any(_RECORD_ARMS)}) AS found"
+# Whether the key `%(key)s` (lower-case hex) made any of the seals.
+OWN_SEALS_BY_SQL = f"SELECT ({_any(_RECORD_ARMS, by_key=True)}) AS found"
 
 
 def ensure_identity(dsn: str) -> str:
     """This node's identity as a start finds it, before anything P2P runs:
-    "present" — the identity folder holds one; "minted" — it held none and
-    the database holds no seal of this node's own analysis, so a new one is
-    generated; "missing" — it holds none and the database holds such seals,
-    signed by the identity that is gone: nothing is generated, and only the
-    owner's choice makes a new one (generate_identity), which turns those
-    records into another author's. A database that cannot be read raises
-    (psycopg2.Error) and nothing is generated."""
+    "present" — the identity folder holds its key (the database is not
+    read); "minted" — it holds none and nothing in the database says the node
+    had one (OWN_SEALS_SQL), so a new one is generated; "missing" — it holds
+    none and the database does say so: nothing is generated, and only the
+    owner's choice makes a new one (generate_identity), which makes the
+    records the lost one signed another author's. A database that cannot be
+    read raises (psycopg2.Error) and nothing is generated. A key that lands
+    meanwhile (a restore, the web interface's account setup) is the
+    identity: generating never writes over one."""
     if has_identity():
         return "present"
-    import psycopg2
     conn = psycopg2.connect(dsn, connect_timeout=10)
     try:
         with conn.cursor() as cur:
-            cur.execute(SEALED_FIRST_HAND_SQL)
-            sealed = cur.fetchone()[0]
+            cur.execute(OWN_SEALS_SQL)
+            had_one = cur.fetchone()[0]
     finally:
         conn.close()
-    if sealed:
+    if had_one:
         return "missing"
-    generate_identity()
+    try:
+        generate_identity()
+    except FileExistsError:
+        return "present"
     return "minted"
 
 
 def generate_identity() -> str:
-    """Generate a new random Ed25519 keypair and write it to disk."""
+    """Generate a new random Ed25519 keypair and write it to disk — never
+    over a key: the key file is created exclusively, and FileExistsError
+    says an identity is there. The info of an identity whose key is gone is
+    moved aside (replaced-<when>/), not written over."""
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required for identity generation")
 
@@ -165,9 +223,98 @@ def generate_identity() -> str:
         "public_key_hex": node_id,
         "algorithm": "Ed25519",
     }
-    _save_keypair(private_key, info)
+    _save_keypair(private_key, info, exclusive=True)
     logger.info(f"Generated node identity: {node_id[:16]}...")
     return node_id
+
+
+class IdentitySettling:
+    """The launcher's way to the identity P2P starts on, without Tk. One
+    operation at a time — a check (ensure_identity) or the owner's choice of
+    a new identity (generate_identity) — and only its completion acts: a
+    request while one runs is refused (False), so no second check reads the
+    folder a mint is writing, and no two completions start P2P.
+
+    `run(fn)` runs fn off the caller's thread; `ui(fn)` hands fn back to it
+    (the launcher's ui_call); `closing()` says the caller quits, and a
+    completion then calls nothing — no notice, no P2P start. The state is
+    the caller's thread's alone. Its callbacks, there: `ready()` — an
+    identity is on disk, P2P may start on it; `missing(first)` — none is,
+    while the database says the node had one; `first` the first time in
+    this process (the owner is asked once a start); `unsettled(error)` —
+    the check decided nothing (the database could not be read, or the check
+    failed: re-raised for the thread's hook after the callback is handed
+    back); `failed(error)` — the owner's new identity could not be made."""
+
+    def __init__(self, dsn, run, ui, closing, *, ready, missing, unsettled, failed):
+        self._dsn, self._run, self._ui, self._closing = dsn, run, ui, closing
+        self._ready, self._missing = ready, missing
+        self._unsettled, self._failed = unsettled, failed
+        self.busy = False
+        self._told = False
+
+    def check(self) -> bool:
+        """Settle the identity; False when an operation already runs."""
+        return self._begin(self._checking)
+
+    def make_new(self) -> bool:
+        """The owner's choice: a new identity; False when an operation runs."""
+        return self._begin(self._making)
+
+    def _begin(self, work) -> bool:
+        if self.busy:
+            return False
+        self.busy = True
+        self._run(work)
+        return True
+
+    def _end(self, then, *args) -> None:
+        def finish():
+            self.busy = False
+            if not self._closing():
+                then(*args)
+        self._ui(finish)
+
+    def _tell_missing(self) -> None:
+        first, self._told = not self._told, True
+        self._missing(first)
+
+    def _checking(self) -> None:
+        try:
+            state = ensure_identity(self._dsn())
+        except psycopg2.Error as e:
+            logger.error("No node identity, and the database could not be read to tell whether "
+                         "this node signed records with one: %s — none made, P2P off until the "
+                         "next start", e)
+            self._end(self._unsettled, e)
+            return
+        except Exception as e:
+            self._end(self._unsettled, e)
+            raise
+        if state == "missing":
+            logger.warning("No node identity, and the database says this node had one (its own "
+                           "seals, or the key its last P2P run held) — none made, P2P off until "
+                           "the owner decides")
+            self._end(self._tell_missing)
+            return
+        if state == "minted":
+            logger.info("Node identity generated")
+        self._end(self._ready)
+
+    def _making(self) -> None:
+        try:
+            generate_identity()
+        except FileExistsError:
+            logger.info("An identity came back before the owner's choice of a new one was made: "
+                        "it stays")
+        except Exception as e:
+            logger.error("A new node identity could not be made: %s", e, exc_info=True)
+            self._end(self._failed, e)
+            return
+        else:
+            logger.warning("Node identity generated on the owner's choice, over records the "
+                           "identity that is gone signed")
+        self._end(self._ready)
 
 
 # ---------------------------------------------------------------------------

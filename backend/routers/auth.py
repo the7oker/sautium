@@ -96,6 +96,7 @@ async def auth_status() -> dict:
     nothing secret — only whether an account exists to log into and whether a
     pairing PIN is currently outstanding."""
     configured = device_auth.account_configured()
+    onboarding = not configured and not device_auth.identity_key_on_disk()
     return {
         # An anonymous account (wizard, random password nobody has seen) is
         # configured and still has no password door. Reporting one sent the
@@ -105,7 +106,10 @@ async def auth_status() -> dict:
         # No account yet: the node cannot be signed into at all, so the UI
         # offers to create one. The window closes for good the moment it is
         # — and is never open over a key on disk, named or not.
-        "onboarding": not configured and not device_auth.identity_key_on_disk(),
+        "onboarding": onboarding,
+        # No identity, while the database says the node had one: the setup
+        # brings that one back, and makes another only when told to
+        "identity_missing": onboarding and await asyncio.to_thread(device_auth.own_seals),
         # A key with no account beside it: nothing here can sign a browser in
         "unnamed_key": not configured and device_auth.identity_key_on_disk(),
         "pairing_open": device_auth.pin_state() is not None,
@@ -122,6 +126,9 @@ class CreateAccountRequest(BaseModel):
     # The code the node wrote to its log and its identity folder at start —
     # or a line pasted around it, which the code is read out of
     setup_code: str = Field(default="", max_length=256)
+    # The owner's word, asked by the page after a refusal said so: an
+    # identity other than the one this node's records were signed with
+    new_identity: bool = False
 
 
 @router.post("/create-account")
@@ -136,14 +143,25 @@ async def create_account(boxed: BoxedRequest) -> dict:
     refused.
 
     The account is the node's P2P identity, not a local login — so this also
-    turns on sync, chat and analysis signing, which stay dark without one."""
+    turns on sync, chat and analysis signing, which stay dark without one.
+
+    On a node that lost its key (`identity_missing` in the status) the setup
+    brings that identity back from its nickname and password; a pair that
+    makes another is a 409 marked `another-identity`, and is made only with
+    `new_identity`, which the page sends after saying what it costs."""
     req, reply = _open(boxed, CreateAccountRequest)
     try:
         # The check lives inside create_account, under its lock — testing it
         # out here as well would only re-open the race it exists to close.
-        info = await device_auth.create_account(req.username, req.password, req.setup_code)
+        info = await device_auth.create_account(req.username, req.password, req.setup_code,
+                                                req.new_identity)
     except device_auth.AccountExists:
         raise HTTPException(status_code=409, detail="account already exists")
+    except device_auth.AnotherIdentity:
+        raise HTTPException(status_code=409, detail="That nickname and password make another "
+                                                    "identity than the one this node's records "
+                                                    "were signed with",
+                            headers={"X-Sautium-Auth-Error": "another-identity"})
     except device_auth.WrongSetupCode:
         raise HTTPException(status_code=403, detail="That is not this node's setup code: the node writes a "
                                                     "new one at each start, to its log and its identity folder")

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -332,6 +333,7 @@ def test_two_changes_at_once_each_need_the_password_of_the_identity_they_change(
 def test_a_docker_account_says_it_has_a_password(tmp_path, monkeypatch):
     pytest.importorskip("cryptography")
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
+    monkeypatch.setattr(device_auth, "_another_identity", lambda _pubkey: False)   # no records here
     info = device_auth._write_identity(tmp_path, "anonymous-1a2b", "a chosen password")
     assert info["anonymous"] is False
     assert json.loads((tmp_path / "node_info.json").read_text())["anonymous"] is False
@@ -428,7 +430,7 @@ def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_n
     the node's user alone — and nothing is created without it; the code
     dies with the account."""
     written = []
-    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p: (
+    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p, **_kw: (
         written.append(u), (d / "node_ed25519.key").write_text("k"),
         (d / "node_info.json").write_text(json.dumps({"username": u})), {"username": u})[3])
     with caplog.at_level("INFO", logger="device_auth"):
@@ -460,7 +462,7 @@ def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_n
 def test_the_setup_code_is_read_out_of_what_was_pasted_around_it(fresh_node, monkeypatch):
     """A line of the log, spaces, another layout's letters: the code inside
     is taken, nothing else is, and nothing is a server error."""
-    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p: {"username": u})
+    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p, **_kw: {"username": u})
     device_auth.prepare_setup()
     code = device_auth._setup_code
     for given in ("\u0410\u0412\u0421\u0415-\u041d\u041a\u041c\u0420-\u0422\u0425\u0410\u0412", "", " - "):
@@ -883,3 +885,232 @@ def test_the_change_sheet_says_how_long_a_shut_door_waits():
     out = _page("return await window.Sautium.auth.changeIdentity('second', 'new password', 'a guess')",
                 store=dict(_SIGNED_IN), replies={"/api/auth/change-identity": [[429, {"Retry-After": "4"}]]})
     assert out["result"] == {"ok": False, "error": "Too many wrong passwords — the next try is taken in 4 s."}
+
+
+
+# ---------------------------------------------------------------------------
+# A node that lost its key: the setup brings its identity back
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def lost_key(fresh_node, scratch_dsn, monkeypatch):
+    """`fresh_node` on a database of its own, its setup code written, the
+    derivation at a test's cost (the same pair → key map). Yields
+    (signed_by(key, imported=False), bound(key), code): a features record
+    sealed by `key`, and the key the launcher's last P2P run held."""
+    import db_pool
+    import psycopg2
+    import psycopg2.pool
+    monkeypatch.setattr(p2p_identity, "ARGON2_TIME_COST", 1)
+    monkeypatch.setattr(p2p_identity, "ARGON2_MEMORY_COST", 8 * 1024)
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    conn = psycopg2.connect(scratch_dsn)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE tracks CASCADE")
+        cur.execute("DELETE FROM user_settings WHERE key = 'p2p.bound_identity'")
+
+    def signed_by(key, imported=False):
+        track = str(uuid.uuid4())
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 't')", (track,))
+            cur.execute("""INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds, imported)
+                           VALUES (%s, 'AQAAdoor', 240, %s) RETURNING id""", (track, imported))
+            cur.execute("""INSERT INTO audio_features (track_id, bpm, analysis_source_id, author_pubkey,
+                                                       signature)
+                           VALUES (%s, 99.0, %s, %s, %s)""", (track, cur.fetchone()[0], key, "5e" * 64))
+
+    def bound(key):
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO user_settings (key, value) VALUES ('p2p.bound_identity', %s)",
+                        (json.dumps(key),))
+
+    device_auth.prepare_setup()
+    yield signed_by, bound, device_auth._setup_code
+    conn.close()
+    pool.closeall()
+
+
+def _key_of(username, password):
+    return p2p_identity.derive_identity(username, password)["public_key_hex"]
+
+
+def test_the_setup_of_a_node_that_lost_its_key_takes_only_the_pair_that_signed_its_records(
+        lost_key, fresh_node):
+    """A typo and another nickname are refused, nothing written and the code
+    kept; the pair that signed the records brings that identity back."""
+    signed_by, _bound, code = lost_key
+    own = _key_of("owner", "the right one")
+    signed_by(own)
+    signed_by("cd" * 32, imported=True)
+    for username, password in (("owner", "the wrong one"), ("other", "the right one")):
+        with pytest.raises(device_auth.AnotherIdentity):
+            asyncio.run(device_auth.create_account(username, password, code))
+        assert not (fresh_node / "node_ed25519.key").exists()
+        assert (fresh_node / device_auth.SETUP_CODE_FILE).exists()
+    info = asyncio.run(device_auth.create_account("owner", "the right one", code))
+    assert info["public_key_hex"] == own and (fresh_node / "node_ed25519.key").exists()
+
+
+def test_another_identity_over_its_records_is_made_on_the_owners_word(lost_key, fresh_node):
+    signed_by, _bound, code = lost_key
+    signed_by(_key_of("owner", "the right one"))
+    info = asyncio.run(device_auth.create_account("other", "a new password", code, new_identity=True))
+    assert info["username"] == "other" and info["public_key_hex"] == _key_of("other", "a new password")
+
+
+def test_with_no_seal_of_its_own_any_pair_is_the_nodes_first(lost_key, fresh_node):
+    signed_by, _bound, code = lost_key
+    signed_by("cd" * 32, imported=True)                # another author's, imported
+    info = asyncio.run(device_auth.create_account("anyone", "a password", code))
+    assert info["username"] == "anyone"
+
+
+def test_where_its_p2p_ran_only_the_key_that_run_held_is_the_nodes(lost_key, fresh_node):
+    """An older pair of the same node signed records here too, and made the
+    key the node retired: the key its last P2P run held is the one."""
+    signed_by, bound, code = lost_key
+    old, new = _key_of("owner", "the old one"), _key_of("owner", "the new one")
+    signed_by(old)
+    signed_by(new)
+    bound(new)
+    with pytest.raises(device_auth.AnotherIdentity):
+        asyncio.run(device_auth.create_account("owner", "the old one", code))
+    info = asyncio.run(device_auth.create_account("owner", "the new one", code))
+    assert info["public_key_hex"] == new
+
+
+def test_the_status_says_the_identity_is_missing_and_the_door_names_another(lost_key, fresh_node,
+                                                                              doors):
+    signed_by, _bound, code = lost_key
+    assert doors.get("/api/auth/status").json()["identity_missing"] is False
+    signed_by(_key_of("owner", "the right one"))
+    status = doors.get("/api/auth/status").json()
+    assert status["onboarding"] is True and status["identity_missing"] is True
+    r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
+        "username": "owner", "password": "the wrong one", "setup_code": code}))
+    assert r.status_code == 409 and r.headers["x-sautium-auth-error"] == "another-identity"
+    assert not (fresh_node / "node_ed25519.key").exists()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_page_asks_for_another_identity_only_with_the_persons_word():
+    create = "return await window.Sautium.auth.createAccount('owner', 'a password', 'AAAA-BBBB-CCCC'"
+    another = [[409, {"X-Sautium-Auth-Error": "another-identity"}]]
+    out = _page(create + ")", unsigned=True, store=dict(_SIGNED_IN),
+                replies={"/api/auth/create-account": another})
+    assert out["result"] == {"anotherIdentity": True}
+    assert out["sent"]["/api/auth/create-account"][0]["new_identity"] is False
+    out = _page(create + ", true)", unsigned=True, store=dict(_SIGNED_IN),
+                replies={"/api/auth/create-account": [[200]]})
+    assert out["result"] is True and out["sent"]["/api/auth/create-account"][0]["new_identity"] is True
+    out = _page(create + ")", unsigned=True, store=dict(_SIGNED_IN),
+                replies={"/api/auth/create-account": [[409]]})
+    assert out["result"] == "This node already has an account — reload."
+
+
+_RESTORE_GATE = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const [naclPath, shaPath, authPath, setup] = process.argv.slice(-4);
+const cfg = JSON.parse(setup);
+const made = {}, sent = [], confirms = [];
+let reloaded = false;
+function el(tag) {
+  const e = { tag, hidden: false, textContent: '', innerHTML: '', disabled: false, children: [],
+              listeners: {}, value: '',
+              addEventListener(k, f) { this.listeners[k] = f; }, focus() {}, showModal() {},
+              appendChild(c) { this.children.push(c); } };
+  e.querySelector = (sel) => {
+    const id = sel.replace(/^#/, '');
+    if (!made[id]) made[id] = el('x');
+    return made[id];
+  };
+  return e;
+}
+const ctx = {
+  window: { addEventListener() {}, dispatchEvent() {},
+            confirmDestructive: async (o) => { confirms.push(o); return cfg.confirm; } },
+  localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+  location: { origin: 'http://node.test', hash: '', pathname: '/', search: '',
+              reload() { reloaded = true; } },
+  document: { readyState: 'loading', addEventListener() {}, getElementById: () => null,
+              createElement: (t) => el(t), body: el('body') },
+  history: { replaceState() {} }, crypto: globalThis.crypto, Headers, URL, TextEncoder, TextDecoder,
+  console, setTimeout, clearTimeout, Request, btoa, atob, Uint8Array, BigInt, DataView, JSON,
+};
+ctx.self = ctx; ctx.window.crypto = globalThis.crypto;
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(naclPath, 'utf8'), ctx);
+const nacl = ctx.nacl = ctx.nacl || ctx.window.nacl;
+const server = nacl.box.keyPair();
+ctx.window.fetch = async (input, init) => {
+  const path = String(input);
+  if (path === '/api/auth/status') return new Response(JSON.stringify(cfg.status));
+  if (path.startsWith('/api/auth/handshake')) {
+    return new Response(JSON.stringify({ eph: Buffer.from(server.publicKey).toString('base64'),
+                                         expires: 4102444800, node_pubkey: '', sig: '' }));
+  }
+  const env = JSON.parse(init.body);
+  const client = Uint8Array.from(Buffer.from(env.client, 'base64'));
+  const opened = nacl.box.open(Uint8Array.from(Buffer.from(env.box, 'base64')),
+                               Uint8Array.from(Buffer.from(env.nonce, 'base64')), client, server.secretKey);
+  const body = JSON.parse(Buffer.from(opened).toString());
+  sent.push(body);
+  if (!body.new_identity) {
+    return new Response('{"detail":"x"}', { status: 409,
+                                            headers: { 'X-Sautium-Auth-Error': 'another-identity' } });
+  }
+  const nonce = nacl.randomBytes(24);
+  const reply = nacl.box(Buffer.from(JSON.stringify({ token: 't', public_key_hex: 'ab'.repeat(32) })),
+                         nonce, client, server.secretKey);
+  return new Response(JSON.stringify({ nonce: Buffer.from(nonce).toString('base64'),
+                                       box: Buffer.from(reply).toString('base64') }));
+};
+ctx.window.Sautium = {};
+vm.runInContext(fs.readFileSync(shaPath, 'utf8'), ctx);
+vm.runInContext(fs.readFileSync(authPath, 'utf8'), ctx);
+ctx.window.Sautium.auth.showLoginGate();
+setTimeout(async () => {
+  const title = made['.confirm-title'].textContent, msg = made['auth-gate-msg'].innerHTML;
+  const button = made['auth-gate-submit'].textContent;
+  for (const [id, typed] of [['auth-user', 'owner'], ['auth-pass', 'a password'],
+                             ['auth-setup', 'AAAA-BBBB-CCCC']]) {
+    (made[id] = made[id] || el('input')).value = typed;
+  }
+  await made['auth-gate-submit'].listeners.click();
+  process.stdout.write(JSON.stringify({ title, msg, button, sent, reloaded,
+                                        confirms: confirms.map((o) => ({ ...o })),
+                                        after: made['auth-gate-msg'].textContent }));
+}, 50);
+"""
+
+
+def _restore_gate(status, confirm):
+    static = ROOT / "backend" / "static"
+    proc = subprocess.run(["node", "-e", _RESTORE_GATE, "--", str(static / "vendor" / "nacl-fast.min.js"),
+                           str(static / "sha256.js"), str(static / "auth.js"),
+                           json.dumps({"status": status, "confirm": confirm})],
+                          capture_output=True, check=True, timeout=30)
+    return json.loads(proc.stdout)
+
+
+_MISSING = {"onboarding": True, "identity_missing": True, "password_login": False,
+            "unnamed_key": False, "pairing_open": False, "username": "owner"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_gate_brings_an_identity_back_and_makes_another_only_after_saying_what_it_costs():
+    out = _restore_gate({**_MISSING, "pin_door": True}, confirm=False)
+    assert out["title"] == "Bring this node's identity back" and out["button"] == "Bring it back"
+    assert "the same pair makes the same identity" in out["msg"]
+    assert "Sautium's window names" in out["msg"] and "docker logs" not in out["msg"]
+    [asked] = out["confirms"]
+    assert asked["focusCancel"] is True and asked["confirmText"] == "Make a new identity"
+    assert "deletes the features and instruments it signed" in asked["message"]
+    assert [body["new_identity"] for body in out["sent"]] == [False]
+    assert out["after"].startswith("Nothing was made") and out["reloaded"] is False
+    out = _restore_gate({**_MISSING, "pin_door": False}, confirm=True)
+    assert "docker logs" in out["msg"]
+    assert [body["new_identity"] for body in out["sent"]] == [False, True]
+    assert {body["username"] for body in out["sent"]} == {"owner"} and out["reloaded"] is True
