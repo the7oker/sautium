@@ -273,8 +273,9 @@ implementation details live in the code, DB and git history.
   off for lite), with this machine's estimate beside it — the instrument
   pass's pending audio at the pace the passes record per device and core
   count after every batch (`analysis_pace`), the sonic pace × 8.5 on a CPU
-  until the tagger has run here, nothing ("measuring") on CUDA or MPS where
-  no ratio was measured; no model is loaded for it, and it reaches the
+  (a Pi 5; a 32-core x86 measured 2.7) or × 0.3 on CUDA — where the GPU's
+  tagger costs less than the sonic pass's CPU work — until the tagger has
+  run here, nothing ("measuring") on MPS where no ratio was measured; no model is loaded for it, and it reaches the
   screen with the library event. The order rule: every track's sonic pass
   goes before any track's instruments — the instrument pass asks at each
   batch seam whether a file newer than the sonic pass's queue waits (a scan

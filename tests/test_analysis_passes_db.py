@@ -604,19 +604,30 @@ def test_the_estimate_takes_the_sonic_pace_then_the_instrument_pace_of_this_mach
     cur.execute("SELECT pass::text, batches FROM analysis_pace ORDER BY analysis_pace.pass")
     assert cur.fetchall() == [("sonic", 2), ("instruments", 1)]
     # another machine — a GPU added, other cores — measures anew
-    assert _estimate(device="cuda")["basis"] == "measuring"
+    assert _estimate(device="mps")["basis"] == "measuring"
     assert _estimate(cores=8)["basis"] == "reference"
 
 
-@pytest.mark.parametrize("device", ["cuda", "mps"])
-def test_with_no_ratio_for_the_device_class_the_row_says_it_is_measuring(
-        cur, no_model, machine, device):
+def test_with_no_ratio_for_the_device_class_the_row_says_it_is_measuring(cur, no_model, machine):
     _pending_files(cur, [240])
     with database.get_db_context() as db:
-        analysis_pace._machine = lambda: (device, 16)
+        analysis_pace._machine = lambda: ("mps", 16)
         analysis_pace.record(db, analysis_pace.SONIC, 4.0, 240.0)
-    e = _estimate(device=device, cores=16)
+    e = _estimate(device="mps", cores=16)
     assert (e["tracks"], e["basis"], e["pace"], e["seconds"]) == (1, "measuring", None, None)
+
+
+def test_on_cuda_the_estimate_waits_for_a_sonic_batch_then_takes_its_ratio(cur, no_model,
+                                                                          machine):
+    """No reference pace for a GPU: before any batch here it is measuring;
+    after the sonic pass's first batch, its pace × the measured ratio."""
+    _pending_files(cur, [240])
+    assert _estimate(device="cuda", cores=16)["basis"] == "measuring"
+    with database.get_db_context() as db:
+        analysis_pace._machine = lambda: ("cuda", 16)
+        analysis_pace.record(db, analysis_pace.SONIC, 2.0, 240.0)          # 0.5 s a minute
+    e = _estimate(device="cuda", cores=16)
+    assert (e["basis"], e["pace"]) == ("sonic", pytest.approx(0.5 * analysis_pace.TAGGER_TO_SONIC["cuda"]))
 
 
 def test_nothing_pending_is_no_time_at_all(cur, no_model, machine):

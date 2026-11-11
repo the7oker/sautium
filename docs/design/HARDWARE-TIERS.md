@@ -389,9 +389,11 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
     Library screen shows the instrument pass's pending audio at that pace
     beside the switch — before the first instrument batch, the sonic pace ×
     8.5 on a CPU (a Pi 5: the tagger 18.9 s per minute against the sonic
-    pass's ~2.2), a reference pace scaled by the cores on a CPU that ran no
-    sonic batch, and "measuring" on CUDA and MPS, where no ratio was
-    measured. Off computes and signs no instruments and removes none: the
+    pass's ~2.2; a 32-core x86 CPU measured 2.7, so there the first estimate
+    runs high) or × 0.3 on CUDA (a laptop RTX 4090: the tagger 0.15–0.19 s
+    per minute against the sonic pass's 0.5–0.8, mostly librosa and fpcalc
+    on the CPU), a reference pace scaled by the cores on a CPU that ran no
+    sonic batch, and "measuring" on MPS, where no ratio was measured. Off computes and signs no instruments and removes none: the
     node still pulls, serves and carries those other nodes made.
 9. ✅ `python cli.py bench` — tracks/hour + library ETA + slower-than-realtime
    warning. UI surfacing of the number still TODO.

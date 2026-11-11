@@ -17,12 +17,12 @@ records after every batch, committed with the batch.
 The estimate is the instrument pass's pending audio (its own queue,
 INSTRUMENTS_PENDING_SQL) at this machine's instrument pace. Until the pass
 has run a batch here, the sonic pass's pace times the tagger-to-sonic ratio
-measured for the device class stands in: on a CPU only, the one class it was
-measured on — a Raspberry Pi 5 on four cores, the tagger 18.9 s per minute of
-audio against the sonic pass's ~2.2 — and a CPU node that has run no sonic
-batch takes that measurement's sonic pace, scaled by its cores. On CUDA and
-MPS nothing was measured, so the row says it is measuring until the first
-instrument batch records a pace. Nothing here loads a model or imports the
+measured for the device class stands in: on a CPU (a Raspberry Pi 5 on four
+cores, the tagger 18.9 s per minute of audio against the sonic pass's ~2.2) and
+on CUDA (a laptop RTX 4090, where the GPU's tagger is cheaper than the sonic
+pass's CPU work) — and a CPU node that has run no sonic batch takes the Pi's
+sonic pace, scaled by its cores. On MPS nothing was measured, so the row says
+it is measuring until the first instrument batch records a pace. Nothing here loads a model or imports the
 ML stack: the screen asks on every library event, a lite Pi included.
 """
 
@@ -37,8 +37,15 @@ SONIC = "sonic"
 INSTRUMENTS = "instruments"
 
 # The tagger's pace against the sonic pass's, per device class where it was
-# measured (the Pi 5, four cores: 18.9 / 2.2 s per minute of audio).
-TAGGER_TO_SONIC = {"cpu": 8.5}
+# measured. CPU: the Pi 5 on four cores, two torch threads (18.9 / 2.2 s per
+# minute of audio). The ratio falls with the cores the tagger gets: a 32-core
+# x86 CPU on the lite profile (16 torch threads) measured 2.89 / 1.09 = 2.7 on
+# the synthetic lab library, so on a large CPU the first estimate runs high
+# until the first instrument batch replaces it. CUDA (2026-11-11): a laptop
+# RTX 4090 with 32 cores on the same library, 0.15-0.19 / 0.50-0.82 s per
+# minute (the sonic pass is librosa, decoding and fpcalc on the CPU) — 0.2 to
+# 0.3, the warm runs 0.3.
+TAGGER_TO_SONIC = {"cpu": 8.5, "cuda": 0.3}
 
 # The sonic pass's pace a CPU node takes before it has run a batch of its
 # own: the same measurement's, s per minute of audio and the cores it ran on.
@@ -129,22 +136,21 @@ def estimate(db: Session, reanalyze: bool) -> Dict[str, Any]:
     `tracks` and `audio_seconds` pending, `pace` (s per minute of audio) and
     `seconds` of analysis — both None while there is no pace to say —, and
     `basis`: 'measured' (this machine's instrument batches), 'sonic' (its
-    sonic pace × the device class's ratio), 'reference' (the measured
-    reference, scaled by the cores) or 'measuring' (no ratio for this device
-    class: the first instrument batch says)."""
+    sonic pace × the device class's ratio), 'reference' (the measured CPU
+    reference, scaled by the cores) or 'measuring' (no pace to start from —
+    MPS, or a CUDA node before its first sonic batch: the first batch
+    says)."""
     tracks, audio = instruments_pending(db, reanalyze)
     measured = pace(db, INSTRUMENTS)
     device, cores = _machine()
+    sonic = pace(db, SONIC) if measured is None and device in TAGGER_TO_SONIC else None
     if measured is not None:
         per_minute, basis = measured, "measured"
-    elif device in TAGGER_TO_SONIC:
-        sonic = pace(db, SONIC)
-        if sonic is None:
-            reference, on_cores = REFERENCE_SONIC_PACE[device]
-            sonic, basis = reference * on_cores / cores, "reference"
-        else:
-            basis = "sonic"
-        per_minute = sonic * TAGGER_TO_SONIC[device]
+    elif sonic is not None:
+        per_minute, basis = sonic * TAGGER_TO_SONIC[device], "sonic"
+    elif device in TAGGER_TO_SONIC and device in REFERENCE_SONIC_PACE:
+        reference, on_cores = REFERENCE_SONIC_PACE[device]
+        per_minute, basis = reference * on_cores / cores * TAGGER_TO_SONIC[device], "reference"
     else:
         per_minute, basis = None, "measuring"
     return {"tracks": tracks, "audio_seconds": audio, "pace": per_minute, "basis": basis,
