@@ -3001,18 +3001,18 @@ class HqpBackend(PlayerBackend):
         play press runs, watched from `read_at`, when this tick's status was
         asked for. Only onto an entry the node gave: `playlist`, HQPlayer's
         as this tick read it (None: not answered), holds the entry after the
-        one it played, and one another controller put there — or none, its
-        playlist cleared since — is no advance of ours: the take moved onto
-        an entry the node never gave, a takeover (_note_listen), and an
-        attempt opened for it was judged on that controller's playlist
-        ("HQPlayer refused the file", ROON-COEX §12.5). On this machine its
-        log is followed while the attempt waits (diag.LogFollower). Called
-        on the poller."""
+        one it played (_after_in), and one another controller put there — or
+        none, its playlist cleared or cut since — is no advance of ours: the
+        take moved onto an entry the node never gave, a takeover
+        (_note_listen), and an attempt opened for it was judged on that
+        controller's playlist ("HQPlayer refused the file", ROON-COEX
+        §12.5). On this machine its log is followed while the attempt waits
+        (diag.LogFollower). Called on the poller."""
         if not self._ends_ours(status) or self._pressed is not None or self._queue.view()[2]:
             return None
         before, playing = self._before
         if playlist is not None:
-            onto = playlist[before.track_index] if before.track_index < len(playlist) else ""
+            onto = self._after_in(playlist, playing[1], before.track_index)
             if not onto or not self.gave(onto, self._layout()):
                 return None
         att = diag.advance(before.track_index, status.track_serial, before.output_delay, read_at)
@@ -3356,19 +3356,29 @@ class HqpBackend(PlayerBackend):
         controller put behind it (Roon's Play Now on a link it kept, ROON-COEX
         F9), or the listen's own entry stands at its place no more in a
         playlist that holds an entry the node never gave (that controller's
-        clear and add). False: its entry in place, one the node gave after it
+        clear and add). False: its entry there, one the node gave after it
         or none (the playlist's end) — HQPlayer's own advance, or end. None:
         the playlist does not tell yet (emptied: that controller's clear read
         before its add). An entry the node never gave elsewhere in the
         playlist — a file added in HQPlayer's own window — is no evidence of
         where the take went."""
         layout = self._layout()
-        n = listen.entry
-        here = playlist[n - 1] if 1 <= n <= len(playlist) else ""
-        if not any(_reads_item(r, listen.item) for r in self._readings(here)):
+        after = self._after_in(playlist, listen.item, listen.entry)
+        if after is None:
             return True if any(u and not self.gave(u, layout) for u in playlist) else None
-        after = playlist[n] if n < len(playlist) else ""
         return bool(after) and not self.gave(after, layout)
+
+    def _after_in(self, playlist: list, item: QueueItem, entry: int) -> Optional[str]:
+        """The URI HQPlayer's `playlist` holds after its entry of `item` —
+        "" where that entry is its last — or None where it holds none of
+        `item`. The entry is found by what it is, nearest the place it was
+        read at (`entry`, 1-based): a removal of the node's before it since
+        that reading moved it, and a track queued twice has two."""
+        at = next((j for j in _outward(entry or 1, len(playlist))
+                   if any(_reads_item(r, item) for r in self._readings(playlist[j - 1]))), None)
+        if at is None:
+            return None
+        return playlist[at] if at < len(playlist) else ""
 
     def _advance_taken(self, att: diag.Attempt, status, playing: tuple, edited: bool) -> bool:
         """Another controller took HQPlayer while its own advance onto an

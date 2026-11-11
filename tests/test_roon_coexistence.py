@@ -1108,6 +1108,8 @@ ROONS = "http://127.0.0.1:30000/1/stream.raw"
     ("a file added elsewhere", OURS + ["file:///E:/Other/ref.wav"], 2, None, False),   # no word on where it went
     ("the playlist's end", OURS[:2], 2, None, False),                      # HQPlayer's own end
     ("emptied", [], 2, None, True),                                        # a clear read before its add: not yet
+    ("a removal of ours moved its entry", OURS[1:] + ["file:///E:/Other/ref.wav"], 2, None, False),   # found by what it is
+    ("roon's behind ours, a removal of ours before it", [OURS[1], ROONS], 2, (3, 0), False),
     ("not read", None, 2, None, True),                                     # the next tick tells
 ])
 def test_a_played_out_listens_take_is_judged_by_where_the_playlist_says_it_went(fake, case, playlist, entry,

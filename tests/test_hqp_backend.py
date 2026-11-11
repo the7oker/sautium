@@ -4200,7 +4200,8 @@ def test_hqplayers_own_advance_seen_after_a_removal_before_its_entry_starts_the_
     assert q.remove(1) is A
     stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="", position=0.0,
                           length=0.0, volume=-3.0, tracks_total=4, track_serial=11)
-    att = b._advance(stopped, time.time())
+    # HQPlayer's playlist as that tick reads it: C's entry is found by what it is, not at the stale index
+    att = b._advance(stopped, time.time(), [f"file:///E:/Music/A/0{i}.flac" for i in (2, 3, 4, 5)])
     try:
         assert att is not None and att.intent == "advance"
         assert (b._starts_already(D), b._starts_already(E)) == (True, False)
@@ -4225,7 +4226,8 @@ def test_hqplayers_own_advance_on_a_tail_mirror_starts_the_track_after_it(fake):
     b._before = (before, (3, C, False))
     stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="", position=0.0,
                           length=0.0, volume=-3.0, tracks_total=4, track_serial=11)
-    att = b._advance(stopped, time.time())
+    att = b._advance(stopped, time.time(), ["file:///E:/Music/X/removed.flac"]
+                     + [f"file:///E:/Music/A/0{i}.flac" for i in (3, 4, 5)])
     try:
         assert att is not None and att.intent == "advance" and b._starts_already(D)
     finally:
@@ -5250,12 +5252,12 @@ def test_the_held_rate_check_asks_nothing_for_an_intent_watched_since_its_tick_b
     monkeypatch.setattr(b._sampler, "due", lambda *a, **k: False)     # its State reads aside
     watched, advance = [], b._advance
 
-    def watched_mid_tick(status, read_at):
+    def watched_mid_tick(status, read_at, playlist):
         # the check's event, then an intent watched while this tick runs, its Play still owed
         if not watched:
             b._rate_event("state")
             watched.append(b._watch("play"))
-        return advance(status, read_at)
+        return advance(status, read_at, playlist)
 
     before = len(fake.arrivals)
     monkeypatch.setattr(b, "_advance", watched_mid_tick)
