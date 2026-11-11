@@ -1295,6 +1295,39 @@ CREATE TRIGGER trg_track_instruments_seal_guard
 BEFORE UPDATE ON track_instruments
 FOR EACH ROW EXECUTE FUNCTION seal_guard_track_instruments();
 
+-- ============================================================
+-- Analysis pace (2026-11-11): what each analysis pass costs on this
+-- machine — the sonic pass (the fingerprint, the segment grid, CLAP,
+-- librosa) and the instrument pass (the AST+PaSST tagger). Per pass, device
+-- and core count (a GPU added is another machine), the batches it finished
+-- here, their audio and their wall time summed: the pace is wall seconds per
+-- minute of audio, the mean of the batches weighed by their audio. The
+-- instrument pass's estimate on the Library screen reads it
+-- (backend/analysis_pace.py). A fact about this machine: never synced,
+-- never signed.
+-- ============================================================
+
+DO $$ BEGIN
+    CREATE TYPE analysis_pass AS ENUM ('sonic', 'instruments');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE compute_device AS ENUM ('cuda', 'mps', 'cpu');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS analysis_pace (
+    pass analysis_pass NOT NULL,
+    device compute_device NOT NULL,
+    cores SMALLINT NOT NULL,
+    batches INTEGER NOT NULL,
+    audio_seconds DOUBLE PRECISION NOT NULL,
+    wall_seconds DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (pass, device, cores),
+    CONSTRAINT chk_analysis_pace CHECK (cores > 0 AND batches > 0
+                                        AND audio_seconds > 0 AND wall_seconds >= 0)
+);
+
 -- -- Enrichment seals (Phase B) --------------------------------------------
 --
 -- The enrichment tables are defined further down; these columns and guards are
