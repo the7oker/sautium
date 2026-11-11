@@ -514,7 +514,10 @@ def test_a_rotation_signs_the_waiting_rows_with_the_old_key(conn, tmp_path, monk
     monkeypatch.setattr(p2p_identity, "_signing_key_cache", None)
     monkeypatch.setattr(p2p_identity, "resolve_identity", lambda s: None)
     device_auth.prepare_setup()
-    asyncio.run(device_auth.create_account("first", "correct-horse", device_auth._setup_code))
+    # The module's witness rows are NODE's, never deleted: over them this
+    # account is another identity, made on the owner's word
+    asyncio.run(device_auth.create_account("first", "correct-horse", device_auth._setup_code,
+                                           new_identity=True))
     old = json.loads((tmp_path / "node_info.json").read_text())["public_key_hex"]
     subjects = [_sighting("handshake") for _ in range(2)]
     assert all(_row(conn, s, "handshake")["signature"] is None for s in subjects)
