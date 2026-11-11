@@ -270,8 +270,9 @@ See:
   that is not a unit vector (norm outside 0.99..1.01) derives none, the
   import gate refuses one, and since 2026-11-11 the node's own passes save
   none (`embeddings._persist_analysis`, by the gate's own `is_unit`: such a
-  track keeps no embedding — its features and instruments are saved all
-  the same — with an error in the log and in the pass's count). Discovery,
+  track's new embedding is not saved — one it held before stays, and its
+  features and instruments are saved all the same — with an error in the
+  log and in the pass's count). Discovery,
   search, Now Playing, the assistant and the CLI read these; no analysis
   writes them and no record carries them (since 2026-11-10, the records'
   cutover below). The thresholds were set

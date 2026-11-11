@@ -215,7 +215,7 @@ def sonic_pass(limit, batch_size, newest_first, max_duration,
                    f"({stats['embeddings']} embeddings, {stats['features']} features)")
         click.echo(f"   • Failed: {stats['failed']} tracks")
         if stats.get("not_unit"):
-            click.echo(f"   • No embedding kept: {stats['not_unit']} tracks — this node's own "
+            click.echo(f"   • New embedding not saved: {stats['not_unit']} tracks — this node's own "
                        "analysis made vectors that are not unit vectors; the log has the details")
         if stats.get("too_long"):
             click.echo(f"   • Too long for this machine now: {stats['too_long']} tracks")
@@ -845,7 +845,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
     """
     import hardware_profile
     hardware_profile.cap_torch_threads()   # the paces are kept per the profile's threads
-    from track_enrichment import run_parallel_enrichment
+    from track_enrichment import refused_said, run_parallel_enrichment
 
     # Validate worker parameters
     if (worker_id is not None) != (worker_count is not None):
@@ -937,8 +937,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
         instruments = gpu.get("instruments")
         if not skip_sonic:
             click.echo(f"   • Sonic pass: {sonic.get('success', 0)} success, {sonic.get('failed', 0)} failed"
-                       + (f", {sonic['not_unit']} kept no embedding (this node's own analysis made "
-                          "vectors that are not unit vectors; the log has the details)"
+                       + (f"{refused_said(sonic)} (this node's own analysis made vectors that "
+                          "are not unit vectors; the log has the details)"
                           if sonic.get("not_unit") else "")
                        + (f", {sonic['too_long']} too long for this machine now" if sonic.get("too_long") else ""))
         if instruments is not None:

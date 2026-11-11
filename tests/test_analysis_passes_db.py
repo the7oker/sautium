@@ -816,7 +816,7 @@ def test_the_sonic_pass_saves_no_embedding_of_a_track_whose_vectors_are_not_unit
     named = [m for m in said if "not unit vectors:" in m]
     assert len(named) == 1 and bad in named[0] and "model clap" in named[0] \
         and "segment norms" in named[0] and "portrait" in named[0], said
-    assert any("1 track(s) kept no embedding" in m for m in said)
+    assert any("1 track(s) had their new embedding refused" in m for m in said)
     assert models.wakes == ["sonic pass"]
     assert _queued(bad)["embeddings"] and not _queued(bad)["features"]
 
@@ -995,7 +995,92 @@ def test_a_stream_whose_forward_fails_keeps_its_other_records_the_same_way(cur, 
     assert models.wakes == ["preview analysis"]
 
 
-def test_the_cli_says_how_many_tracks_kept_no_embedding(cur, monkeypatch):
+def test_a_refusal_is_counted_when_the_tracks_features_save_then_raises(
+        cur, prints, models, monkeypatch):
+    """The track's other failure does not take the refusal out of the count:
+    refused, then its features' save raises — the savepoint rolls back, the
+    track fails, and not_unit still says its embedding was refused."""
+    _three(cur, prints, fixed=True)
+    _clap_answers(monkeypatch, models, {2: _off_unit("the portrait")})
+    real, seen = audio_analysis.save_features, []
+
+    def save(db, track_id, features, src_id):
+        seen.append(str(track_id))
+        if len(seen) == 2:
+            raise RuntimeError("the save broke")
+        return real(db, track_id, features, src_id)
+    monkeypatch.setattr(audio_analysis, "save_features", save)
+    stats = models.sonic()
+    assert {k: stats[k] for k in ("processed", "success", "failed", "not_unit", "embeddings",
+                                  "features")} == {"processed": 3, "success": 2, "failed": 1,
+                                                   "not_unit": 1, "embeddings": 2, "features": 2}
+    assert _records(cur, seen[1]) == {}
+
+
+def _holds(cur, track) -> dict:
+    """What the sync says this node holds of a track, and whose it is."""
+    from desktop.p2p import sync_queries
+    out = {}
+    for kind, sql in (("segments", sync_queries.HOLDS_SEGMENTS), ("features", sync_queries.HOLDS_FEATURES),
+                      ("instruments", sync_queries.HOLDS_INSTRUMENTS),
+                      ("own", sync_queries._OWN_ANALYSIS), ("carried", sync_queries._CARRIED)):
+        cur.execute(f"SELECT {sql.format(t='%s::uuid')}", (track,) * sql.count("{t}"))
+        out[kind] = cur.fetchone()[0]
+    return out
+
+
+def test_a_node_whose_clap_is_at_fault_for_every_track_from_its_first_run(
+        cur, prints, models, run, monkeypatch):
+    """The whole run on such a node: every track keeps its features and its
+    instruments and no embedding, one forward each (no loop); the node holds
+    no segments of them, so a peer's fill the gap; the tracks stay the sonic
+    pass's, the run says how many were refused, and the next run counts
+    them failed — nothing else left to save."""
+    tracks = _three(cur, prints, fixed=True)
+    generator = type(embeddings.AudioEmbeddingGenerator())      # the run's fixture stands a factory in
+    monkeypatch.setattr(generator, "_compute_segments", lambda self, audio: (
+        models.calls.append(("CLAP", None)), _off_unit("the portrait"))[1])
+    said = []
+    sonic = run.go(progress_cb=said.append)["gpu"]["sonic"]
+    assert {k: sonic[k] for k in ("processed", "success", "failed", "not_unit", "embeddings",
+                                  "features")} == {"processed": 3, "success": 3, "failed": 0,
+                                                   "not_unit": 3, "embeddings": 0, "features": 3}
+    assert len([c for c in models.calls if c[0] == "CLAP"]) == 3
+    assert any("3 sonic, 3 had their new embedding refused" in line for line in said), said
+    assert all(set(_records(cur, t)) == {"features", "instruments"} for t in tracks.values())
+    for track in tracks.values():
+        assert _holds(cur, track) == {"segments": False, "features": True, "instruments": True,
+                                      "own": True, "carried": False}
+        assert _queued(track) == {"embeddings": True, "features": False, "instruments": False}
+    monkeypatch.setattr(settings_router, "_synced_since_scan", lambda: True)
+    assert settings_router._analysis_pending() is True
+    again = run.go()["gpu"]["sonic"]
+    assert (again["processed"], again["success"], again["failed"], again["not_unit"]) == (3, 0, 3, 3)
+    assert len([c for c in models.calls if c[0] == "CLAP"]) == 6
+
+
+def test_a_refused_stream_with_nothing_else_to_save_saves_nothing_and_wakes_no_notary(
+        cur, models, stream, monkeypatch, caplog):
+    """A track that holds its features and instruments and lacks only the
+    embedding, streamed while CLAP is at fault: nothing is saved, so there
+    is nothing to seal."""
+    track = _track(cur)
+    monkeypatch.setattr(embeddings.AudioEmbeddingGenerator, "_compute_segments", lambda self, audio: (
+        models.calls.append(("CLAP", None)), _off_unit("a short segment"))[1])
+    stream.run(track)
+    held = _records(cur, track)
+    assert set(held) == {"features", "instruments"} and models.wakes == ["preview analysis"]
+    models.wakes.clear()
+    caplog.clear()
+    from streaming import enrichment
+    with caplog.at_level(logging.ERROR, logger=enrichment.__name__):
+        stream.run(track)                                   # the embedding alone is asked for
+    assert _records(cur, track) == held and _segments(cur, track) == 0
+    assert models.wakes == [] and models.tagger.calls == 1
+    assert len([r for r in caplog.records if "no embedding saved" in r.getMessage()]) == 1
+
+
+def test_the_cli_says_how_many_tracks_had_their_new_embedding_refused(cur, monkeypatch):
     from click.testing import CliRunner
     monkeypatch.chdir(BACKEND)
     import cli
@@ -1006,18 +1091,21 @@ def test_the_cli_says_how_many_tracks_kept_no_embedding(cur, monkeypatch):
     monkeypatch.setattr(embeddings, "sonic_pass", lambda **_kw: dict(counted))
     said = CliRunner().invoke(cli.cli, ["sonic-pass"])
     assert said.exit_code == 0, said.output
-    assert ("   • No embedding kept: 2 tracks — this node's own analysis made vectors that are "
-            "not unit vectors; the log has the details") in said.output.splitlines()
+    assert ("   • New embedding not saved: 2 tracks — this node's own analysis made vectors that "
+            "are not unit vectors; the log has the details") in said.output.splitlines()
     monkeypatch.setattr(embeddings, "sonic_pass", lambda **_kw: dict(counted, not_unit=0))
-    assert "No embedding kept" not in CliRunner().invoke(cli.cli, ["sonic-pass"]).output
+    assert "New embedding not saved" not in CliRunner().invoke(cli.cli, ["sonic-pass"]).output
 
     monkeypatch.setattr(track_enrichment, "run_parallel_enrichment",
                         lambda **_kw: {"gpu": {"sonic": dict(counted)}})
     run = CliRunner().invoke(cli.cli, ["enrich-tracks"])
     assert run.exit_code == 0, run.output
     line = next(l for l in run.output.splitlines() if "Sonic pass:" in l)
-    assert line == ("   • Sonic pass: 4 success, 1 failed, 2 kept no embedding (this node's own "
-                    "analysis made vectors that are not unit vectors; the log has the details)")
+    assert line == ("   • Sonic pass: 4 success, 1 failed, 2 had their new embedding refused (this "
+                    "node's own analysis made vectors that are not unit vectors; the log has the "
+                    "details)")
+    assert track_enrichment.refused_said({"not_unit": 2}) == ", 2 had their new embedding refused"
+    assert track_enrichment.refused_said({"not_unit": 0}) == "" == track_enrichment.refused_said({})
 
 
 # -- The per-track pipeline ------------------------------------------------------

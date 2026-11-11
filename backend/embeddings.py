@@ -724,9 +724,9 @@ class AudioEmbeddingGenerator:
             )
             if stats["not_unit"]:
                 logger.error(
-                    f"Sonic pass: {stats['not_unit']} track(s) kept no embedding because this "
-                    "node's own analysis made vectors that are not unit vectors — a fault of its "
-                    "model or code, not of the files (each is named above)")
+                    f"Sonic pass: {stats['not_unit']} track(s) had their new embedding refused "
+                    "because this node's own analysis made vectors that are not unit vectors — a "
+                    "fault of its model or code, not of the files (each is named above)")
 
         return stats
 

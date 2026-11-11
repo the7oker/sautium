@@ -43,6 +43,14 @@ from models import (
 logger = logging.getLogger(__name__)
 
 
+def refused_said(sonic: dict) -> str:
+    """What a summary of the sonic pass adds for the tracks whose new
+    embedding was refused as not unit vectors (stats' not_unit): nothing
+    when there are none."""
+    refused = sonic.get("not_unit")
+    return f", {refused} had their new embedding refused" if refused else ""
+
+
 def run_parallel_enrichment(
     limit: Optional[int] = None,
     skip_sonic: bool = False,
@@ -227,7 +235,8 @@ def run_parallel_enrichment(
                 _counted(combined, "sonic", AudioEmbeddingGenerator().sonic_pass(
                     **gpu_kwargs, cancel_flag=_seam, force=force_sonic, since_file_id=since,
                     on_batch=_progress("Sonic analysis")))
-                pipeline_progress["gpu"] = f"GPU: {combined['sonic'].get('success', 0)} sonic"
+                pipeline_progress["gpu"] = (f"GPU: {combined['sonic'].get('success', 0)} sonic"
+                                            + refused_said(combined["sonic"]))
                 _update_progress()
 
             if _halted() or not _instruments_wanted():
@@ -257,7 +266,8 @@ def run_parallel_enrichment(
             _counted(combined, "instruments", AudioAnalyzer().instrument_pass(
                 force=force_instruments, cancel_flag=_instrument_seam, attempted=taken,
                 on_batch=_progress("Instruments"), **gpu_kwargs))
-            pipeline_progress["gpu"] = (f"GPU: {combined.get('sonic', {}).get('success', 0)} sonic, "
+            pipeline_progress["gpu"] = (f"GPU: {combined.get('sonic', {}).get('success', 0)} sonic"
+                                        f"{refused_said(combined.get('sonic', {}))}, "
                                         f"{combined['instruments'].get('success', 0)} instruments")
             _update_progress()
             if not gave_way or _halted():

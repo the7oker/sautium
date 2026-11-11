@@ -2087,7 +2087,7 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
         # running=True with no subscriber wake, and the UI sits on "Starting
         # enrichment..." until the backend restarts — /enrich/start answers
         # 409 for the rest of the process lifetime.
-        from track_enrichment import run_parallel_enrichment
+        from track_enrichment import refused_said, run_parallel_enrichment
         result = run_parallel_enrichment(
             limit=limit,
             skip_sonic=not local_analysis,
@@ -2107,7 +2107,7 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
         enrich_emb_s = result.get("enrichment_embeddings", {})
         bio_emb_s = enrich_emb_s.get("artist_bios", {})
         parts = [
-            f"Sonic: {sonic_s.get('success', 0)}",
+            f"Sonic: {sonic_s.get('success', 0)}{refused_said(sonic_s)}",
             *([f"Instruments: {instr_s.get('success', 0)}"] if instr_s is not None else []),
             f"Text: {text_s.get('success', 0)}",
             f"Lyrics emb: {lyrics_emb_s.get('success', 0)}",
