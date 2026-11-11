@@ -347,6 +347,28 @@ device refuses fails its track alone. Measured on neither yet: a 4 GB card
 and an 8 GB Mac are owed a sonic pass under a watch of their memory (on the
 Mac, the Metal side as well — MPS keeps a graph per shape).
 
+What one track holds grows with its length, on every device, and so does
+not fit every machine (measured on x86, 2026-11-11, per minute of audio):
+the 48 kHz decode 11.0 MiB — read into one array since 2026-11-11, where it
+was held twice (bytes and a copy, ~22) — and its 22 050 Hz resample with
+the resampler's transient 10.1 MiB; the amplitude block a constant ~50 MiB
+whatever the length, computed chunk by chunk since 2026-11-11 (the same
+per-frame values bit for bit, on synthetic signals and the 90 files of the
+lab library) where its whole-signal frame arrays took ~63 MiB a minute — a
+20-minute track then needed ~2 GiB on its own. The instrument pass holds the
+decode and the tagger's two resamples, 18.3 MiB more. So a pass takes a
+track only up to the longest this machine can hold when it reads its queue
+(`analysis_pace.longest_track_seconds`): what is available (within a
+container's limit, its droppable page cache counted free) less 15 % and a
+model the pass still loads (CLAP, the tagger: 1 GB each in RAM, 0.3 on
+CUDA), at 22 MiB a minute for the sonic pass and 30 for the instruments. An
+8 GB Pi 5 with CLAP resident and ~3 GB available holds a track of about 1 h
+45 min in its sonic pass and 45 min in its instrument pass; a 16 GB one with
+~10 GB available, about 6 h and 4 h; a 32 GB desktop, every real track. A
+longer track is left out of the queue by its known duration — never decoded,
+never deleted, counted in the run's statistics and its log, its analysis
+left to the network — and a stream past the same bound is not analysed.
+
 ## 6. Prioritized backlog
 
 **P0 — unblock (SHIPPED 2026-07-10):**

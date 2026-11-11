@@ -17,9 +17,10 @@ the box and the spec sheet use: a "16 GB" card is 16 GiB, and printing
 it as 17.2 decimal GB made the owner ask where the number came from.
 - CUDA:  >=7.5 GiB VRAM -> full, >=5.5 GiB -> standard, else lite
 - MPS:   >=23 GiB unified -> full, >=15 GiB -> standard, else lite
-- CPU-only -> lite (a CPU runs the sonic pass at a few seconds per minute of
-  audio, and the instrument tagger at about nine times that: lite keeps
-  the tagger behind the owner's switch, off by default)
+- CPU-only -> lite (a CPU runs the sonic pass at a second or two per minute
+  of audio, and the instrument tagger at three to nine times that — fewer
+  torch threads, the larger the factor: lite keeps the tagger behind the
+  owner's switch, off by default)
 A machine with <12 GB system RAM is demoted one tier: on CUDA the
 whole-track audio buffers live in system RAM, and the model set +
 Postgres + OS don't fit a full/standard working set below that.
@@ -161,6 +162,20 @@ class HardwareProfile:
                 "io_workers": self.io_workers,
             },
         }
+
+
+def cap_torch_threads(profile: Optional["HardwareProfile"] = None) -> Optional[int]:
+    """Cap torch's intra-op threads at the profile's (torch_cpu_threads), the
+    one place every process that runs a model does it — the backend at its
+    start, the CLI's analysis commands — so a pass's pace is recorded under
+    the threads the estimate reads. Returns the cap, or None where none
+    applies."""
+    profile = profile or resolve()
+    if not (profile.ml_available and profile.torch_cpu_threads):
+        return None
+    import torch
+    torch.set_num_threads(profile.torch_cpu_threads)
+    return profile.torch_cpu_threads
 
 
 def _total_ram_gb() -> float:

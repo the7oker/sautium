@@ -431,12 +431,12 @@ async def lifespan(app: FastAPI):
     # stream-enrichment mode at their call sites.
     import hardware_profile
     _profile = hardware_profile.resolve()
-    if _profile.torch_cpu_threads and torch:
-        # Without a cap torch claims every core for intra-op parallelism and
-        # starves the decode pool + event loop: CPU-only machines, and an MPS
-        # node's CPU copy of the text encoder.
-        torch.set_num_threads(_profile.torch_cpu_threads)
-        logger.info(f"torch CPU threads capped at {_profile.torch_cpu_threads}")
+    # Without a cap torch claims every core for intra-op parallelism and
+    # starves the decode pool + event loop: CPU-only machines, and an MPS
+    # node's CPU copy of the text encoder.
+    capped = hardware_profile.cap_torch_threads(_profile)
+    if capped:
+        logger.info(f"torch CPU threads capped at {capped}")
 
     # The fingerprint self-test, before anything could analyse: its verdict
     # is logged now and kept for the analysis passes and the notices.

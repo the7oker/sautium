@@ -122,23 +122,33 @@ def models(monkeypatch):
     silence = np.zeros(48000 * 20, dtype=np.float32)
     gen = embeddings.AudioEmbeddingGenerator
     ns = types.SimpleNamespace(calls=calls, wakes=[], tagger=_Tagger({"piano": 0.62}),
-                               on_clap=None, tagger_load_seconds=0.0)
+                               on_clap=None, tagger_load_seconds=0.0, unreadable=set(),
+                               decode_seconds=0.0, clap_fails=set())
 
     def decoded(kind):
         def load(*args):
-            path = next(a for a in args if isinstance(a, str))
-            calls.append((kind, path.rsplit("/", 1)[-1]))
+            name = next(a for a in args if isinstance(a, str)).rsplit("/", 1)[-1]
+            calls.append((kind, name))
+            time.sleep(ns.decode_seconds)
+            if name in ns.unreadable:
+                if kind == "sonic decode":
+                    return None                     # _load_audio's answer to a failure
+                raise ValueError(f"ffmpeg produced no samples for {name}")
             return silence
         return load
 
     monkeypatch.setattr(embeddings, "_reanalyze_imported", lambda: False)
     monkeypatch.setattr(notary, "wake", lambda reason, **kw: ns.wakes.append(reason))
+    # any track fits: what this machine holds is the tests of the bound's own
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 64.0)
     monkeypatch.setattr(gen, "load_model", lambda self: calls.append(("load", "CLAP")))
     monkeypatch.setattr(gen, "_load_audio", lambda self, *a: decoded("sonic decode")(*a))
     def clap(self, audio):
         calls.append(("CLAP", None))
         if ns.on_clap:
             ns.on_clap()
+        if len([c for c in calls if c[0] == "CLAP"]) in ns.clap_fails:
+            return None                             # what an out-of-memory forward answers
         return [0], np.stack([UNIT]), UNIT
     monkeypatch.setattr(gen, "_compute_segments", clap)
     monkeypatch.setattr(audio_analysis.AudioAnalyzer, "features_from_array",
@@ -583,17 +593,30 @@ def _estimate(device="cpu", cores=4, threads=2):
 
 @pytest.fixture
 def machine(monkeypatch):
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 64.0)   # any track fits
     monkeypatch.setattr(analysis_pace, "_machine", analysis_pace._machine)
     monkeypatch.setattr(analysis_pace, "_tagger_threads", analysis_pace._tagger_threads)
 
 
-def test_the_estimate_before_any_batch_is_the_measured_reference_scaled_by_the_cores(
-        cur, no_model, machine):
+@pytest.mark.parametrize("name,cores,threads,pace", [
+    ("lite", 4, 2, 18.9),                                          # the Pi 5 measured
+    ("standard", 6, 4, 18.9 + (2.89 - 18.9) / 3),
+    ("lite", 32, 16, 2.89),                                        # the 32-core x86 measured
+])
+def test_the_estimate_before_any_batch_is_the_taggers_measured_pace_at_this_machines_threads(
+        cur, no_model, machine, monkeypatch, name, cores, threads, pace):
+    """Round 2's Q2: the Pi's sonic pace scaled by the cores, times a ratio
+    already chosen by the threads, counted the cores twice — a 32-core lite
+    x86 read 0.73 s a minute against its measured 2.89."""
     _pending_files(cur, [240, 120, None])     # an unknown length counts as five minutes
-    e = _estimate(cores=8)
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile(name, cores=cores))
+    assert analysis_pace._tagger_threads() == threads
+    analysis_pace._machine = lambda: ("cpu", cores)
+    with database.get_db_context() as db:
+        e = analysis_pace.estimate(db, reanalyze=False)
     assert (e["tracks"], e["audio_seconds"], e["basis"]) == (3, 660.0, "reference")
-    assert e["pace"] == pytest.approx(2.2 * 4 / 8 * 8.5)
-    assert e["seconds"] == pytest.approx(11 * 2.2 * 4 / 8 * 8.5)
+    assert e["pace"] == pytest.approx(pace)
+    assert e["seconds"] == pytest.approx(11 * pace)
 
 
 def test_the_estimate_takes_the_sonic_pace_then_the_instrument_pace_of_this_machine(
@@ -678,10 +701,13 @@ def stream(cur, prints, models, monkeypatch):
     analyzer.ensemble = models.tagger
     enricher._embedder = embeddings.AudioEmbeddingGenerator(model_name="clap", device="cpu")
     enricher._analyzer = analyzer
-    monkeypatch.setattr(enricher, "_models", lambda sonic, tag: (enricher._embedder, analyzer))
+    loads = []
+    monkeypatch.setattr(enricher, "_models", lambda sonic, tag: (
+        loads.append((sonic, tag)), (enricher._embedder, analyzer))[1])
     return types.SimpleNamespace(
-        run=lambda track: enricher._enrich(track, b"stream", (60.0,), True, "lossless-test"),
-        switch=switch)
+        run=lambda track, lengths=(60.0,): enricher._enrich(track, b"stream", lengths, True,
+                                                            "lossless-test"),
+        switch=switch, loads=loads)
 
 
 def test_a_stream_of_a_track_with_its_sonic_records_held_runs_the_tagger_alone(
@@ -1063,3 +1089,231 @@ def test_an_estimate_that_fails_leaves_the_library_screen_standing(cur, monkeypa
     monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("full"))
     state = settings_router._instruments_state()
     assert state["enabled"] is True and state["tracks"] is None and state["seconds"] is None
+
+
+# -- Review round 2 -------------------------------------------------------------
+
+def _analysed(cur, prints, n):
+    """`n` owned tracks whose sonic records are complete and whose
+    instruments are none."""
+    for i in range(n):
+        t = _track(cur, f"t{i}")
+        mf = _file(cur, t, f"/music/t{i}.flac")
+        fp = encode(noise(950, 500 + i))
+        prints[f"/music/t{i}.flac"] = fp
+        _sonic(cur, t, _source(cur, t, fp, media_file=mf))
+
+
+@pytest.mark.parametrize("skip_sonic", [False, True])
+def test_switched_off_the_per_track_pipeline_selects_no_track_for_its_instruments(
+        cur, prints, models, monkeypatch, skip_sonic):
+    """Round 2's Q1: with the switch off every owned track lacking
+    instruments was selected and given a scoped sonic pass for nothing."""
+    import track_enrichment
+    _analysed(cur, prints, 6)
+    monkeypatch.setattr(settings_router, "instruments_on", lambda: False)
+    _on_cpu(monkeypatch)
+    stats = track_enrichment.TrackEnrichmentPipeline(skip_sonic=skip_sonic,
+                                                     skip_lastfm=True).enrich_tracks()
+    assert stats["processed"] == 0 and models.calls == []
+
+
+def test_with_the_sonic_pass_skipped_and_the_switch_off_the_run_takes_no_lane(
+        cur, prints, models, run, monkeypatch):
+    import device
+    taken = []
+    real = device.heavy_pass
+    monkeypatch.setattr(device, "heavy_pass", lambda name, **kw: (taken.append(name), real(name, **kw))[1])
+    _analysed(cur, prints, 2)
+    run.switch["on"] = False
+    run.go(skip_sonic=True)
+    assert "the analysis run's audio half" not in taken
+
+
+def test_a_timed_run_never_gives_way(cur, prints, models, run):
+    _three(cur, prints)
+    prints["/music/late.flac"] = encode(noise(950, 999))
+
+    def a_scan_adds_a_file(call):
+        if call == 1:
+            _file(cur, _track(cur, "late"), "/music/late.flac")
+    models.tagger.on_tag = a_scan_adds_a_file
+    run.go(max_duration_seconds=3600)
+    assert ("sonic", "late.flac") not in _decodes(models)
+
+
+@pytest.fixture
+def one_batch(monkeypatch):
+    import device
+    monkeypatch.setattr(device, "audio_batch_budget_seconds", lambda **kw: 100000.0)
+
+
+@pytest.mark.parametrize("which", ["sonic", "instruments"])
+def test_a_batch_whose_decode_failed_records_no_pace(cur, prints, models, which, one_batch):
+    _three(cur, prints)
+    if which == "instruments":
+        models.sonic()
+        cur.execute("DELETE FROM analysis_pace")
+    models.unreadable.add("b.flac")
+    stats = getattr(models, which)()
+    assert stats["failed"] == 1 and stats["success"] == 2
+    cur.execute("SELECT count(*) FROM analysis_pace")
+    assert cur.fetchone() == (0,)
+
+
+def test_a_batch_whose_tagging_failed_records_no_instruments_pace(cur, prints, models, one_batch):
+    _three(cur, prints)
+    models.sonic()
+    cur.execute("DELETE FROM analysis_pace")
+
+    def the_second_fails(call):
+        if call == 2:
+            raise RuntimeError("the tagger failed on this track")
+    models.tagger.on_tag = the_second_fails
+    stats = models.instruments()
+    assert (stats["success"], stats["failed"]) == (2, 1)
+    cur.execute("SELECT count(*) FROM analysis_pace")
+    assert cur.fetchone() == (0,)
+
+
+def test_a_forward_out_of_memory_fails_its_track_alone(cur, prints, models, one_a_batch):
+    """A refused CLAP forward answers None (embeddings._generate_batch_
+    embeddings catches the out-of-memory): that track fails, its features
+    stand, the others go on, and its batch is no pace."""
+    tracks = _three(cur, prints, fixed=True)
+    models.clap_fails.add(2)
+    stats = models.sonic()
+    assert (stats["success"], stats["embeddings"], stats["features"]) == (3, 2, 3)
+    assert "embeddings" not in _records(cur, tracks["b"])
+    cur.execute("SELECT batches FROM analysis_pace WHERE pass = 'sonic'")
+    assert cur.fetchone() == (2,)
+
+
+def test_the_sonic_pace_keeps_the_decode_under_way_beside_a_seam(cur, prints, models, one_a_batch):
+    """Round 2: subtracting a seam's whole wait also took out the batch's
+    decode, under way beside it in the prefetch."""
+    _three(cur, prints)
+    models.decode_seconds = 0.6
+
+    def a_stream_goes_first():
+        time.sleep(0.6)
+        return False
+    models.sonic(cancel_flag=a_stream_goes_first)
+    cur.execute("SELECT batches, wall_seconds FROM analysis_pace WHERE pass = 'sonic'")
+    batches, wall = cur.fetchone()
+    assert batches == 3 and wall > 1.2
+
+
+def test_a_stream_making_features_alone_loads_no_clap(cur, models, stream):
+    track = _track(cur)
+    _embedding(cur, track, _source(cur, track, NEAR, imported=True, duration=60))
+    stream.switch["on"] = False
+    stream.run(track)
+    assert stream.loads == [(False, False)]
+    assert "features" in _records(cur, track)
+
+
+# -- The longest track this machine can hold -------------------------------------
+
+def test_a_track_longer_than_this_machine_holds_is_left_out_and_counted(cur, prints, models,
+                                                                       monkeypatch):
+    """Round 2's R2.H1: the decode and its resample grow with a track's
+    length, so past what this machine holds now a track is in no queue — by
+    its known duration, never decoded — and counted; nothing is deleted."""
+    short, long_ = _track(cur, "short"), _track(cur, "long")
+    _file(cur, short, "/music/short.flac", duration=120)
+    _file(cur, long_, "/music/long.flac", duration=2700)
+    prints.update({"/music/short.flac": FP, "/music/long.flac": OTHER})
+    monkeypatch.setattr(analysis_pace, "longest_track_seconds", lambda kinds, reserve_gb=0.0: 600.0)
+    sonic = models.sonic()
+    assert (sonic["success"], sonic["too_long"]) == (1, 1)
+    instruments = models.instruments()
+    assert (instruments["success"], instruments["too_long"]) == (1, 1)
+    assert [c for c in models.calls if c[1] == "long.flac"] == []
+    with database.get_db_context() as db:
+        e = analysis_pace.estimate(db, reanalyze=False)
+    assert (e["tracks"], e["too_long"]) == (0, 1)
+
+
+@pytest.mark.parametrize("available,reserve,kind,minutes", [
+    (8.0, 0.0, "sonic", ((8.0 * 0.85) * 1e3 / 1.048576 - 64) / 22.0),
+    (4.0, 1.0, "instruments", ((4.0 * 0.85 - 1.0) * 1e3 / 1.048576 - 64) / 30.0),
+    (1.0, 1.0, "instruments", 0.0),                     # no room: no track
+])
+def test_the_longest_track_follows_what_is_available(monkeypatch, available, reserve, kind,
+                                                     minutes):
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: available)
+    assert analysis_pace.longest_track_seconds([kind], reserve_gb=reserve) == pytest.approx(
+        max(0.0, minutes) * 60)
+    both = analysis_pace.longest_track_seconds([analysis_pace.SONIC, analysis_pace.INSTRUMENTS],
+                                               reserve_gb=reserve)
+    assert both == analysis_pace.longest_track_seconds([analysis_pace.INSTRUMENTS], reserve_gb=reserve)
+
+
+def test_a_containers_limit_bounds_what_is_available(monkeypatch, tmp_path):
+    (tmp_path / "max").write_text("4294967296\n")
+    (tmp_path / "current").write_text("3221225472\n")
+    (tmp_path / "stat").write_text("anon 1\ninactive_file 1073741824\n")
+    monkeypatch.setattr(analysis_pace, "_CGROUPS", (
+        (str(tmp_path / "max"), str(tmp_path / "current"), str(tmp_path / "stat"), "inactive_file"),))
+    assert analysis_pace._cgroup_room_bytes() == 2 * 1073741824     # the dropped cache is room
+    assert analysis_pace.available_memory_gb() <= 2 * 1073741824 / 1e9
+    (tmp_path / "max").write_text("max\n")
+    assert analysis_pace._cgroup_room_bytes() is None
+
+
+def test_a_stream_longer_than_this_machine_holds_is_not_analysed(cur, models, stream, monkeypatch):
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 1.2)
+    track = _track(cur)
+    stream.switch["on"] = False
+    stream.run(track, lengths=(5400.0,))
+    assert models.calls == [] and _records(cur, track) == {}
+
+
+def test_the_guidance_trail_leaves_out_a_track_past_reach(cur, monkeypatch):
+    monkeypatch.chdir(BACKEND)
+    import main  # noqa: F401
+    track = _track(cur)
+    _file(cur, track, "/music/a.flac", duration=7200)
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 64.0)
+    assert settings_router._analysis_pending() is True
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 1.5)
+    assert settings_router._analysis_pending() is False
+
+
+def test_the_cli_caps_torch_at_the_profiles_threads(monkeypatch):
+    import torch
+    capped = []
+    monkeypatch.setattr(torch, "set_num_threads", capped.append)
+    assert hardware_profile.cap_torch_threads(_profile("lite", cores=8)) == 4
+    assert hardware_profile.cap_torch_threads(_profile("full", device="cuda")) is None
+    assert capped == [4]
+
+
+def test_enrich_tracks_says_and_exits_on_a_failed_audio_half(monkeypatch):
+    from click.testing import CliRunner
+    monkeypatch.chdir(BACKEND)
+    import cli
+    import track_enrichment
+    monkeypatch.setattr(hardware_profile, "cap_torch_threads", lambda *a: None)
+    monkeypatch.setattr(track_enrichment, "run_parallel_enrichment",
+                        lambda **kw: {"gpu": {"error": "ForeignKeyViolation"}})
+    result = CliRunner().invoke(cli.cli, ["enrich-tracks", "--skip-lastfm", "--skip-lyrics"])
+    assert result.exit_code == 1 and "The audio analysis failed" in result.output
+    assert "complete!" not in result.output
+
+
+def test_a_registration_failure_is_logged_with_its_traceback(cur, prints, models, monkeypatch,
+                                                             caplog, one_a_batch):
+    tracks = _three(cur, prints, fixed=True)
+    real = provenance.get_or_create_local
+
+    def flaky(db, track_id, *a, **kw):
+        if str(track_id) == tracks["b"]:
+            raise RuntimeError("two registrations")
+        return real(db, track_id, *a, **kw)
+    monkeypatch.setattr(provenance, "get_or_create_local", flaky)
+    models.sonic()
+    models.instruments()
+    failed = [r for r in caplog.records if r.getMessage().startswith("Registration failed")]
+    assert len(failed) == 2 and all(r.exc_info and r.levelname == "ERROR" for r in failed)

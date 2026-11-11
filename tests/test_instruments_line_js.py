@@ -1,6 +1,7 @@
 """backend/static/app-shell.js's "Recognise instruments" line under Node:
 what the line says on and off, measuring or with an estimate, with nothing
-left, and nothing when the estimate could not be read. app-shell.js's own
+left, with tracks past what the machine holds, on a node with no tracks of
+its own, and nothing when the estimate could not be read. app-shell.js's own
 functions, run as written; skipped where Node is not."""
 
 import json
@@ -28,7 +29,7 @@ const fmtNum = n => String(n);
 %(time)s
 %(line)s
 const cases = %(cases)s;
-process.stdout.write(JSON.stringify(cases.map(_instrumentsLine)));
+process.stdout.write(JSON.stringify(cases.map(([ins, analysable]) => _instrumentsLine(ins, analysable))));
 """
 
 CASES = [
@@ -42,13 +43,20 @@ CASES = [
     ({"enabled": False, "tracks": 93, "seconds": None},
      "Off: instruments come only from peers that recognised them."),
     ({"enabled": True, "tracks": None, "seconds": None}, ""),
+    ({"enabled": True, "tracks": 3, "seconds": 7200, "too_long": 2},
+     "3 tracks to go: about 2 hours of analysis on this machine. 2 longer tracks are past what "
+     "this machine can hold now: their instruments come from peers."),
+    ({"enabled": False, "tracks": 0, "seconds": 0, "too_long": 1},
+     "1 longer track is past what this machine can hold now: their instruments come from peers."),
 ]
+NO_TRACKS = ({"enabled": True, "tracks": 0, "seconds": 0},
+             "No tracks of your own yet. The switch also decides whether streamed tracks are tagged.")
 
 
 def test_the_line_says_what_the_instrument_pass_has_left_here():
     driver = DRIVER % {"time": _function("_analysisTime(seconds)"),
-                       "line": _function("_instrumentsLine(ins)"),
-                       "cases": json.dumps([c for c, _ in CASES])}
+                       "line": _function("_instrumentsLine(ins, analysable)"),
+                       "cases": json.dumps([[c, 93] for c, _ in CASES] + [[NO_TRACKS[0], 0]])}
     proc = subprocess.run([NODE, "-e", driver], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout) == [line for _, line in CASES]
+    assert json.loads(proc.stdout) == [line for _, line in CASES] + [NO_TRACKS[1]]

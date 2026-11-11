@@ -13618,18 +13618,34 @@
     if (hours < 48) return `about ${hours} ${hours === 1 ? 'hour' : 'hours'}`;
     return `about ${Math.round(seconds / 86400)} days`;
   }
-  function _instrumentsLine(ins) {
+  function _instrumentsLine(ins, analysable) {
     if (ins.tracks == null) return '';           // the estimate could not be read
-    const tracks = `${fmtNum(ins.tracks)} ${ins.tracks === 1 ? 'track' : 'tracks'}`;
-    if (!ins.tracks) return 'Every track has its instruments.';
+    if (!analysable) return 'No tracks of your own yet. The switch also decides whether streamed tracks are tagged.';
+    const count = (n, one, many) => `${fmtNum(n)} ${n === 1 ? one : many}`;
+    const tracks = count(ins.tracks, 'track', 'tracks');
+    // tracks longer than this machine can hold now are in no queue
+    const beyond = !ins.too_long ? '' : `${count(ins.too_long, 'longer track is', 'longer tracks are')} past what this machine can hold now: their instruments come from peers.`;
+    const withBeyond = text => beyond ? `${text} ${beyond}` : text;
+    if (!ins.tracks) return beyond || 'Every track has its instruments.';
     if (ins.enabled) {
-      return ins.seconds == null
+      return withBeyond(ins.seconds == null
         ? `${tracks} to go. Measuring this machine's pace: the estimate follows the first tracks.`
-        : `${tracks} to go: ${_analysisTime(ins.seconds)} of analysis on this machine.`;
+        : `${tracks} to go: ${_analysisTime(ins.seconds)} of analysis on this machine.`);
     }
-    return ins.seconds == null
+    return withBeyond(ins.seconds == null
       ? `Off: instruments come only from peers that recognised them.`
-      : `Off: instruments come only from peers. Here, ${tracks} would take ${_analysisTime(ins.seconds)} of analysis.`;
+      : `Off: instruments come only from peers. Here, ${tracks} would take ${_analysisTime(ins.seconds)} of analysis.`);
+  }
+  /* The switch's state is the library payload's: a tap paints it at once,
+     and the payload repaints it once no write of this tab is in flight —
+     another tab's change, or a write that failed, lands there too. */
+  let _instrumentsWrites = 0;
+  function _paintInstrumentsToggle(root, enabled) {
+    const el = root.querySelector('[data-action="toggle-instruments"]');
+    if (!el) return;
+    if (el.classList.contains('on') !== enabled) el.classList.toggle('on', enabled);
+    const pressed = enabled ? 'true' : 'false';
+    if (el.getAttribute('aria-pressed') !== pressed) el.setAttribute('aria-pressed', pressed);
   }
   function _refreshEnrichRow(root, key, done, total) {
     const row = root.querySelector(`[data-enrich-row="${key}"]`);
@@ -15797,7 +15813,7 @@
           <span class="form-label">Recognise instruments</span>
           <button class="toggle ${instruments.enabled ? 'on' : ''}" data-action="toggle-instruments" aria-pressed="${instruments.enabled ? 'true' : 'false'}"><span class="knob"></span></button>
         </div>
-        <div class="form-row stacked"><div class="row-stack-sub" data-instruments-line>${escapeProfileHtml(_instrumentsLine(instruments))}</div></div>
+        <div class="form-row stacked"><div class="row-stack-sub" data-instruments-line>${escapeProfileHtml(_instrumentsLine(instruments, lib.analysable_tracks))}</div></div>
       </div>`;
 
     const emptyState = !isEmpty ? '' : !isPathSet ? `
@@ -15893,13 +15909,27 @@
     // on-off-on ends where the finger left it; the line under it follows
     // with the library event the write sends.
     onAction('[data-action="toggle-instruments"]', e => {
-      const el = e.currentTarget;
-      const want = !el.classList.contains('on');
-      el.classList.toggle('on', want);
-      el.setAttribute('aria-pressed', want ? 'true' : 'false');
-      return serialized('library.instruments', () => fetch('/api/settings/library/instruments', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: want }) }));
+      const want = !e.currentTarget.classList.contains('on');
+      _paintInstrumentsToggle(root, want);
+      _instrumentsWrites += 1;
+      return serialized('library.instruments', async () => {
+        let ok = false;
+        try {
+          const r = await fetch('/api/settings/library/instruments', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: want }) });
+          ok = r.ok;
+        } catch (_) {}
+        _instrumentsWrites -= 1;
+        // a write that landed sends the library event; one that failed does
+        // not, so the switch goes back to what the node says
+        if (!ok && !_instrumentsWrites) {
+          try {
+            const lib = await (await fetch('/api/settings/library')).json();
+            if (lib.instruments && !_instrumentsWrites) _paintInstrumentsToggle(root, lib.instruments.enabled);
+          } catch (_) {}
+        }
+      });
     });
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
@@ -15950,8 +15980,9 @@
       _refreshEnrichRow(root, 'instruments', lib.instruments_done, lib.analysable_tracks);
       const instrumentsLine = root.querySelector('[data-instruments-line]');
       if (instrumentsLine && lib.instruments) {
-        const line = _instrumentsLine(lib.instruments);
+        const line = _instrumentsLine(lib.instruments, lib.analysable_tracks);
         if (instrumentsLine.textContent !== line) instrumentsLine.textContent = line;
+        if (!_instrumentsWrites) _paintInstrumentsToggle(root, lib.instruments.enabled);
       }
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);

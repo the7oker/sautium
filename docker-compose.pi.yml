@@ -40,7 +40,8 @@ services:
     shm_size: 1gb
     # Sized for a 16 GB Pi 5 whose database (the MusicBrainz dump alone is
     # ~23 GB) sits on NVMe (measured on a Pi 5, 2026-11-09): 2 GB of buffers and an
-    # 8 GB cache estimate beside the backend's ~0.5 GB on lite; random reads
+    # 8 GB cache estimate beside the backend's own (~0.5 GB idle on lite;
+    # CLAP and its passes' audio when the sonic pass runs); random reads
     # cost little more than sequential ones and the disk takes many at once.
     # synchronous_commit and fsync stay on: the identity and the registry are
     # written here. Weaker boards override via .env, e.g. PG_SHARED_BUFFERS=512MB

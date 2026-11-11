@@ -164,6 +164,8 @@ def sonic_pass(limit, batch_size, newest_first, max_duration,
                filter_artist, filter_album, filter_genre, filter_path,
                filter_tag, filter_track_number, filter_lossless):
     """The sonic pass: CLAP segments and librosa features, one decode a track."""
+    import hardware_profile
+    hardware_profile.cap_torch_threads()   # the paces are kept per the profile's threads
     from embeddings import sonic_pass as do_generate
 
     click.echo("🎵 Starting the sonic pass...")
@@ -689,6 +691,8 @@ def instrument_pass(limit, force, newest_first, max_duration,
                     filter_tag, filter_track_number, filter_lossless):
     """The instrument pass: the AST+PaSST tagger, one decode a track — whatever
     the Recognise instruments switch says (a run by hand is the owner's)."""
+    import hardware_profile
+    hardware_profile.cap_torch_threads()   # the paces are kept per the profile's threads
     from audio_analysis import AudioAnalyzer
 
     click.echo("🎵 Starting the instrument pass...")
@@ -812,6 +816,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
     Only processes missing data unless --force flags are used.
     Supports all filter options for targeted processing.
     """
+    import hardware_profile
+    hardware_profile.cap_torch_threads()   # the paces are kept per the profile's threads
     from track_enrichment import run_parallel_enrichment
 
     # Validate worker parameters
@@ -892,17 +898,23 @@ def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
             worker_count=worker_count,
         )
 
-        click.echo("\n\n✅ Track enrichment complete!")
+        gpu = result.get("gpu", {})
+        if gpu.get("error"):
+            click.echo(f"\n\n❌ The audio analysis failed: {gpu['error']}", err=True)
+        else:
+            click.echo("\n\n✅ Track enrichment complete!")
         click.echo(f"📊 Statistics:")
 
         # GPU stats
-        gpu = result.get("gpu", {})
         sonic = gpu.get("sonic", {})
         instruments = gpu.get("instruments")
         if not skip_sonic:
-            click.echo(f"   • Sonic pass: {sonic.get('success', 0)} success, {sonic.get('failed', 0)} failed")
+            click.echo(f"   • Sonic pass: {sonic.get('success', 0)} success, {sonic.get('failed', 0)} failed"
+                       + (f", {sonic['too_long']} too long for this machine now" if sonic.get("too_long") else ""))
         if instruments is not None:
-            click.echo(f"   • Instruments: {instruments.get('success', 0)} success, {instruments.get('failed', 0)} failed")
+            click.echo(f"   • Instruments: {instruments.get('success', 0)} success, {instruments.get('failed', 0)} failed"
+                       + (f", {instruments['too_long']} too long for this machine now"
+                          if instruments.get("too_long") else ""))
 
         # Last.fm stats
         lastfm = result.get("lastfm", {})
@@ -925,6 +937,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
         logger.exception("Track enrichment failed")
+        sys.exit(1)
+    if gpu.get("error"):
         sys.exit(1)
 
 
@@ -1596,6 +1610,8 @@ def bench(tracks):
     prints tracks/hour plus a whole-library ETA —
     the honest number behind the "analyze locally vs import via P2P"
     decision (docs/design/HARDWARE-TIERS.md)."""
+    import hardware_profile
+    hardware_profile.cap_torch_threads()   # the paces are kept per the profile's threads
     import time as _time
 
     from sqlalchemy import text as sql_text

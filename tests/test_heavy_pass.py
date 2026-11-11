@@ -484,9 +484,11 @@ def stream_db(scratch_dsn, monkeypatch):
 def stream(monkeypatch):
     """A stream's analysis with every model a fake that says which pass held
     the accelerator when it ran, its audio a minute of silence."""
+    import analysis_pace
     import librosa
     import provenance
     from streaming import enrichment
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 64.0)   # any track fits
 
     seen = []
 

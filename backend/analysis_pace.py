@@ -22,14 +22,17 @@ has run a batch here, the sonic pass's pace times the tagger-to-sonic ratio
 stands in: on a CPU by the tagger's torch threads, between the two machines
 it was measured on (CPU_RATIO_POINTS), and on CUDA (a laptop RTX 4090, where
 the GPU's tagger is cheaper than the sonic pass's CPU work); a CPU node that
-has run no sonic batch takes the Pi's sonic pace, scaled by its cores. On MPS
-nothing was measured, nor on a CUDA node before its first sonic batch, so
-the row says it is measuring until a batch records a pace. Nothing here
-loads a model or imports the ML stack: the screen asks on every library
-event, a lite Pi included.
+has run neither pass takes the tagger's own measured pace at its threads
+(CPU_TAGGER_PACE_POINTS). On MPS nothing was measured, nor on a CUDA node
+before its first sonic batch, so the row says it is measuring until a batch
+records a pace. A track longer than this machine can hold now
+(longest_track_seconds) is in no queue and in no estimate; the estimate
+counts such tracks apart. Nothing here loads a model or imports the ML
+stack: the screen asks on every library event, a lite Pi included.
 """
 
 import math
+import os
 from typing import Any, Dict, Optional
 
 from sqlalchemy import text as sa_text
@@ -56,9 +59,11 @@ INSTRUMENTS = "instruments"
 CPU_RATIO_POINTS = ((2, 8.5), (16, 2.66))
 CUDA_RATIO = 0.3
 
-# The sonic pass's pace a CPU node takes before it has run a batch of its
-# own: the same measurement's, s per minute of audio and the cores it ran on.
-REFERENCE_SONIC_PACE = {"cpu": (2.2, 4)}
+# The tagger's own pace on a CPU at the same two points (s per minute of
+# audio), the estimate before this machine has run either pass: interpolated
+# by the tagger's threads as the ratio is — the threads already say how much
+# of the machine the tagger takes, so the cores scale nothing further.
+CPU_TAGGER_PACE_POINTS = ((2, 18.9), (16, 2.89))
 
 # A file of unknown length counts as five minutes, as the passes' batches do.
 UNKNOWN_SECONDS = 300.0
@@ -106,6 +111,98 @@ def _machine():
     return profile.device, profile.cores
 
 
+# What one track holds at once while a pass works on it, in MiB per minute of
+# its audio (measured 2026-11-11 on x86, the release image's librosa and soxr):
+# the sonic pass holds the 48 kHz decode (11.0) and its 22 050 Hz resample
+# with the resampler's transient (10.1), the amplitude block a constant ~50
+# MiB whatever the length (audio_analysis.amplitude_frames); the instrument
+# pass holds the decode and the tagger's two resamples, to 16 and 32 kHz,
+# with their transients (18.3). A stream's analysis holds what both hold.
+TRACK_MB_PER_MINUTE = {SONIC: 22.0, INSTRUMENTS: 30.0}
+TRACK_FIXED_MB = 64.0
+# The memory a model a pass will still load takes from what a track may hold,
+# in GB: its weights and runtime in RAM on a CPU and in unified memory (MPS) —
+# the AST+PaSST pair's ~0.9 GiB a lite x86 node's peak rose by with it, CLAP's
+# 0.6 GB of fp32 weights with its runtime — and only their host side on CUDA,
+# where the weights sit in the card's memory.
+MODEL_RAM_GB = {"clap": {"cpu": 1.0, "mps": 1.0, "cuda": 0.3},
+                "tagger": {"cpu": 1.0, "mps": 1.0, "cuda": 0.3}}
+
+
+def model_ram_gb(model: str) -> float:
+    return MODEL_RAM_GB[model][_machine()[0]]
+
+
+_CGROUPS = (("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current",
+             "/sys/fs/cgroup/memory.stat", "inactive_file"),
+            ("/sys/fs/cgroup/memory/memory.limit_in_bytes",
+             "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+             "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"))
+
+
+def _cgroup_room_bytes() -> Optional[int]:
+    """What the process's control group still allows — a container's memory
+    limit less its use, the page cache it may drop not counted as use — or
+    None where no limit is set."""
+    for limit_path, used_path, stat_path, reclaimable in _CGROUPS:
+        try:
+            limit = open(limit_path).read().strip()
+            used = int(open(used_path).read().strip())
+        except (OSError, ValueError):
+            continue
+        if limit == "max" or int(limit) >= 1 << 60:
+            return None
+        try:
+            stat = dict(line.split() for line in open(stat_path))
+            used -= int(stat.get(reclaimable, 0))
+        except (OSError, ValueError):
+            pass
+        return int(limit) - used
+    return None
+
+
+def available_memory_gb() -> float:
+    """The memory this machine can still give, in GB: what the system says
+    is available, within the container's limit where one is set."""
+    try:
+        import psutil
+        available = psutil.virtual_memory().available
+    except ImportError:
+        available = None
+        try:
+            for line in open("/proc/meminfo"):
+                if line.startswith("MemAvailable:"):
+                    available = int(line.split()[1]) * 1024
+        except OSError:
+            pass
+        if available is None:
+            available = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    room = _cgroup_room_bytes()
+    if room is not None:
+        available = min(available, room)
+    return available / 1e9
+
+
+def longest_track_seconds(kinds, reserve_gb: float = 0.0) -> float:
+    """The longest track the passes `kinds` (SONIC, INSTRUMENTS, or both for a
+    stream) may take on this machine now: what one track holds per minute of
+    its audio (TRACK_MB_PER_MINUTE, the larger of the kinds) within what is
+    available, less the usual headroom (as the batch budget leaves 15 %) and
+    a model the pass will still load (`reserve_gb`). The decode and its
+    resample scale with the track's length, so a track past this is left out
+    of the queue by its known duration — never decoded, nothing deleted; its
+    analysis can come from the network."""
+    per_minute = max(TRACK_MB_PER_MINUTE[k] for k in kinds)
+    usable_mb = (available_memory_gb() * 0.85 - reserve_gb) * 1e3 / 1.048576 - TRACK_FIXED_MB
+    return max(0.0, usable_mb / per_minute * 60.0)
+
+
+def _interpolated(points, threads: int) -> float:
+    (t0, v0), (t1, v1) = points
+    t = min(max(threads, t0), t1)
+    return v0 + (v1 - v0) * math.log(t / t0) / math.log(t1 / t0)
+
+
 def _tagger_threads() -> int:
     """The torch threads the tagger runs with on a CPU (the profile's cap,
     else every core)."""
@@ -121,9 +218,7 @@ def tagger_to_sonic(device: str) -> Optional[float]:
         return CUDA_RATIO
     if device != "cpu":
         return None
-    (t0, r0), (t1, r1) = CPU_RATIO_POINTS
-    t = min(max(_tagger_threads(), t0), t1)
-    return r0 + (r1 - r0) * math.log(t / t0) / math.log(t1 / t0)
+    return _interpolated(CPU_RATIO_POINTS, _tagger_threads())
 
 
 def record(db: Session, kind: str, wall_seconds: float, audio_seconds: float) -> None:
@@ -160,14 +255,27 @@ def pace(db: Session, kind: str) -> Optional[float]:
         {"kind": kind, "device": device, "cores": cores}).scalar()
 
 
-def instruments_pending(db: Session, reanalyze: bool) -> tuple:
-    """(tracks, seconds of audio) in the instrument pass's queue."""
+# A queue's row this machine can hold now (longest_track_seconds), by the
+# file's known duration — a file of unknown length is taken, as before.
+def within_reach_sql(alias: str = "mf") -> str:
+    return f" AND ({alias}.duration_seconds IS NULL OR {alias}.duration_seconds <= :longest)"
+
+
+def beyond_reach_sql(alias: str = "mf") -> str:
+    return f" AND {alias}.duration_seconds > :longest"
+
+
+def instruments_pending(db: Session, reanalyze: bool, longest: float) -> tuple:
+    """(tracks, seconds of audio) in the instrument pass's queue that this
+    machine can hold (`longest`), and the tracks past it."""
+    params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS, "reanalyze": reanalyze,
+              "unknown": UNKNOWN_SECONDS, "longest": longest}
     row = db.execute(sa_text(f"""
         SELECT count(*), COALESCE(sum(COALESCE(q.duration_seconds, :unknown)), 0)
-          FROM ({INSTRUMENTS_PENDING_SQL}) q"""),
-        {"min_seconds": provenance.MIN_MATERIAL_SECONDS, "reanalyze": reanalyze,
-         "unknown": UNKNOWN_SECONDS}).one()
-    return int(row[0]), float(row[1])
+          FROM ({INSTRUMENTS_PENDING_SQL}{within_reach_sql()}) q"""), params).one()
+    beyond = db.execute(sa_text(f"SELECT count(*) FROM ({INSTRUMENTS_PENDING_SQL}{beyond_reach_sql()}) q"),
+                        params).scalar()
+    return int(row[0]), float(row[1]), int(beyond)
 
 
 def estimate(db: Session, reanalyze: bool) -> Dict[str, Any]:
@@ -175,11 +283,13 @@ def estimate(db: Session, reanalyze: bool) -> Dict[str, Any]:
     `tracks` and `audio_seconds` pending, `pace` (s per minute of audio) and
     `seconds` of analysis — both None while there is no pace to say —, and
     `basis`: 'measured' (this machine's instrument batches), 'sonic' (its
-    sonic pace × the device class's ratio), 'reference' (the measured CPU
-    reference, scaled by the cores) or 'measuring' (no pace to start from —
-    MPS, or a CUDA node before its first sonic batch: the first batch
-    says)."""
-    tracks, audio = instruments_pending(db, reanalyze)
+    sonic pace × the device class's ratio), 'reference' (the tagger's
+    measured CPU pace at this machine's threads) or 'measuring' (no pace to
+    start from — MPS, or a CUDA node before its first sonic batch: the first
+    batch says); `too_long`, the pending tracks this machine cannot hold now,
+    left out of the rest."""
+    tracks, audio, beyond = instruments_pending(
+        db, reanalyze, longest_track_seconds([INSTRUMENTS], reserve_gb=model_ram_gb("tagger")))
     measured = pace(db, INSTRUMENTS)
     device, cores = _machine()
     ratio = tagger_to_sonic(device) if measured is None else None
@@ -188,10 +298,10 @@ def estimate(db: Session, reanalyze: bool) -> Dict[str, Any]:
         per_minute, basis = measured, "measured"
     elif sonic is not None:
         per_minute, basis = sonic * ratio, "sonic"
-    elif ratio is not None and device in REFERENCE_SONIC_PACE:
-        reference, on_cores = REFERENCE_SONIC_PACE[device]
-        per_minute, basis = reference * on_cores / cores * ratio, "reference"
+    elif device == "cpu":
+        per_minute, basis = _interpolated(CPU_TAGGER_PACE_POINTS, _tagger_threads()), "reference"
     else:
         per_minute, basis = None, "measuring"
     return {"tracks": tracks, "audio_seconds": audio, "pace": per_minute, "basis": basis,
-            "seconds": audio / 60.0 * per_minute if per_minute is not None else None}
+            "seconds": audio / 60.0 * per_minute if per_minute is not None else None,
+            "too_long": beyond}

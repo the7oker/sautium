@@ -161,7 +161,9 @@ def run_parallel_enrichment(
     def _run_gpu_pipeline():
         logger.info("Pipeline A (GPU): starting the sonic and instrument passes")
         combined = {}
-        if not (skip_sonic and skip_instruments):
+        # with the sonic pass skipped, the half is the instruments alone: the
+        # switch decides before the lane is taken
+        if not skip_sonic or _instruments_wanted():
             from device import get_device, heavy_pass
             with heavy_pass("the analysis run's audio half") as held:
                 if not held:        # the node stops
@@ -240,9 +242,11 @@ def run_parallel_enrichment(
                     logger.info("Recognise instruments was switched off: the instrument pass ends")
                     return True
                 if can_give_way:
+                    import analysis_pace
                     from embeddings import sonic_work_since
                     with get_db_context() as db:
-                        if sonic_work_since(db, seen, track_ids):
+                        if sonic_work_since(db, seen, track_ids, analysis_pace.longest_track_seconds(
+                                [analysis_pace.SONIC])):
                             gave_way.append(True)
                             return True
                 return False
@@ -795,7 +799,9 @@ class TrackEnrichmentPipeline:
             else:
                 lacks.append(~exists(select(Embedding.id).where(Embedding.track_id == Track.id)))
                 lacks.append(~exists(select(AudioFeature.id).where(AudioFeature.track_id == Track.id)))
-        if not self.skip_instruments:
+        # the switch as the call starts: a track the call did not select is
+        # the next call's; one it did is read again per track
+        if self._instruments_wanted():
             if self.force_instruments:
                 lacks.append(True)
             else:

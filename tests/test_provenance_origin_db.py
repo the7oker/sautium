@@ -1694,6 +1694,8 @@ def _passes(monkeypatch, features=None, tagger=None):
                         lambda: provenance.Fingerprinter("ok", "/usr/bin/fpcalc"))
     monkeypatch.setattr(embeddings, "_reanalyze_imported", lambda: False)
     monkeypatch.setattr(notary, "wake", lambda reason: None)
+    import analysis_pace
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 64.0)   # any track fits
     silence = lambda *a: np.zeros(48000 * 20, dtype=np.float32)   # noqa: E731
     vec = np.full(512, 1 / np.sqrt(512), dtype=np.float32)
     gen = embeddings.AudioEmbeddingGenerator
@@ -1907,6 +1909,8 @@ def test_a_streams_analysis_saves_both_records_under_the_streams_row(conn, monke
     monkeypatch.setattr(provenance, "create_stream_source", lambda *a: stream)
     monkeypatch.setattr(notary, "wake", lambda reason: None)
     monkeypatch.setattr(settings_router, "instruments_on", lambda: True)
+    import analysis_pace
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 64.0)   # any track fits
     enricher = enrichment.PreviewEnricher()
     monkeypatch.setattr(enricher, "_models", lambda sonic, tag: (Embedder(), Analyzer()))
     enricher._enrich(track, b"stream", (60.0,), True, "lossless-test")

@@ -171,18 +171,23 @@ def newest_file_id(db: Session) -> int:
     return int(db.execute(sa_text("SELECT COALESCE(max(id), 0) FROM media_files")).scalar())
 
 
-def sonic_work_since(db: Session, file_id: int, track_ids: Optional[list] = None) -> bool:
+def sonic_work_since(db: Session, file_id: int, track_ids: Optional[list] = None,
+                     longest: float = float("inf")) -> bool:
     """Whether a file newer than `file_id` waits for the sonic pass — a scan
     added it after the pass read its queue — among `track_ids` when the run
     is scoped to them. The instrument pass asks at each of its batch seams
     and gives way: the sonic pass of any track goes before the instruments of
     any track. A file the pass has seen and could not analyse stays pending
-    without calling it back."""
+    without calling it back, nor does one longer than the pass may take
+    (`longest`)."""
+    import analysis_pace
     scope = "" if track_ids is None else " AND p.track_id = ANY(:track_ids)"
     return bool(db.execute(sa_text(
-        f"SELECT EXISTS (SELECT 1 FROM ({PENDING_SQL}) p WHERE p.media_file_id > :since{scope})"),
+        f"SELECT EXISTS (SELECT 1 FROM ({PENDING_SQL}) p WHERE p.media_file_id > :since{scope}"
+        f"{analysis_pace.within_reach_sql('p')})"),
         {"since": file_id, "min_seconds": provenance.MIN_MATERIAL_SECONDS,
-         "reanalyze": _reanalyze_imported(), "track_ids": track_ids}).scalar())
+         "reanalyze": _reanalyze_imported(), "track_ids": track_ids,
+         "longest": longest}).scalar())
 
 
 class AudioEmbeddingGenerator:
@@ -244,13 +249,14 @@ class AudioEmbeddingGenerator:
         return text_features[0].cpu().numpy()
 
     def _load_audio(self, file_path: str, cue_start: Optional[float] = None,
-                    cue_end: Optional[float] = None) -> Optional[np.ndarray]:
+                    cue_end: Optional[float] = None,
+                    duration_seconds: Optional[float] = None) -> Optional[np.ndarray]:
         """Load the WHOLE track at 48kHz mono (shared scanner decode path) —
         segments cover the full canonical grid; the track-level vector's
         middle window is sliced from the same array. For a CUE slice the
         bounded decode IS the track, so the grid stays array-relative."""
         try:
-            return load_full_track_48k(file_path, cue_start, cue_end)
+            return load_full_track_48k(file_path, cue_start, cue_end, duration_seconds)
         except Exception as e:
             logger.error(f"Failed to load audio {file_path}: {e}")
             return None
@@ -438,7 +444,7 @@ class AudioEmbeddingGenerator:
 
         provenance.require_fingerprinter()
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0,
-                 "embeddings": 0, "features": 0}
+                 "embeddings": 0, "features": 0, "too_long": 0}
         start_time = time.time()
         if not force:
             # A failed look costs only the work it would have saved: the
@@ -462,6 +468,20 @@ class AudioEmbeddingGenerator:
                 query_sql += " AND q.media_file_id > :since"
                 params["since"] = since_file_id
 
+            # A track longer than this machine can hold now is left out by
+            # its known duration (analysis_pace.longest_track_seconds), and
+            # counted: the decode and its resample grow with its length
+            params["longest"] = analysis_pace.longest_track_seconds(
+                [analysis_pace.SONIC],
+                reserve_gb=0.0 if self.model is not None else analysis_pace.model_ram_gb("clap"))
+            stats["too_long"] = db.execute(sa_text(
+                f"SELECT count(*) FROM ({query_sql}{analysis_pace.beyond_reach_sql('q')}) b"),
+                params).scalar()
+            if stats["too_long"]:
+                logger.info(f"Sonic pass: {stats['too_long']} track(s) longer than this machine "
+                            f"can hold now ({params['longest'] / 60:.0f} min) are left to the network")
+            query_sql += analysis_pace.within_reach_sql("q")
+
             # Gaps first: a track missing a record beats an upgrade
             # (stream→owned, better rip, imported→first-hand) — coverage
             # before recomputation.
@@ -477,7 +497,8 @@ class AudioEmbeddingGenerator:
             total = len(rows)
 
             if total == 0:
-                logger.info("No tracks pending the sonic pass")
+                (logger.debug if track_ids is not None else logger.info)(
+                    "No tracks pending the sonic pass")
                 return stats
 
             # CLAP only for a queue that holds an embedding to make: after the
@@ -516,7 +537,8 @@ class AudioEmbeddingGenerator:
             def _load_one(item):
                 row, _src, _embed, describe = item
                 local_path = settings.translate_to_local_path(row.file_path)
-                audio = self._load_audio(local_path, row.cue_start_seconds, row.cue_end_seconds)
+                audio = self._load_audio(local_path, row.cue_start_seconds, row.cue_end_seconds,
+                                         row.duration_seconds)
                 features = None
                 if audio is not None and describe:
                     try:
@@ -527,7 +549,9 @@ class AudioEmbeddingGenerator:
                 return item, audio, features
 
             def _load_batch(todo):
-                """Decode a batch in the I/O pool: (loaded, failed count)."""
+                """Decode a batch in the I/O pool: (loaded, failed count, when
+                the decode began and ended)."""
+                began = time.monotonic()
                 loaded = []
                 failed = 0
                 futures = [io_pool.submit(_load_one, item) for item in todo]
@@ -538,7 +562,7 @@ class AudioEmbeddingGenerator:
                     else:
                         failed += 1
                         logger.warning(f"Skipping track {item[0].track_id}: audio load failed")
-                return loaded, failed
+                return loaded, failed, began, time.monotonic()
 
             # Split into batch slices — bounded by BOTH row count and total
             # audio duration: whole tracks are held decoded in RAM per batch,
@@ -574,12 +598,14 @@ class AudioEmbeddingGenerator:
                 prefetch_future = prefetch_pool.submit(_load_batch, planned)
 
                 for batch_idx in tqdm(range(num_batches), desc="Sonic pass", unit="batch"):
-                    # what the seam gave to another pass is no time of this one
+                    # What the seam gave to another pass is no time of this one —
+                    # but the batch's decode, under way beside it, is: the wait
+                    # is left out less the part of it the decode overlapped
                     seam_began = time.monotonic()
                     if cancel_flag and cancel_flag():
                         logger.info("Sonic pass cancelled")
                         break
-                    batch_began += time.monotonic() - seam_began
+                    seam_ended = time.monotonic()
 
                     if max_duration_seconds:
                         elapsed = time.time() - start_time
@@ -587,7 +613,9 @@ class AudioEmbeddingGenerator:
                             logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
                             break
 
-                    loaded, batch_failed = prefetch_future.result()
+                    loaded, batch_failed, decode_began, decode_ended = prefetch_future.result()
+                    overlap = max(0.0, min(seam_ended, decode_ended) - max(seam_began, decode_began))
+                    batch_began += (seam_ended - seam_began) - overlap
                     stats["processed"] += len(batch_slices[batch_idx])
                     stats["failed"] += batch_failed
                     for outcome in outcomes:
@@ -664,7 +692,7 @@ class AudioEmbeddingGenerator:
                 describe = force or (row.features_pending and not provenance.held_in_group(
                     db, src_id, "audio_features"))
         except Exception as e:
-            logger.error(f"Registration failed for {row.track_id}: {e}")
+            logger.error(f"Registration failed for {row.track_id}: {e}", exc_info=True)
             return "failed"
         if not (embed or describe):
             return "skipped"

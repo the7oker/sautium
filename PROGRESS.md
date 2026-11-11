@@ -299,7 +299,15 @@ implementation details live in the code, DB and git history.
   "already held" is decided per kind, so a better copy holding no
   instruments leaves a stream something to add. Off computes no
   instruments and removes none; the node still pulls, serves and carries
-  those other nodes made.
+  those other nodes made. What a pass holds of one track grows with its
+  length (the decode, its resamples), so each takes a track only up to the
+  longest this machine can hold when it reads its queue
+  (`analysis_pace.longest_track_seconds`), leaving a longer one out by its
+  known duration, counted and never decoded — lite never ran the bulk pass
+  before, and a 45-minute mix on an 8 GB Pi would have killed the backend
+  on every run. The amplitude block is computed chunk by chunk and the
+  decode read into one array, so the bound is the decode and its resample
+  alone (HARDWARE-TIERS.md § 5's last note has the numbers).
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be

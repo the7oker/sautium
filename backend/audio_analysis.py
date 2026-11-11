@@ -29,6 +29,8 @@ switch (enrichment.instruments). Each decodes a track once.
 
 import logging
 import subprocess
+import tempfile
+import threading
 from typing import Any, Dict, Optional
 
 import librosa
@@ -66,15 +68,26 @@ _MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
 _KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
+# The decode's deadline, as subprocess.run's timeout was
+DECODE_TIMEOUT_SECONDS = 300
+
+
 def load_full_track_48k(local_path: str, cue_start: Optional[float] = None,
-                        cue_end: Optional[float] = None) -> np.ndarray:
+                        cue_end: Optional[float] = None,
+                        duration_seconds: Optional[float] = None) -> np.ndarray:
     """Decode the whole file to 48kHz mono float32 via ffmpeg — one decode
     path shared by the scanner and backfills so scores stay comparable.
     ffmpeg outruns audioread severalfold on mp3 (which has no seek table and
     must be decoded sequentially anyway). cue_start/cue_end bound a CUE image
     slice: -ss before -i input-seeks (accurate_seek drops samples to the exact
     position), so the returned array IS the track — every downstream window
-    grid stays array-relative and slice-agnostic."""
+    grid stays array-relative and slice-agnostic.
+
+    ffmpeg's output is read straight into one array sized from the known
+    duration (a second over it; doubled should the file run longer), never
+    gathered as bytes and copied — the track is held once, not twice. Its
+    errors go to a file, not a pipe: a damaged file can say more than a
+    pipe holds while its samples are read."""
     cmd = ["ffmpeg", "-v", "error"]
     if cue_start is not None:
         cmd += ["-ss", f"{cue_start:.6f}"]
@@ -82,8 +95,32 @@ def load_full_track_48k(local_path: str, cue_start: Optional[float] = None,
     if cue_end is not None:
         cmd += ["-t", f"{cue_end - (cue_start or 0.0):.6f}"]
     cmd += ["-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"]
-    out = subprocess.run(cmd, capture_output=True, check=True, timeout=300).stdout
-    audio = np.frombuffer(out, dtype=np.float32).copy()
+    expected = int((float(duration_seconds) if duration_seconds else 600.0) * DECODE_SR) + DECODE_SR
+    buf = np.empty(expected, dtype=np.float32)
+    got = 0
+    with tempfile.TemporaryFile() as errors:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errors)
+        deadline = threading.Timer(DECODE_TIMEOUT_SECONDS, proc.kill)
+        deadline.start()
+        try:
+            while True:
+                if got == buf.nbytes:
+                    grown = np.empty(len(buf) * 2, dtype=np.float32)
+                    grown[:len(buf)] = buf
+                    buf = grown
+                n = proc.stdout.readinto(memoryview(buf).cast("B")[got:])
+                if not n:
+                    break
+                got += n
+            proc.stdout.close()
+            returncode = proc.wait()
+        finally:
+            deadline.cancel()
+        if returncode != 0:
+            errors.seek(0)
+            raise subprocess.CalledProcessError(returncode, cmd,
+                                                stderr=errors.read().decode("utf-8", "replace"))
+    audio = buf[:got // 4]
     if not len(audio):
         raise ValueError(f"ffmpeg produced no samples for {local_path}")
     return audio
@@ -97,6 +134,55 @@ def middle_segment(audio: np.ndarray, sr: int, seconds: float) -> np.ndarray:
     return audio[start:start + n]
 
 
+# librosa's frame grid for the amplitude block: its defaults for rms,
+# spectral_centroid and zero_crossing_rate (frame and FFT 2048, hop 512,
+# centred: the signal padded by half a frame at either end — zeros for the
+# RMS and the STFT, the edge value for the zero crossings).
+FRAME = 2048
+HOP = 512
+# Frames computed at a time: about 47 s of 22 050 Hz audio, a few MB of frame
+# arrays whatever the track's length.
+CHUNK_FRAMES = 2048
+
+
+def _padded_slice(y: np.ndarray, start: int, stop: int, mode: str) -> np.ndarray:
+    """Samples [start, stop) of `y` padded by FRAME // 2 at either end — the
+    centred signal librosa frames — without copying the whole of it."""
+    pad = FRAME // 2
+    lo, hi = max(0, start - pad), min(len(y), stop - pad)
+    part = y[lo:hi] if hi > lo else y[:0]
+    before, after = max(0, pad - start), max(0, stop - pad - len(y))
+    if not (before or after):
+        return part
+    if mode == "edge":
+        return np.concatenate([np.full(before, y[0], dtype=y.dtype), part,
+                               np.full(after, y[-1], dtype=y.dtype)])
+    return np.concatenate([np.zeros(before, dtype=y.dtype), part, np.zeros(after, dtype=y.dtype)])
+
+
+def amplitude_frames(y: np.ndarray, sr: int):
+    """librosa's per-frame RMS, spectral centroid and zero-crossing rate of
+    the whole signal, computed CHUNK_FRAMES frames at a time over the
+    centred signal: each frame sees the samples it sees in librosa's
+    whole-signal call, so the values are those, while the frame arrays a
+    whole-signal call builds (two STFT-sized ones and more, ~67 MB per
+    minute of audio) never exist."""
+    n_frames = 1 + len(y) // HOP
+    rms, centroid, zcr = [], [], []
+    for first in range(0, n_frames, CHUNK_FRAMES):
+        last = min(first + CHUNK_FRAMES, n_frames)
+        start, stop = first * HOP, (last - 1) * HOP + FRAME
+        zeros = _padded_slice(y, start, stop, "constant")
+        rms.append(librosa.feature.rms(y=zeros, frame_length=FRAME, hop_length=HOP,
+                                       center=False)[0])
+        centroid.append(librosa.feature.spectral_centroid(y=zeros, sr=sr, n_fft=FRAME,
+                                                          hop_length=HOP, center=False)[0])
+        zcr.append(librosa.feature.zero_crossing_rate(_padded_slice(y, start, stop, "edge"),
+                                                      frame_length=FRAME, hop_length=HOP,
+                                                      center=False)[0])
+    return np.concatenate(rms), np.concatenate(centroid), np.concatenate(zcr)
+
+
 def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
     """RMS/dynamic-range/brightness/zcr block, shared by the scanner and the
     full-track backfill so both produce methodologically identical values.
@@ -104,10 +190,12 @@ def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
     the same 22050Hz signal the scanner has always used, or historic values
     stop being comparable. Frame-wise stats over the WHOLE given signal: mean
     for level/spectral features, p95-p5 for dynamic range (a mean would
-    erase exactly the quiet-intro-vs-loud-climax spread it measures)."""
+    erase exactly the quiet-intro-vs-loud-climax spread it measures). The
+    frames come chunk by chunk (amplitude_frames), the statistics over all
+    of them."""
     features: Dict[str, Any] = {}
 
-    rms = librosa.feature.rms(y=y)[0]
+    rms, spectral_centroid, zcr = amplitude_frames(y, sr)
     features["energy"] = round(float(np.mean(rms)), 6)
     rms_db = librosa.amplitude_to_db(rms)
     features["energy_db"] = round(float(np.mean(rms_db)), 2)
@@ -119,11 +207,9 @@ def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
     else:
         features["dynamic_range_db"] = 0.0
 
-    spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
     nyquist = sr / 2.0
     features["brightness"] = round(float(np.mean(spectral_centroid) / nyquist), 4)
 
-    zcr = librosa.feature.zero_crossing_rate(y)[0]
     features["zero_crossing_rate"] = round(float(np.mean(zcr)), 6)
 
     return features
@@ -322,7 +408,7 @@ class AudioAnalyzer:
                 provenance.relink_returned_files(track_ids, cancel_check=cancel_flag)
             except Exception as e:
                 logger.error(f"Re-link before the pass failed: {e}", exc_info=True)
-        stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
+        stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0, "too_long": 0}
         start_time = time.time()
         batch_size = 16
         from hardware_profile import resolve as _hw
@@ -337,6 +423,22 @@ class AudioAnalyzer:
             if track_ids is not None:
                 query_sql += " AND mf.track_id = ANY(:track_ids)"
                 params["track_ids"] = track_ids
+            if attempted is not None:
+                query_sql += " AND mf.id <> ALL(CAST(:attempted AS integer[]))"
+                params["attempted"] = sorted(attempted)
+            # A track longer than this machine can hold now is left out by
+            # its known duration (analysis_pace.longest_track_seconds), and
+            # counted: the decode and the tagger's resamples grow with it
+            params["longest"] = analysis_pace.longest_track_seconds(
+                [analysis_pace.INSTRUMENTS],
+                reserve_gb=0.0 if self.ensemble is not None else analysis_pace.model_ram_gb("tagger"))
+            stats["too_long"] = db.execute(sa_text(
+                f"SELECT count(*) FROM ({query_sql}{analysis_pace.beyond_reach_sql()}) b"),
+                params).scalar()
+            if stats["too_long"]:
+                logger.info(f"Instrument pass: {stats['too_long']} track(s) longer than this machine "
+                            f"can hold now ({params['longest'] / 60:.0f} min) are left to the network")
+            query_sql += analysis_pace.within_reach_sql()
 
             # Gaps first — coverage before recomputation (as the sonic pass)
             if order_by_date:
@@ -347,11 +449,10 @@ class AudioAnalyzer:
                 query_sql += f" LIMIT {limit}"
 
             rows = db.execute(sa_text(query_sql), params).fetchall()
-            if attempted is not None:
-                rows = [r for r in rows if r.media_file_id not in attempted]
             total = len(rows)
             if total == 0:
-                logger.info("No tracks pending the instrument pass")
+                (logger.debug if track_ids is not None else logger.info)(
+                    "No tracks pending the instrument pass")
                 return stats
 
             logger.info(f"Instrument pass: {total} tracks "
@@ -410,7 +511,7 @@ class AudioAnalyzer:
                     analysed = 0.0
                     wrote = False
                     # a decode that failed spent time on no audio: the batch
-                    # says nothing true about the pace
+                    # says nothing true about the pace (nor one a tagging failed)
                     whole = all(audio is not None for audio in decoded)
                     for (row, src_id), audio in zip(todo, decoded):
                         if audio is None:
@@ -419,8 +520,10 @@ class AudioAnalyzer:
                         outcome = self._tag_track(db, row, src_id, audio)
                         stats[outcome] += 1
                         wrote = wrote or outcome == "success"
-                        if outcome != "failed":
-                            analysed += len(audio) / DECODE_SR
+                        # a tagging that failed spent time on no record: the
+                        # batch is no pace either
+                        whole = whole and outcome != "failed"
+                        analysed += len(audio) / DECODE_SR
                     del decoded
                     # Batch GPU work (AST/PaSST) is done — return the
                     # allocator's free blocks so the footprint tracks the live
@@ -464,7 +567,7 @@ class AudioAnalyzer:
                         db, src_id, "track_instruments")
             except Exception as e:
                 stats["failed"] += 1
-                logger.error(f"Registration failed for {row.track_id}: {e}")
+                logger.error(f"Registration failed for {row.track_id}: {e}", exc_info=True)
                 continue
             if src_id is None:
                 stats["failed"] += 1
@@ -478,7 +581,8 @@ class AudioAnalyzer:
     def _decode(self, row) -> Optional[np.ndarray]:
         try:
             return load_full_track_48k(settings.translate_to_local_path(row.file_path),
-                                       row.cue_start_seconds, row.cue_end_seconds)
+                                       row.cue_start_seconds, row.cue_end_seconds,
+                                       row.duration_seconds)
         except Exception as e:
             logger.error(f"Decode failed for {row.file_path}: {e}")
             return None

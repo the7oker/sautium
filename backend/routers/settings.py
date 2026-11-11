@@ -655,7 +655,9 @@ async def _library_state() -> Dict[str, Any]:
         "scan":               scan,
         "enrich":             enrich,
         "away":               {"albums": int(away["albums"]), "copies": int(away["copies"])},
-        "instruments":        _instruments_state() if stats.get("analysis_available") else None,
+        # its estimate is synchronous DB work: off the event loop
+        "instruments":        (await asyncio.to_thread(_instruments_state)
+                               if stats.get("analysis_available") else None),
         "hqp_library":        _hqp_library_state(),
     }
 
@@ -675,7 +677,7 @@ def _instruments_state() -> Dict[str, Any]:
         # nothing of the time
         logger.warning(f"Instruments estimate failed: {e}")
         left = {"tracks": None, "audio_seconds": None, "pace": None, "basis": None,
-                "seconds": None}
+                "seconds": None, "too_long": None}
     return {"enabled": enabled, **left}
 
 
@@ -1086,7 +1088,8 @@ def _analysis_pending() -> bool:
     """Any owned track the sonic pass would still analyse: an analysis-
     source file at or above the material floor (the queues' own predicate
     — under one grid window nothing is analysed, provenance.
-    MIN_MATERIAL_SECONDS — and not of a copy that is away) without
+    MIN_MATERIAL_SECONDS — not of a copy that is away, and not longer than
+    the pass can hold here now, analysis_pace.longest_track_seconds) without
     embeddings or without features. The instruments are not the trail's:
     their pass is the owner's switch, and their progress shows in their own
     row of the Library screen. EXISTS,
@@ -1094,6 +1097,7 @@ def _analysis_pending() -> bool:
     first hit. Driven from media_files, never from tracks: the phantom
     layer makes `tracks` three million rows, and the owned-first shape
     is the difference between 46 ms and 2.9 s (measured)."""
+    import analysis_pace
     import provenance
     row = db_query_one("""
         SELECT EXISTS (
@@ -1102,12 +1106,16 @@ def _analysis_pending() -> bool:
              WHERE mf.is_analysis_source AND av.absent_since IS NULL
                AND (mf.duration_seconds IS NULL
                     OR mf.duration_seconds >= %(min_seconds)s)
+               AND (mf.duration_seconds IS NULL
+                    OR mf.duration_seconds <= %(longest)s)
                AND (NOT EXISTS (SELECT 1 FROM embeddings e
                                  WHERE e.track_id = mf.track_id)
                     OR NOT EXISTS (SELECT 1 FROM audio_features af
                                     WHERE af.track_id = mf.track_id))
         ) AS pending
-    """, {"min_seconds": provenance.MIN_MATERIAL_SECONDS})
+    """, {"min_seconds": provenance.MIN_MATERIAL_SECONDS,
+          "longest": analysis_pace.longest_track_seconds(
+              [analysis_pace.SONIC], reserve_gb=analysis_pace.model_ram_gb("clap"))})
     return bool(row and row.get("pending"))
 
 
