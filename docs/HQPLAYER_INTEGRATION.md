@@ -576,7 +576,7 @@ comes after the control port answers again — so neither can end the wait.
   was owed (the spot's generation). A paused
   HQPlayer whose playlist is rebuilt is left stopped at its spot, never
   played to be paused again: the status names the spot's slot and carries
-  `resume`, Now Playing says "Stopped at m:ss — Play resumes here", the next
+  `resume`, Now Playing says "Play resumes at m:ss" (worded so since 2026-11-11), the next
   reorder and a "play next" anchor on that slot, and the play press resumes
   it there. The spot names a queue item, not a slot: an insert or a removal
   before it moves its index, an append after it changes nothing, and it goes
@@ -697,12 +697,20 @@ comes after the control port answers again — so neither can end the wait.
   spot set or moved since the listen's reading (D6's, the person's) is put
   back over. A listen that played out — read in its last seconds, or, where
   HQPlayer names no take, long enough ago to have played them — was cut by no
-  one either, but its track counted as played: the takeover after it leaves
-  the spot at the slot after it, at 0, and holds no listen (since 2026-11-11,
-  the owner's listening check: Play then started the queue from its head);
-  at the queue's last slot none follows — no spot, and Play does what it does
-  at the queue's end. Where no spot is left, another controller took an idle
-  HQPlayer, and while it holds HQPlayer — or its playlist rests there with
+  one either. One read in its last seconds is a track that counted as played:
+  where the take then moves onto an entry the node never gave — read playing
+  or paused, or told by the playlist read at the stopped tick that saw the
+  take moved (the entry after ours another controller's, or ours gone from
+  its place in that controller's playlist; an entry of no one's elsewhere in
+  the playlist tells nothing) — the takeover leaves the spot at the slot
+  after it, at 0, and holds no listen (since 2026-11-11, the owner's
+  listening check: Play then started the queue from its head); at the queue's
+  last slot none follows — no spot, and Play does what it does at the queue's
+  end. A playlist that tells the take went on to an entry of the node's, or
+  to none, is HQPlayer's own advance or end, and that listen judges nothing
+  later; another controller that takes HQPlayer while that advance is still
+  watched leaves the spot at the advance's entry, at 0. Where no spot is
+  left, another controller took an idle HQPlayer, and while it holds HQPlayer — or its playlist rests there with
   nothing of ours read — a Seek, Next or Previous is refused in words:
   nothing of the queue's to move, and HQPlayer's own would move that
   controller's stream. A start that waited for its stream (below) when
@@ -1772,8 +1780,10 @@ so. On this machine HQPlayer's log is followed meanwhile, and its refusal
 line closes the attempt at once as `rate_refused`. The close at the first
 stopped tick stays a Play's. An advance that played, or one another action
 took over — a takeover among them: HQPlayer read playing or pausing an entry
-not ours while the attempt waits ends it as superseded, never judged on that
-entry (since 2026-11-11) — is not kept; a start on the same take after the deadline (the
+the node never gave while the attempt waits, or resting on a playlist that
+holds one with the take moved past the advance's, ends it as superseded,
+never judged on that playlist, and leaves the spot at the advance's entry
+(since 2026-11-11) — is not kept; a start on the same take after the deadline (the
 same `track_serial`) makes it `played` and clears its failure — a Play of
 that entry is another take, an attempt of its own.
 
@@ -1968,36 +1978,43 @@ Now Playing alone, which he did not see). Now Playing keeps the state in one
 line, the action first.
 
 The backend mints an event once, where it reaches its verdict, and says it on
-the status as `output_event` — `{id, kind, attempt?, reason?}` — for as long
-as the state it led to stands, so a page that missed a coalesced status still
-meets it:
+the status as `output_event` — `{id, kind, attempt?, reason?}` — while the
+state it led to stands, so a page that missed a coalesced status still meets
+it. One event rides the status at a time, the newest in kind (a refusal over
+a stop over a takeover); an older one comes back when the newer one's state
+ends, and any of them leaves a status that says something else (a start
+waiting for its stream, an outage) and returns:
 
-| `kind` | minted when | said while |
+| `kind` | minted when | on the status while |
 |---|---|---|
-| `took` | a takeover leaves a spot: it cut the node's listen, took the output from a start that waited for its stream, or took it once our track had played out with a slot after it | that spot stands and the output has read no entry of ours since (HQPlayer); another controller holds the renderer at that spot (DLNA) |
+| `took` | a takeover leaves a spot: it cut the node's listen, took the output from a start that waited for its stream or from HQPlayer's own advance under way, or took it once our track had played out with a slot after it | a spot stands and the output has read no entry of ours since (HQPlayer); another controller holds the renderer at that spot (DLNA) |
 | `stopped` | a take-back's attempt closes as `other_stopped` | Now Playing offers that diagnosis |
-| `refused` | HQPlayer's log names why it refused the other app's track (one event per refused track) | that refusal is said beside the spot |
+| `refused` | HQPlayer's log names why it refused the other app's track (one event per refused track) | that refusal stands (HQPlayer stopped on that playlist, the spot standing) |
 | `paused` | a renderer reads paused on our track by no word of the node's | until a status that no longer says `paused_on_device` |
 
-`id` is the attempt's where the event has one (`stopped`, `refused`), else a
-new id of the same kind (`playback.base.new_id`: the clock's milliseconds,
-never the same twice in a process). Another app playing through an output the
-node was not playing on left no spot and is no event: nothing of the person's
-was taken, and Now Playing's line says the state.
+Every id comes from one generator (`playback.base.new_id`: the clock's
+milliseconds, never the same twice in a process, a later one larger) at the
+moment of the verdict — `refused` is its attempt's id, made then; `stopped`
+has an id of its own beside its attempt's, which is as old as the press.
+Another app playing through an output the node was not playing on left no
+spot and is no event: nothing of the person's was taken, and Now Playing's
+line says the state.
 
-One toast per event and page: a page keeps the ids it has met
-(`app-shell.js`, `onOutputEvent`) and tells an id it has not met, once — a
-poll, a second read of the state and the next status carry the same id. The
-status a connection of `/api/events` opens with is flagged `initial` by the
-server, as the connect-time notices snapshot is, and paints state only: its
-event becomes known without a toast, so a page opened after the event, a
-reload and a stream that reconnects (a phone tab back from the background)
-see Now Playing's line and no stale toast; `player.js` keeps the flag for the
-status the page really paints when a newer one supersedes the connect-time
-one. The toast's Why? opens the attempt's sheet (`stopped`, `refused`), or a
-sheet of the same shell with the node's two sentences (`took`, `paused`); the
-generic diagnosis toast stands down for those two codes. The words are drafts
-for the owner's words review.
+One toast per event and page (`app-shell.js`, `onOutputEvent`): a page tells
+an id it has not met, once — a poll, a second read of the state and the next
+status carry the same id — and only an event minted during its connection.
+The status a connection of `/api/events` opens with carries `event_floor`, an
+id from the same generator: an event at or under it happened before the
+connection, whether that status carries it or a later one brings it back. So
+a page opened after the event, a reload and a stream that reconnects (a phone
+tab back from the background) see Now Playing's line and no stale toast;
+`player.js` hands the floor on to the status the page really paints when a
+newer one supersedes the connect-time one. The toast's Why? opens the
+attempt's sheet (`stopped`, `refused`), or a sheet of the same shell with the
+node's two sentences (`took`, `paused`); the generic diagnosis toast stands
+down for those two codes, and Now Playing's Why button stays for both — it
+asks only "Why?" for the other app's refused track, which was no play of
+ours. The words are drafts for the owner's words review.
 
 ### DSP load — what this HQPlayer keeps up with (2026-10-02)
 

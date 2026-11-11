@@ -1340,13 +1340,15 @@
       if (this.excerptBadge) this.excerptBadge.hidden = !data.excerpt;
       // The HQPlayer output judged the last play of this track failed
       // (playback/hqp_diagnostics.py) — offered beside the track it is about,
-      // never beside the queue head a stopped status falls back to. Another
-      // app's track HQPlayer refused is none of this track's plays: its
-      // toast says it and opens its sheet (output events, below)
+      // never beside the queue head a stopped status falls back to
       const diag = data.diagnosis;
-      const why = !!diag && diag.code !== 'other_refused'
-        && (!diag.track_id || diag.track_id === data.track_id);
+      const why = !!diag && (!diag.track_id || diag.track_id === data.track_id);
+      // ...and another app's track HQPlayer refused is none of this track's
+      // plays: its button asks only "Why?" (its toast said what, and is gone
+      // in ten seconds; a page opened later never had one)
+      const asks = why && diag.code === 'other_refused' ? 'Why?' : "Why didn't it play?";
       this.whyBtn.hidden = !why;
+      if (this.whyBtn.textContent !== asks) this.whyBtn.textContent = asks;
       this.whyBtn.dataset.attempt = why ? diag.id : '';
       const tag = outputLine(data, why ? diag : null);
       this.hqpTag.hidden = !tag;
@@ -6283,13 +6285,15 @@
      it on the status as `output_event` ({id, kind, attempt?, reason?}) for
      as long as the state it led to stands, so no page misses it to a
      coalesced status; a page tells an id it has not met, once — a poll, a
-     second read of the state, the next status are the same id. The status
-     a connection opens with (`initial`, flagged by the server as the
-     connect-time notices are) paints state only: its event becomes known
-     without a toast, so a page opened after the event, a reload and a
-     stream that reconnects (a phone tab back from the background) see the
-     line on Now Playing, never a stale toast. The words are drafts for the
-     owner's words review. */
+     second read of the state, the next status are the same id. And only an
+     event minted during its connection: the status a connection opens with
+     carries its floor (`event_floor`, an id of the kind the events' are —
+     later is larger), and an event at or under it happened before — on
+     that status or on any later one, an event that left the status under a
+     newer one or an outage and came back. So a page opened after the
+     event, a reload and a stream that reconnects (a phone tab back from the
+     background) see the line on Now Playing, never a stale toast. The words
+     are drafts for the owner's words review. */
 
   // What the output says beside the track on Now Playing, the action first
   // — the part a narrow screen must not lose: the build it is in (its
@@ -6372,11 +6376,13 @@
   }
 
   const outputEventsMet = new Set();
+  let outputEventFloor = 0;
   function onOutputEvent(data) {
-    const ev = data && data.output_event;
-    if (!ev || outputEventsMet.has(ev.id)) return;
+    if (!data) return;
+    if (data.event_floor != null) outputEventFloor = Math.max(outputEventFloor, data.event_floor);
+    const ev = data.output_event;
+    if (!ev || ev.id <= outputEventFloor || outputEventsMet.has(ev.id)) return;
     outputEventsMet.add(ev.id);
-    if (data.initial) return;
     const c = outputEventCopy(ev, data);
     if (!c) return;
     // Its attempt's failure is said here: the play route's answer for the

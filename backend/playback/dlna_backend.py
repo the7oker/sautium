@@ -1539,7 +1539,10 @@ class DlnaBackend(PlayerBackend):
         if slot is not None:
             self._index, self._resume = slot, parked[1]
         elif self._said in ("playing", "paused") and self._unslotted is None:
-            if not (self._length > 0 and self._position >= self._length - _TRACK_END_SLACK):
+            # Where the audio was, as the track's end is judged (the poll's
+            # stopped verdict): the clock runs only while it plays
+            at = max(self._position, self._wall_estimate()) if self._said == "playing" else self._position
+            if not (self._length > 0 and at >= self._length - _TRACK_END_SLACK):
                 self._resume = self._position
                 self._cut = self._queue.item_at(self._index)
             elif (after := self._queue.item_at(self._index + 1)) is not None:

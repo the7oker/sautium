@@ -1,10 +1,10 @@
 """What another app did to the output, as the Web UI tells it (ROON-COEX
 §12.6): backend/static/app-shell.js's output-events block, cut from the file
-between its banners, runs under Node against stubs while statuses are
-replayed — one toast per event and page, the connect-time status painting
-state only, the words with the action first — and player.js's status path
-carries the connect-time flag to the status the page really paints. Skipped
-where Node is not."""
+between its banners with the generic diagnosis toast beside it, runs under
+Node against stubs while statuses are replayed — one toast per event and
+page, none for an event minted before the page's connection (its floor),
+the words with the action first — and player.js's status path hands the
+floor on to the status the page really paints. Skipped where Node is not."""
 
 import json
 import shutil
@@ -25,22 +25,28 @@ const shell = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
 const start = shell.indexOf('  /* ---- Output events: what another app did to the output');
 const end = shell.indexOf('  /* ---- Output events: end ---- */', start);
 if (start < 0 || end < 0) throw new Error('the output-events block was not found');
+// ...and the toast of a play the output judged failed, which stands down for these events
+const dStart = shell.indexOf('  let lastDiagnosisSeen;');
+const dEnd = shell.indexOf('  // A DSP change that went through a build answered its caller', dStart);
+if (dStart < 0 || dEnd < 0) throw new Error('the diagnosis toast was not found');
 
 function page() {
   const toasts = [], opened = [], on = {};
+  const escape = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
   const ctx = {
     notices: { toast: t => toasts.push(t) },
-    saidAttempts: new Set(),
+    saidAttempts: new Set(), metDiagnoses: new Set(), escapeHtml: escape,
     fmtDuration: s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`,
-    escapeProfileHtml: s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`),
+    escapeProfileHtml: escape,
     openHqpDiagnosis: id => opened.push(['attempt', id]),
     openModal: html => { opened.push(['sheet', html.replace(/\s+/g, ' ')]);
                          return { el: { querySelector: () => ({ addEventListener() {}, focus() {} }) },
                                   close() {} }; },
-    document: { addEventListener: (t, f) => { on[t] = f; } },
+    document: { addEventListener: (t, f) => { (on[t] = on[t] || []).push(f); } },
   };
-  vm.runInNewContext(shell.slice(start, end) + '\n;this.outputLine = outputLine;', ctx);
-  return { ctx, toasts, opened, status: d => on['np-update']({ detail: d }) };
+  vm.runInNewContext(shell.slice(start, end) + shell.slice(dStart, dEnd).replace('const metDiagnoses = new Set();', '')
+                     + '\n;this.outputLine = outputLine;', ctx);
+  return { ctx, toasts, opened, status: d => on['np-update'].forEach(f => f({ detail: d })) };
 }
 
 const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -89,13 +95,14 @@ PAUSED = {"id": 14, "kind": "paused"}
 
 
 def test_an_event_is_one_toast_for_a_page_that_was_connected_when_it_happened():
-    """The page is connected; Roon takes HQPlayer: the status that first
-    carries the event toasts — once. The statuses after it (a poll, a second
-    read of the state: the same id while the state stands), and the status a
-    reconnect of the stream opens with, say nothing more."""
-    out = _run({"p": [_st(initial=True, state="playing", resume=None),
+    """The page is connected (its floor under the event's id); Roon takes
+    HQPlayer: the status that first carries the event toasts — once. The
+    statuses after it (a poll, a second read of the state: the same id while
+    the state stands), and the status a reconnect of the stream opens with
+    (a new floor, above the event), say nothing more."""
+    out = _run({"p": [_st(event_floor=10, state="playing", resume=None),
                       _st(TOOK, source="external"), _st(TOOK, source="external"), _st(TOOK),
-                      _st(TOOK, initial=True), _st(TOOK)]})
+                      _st(TOOK, event_floor=20), _st(TOOK)]})
     said = out["p"]
     assert [len(t) for t in said] == [0, 1, 0, 0, 0, 0]
     assert said[1][0] == {"kind": "info", "key": "player.other_app", "label": "Why?",
@@ -105,16 +112,43 @@ def test_an_event_is_one_toast_for_a_page_that_was_connected_when_it_happened():
 
 def test_a_page_opened_after_the_event_sees_the_state_and_no_stale_toast():
     """A page opened later — a reload, a second device — and a stream that
-    reconnects after the event (a phone tab back from the background): the
-    status the connection opens with paints state only, its event known from
-    then on; an event that happens after it toasts, once."""
-    out = _run({"opened_later": [_st(TOOK, initial=True, source="external"), _st(TOOK, source="external"),
+    reconnects after the event (a phone tab back from the background): an
+    event minted before the connection (at or under its floor) is state,
+    whichever status carries it — the one the connection opens with, or a
+    later one that brings it back: the takeover's, when the refusal that
+    stood over it at the connection ends; any, after an outage the page
+    connected in (review round 1's finding 2). An event that happens after
+    the connection toasts, once."""
+    out = _run({"opened_later": [_st(TOOK, event_floor=11, source="external"), _st(TOOK, source="external"),
                                  _st(REFUSED), _st(REFUSED), _st(TOOK)],
-                "slept_through_it": [_st(initial=True, state="playing", resume=None),
-                                     _st(STOPPED, initial=True), _st(STOPPED), _st(PAUSED, state="paused")]})
+                "opened_during_the_refusal": [_st(REFUSED, event_floor=12), _st(REFUSED), _st(TOOK), _st(TOOK)],
+                "opened_during_an_outage": [{"state": "disconnected", "event_floor": 30}, _st(TOOK), _st(STOPPED),
+                                            _st({"id": 31, "kind": "paused"}, state="paused")],
+                "slept_through_it": [_st(event_floor=5, state="playing", resume=None),
+                                     _st(STOPPED, event_floor=13), _st(STOPPED), _st(PAUSED, state="paused")]})
     assert [len(t) for t in out["opened_later"]] == [0, 0, 1, 0, 0]
     assert out["opened_later"][2][0]["title"] == "HQPlayer refused the other app's track"
+    assert [len(t) for t in out["opened_during_the_refusal"]] == [0, 0, 0, 0]
+    assert [len(t) for t in out["opened_during_an_outage"]] == [0, 0, 0, 1]
     assert [len(t) for t in out["slept_through_it"]] == [0, 0, 0, 1]
+
+
+def test_an_event_with_a_diagnosis_is_one_toast_not_two():
+    """The other app's stop of a take-back and its refused track ride the
+    status with a diagnosis too (Now Playing's Why button): the event's
+    toast says them, and the toast of a play the output judged failed stands
+    down for those two codes — one toast per event, from one place. A failed
+    play of the node's own keeps its toast."""
+    stopped = {"id": 9, "code": "other_stopped", "title": "Another app stopped HQPlayer",
+               "next": "Press Play to resume where it was.", "track_id": "t", "failing": False}
+    refused = {"id": 12, "code": "other_refused", "title": "HQPlayer refused the other app's track", "next": "",
+               "track_id": None, "failing": False}
+    own = {"id": 40, "code": "not_played", "title": "HQPlayer could not play it", "next": "", "track_id": "t",
+           "failing": False}
+    out = _run({"p": [_st(), _st({"id": 13, "kind": "stopped", "attempt": 9}, diagnosis=stopped),
+                      _st(REFUSED, diagnosis=refused), _st(diagnosis=own)]})
+    assert [[t["key"] for t in said] for said in out["p"]] == [
+        [], ["player.other_app"], ["player.other_app"], ["hqplayer.diagnosis"]]
 
 
 def test_each_event_says_what_happened_and_what_play_does_and_opens_its_sheet():
@@ -215,23 +249,41 @@ const tick = () => new Promise(r => setTimeout(r, 20));
     if (step === 'release') release(); else send(step);
     await tick();
   }
-  process.stdout.write(JSON.stringify(painted.map(d => [d.n, !!d.initial])));
+  process.stdout.write(JSON.stringify(painted.map(d => [d.n, d.event_floor == null ? null : d.event_floor])));
 })();
 """
 
 
-def test_the_connect_time_flag_stays_with_the_connection_when_its_status_is_superseded():
+def test_a_connections_floor_reaches_the_page_when_its_first_status_is_superseded():
     """player.js: the status a connection opens with waits for the playlist;
     a newer status arrives meanwhile and supersedes it (the newest speaks).
-    That status is the page's first view of this connection all the same: it
-    is painted as the connect-time one, so an event it carries from before
-    the connection toasts nothing. The status after it is a live one; the
-    next connection's first is connect-time again."""
+    The floor that status carried is the connection's: the status painted in
+    its place hands it on, so an event from before the connection toasts
+    nothing. The status after it carries none; the next connection's first
+    carries its own."""
     def status(n, **more):
         return {"t": "status", "d": {"state": "stopped", "n": n, "playlist_version": 7, **more}}
     proc = subprocess.run(
         [NODE, "-e", _PLAYER, "--", str(STATIC / "player.js")],
-        input=json.dumps([{"t": "hello"}, status(1, initial=True), status(2), "release", status(3),
-                          {"t": "hello"}, status(4, initial=True), status(5)]).encode(),
+        input=json.dumps([{"t": "hello"}, status(1, event_floor=100), status(2), "release", status(3),
+                          {"t": "hello"}, status(4, event_floor=200), status(5)]).encode(),
         capture_output=True, check=True)
-    assert json.loads(proc.stdout) == [[2, True], [3, False], [4, True], [5, False]], proc.stdout
+    assert json.loads(proc.stdout) == [[2, 100], [3, None], [4, 200], [5, None]], proc.stdout
+
+
+def test_now_playings_line_may_shrink_and_wrap_inside_its_tag():
+    """The line is a sentence in a badge: the badge's own rule keeps it from
+    shrinking (a quality tag never wraps), so the line's class must let it —
+    it ran past the phone's right edge, cut before what Play does. Rendered
+    at 360 and 390 px in the slice's record; pinned here as the stylesheet's
+    words."""
+    import re
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    tag = re.search(r'<span class="([^"]*)" id="npHqpTag"', html).group(1).split()
+    assert {"np-q-badge", "np-output-line"} <= set(tag)
+    rule = re.search(r"\.np-q-badge\.np-output-line\s*\{([^}]*)\}", css).group(1)
+    props = dict(p.strip().split(":", 1) for p in rule.split(";") if ":" in p)
+    assert props["flex-shrink"].strip() == "1" and props["min-width"].strip() == "0"
+    assert props["overflow-wrap"].strip() == "anywhere" and "white-space" not in props
+    assert css.index(".np-q-badge.np-output-line") > css.index(".np-q-badge {")      # after the badge's own rule

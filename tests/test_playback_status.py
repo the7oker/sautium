@@ -187,32 +187,37 @@ def test_a_seek_the_output_refused_answers_in_its_words(monkeypatch):
     assert player.seek(player.SeekRequest(position=30)) == {"ok": False, "refusal": "HQPlayer refused Seek"}
 
 
-def test_the_status_a_connection_opens_with_is_flagged_and_a_live_one_is_not(monkeypatch):
-    """The page's event stream: the status it opens with says what happened
-    before the connection — flagged `initial`, as the connect-time notices
-    are, so the page paints state from it and tells no event it carries
-    (`output_event`, ROON-COEX §12.6); a status pushed after is a live one,
-    unflagged, and the flag is the stream's own, never kept on the manager's
-    status."""
+def test_the_status_a_connection_opens_with_carries_the_floor_of_its_events(monkeypatch):
+    """The page's event stream: the status it opens with carries
+    `event_floor`, an id of the events' kind minted at the connection — an
+    event with an id at or under it (the one that status carries; one that
+    comes back on a later status) happened before the connection, and the
+    page tells none of them (`output_event`, ROON-COEX §12.6); an event
+    minted after it is above the floor. A status pushed after is a live one,
+    with no floor, and the floor is the stream's own, never kept on the
+    manager's status."""
     import json
 
     from routers import player as player_router
     from routers import settings as settings_router
     monkeypatch.setattr(settings_router, "_notices_state", lambda: {})
+    from playback.base import new_id
     mgr = player_router.manager
-    monkeypatch.setattr(mgr, "_latest_status", {"state": "stopped", "output_event": {"id": 5, "kind": "took"}})
+    before = new_id()
+    monkeypatch.setattr(mgr, "_latest_status", {"state": "stopped", "output_event": {"id": before, "kind": "took"}})
 
     async def run():
         stream = (await player_router.events_stream(tab=None)).body_iterator
         assert await stream.__anext__() == 'data: {"t": "hello"}\n\n'
         first = json.loads((await stream.__anext__())[6:])
-        assert first["t"] == "status" and first["d"]["initial"] is True
-        assert first["d"]["output_event"] == {"id": 5, "kind": "took"}
+        assert first["t"] == "status" and first["d"]["output_event"] == {"id": before, "kind": "took"}
+        floor = first["d"]["event_floor"]
+        assert before < floor < new_id()
         assert json.loads((await stream.__anext__())[6:])["t"] == "notice"
-        mgr._push_status({"state": "stopped", "output": {}, "output_event": {"id": 6, "kind": "refused"}})
+        mgr._push_status({"state": "stopped", "output": {}, "output_event": {"id": new_id(), "kind": "refused"}})
         live = json.loads((await asyncio.wait_for(stream.__anext__(), 3))[6:])
-        assert live["t"] == "status" and "initial" not in live["d"]
-        assert live["d"]["output_event"]["id"] == 6 and "initial" not in mgr.latest_status
+        assert live["t"] == "status" and "event_floor" not in live["d"]
+        assert live["d"]["output_event"]["id"] > floor and "event_floor" not in mgr.latest_status
         reading = asyncio.ensure_future(stream.__anext__())
         await asyncio.sleep(0.05)
         reading.cancel()

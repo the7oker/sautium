@@ -985,7 +985,8 @@ class PlaybackManager:
             new_data["paused_on_device"] = True
         # What another controller did to the output — took it, stopped it, had
         # its track refused, paused the renderer: one event with an id, said
-        # while its state stands, told once by every page (ROON-COEX §12.6)
+        # while its state stands, told once by every page connected when it
+        # was minted (ROON-COEX §12.6)
         if s.extra.get("output_event"):
             new_data["output_event"] = s.extra["output_event"]
 
@@ -1222,6 +1223,8 @@ class PlaybackManager:
             idle["diagnosis"] = self._latest_status["diagnosis"]
         if self._latest_status.get("other_refused"):
             idle["other_refused"] = self._latest_status["other_refused"]
+        if self._latest_status.get("output_event"):
+            idle["output_event"] = self._latest_status["output_event"]
         if self._latest_status.get("starting"):
             idle["starting"] = True
         self._push_status(idle)

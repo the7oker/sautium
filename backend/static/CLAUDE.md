@@ -551,9 +551,10 @@ own track refused by HQPlayer, paused the renderer — is no notice (no row,
 no trail) but an **event on the status** (`output_event`, since 2026-11-11):
 `onOutputEvent` in `app-shell.js` toasts an id the page has not met, once,
 under one key (`player.other_app`), in the output-unavailable toast's form
-with a Why? that opens its sheet. The status a connection opens with is
-flagged `initial` and paints state only, exactly as the connect-time notices
-snapshot does; Now Playing's line (`outputLine`) keeps the state, the action
+with a Why? that opens its sheet. The status a connection opens with carries
+`event_floor`, and an event with an id at or under it is state to paint,
+never news — the connect-time notices snapshot's rule, kept for an event that
+leaves the status and comes back; Now Playing's line (`outputLine`) keeps the state, the action
 first, and wraps rather than clips. The rule for when an event exists and how
 long the status carries it lives in the backends
 (`docs/HQPLAYER_INTEGRATION.md` § "Output events").

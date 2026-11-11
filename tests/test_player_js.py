@@ -610,7 +610,7 @@ for (const status of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   ctx.__np.onStatus.call(np, status);
   ctx.__mp.update.call(mp, status);
   out.push([drawn.np.startsWith('M9 5v20'), drawn.mp.startsWith('M8 5v14'), np.hqpTag.textContent,
-            np.whyBtn.hidden, np.whyBtn.dataset.attempt]);
+            np.whyBtn.hidden, np.whyBtn.dataset.attempt, np.whyBtn.hidden ? null : np.whyBtn.textContent]);
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -635,18 +635,19 @@ def test_the_transport_offers_play_while_another_app_holds_the_output():
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     assert json.loads(proc.stdout) == [
-        [True, True, "Play takes it back · another app has HQPlayer Desktop", True, ""],
-        [True, True, "Play resumes at 1:23 · another app has HQPlayer Desktop", True, ""],
-        [False, False, "", True, ""]]
+        [True, True, "Play takes it back · another app has HQPlayer Desktop", True, "", None],
+        [True, True, "Play resumes at 1:23 · another app has HQPlayer Desktop", True, "", None],
+        [False, False, "", True, "", None]]
 
 
-def test_another_apps_refused_track_is_no_word_beside_our_track_on_now_playing():
+def test_another_apps_refused_track_is_a_toasts_word_and_now_playing_keeps_its_why():
     """ROON-COEX §12.6 (the owner's decision of 2026-11-11, in place of P12
     (a)'s row): beside the spot the takeover left, HQPlayer stopped on
-    another app's track it refused — its toast says so and opens its sheet;
-    Now Playing keeps the state alone, the action first, and no "Why didn't
-    it play?" beside our track, which did not fail. A failed play of the
-    node's own keeps its Why button."""
+    another app's track it refused — its toast says so; Now Playing keeps
+    the state alone, the action first, and the way to that attempt's sheet:
+    its button asks only "Why?" there, never "Why didn't it play?" beside
+    our track, which did not fail. A failed play of the node's own asks
+    that."""
     base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
             "position_formatted": "0:00", "length_formatted": "5:00",
             "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
@@ -661,8 +662,9 @@ def test_another_apps_refused_track_is_no_word_beside_our_track_on_now_playing()
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     rows = json.loads(proc.stdout)
-    assert rows[0][2:] == ["Play resumes at 0:17", True, ""]
+    assert rows[0][2:4] == ["Play resumes at 0:17", False] and str(rows[0][4]) == "7" and rows[0][5] == "Why?"
     assert rows[1][2:4] == ["", False] and str(rows[1][4]) == "8"    # a DOM dataset holds the attempt as text
+    assert rows[1][5] == "Why didn't it play?"
 
 
 def test_a_take_back_the_other_app_stopped_says_so_at_its_spot():

@@ -204,20 +204,21 @@
   // black-holed network can outlive the disconnect grace, and the
   // "disconnected" paint bumps the sequence so the pre-drop status that
   // finally resolves is dropped instead of repainted over it.
-  // The status a connection opens with is flagged by the server (`initial`):
-  // what it says happened before this connection, so it paints state and
-  // toasts nothing (app-shell.js, output events). The flag is the
-  // connection's, not that message's: a newer status that supersedes it
-  // while it waits for the playlist is this page's first view all the same.
+  // The status a connection opens with carries the floor of its events
+  // (`event_floor`, an id): what any status says happened at or before it
+  // happened before this connection — state to paint, never news
+  // (app-shell.js, output events). The floor is the connection's, not that
+  // message's: a newer status that supersedes it while it waits for the
+  // playlist hands it on.
   let _sseChain = Promise.resolve();
   let _statusSeq = 0;
-  let _initialOwed = false;
+  let _floorOwed = null;
   function handleStatusEvent(data) {
     // A real message means the stream is back — the pending
     // "disconnected" paint is no longer true.
     if (_disconnectPaint) { clearTimeout(_disconnectPaint); _disconnectPaint = null; }
     announceLink(true);
-    if (data.initial) _initialOwed = true;
+    if (data.event_floor != null) _floorOwed = data.event_floor;
     const seq = ++_statusSeq;
     _sseChain = _sseChain
       .then(() => processStatusEvent(data, seq))
@@ -296,9 +297,9 @@
     // on the status, so any screen can read it off window.currentStatus or
     // the np-update detail.
     data = withQueueFallback(data);
-    if (_initialOwed || data.initial) {
-      _initialOwed = false;
-      data = { ...data, initial: true };
+    if (_floorOwed != null) {
+      data = { ...data, event_floor: _floorOwed };
+      _floorOwed = null;
     }
     window.currentStatus = data;
     document.dispatchEvent(new CustomEvent('np-update', { detail: data }));

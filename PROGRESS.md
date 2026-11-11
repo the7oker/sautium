@@ -3426,7 +3426,7 @@ third, which read as the queue gaining a track. The queue itself never
 changed (no output path adds a slot); reproduced on a fake renderer in
 `tests/test_dlna_backend.py`. Now losing a renderer freezes its spot — the
 slot, and the second by the clock when it played — and its status says
-"stopped" with `resume` (Now Playing's "Stopped at … — Play resumes here");
+"stopped" with `resume` (Now Playing's "Play resumes at …", worded "Stopped at … — Play resumes here" until 2026-11-11);
 nothing it still says moves it. The play gate reads that spot
 (`PlaybackManager.spot`) before it detaches the lost instance and hands it to
 the attach (`activate(spot=)`, `resume_at(slot, position)`): an Opus stream
@@ -3472,7 +3472,7 @@ holds it paused with nothing loaded and starts there at Play (Opus by
 `?ss=`, any other by a Seek once it plays); the browser primes the tab
 that claims the output there; the built-in engine is seeded in its own
 command order and opens nothing until Play; HQPlayer, found stopped at the
-attach, keeps it as its resume spot ("Stopped at … — Play resumes here") —
+attach, keeps it as its resume spot ("Play resumes at …") —
 one found playing keeps its own place, as the attach always had it. When the
 old output played, the route then presses Play as the person would, through
 the play gate and once its locks are let go — never inside `activate`,

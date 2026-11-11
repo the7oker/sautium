@@ -28,7 +28,7 @@ from ensemble_instruments import present_instruments
 from lrclib import LrclibService
 from playback import queue as queue_mod
 from playback import sessions
-from playback.base import OutputRefused, ReorderPlan
+from playback.base import OutputRefused, ReorderPlan, new_id
 from playback.dlna_backend import AnswerRefused, read_answer
 from playback import hqp_link
 from playback.hqp_link import Building, Dropped, GaveUp, NotAnswering, through
@@ -1338,12 +1338,16 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
         meter = hqp_meter.register(tab, meter_evt, loop) if tab else None
         try:
             yield 'data: {"t": "hello"}\n\n'
-            # The connect-time status is flagged, as the notices' copy below
-            # is: what it says happened before this connection — it paints
-            # state, and an event it carries (`output_event`) is no news
+            # The connect-time status carries the floor of this connection's
+            # events (`event_floor`, an id of the kind theirs are, minted
+            # now): what a status says happened at or before it — on this
+            # one or on any later, an event gone from the status and back —
+            # happened before this connection: state for the page to paint,
+            # never news (`output_event`). The notices' copy below is flagged
+            # for the same reason
             yield ("data: "
                    + json.dumps({"t": "status",
-                                 "d": {**manager.latest_status, "initial": True}})
+                                 "d": {**manager.latest_status, "event_floor": new_id()}})
                    + "\n\n")
             last_version = manager.status_version
             # Notices travel as the whole active set, never as single
