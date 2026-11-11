@@ -425,6 +425,9 @@ async def lifespan(app: FastAPI):
     # DB on the event loop (the auth middleware runs there).
     await asyncio.to_thread(device_auth.prime)
     await asyncio.to_thread(device_auth.prepare_setup)
+    # The key this node signs with on record — or, with none, whether the
+    # database says it had one (the account setup's question)
+    await asyncio.to_thread(device_auth.record_identity_state)
 
     # Resolve the hardware profile (full/standard/lite — HARDWARE-TIERS.md).
     # Drives the pre-warm set below plus pool sizes, phantom minting and

@@ -280,29 +280,57 @@ class AnotherIdentity(Exception):
     nickname, a password changed since. Made only on the owner's word."""
 
 
-def own_seals() -> bool:
-    """Whether this node's database says it had an identity: the key its
-    launcher's last P2P run held, or any seal of its own
-    (desktop/node_identity.OWN_SEALS_SQL)."""
+# Set at start (record_identity_state): no key, while the database says this
+# node had one. It cannot change before a key is placed, which ends the
+# onboarding it is asked for in.
+_identity_missing = False
+
+
+def _record_signing_key(pubkey: str) -> None:
+    """`pubkey` as the node's signing key of record
+    (desktop/node_identity.SIGNING_KEY_SETTING)."""
+    from desktop.node_identity import SIGNING_KEY_SETTING
+    from routers.settings import _write
+    _write(SIGNING_KEY_SETTING, pubkey.lower())
+
+
+def record_identity_state() -> None:
+    """At start, after the migrations: the key this node signs with, when one
+    resolves (the identity folder's or the environment's), as its signing key
+    of record; with none, whether the database says the node had one
+    (OWN_SEALS_SQL), for the status to say once per start."""
+    global _identity_missing
+    pubkey = _expected_pubkey()
+    if pubkey is not None:
+        _record_signing_key(pubkey)
+        return
     from db_pool import db_query_one
     from desktop.node_identity import OWN_SEALS_SQL
-    return db_query_one(OWN_SEALS_SQL)["found"]
+    _identity_missing = db_query_one(OWN_SEALS_SQL)["found"]
+
+
+def identity_missing() -> bool:
+    """No identity here, while the database said at start the node had one."""
+    return _identity_missing
 
 
 def _another_identity(pubkey: str) -> bool:
     """Whether the identity `pubkey` (lower-case hex) is not the one this
-    node's database names as its own. Where the launcher's P2P ran, it names
-    the key that run held (p2p.bound_identity): only that one is this node's
-    — an older pair of the same node made the key the node then retired, and
-    its friends know the newer. Else any key that sealed records here as the
-    node's own is; with no such seal, any identity is the node's first."""
+    node's database names as its own: its signing key of record, which every
+    start with a key, the account setup and a rotation write
+    (SIGNING_KEY_SETTING). A node that lost its folder before its first start
+    on this release recorded none: then the key its launcher's last P2P run
+    held (p2p.bound_identity), else any key that sealed records here as the
+    node's own; with no such seal, any identity is the node's first."""
     from db_pool import get_conn
-    from desktop.node_identity import BOUND_IDENTITY_SQL, OWN_SEALS_BY_SQL, OWN_SEALS_SQL
+    from desktop.node_identity import (BOUND_IDENTITY_SQL, OWN_SEALS_BY_SQL, OWN_SEALS_SQL,
+                                       SIGNING_KEY_SQL)
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT {BOUND_IDENTITY_SQL}")
-        bound = cur.fetchone()[0]
-        if bound is not None:
-            return bound.lower() != pubkey
+        cur.execute(f"SELECT {SIGNING_KEY_SQL}, {BOUND_IDENTITY_SQL}")
+        recorded, bound = cur.fetchone()
+        named = recorded if recorded is not None else bound
+        if named is not None:
+            return named.lower() != pubkey
         cur.execute(OWN_SEALS_SQL)
         if not cur.fetchone()[0]:
             return False
@@ -362,11 +390,12 @@ async def create_account(username: str, password: str, setup_code: str,
     produce exactly one — its owner's, who alone reads the setup code
     (prepare_setup; WrongSetupCode, checked before anything is derived).
 
-    A node whose database says it had an identity (own_seals) has lost its
-    key: the setup brings that identity back, from the same nickname and
-    password, and refuses a pair that makes another (AnotherIdentity)
-    unless `new_identity` — the owner's word, given after he was told that
-    a new identity makes his records another author's."""
+    A node whose database says it had an identity has lost its key: the
+    setup brings that identity back, from the same nickname and password —
+    the info the folder kept of it stays — and refuses a pair that makes
+    another (AnotherIdentity) unless `new_identity`, the owner's word, given
+    after he was told that a new identity makes his records another
+    author's."""
     global _setup_code
     d = _identity_dir()
     if d is None:
@@ -435,7 +464,7 @@ async def rotate_identity(username: str, password: str, current_password: str = 
         elif not await password_tried(current_password, signed=True):
             raise WrongPassword()
         result = await _rotate_locked(d, username, password)
-    _after_rotation()
+    _after_rotation(result["info"]["public_key_hex"])
     return result["info"]
 
 
@@ -451,7 +480,7 @@ async def _rotate_locked(d, username: str, password: str) -> dict:
         _rotate, d, username, password or secrets.token_urlsafe(32), not password)
 
 
-def _after_rotation() -> None:
+def _after_rotation(pubkey: str) -> None:
     import p2p_chat
     import p2p_identity
     from db_pool import db_execute
@@ -459,6 +488,7 @@ def _after_rotation() -> None:
     p2p_identity.forget_cached()
     p2p_router.forget_identity()
     p2p_chat.forget_service()
+    _record_signing_key(pubkey)
     # The Worker's invite code → mailbox mapping named the old code.
     db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
     # Tokens are bound to the public key, so every paired browser is out
@@ -469,16 +499,16 @@ def _after_rotation() -> None:
 
 def _write_identity(d, username: str, password: str, new_identity: bool = False) -> dict:
     import json
-    import os
-    import stat
 
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+    from desktop.node_identity import place_key, pubkey_on_disk
     from p2p_identity import derive_identity, derive_private_key
 
     info = derive_identity(username, password)          # validates the name
-    if not new_identity and _another_identity(info["public_key_hex"]):
+    pubkey = info["public_key_hex"]
+    if not new_identity and _another_identity(pubkey):
         raise AnotherIdentity()
     # Said, not left to account_anonymous's reading of the name's shape: the
     # owner chose this password, whatever the nickname looks like
@@ -486,28 +516,38 @@ def _write_identity(d, username: str, password: str, new_identity: bool = False)
     key: Ed25519PrivateKey = derive_private_key(username, password)
 
     d.mkdir(parents=True, exist_ok=True)
-    key_path = d / "node_ed25519.key"
-    # O_EXCL, not "check then write": an identity already on disk must never
-    # be overwritten, and the filesystem enforces that even against a second
-    # process that never saw our lock. A half-written node_info.json would
-    # slip past account_configured(), but the key file still exists — and
-    # overwriting it would silently change who this node is.
     try:
-        fd = os.open(key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        raise AccountExists()
-    with os.fdopen(fd, "wb") as f:
-        f.write(key.private_bytes(
+        left = json.loads((d / "node_info.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        left = None
+    except ValueError:
+        left = {}                       # unreadable: moved aside like another identity's
+    # Only the key was lost: the info names this identity, with what the
+    # pair does not derive — the keys it retired, its email — and stays
+    kept = left is not None and str(left.get("public_key_hex", "")).lower() == pubkey
+    # On record before it is placed: a key placed and not on record would,
+    # lost before the next start, have its own pair refused
+    _record_signing_key(pubkey)
+    # Placed, never over a key: an identity already on disk must never be
+    # overwritten, and the filesystem enforces that even against a second
+    # process that never saw our lock (place_key). A half-written
+    # node_info.json would slip past account_configured(), but the key file
+    # still exists — and overwriting it would silently change who this node is.
+    try:
+        place_key(d, key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()))
-    try:
-        os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
+            encryption_algorithm=serialization.NoEncryption()), keep_info=kept)
+    except FileExistsError:
+        _record_signing_key(pubkey_on_disk(d))   # the key that landed is the one on record
+        raise AccountExists()
     (d / "node_ed25519.pub").write_bytes(key.public_key().public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo))
+    if kept:
+        logger.info("identity brought back: %s (invite %s), its info kept",
+                    left.get("username"), left.get("invite_code"))
+        return left
     (d / "node_info.json").write_text(json.dumps(info, indent=2),
                                       encoding="utf-8")
     logger.info("account created: %s (invite %s)",

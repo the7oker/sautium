@@ -325,10 +325,12 @@
     "author's. If the node started on this version of Sautium while it still had its identity, " +
     "they stay as they are, under that identity's signatures, and what is analysed or changed " +
     "from now on is signed with the new one. If the identity went before that, the next start " +
-    "deletes the features and instruments it signed — analysed again where the music file is " +
-    "here; a streamed track's come back only if a pull from the network brings them back — and of " +
-    "its embeddings keeps the ones it signed whole, as another author's, and deletes the ones " +
-    "mixed with unsigned parts, analysed again where the file is here.";
+    "deletes the features and instruments it signed, and those of its embeddings mixed with " +
+    "unsigned parts; the embeddings it signed whole stay, as another author's. What is deleted " +
+    "is analysed again where the music file is here (instruments only where “Recognise " +
+    "instruments” is on, which a lite machine's default is not); a streamed track's on its " +
+    "next full stream where one is still to be had (a provider of your own, or its one demo " +
+    "listen not yet spent), and otherwise only if a pull from the network brings them back.";
   // Only a 401 says the password or the code was wrong; a 429 is the door
   // shut by wrong passwords, its wait named; anything else is the exchange
   // that did not finish, said as such.
@@ -593,8 +595,17 @@
     // no identity is met only when an account is being created ("Set it up").
     function askNodeChanged(err, onAccept) {
       const unset = !err.seen;
-      title.textContent = unset ? "A node that is not set up" : "A different node";
-      msg.textContent = unset
+      // The node answering with no identity is the one whose identity the
+      // form brings back, as far as it can tell
+      const restoring = unset && mode === "restore";
+      title.textContent = restoring ? "This node's identity is missing"
+        : unset ? "A node that is not set up" : "A different node";
+      msg.textContent = restoring
+        ? "This node presents no identity: its identity is missing, as the form says. This " +
+          "browser signed in to a node at this address before. If that was this node, go on " +
+          "and bring its identity back. If it was not, stop: something else is answering on " +
+          "this network."
+        : unset
         ? "This node presents no identity — it is not set up yet. This browser " +
           "signed in to another node at this address before. If you are setting " +
           "this node up again, set it up. If you are not, stop: something else is " +
@@ -606,7 +617,8 @@
       fields.hidden = true;
       formActions.hidden = true;
       nodeActions.hidden = false;
-      overlay.querySelector("#auth-gate-accept").textContent = unset ? "Set it up" : "Continue";
+      overlay.querySelector("#auth-gate-accept").textContent =
+        restoring ? "Bring it back" : unset ? "Set it up" : "Continue";
       overlay.querySelector("#auth-gate-stop").onclick = () => showForm();
       overlay.querySelector("#auth-gate-accept").onclick = () => {
         window.Sautium.auth.acceptNode(err.seen);

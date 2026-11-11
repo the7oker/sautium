@@ -295,6 +295,8 @@ def rotations(doors, tmp_path, monkeypatch):
     monkeypatch.setattr(db_pool, "db_execute", lambda *a, **k: None)
     monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
+    recorded = []
+    monkeypatch.setattr(device_auth, "_record_signing_key", recorded.append)
     asked = []
 
     async def verify(password, **kw):
@@ -306,7 +308,7 @@ def rotations(doors, tmp_path, monkeypatch):
     def change(**payload):
         return doors.post("/api/auth/change-identity",
                           json=_seal(doors.get("/api/auth/handshake").json(), payload))
-    change.asked = asked
+    change.asked, change.recorded = asked, recorded
     return change, done
 
 
@@ -334,6 +336,7 @@ def test_a_docker_account_says_it_has_a_password(tmp_path, monkeypatch):
     pytest.importorskip("cryptography")
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
     monkeypatch.setattr(device_auth, "_another_identity", lambda _pubkey: False)   # no records here
+    monkeypatch.setattr(device_auth, "_record_signing_key", lambda _pubkey: None)
     info = device_auth._write_identity(tmp_path, "anonymous-1a2b", "a chosen password")
     assert info["anonymous"] is False
     assert json.loads((tmp_path / "node_info.json").read_text())["anonymous"] is False
@@ -399,6 +402,7 @@ def test_the_change_asks_its_derivation_as_a_signed_caller(rotations, monkeypatc
     assert change(username="second", password="new password",
                   current_password="the right one").status_code == 200
     assert change.asked == [True]
+    assert change.recorded == ["cd" * 32]              # the new key, the node's on record
 
 
 def test_an_identity_from_the_environment_is_changed_there_before_any_password_is_derived(
@@ -895,21 +899,27 @@ def test_the_change_sheet_says_how_long_a_shut_door_waits():
 @pytest.fixture
 def lost_key(fresh_node, scratch_dsn, monkeypatch):
     """`fresh_node` on a database of its own, its setup code written, the
-    derivation at a test's cost (the same pair → key map). Yields
-    (signed_by(key, imported=False), bound(key), code): a features record
-    sealed by `key`, and the key the launcher's last P2P run held."""
+    derivation at a test's cost (the same pair → key map). Its `signed_by(key,
+    imported=False)` adds a features record sealed by `key`; `bound(key)` and
+    `recorded(key)` set the key the launcher's last P2P run held and the
+    node's signing key of record; `record()` reads the latter back."""
+    import types
+
     import db_pool
     import psycopg2
     import psycopg2.pool
+    from desktop import node_identity
     monkeypatch.setattr(p2p_identity, "ARGON2_TIME_COST", 1)
     monkeypatch.setattr(p2p_identity, "ARGON2_MEMORY_COST", 8 * 1024)
+    monkeypatch.setattr(device_auth, "_identity_missing", False)
     pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
     monkeypatch.setattr(db_pool, "_pool", pool)
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute("TRUNCATE tracks CASCADE")
-        cur.execute("DELETE FROM user_settings WHERE key = 'p2p.bound_identity'")
+        cur.execute("DELETE FROM user_settings WHERE key IN ('p2p.bound_identity', "
+                    "'identity.signing_key')")
 
     def signed_by(key, imported=False):
         track = str(uuid.uuid4())
@@ -921,13 +931,21 @@ def lost_key(fresh_node, scratch_dsn, monkeypatch):
                                                        signature)
                            VALUES (%s, 99.0, %s, %s, %s)""", (track, cur.fetchone()[0], key, "5e" * 64))
 
-    def bound(key):
+    def setting(name, key):
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO user_settings (key, value) VALUES ('p2p.bound_identity', %s)",
-                        (json.dumps(key),))
+            cur.execute("""INSERT INTO user_settings (key, value) VALUES (%s, %s)
+                           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                        (name, json.dumps(key)))
+
+    def record():
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {node_identity.SIGNING_KEY_SQL}")
+            return cur.fetchone()[0]
 
     device_auth.prepare_setup()
-    yield signed_by, bound, device_auth._setup_code
+    yield types.SimpleNamespace(signed_by=signed_by, bound=lambda key: setting("p2p.bound_identity", key),
+                                recorded=lambda key: setting("identity.signing_key", key),
+                                record=record, code=device_auth._setup_code, conn=conn)
     conn.close()
     pool.closeall()
 
@@ -936,62 +954,158 @@ def _key_of(username, password):
     return p2p_identity.derive_identity(username, password)["public_key_hex"]
 
 
+def _bring_back(node, username, password, **kw):
+    return asyncio.run(device_auth.create_account(username, password, node.code, **kw))
+
+
 def test_the_setup_of_a_node_that_lost_its_key_takes_only_the_pair_that_signed_its_records(
         lost_key, fresh_node):
-    """A typo and another nickname are refused, nothing written and the code
-    kept; the pair that signed the records brings that identity back."""
-    signed_by, _bound, code = lost_key
+    """No signing key on record (lost before its first start on this
+    release): a typo and another nickname are refused, nothing written and
+    the code kept; the pair that signed the records brings that identity
+    back, and is on record."""
     own = _key_of("owner", "the right one")
-    signed_by(own)
-    signed_by("cd" * 32, imported=True)
+    lost_key.signed_by(own)
+    lost_key.signed_by("cd" * 32, imported=True)
     for username, password in (("owner", "the wrong one"), ("other", "the right one")):
         with pytest.raises(device_auth.AnotherIdentity):
-            asyncio.run(device_auth.create_account(username, password, code))
+            _bring_back(lost_key, username, password)
         assert not (fresh_node / "node_ed25519.key").exists()
         assert (fresh_node / device_auth.SETUP_CODE_FILE).exists()
-    info = asyncio.run(device_auth.create_account("owner", "the right one", code))
+    info = _bring_back(lost_key, "owner", "the right one")
     assert info["public_key_hex"] == own and (fresh_node / "node_ed25519.key").exists()
+    assert lost_key.record() == own
 
 
 def test_another_identity_over_its_records_is_made_on_the_owners_word(lost_key, fresh_node):
-    signed_by, _bound, code = lost_key
-    signed_by(_key_of("owner", "the right one"))
-    info = asyncio.run(device_auth.create_account("other", "a new password", code, new_identity=True))
+    lost_key.signed_by(_key_of("owner", "the right one"))
+    info = _bring_back(lost_key, "other", "a new password", new_identity=True)
     assert info["username"] == "other" and info["public_key_hex"] == _key_of("other", "a new password")
+    assert lost_key.record() == info["public_key_hex"]
 
 
 def test_with_no_seal_of_its_own_any_pair_is_the_nodes_first(lost_key, fresh_node):
-    signed_by, _bound, code = lost_key
-    signed_by("cd" * 32, imported=True)                # another author's, imported
-    info = asyncio.run(device_auth.create_account("anyone", "a password", code))
-    assert info["username"] == "anyone"
+    lost_key.signed_by("cd" * 32, imported=True)       # another author's, imported
+    assert _bring_back(lost_key, "anyone", "a password")["username"] == "anyone"
 
 
 def test_where_its_p2p_ran_only_the_key_that_run_held_is_the_nodes(lost_key, fresh_node):
-    """An older pair of the same node signed records here too, and made the
-    key the node retired: the key its last P2P run held is the one."""
-    signed_by, bound, code = lost_key
+    """No key on record: an older pair of the same node signed records here
+    too, and made the key the node retired; the key its last P2P run held is
+    the one."""
     old, new = _key_of("owner", "the old one"), _key_of("owner", "the new one")
-    signed_by(old)
-    signed_by(new)
-    bound(new)
+    lost_key.signed_by(old)
+    lost_key.signed_by(new)
+    lost_key.bound(new)
     with pytest.raises(device_auth.AnotherIdentity):
-        asyncio.run(device_auth.create_account("owner", "the old one", code))
-    info = asyncio.run(device_auth.create_account("owner", "the new one", code))
-    assert info["public_key_hex"] == new
+        _bring_back(lost_key, "owner", "the old one")
+    assert _bring_back(lost_key, "owner", "the new one")["public_key_hex"] == new
 
 
-def test_the_status_says_the_identity_is_missing_and_the_door_names_another(lost_key, fresh_node,
-                                                                              doors):
-    signed_by, _bound, code = lost_key
+@pytest.mark.parametrize("bound", ["old", None])
+def test_the_signing_key_of_record_is_the_one_the_setup_takes_back(lost_key, fresh_node, bound):
+    """A rotation while the launcher's P2P was down left its last key bound;
+    a Docker node binds none, and an older pair of the same node sealed
+    records too: the key on record is the one, the older pair refused."""
+    old, new = _key_of("owner", "the old one"), _key_of("owner", "the new one")
+    lost_key.signed_by(old)
+    lost_key.signed_by(new)
+    if bound:
+        lost_key.bound(old)
+    lost_key.recorded(new)
+    with pytest.raises(device_auth.AnotherIdentity):
+        _bring_back(lost_key, "owner", "the old one")
+    assert _bring_back(lost_key, "owner", "the new one")["public_key_hex"] == new
+
+
+def test_a_new_identity_on_record_is_the_only_one_a_second_loss_takes_back(lost_key, fresh_node):
+    """The launcher's new identity (a random key no pair derives) or the
+    setup's new_identity went on record: the account it replaced is refused."""
+    replaced = _key_of("owner", "the right one")
+    lost_key.signed_by(replaced)
+    lost_key.bound(replaced)
+    lost_key.recorded("ef" * 32)                       # the launcher's random key, lost too
+    with pytest.raises(device_auth.AnotherIdentity):
+        _bring_back(lost_key, "owner", "the right one")
+    made = _bring_back(lost_key, "second", "a new password", new_identity=True)["public_key_hex"]
+    (fresh_node / "node_ed25519.key").unlink()          # lost again, before any start
+    (fresh_node / "node_info.json").unlink()
+    device_auth.prepare_setup()
+    lost_key.code = device_auth._setup_code
+    with pytest.raises(device_auth.AnotherIdentity):
+        _bring_back(lost_key, "owner", "the right one")
+    assert _bring_back(lost_key, "second", "a new password")["public_key_hex"] == made
+
+
+def test_the_same_pair_over_the_info_left_keeps_it(lost_key, fresh_node):
+    """Only the key was lost: node_info.json still names the identity and
+    the one it retired, with its email. The same pair brings back the key
+    and keeps that info — the retired key stays the node's own for the
+    cutover, its email verified."""
+    from desktop.p2p import witness
+    current, retired = _key_of("owner", "the new one"), _key_of("owner", "the old one")
+    lost_key.signed_by(current)
+    lost_key.signed_by(retired)
+    lost_key.recorded(current)
+    left = {"node_id": current, "public_key_hex": current, "algorithm": "Ed25519",
+            "username": "owner", "invite_code": "owner#AAAA-BBBB-CCCC", "email": "o@example.org",
+            "email_verified": True, "anonymous": False,
+            "previous": [{"public_key_hex": retired, "username": "owner", "invite_code": "x",
+                          "retired_at": "2026-10-01T00:00:00Z",
+                          "dir": "20261001T000000Z-" + retired[:12]}]}
+    (fresh_node / "node_info.json").write_text(json.dumps(left))
+    info = _bring_back(lost_key, "owner", "the new one")
+    assert info == left and json.loads((fresh_node / "node_info.json").read_text()) == left
+    assert witness.own_keys(current, fresh_node) == {current, retired}
+    assert list(fresh_node.glob("replaced-*")) == []
+
+
+def test_another_identity_over_the_info_left_moves_it_aside(lost_key, fresh_node):
+    lost_key.recorded(_key_of("owner", "the right one"))
+    left = {"node_id": "11" * 32, "public_key_hex": "11" * 32, "username": "owner"}
+    (fresh_node / "node_info.json").write_text(json.dumps(left))
+    info = _bring_back(lost_key, "other", "a new password", new_identity=True)
+    assert json.loads((fresh_node / "node_info.json").read_text())["username"] == "other"
+    [aside] = fresh_node.glob("replaced-*")
+    assert json.loads((aside / "node_info.json").read_text()) == left
+    assert info["username"] == "other"
+
+
+def test_a_start_puts_its_key_on_record_or_says_once_that_the_identity_is_missing(
+        lost_key, fresh_node, doors, monkeypatch):
+    """The status reads what the start found, without asking the database."""
+    import db_pool
     assert doors.get("/api/auth/status").json()["identity_missing"] is False
-    signed_by(_key_of("owner", "the right one"))
-    status = doors.get("/api/auth/status").json()
-    assert status["onboarding"] is True and status["identity_missing"] is True
+    lost_key.signed_by(_key_of("owner", "the right one"))
+    device_auth.record_identity_state()
+    assert lost_key.record() is None
+    real = db_pool.get_conn
+
+    def no_database():
+        raise AssertionError("the status asked the database")
+    monkeypatch.setattr(db_pool, "get_conn", no_database)
+    for _ in range(2):
+        status = doors.get("/api/auth/status").json()
+        assert status["onboarding"] is True and status["identity_missing"] is True
+    monkeypatch.setattr(db_pool, "get_conn", real)
+    monkeypatch.setattr(device_auth, "_expected_pubkey", lambda: "ab" * 32)    # a key resolves
+    device_auth.record_identity_state()
+    assert lost_key.record() == "ab" * 32
+
+
+def test_the_door_names_another_identity(lost_key, fresh_node, doors):
+    lost_key.signed_by(_key_of("owner", "the right one"))
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
-        "username": "owner", "password": "the wrong one", "setup_code": code}))
+        "username": "owner", "password": "the wrong one", "setup_code": lost_key.code}))
     assert r.status_code == 409 and r.headers["x-sautium-auth-error"] == "another-identity"
     assert not (fresh_node / "node_ed25519.key").exists()
+
+
+def test_the_signing_key_of_record_stays_out_of_the_life_merge():
+    """A merged backup's settings never name the key this node signs with."""
+    import life_merge
+    from desktop.node_identity import SIGNING_KEY_SETTING
+    assert SIGNING_KEY_SETTING not in life_merge.SETTINGS_ALLOWLIST
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -1031,7 +1145,7 @@ function el(tag) {
 const ctx = {
   window: { addEventListener() {}, dispatchEvent() {},
             confirmDestructive: async (o) => { confirms.push(o); return cfg.confirm; } },
-  localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+  localStorage: { getItem: (k) => (cfg.store || {})[k] ?? null, setItem() {}, removeItem() {} },
   location: { origin: 'http://node.test', hash: '', pathname: '/', search: '',
               reload() { reloaded = true; } },
   document: { readyState: 'loading', addEventListener() {}, getElementById: () => null,
@@ -1081,16 +1195,18 @@ setTimeout(async () => {
   await made['auth-gate-submit'].listeners.click();
   process.stdout.write(JSON.stringify({ title, msg, button, sent, reloaded,
                                         confirms: confirms.map((o) => ({ ...o })),
-                                        after: made['auth-gate-msg'].textContent }));
+                                        after: made['auth-gate-msg'].textContent,
+                                        after_title: made['.confirm-title'].textContent,
+                                        accept: (made['auth-gate-accept'] || {}).textContent }));
 }, 50);
 """
 
 
-def _restore_gate(status, confirm):
+def _restore_gate(status, confirm, store=None):
     static = ROOT / "backend" / "static"
     proc = subprocess.run(["node", "-e", _RESTORE_GATE, "--", str(static / "vendor" / "nacl-fast.min.js"),
                            str(static / "sha256.js"), str(static / "auth.js"),
-                           json.dumps({"status": status, "confirm": confirm})],
+                           json.dumps({"status": status, "confirm": confirm, "store": store or {}})],
                           capture_output=True, check=True, timeout=30)
     return json.loads(proc.stdout)
 
@@ -1114,3 +1230,15 @@ def test_the_gate_brings_an_identity_back_and_makes_another_only_after_saying_wh
     assert "docker logs" in out["msg"]
     assert [body["new_identity"] for body in out["sent"]] == [False, True]
     assert {body["username"] for body in out["sent"]} == {"owner"} and out["reloaded"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_browser_that_knew_a_node_here_is_asked_in_the_words_of_bringing_it_back():
+    """In the restore form the node answering with no identity is the one
+    whose identity is missing: the question says so, and its way on is
+    bringing it back; nothing is sent before the answer."""
+    out = _restore_gate({**_MISSING, "pin_door": True}, confirm=False,
+                        store={"sautium.node_pubkey": "cd" * 32})
+    assert out["sent"] == [] and out["confirms"] == []
+    assert out["after_title"] == "This node's identity is missing" and out["accept"] == "Bring it back"
+    assert "its identity is missing, as the form says" in out["after"]

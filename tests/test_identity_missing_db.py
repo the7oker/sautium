@@ -39,7 +39,8 @@ def conn(scratch_dsn):
     c.autocommit = True
     with c.cursor() as cur:
         cur.execute("TRUNCATE tracks, albums, embedding_models CASCADE")
-        cur.execute("DELETE FROM user_settings WHERE key = 'p2p.bound_identity'")
+        cur.execute("DELETE FROM user_settings WHERE key IN ('p2p.bound_identity', "
+                    "'identity.signing_key')")
         cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)",
                     (MODEL,))
     yield c
@@ -98,6 +99,10 @@ def _canon(cur, kind, imported=False) -> None:
 UNREACHABLE = "postgresql://nobody:none@127.0.0.1:1/none"
 
 
+def _key_on_disk(folder) -> str:
+    return json.loads((folder / "node_info.json").read_text())["public_key_hex"]
+
+
 def test_the_identity_on_disk_is_the_one_a_start_takes(conn, scratch_dsn, folder):
     with conn.cursor() as cur:
         _record(cur, "features", _source(cur, _track(cur)), SEAL)
@@ -107,10 +112,11 @@ def test_the_identity_on_disk_is_the_one_a_start_takes(conn, scratch_dsn, folder
     assert node_identity.ensure_identity(UNREACHABLE) == "present"   # the database is not read
 
 
-def test_a_key_without_its_info_is_the_identity(conn, scratch_dsn, folder):
+def test_a_key_without_its_info_is_the_identity_and_gets_the_info_again(conn, scratch_dsn, folder):
     """Presence is the key's: one left without node_info.json is kept, never
-    written over, whatever the database holds."""
-    node_identity.generate_identity()
+    written over, whatever the database holds — and gets the info a random
+    identity has, from the key, so P2P runs on its node id."""
+    node = node_identity.generate_identity()
     (folder / "node_info.json").unlink()
     key = (folder / "node_ed25519.key").read_bytes()
     for _ in range(2):
@@ -118,7 +124,9 @@ def test_a_key_without_its_info_is_the_identity(conn, scratch_dsn, folder):
     with pytest.raises(FileExistsError):
         node_identity.generate_identity()
     assert (folder / "node_ed25519.key").read_bytes() == key
-    assert not (folder / "node_info.json").exists()
+    assert json.loads((folder / "node_info.json").read_text()) == {
+        "node_id": node, "public_key_hex": node, "algorithm": "Ed25519"}
+    assert node_identity.get_node_id() == node and node_identity.get_account_info() is None
 
 
 def test_no_identity_over_no_seal_of_this_nodes_own_gets_a_new_one(conn, scratch_dsn, folder):
@@ -135,9 +143,11 @@ def test_no_identity_over_no_seal_of_this_nodes_own_gets_a_new_one(conn, scratch
     (folder / "node_info.json").write_text('{"username": "gone"}')
     assert node_identity.ensure_identity(scratch_dsn) == "minted"
     assert (folder / "node_ed25519.key").exists()
-    assert "username" not in json.loads((folder / "node_info.json").read_text())
+    info = json.loads((folder / "node_info.json").read_text())
+    assert "username" not in info and _recorded(conn) == info["public_key_hex"]
     [aside] = folder.glob("replaced-*")
     assert json.loads((aside / "node_info.json").read_text()) == {"username": "gone"}
+    assert [p.name for p in folder.iterdir() if p.name.startswith(".")] == []   # no key left half-named
 
 
 @pytest.mark.parametrize("kind", ["segments", "features", "instruments"])
@@ -192,6 +202,19 @@ def test_a_witness_statement_of_its_own_says_the_node_had_an_identity(conn):
         conn.autocommit = True
 
 
+def _recorded(conn):
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT {node_identity.SIGNING_KEY_SQL}")
+        return cur.fetchone()[0]
+
+
+def test_a_signing_key_of_record_says_the_node_had_an_identity(conn, scratch_dsn, folder):
+    with conn.cursor() as cur:
+        cur.execute(node_identity.RECORD_SIGNING_KEY_SQL, {"key": json.dumps("cd" * 32)})
+    assert node_identity.ensure_identity(scratch_dsn) == "missing"
+    assert not (folder / "node_ed25519.key").exists()
+
+
 def test_the_key_its_last_p2p_run_held_says_the_node_had_an_identity(conn, scratch_dsn, folder):
     with conn.cursor() as cur:
         cur.execute("INSERT INTO user_settings (key, value) VALUES ('p2p.bound_identity', %s)",
@@ -206,9 +229,15 @@ def test_a_key_that_lands_between_the_check_and_the_mint_stays(conn, scratch_dsn
     start's mint refuses to write over it, and the start takes it."""
     node_identity.generate_identity()
     key = (folder / "node_ed25519.key").read_bytes()
-    monkeypatch.setattr(node_identity, "has_identity", lambda: False)   # read before it landed
+    real, reads = node_identity.has_identity, []
+
+    def read_before_it_landed():
+        reads.append(1)
+        return real() if len(reads) > 1 else False
+    monkeypatch.setattr(node_identity, "has_identity", read_before_it_landed)
     assert node_identity.ensure_identity(scratch_dsn) == "present"
     assert (folder / "node_ed25519.key").read_bytes() == key
+    assert _recorded(conn) == _key_on_disk(folder)       # the key that landed is the one on record
 
 
 def test_a_database_that_cannot_be_read_decides_nothing(folder):
@@ -232,7 +261,7 @@ class _Launcher:
         self.settling = node_identity.IdentitySettling(
             lambda: dsn, self.threads.append, self.queue.append, lambda: self.closing,
             ready=lambda: self.said.append("ready"),
-            missing=lambda first: self.said.append(("missing", first)),
+            missing=lambda: self.said.append("missing"),
             unsettled=lambda e: self.said.append(("unsettled", type(e).__name__)),
             failed=lambda e: self.said.append(("failed", type(e).__name__)))
 
@@ -253,14 +282,14 @@ def test_a_backend_start_while_the_owners_choice_is_made_checks_nothing(conn, sc
     assert node.settling.check()
     node.thread()
     node.drain()
-    assert node.said == [("missing", True)]
+    assert node.said == ["missing"]
     assert node.settling.make_new()                    # the owner's click
     assert not node.settling.check()                   # the restart, meanwhile
     node.thread()
     assert node.threads == []
     key = (folder / "node_ed25519.key").read_bytes()
     node.drain()
-    assert node.said == [("missing", True), "ready"]
+    assert node.said == ["missing", "ready"] and _recorded(conn) == _key_on_disk(folder)
     assert node.settling.check()                       # the next start's, after it
     node.thread()
     node.drain()
@@ -278,7 +307,7 @@ def test_the_owners_choice_is_refused_while_a_check_runs(conn, scratch_dsn, fold
     assert not node.settling.make_new()
     node.thread()
     node.drain()
-    assert node.said == [("missing", True), ("missing", False)]   # asked once a start
+    assert node.said == ["missing", "missing"]
     assert not (folder / "node_ed25519.key").exists()
     assert node.settling.make_new()                    # tried again, once the check is over
     node.thread()
@@ -299,6 +328,7 @@ def test_a_choice_made_after_the_identity_came_back_keeps_it(conn, scratch_dsn, 
     node.thread()
     node.drain()
     assert node.said[-1] == "ready" and (folder / "node_ed25519.key").read_bytes() == key
+    assert _recorded(conn) == _key_on_disk(folder)       # the key back is the one on record
 
 
 def test_a_completion_while_the_launcher_quits_calls_nothing(conn, scratch_dsn, folder):
@@ -337,7 +367,7 @@ def test_a_new_identity_that_could_not_be_made_is_said_and_can_be_chosen_again(
         conn, scratch_dsn, folder, monkeypatch):
     real = node_identity.generate_identity
 
-    def full_disk():
+    def full_disk(_dsn=None):
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(node_identity, "generate_identity", full_disk)
     node = _Launcher(scratch_dsn)
@@ -352,9 +382,68 @@ def test_a_new_identity_that_could_not_be_made_is_said_and_can_be_chosen_again(
     assert node.said[-1] == "ready" and (folder / "node_ed25519.key").exists()
 
 
-def test_a_key_whose_info_cannot_be_moved_aside_is_taken_back(folder, monkeypatch):
+def test_the_owners_new_identity_is_on_record_before_it_is_placed(conn, scratch_dsn, folder):
+    node = _Launcher(UNREACHABLE)                      # the database away: nothing is placed
+    node.settling.make_new()
+    node.thread()
+    node.drain()
+    assert node.said == [("failed", "OperationalError")] and not (folder / "node_ed25519.key").exists()
+    node = _Launcher(scratch_dsn)
+    node.settling.make_new()
+    node.thread()
+    node.drain()
+    assert node.said == ["ready"] and _recorded(conn) == _key_on_disk(folder)
+
+
+def test_a_crash_before_the_key_is_linked_leaves_no_key_beside_another_identitys_info(
+        folder, monkeypatch):
+    """The key is written under a temporary name and linked into place after
+    the info of the identity that is gone was moved: a crash between leaves
+    that info aside and no key, never the two together."""
+    folder.mkdir(parents=True)
+    (folder / "node_info.json").write_text('{"username": "gone"}')
+
+    def power_cut(*_a):
+        raise SystemExit("power cut")
+    monkeypatch.setattr(node_identity, "_link_exclusive", power_cut)
+    with pytest.raises(SystemExit):
+        node_identity.generate_identity()
+    assert not (folder / "node_ed25519.key").exists() and not (folder / "node_info.json").exists()
+    [aside] = folder.glob("replaced-*")
+    assert json.loads((aside / "node_info.json").read_text()) == {"username": "gone"}
+
+
+def test_a_key_that_lands_before_the_link_is_kept_and_the_info_goes_back(folder, monkeypatch):
+    folder.mkdir(parents=True)
+    (folder / "node_info.json").write_text('{"username": "gone"}')
+    real = node_identity._link_exclusive
+
+    def another_writer_first(tmp, key, pem):
+        key.write_bytes(b"the key that landed")
+        real(tmp, key, pem)
+    monkeypatch.setattr(node_identity, "_link_exclusive", another_writer_first)
+    with pytest.raises(FileExistsError):
+        node_identity.generate_identity()
+    assert (folder / "node_ed25519.key").read_bytes() == b"the key that landed"
+    assert json.loads((folder / "node_info.json").read_text()) == {"username": "gone"}
+    assert list(folder.glob("replaced-*")) == []
+    assert [p.name for p in folder.iterdir() if p.name.startswith(".")] == []
+
+
+def test_a_filesystem_without_hard_links_gets_the_key_created_exclusively(folder, monkeypatch):
+    def no_links(_src, _dst):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(node_identity.os, "link", no_links)
+    node = node_identity.generate_identity()
+    assert node_identity.has_identity() and _key_on_disk(folder) == node
+    with pytest.raises(FileExistsError):
+        node_identity.generate_identity()
+    assert _key_on_disk(folder) == node
+
+
+def test_a_key_whose_info_cannot_be_moved_aside_is_not_placed(folder, monkeypatch):
     """Beside a new key the old info would name the identity that is gone:
-    when it cannot be moved, the new key goes and the old info stays."""
+    when it cannot be moved, no key is placed and the old info stays."""
     folder.mkdir(parents=True)
     (folder / "node_info.json").write_text('{"username": "gone"}')
 
@@ -447,7 +536,7 @@ def _launcher(dsn):
             setattr(app, node.name, types.MethodType(ns[node.name], app))
     assert all(hasattr(app, name) for name in _NOTICE_METHODS)
     app.words = ns
-    app._shutting_down = app._node_down = app._p2p_starting = False
+    app._shutting_down = app._node_down = app._p2p_starting = app._identity_asked = False
     app.p2p_manager = app._identity_notice = None
     app._status_dot, app._progress_text = _Widget(), _Widget()
     app._status_text = _Widget(text="All services running")
@@ -516,6 +605,12 @@ def test_a_check_that_could_not_read_the_database_leaves_the_notice_and_its_choi
     app.dsn = UNREACHABLE                              # a restart's check, the database away
     _checked(node)
     assert app._status_text.cget("text") == app.words["IDENTITY_UNCHECKED_STATUS"] and notice.alive
+    notice.make.options["command"]()                   # nothing is made off the record
+    node.thread()
+    node.drain()
+    assert "could not be made" in notice.caption.cget("text") and app.p2p_starts == 0
+    assert not (folder / "node_ed25519.key").exists()
+    app.dsn = scratch_dsn                              # the database back
     notice.make.options["command"]()
     node.thread()
     node.drain()
@@ -524,7 +619,7 @@ def test_a_check_that_could_not_read_the_database_leaves_the_notice_and_its_choi
 
 def test_the_launcher_says_a_new_identity_that_could_not_be_made_in_the_notice(
         conn, scratch_dsn, folder, monkeypatch):
-    def full_disk():
+    def full_disk(_dsn=None):
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(node_identity, "generate_identity", full_disk)
     with conn.cursor() as cur:
@@ -540,6 +635,37 @@ def test_the_launcher_says_a_new_identity_that_could_not_be_made_in_the_notice(
     assert again is not None and again is not notice
     assert "No space left on device" in again.caption.cget("text")
     assert again.make.cget("state") == "normal" and app.p2p_starts == 0
+
+
+def test_a_check_that_lands_while_the_services_are_down_leaves_their_line_and_starts_nothing(
+        conn, scratch_dsn, folder):
+    with conn.cursor() as cur:
+        _record(cur, "features", _source(cur, _track(cur)), SEAL)
+    app, node = _launcher(scratch_dsn)
+    down = "Backend crashed — restarting..."
+    assert node.settling.check()
+    node.thread()
+    app._node_down = True                              # the backend went down meanwhile
+    app._status_text.configure(text=down)
+    node.drain()
+    assert app._identity_notice is None and not app._identity_asked
+    assert app._status_text.cget("text") == down
+    app._node_down = False                             # their next start asks
+    app._status_text.configure(text="All services running")
+    _checked(node)
+    notice = app._identity_notice
+    assert notice is not None and app._identity_asked
+    node_identity.generate_identity()                  # the folder put back
+    assert node.settling.check()
+    node.thread()
+    app._node_down = True
+    app._status_text.configure(text=down)
+    node.drain()
+    assert app.p2p_starts == 0 and app._status_text.cget("text") == down and not notice.alive
+    app._node_down = False
+    app._status_text.configure(text="All services running")
+    _checked(node)
+    assert app.p2p_starts == 1
 
 
 def test_the_launcher_quitting_shows_nothing_and_starts_nothing(conn, scratch_dsn, folder):

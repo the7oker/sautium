@@ -318,11 +318,13 @@ implementation details live in the code, DB and git history.
   whose identity folder held none made a new one at its start, silently —
   and the database's seals were the lost identity's: its next start's
   cutover would have taken the node's own records for another author's. The
-  identity is the key file (`node_identity.has_identity`): a start that finds
-  none reads the database first (`ensure_identity`, `OWN_SEALS_SQL` — the key
-  the launcher's last P2P run held, `p2p.bound_identity`, or any seal of the
-  node's own: its analysis, the arms the records' cutover fails closed on,
-  its canon rows, its witness statements). With none of that it makes one as
+  identity is the key file (`node_identity.has_identity`; a key left without
+  its info gets the info again from the key): a start that finds none reads
+  the database first (`ensure_identity`, `OWN_SEALS_SQL` — the node's
+  signing key of record, the key the launcher's last P2P run held,
+  `p2p.bound_identity`, or any seal of the node's own: its analysis, the arms
+  the records' cutover fails closed on, its canon rows, its witness
+  statements). With none of that it makes one as
   before; with any it makes none, P2P stays off, the status line says so,
   and the window says once a start how to bring the identity back (the
   folder from a copy; the same nickname and password at the web interface's
@@ -333,22 +335,35 @@ implementation details live in the code, DB and git history.
   and offers a new identity on the owner's choice. That one is random,
   without a nickname: browsers reach it only through Open Web UI or a QR
   code, and chat, friends, the invite code, support requests and backups are
-  off with it. The web interface's account setup on such a node brings the
-  identity back from the pair that signed its records — where the launcher's
-  P2P ran, only the key that run held — and makes another only on the
-  owner's word, after it said what that costs (`device_auth.create_account`,
-  `new_identity`). A new identity is written exclusively, never over a key,
-  and one operation settles it at a time (`IdentitySettling`): two keys and
-  two P2P starts came of a restart during the owner's choice. What a new
+  off with it. The web interface's account setup on such a node takes back
+  only the node's signing key of record (`identity.signing_key`: the key the
+  backend found at its last start, or that the setup, a rotation or the
+  launcher's new identity put in place since — neither `p2p.bound_identity`,
+  which the launcher's P2P alone writes, nor the keys that sealed records
+  name the key last in place, and a rotation while P2P was down or a Docker
+  node's older pair slipped past them); a node that lost its folder before
+  its first start on this release recorded none and falls back to the
+  launcher's last P2P key, then to the keys that sealed its records. The
+  info the folder kept of that same identity stays, with its retired keys
+  and email, and another identity is made only on the owner's word, after
+  the page said what it costs (`device_auth.create_account`,
+  `new_identity`). A new key is placed exclusively, written under a
+  temporary name and linked into place after the info of the identity that
+  is gone was moved aside (`node_identity.place_key`), and one operation
+  settles the identity at a time (`IdentitySettling`): two keys and two P2P
+  starts came of a restart during the owner's choice. What a new
   identity costs depends on the cutover: on a node that started on this
   release with its identity, its records stay under the lost identity's
   seals, and what is analysed or changed from then on (a canon pass shedding
   a seal included) is signed with the new key; on one whose identity went
   before, the next start's cutover runs with the new key — the lost key's
-  features and instruments are deleted (analysed again where a file is here;
-  a stream's come back only if a pull brings them), its whole embedding
-  grids are kept as another author's imported twins, and grids mixed with
-  unsigned segments are deleted.
+  features and instruments are deleted, its whole embedding grids are kept
+  as another author's imported twins, and grids mixed with unsigned segments
+  are deleted; what is deleted is analysed again where a file is here
+  (instruments only with "Recognise instruments" on, lite's default off), a
+  stream's on its next full stream where one is still to be had (a provider
+  of the owner's own, the demo listen not yet spent), else only if a pull
+  brings it back.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be

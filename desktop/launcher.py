@@ -72,10 +72,12 @@ NEW_IDENTITY_COSTS = (
     "node started on this version of Sautium while it still had its identity, they stay as they "
     "are, under that identity's signatures, and what is analysed or changed from now on is "
     "signed with the new one. If the identity went before that, the next start deletes the "
-    "features and instruments it signed — analysed again where the music file is here; a "
-    "streamed track's come back only if a pull from the network brings them back — and of its "
-    "embeddings keeps the ones it signed whole, as another author's, and deletes the ones mixed "
-    "with unsigned parts, analysed again where the file is here.")
+    "features and instruments it signed, and those of its embeddings mixed with unsigned parts; "
+    "the embeddings it signed whole stay, as another author's. What is deleted is analysed again "
+    "where the music file is here (instruments only where “Recognise instruments” is on, "
+    "which a lite machine's default is not); a streamed track's on its next full stream where "
+    "one is still to be had (a provider of your own, or its one demo listen not yet spent), and "
+    "otherwise only if a pull from the network brings them back.")
 # The status line until the identity is back or the owner chose: asked once a
 # start, the progress line says where the choice is.
 IDENTITY_MISSING_STATUS = "Network off: this node's identity is missing"
@@ -147,6 +149,7 @@ class LauncherApp(ctk.CTk):
         self._job_listeners: list = []  # Settings & Tools windows watching those jobs (Tk thread)
         self._settings_dialog = None
         self._identity_notice = None  # _show_identity_notice's window while it is up
+        self._identity_asked = False  # the notice was shown: once a start
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -686,28 +689,38 @@ class LauncherApp(ctk.CTk):
 
     def _identity_ready(self):
         """An identity is on disk: the notice has nothing left to say, the
-        status line drops what it said of the network, and P2P starts on it."""
+        status line drops what it said of the network, and P2P starts on it
+        — while the services are up: one that came back down keeps its own
+        line, and their next start checks again and starts P2P."""
         notice, self._identity_notice = self._identity_notice, None
         if notice is not None and notice.winfo_exists():
             notice.destroy()
-        said = (IDENTITY_MISSING_STATUS, IDENTITY_UNCHECKED_STATUS)
-        if self._status_text.cget("text") in said and not self._node_down:
+        if self._node_down:
+            return
+        if self._status_text.cget("text") in (IDENTITY_MISSING_STATUS, IDENTITY_UNCHECKED_STATUS):
             self._set_status("running", "All services running")
             self._progress_text.configure(text="")
         self._start_p2p()
 
-    def _identity_missing(self, first: bool):
+    def _identity_missing(self):
         """No identity, while the database says this node had one: nothing is
         made on its own. The owner is asked once a start; until he chooses,
-        the status line says the network is off and why."""
+        the status line says the network is off and why. Not while the
+        services are down: their line stays, and their next start asks."""
+        if self._node_down:
+            return
         self._set_status("error", IDENTITY_MISSING_STATUS)
         self._progress_text.configure(text=IDENTITY_MISSING_HINT)
-        if first:
+        if not self._identity_asked:
+            self._identity_asked = True
             self._show_identity_notice()
 
     def _identity_unsettled(self, error):
         """The check decided nothing (its error is logged): P2P stays off
-        until the next backend start checks again."""
+        until the next backend start checks again. Not over the line of
+        services that went down meanwhile."""
+        if self._node_down:
+            return
         self._set_status("error", IDENTITY_UNCHECKED_STATUS)
         self._progress_text.configure(text=str(error)[:200])
 

@@ -109,7 +109,7 @@ async def auth_status() -> dict:
         "onboarding": onboarding,
         # No identity, while the database says the node had one: the setup
         # brings that one back, and makes another only when told to
-        "identity_missing": onboarding and await asyncio.to_thread(device_auth.own_seals),
+        "identity_missing": onboarding and device_auth.identity_missing(),
         # A key with no account beside it: nothing here can sign a browser in
         "unnamed_key": not configured and device_auth.identity_key_on_disk(),
         "pairing_open": device_auth.pin_state() is not None,

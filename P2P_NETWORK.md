@@ -273,13 +273,15 @@ messages are kept and retried every minute through a fresh DHT lookup.
 Deterministic identity: the same username+password on any device yields the
 same identity (same keys, same invite code). A launcher start that finds no
 key makes none over what says the node had one (since 2026-11-11,
-`node_identity.ensure_identity`: a seal of its own in the database, or the key
-its last P2P run held): P2P stays off, and its window offers the ways back —
-the folder from a copy, the same pair at the web interface's account setup, a
-backup's restore — and a new identity only on the owner's choice, which leaves
-those records another author's. The web interface's account setup on such a
-node takes only the pair that signed them (the key the last P2P run held,
-where it ran) and makes another only on the owner's word (`new_identity`).
+`node_identity.ensure_identity`: its signing key of record, a seal of its own
+in the database, or the key its last P2P run held): P2P stays off, and its
+window offers the ways back — the folder from a copy, the same pair at the web
+interface's account setup, a backup's restore — and a new identity only on the
+owner's choice, which leaves those records another author's. The web
+interface's account setup on such a node takes back only its signing key of
+record (`identity.signing_key`, the key it signed with: recorded at each start
+with a key, at the setup, at a rotation and at the launcher's new identity)
+and makes another only on the owner's word (`new_identity`).
 
 ```
 username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed25519 keypair
