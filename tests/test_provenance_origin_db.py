@@ -1091,8 +1091,8 @@ def test_the_elected_file_replaces_another_materials_analysis_whatever_its_quali
 
     import numpy as np
     generator = embeddings.AudioEmbeddingGenerator.__new__(embeddings.AudioEmbeddingGenerator)
-    model = types.SimpleNamespace(id=MODEL)
-    vec = np.full((1, 512), 0.05, dtype=np.float32)
+    model = types.SimpleNamespace(id=MODEL, name="clap")
+    vec = np.full((1, 512), 1 / np.sqrt(512), dtype=np.float32)     # a unit vector, as CLAP's are
     with conn.cursor() as cur:
         track = _track(cur)
         cd = _source(cur, track, OTHER, bit_depth=16)

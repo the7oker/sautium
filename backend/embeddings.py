@@ -194,7 +194,9 @@ def sonic_work_since(db: Session, file_id: int, track_ids: Optional[list] = None
 class NotUnitVectors(ValueError):
     """An analysis this node made whose segments or portrait are not unit
     vectors — what the import gate of every peer refuses, and the derived
-    scores assume. Nothing of it is saved."""
+    scores assume. The embedding is not saved; the track's other kinds
+    (features, instruments) are not CLAP's, and are saved as they are when
+    CLAP fails in any other way."""
 
 
 class AudioEmbeddingGenerator:
@@ -384,20 +386,12 @@ class AudioEmbeddingGenerator:
         This is where every vector this node computed is written, the sonic
         pass's and a stream's alike, so here they are held to the band the
         import gate holds a peer's to (sync_client.is_unit — the gate's own
-        function, so the two cannot differ): NotUnitVectors before anything
-        is written when a segment or the portrait is outside it. The encoder
-        normalizes, so that is a fault of this node's model or code — and
-        without the check its bundles would be sealed, served, and refused
-        by every peer."""
-        segments = [v.tolist() for v in vecs]
-        mean = portrait.tolist()
-        if not (is_unit(mean) and all(is_unit(s) for s in segments)):
-            norms = [float(np.linalg.norm(np.asarray(s, dtype=np.float64))) for s in segments]
-            raise NotUnitVectors(
-                f"the analysis of track {track_id} is not unit vectors: segment norms "
-                f"{min(norms):.6g}..{max(norms):.6g}, portrait "
-                f"{float(np.linalg.norm(np.asarray(mean, dtype=np.float64))):.6g} "
-                f"(a unit vector is {UNIT_NORM[0]}..{UNIT_NORM[1]}); model {model.name}")
+        function, so the two cannot differ): NotUnitVectors, before anything
+        is written, when a segment or the portrait of an analysis that would
+        be saved is outside it — one the rank declines is not saved, and
+        not checked. The encoder normalizes, so that is a fault of this
+        node's model or code — and without the check its bundles would be
+        sealed, served, and refused by every peer."""
         existing = db.execute(sa_text("""
             SELECT e.analysis_source_id,
                    EXISTS (SELECT 1 FROM embedding_segments g WHERE g.embedding_id = e.id) AS whole
@@ -407,6 +401,16 @@ class AudioEmbeddingGenerator:
         if existing and existing.whole and provenance.outranked(
                 db, existing.analysis_source_id, analysis_source_id):
             return False
+
+        segments = [v.tolist() for v in vecs]
+        mean = portrait.tolist()
+        if not (is_unit(mean) and all(is_unit(s) for s in segments)):
+            norms = [float(np.linalg.norm(np.asarray(s, dtype=np.float64))) for s in segments]
+            raise NotUnitVectors(
+                f"the analysis of track {track_id} is not unit vectors: segment norms "
+                f"{min(norms):.6g}..{max(norms):.6g}, portrait "
+                f"{float(np.linalg.norm(np.asarray(mean, dtype=np.float64))):.6g} "
+                f"(a unit vector is {UNIT_NORM[0]}..{UNIT_NORM[1]}); model {model.name}")
 
         eid = db.execute(sa_text("""
             INSERT INTO embeddings (track_id, model_id, vector,
@@ -466,8 +470,10 @@ class AudioEmbeddingGenerator:
             processed, success (a record saved), failed, skipped (nothing to
             make: the group holds it, or a better copy's records stand),
             embeddings and features (the records saved), and not_unit — the
-            failed tracks whose computed vectors were not unit vectors
-            (NotUnitVectors: nothing of such a track is saved).
+            tracks whose embedding was not saved because the vectors computed
+            for it were not unit vectors (NotUnitVectors). Such a track is
+            counted as any track whose CLAP forward failed: a success when
+            its features were saved, failed when nothing was.
         """
         import time
         import notary
@@ -682,11 +688,9 @@ class AudioEmbeddingGenerator:
 
                     analysed, wrote_any = 0.0, False
                     for item, audio, features in loaded:
-                        outcome, made = self._sonic_track(db, item, audio, features,
-                                                          embedding_model, save_features)
-                        if outcome == "not_unit":
-                            stats["not_unit"] += 1
-                            outcome = "failed"
+                        outcome, made, not_unit = self._sonic_track(
+                            db, item, audio, features, embedding_model, save_features)
+                        stats["not_unit"] += not_unit
                         stats[outcome] += 1
                         stats["embeddings"] += made.count("embeddings")
                         stats["features"] += made.count("features")
@@ -720,9 +724,9 @@ class AudioEmbeddingGenerator:
             )
             if stats["not_unit"]:
                 logger.error(
-                    f"Sonic pass: {stats['not_unit']} of the failed track(s) were not saved because "
-                    "this node's own analysis made vectors that are not unit vectors — a fault of "
-                    "its model or code, not of the files (each is named above)")
+                    f"Sonic pass: {stats['not_unit']} track(s) kept no embedding because this "
+                    "node's own analysis made vectors that are not unit vectors — a fault of its "
+                    "model or code, not of the files (each is named above)")
 
         return stats
 
@@ -755,12 +759,13 @@ class AudioEmbeddingGenerator:
 
     def _sonic_track(self, db: Session, item, audio, features, model, save_features):
         """One decoded track of the sonic pass, its records made and saved
-        under a savepoint of its own. Returns the outcome (success, failed,
-        skipped: a better copy's records stand; not_unit: its vectors were
-        not unit vectors, and nothing of the track is saved — its features
-        neither) and the kinds saved."""
+        under a savepoint of its own. Returns the outcome (success: a record
+        saved; failed; skipped: a better copy's records stand), the kinds
+        saved, and whether its embedding was refused as not unit vectors
+        (NotUnitVectors) — the embedding alone: the features are saved all
+        the same, as when the forward fails."""
         row, src_id, embed, describe = item
-        made, failed = [], False
+        made, failed, not_unit = [], False, False
         try:
             with db.begin_nested():
                 if embed:
@@ -768,22 +773,24 @@ class AudioEmbeddingGenerator:
                     if computed is None:
                         failed = True
                         logger.error(f"Failed embedding for track {row.track_id}")
-                    elif self._persist_analysis(db, row.track_id, model, *computed, src_id):
-                        made.append("embeddings")
+                    else:
+                        try:
+                            if self._persist_analysis(db, row.track_id, model, *computed, src_id):
+                                made.append("embeddings")
+                        except NotUnitVectors as e:
+                            failed = not_unit = True
+                            logger.error(f"Sonic pass: no embedding saved — {e}")
                 if describe:
                     if features is None:
                         failed = True
                     elif save_features(db, row.track_id, features, src_id):
                         made.append("features")
-        except NotUnitVectors as e:
-            logger.error(f"Sonic pass: nothing saved — {e}")
-            return "not_unit", []
         except Exception as e:
             logger.error(f"Sonic pass failed for {row.track_id}: {e}")
-            return "failed", []
+            return "failed", [], not_unit
         if made:
-            return "success", made
-        return ("failed" if failed else "skipped"), made
+            return "success", made, not_unit
+        return ("failed" if failed else "skipped"), made, not_unit
 
 
 def sonic_pass(

@@ -785,43 +785,112 @@ def _clap_answers(monkeypatch, models, answers: dict) -> None:
     monkeypatch.setattr(embeddings.AudioEmbeddingGenerator, "_compute_segments", clap)
 
 
+def _segments(cur, track) -> int:
+    cur.execute("SELECT count(*) FROM embedding_segments s JOIN embeddings e ON e.id = s.embedding_id "
+                "WHERE e.track_id = %s", (track,))
+    return cur.fetchone()[0]
+
+
 @pytest.mark.parametrize("what", ["a long segment", "a short segment", "the portrait", "not a number"])
-def test_the_sonic_pass_saves_no_record_of_a_track_whose_vectors_are_not_unit(
+def test_the_sonic_pass_saves_no_embedding_of_a_track_whose_vectors_are_not_unit(
         cur, prints, models, monkeypatch, caplog, what):
     """The band the import gate holds a peer's bundle to, held to this node's
-    own: the track fails alone — its features unsaved too — the rest of the
-    batch saves, and the pass counts it and says so."""
+    own. The refused kind is the embedding alone: the track's features are
+    not CLAP's and are saved, as when the forward fails; the rest of the
+    batch saves; the pass counts the track and says so."""
     tracks = _three(cur, prints, fixed=True)
     _clap_answers(monkeypatch, models, {2: _off_unit(what)})
     with caplog.at_level(logging.ERROR, logger="embeddings"):
         stats = models.sonic()
     assert {k: stats[k] for k in ("processed", "success", "failed", "not_unit", "embeddings",
-                                  "features")} == {"processed": 3, "success": 2, "failed": 1,
-                                                   "not_unit": 1, "embeddings": 2, "features": 2}
+                                  "features")} == {"processed": 3, "success": 3, "failed": 0,
+                                                   "not_unit": 1, "embeddings": 2, "features": 3}
     # whichever of the batch's three the second forward was (its decodes race)
     held = {n: set(_records(cur, track)) for n, track in tracks.items()}
-    refused = [n for n in held if not held[n]]
+    refused = [n for n in held if held[n] == {"features"}]
     assert len(refused) == 1 and all(held[n] == {"embeddings", "features"}
                                      for n in held if n not in refused), held
     bad = tracks[refused[0]]
-    cur.execute("""SELECT t.title, count(s.id) FROM tracks t
-                   LEFT JOIN embeddings e ON e.track_id = t.id
-                   LEFT JOIN embedding_segments s ON s.embedding_id = e.id
-                   GROUP BY t.title ORDER BY t.title""")
-    assert cur.fetchall() == [(n, 0 if n in refused else 1) for n in "abc"]
+    assert [_segments(cur, tracks[n]) for n in "abc"] == [0 if n in refused else 1 for n in "abc"]
     said = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     named = [m for m in said if "not unit vectors:" in m]
     assert len(named) == 1 and bad in named[0] and "model clap" in named[0] \
         and "segment norms" in named[0] and "portrait" in named[0], said
-    assert any("1 of the failed track(s) were not saved" in m for m in said)
-    assert models.wakes == ["sonic pass"]                   # for the two that were saved
-    assert _queued(bad)["embeddings"] and _queued(bad)["features"]
+    assert any("1 track(s) kept no embedding" in m for m in said)
+    assert models.wakes == ["sonic pass"]
+    assert _queued(bad)["embeddings"] and not _queued(bad)["features"]
 
     # still in the queue: once the node analyses rightly again, it is saved
     _clap_answers(monkeypatch, models, {})
     again = models.sonic()
-    assert (again["success"], again["failed"], again["not_unit"]) == (1, 0, 0)
+    assert (again["success"], again["failed"], again["not_unit"], again["embeddings"]) == (1, 0, 0, 1)
     assert set(_records(cur, bad)) == {"embeddings", "features"}
+
+
+def test_a_batch_refused_whole_with_nothing_else_to_save_fails_whole_and_wakes_no_notary(
+        cur, prints, models, monkeypatch):
+    """Tracks that hold their features and lack only the embedding: refused,
+    nothing is saved — failed, as a track whose forward failed with nothing
+    else to save is — the notary is not woken, and the registrations stay
+    for the run that analyses rightly."""
+    tracks = _three(cur, prints, fixed=True)
+    assert models.sonic()["success"] == 3
+    cur.execute("DELETE FROM embeddings")
+    cur.execute("SELECT array_agg(id ORDER BY id) FROM analysis_sources")
+    registered = cur.fetchone()[0]
+    models.wakes.clear()
+    models.calls.clear()
+    _clap_answers(monkeypatch, models, {n: _off_unit("the portrait") for n in (1, 2, 3)})
+    stats = models.sonic()
+    assert {k: stats[k] for k in ("processed", "success", "failed", "not_unit", "embeddings",
+                                  "features")} == {"processed": 3, "success": 0, "failed": 3,
+                                                   "not_unit": 3, "embeddings": 0, "features": 0}
+    assert models.wakes == []
+    assert all(set(_records(cur, t)) == {"features"} for t in tracks.values())
+    _clap_answers(monkeypatch, models, {})
+    again = models.sonic()
+    assert (again["success"], again["failed"], again["not_unit"], again["embeddings"]) == (3, 0, 0, 3)
+    cur.execute("SELECT array_agg(id ORDER BY id) FROM analysis_sources")
+    assert cur.fetchone()[0] == registered
+
+
+def test_a_forced_re_analysis_refused_leaves_the_old_embedding_and_its_segments(
+        cur, prints, models, monkeypatch):
+    track = _track(cur)
+    _file(cur, track, "/music/a.flac")
+    prints["/music/a.flac"] = FP
+    assert models.sonic([uuid.UUID(track)])["success"] == 1
+
+    def held():
+        cur.execute("""SELECT e.id, e.updated_at, e.vector::text,
+                              (SELECT array_agg(s.id ORDER BY s.id) FROM embedding_segments s
+                                WHERE s.embedding_id = e.id),
+                              (SELECT f.bpm FROM audio_features f WHERE f.track_id = e.track_id)
+                         FROM embeddings e WHERE e.track_id = %s""", (track,))
+        return cur.fetchall()
+    before = held()
+    assert len(before) == 1 and before[0][3]
+    _clap_answers(monkeypatch, models, {1: _off_unit("a short segment")})
+    models.calls.clear()
+    stats = models.sonic([uuid.UUID(track)], force=True)
+    assert (stats["not_unit"], stats["embeddings"], stats["failed"]) == (1, 0, 0)
+    assert held() == before
+
+
+def test_an_analysis_the_rank_declines_is_not_saved_and_not_checked(cur, models):
+    """A lower-ranked copy's analysis is declined before the check: what is
+    not saved is not this node's to refuse."""
+    track = _track(cur)
+    owned = _source(cur, track, FP)
+    _embedding(cur, track, owned)
+    lesser = _source(cur, track, NEAR, imported=True)
+    generator = embeddings.AudioEmbeddingGenerator(model_name="clap", device="cpu")
+    with database.get_db_context() as db:
+        model = db.get(embeddings.EmbeddingModel, uuid.UUID(MODEL))
+        assert generator._persist_analysis(db, track, model, *_off_unit("a long segment"), lesser) is False
+        with pytest.raises(embeddings.NotUnitVectors):
+            generator._persist_analysis(db, track, model, *_off_unit("a long segment"), owned)
+    assert _records(cur, track)["embeddings"] == owned
 
 
 def test_what_the_pass_refuses_to_save_is_what_the_import_gate_refuses(cur, models):
@@ -848,25 +917,107 @@ def test_what_the_pass_refuses_to_save_is_what_the_import_gate_refuses(cur, mode
         assert bool(_records(cur, track)) is unit
 
 
+def test_the_vectors_the_encoders_own_chain_makes_pass_the_check(cur, monkeypatch):
+    """The real _compute_segments — float32 unit rows from the forward, their
+    normalized mean — over grids from one window to four hours and rows from
+    nearly equal to nearly unrelated, into the real save: every vector
+    inside the band by five orders, as computed and as stored."""
+    from desktop import sync_client
+    rng = np.random.default_rng(1)
+    generator = embeddings.AudioEmbeddingGenerator(model_name="clap", device="cpu")
+    spread = {"x": 1.0}
+
+    def forward(windows):
+        base = rng.standard_normal(512).astype(np.float32)
+        rows = base + rng.standard_normal((len(windows), 512)).astype(np.float32) * spread["x"]
+        return (rows / np.linalg.norm(rows, axis=1, keepdims=True)).astype(np.float32)
+    monkeypatch.setattr(generator, "_generate_batch_embeddings", forward)
+    second = np.zeros(48000, dtype=np.float32)
+    worst = 0.0
+    with database.get_db_context() as db:
+        model = db.get(embeddings.EmbeddingModel, uuid.UUID(MODEL))
+        for seconds in (10, 20, 35, 60, 240, 600, 3600, 4 * 3600):
+            for spread["x"] in (0.01, 1.0, 30.0):
+                audio = np.lib.stride_tricks.as_strided(second, shape=(48000 * seconds,), strides=(0,))
+                idxs, vecs, portrait = generator._compute_segments(audio)
+                assert vecs.dtype == portrait.dtype == np.float32
+                for vector in list(vecs) + [portrait]:
+                    values = vector.tolist()
+                    assert sync_client.is_unit(values)
+                    worst = max(worst, abs(math.sqrt(math.fsum(x * x for x in values)) - 1))
+                assert generator._persist_analysis(db, _track(cur), model, idxs, vecs, portrait, None)
+                db.commit()
+    assert worst < 1e-6
+    cur.execute("""SELECT (SELECT max(abs(vector_norm(vector) - 1)) FROM embedding_segments),
+                          (SELECT max(abs(vector_norm(vector) - 1)) FROM embeddings),
+                          (SELECT count(*) FROM embeddings)""")
+    stored_segments, stored_portraits, saved = cur.fetchone()
+    assert saved == 24 and stored_segments < 1e-6 and stored_portraits < 1e-6
+
+
 @pytest.mark.parametrize("what", ["a long segment", "the portrait"])
-def test_a_stream_whose_vectors_are_not_unit_saves_nothing_and_the_next_one_saves(
+def test_a_stream_whose_vectors_are_not_unit_keeps_its_other_records_and_no_embedding(
         cur, models, stream, monkeypatch, caplog, what):
-    """The stream path saves through the same check: no embedding, and no
-    features or instruments of the same run either; nothing to seal, so the
-    notary is not woken. Another stream beside it is saved whole."""
-    bad, good = _track(cur, "bad"), _track(cur, "good")
+    """The stream path saves through the same check, and the refused kind is
+    the embedding alone: the stream may be the track's one full listen, so
+    its features and instruments are saved and sealed, as when the forward
+    fails. Streamed again and analysed rightly, the embedding joins them
+    under the same registration."""
+    track = _track(cur)
     _clap_answers(monkeypatch, models, {1: _off_unit(what)})
     from streaming import enrichment
     with caplog.at_level(logging.ERROR, logger=enrichment.__name__):
-        stream.run(bad)
-    assert _records(cur, bad) == {}
-    assert models.wakes == []
-    said = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
-    assert len(said) == 1 and bad in said[0] and "model clap" in said[0] \
-        and "nothing saved" in said[0], said
-    stream.run(good)
-    assert set(_records(cur, good)) == {"embeddings", "features", "instruments"}
+        stream.run(track)
+    records = _records(cur, track)
+    assert set(records) == {"features", "instruments"} and _segments(cur, track) == 0
     assert models.wakes == ["preview analysis"]
+    said = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(said) == 1 and track in said[0] and "model clap" in said[0] \
+        and "no embedding saved" in said[0], said
+    cur.execute("SELECT id FROM analysis_sources WHERE track_id = %s", (track,))
+    registered = [r[0] for r in cur.fetchall()]
+    assert registered == [records["features"]] == [records["instruments"]]
+
+    stream.run(track)                                       # the forward is right this time
+    assert _records(cur, track) == dict(records, embeddings=registered[0])
+    assert _segments(cur, track) == 1 and models.tagger.calls == 1
+    assert models.wakes == ["preview analysis", "preview analysis"]
+    cur.execute("SELECT id FROM analysis_sources WHERE track_id = %s", (track,))
+    assert [r[0] for r in cur.fetchall()] == registered
+
+
+def test_a_stream_whose_forward_fails_keeps_its_other_records_the_same_way(cur, models, stream):
+    """What the refusal is counted as: CLAP answering nothing."""
+    track = _track(cur)
+    models.clap_fails = {1}
+    stream.run(track)
+    assert set(_records(cur, track)) == {"features", "instruments"}
+    assert models.wakes == ["preview analysis"]
+
+
+def test_the_cli_says_how_many_tracks_kept_no_embedding(cur, monkeypatch):
+    from click.testing import CliRunner
+    monkeypatch.chdir(BACKEND)
+    import cli
+    import track_enrichment
+    monkeypatch.setattr(hardware_profile, "cap_torch_threads", lambda *a: None)
+    counted = {"processed": 5, "success": 4, "failed": 1, "skipped": 0, "embeddings": 3,
+               "features": 4, "too_long": 0, "not_unit": 2}
+    monkeypatch.setattr(embeddings, "sonic_pass", lambda **_kw: dict(counted))
+    said = CliRunner().invoke(cli.cli, ["sonic-pass"])
+    assert said.exit_code == 0, said.output
+    assert ("   • No embedding kept: 2 tracks — this node's own analysis made vectors that are "
+            "not unit vectors; the log has the details") in said.output.splitlines()
+    monkeypatch.setattr(embeddings, "sonic_pass", lambda **_kw: dict(counted, not_unit=0))
+    assert "No embedding kept" not in CliRunner().invoke(cli.cli, ["sonic-pass"]).output
+
+    monkeypatch.setattr(track_enrichment, "run_parallel_enrichment",
+                        lambda **_kw: {"gpu": {"sonic": dict(counted)}})
+    run = CliRunner().invoke(cli.cli, ["enrich-tracks"])
+    assert run.exit_code == 0, run.output
+    line = next(l for l in run.output.splitlines() if "Sonic pass:" in l)
+    assert line == ("   • Sonic pass: 4 success, 1 failed, 2 kept no embedding (this node's own "
+                    "analysis made vectors that are not unit vectors; the log has the details)")
 
 
 # -- The per-track pipeline ------------------------------------------------------

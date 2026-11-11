@@ -270,9 +270,11 @@ See:
   that is not a unit vector (norm outside 0.99..1.01) derives none, the
   import gate refuses one, and since 2026-11-11 the node's own passes save
   none (`embeddings._persist_analysis`, by the gate's own `is_unit`: such a
-  track fails alone, with an error in the log and in the pass's count). Discovery, search, Now Playing, the assistant and
-  the CLI read these; no analysis writes them and no record carries them
-  (since 2026-11-10, the records' cutover below). The thresholds were set
+  track keeps no embedding — its features and instruments are saved all
+  the same — with an error in the log and in the pass's count). Discovery,
+  search, Now Playing, the assistant and the CLI read these; no analysis
+  writes them and no record carries them (since 2026-11-10, the records'
+  cutover below). The thresholds were set
   2026-11-11 from a measurement on a real library of ~41 000 tracks: one
   per mood (`MOOD_MIN`, a map, 0.048..0.089) and 0.48 for danceable, each
   the threshold at which its gate passes the share of that library's

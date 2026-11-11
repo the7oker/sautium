@@ -303,11 +303,11 @@ class PreviewEnricher:
                     if embedder._persist_analysis(db, track_id, model, *computed, src_id):
                         saved.append("embedding")
                 except NotUnitVectors as e:
-                    # This node's own analysis went wrong: none of it is
-                    # saved, the features and instruments of the same run
-                    # neither (the session ends uncommitted)
-                    logger.error("preview enrich: nothing saved — %s", e)
-                    return
+                    # This node's own CLAP went wrong: no embedding. The
+                    # features and the instruments are not CLAP's and are
+                    # saved, as when the forward fails — the stream may be
+                    # the track's one full listen
+                    logger.error("preview enrich: no embedding saved — %s", e)
             if feats and save_features(db, track_id, feats, src_id):
                 saved.append("features")
             if instruments is not None and save_instruments(db, track_id, instruments, src_id):

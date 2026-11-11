@@ -111,7 +111,8 @@ def _on_the_grid(segments, duration) -> bool:
 # in bf16 would stay within 0.8 %. A seal says who made a vector, not that
 # it is one a node can use. The node's own passes hold what they save to
 # the same band (backend/embeddings.py _persist_analysis), so a node whose
-# analysis went wrong fails there and never seals what every peer refuses.
+# analysis went wrong saves no embedding there and never seals what every
+# peer refuses.
 UNIT_NORM = (0.99, 1.01)
 
 
