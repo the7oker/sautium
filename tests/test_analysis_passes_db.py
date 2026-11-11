@@ -544,6 +544,7 @@ def test_the_guidance_trail_points_a_lite_node_at_analyse_library(cur, monkeypat
     monkeypatch.chdir(BACKEND)
     import main  # noqa: F401  — the trail reads its workers' state
     monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("lite"))
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 64.0)   # any track fits
     monkeypatch.setattr(settings_router, "_synced_since_scan", lambda: True)
     monkeypatch.setattr(settings_router, "_notices_state", lambda: {"items": []})
     track = _track(cur)

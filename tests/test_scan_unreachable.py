@@ -1359,6 +1359,8 @@ def test_coverage_and_the_trail_count_what_the_passes_read(
         cur, library, main_module, monkeypatch, tmp_path, scanned_library):
     """An unanalysed album away leaves the Library's "left" figures and the
     analysis trail, as it leaves the queues."""
+    import analysis_pace
+    monkeypatch.setattr(analysis_pace, "available_memory_gb", lambda: 64.0)   # any track fits
     _move(library / "Q2 Probe", tmp_path / "card" / "Q2 Probe")
     assert settings_router._analysis_pending() is True   # Probe B, unanalysed, here
 
