@@ -1176,6 +1176,10 @@ def test_an_answer_in_transit_is_no_reading_of_a_track_in_its_last_seconds(fake)
     ("a foreign file elsewhere in the playlist, the take moved on", False, None),
     ("our own slot 4 playing on a later take", False, None),
     ("roon's playlist on the advance's take", False, None),
+    ("an emptied playlist, the take moved on", False, None),
+    ("entries that name nothing, the take moved on", False, None),
+    ("roon's entry playing, the advance's entry played already", True, None),
+    ("roon's refused start, the advance's entry played out already", True, None),
 ])
 def test_a_takeover_while_hqplayers_own_advance_is_watched_leaves_the_spot_at_its_entry(fake, tick, taken, spot):
     """_advance_taken: HQPlayer's own advance onto slot 3 is watched (the
@@ -1188,7 +1192,13 @@ def test_a_takeover_while_hqplayers_own_advance_is_watched_leaves_the_spot_at_it
     holds an entry of ours tells nothing, whatever else is in it and
     whichever take it is on (review round 2: HQPlayer moving on again by
     itself beside a foreign entry was "another app took HQPlayer", its spot
-    at a track that had played); nor does an entry the node handed."""
+    at a track that had played); nor does an entry the node handed, an
+    emptied playlist, or one whose entries name nothing. Once the advance's
+    entry started, the attempt is only watched out: a takeover then ends it
+    and leaves none of its spots (review round 3: a short last track played
+    out, and Roon's start on the idle HQPlayer was a takeover at it) — the
+    track's own listen judges that. The refusal of the other app's stream is
+    read where the verdict found HQPlayer at rest."""
     q = CanonicalQueue()
     q.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in (1, 2, 3, 4)])
     b = hb.HqpBackend(emit=lambda *_: None, queue=q)
@@ -1214,12 +1224,29 @@ def test_a_takeover_while_hqplayers_own_advance_is_watched_leaves_the_spot_at_it
                                                    (4, q.item_at(4), False), ours + [ref]),
         "roon's playlist on the advance's take": (_st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=6),
                                                   (0, None, False), [ROONS]),
+        "an emptied playlist, the take moved on": (_st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=7),
+                                                   (0, None, False), []),
+        "entries that name nothing, the take moved on": (_st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=7),
+                                                         (0, None, False), ["", ""]),
+        "roon's entry playing, the advance's entry played already": roon_plays,
+        "roon's refused start, the advance's entry played out already": (
+            _st(PlaybackState.STOPPED, 1, 0.0, uri=ROONS, serial=8), (0, None, False), [ROONS]),
     }[tick]
     if tick.endswith("a spot standing"):
         b._set_spot(q.item_at(1), 0)
     if tick.endswith("queued no more"):
         q.remove(3)
+    if tick.endswith("already"):
+        for second, at in ((0.0, 2.0), (2.0, 3.0), (4.0, 4.0)):         # slot 3 played on the advance's take
+            att.tick(_st(PlaybackState.PLAYING, 3, second, uri=ours[2], serial=6, length=5.0), "playing", at)
+        if "played out" in tick:
+            att.tick(_st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=7, length=0.0), "stopped", 5.0)
+    att.tick(status, hb.STATE_NAMES.get(status.state, "unknown"), 6.0)  # the poller hands the attempt the tick first
+    reads = []
+    b._other_refused_log = lambda *a: reads.append(a)
     assert b._advance_taken(att, status, playing, playlist) is taken
+    assert _wait(lambda: len(reads) == (1 if spot == (3, 0) and playlist else 0), timeout=2) or reads == []
+    assert len(reads) == (1 if spot == (3, 0) and playlist else 0)      # the other app's refusal, read at rest
     assert b._spot_at() == spot
     left = spot == (3, 0)
     assert b._takeover is left and (b._output_event(None, None) or {}).get("kind") == ("took" if left else None)
@@ -5529,7 +5556,8 @@ def test_hqplayers_own_advance_onto_our_next_entry_that_lands_late_is_its_advanc
         b.shutdown()
 
 
-@pytest.mark.parametrize("read", ["roon's start alone", "the advance's stopped tick first"])
+@pytest.mark.parametrize("read", ["roon's start alone", "the advance's stopped tick first",
+                                  "the advance's stopped tick first, roon's start refused"])
 def test_an_advance_and_a_takeover_inside_one_status_interval(fake, listens, monkeypatch, read):
     """The neighbour: our track ends, HQPlayer makes its own Next onto slot 3
     (the queue's, its playlist intact), and Roon's whole start comes before
@@ -5538,7 +5566,10 @@ def test_an_advance_and_a_takeover_inside_one_status_interval(fake, listens, mon
     what stood then. The read that finds Roon's entry playing, two takes past
     our listen, is the takeover: the track had played out, so the spot is
     slot 3 at 0; the attempt, where one opened, ends there as superseded —
-    never judged on Roon's playlist, never kept."""
+    never judged on Roon's playlist, never kept. So where HQPlayer refuses
+    Roon's stream and rests on its playlist, nothing of ours in it (the
+    playlist read at that tick tells: review round 3's pin through the
+    poller)."""
     writes, lastfm = listens
     _fast_verdicts(monkeypatch)
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
@@ -5564,7 +5595,12 @@ def test_an_advance_and_a_takeover_inside_one_status_interval(fake, listens, mon
             att = b._attempt
             with fake._lock:
                 _roon_started_since_the_last_read(fake)
-        assert _wait(lambda: mgr._latest_status.get("source") == "external", timeout=10)
+                if read.endswith("refused"):
+                    fake.state = int(PlaybackState.STOPPED)             # HQPlayer took its Play and stopped at once
+        if read.endswith("refused"):
+            assert _wait(lambda: mgr._latest_status.get("resume") is not None, timeout=10)
+        else:
+            assert _wait(lambda: mgr._latest_status.get("source") == "external", timeout=10)
         k = len(fake.commands)
         assert _wait(lambda: _statuses(fake, k) >= 4, timeout=10)      # past an advance's deadline
         st = mgr._latest_status

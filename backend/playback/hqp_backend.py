@@ -3237,8 +3237,9 @@ class HqpBackend(PlayerBackend):
         HQPlayer names no take (HQPlayer 5), a listen in its last seconds —
         or long enough ago to have played out — cuts nothing and leaves no
         spot, as before: nothing there tells a takeover from a start on an
-        HQPlayer left idle, and time is no evidence of what played. Ticks between that find neither — the other controller's
-        Stop on our entry, its cleared playlist — leave the listen as it was.
+        HQPlayer left idle, and time is no evidence of what played. Ticks
+        between that find neither — the other controller's Stop on our entry,
+        its cleared playlist — leave the listen as it was.
 
         The takeover is the node's too where nothing of the other
         controller's ever plays (ROON-COEX F7: a rate HQPlayer's output
@@ -3372,8 +3373,9 @@ class HqpBackend(PlayerBackend):
         the node never gave — the entry after the listen's is one another
         controller put behind it (Roon's Play Now on a link it kept, ROON-COEX
         F9), or the playlist holds the listen's own entry no more, and one
-        the node never gave (that controller's clear and add). False: its entry there, one the node gave after it
-        or none (the playlist's end) — HQPlayer's own advance, or end. None:
+        the node never gave (that controller's clear and add). False: its
+        entry there, one the node gave after it or none (the playlist's end)
+        — HQPlayer's own advance, or end. None:
         the playlist does not tell yet (emptied: that controller's clear read
         before its add). An entry the node never gave elsewhere in the
         playlist — a file added in HQPlayer's own window — is no evidence of
@@ -3401,14 +3403,19 @@ class HqpBackend(PlayerBackend):
         entry of ours is watched (`att`): this tick reads it playing or
         pausing an entry the node never gave, or — at rest, the take moved
         past the advance's — its playlist, as this tick read and judged it
-        (`playlist`), holds entries and none the node gave: that controller's
-        clear and its own stream, refused (F7's shape). A playlist that still
-        holds an entry of ours tells nothing of the kind, whatever else is in
-        it: HQPlayer moved on again by itself, the person pressed Next in its
-        own window, a file was added there. The entry HQPlayer was moving on
-        to is a start cut in its first seconds (D3.2): the spot at its slot,
-        at 0, where the advance names it (a mirror in step or a tail:
-        _advance) and no spot stands. Called on the poller."""
+        (`playlist`), names an entry the node never gave and none it gave:
+        that controller's clear and its own stream, refused (F7's shape). A
+        playlist that still holds an entry of ours tells nothing of the kind,
+        whatever else is in it: HQPlayer moved on again by itself, the person
+        pressed Next in its own window, a file was added there. While the
+        advance's start is still under way (diag.Attempt.under_way), the
+        entry HQPlayer was moving on to is a start cut in its first seconds
+        (D3.2): the spot at its slot, at 0, where the advance names it (a
+        mirror in step or a tail: _advance) and no spot stands. Once that
+        entry started, the attempt is only watched out to its deadline: its
+        track's own listen is what a takeover is judged by (_note_listen) —
+        a short track that played out leaves none of the advance's spots.
+        Called on the poller."""
         adv = att.advance
         if adv is None or att.t0 is None:
             return False
@@ -3418,11 +3425,12 @@ class HqpBackend(PlayerBackend):
                 return False
         else:
             layout = self._layout()
-            if (not playlist or status.track_serial is None or status.track_serial == adv["serial"]
-                    or any(self.gave(u, layout) for u in playlist)):
+            named = [u for u in playlist or () if u]
+            if (not named or status.track_serial is None or status.track_serial == adv["serial"]
+                    or any(self.gave(u, layout) for u in named)):
                 return False
         item = att.target[0] if att.target is not None else None
-        if (item is not None and self._queue.index_of(item) is not None
+        if (item is not None and att.under_way() and self._queue.index_of(item) is not None
                 and self._leave_spot(item, 0, status, not busy, unless_set=True)):
             logger.info("another controller took HQPlayer while it moved on to slot %d — Play starts it there",
                         self._queue.index_of(item))

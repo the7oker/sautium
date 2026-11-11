@@ -4259,6 +4259,9 @@ def test_hqplayers_own_advance_finds_its_entry_by_what_it_is_not_at_a_stale_inde
         if att is not None:
             att.request_end("superseded")
             hqp_meter.meter.unwatch(att.id)
+    # ...and it is the entry AFTER that place that is asked about: another controller's there opens none
+    assert b2._advance(stopped, time.time(), ["file:///E:/Music/A/01.flac", gone,
+                                              "http://127.0.0.1:30000/1/stream.raw"]) is None
 
 
 def test_hqplayers_own_advance_on_a_tail_mirror_starts_the_track_after_it(fake):
