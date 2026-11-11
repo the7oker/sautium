@@ -314,6 +314,19 @@ implementation details live in the code, DB and git history.
   under-state a duration; a stream, decoded at its native rate and
   channels, is bounded by its own header. HARDWARE-TIERS.md § 5's last
   note has the numbers, worked from the formula, not measured on a Pi.
+- **No identity is made over a node's own seals (2026-11-11).** A launcher
+  whose identity folder held none made a new one at its start, silently —
+  and the database's seals were the lost identity's: its next start's
+  cutover would have taken the node's own records for another author's. A
+  start that finds no identity now reads the database first
+  (`node_identity.ensure_identity`, the check the cutover fails closed on):
+  with no seal of the node's own analysis it makes one as before; with such
+  seals it makes none, P2P stays off, and the window says how to bring the
+  identity back (the folder from a copy; the same nickname and password at
+  the web interface's account setup — the pair is the key; a backup's
+  restore, which replaces the database too) and offers the one way to a new
+  identity, the owner's choice, which turns those records into another
+  author's: they keep the lost identity's seals.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be

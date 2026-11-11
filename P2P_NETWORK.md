@@ -271,7 +271,12 @@ messages are kept and retried every minute through a fresh DHT lookup.
 ## Account System (Phase P4)
 
 Deterministic identity: the same username+password on any device yields the
-same identity (same keys, same invite code).
+same identity (same keys, same invite code). A launcher start that finds no
+identity makes none over seals of the node's own analysis in its database
+(since 2026-11-11, `node_identity.ensure_identity`): P2P stays off, and its
+window offers the ways back — the folder from a copy, the same pair at the web
+interface's account setup, a backup's restore — and a new identity only on the
+owner's choice, which leaves those records another author's.
 
 ```
 username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed25519 keypair

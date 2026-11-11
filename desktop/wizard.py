@@ -1961,7 +1961,10 @@ class SetupWizard(ctk.CTkToplevel):
                         "degraded until present", ", ".join(_missing)
                     )
 
-                # Create account identity (or random if skipped)
+                # The account identity: the account step yields one on every
+                # path (a chosen pair, a minted one, or the backup's). A start
+                # that finds none is the launcher's to settle, once the
+                # database it checks is up (node_identity.ensure_identity).
                 if account_data and account_data.get("restore"):
                     # The identity is written by the restore below, from the
                     # backup, once the database exists to restore into.
@@ -1991,13 +1994,6 @@ class SetupWizard(ctk.CTkToplevel):
                             "Birth certificate fetch failed (offline?) — "
                             "will retry at P2P start"
                         )
-                else:
-                    progress("Generating node identity...")
-                    from desktop.node_identity import (
-                        has_identity, generate_identity,
-                    )
-                    if not has_identity():
-                        generate_identity()
 
                 # Initialize database
                 from desktop.db_init import full_init

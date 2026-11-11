@@ -41,6 +41,21 @@ QR_SIZE = 150
 QR_BLOCK_HEIGHT = QR_SIZE + 28
 WINDOW_SIZE = f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}"
 
+# What _show_identity_missing says: the identity folder holds none while the
+# database holds this node's seals (node_identity.ensure_identity).
+IDENTITY_MISSING = (
+    "There is no identity in {folder}, but this node's database holds analysis it signed "
+    "with one. So no new identity was made, and the network stays off until you choose.\n\n"
+    "To bring it back:\n"
+    "•  put a copy of that folder back, then restart Sautium;\n"
+    "•  or, if the node had a nickname and password, create the account again in the web "
+    "interface with the same nickname and password: the same pair is the same identity. It "
+    "asks for the setup code in setup_code.txt in that folder. Then restart Sautium;\n"
+    "•  or restore a backup (Settings & Tools › Backup & Restore). This also replaces the "
+    "database with the one in the backup; the current one is kept beside it.\n\n"
+    "A new identity makes everything this node has signed so far another author's: it keeps "
+    "the signatures of the identity that is gone.")
+
 # Appearance
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -67,11 +82,13 @@ class LauncherApp(ctk.CTk):
         # in it and the browser asked for a password instead.
         self.api_client.set_port(self.config.get("ports", {}).get("web", 8000))
         self.p2p_manager = None
-        # Set while _start_p2p's background thread is between
-        # "thread launched" and "self.p2p_manager assigned". Prevents a
-        # second _on_services_ready call (from a Scan-driven backend
-        # restart) from launching a parallel P2PManager that races on the
-        # same listen port.
+        # Set while the identity P2P starts on is settled
+        # (_ensure_node_identity), and while _start_p2p's background thread
+        # is between "thread launched" and "self.p2p_manager assigned".
+        # Prevents a second _on_services_ready call (from a Scan-driven
+        # backend restart) from settling the identity twice — two keys
+        # minted — or launching a parallel P2PManager that races on the same
+        # listen port.
         self._p2p_starting = False
         # Held by a P2P start from "not quitting?" through P2PManager.start(),
         # and by the quit's P2P stop: the start either finished before the
@@ -96,6 +113,7 @@ class LauncherApp(ctk.CTk):
         self._jobs: dict = {}         # kind ("backup" | "export" | "import") -> desktop/backup_task.CliRun
         self._job_listeners: list = []  # Settings & Tools windows watching those jobs (Tk thread)
         self._settings_dialog = None
+        self._identity_notice = None  # _show_identity_missing's window while it is up
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -463,20 +481,19 @@ class LauncherApp(ctk.CTk):
         self._start_event_streams()
         self._refresh_pairing_qr()
 
-        # Silently generate node identity if not present
-        self._ensure_node_identity()
-
-        # Start P2P services only if not already running. _on_services_ready
-        # is also called from the Scan flow's `restart_backend_and_tracker`,
-        # but P2P is independent of the backend process — its only DB-side
-        # dependency (postgres password / port) doesn't change on a backend
-        # restart, so there's nothing to rebuild. Re-running stop+start here
-        # used to race with the still-mounting first P2PManager (its
-        # background thread hadn't yet assigned self.p2p_manager) and bound
-        # two managers to the same port. Update path explicitly nulls
-        # p2p_manager itself before calling _on_services_ready.
+        # Start P2P services only if not already running, and only on an
+        # identity — _ensure_node_identity starts them once one is on disk.
+        # _on_services_ready is also called from the Scan flow's
+        # `restart_backend_and_tracker`, but P2P is independent of the backend
+        # process — its only DB-side dependency (postgres password / port)
+        # doesn't change on a backend restart, so there's nothing to rebuild.
+        # Re-running stop+start here used to race with the still-mounting
+        # first P2PManager (its background thread hadn't yet assigned
+        # self.p2p_manager) and bound two managers to the same port. Update
+        # path explicitly nulls p2p_manager itself before calling
+        # _on_services_ready.
         if self.p2p_manager is None and not self._p2p_starting:
-            self._start_p2p()
+            self._ensure_node_identity()
 
         # Auto-trigger Last.fm auth if pending from wizard
         self._check_lastfm_pending_auth()
@@ -634,17 +651,99 @@ class LauncherApp(ctk.CTk):
         return targets
 
     def _ensure_node_identity(self):
-        """Generate node identity on first run (non-blocking)."""
-        def _gen():
+        """The identity P2P starts on, off the Tk thread: the one on disk, or
+        a new one when there is none and the database holds no seal of this
+        node's own analysis (node_identity.ensure_identity). Over such seals
+        nothing is made on its own — the owner is told, and P2P stays off
+        until the identity is back or he chooses a new one
+        (_show_identity_missing). A database that cannot be read decides
+        nothing either."""
+        def _check():
+            import psycopg2
+            from desktop.node_identity import ensure_identity
             try:
-                from desktop.node_identity import has_identity, generate_identity
-                if not has_identity():
-                    generate_identity()
-                    logger.info("Node identity generated")
-            except Exception as e:
-                logger.debug(f"Node identity generation skipped: {e}")
+                state = ensure_identity(self._get_local_db_dsn())
+            except psycopg2.Error as e:
+                logger.error("No node identity, and the database could not be read to tell "
+                             "whether this node signed records with one: %s — none made, P2P "
+                             "off until the next start", e)
+                self.ui_call(self._identity_unsettled)
+                return
+            except Exception:
+                # Logged by the thread's hook; the next start settles it again
+                self.ui_call(self._identity_unsettled)
+                raise
+            if state == "missing":
+                logger.warning("No node identity, and the database holds records this node "
+                               "signed with the one that is gone — none made, P2P off until "
+                               "the owner decides")
+                self.ui_call(self._show_identity_missing)
+                return
+            if state == "minted":
+                logger.info("Node identity generated")
+            self.ui_call(self._identity_ready)
 
-        threading.Thread(target=_gen, daemon=True).start()
+        self._p2p_starting = True
+        threading.Thread(target=_check, daemon=True, name="node-identity").start()
+
+    def _identity_unsettled(self):
+        """No identity to start P2P on: the start is over until the next."""
+        self._p2p_starting = False
+
+    def _identity_ready(self):
+        """An identity is on disk: the notice, when one is up, has nothing
+        left to say, and P2P starts on it."""
+        self._p2p_starting = False
+        notice, self._identity_notice = self._identity_notice, None
+        if notice is not None and notice.winfo_exists():
+            notice.destroy()
+        self._start_p2p()
+
+    def _show_identity_missing(self):
+        """The identity folder holds no identity while the database holds
+        records this node signed with the one that was there. Nothing is made
+        on its own: the window says how to bring it back, and offers the one
+        way to a new identity, which makes those records another author's."""
+        self._identity_unsettled()
+        if self._identity_notice is not None and self._identity_notice.winfo_exists():
+            self._identity_notice.lift()
+            return
+        from desktop.node_identity import _identity_dir
+        dialog = ctk.CTkToplevel(self)
+        self._identity_notice = dialog
+        dialog.title("Identity missing")
+        dialog.geometry("560x540")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        ctk.CTkLabel(dialog, text="This node's identity is missing",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
+        ctk.CTkLabel(dialog, text=IDENTITY_MISSING.format(folder=_identity_dir()), justify="left",
+                     wraplength=490, text_color="gray").pack(padx=24, anchor="w")
+        btns = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
+
+        def later():
+            self._identity_notice = None
+            dialog.destroy()
+
+        def make_new():
+            later()
+            threading.Thread(target=self._make_new_identity, daemon=True,
+                             name="node-identity").start()
+
+        dialog.protocol("WM_DELETE_WINDOW", later)
+        ctk.CTkButton(btns, text="Not now", width=110, command=later).pack(side="right")
+        ctk.CTkButton(btns, text="Make a new identity", width=170, command=make_new,
+                      fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
+
+    def _make_new_identity(self):
+        """The owner's choice at the notice: a new identity whatever the
+        database holds, and P2P on it."""
+        from desktop.node_identity import generate_identity
+        generate_identity()
+        logger.warning("Node identity generated on the owner's choice, over records the "
+                       "identity that is gone signed")
+        self.ui_call(self._identity_ready)
 
     def _on_identity_rotated(self):
         """The backend rotated this node's key (Profile → name / password).

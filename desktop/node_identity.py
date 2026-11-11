@@ -105,6 +105,49 @@ def has_identity() -> bool:
     return (_identity_dir() / "node_info.json").exists()
 
 
+# Seals on this node's own analysis: segments, features and instruments under a
+# source that is not imported (or under none). Each names the key that signed
+# it, which was this node's — so with no identity in sight they say the node
+# had one: the analysis records' cutover (backend/db_migrate) decides nothing
+# without it, and no start mints a new identity over them (ensure_identity).
+SEALED_FIRST_HAND_SQL = """
+    SELECT EXISTS (SELECT 1 FROM embedding_segments es
+                     JOIN embeddings e ON e.id = es.embedding_id
+                     LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                    WHERE es.signature IS NOT NULL AND s.imported IS NOT TRUE)
+        OR EXISTS (SELECT 1 FROM audio_features a
+                     LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                    WHERE a.signature IS NOT NULL AND s.imported IS NOT TRUE)
+        OR EXISTS (SELECT 1 FROM track_instruments i
+                     LEFT JOIN analysis_sources s ON s.id = i.analysis_source_id
+                    WHERE i.signature IS NOT NULL AND s.imported IS NOT TRUE)"""
+
+
+def ensure_identity(dsn: str) -> str:
+    """This node's identity as a start finds it, before anything P2P runs:
+    "present" — the identity folder holds one; "minted" — it held none and
+    the database holds no seal of this node's own analysis, so a new one is
+    generated; "missing" — it holds none and the database holds such seals,
+    signed by the identity that is gone: nothing is generated, and only the
+    owner's choice makes a new one (generate_identity), which turns those
+    records into another author's. A database that cannot be read raises
+    (psycopg2.Error) and nothing is generated."""
+    if has_identity():
+        return "present"
+    import psycopg2
+    conn = psycopg2.connect(dsn, connect_timeout=10)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(SEALED_FIRST_HAND_SQL)
+            sealed = cur.fetchone()[0]
+    finally:
+        conn.close()
+    if sealed:
+        return "missing"
+    generate_identity()
+    return "minted"
+
+
 def generate_identity() -> str:
     """Generate a new random Ed25519 keypair and write it to disk."""
     if not HAS_CRYPTO:

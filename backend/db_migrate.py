@@ -293,19 +293,6 @@ def _own_keys() -> frozenset:
 _OTHERS = ("({t}.signature IS NOT NULL"
            " AND NOT lower({t}.author_pubkey) = ANY(CAST(:keys AS text[])))")
 
-# Seals on records no imported source holds — the node's own, unless it
-# never had a key: what deciding without the node's keys would take for
-# another author's.
-_SEALED_NOT_IMPORTED = """
-    SELECT EXISTS (SELECT 1 FROM audio_features a
-                     LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                    WHERE a.signature IS NOT NULL AND s.imported IS NOT TRUE)
-        OR EXISTS (SELECT 1 FROM embedding_segments es
-                     JOIN embeddings e ON e.id = es.embedding_id
-                     LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
-                    WHERE es.signature IS NOT NULL AND s.imported IS NOT TRUE)"""
-
-
 def _split_flipped(db, keys: list) -> dict:
     """The grids another author sealed under this node's own source row — a
     registration flipped an imported row first-hand until 2026-11-10
@@ -414,12 +401,16 @@ def _reseal_analysis_records() -> dict:
 
     import provenance
     from database import SessionLocal
+    from desktop.node_identity import SEALED_FIRST_HAND_SQL
 
     keys = sorted(_own_keys())
     started = time.monotonic()
     db = SessionLocal()
     try:
-        if not keys and db.execute(text(_SEALED_NOT_IMPORTED)).scalar():
+        # Seals on records no imported source holds — the node's own, unless
+        # it never had a key: what deciding without the node's keys would
+        # take for another author's.
+        if not keys and db.execute(text(SEALED_FIRST_HAND_SQL)).scalar():
             logger.error("the analysis records are not re-sealed: records no imported source holds "
                          "carry seals, and no key of this node resolves (P2P_USERNAME/P2P_PASSWORD, "
                          "or the identity folder) — the node's own would go as another's; the next "
