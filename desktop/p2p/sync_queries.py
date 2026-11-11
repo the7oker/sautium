@@ -827,9 +827,10 @@ def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
     tracklist with a recording MBID — for a binding, that very recording —,
     lacking the category, owned or, with the phantom layer on, phantom: one
     carried here already (_CARRIED: another author's analysis of it, of any
-    kind, is here — what follows adds nothing to carry), or one more within
-    the room the carry limit leaves (an owned track's gap-fill is never
-    carrying, nor what joins a phantom's own analysis: count_carried_tracks).
+    kind, is here — what follows adds nothing to carry) or holding analysis
+    of this node's own (_OWN_ANALYSIS: what joins it spends no room), or one
+    more within the room the carry limit leaves (an owned track's gap-fill is
+    never carrying either: count_carried_tracks counts neither).
     One item per track (per track and recording for a binding), but for a
     record category, whose every item of a track taken goes to the importer
     to choose from. No offer state is kept: the
@@ -855,16 +856,18 @@ def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
         WITH cand AS (
             SELECT p.id, p.rec,
                    EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = p.id) AS owned,
-                   {_CARRIED.format(t="p.id")} AS carried
+                   {_CARRIED.format(t="p.id")} AS carried,
+                   {_OWN_ANALYSIS.format(t="p.id")} AS own_analysis
               FROM unnest(%(ids)s::uuid[], %(recs)s::uuid[]) AS p(id, rec)
              WHERE EXISTS (SELECT 1 FROM album_tracks at2
                             WHERE at2.track_id = p.id AND at2.recording_mbid IS NOT NULL
                               AND (p.rec IS NULL OR at2.recording_mbid = p.rec))
                AND {_LACKS[category].format(t="p.id")})
         SELECT id::text AS track_uuid, rec::text AS rec FROM cand
-         WHERE owned OR (carried AND %(phantoms)s)
+         WHERE owned OR ((carried OR own_analysis) AND %(phantoms)s)
         UNION ALL
-        (SELECT id::text, rec::text FROM cand WHERE NOT owned AND NOT carried AND %(phantoms)s
+        (SELECT id::text, rec::text FROM cand
+          WHERE NOT owned AND NOT carried AND NOT own_analysis AND %(phantoms)s
           ORDER BY id LIMIT %(room)s)""",
         {"ids": [k[0] for k in keyed], "recs": [k[1] for k in keyed],
          "phantoms": phantom_layer_on(conn), "room": max(room, 0)})
@@ -898,9 +901,9 @@ def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
     mbids = recording_mbids[:CARRY_MAX_TRACKS]
     # The phantom layer is the owner's switch: off, only owned tracks are
     # wanted — their gap-fill is the node's own library. As a push is judged
-    # (wanted_for_push): a phantom carried here already is wanted whatever
-    # the room — what it lacks adds nothing to carry —, and the room is for
-    # phantoms not carried yet.
+    # (wanted_for_push): a phantom carried here already, or holding analysis
+    # of this node's own, is wanted whatever the room — what it lacks adds
+    # nothing to carry —, and the room is for the other phantoms.
     matched = db_query(
         conn,
         f"""WITH m AS (SELECT DISTINCT at2.track_id
@@ -909,11 +912,14 @@ def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
                 c AS (SELECT m.track_id,
                              EXISTS (SELECT 1 FROM owned_files f
                                       WHERE f.track_id = m.track_id) AS owned,
-                             {_CARRIED.format(t="m.track_id")} AS carried
+                             {_CARRIED.format(t="m.track_id")} AS carried,
+                             {_OWN_ANALYSIS.format(t="m.track_id")} AS own_analysis
                         FROM m)
-           SELECT track_id::text AS track_uuid FROM c WHERE owned OR (carried AND %(p)s)
+           SELECT track_id::text AS track_uuid FROM c
+            WHERE owned OR ((carried OR own_analysis) AND %(p)s)
            UNION ALL
-           (SELECT track_id::text FROM c WHERE NOT owned AND NOT carried AND %(p)s
+           (SELECT track_id::text FROM c
+             WHERE NOT owned AND NOT carried AND NOT own_analysis AND %(p)s
              ORDER BY track_id LIMIT %(room)s)""",
         {"m": mbids, "p": phantom_layer_on(conn), "room": max(room, 0)},
     )

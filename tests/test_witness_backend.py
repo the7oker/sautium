@@ -170,6 +170,19 @@ def _stamped(row) -> bool:
 # Signing and stamping
 # ---------------------------------------------------------------------------
 
+def test_the_notary_counts_what_sign_wrote_and_drains_by_what_it_tried(monkeypatch):
+    """sign() reports the records it signed and the ones it tried: a pass
+    that tried the cap is followed by another though it left a record that
+    changed under it, and the notary's count says what was written."""
+    n = notary._Notary()
+    monkeypatch.setattr(n, "_connect", lambda: None)
+    cap = sign_audio.MAX_RECORDS_PER_BATCH
+    passes = iter([sign_audio.SignResult(cap - 1, cap), sign_audio.SignResult(1, 1)])
+    monkeypatch.setattr(sign_audio, "sign", lambda conn, full=False: next(passes))
+    n._sign(["analysis"], full=False)
+    assert n.status()["last_signed"] == cap
+
+
 def test_sign_witness_signs_witness_rows_and_nothing_else(conn, stage, monkeypatch):
     def scan(*_a, **_k):
         raise AssertionError("a witness pass ran a catalogue scan")

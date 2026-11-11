@@ -67,6 +67,11 @@ EVENT_KINDS = frozenset({
     "sync.failed",
     "sync.import_failed",
     "update.failed",
+    "mb_slice.failed",
+    "mb_slice.refused",
+    "lb_slice.failed",
+    "lb_slice.refused",
+    "slice.penalized",
     "migration.waiting",
 })
 # What a report may call an event: `family.name`. EVENT_KINDS is the

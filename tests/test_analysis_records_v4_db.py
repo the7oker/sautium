@@ -650,7 +650,7 @@ def test_sign_signs_the_kept_records_as_features_v4_and_instruments_v1():
         on.mp.setattr(sign_audio, "_timestamp_root", stamp)
         stage = sign_audio.connect()
         try:
-            assert sign_audio.sign(stage, full=True) == 2 + 2 + 2   # features, instruments, segments
+            assert sign_audio.sign(stage, full=True).signed == 2 + 2 + 2   # features, instruments, segments
             assert sign_audio.stamp(stage).stamped == 6
         finally:
             stage.close()

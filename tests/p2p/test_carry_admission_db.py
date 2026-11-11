@@ -102,8 +102,9 @@ def test_the_carry_limit_is_the_room_left_and_an_owned_gap_is_not_carrying(conn)
     assert _wanted(conn, budget=4) == {OWNED, PHANTOM}
     assert _wanted(conn, budget=3) == {OWNED}
     assert _wanted(conn, budget=0) == set()
-    assert _wanted(conn, budget=3, category="audio_features") == {OWNED}       # every category
-    assert _wanted(conn, budget=3, category="track_mbids") == {OWNED}
+    # every category; ANALYSED, whose grid is this node's own, spends no room
+    assert _wanted(conn, budget=3, category="audio_features") == {OWNED, ANALYSED}
+    assert _wanted(conn, budget=3, category="track_mbids") == {OWNED, ANALYSED}
 
 
 def test_a_carried_tracks_features_and_binding_follow_its_segments_whatever_the_room(conn):
@@ -114,8 +115,8 @@ def test_a_carried_tracks_features_and_binding_follow_its_segments_whatever_the_
                     "VALUES (%s, %s, %s::vector, %s)",
                     (PHANTOM, MODEL, "[" + ",".join(["0.01"] * 512) + "]", cur.fetchone()[0]))
     budget = 1                                        # the room is spent: 1 carried of 1
-    assert _wanted(conn, budget=budget, category="audio_features") == {OWNED, PHANTOM}
-    assert _wanted(conn, budget=budget, category="track_mbids") == {OWNED, PHANTOM}
+    assert _wanted(conn, budget=budget, category="audio_features") == {OWNED, PHANTOM, ANALYSED}
+    assert _wanted(conn, budget=budget, category="track_mbids") == {OWNED, PHANTOM, ANALYSED}
 
 
 def _imported(conn, track, table):
@@ -142,12 +143,57 @@ def test_every_carried_kind_is_carrying_and_spends_the_room_without_analysis_of_
     _imported(conn, PHANTOM, "audio_features")              # its features alone
     assert sync_queries.count_carried_tracks(conn) == 1
     assert _wanted(conn, budget=1) == {OWNED, PHANTOM}       # carried: its segments follow
-    assert _wanted(conn, budget=1, category="audio_features") == {OWNED}    # the room is spent
+    bare = str(uuid.uuid4())                                 # a phantom this node holds nothing of
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'bare')", (bare,))
+        cur.execute("""INSERT INTO album_tracks (album_id, track_id, position, recording_mbid)
+                       VALUES (%s, %s, 200, %s)""", (ALBUM, bare, str(uuid.uuid4())))
+    push = [{"track_uuid": bare}]
+    assert sync_queries.wanted_for_push(conn, "audio_features", push, 1) == []   # the room is spent
+    assert sync_queries.wanted_for_push(conn, "audio_features", push, 2) == push
     _imported(conn, ANALYSED, "track_instruments")          # beside a grid of its own
     assert sync_queries.count_carried_tracks(conn) == 1
-    assert _wanted(conn, budget=1, category="audio_features") == {OWNED, ANALYSED}
+    assert sync_queries.wanted_for_push(conn, "audio_features", push, 2) == push  # a room of one still
     wanted = sync_queries.wanted_tracks(conn, [_recording(conn, t) for t in (PHANTOM, ANALYSED)], 1)
     assert set(wanted["audio_features"]) == {ANALYSED}
+
+
+def _self_analysed(conn, n):
+    """n phantoms on the tracklist holding a grid of this node's own and
+    nothing another author made."""
+    out = []
+    with conn.cursor() as cur:
+        for i in range(n):
+            tid = str(uuid.uuid4())
+            out.append(tid)
+            cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'streamed')", (tid,))
+            cur.execute("""INSERT INTO album_tracks (album_id, track_id, position, recording_mbid)
+                           VALUES (%s, %s, %s, %s)""", (ALBUM, tid, 100 + i, str(uuid.uuid4())))
+            cur.execute("INSERT INTO analysis_sources (track_id, chromaprint) VALUES (%s, 'AQAA') "
+                        "RETURNING id", (tid,))
+            cur.execute("""INSERT INTO embeddings (track_id, model_id, vector, analysis_source_id)
+                           VALUES (%s, %s, %s::vector, %s) RETURNING id""",
+                        (tid, MODEL, "[" + ",".join(["0.01"] * 512) + "]", cur.fetchone()[0]))
+            cur.execute("""INSERT INTO embedding_segments (embedding_id, segment_index, vector)
+                           VALUES (%s, 0, %s::vector)""",
+                        (cur.fetchone()[0], "[" + ",".join(["0.01"] * 512) + "]"))
+    return out
+
+
+def test_a_phantom_holding_analysis_of_its_own_is_taken_whatever_the_room(conn):
+    """Probes P3 and P4 of the third review: what lands for a phantom that
+    holds analysis of this node's own spends no room (count_carried_tracks),
+    yet the admission had it wait for room like a phantom it holds nothing
+    of — refused at a spent room, one of five at a room of one. It is taken
+    as a carried one is, by the push and by the offer."""
+    _imported(conn, PHANTOM, "audio_features")                  # the room: 1 carried of 1
+    assert _wanted(conn, budget=1, category="instruments") == {OWNED, PHANTOM, ANALYSED}
+    offered = sync_queries.wanted_tracks(conn, [_recording(conn, ANALYSED)], 1)
+    assert offered["instruments"] == [ANALYSED]
+    many = _self_analysed(conn, 5)
+    kept = sync_queries.wanted_for_push(conn, "instruments", [{"track_uuid": t} for t in many], 2)
+    assert {it["track_uuid"] for it in kept} == set(many)       # a room of one left
+    assert sync_queries.count_carried_tracks(conn) == 1
 
 
 def test_an_offer_wants_a_carried_tracks_gaps_whatever_the_room(conn):

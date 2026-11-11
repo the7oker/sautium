@@ -359,7 +359,7 @@ def test_sign_never_signs_an_imported_twins_record_whose_seal_a_shed_removed(
 
     stage = psycopg2.connect(scratch_dsn, cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        assert sign_audio.sign(stage) == 1                       # its own segment, nothing else
+        assert sign_audio.sign(stage).signed == 1                # its own segment, nothing else
     finally:
         stage.close()
     with conn.cursor() as cur:
@@ -686,7 +686,7 @@ def _grid(cur, track, source, duration) -> tuple:
 def _sign(scratch_dsn) -> int:
     stage = psycopg2.connect(scratch_dsn, cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        return sign_audio.sign(stage)
+        return sign_audio.sign(stage).signed
     finally:
         stage.close()
 
@@ -1931,7 +1931,7 @@ def test_a_save_racing_sign_leaves_no_seal_over_what_the_record_no_longer_is(
             return real(*a, **kw)
 
         monkeypatch.setattr(sign_audio, "_collect_enrichment", between)
-        _sign(scratch_dsn)
+        assert _sign(scratch_dsn) == 0                            # tried, and left
         monkeypatch.setattr(sign_audio, "_collect_enrichment", real)
         assert done
     else:
@@ -1945,3 +1945,71 @@ def test_a_save_racing_sign_leaves_no_seal_over_what_the_record_no_longer_is(
     assert _sign(scratch_dsn) == 1
     author, signed = sealed()
     assert rs.verify(_record_payload(kind, track, duration, now), signed, author)
+
+
+def test_an_album_changed_between_signs_read_and_write_is_sealed_as_it_became(
+        conn, scratch_dsn, monkeypatch):
+    """Probe P7 of the third review: the album layer kept the read-to-write
+    window the records lost — a canon pass renaming an album between sign()'s
+    read and its write left a seal over the old title that verified nowhere,
+    and nothing signed it again. Every table sign() writes is sealed only as
+    it was read: the album stays unsigned and the next full pass seals it as
+    it became; its tracklist row, unchanged, is sealed by the first."""
+    monkeypatch.setattr(p2p_identity, "_signing_key_cache", NODE)
+    album = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        track = _track(cur)
+        _record_row(cur, "features", track, _source(cur, track, FP, duration=240), _FEATURES)
+        cur.execute("INSERT INTO albums (id, title, musicbrainz_id) VALUES (%s, 'LP', %s)",
+                    (album, str(uuid.uuid4())))
+        cur.execute("""INSERT INTO album_tracks (album_id, track_id, position, recording_mbid)
+                       VALUES (%s, %s, 1, %s)""", (album, track, str(uuid.uuid4())))
+    real = sign_audio._collect_enrichment
+
+    def then_rename(*a, **kw):
+        n = real(*a, **kw)                                  # read and signed
+        _save(scratch_dsn, "UPDATE albums SET title = 'Another LP' WHERE id = %s", (album,))
+        return n
+
+    monkeypatch.setattr(sign_audio, "_collect_enrichment", then_rename)
+    assert _sign(scratch_dsn) == 2                          # the features, the tracklist row
+    monkeypatch.setattr(sign_audio, "_collect_enrichment", real)
+
+    def album_row():
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""SELECT id::text AS entity, created_at AS fetched_at,
+                                  musicbrainz_id::text AS rg_mbid, title, release_year,
+                                  mb_match_confidence::text AS confidence, author_pubkey, signature
+                             FROM albums WHERE id = %s""", (album,))
+            return cur.fetchone()
+
+    assert album_row()["signature"] is None
+    with conn.cursor() as cur:
+        cur.execute("SELECT signature IS NOT NULL FROM album_tracks WHERE album_id = %s", (album,))
+        assert cur.fetchone() == (True,)
+    stage = psycopg2.connect(scratch_dsn, cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        assert sign_audio.sign(stage, full=True).signed == 1
+    finally:
+        stage.close()
+    r = album_row()
+    content = rs.blake2b_hex(rs.canonical_enrichment_blob("album", r))
+    assert r["title"] == "Another LP" and rs.verify(rs.enrichment_payload(
+        r["author_pubkey"], "album", r["entity"], "", content, r["fetched_at"]),
+        r["signature"], r["author_pubkey"])
+
+
+def test_a_tracklist_row_sign_makes_itself_is_sealed_by_the_pass_that_made_it(
+        conn, scratch_dsn, monkeypatch):
+    """A row sign() materialises (an owned file's tracklist row) reads the
+    version its own transaction wrote, so the check passes it."""
+    monkeypatch.setattr(p2p_identity, "_signing_key_cache", NODE)
+    with conn.cursor() as cur:
+        track = _track(cur)
+        mf = _file(cur, track, "/music/a.flac")
+        cur.execute("UPDATE media_files SET track_number = 1 WHERE id = %s", (mf,))
+        _record_row(cur, "features", track, _source(cur, track, FP, media_file=mf), _FEATURES)
+    assert _sign(scratch_dsn) == 2                          # the features, the row it made
+    with conn.cursor() as cur:
+        cur.execute("SELECT signature IS NOT NULL FROM album_tracks WHERE track_id = %s", (track,))
+        assert cur.fetchall() == [(True,)]

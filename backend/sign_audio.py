@@ -122,6 +122,11 @@ STAMP_MAX_ROOTS = 100
 # oldest witness row still waiting for its stamp (None when none waits) —
 # what the notary arms its witness backstop from.
 StampResult = namedtuple("StampResult", "stamped not_before witness_waiting")
+# What sign() hands its callers: the records it signed (the UPDATEs' row
+# counts — a record changed between its read and its write is left for the
+# next pass) and the records it tried, which the cap reads: a pass that
+# tried the cap leaves more waiting, whatever it could write.
+SignResult = namedtuple("SignResult", "signed tried")
 
 
 class NotaryThrottled(Exception):
@@ -217,7 +222,7 @@ _ENRICHMENT_SOURCES = {
     # left the node (2026-08-25). RG-anchored albums only — an unanchored
     # album is exactly the non-canon residue the snapshot must not carry.
     "album": ("""
-        SELECT al.id, al.id::text AS entity, '' AS source,
+        SELECT al.id, al.xmin::text AS read_as, al.id::text AS entity, '' AS source,
                al.created_at AS fetched_at,
                al.musicbrainz_id::text AS rg_mbid, al.title,
                al.release_year,
@@ -229,7 +234,7 @@ _ENRICHMENT_SOURCES = {
                        WHERE at2.album_id = al.id AND {track_pred})""",
         "albums"),
     "album_track": ("""
-        SELECT at2.id, at2.track_id::text AS entity, '' AS source,
+        SELECT at2.id, at2.xmin::text AS read_as, at2.track_id::text AS entity, '' AS source,
                at2.created_at AS fetched_at,
                at2.album_id::text AS album_uuid, at2.disc, at2.position,
                at2.length_ms, at2.recording_mbid::text AS recording_mbid
@@ -237,7 +242,7 @@ _ENRICHMENT_SOURCES = {
         WHERE at2.signature IS NULL AND NOT at2.imported
           AND {track_pred}""", "album_tracks"),
     "track_mbid": ("""
-        SELECT tm.recording_mbid AS id, tm.track_id::text AS entity,
+        SELECT tm.recording_mbid AS id, tm.xmin::text AS read_as, tm.track_id::text AS entity,
                '' AS source, tm.created_at AS fetched_at,
                tm.recording_mbid::text AS recording_mbid,
                tm.confidence::text AS confidence
@@ -271,15 +276,14 @@ _TABLE_PK = {"track_mbids": ("recording_mbid", "uuid"),
 # signs them under their new uuid. The window used to hold a Worker round
 # trip (52 segments of tracks split mid-batch verified invalid, 2026-08-25);
 # signing no longer waits on the network, so it is the seconds of one pass.
+# The UPDATE asserts the row version read too (xmin, since 2026-11-11): a
+# save between the SELECT and the UPDATE — another link, another value, a
+# canon pass's new title — is just as invisible to the guards, and the record
+# stays unsigned for the next pass, which signs it as it is.
 _TABLE_ENTITY = {"embedding_segments": None,       # via embeddings.track_id, see below
                  "audio_features": "track_id", "track_instruments": "track_id",
                  "album_tracks": "track_id", "track_mbids": "track_id",
                  "albums": "id"}
-# The per-track records whose UPDATE also asserts the row version read
-# (xmin): a save between the SELECT and the UPDATE — another link, another
-# value — is just as invisible to the guards, and the record stays unsigned
-# for the next pass (2026-11-11).
-_SEALED_AS_READ = frozenset({"audio_features", "track_instruments"})
 
 
 def _materialize_owned_tracklists(cur) -> int:
@@ -350,7 +354,8 @@ def _collect_enrichment(cur, author, key, pending, chunk=20000,
                 payload = rs.enrichment_payload(author, kind, r["entity"],
                                                 r["source"], content,
                                                 r["fetched_at"])
-                pending.append((table, r["id"], rs.sign(payload, key), r["entity"]))
+                pending.append((table, r["id"], rs.sign(payload, key), r["entity"],
+                                r["read_as"]))
                 added += 1
             if budget is not None and added >= budget:
                 break
@@ -412,11 +417,11 @@ def sign_witness(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> int:
 
 
 def sign(conn, full=False, limit=None, dry_run=False,
-         max_records=MAX_RECORDS_PER_BATCH) -> int:
+         max_records=MAX_RECORDS_PER_BATCH) -> SignResult:
     """Stage 1 — author-sign every record that became signable. Local and
-    instant: no Worker, no batch. Returns the number of records signed;
-    a call that fills the cap means more are waiting, so loop until 0 to
-    drain a backlog.
+    instant: no Worker, no batch. Returns the records signed and the records
+    tried (SignResult); a call that tried the cap means more are waiting, so
+    loop until it tries fewer to drain a backlog.
 
     The analysis layer is found from its unsigned rows (cheap on every
     wake); the album layer above it is scoped to those tracks unless
@@ -424,7 +429,7 @@ def sign(conn, full=False, limit=None, dry_run=False,
     Witness records sign first, in their own transaction (sign_witness)."""
     signer = _signer()
     if signer is None:
-        return 0
+        return SignResult(0, 0)
     key, author = signer
     witnessed = _sign_witness(conn, key, author, dry_run=dry_run, max_records=max_records)
     cur = conn.cursor()
@@ -439,7 +444,7 @@ def sign(conn, full=False, limit=None, dry_run=False,
     if track_ids:
         logger.info("tracks with unsigned analysis: %d", len(track_ids))
 
-    # pending: (table, pk, signature, entity uuid[, the row version read])
+    # pending: (table, pk, signature, entity uuid, the row version read)
     # across every table
     pending, capped = [], False
     for tid in track_ids:
@@ -449,7 +454,7 @@ def sign(conn, full=False, limit=None, dry_run=False,
         params = {"tid": tid}
 
         cur.execute(f"""
-            SELECT s.id, s.segment_index, s.vector::text AS vec,
+            SELECT s.id, s.xmin::text AS read_as, s.segment_index, s.vector::text AS vec,
                    e.model_id::text AS model,
                    src.chromaprint, src.duration_seconds, src.grid_version
             FROM embedding_segments s
@@ -464,7 +469,8 @@ def sign(conn, full=False, limit=None, dry_run=False,
                 author, tid, seg["chromaprint"], seg["duration_seconds"],
                 seg["model"], seg["segment_index"], vh,
                 grid_version=seg["grid_version"])
-            pending.append(("embedding_segments", seg["id"], rs.sign(payload, key), tid))
+            pending.append(("embedding_segments", seg["id"], rs.sign(payload, key), tid,
+                            seg["read_as"]))
 
         cur.execute(f"""
             SELECT a.id, a.xmin::text AS read_as, a.analysis_version,
@@ -511,40 +517,37 @@ def sign(conn, full=False, limit=None, dry_run=False,
         conn.rollback()
         logger.info("dry-run — %d record(s) would sign, nothing stored",
                     len(pending) + witnessed)
-        return len(pending) + witnessed
+        return SignResult(0, len(pending) + witnessed)
     if not pending:
         conn.commit()          # the materialized tracklist rows, if any
-        return witnessed
+        return SignResult(witnessed, witnessed)
 
     # Grouped and batched: a statement per record was fine at audio scale and
     # is not at enrichment scale — the first unified pass signed 300k+ rows.
     by_table: dict = {}
-    for table, pk, sig, entity, *read_as in pending:
-        by_table.setdefault(table, []).append((pk, author, sig, entity, *read_as))
+    for table, pk, sig, entity, read_as in pending:
+        by_table.setdefault(table, []).append((pk, author, sig, entity, read_as))
+    total_signed = 0
     for table, rows in by_table.items():
         pk_col, pk_cast = _TABLE_PK.get(table, ("id", "int"))
         entity_col = _TABLE_ENTITY[table]
         # A record is sealed only as it was read: the version of its row
         # (xmin) is the one its values and its link's declaration were
-        # signed from. A save that lands in between — a new link, a new
-        # value — makes another version the guard cannot shed a seal from,
-        # since the seal arrives after it; that row stays unsigned for the
-        # next pass, which reads it as it is. Optimistic: nothing is locked
-        # across the signing. Segments need no check: a save replaces them.
-        as_read = table in _SEALED_AS_READ
-        columns = "v(pk, author, sig, entity, read_as)" if as_read else "v(pk, author, sig, entity)"
+        # signed from. A save that lands in between makes another version
+        # the guard cannot shed a seal from, since the seal arrives after
+        # it; that row stays unsigned for the next pass, which reads it as it
+        # is. Optimistic: nothing is locked across the signing. A row this
+        # pass made itself (a materialised tracklist row) reads the version
+        # its own transaction wrote, and compares equal.
         if entity_col is None:
-            entity_sql = (f"FROM (VALUES %s) AS {columns}, "
+            entity_sql = ("FROM (VALUES %s) AS v(pk, author, sig, entity, read_as), "
                           "embeddings e "
                           "WHERE t.id = v.pk AND e.id = t.embedding_id "
                           "AND e.track_id = v.entity")
         else:
-            entity_sql = (f"FROM (VALUES %s) AS {columns} "
+            entity_sql = ("FROM (VALUES %s) AS v(pk, author, sig, entity, read_as) "
                           f"WHERE t.{pk_col} = v.pk AND t.{entity_col} = v.entity")
-        if as_read:
-            entity_sql += " AND t.xmin = v.read_as"
-        template = (f"(%s::{pk_cast}, %s, %s, %s::uuid, %s::xid)" if as_read
-                    else f"(%s::{pk_cast}, %s, %s, %s::uuid)")
+        entity_sql += " AND t.xmin = v.read_as"
         signed = 0
         for i in range(0, len(rows), 500):
             page = rows[i:i + 500]
@@ -554,7 +557,7 @@ def sign(conn, full=False, limit=None, dry_run=False,
                        SET author_pubkey = v.author, signature = v.sig
                     {entity_sql} AND t.signature IS NULL""",
                 page,
-                template=template,
+                template=f"(%s::{pk_cast}, %s, %s, %s::uuid, %s::xid)",
                 page_size=500,
             )
             signed += cur.rowcount
@@ -563,12 +566,14 @@ def sign(conn, full=False, limit=None, dry_run=False,
                            "pass was open — left unsigned for the next pass",
                            len(rows) - signed, len(rows), table)
         logger.info("signed %d rows in %s", signed, table)
+        total_signed += signed
     conn.commit()
-    logger.info("signed %d record(s) over %d track(s)", len(pending), len(track_ids))
+    logger.info("signed %d of %d record(s) over %d track(s)", total_signed, len(pending),
+                len(track_ids))
     if capped:
         logger.info("pass capped at %d records — run again to continue",
                     max_records)
-    return len(pending) + witnessed
+    return SignResult(total_signed + witnessed, len(pending) + witnessed)
 
 
 # Stage 2 finds "signed, awaiting stamp" by scan; the partial indexes of
@@ -747,8 +752,8 @@ def run(stage="both", limit=None, dry_run=False, until_done=False,
         while True:
             n = sign(conn, full=True, limit=limit, dry_run=dry_run,
                      max_records=max_records)
-            total += n
-            if not until_done or dry_run or n < max_records or not max_records:
+            total += n.signed
+            if not until_done or dry_run or n.tried < max_records or not max_records:
                 break
     if stage in ("stamp", "both"):
         while True:

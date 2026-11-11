@@ -188,15 +188,17 @@ class _Notary:
         # A wake for sightings alone signs them alone: a probe of a new peer
         # must not cost the catalogue scans an analysis wake runs.
         if not full and all(r == WITNESS for r in reasons):
-            step = sign_audio.sign_witness
+            def step(c):
+                n = sign_audio.sign_witness(c)
+                return sign_audio.SignResult(n, n)
         else:
             def step(c):
                 return sign_audio.sign(c, full=full)
         total = 0
         while True:
             n = step(conn)
-            total += n
-            if n < sign_audio.MAX_RECORDS_PER_BATCH:
+            total += n.signed
+            if n.tried < sign_audio.MAX_RECORDS_PER_BATCH:
                 break
         if total:
             logger.info("notary: signed %d record(s) on wake (%s)",

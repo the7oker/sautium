@@ -153,8 +153,10 @@ def support_reports(node: str = "", kind: str = "", since: str = "", limit: int 
     username or pubkey prefix; `kind` one of node.started, service.start_failed,
     p2p.start_failed, backend.crashed, backend.restarted, backend.gave_up,
     agent.signin_opened, agent.signin_failed, agent.signin_timeout, agent.state_changed, chat.error,
-    sync.failed, sync.import_failed, update.failed; `since` ISO 8601. Reports carry states,
-    counters and error strings — never logs or dialogs (those need a warrant)."""
+    sync.failed, sync.import_failed, update.failed, mb_slice.failed, mb_slice.refused,
+    lb_slice.failed, lb_slice.refused, slice.penalized, migration.waiting; `since` ISO 8601.
+    Reports carry states, counters and error strings — never logs or dialogs (those need a
+    warrant)."""
     try:
         return _dump(_backend_get("/api/support/reports",
                                   {"node": node, "kind": kind, "since": since, "limit": limit}))
