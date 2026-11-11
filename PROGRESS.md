@@ -159,7 +159,8 @@ implementation details live in the code, DB and git history.
   for librosa.
 - **Vocal detection thresholds**: >0.65 vocal, <0.35 instrumental, else mixed.
   Known unreliable — for vocal/instrumental queries use `artists.is_vocalist`
-  (classified from Last.fm bio keywords).
+  (classified from Last.fm bio keywords). The class went on 2026-11-11 (two
+  entries below): nothing derives it any more.
 - **The zero-shot values are derived from the stored segments (2026-11-10).**
   The analyser scored one random 10 s crop of the middle 30 s, so a re-run
   of one file on one machine moved the vocal score by up to 0.33 and no two
@@ -176,8 +177,8 @@ implementation details live in the code, DB and git history.
   constants. In SQL rather than Python because the launcher's P2P process
   imports segments without numpy, and one derivation serves every write
   path. Rows, not JSONB; no stored class — thresholds are read-time
-  constants (`backend/zero_shot.py`: the values above, a mood at 0.05,
-  danceable at 0.5, until a measurement on a real library sets them). The
+  constants (`backend/zero_shot.py`; set from a real library on
+  2026-11-11, the next entry). The
   full fill of 494 000 synthetic segments, the master's scale, takes 11 s
   in memory (the segments already in the page cache; a cold start adds the
   read of ~1.4 GB). The derivation is total: a seal says who made a vector,
@@ -188,6 +189,25 @@ implementation details live in the code, DB and git history.
   bf16, x86 and ARM). The bias of the vocal score is
   the prompts', not the crop's: `artists.is_vocalist` stays the vocal
   signal.
+- **The derived thresholds set from a real library; the vocal class gone
+  (2026-11-11).** Measured read-only on a library of ~41 000 analysed
+  tracks (504 000 segments), the derived scores against the values the
+  analyser had stored and against `artists.is_vocalist`. A mood counts at
+  0.06: the thresholds that keep each mood's share of tracks where the
+  stored values (above 0.05 of one random crop) had it run from 0.048 to
+  0.089, median 0.060, and at 0.06 the eight gates pass between 6 points
+  fewer and 8 more than before. Danceable counts at 0.48, which keeps its
+  share at 0.79 (0.5 would pass 0.77). The vocal score separates nothing:
+  AUC of singing artists' tracks against instrumental artists' is 0.67
+  (0.70 for the stored crop), the medians are 0.038 against 0.014, and at
+  the old 0.65 / 0.35 lines 95 % of singing artists' tracks read
+  "instrumental" — no threshold sorts even the spot-check artists. So the
+  class is gone, not re-tuned: no reader derives vocal / instrumental /
+  mixed from the score, the score is shown as the number it is, and the
+  CLI's `--vocal` / `--instrumental` flags filter by `artists.is_vocalist`.
+  The mean over the windows and the portrait agree (correlation 0.95–0.99
+  per label, the same top mood for 95 % of tracks); the windows stay, being
+  the steadier across devices.
 - **A record version per kind, and the cutover that made it (2026-11-10).**
   One audio version governed the segment and the features record, so a
   change to the features would have re-signed every segment (~497 000 on

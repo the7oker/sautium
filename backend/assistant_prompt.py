@@ -42,8 +42,9 @@ _ZERO_SHOT_NOTE = (
     f"`WHERE (z.moods->>'calm and relaxing')::float >= {zero_shot.MOOD_MIN}`; "
     'order by the score for "the most".\n'
     f"  - `danceability`: 0..1, danceable at >= {zero_shot.DANCEABLE_MIN}.\n"
-    "  - `vocal_score`: NOT a reliable vocal/instrumental signal (most vocal tracks score low). "
-    "For vocal/instrumental queries, use `artists.is_vocalist` column. "
+    "  - `vocal_score`: a number, NOT a vocal/instrumental class: it does not separate the tracks "
+    "of singing artists from instrumental ones (most vocal tracks score under 0.1), and no class is "
+    "derived from it. For vocal/instrumental queries, use `artists.is_vocalist` column. "
     "For female/male vocal queries, combine `artists.gender` with `artists.is_vocalist`.\n"
     "  - The rows behind the view, for a filter over the whole library: **zero_shot_scores** "
     "(embedding_id -> embeddings.id, label_id, score) and **zero_shot_labels** (id, label_set "

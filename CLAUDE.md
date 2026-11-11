@@ -270,10 +270,14 @@ See:
   that is not a unit vector (norm outside 0.99..1.01) derives none, and the
   import gate refuses one. Discovery, search, Now Playing, the assistant and
   the CLI read these; no analysis writes them and no record carries them
-  (since 2026-11-10, the records' cutover below). **The vocal score is
-  unreliable as a class**: for vocal/instrumental queries, use
-  `artists.is_vocalist` (classified from bio keywords). See `PROGRESS.md`
-  design decisions.
+  (since 2026-11-10, the records' cutover below). The thresholds were set
+  2026-11-11 from a measurement on a real library (a mood at 0.06,
+  danceable at 0.48: each gate passes about the share of tracks the stored
+  values did). **There is no vocal/instrumental class**: the vocal score
+  does not separate singing artists' tracks from instrumental ones (AUC
+  0.67), so it is shown as a number and nothing derives a class from it —
+  for vocal/instrumental queries, use `artists.is_vocalist` (classified from
+  bio keywords). See `PROGRESS.md` design decisions.
 - **A record version per kind** (since 2026-11-10, `record_sig.py`): the
   segments v3, the features v4 (`audio_features`: tempo, key, the amplitude
   block — the nine fields of `FEATURE_ORDER`), the instruments v1, a record
@@ -694,7 +698,7 @@ toast takes no pointer events and never blocks the user (see
 | `desktop/p2p/mb_slice_cycle.py` + `desktop/p2p/slice_sources.py` | The MB slice requester shared by the launcher's P2PManager and the Docker backend (the pending tiers incl. imported-scrobble names, `mb.search_sources`, `mb_slice.status`) and the source finder both slice families share (every DHT holder; the directory and the master hint whenever no primary source is usable; the verified set kept between runs) |
 | `backend/track_similarity.py` | The ONE "similar tracks" scorer — recall by mean-KNN plus a kin arm, rank by segment chamfer minus a Last.fm tag bonus — behind radio, the Now Playing Similar shelf, `play-similar` and Discovery's seed (`_SEED_SCORE` imports its weights). Radio itself (the drifting batch fill, the refill observer on the status tick, `manager.radio_mode`) is `backend/routers/player.py` § "Radio mode"; the decisions are in PROGRESS.md § "Radio and track similarity" |
 | `backend/hqp_library.py` + `backend/playback/substitute.py` | An HQPlayer's own library as album variants (`<LibraryGet/>` → `scanner.import_metadata` with an HQPlayer `FileSink`; `hqp_endpoints` as the library's identity and the registry of chosen HQPlayers; a sync never removes rows) and what the ACTIVE output opens for each queue slot (`QueueItem.play`, re-read on an output switch: a rip here, that HQPlayer's copy, else a stream fetched lazily a lead window ahead of the playhead) |
-| `backend/zero_shot.py` + `backend/zero_shot_labels/labels.json` | The zero-shot values as readers see them: the release's label embeddings (made once by `scripts/make_zero_shot_labels.py`, loaded only under the pinned digest), the read-time thresholds (`MOOD_MIN`, `DANCEABLE_MIN`, `VOCAL_MIN`, `INSTRUMENTAL_MAX`) and the SQL fragments the gates share. The derivation itself is SQL — `zero_shot_derive` and the two triggers on `embedding_segments` in `001_initial.sql`; `db_migrate`'s `zero_shot_labels_v1` loads the labels and scores what a node already held |
+| `backend/zero_shot.py` + `backend/zero_shot_labels/labels.json` | The zero-shot values as readers see them: the release's label embeddings (made once by `scripts/make_zero_shot_labels.py`, loaded only under the pinned digest), the read-time thresholds (`MOOD_MIN`, `DANCEABLE_MIN`) and the SQL fragments the gates share. The derivation itself is SQL — `zero_shot_derive` and the two triggers on `embedding_segments` in `001_initial.sql`; `db_migrate`'s `zero_shot_labels_v1` loads the labels and scores what a node already held |
 | `backend/streaming/demo.py` | The demo policy: the `demo_plays` ledger (one full demo-channel listen per track), the resolve's per-track provider order, the proxy's fetch-time gate (`link_admissible`), the status observer that spends the listen past 90 % and drops the spent buffer |
 | `backend/streaming/deezer_catalog.py` + `deezer_preview.py` | Deezer public API in core: the catalog resolve (barcode → album tracklist → track gate, one pacer + memo per process) shared as `DeezerCatalogProvider` by the BYO lossless module and the core 30 s excerpt provider (`deezer_preview`, `manifest.excerpt`, always last in `providers_preferred()`) |
 

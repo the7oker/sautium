@@ -10,7 +10,6 @@ import time
 import click
 from sqlalchemy import text
 
-import zero_shot
 from config import settings, LOGGING_CONFIG
 from database import get_db_context, engine
 from api_cooldown import cooling_down
@@ -746,10 +745,10 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
         if stats['success'] > 0:
             try:
                 with get_db_context() as db:
-                    rows = db.execute(text(f"""
+                    rows = db.execute(text("""
                         SELECT t.title, a2.name as artist,
                                af.bpm, af.key, af.mode,
-                               {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental,
+                               round(z.vocal_score::numeric, 3) AS vocal_score,
                                round(z.danceability::numeric, 3) AS danceability, ti.instruments
                         FROM audio_features af
                         JOIN tracks t ON af.track_id = t.id
@@ -772,7 +771,7 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
                             click.echo(
                                 f"   • {row.artist} - {row.title}"
                                 f"\n     BPM: {row.bpm or '?'} | Key: {row.key or '?'} {row.mode or ''}"
-                                f" | {row.vocal_instrumental or '?'}"
+                                f" | Vocal score: {row.vocal_score if row.vocal_score is not None else '?'}"
                                 f" | Dance: {row.danceability or '?'}"
                                 f"\n     Instruments: {instruments or 'N/A'}"
                             )
@@ -938,8 +937,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
 @click.option("--bpm-max", type=float, default=None, help="Maximum BPM")
 @click.option("--key", "-k", type=str, default=None, help="Musical key (e.g. 'Am', 'C', 'F#m', 'D major')")
 @click.option("--instrument", type=str, default=None, help="Instrument name (e.g. 'piano', 'saxophone')")
-@click.option("--vocal", is_flag=True, default=False, help="Only vocal tracks")
-@click.option("--instrumental", is_flag=True, default=False, help="Only instrumental tracks")
+@click.option("--vocal", is_flag=True, default=False, help="Only tracks of artists known to sing")
+@click.option("--instrumental", is_flag=True, default=False, help="Only tracks of artists known as instrumental")
 @click.option("--danceable", is_flag=True, default=False, help="Only danceable tracks")
 @click.option("--limit", "-l", type=int, default=20, help="Number of results")
 @click.option("--artist", type=str, default=None, help="Filter by artist name")
@@ -956,9 +955,9 @@ def search_features(bpm_min, bpm_max, key, instrument, vocal, instrumental, danc
     if instrument:
         filters["instrument"] = instrument
     if vocal:
-        filters["vocal"] = "vocal"
+        filters["vocalist"] = "vocal"
     elif instrumental:
-        filters["vocal"] = "instrumental"
+        filters["vocalist"] = "instrumental"
     if danceable:
         filters["danceable"] = True
     if artist:
@@ -993,8 +992,8 @@ def search_features(bpm_min, bpm_max, key, instrument, vocal, instrumental, danc
         desc_parts.append(f"Key: {k} {m}".strip())
     if filters.get("instrument"):
         desc_parts.append(f"Instrument: {filters['instrument']}")
-    if filters.get("vocal"):
-        desc_parts.append(filters["vocal"])
+    if filters.get("vocalist"):
+        desc_parts.append(f"{filters['vocalist']} artists")
     if filters.get("danceable"):
         desc_parts.append("danceable")
 
@@ -1004,14 +1003,14 @@ def search_features(bpm_min, bpm_max, key, instrument, vocal, instrumental, danc
         with get_db_context() as db:
             result = search_by_features(db, filters=filters, limit=limit)
 
-        click.echo(f"\n{'#':<4} {'BPM':>5} {'Key':>4} {'Mode':>5} {'Vocal':>12} {'Dance':>5}  {'Artist':<25} {'Title':<35}")
+        click.echo(f"\n{'#':<4} {'BPM':>5} {'Key':>4} {'Mode':>5} {'Vocal score':>12} {'Dance':>5}  {'Artist':<25} {'Title':<35}")
         click.echo("-" * 100)
 
         for i, track in enumerate(result["results"], 1):
             bpm = f"{track.get('bpm', 0):.0f}" if track.get("bpm") else "?"
             k = track.get("key") or "?"
             m = track.get("mode") or "?"
-            v = (track.get("vocal_instrumental") or "?")[:12]
+            v = f"{track['vocal_score']:.2f}" if track.get("vocal_score") is not None else "?"
             d = f"{track.get('danceability', 0):.2f}" if track.get("danceability") is not None else "?"
             artist_name = (track.get("artist") or "Unknown")[:24]
             title = (track.get("title") or "?")[:34]

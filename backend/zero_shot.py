@@ -31,13 +31,18 @@ LABELS_DIGEST = "8dddc91e69bc9f16a65a521a55ec89e41a0b9cc3e4abcdf8b226c2b5606a3af
 MOODS = "moods"
 DANCEABLE = "danceable"
 
-# Provisional: the semantics of the stored values they replace (a mood was
-# stored above 0.05; danceable at 0.5; the class by 0.65 / 0.35), carried
-# over until a measurement on a real library sets them.
-MOOD_MIN = 0.05
-DANCEABLE_MIN = 0.5
-VOCAL_MIN = 0.65
-INSTRUMENTAL_MAX = 0.35
+# Set 2026-11-11 from a measurement on a real library of ~41 000 tracks, so
+# each gate passes about the share of tracks the stored values it replaces
+# did (a mood was stored above 0.05 of one random crop; danceable at 0.5).
+# MOOD_MIN is the median of the eight thresholds that keep each mood's share
+# (they run 0.048..0.089; at 0.06 the gates pass between 6 points fewer and
+# 8 more than before). DANCEABLE_MIN keeps the share at 0.79.
+# There is no vocal/instrumental class: the vocal score does not separate
+# the tracks of singing artists from those of instrumental ones (AUC 0.67;
+# medians 0.038 against 0.014), so it stays a number — whether an artist
+# sings is artists.is_vocalist.
+MOOD_MIN = 0.06
+DANCEABLE_MIN = 0.48
 
 
 def labels_digest(doc: dict) -> str:
@@ -70,13 +75,6 @@ def present_moods(moods: Optional[Dict[str, float]]) -> Dict[str, float]:
         return {}
     return {k: round(v, 3) for k, v in sorted(moods.items(), key=lambda kv: -kv[1])
             if v >= MOOD_MIN}
-
-
-def vocal_class_sql(score: str) -> str:
-    """The vocal class of a vocal score, in SQL: no class is stored."""
-    return (f"CASE WHEN {score} >= {VOCAL_MIN} THEN 'vocal' "
-            f"WHEN {score} <= {INSTRUMENTAL_MAX} THEN 'instrumental' "
-            f"WHEN {score} IS NOT NULL THEN 'mixed' END")
 
 
 def track_gate_sql(track: str, key: str, bound: str) -> str:

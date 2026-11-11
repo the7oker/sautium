@@ -755,14 +755,16 @@ def test_the_delta_lands_on_a_node_that_ran_the_earlier_files_and_holds_segments
 
 @pytest.fixture(scope="module")
 def library(cur):
-    """Six owned tracks: five whose segments are label vectors, so every
-    score the readers gate on is far from its threshold, and one with
-    features alone."""
+    """Six owned tracks of one artist known as instrumental: five whose
+    segments are label vectors, so every score the readers gate on is far
+    from its threshold — and the vocal score spans 0 to 1 under that one
+    artist — and one with features alone."""
     cur.execute("TRUNCATE tracks, albums, artists CASCADE")
     made = {"dance": ["danceable"], "sung": ["vocal"], "still": ["not_danceable"],
             "calm": ["calm and relaxing"], "mixed": ["vocal", "instrumental"], "bare": []}
     artist, album = str(uuid.uuid4()), str(uuid.uuid4())
-    cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'the reader')", (artist,))
+    cur.execute("INSERT INTO artists (id, name, is_vocalist) VALUES (%s, 'the reader', 'instrumental')",
+                (artist,))
     cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'small library')", (album,))
     cur.execute("INSERT INTO album_artists (album_id, artist_id, role) VALUES (%s, %s, 'primary')",
                 (album, artist))
@@ -787,17 +789,11 @@ def library(cur):
     scored = [n for n in want if want[n]]
     assert want["dance"]["danceable"] > zero_shot.DANCEABLE_MIN + 0.1
     assert all(want[n]["danceable"] < zero_shot.DANCEABLE_MIN - 0.1 for n in scored if n != "dance")
-    assert want["sung"]["vocal"] > zero_shot.VOCAL_MIN + 0.1
-    assert want["still"]["vocal"] < zero_shot.INSTRUMENTAL_MAX - 0.1
-    assert zero_shot.INSTRUMENTAL_MAX + 0.1 < want["mixed"]["vocal"] < zero_shot.VOCAL_MIN - 0.1
+    assert want["sung"]["vocal"] > 0.99 and want["still"]["vocal"] < 0.01
+    assert 0.4 < want["mixed"]["vocal"] < 0.6
     assert all(abs(score - zero_shot.MOOD_MIN) > 1e-4
                for n in scored for key, score in want[n].items() if key in dict(SETS["moods"]))
     return {"tracks": tracks, "want": want, "artist": artist, "album": album}
-
-
-def _class(score) -> str:
-    return ("vocal" if score >= zero_shot.VOCAL_MIN
-            else "instrumental" if score <= zero_shot.INSTRUMENTAL_MAX else "mixed")
 
 
 @pytest.fixture(scope="module")
@@ -826,9 +822,45 @@ def test_search_filters_by_the_danceable_score_and_shows_the_derived_values(libr
     for name in scored:
         assert every[name]["danceability"] == pytest.approx(want[name]["danceable"], abs=6e-4)
         assert every[name]["danceability"] == round(every[name]["danceability"], 3)
-        assert every[name]["vocal_instrumental"] == _class(want[name]["vocal"])
-    assert every["bare"]["danceability"] is None and every["bare"]["vocal_instrumental"] is None
-    assert {every[n]["vocal_instrumental"] for n in scored} == {"vocal", "instrumental", "mixed"}
+        assert every[name]["vocal_score"] == pytest.approx(want[name]["vocal"], abs=6e-4)
+    assert every["bare"]["danceability"] is None and every["bare"]["vocal_score"] is None
+
+
+def test_no_reader_makes_a_class_of_the_vocal_score(library, session, scratch_dsn, monkeypatch):
+    """The score is shown as a number; vocal or instrumental is the artist's
+    is_vocalist — here 'instrumental' for every track, the one scoring 1.0
+    included."""
+    search = pytest.importorskip("search")
+    import assistant_queries
+    import db_pool
+    import psycopg2.pool
+
+    assert not {"VOCAL_MIN", "INSTRUMENTAL_MAX", "vocal_class_sql"} & set(dir(zero_shot))
+    want, tracks = library["want"], library["tracks"]
+    with session() as db:
+        every = search.search_by_features(db, {"bpm_min": 1})["results"]
+        by_artist = {flt: {r["title"] for r in search.search_by_features(db, {"vocalist": flt})["results"]}
+                     for flt in ("instrumental", "vocal")}
+    assert all("vocal_instrumental" not in r for r in every)
+    assert by_artist == {"instrumental": set(tracks), "vocal": set()}
+
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    try:
+        for name in ("sung", "still"):
+            features = assistant_queries.track_features(db_pool.db_query, tracks[name])
+            assert "vocal_instrumental" not in features
+            assert float(features["vocal_score"]) == pytest.approx(want[name]["vocal"], abs=1e-6)
+            assert features["artist_is_vocalist"] == "instrumental"
+            said = assistant_queries.format_track_info(
+                {"artist": "the reader", "title": name, "album": "small library",
+                 "track_id": tracks[name]}, features)
+            assert f"Vocal score: {want[name]['vocal']:.2f} (zero-shot, no vocal/instrumental verdict)" in said
+            assert "Artist: instrumental" in said and "Type:" not in said
+        bare = assistant_queries.track_features(db_pool.db_query, tracks["bare"])
+        assert bare["vocal_score"] is None and bare["artist_is_vocalist"] == "instrumental"
+    finally:
+        pool.closeall()
 
 
 def test_the_discovery_gates_read_the_scores_at_every_level(library, session):
@@ -880,12 +912,11 @@ def test_now_playing_and_the_assistant_show_the_derived_values(library, conn, sc
         assert player._zero_shot_detail(tracks["bare"]) == {"danceability": None, "moods": None}
 
         features = assistant_queries.track_features(db_pool.db_query, tracks["still"])
-        assert features["vocal_instrumental"] == "instrumental"
         assert float(features["danceability"]) == pytest.approx(want["still"]["danceable"], abs=1e-6)
         assert float(features["bpm"]) == 100 + list(tracks).index("still")
         bare = assistant_queries.track_features(db_pool.db_query, tracks["bare"])
-        assert bare["vocal_instrumental"] is None and bare["danceability"] is None
-        assert "Type: instrumental" in assistant_queries.format_track_info(
+        assert bare["danceability"] is None
+        assert f"Danceability: {want['still']['danceable']:.2f}" in assistant_queries.format_track_info(
             {"artist": "the reader", "title": "still", "album": "small library",
              "track_id": tracks["still"]}, features)
         assert assistant_queries.track_features(db_pool.db_query, str(uuid.uuid4())) is None
@@ -893,23 +924,13 @@ def test_now_playing_and_the_assistant_show_the_derived_values(library, conn, sc
         pool.closeall()
 
 
-def test_the_sql_helpers_say_what_the_thresholds_say(library, cur):
+def test_the_gate_helper_says_what_the_threshold_says(library, cur):
     want, tracks = library["want"], library["tracks"]
     for name, track in tracks.items():
-        cur.execute(f"""SELECT {zero_shot.track_gate_sql("t.id", zero_shot.DANCEABLE, ">= %s")},
-                               (SELECT {zero_shot.vocal_class_sql("z.vocal_score")}
-                                  FROM track_zero_shot z WHERE z.track_id = t.id)
+        cur.execute(f"""SELECT {zero_shot.track_gate_sql("t.id", zero_shot.DANCEABLE, ">= %s")}
                           FROM tracks t WHERE t.id = %s""", (zero_shot.DANCEABLE_MIN, track))
-        gate, cls = cur.fetchone()
-        if want[name] is None:
-            assert (gate, cls) == (False, None)
-        else:
-            assert gate == (want[name]["danceable"] >= zero_shot.DANCEABLE_MIN)
-            assert cls == _class(want[name]["vocal"])
-    for score, cls in ((zero_shot.VOCAL_MIN, "vocal"), (zero_shot.INSTRUMENTAL_MAX, "instrumental"),
-                       ((zero_shot.VOCAL_MIN + zero_shot.INSTRUMENTAL_MAX) / 2, "mixed")):
-        cur.execute(f"SELECT {zero_shot.vocal_class_sql('%s::float8')}", (score, score, score))
-        assert cur.fetchone()[0] == cls
+        gate = cur.fetchone()[0]
+        assert gate == (want[name] is not None and want[name]["danceable"] >= zero_shot.DANCEABLE_MIN)
 
 
 def test_a_score_exactly_at_its_threshold_passes_its_gate(library, cur, session):

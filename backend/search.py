@@ -334,7 +334,7 @@ def _build_feature_result(row) -> Dict[str, Any]:
         "bpm": float(row.bpm) if row.bpm else None,
         "key": row.key,
         "mode": row.mode,
-        "vocal_instrumental": row.vocal_instrumental,
+        "vocal_score": row.vocal_score,
         "danceability": row.danceability,
         "instruments": present_instruments(row.instruments) if hasattr(row, "instruments") else None,
     }
@@ -346,11 +346,11 @@ def search_by_features(
     limit: int = None,
 ) -> Dict[str, Any]:
     """
-    Search tracks by audio features (BPM, key, instruments, vocal, danceability).
+    Search tracks by audio features (BPM, key, instruments, danceability).
 
     Args:
         db: Database session.
-        filters: Feature filters (bpm_min, bpm_max, key, mode, instrument, vocal, danceable,
+        filters: Feature filters (bpm_min, bpm_max, key, mode, instrument, vocalist, danceable,
                                   plus standard: artist, genre, is_lossless).
         limit: Max results.
 
@@ -371,7 +371,7 @@ def search_by_features(
                mf.is_lossless,
                mf.duration_seconds,
                af.bpm, af.key, af.mode,
-               {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental,
+               round(z.vocal_score::numeric, 3)::float8 AS vocal_score,
                round(z.danceability::numeric, 3)::float8 AS danceability, ti.instruments
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id

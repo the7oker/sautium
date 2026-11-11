@@ -16,7 +16,6 @@ the id of a FILE and appears only where a file is the subject.
 import os
 import uuid as _uuid
 
-import zero_shot
 from ensemble_instruments import present_instruments
 from hqplayer_client import format_time
 from sql_queries import best_rip_order, owned_rank
@@ -350,11 +349,16 @@ def track_info(q, track_uuid: str):
 
 def track_features(q, track_uuid: str):
     """The track's analysis for display: the features and the instruments
-    records, with the danceability and vocal class derived from its segments
-    (zero_shot.py) — any of the three may be missing."""
-    rows = q(f"""
+    records, with the danceability and the vocal score derived from its
+    segments (zero_shot.py) — any of the three may be missing. The score is
+    no vocal/instrumental verdict; whether the artist sings is the artist's
+    own `is_vocalist`, given beside it."""
+    rows = q("""
         SELECT af.bpm, af.key, af.mode, af.energy_db, ti.instruments,
-               z.danceability, {zero_shot.vocal_class_sql("z.vocal_score")} AS vocal_instrumental
+               z.danceability, z.vocal_score,
+               (SELECT a.is_vocalist::text FROM track_artists ta
+                  JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id AND ta.role = 'primary' LIMIT 1) AS artist_is_vocalist
         FROM tracks t
         LEFT JOIN audio_features af ON af.track_id = t.id
         LEFT JOIN track_instruments ti ON ti.track_id = t.id
@@ -474,8 +478,11 @@ def format_track_info(row: dict, features: dict | None) -> str:
             lines.append(f"  Energy: {float(features['energy_db']):.1f} dB")
         if features.get("danceability") is not None:
             lines.append(f"  Danceability: {float(features['danceability']):.2f}")
-        if features.get("vocal_instrumental"):
-            lines.append(f"  Type: {features['vocal_instrumental']}")
+        if features.get("vocal_score") is not None:
+            lines.append(f"  Vocal score: {float(features['vocal_score']):.2f} "
+                         "(zero-shot, no vocal/instrumental verdict)")
+        if features.get("artist_is_vocalist") in ("vocal", "instrumental"):
+            lines.append(f"  Artist: {features['artist_is_vocalist']}")
         if features.get("instruments"):
             # storage is the raw top-20 score distribution — show only labels
             # above their read thresholds
