@@ -1002,6 +1002,7 @@ def _st(state, track, position, *, uri, serial, length=300.0):
     ("last_seconds_same_take", None),  # a verdict that turned on the same take: no start of anyone's
     ("last_seconds_stopped_by_us", None),      # a Stop of ours in those seconds ended the listen: an idle HQPlayer
     ("last_seconds_onto_our_own_stale_entry", None),   # an entry the node handed, queued no more: HQPlayer's own advance
+    ("hqp5_last_seconds", None),       # HQPlayer 5 names no take to tell a takeover from a start on an idle HQPlayer
     ("stopped_by_us", None),           # a Stop of ours after the reading ended the listen
     ("named_by_nothing", None),        # the slot from the layout alone: never a listen to cut
     ("hqp5_next_tick", (2, 30)),       # HQPlayer 5, no take: the tick before was the listen's
@@ -1016,7 +1017,7 @@ def test_the_takeover_rule_case_by_case(fake, case, spot):
     b = hb.HqpBackend(emit=lambda *_: None, queue=q)
     own_uri = "" if case == "named_by_nothing" else "file:///E:/Music/A/02.flac"
     serial = None if case.startswith("hqp5") else 5
-    position = 297.0 if case.startswith("last_seconds") else 30.0
+    position = 297.0 if "last_seconds" in case else 30.0
     b._note_listen(_st(PlaybackState.PLAYING, 2, position, uri=own_uri, serial=serial),
                    (2, q.item_at(2), False), position, 1.0, 0.0, moving=True)
     if case.endswith("stopped_by_us"):
@@ -1110,6 +1111,9 @@ ROONS = "http://127.0.0.1:30000/1/stream.raw"
     ("emptied", [], 2, None, True),                                        # a clear read before its add: not yet
     ("a removal of ours moved its entry", OURS[1:] + ["file:///E:/Other/ref.wav"], 2, None, False),   # found by what it is
     ("roon's behind ours, a removal of ours before it", [OURS[1], ROONS], 2, (3, 0), False),
+    ("roon's behind ours, after a Stop of ours", [OURS[1], ROONS], 1, None, False),     # the node's word ended it
+    ("roon's behind ours, a spot set since", [OURS[1], ROONS], 1, None, False),         # the newer word stands
+    ("roon's playlist on the same take", [ROONS], 2, None, True),                      # its clear and add before its Play
     ("not read", None, 2, None, True),                                     # the next tick tells
 ])
 def test_a_played_out_listens_take_is_judged_by_where_the_playlist_says_it_went(fake, case, playlist, entry,
@@ -1128,11 +1132,18 @@ def test_a_played_out_listens_take_is_judged_by_where_the_playlist_says_it_went(
     q, b = _three(fake)
     b._note_listen(_st(PlaybackState.PLAYING, entry, 297.0, uri=OURS[1], serial=5),
                    (2, q.item_at(2), False), 297.0, 1.0, 0.0, moving=True)
-    stopped = _st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=6, length=0.0)
+    stopped = _st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=5 if case.endswith("same take") else 6, length=0.0)
     foreign = playlist is not None and any(not u.startswith("file:///E:/Music/A/") for u in playlist)
+    if case.endswith("Stop of ours"):
+        b._stopped_at = 1.5
+    if case.endswith("spot set since"):
+        b._set_spot(q.item_at(1), 0)
+        spot = (1, 0)
     took = b._note_listen(stopped, (0, None, False), 0.0, 2.0, 1.0, edited=foreign, playlist=playlist)
-    assert (took, b._spot_at()) == (spot is not None, spot) and b._cut is None
-    assert (b._listen is not None) is kept
+    assert (took, b._spot_at()) == (spot is not None and not case.endswith("spot set since"), spot)
+    assert b._cut is None and (b._listen is not None) is kept
+    if case.endswith("spot set since"):
+        return
     if not kept and spot is None:
         # ...and another controller's start on the HQPlayer that advance or end left takes nothing
         later = _st(PlaybackState.PLAYING, 1, 2.0, uri=ROONS, serial=7)
@@ -1155,39 +1166,87 @@ def test_an_answer_in_transit_is_no_reading_of_a_track_in_its_last_seconds(fake)
     assert b._spot_at() == (3, 0) and b._cut is q.item_at(3)
 
 
-@pytest.mark.parametrize("tick, taken", [
-    ("roon's entry playing", True),
-    ("roon's refused start, the take moved on", True),
-    ("our own entry of an earlier queue playing", False),
-    ("a foreign file elsewhere in the playlist, the advance's take", False),
+@pytest.mark.parametrize("tick, taken, spot", [
+    ("roon's entry playing", True, (3, 0)),
+    ("roon's refused start, the take moved on", True, (3, 0)),
+    ("roon's entry playing, a spot standing", True, (1, 0)),
+    ("roon's entry playing, the advance's track queued no more", True, None),
+    ("our own entry of an earlier queue playing", False, None),
+    ("a foreign file elsewhere in the playlist, the advance's take", False, None),
+    ("a foreign file elsewhere in the playlist, the take moved on", False, None),
+    ("our own slot 4 playing on a later take", False, None),
+    ("roon's playlist on the advance's take", False, None),
 ])
-def test_a_takeover_while_hqplayers_own_advance_is_watched_leaves_the_spot_at_its_entry(fake, tick, taken):
+def test_a_takeover_while_hqplayers_own_advance_is_watched_leaves_the_spot_at_its_entry(fake, tick, taken, spot):
     """_advance_taken: HQPlayer's own advance onto slot 3 is watched (the
     listen of slot 2 over: its playlist told the take went on to an entry of
-    ours). A tick that reads an entry the node never gave playing, or a
-    playlist holding one with the take moved past the advance's (Roon's
-    refused start), is the takeover: the attempt ends there and the spot is
-    slot 3 at 0, the advance's entry. An entry the node handed, or a foreign
-    entry in a playlist still on the advance's take, is no one's takeover."""
-    q, b = _three(fake)
+    ours). A tick that reads an entry the node never gave playing, or — at
+    rest, the take moved past the advance's — a playlist that holds none the
+    node gave (Roon's clear and its refused stream), is the takeover: the
+    attempt ends there and the spot is slot 3 at 0, the advance's entry,
+    where no spot stands and the queue still names it. A playlist that still
+    holds an entry of ours tells nothing, whatever else is in it and
+    whichever take it is on (review round 2: HQPlayer moving on again by
+    itself beside a foreign entry was "another app took HQPlayer", its spot
+    at a track that had played); nor does an entry the node handed."""
+    q = CanonicalQueue()
+    q.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in (1, 2, 3, 4)])
+    b = hb.HqpBackend(emit=lambda *_: None, queue=q)
     att = diag.advance(2, 6, None, 1.0)
     att.aim(q.item_at(3))
-    stale = "file:///E:/Music/X/removed.flac"
+    stale, ref = "file:///E:/Music/X/removed.flac", "file:///E:/Other/ref.wav"
+    ours = [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3, 4)]
     b._given = {stale}
-    status, playing, edited = {
-        "roon's entry playing": (_st(PlaybackState.PLAYING, 1, 0.0, uri=ROONS, serial=7), (0, None, True), True),
+    roon_plays = (_st(PlaybackState.PLAYING, 1, 0.0, uri=ROONS, serial=7), (0, None, True), None)
+    status, playing, playlist = {
+        "roon's entry playing": roon_plays,
+        "roon's entry playing, a spot standing": roon_plays,
+        "roon's entry playing, the advance's track queued no more": roon_plays,
         "roon's refused start, the take moved on": (_st(PlaybackState.STOPPED, 1, 0.0, uri=ROONS, serial=7),
-                                                    (0, None, False), True),
+                                                    (0, None, False), [ROONS]),
         "our own entry of an earlier queue playing": (_st(PlaybackState.PLAYING, 4, 0.0, uri=stale, serial=6),
-                                                      (0, None, True), False),
+                                                      (0, None, True), None),
         "a foreign file elsewhere in the playlist, the advance's take": (
-            _st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=6), (0, None, False), True),
+            _st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=6), (0, None, False), ours + [ref]),
+        "a foreign file elsewhere in the playlist, the take moved on": (
+            _st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=7), (0, None, False), ours + [ref]),
+        "our own slot 4 playing on a later take": (_st(PlaybackState.PLAYING, 4, 1.0, uri=ours[3], serial=7),
+                                                   (4, q.item_at(4), False), ours + [ref]),
+        "roon's playlist on the advance's take": (_st(PlaybackState.STOPPED, 0, 0.0, uri="", serial=6),
+                                                  (0, None, False), [ROONS]),
     }[tick]
-    assert b._advance_taken(att, status, playing, edited) is taken
-    assert b._spot_at() == ((3, 0) if taken else None) and b._takeover is taken
-    assert (b._output_event(None, None) or {}).get("kind") == ("took" if taken else None)
+    if tick.endswith("a spot standing"):
+        b._set_spot(q.item_at(1), 0)
+    if tick.endswith("queued no more"):
+        q.remove(3)
+    assert b._advance_taken(att, status, playing, playlist) is taken
+    assert b._spot_at() == spot
+    left = spot == (3, 0)
+    assert b._takeover is left and (b._output_event(None, None) or {}).get("kind") == ("took" if left else None)
     tap = diag.Attempt(intent="select", t0=1.0)
-    assert not b._advance_taken(tap, status, playing, edited)      # a start of the node's is judged by its listen
+    assert not b._advance_taken(tap, status, playing, playlist)    # a start of the node's is judged by its listen
+
+
+def test_the_entry_after_ours_is_found_nearest_the_place_it_was_read_at(fake):
+    """_after_in: a track queued twice has two entries — the one nearest the
+    place the listen was read at is its own, and the entry after that one is
+    asked about; none of it in the playlist is None, its last entry ""."""
+    q, b = _three(fake)
+    twice = [OURS[1], OURS[0], OURS[1], OURS[2]]
+    assert b._after_in(twice, q.item_at(2), 3) == OURS[2]
+    assert b._after_in(twice, q.item_at(2), 1) == OURS[0]
+    assert b._after_in([ROONS], q.item_at(2), 2) is None and b._after_in(OURS[:2], q.item_at(2), 2) == ""
+
+
+def test_the_other_apps_stop_is_an_event_of_its_own_verdict_alone(fake):
+    """_output_event: `stopped` is said for the attempt whose verdict minted
+    its id (_finalize) — another attempt's `other_stopped` diagnosis, one
+    from before this backend's event, is no event."""
+    q, b = _three(fake)
+    b._stopped_event = (40, 99)
+    assert b._output_event({"id": 40, "code": "other_stopped"}, None) == {"id": 99, "kind": "stopped", "attempt": 40}
+    assert b._output_event({"id": 41, "code": "other_stopped"}, None) is None
+    assert b._output_event({"id": 40, "code": "not_played"}, None) is None
 
 
 def _listening(b, q, second, *, serial=5, at=1.0, length=300.0):
@@ -5601,10 +5660,9 @@ def test_an_ordinary_stopped_advance_beside_a_file_added_in_hqplayers_own_window
     """Review round 1's finding 1, end to end. A file is added at the end of
     HQPlayer's playlist in its own window (drift: an entry the node never
     gave, nowhere near ours); slot 2 plays out and HQPlayer stops between
-    the two entries, then plays slot 3 — or refuses it. The take went onto
-    an entry of ours: HQPlayer's own advance, watched as one — no takeover's
-    spot, no event, and a refusal of slot 3 is the node's own verdict, never
-    "HQPlayer refused the other app's track"."""
+    the two entries, then plays slot 3. The take went onto an entry of
+    ours: HQPlayer's own advance, watched as one — no takeover's spot, no
+    event, nothing said of another app's track."""
     writes, lastfm = listens
     _fast_verdicts(monkeypatch)
     mgr, b = _node_plays_slot_2(fake, monkeypatch)
@@ -5631,16 +5689,21 @@ def test_an_ordinary_stopped_advance_beside_a_file_added_in_hqplayers_own_window
         b.shutdown()
 
 
+@pytest.mark.parametrize("hqplayer", ["6", "5"])
 def test_roon_starting_on_an_hqplayer_the_queues_end_left_idle_takes_nothing_though_the_queue_grew(
-        fake, listens, monkeypatch):
+        fake, listens, monkeypatch, hqplayer):
     """Review round 1's finding 3. The queue's last slot plays out and
     HQPlayer stops by itself; the person appends a track, nothing plays;
     later Roon starts on the idle HQPlayer. Nothing of the person's was
     taken: no spot at the appended track, no event (a toast on a Sautium
-    that was not playing)."""
+    that was not playing). On HQPlayer 5 too, which names no take (review
+    round 2): nothing there tells that start from a takeover, so a listen in
+    its last seconds leaves no spot, as before the body."""
     from playback import manager as manager_mod
     writes, lastfm = listens
     _fast_verdicts(monkeypatch)
+    if hqplayer == "5":
+        fake.track_serial = None
     fake.raw_streams = "uri"
     roon = FakeRoon(fake.port)
     mgr = _album(3)
@@ -5814,3 +5877,92 @@ def test_what_another_controller_did_to_the_renderer_is_one_event_each(tmp_path,
     wait_for(lambda: n.last.extra.get("source") == "external", timeout=5, what="external")
     took = n.last.extra["output_event"]
     assert took["kind"] == "took" and took["id"] > again["id"] and n.last.extra["resume"]["index"] == 1
+
+
+def test_hqplayer_moving_on_again_while_its_advance_is_watched_beside_a_foreign_entry_is_no_takeover(
+        fake, listens, monkeypatch):
+    """Review round 2's finding 1, end to end (its probe). A tail mirror that
+    holds an entry of HQPlayer's own before ours: [01, X09, 02, 03, 04]
+    against the queue [1, 2, 3, 4]. Slot 2 plays out; HQPlayer stops between
+    the entries and plays slot 3, its advance watched; three reads on it
+    moves on to slot 4 by itself (a short track, the person's Next in its own
+    window) — the take moved with no command of the node's, the playlist read
+    at that tick still the same. Nobody took HQPlayer: no event, no spot at
+    the track that played — Stop rests on slot 4, and Play starts it."""
+    from playback import hqp_link as hl
+    from playback import manager as manager_mod
+    monkeypatch.setattr(hl.BuildWatch, "after", 0.3)
+    monkeypatch.setattr(diag, "OBSERVE_S", 1.5)
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 10 ** 6)
+    mgr = _album(3)
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    b = _attach(mgr)
+    said = []
+    try:
+        with fake._lock:
+            fake.state, fake.track, fake.position = PLAYING, 1, 41.0
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                     and mgr._latest_status.get("position", 0) >= 42)
+        mgr.queue.append([_item("E:/Music/A/04.flac", 4)])
+        with fake._lock:
+            fake.playlist = ["file:///E:/Music/A/01.flac", "file:///E:/Music/X/09.flac",
+                             "file:///E:/Music/A/02.flac", "file:///E:/Music/X/10.flac",
+                             "file:///E:/Music/A/03.flac"]
+            fake.track, fake.state, fake.position = 3, PLAYING, 10.0
+        b.lose_mirror("HQPlayer took 0 of 1 appended tracks")
+        assert _wait(lambda: fake.playlist == [
+            "file:///E:/Music/A/01.flac", "file:///E:/Music/X/09.flac", "file:///E:/Music/A/02.flac",
+            "file:///E:/Music/A/03.flac", "file:///E:/Music/A/04.flac"] and b._mirror == "tail", timeout=8), (
+            fake.playlist, b._mirror)
+        assert _wait(lambda: mgr._latest_status.get("track_index") == 2 and b._attempt is None
+                     and tracker._play_session is not None, timeout=10)
+        k = len(fake.commands)
+        assert _wait(lambda: _statuses(fake, k) >= 3, timeout=10)
+        fake.advance_polls = 2
+        mgr._observers.append(lambda st, item: said.append((st.get("output_event") or {}).get("kind")))
+        _near_its_end(fake)
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                     and mgr._latest_status.get("track_index") == 3, timeout=20)
+        with fake._lock:
+            fake.length = 300
+        assert b._attempt is not None and b._attempt.advance is not None, "the advance onto slot 3 is not watched"
+        k = len(fake.commands)
+        assert _wait(lambda: _statuses(fake, k) >= 3, timeout=10)
+        fake.advance_polls = 0
+        fake.end_now()                      # HQPlayer's own Next onto slot 4
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                     and mgr._latest_status.get("track_index") == 4, timeout=20)
+        with fake._lock:
+            fake.length = 300
+        k = len(fake.commands)
+        assert _wait(lambda: _statuses(fake, k) >= 3, timeout=10)
+        assert [e for e in said if e] == [] and b._spot_at() is None and not b._takeover
+        assert b.stop()
+        assert _wait(lambda: fake.state == int(PlaybackState.STOPPED)
+                     and mgr._latest_status.get("state") == "stopped", timeout=10)
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 2, timeout=10)
+        assert mgr._latest_status.get("track_index") == 4
+        assert b.play()
+        assert _wait(lambda: fake.state == PLAYING and mgr._latest_status.get("state") == "playing", timeout=20)
+        assert fake.playlist[fake.track - 1].endswith("/04.flac")
+    finally:
+        b.shutdown()
+
+
+def test_b_the_renderers_end_is_judged_where_the_audio_was_at_a_takeover(tmp_path, proxy, renderers):
+    """The renderer's played-out rule reads where the audio was as its own
+    stopped verdict does: the clock's estimate while it played, when the
+    last reading is seconds stale (a stalled tick before the takeover's
+    event). Twelve seconds of track, the last reading at 5, the clock at 11:
+    played out — the spot at slot 2 at 0, no listen held; paused at 5, the
+    clock runs no further: cut there."""
+    from playback.dlna_backend import DlnaBackend
+    for said, spot, cut in (("playing", (2, 0.0), False), ("paused", (1, 5.0), True)):
+        q = CanonicalQueue()
+        q.replace([track(tmp_path, 1, seconds=12.0), track(tmp_path, 2, seconds=60.0)])
+        b = DlnaBackend(emit=lambda *_: None, queue=q, renderer=renderers().record)
+        b._index, b._length, b._position, b._said = 1, 12.0, 5.0, said
+        b._wall_base, b._wall_t0 = 5.0, b._clock() - 6.0
+        b._taken_by_another()
+        assert (b._index, b._resume) == spot and (b._cut is not None) is cut

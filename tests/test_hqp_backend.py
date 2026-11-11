@@ -4211,6 +4211,56 @@ def test_hqplayers_own_advance_seen_after_a_removal_before_its_entry_starts_the_
         hqp_meter.meter.unwatch(att.id)
 
 
+def test_hqplayers_own_advance_finds_its_entry_by_what_it_is_not_at_a_stale_index(fake, monkeypatch):
+    """The playlist read at the advance's stopped tick is asked for the entry
+    after the one HQPlayer played, found by what that entry is: slot D read
+    at entry 4 of 5, slot A removed before the tick — D is entry 3 now, E
+    after it, and the stale index 4 + 1 is past the playlist's end (no
+    advance of ours, it would say). An entry nothing names — a stream's
+    token of an earlier process, the layout's word for the slot — is asked
+    for at the place after the one the status named, as before."""
+    items = [_item(f"E:/Music/A/0{i}.flac", i) for i in range(1, 6)]
+    q = CanonicalQueue()
+    q.replace(items)
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    A, _, _, D, E = items
+    before = TrackStatus(state=PlaybackState.PLAYING, track_index=4, track_id="", position=297.0,
+                         length=300.0, volume=-3.0, uri="file:///E:/Music/A/04.flac", tracks_total=5,
+                         track_serial=10)
+    b._before = (before, (4, D, False))
+    assert q.remove(1) is A
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="", position=0.0,
+                          length=0.0, volume=-3.0, tracks_total=4, track_serial=11)
+    att = b._advance(stopped, time.time(), [f"file:///E:/Music/A/0{i}.flac" for i in (2, 3, 4, 5)])
+    try:
+        assert att is not None and b._starts_already(E)
+    finally:
+        b._attempt = None
+        if att is not None:
+            att.request_end("superseded")
+            hqp_meter.meter.unwatch(att.id)
+    proxy = streaming_service.get_proxy()
+    monkeypatch.setattr(proxy, "preview_meta", lambda token: None)
+    q2 = CanonicalQueue()
+    q2.replace([_item("E:/Music/A/01.flac", 1),
+                QueueItem(track_id="track-9", media_file_id=None, source={"kind": "proxy", "token": "tokP"},
+                          title="P", artist="X"),
+                _item("E:/Music/A/03.flac", 3)])
+    b2 = HqpBackend(emit=lambda *_: None, queue=q2)
+    gone = proxy.url_for("gone", host=b2._url_host)
+    before = TrackStatus(state=PlaybackState.PLAYING, track_index=2, track_id="", position=297.0, length=300.0,
+                         volume=-3.0, uri=gone, tracks_total=3, track_serial=10)
+    b2._before = (before, (2, q2.item_at(2), False))
+    att = b2._advance(stopped, time.time(), ["file:///E:/Music/A/01.flac", gone, "file:///E:/Music/A/03.flac"])
+    try:
+        assert att is not None, "HQPlayer's own advance from an entry nothing names is not watched"
+    finally:
+        b2._attempt = None
+        if att is not None:
+            att.request_end("superseded")
+            hqp_meter.meter.unwatch(att.id)
+
+
 def test_hqplayers_own_advance_on_a_tail_mirror_starts_the_track_after_it(fake):
     """On a tail mirror HQPlayer's playlist from the entry it reads to its end
     is the queue from that slot: its own advance from C moves on to D."""

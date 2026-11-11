@@ -1223,8 +1223,6 @@ class PlaybackManager:
             idle["diagnosis"] = self._latest_status["diagnosis"]
         if self._latest_status.get("other_refused"):
             idle["other_refused"] = self._latest_status["other_refused"]
-        if self._latest_status.get("output_event"):
-            idle["output_event"] = self._latest_status["output_event"]
         if self._latest_status.get("starting"):
             idle["starting"] = True
         self._push_status(idle)

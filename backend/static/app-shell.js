@@ -6379,7 +6379,9 @@
   let outputEventFloor = 0;
   function onOutputEvent(data) {
     if (!data) return;
-    if (data.event_floor != null) outputEventFloor = Math.max(outputEventFloor, data.event_floor);
+    // Each connection's floor is its own: a backend that came back counting
+    // lower (its clock set back) is not held to the one before it
+    if (data.event_floor != null) outputEventFloor = data.event_floor;
     const ev = data.output_event;
     if (!ev || ev.id <= outputEventFloor || outputEventsMet.has(ev.id)) return;
     outputEventsMet.add(ev.id);

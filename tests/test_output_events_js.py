@@ -128,6 +128,11 @@ def test_a_page_opened_after_the_event_sees_the_state_and_no_stale_toast():
                                      _st(STOPPED, event_floor=13), _st(STOPPED), _st(PAUSED, state="paused")]})
     assert [len(t) for t in out["opened_later"]] == [0, 0, 1, 0, 0]
     assert out["opened_later"][2][0]["title"] == "HQPlayer refused the other app's track"
+    # Each connection's floor is its own: a backend back with its ids counting lower (its clock set back)
+    # is not held to the floor of the connection before it
+    back = _run({"p": [_st(event_floor=1_000_000), _st(event_floor=940_000),
+                       _st({"id": 950_000, "kind": "took"}), _st({"id": 930_000, "kind": "paused"})]})
+    assert [len(t) for t in back["p"]] == [0, 0, 1, 0]
     assert [len(t) for t in out["opened_during_the_refusal"]] == [0, 0, 0, 0]
     assert [len(t) for t in out["opened_during_an_outage"]] == [0, 0, 0, 1]
     assert [len(t) for t in out["slept_through_it"]] == [0, 0, 0, 1]

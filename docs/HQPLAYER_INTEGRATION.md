@@ -698,18 +698,21 @@ comes after the control port answers again — so neither can end the wait.
   back over. A listen that played out — read in its last seconds, or, where
   HQPlayer names no take, long enough ago to have played them — was cut by no
   one either. One read in its last seconds is a track that counted as played:
-  where the take then moves onto an entry the node never gave — read playing
-  or paused, or told by the playlist read at the stopped tick that saw the
-  take moved (the entry after ours another controller's, or ours gone from
-  its place in that controller's playlist; an entry of no one's elsewhere in
-  the playlist tells nothing) — the takeover leaves the spot at the slot
-  after it, at 0, and holds no listen (since 2026-11-11, the owner's
-  listening check: Play then started the queue from its head); at the queue's
-  last slot none follows — no spot, and Play does what it does at the queue's
-  end. A playlist that tells the take went on to an entry of the node's, or
-  to none, is HQPlayer's own advance or end, and that listen judges nothing
-  later; another controller that takes HQPlayer while that advance is still
-  watched leaves the spot at the advance's entry, at 0. Where no spot is
+  where HQPlayer names the take (HQPlayer 6) and it then moves onto an entry
+  the node never gave — read playing or paused, or told by the playlist read
+  at the stopped tick that saw the take moved (the entry after ours another
+  controller's, or ours, found by what it is, gone from that controller's
+  playlist; an entry of no one's elsewhere in the playlist tells nothing) —
+  the takeover leaves the spot at the slot after it, at 0, and holds no
+  listen (since 2026-11-11, the owner's listening check: Play then started
+  the queue from its head); at the queue's last slot none follows — no spot,
+  and Play does what it does at the queue's end. A playlist that tells the
+  take went on to an entry of the node's, or to none, is HQPlayer's own
+  advance or end, and that listen judges nothing later; another controller
+  that takes HQPlayer while that advance is still watched leaves the spot at
+  the advance's entry, at 0. On HQPlayer 5, which names no take, a listen in
+  its last seconds leaves no spot, as before: nothing there tells a takeover
+  from a start on an HQPlayer left idle. Where no spot is
   left, another controller took an idle HQPlayer, and while it holds HQPlayer — or its playlist rests there with
   nothing of ours read — a Seek, Next or Previous is refused in words:
   nothing of the queue's to move, and HQPlayer's own would move that
@@ -1780,8 +1783,9 @@ so. On this machine HQPlayer's log is followed meanwhile, and its refusal
 line closes the attempt at once as `rate_refused`. The close at the first
 stopped tick stays a Play's. An advance that played, or one another action
 took over — a takeover among them: HQPlayer read playing or pausing an entry
-the node never gave while the attempt waits, or resting on a playlist that
-holds one with the take moved past the advance's, ends it as superseded,
+the node never gave while the attempt waits, or at rest on a playlist that
+holds none the node gave, the take moved past the advance's, ends it as
+superseded,
 never judged on that playlist, and leaves the spot at the advance's entry
 (since 2026-11-11) — is not kept; a start on the same take after the deadline (the
 same `track_serial`) makes it `played` and clears its failure — a Play of
