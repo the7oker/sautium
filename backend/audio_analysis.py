@@ -68,13 +68,21 @@ _MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
 _KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
-# The decode's deadline, as subprocess.run's timeout was
+# The decode's deadline: five minutes, as subprocess.run's timeout was, and a
+# quarter of the track's known length more — a decode slower than four times
+# real time has stalled, whatever the track.
 DECODE_TIMEOUT_SECONDS = 300
+
+
+class TrackTooLong(Exception):
+    """A decode passed the longest track the pass admitted
+    (analysis_pace.longest_track_seconds): its file says less than it holds."""
 
 
 def load_full_track_48k(local_path: str, cue_start: Optional[float] = None,
                         cue_end: Optional[float] = None,
-                        duration_seconds: Optional[float] = None) -> np.ndarray:
+                        duration_seconds: Optional[float] = None,
+                        max_seconds: Optional[float] = None) -> np.ndarray:
     """Decode the whole file to 48kHz mono float32 via ffmpeg — one decode
     path shared by the scanner and backfills so scores stay comparable.
     ffmpeg outruns audioread severalfold on mp3 (which has no seek table and
@@ -85,9 +93,12 @@ def load_full_track_48k(local_path: str, cue_start: Optional[float] = None,
 
     ffmpeg's output is read straight into one array sized from the known
     duration (a second over it; doubled should the file run longer), never
-    gathered as bytes and copied — the track is held once, not twice. Its
-    errors go to a file, not a pipe: a damaged file can say more than a
-    pipe holds while its samples are read."""
+    gathered as bytes and copied — the track is held once, not twice. Past
+    `max_seconds` of audio (the pass's bound) the decode stops, ffmpeg is
+    killed and TrackTooLong raised: a duration a tag under-states never
+    makes the decode hold more than the bound admits. Its errors go to a
+    file, not a pipe: a damaged file can say more than a pipe holds while
+    its samples are read."""
     cmd = ["ffmpeg", "-v", "error"]
     if cue_start is not None:
         cmd += ["-ss", f"{cue_start:.6f}"]
@@ -96,26 +107,46 @@ def load_full_track_48k(local_path: str, cue_start: Optional[float] = None,
         cmd += ["-t", f"{cue_end - (cue_start or 0.0):.6f}"]
     cmd += ["-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"]
     expected = int((float(duration_seconds) if duration_seconds else 600.0) * DECODE_SR) + DECODE_SR
+    limit = None if max_seconds is None else int(max_seconds * DECODE_SR) * 4
+    if limit is not None:
+        expected = min(expected, limit // 4 + DECODE_SR)
     buf = np.empty(expected, dtype=np.float32)
     got = 0
+    seconds_allowed = DECODE_TIMEOUT_SECONDS + (float(duration_seconds) / 4 if duration_seconds else 0)
+    killed_at_deadline = threading.Event()
+
     with tempfile.TemporaryFile() as errors:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errors)
-        deadline = threading.Timer(DECODE_TIMEOUT_SECONDS, proc.kill)
+
+        def _deadline():
+            killed_at_deadline.set()
+            proc.kill()
+        deadline = threading.Timer(seconds_allowed, _deadline)
         deadline.start()
         try:
             while True:
                 if got == buf.nbytes:
-                    grown = np.empty(len(buf) * 2, dtype=np.float32)
+                    size = len(buf) * 2 if limit is None else min(len(buf) * 2, limit // 4 + DECODE_SR)
+                    grown = np.empty(size, dtype=np.float32)
                     grown[:len(buf)] = buf
                     buf = grown
                 n = proc.stdout.readinto(memoryview(buf).cast("B")[got:])
                 if not n:
                     break
                 got += n
+                if limit is not None and got > limit:
+                    raise TrackTooLong(f"{local_path} decodes past {max_seconds / 60:.0f} min")
             proc.stdout.close()
             returncode = proc.wait()
         finally:
             deadline.cancel()
+            if proc.poll() is None:         # the loop raised: ffmpeg goes with it
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
+        if killed_at_deadline.is_set():
+            logger.warning(f"Decode of {local_path} passed its deadline of {seconds_allowed:.0f} s: killed")
+            raise subprocess.TimeoutExpired(cmd, seconds_allowed)
         if returncode != 0:
             errors.seek(0)
             raise subprocess.CalledProcessError(returncode, cmd,
@@ -386,9 +417,10 @@ class AudioAnalyzer:
             cancel_flag: Asked before every batch; True ends the pass there.
             on_batch: Called with (tracks done, tracks queued) after each batch.
             attempted: media_files ids this run's earlier instrument pass
-                took already — left out, and every file this one takes is
-                added: a pass resumed after giving way does not try again a
-                file it could not address or decode.
+                took already — left out, and every file this one takes, or
+                leaves out as too long, is added: a pass resumed after giving
+                way does not try again a file it could not address or decode,
+                nor count again one past reach.
 
         Returns:
             processed, success (saved), failed, skipped (the group holds
@@ -428,13 +460,16 @@ class AudioAnalyzer:
                 params["attempted"] = sorted(attempted)
             # A track longer than this machine can hold now is left out by
             # its known duration (analysis_pace.longest_track_seconds), and
-            # counted: the decode and the tagger's resamples grow with it
-            params["longest"] = analysis_pace.longest_track_seconds(
-                [analysis_pace.INSTRUMENTS],
-                reserve_gb=0.0 if self.ensemble is not None else analysis_pace.model_ram_gb("tagger"))
-            stats["too_long"] = db.execute(sa_text(
-                f"SELECT count(*) FROM ({query_sql}{analysis_pace.beyond_reach_sql()}) b"),
-                params).scalar()
+            # counted: the decode and the tagger's resamples grow with it. A
+            # run that resumes the pass after a give-way counts it once — it
+            # is among what the run tried
+            params["longest"] = analysis_pace.longest_track_seconds([analysis_pace.INSTRUMENTS])
+            beyond = db.execute(sa_text(
+                f"SELECT b.media_file_id FROM ({query_sql}{analysis_pace.beyond_reach_sql()}) b"),
+                params).scalars().all()
+            stats["too_long"] = len(beyond)
+            if attempted is not None:
+                attempted.update(beyond)
             if stats["too_long"]:
                 logger.info(f"Instrument pass: {stats['too_long']} track(s) longer than this machine "
                             f"can hold now ({params['longest'] / 60:.0f} min) are left to the network")
@@ -466,7 +501,7 @@ class AudioAnalyzer:
             from device import audio_batch_budget_seconds, empty_cache
             from ensemble_instruments import RESIDENT_GB
             batch_budget_seconds = audio_batch_budget_seconds(
-                reserve_gb=0.0 if self.ensemble is not None else RESIDENT_GB)
+                reserve_gb=0.0 if analysis_pace.resident("tagger") else RESIDENT_GB)
             batches = []
             cur, cur_seconds = [], 0.0
             for row in rows:
@@ -497,7 +532,14 @@ class AudioAnalyzer:
                     stats["processed"] += len(batch_rows)
                     if attempted is not None:
                         attempted.update(r.media_file_id for r in batch_rows)
-                    todo = self._register_batch(db, batch_rows, force, stats)
+                    # What this machine holds is read again as each batch is
+                    # planned: a model loaded beside the pass since the queue
+                    # was read (a search's text encoder) leaves less room
+                    longest = analysis_pace.longest_track_seconds([analysis_pace.INSTRUMENTS])
+                    within = [r for r in batch_rows
+                              if r.duration_seconds is None or r.duration_seconds <= longest]
+                    stats["too_long"] += len(batch_rows) - len(within)
+                    todo = self._register_batch(db, within, force, stats)
                     # The registrations commit before the long part, so no
                     # other pass waits on them while the batch is tagged
                     db.commit()
@@ -507,13 +549,17 @@ class AudioAnalyzer:
                         self.load_model()
                         batch_began = time.monotonic()
 
-                    decoded = list(io_pool.map(self._decode, [row for row, _ in todo]))
+                    decoded = list(io_pool.map(lambda row: self._decode(row, longest),
+                                               [row for row, _ in todo]))
                     analysed = 0.0
                     wrote = False
                     # a decode that failed spent time on no audio: the batch
                     # says nothing true about the pace (nor one a tagging failed)
-                    whole = all(audio is not None for audio in decoded)
+                    whole = all(isinstance(audio, np.ndarray) for audio in decoded)
                     for (row, src_id), audio in zip(todo, decoded):
+                        if audio is TrackTooLong:
+                            stats["too_long"] += 1
+                            continue
                         if audio is None:
                             stats["failed"] += 1
                             continue
@@ -578,11 +624,16 @@ class AudioAnalyzer:
                 todo.append((row, src_id))
         return todo
 
-    def _decode(self, row) -> Optional[np.ndarray]:
+    def _decode(self, row, max_seconds: float):
+        """The track's audio; TrackTooLong (the class) for one that decodes
+        past `max_seconds`, None for one that fails."""
         try:
             return load_full_track_48k(settings.translate_to_local_path(row.file_path),
                                        row.cue_start_seconds, row.cue_end_seconds,
-                                       row.duration_seconds)
+                                       row.duration_seconds, max_seconds)
+        except TrackTooLong as e:
+            logger.info(f"Instrument pass: {e} — left to the network")
+            return TrackTooLong
         except Exception as e:
             logger.error(f"Decode failed for {row.file_path}: {e}")
             return None

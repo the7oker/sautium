@@ -788,10 +788,14 @@ class TrackEnrichmentPipeline:
 
         # The passes: an owned track with an analysis-source file (the
         # passes' own queues read nothing else) lacking a record one of them
-        # makes — driven from the file, never from every track: the phantom
-        # layer is millions of them
+        # makes, and that this machine can hold now (the queues' own bound) —
+        # driven from the file, never from every track: the phantom layer is
+        # millions of them
+        import analysis_pace
+        longest = analysis_pace.longest_track_seconds([analysis_pace.SONIC])
         analysed = exists(select(MediaFile.id).where(
-            MediaFile.track_id == Track.id, MediaFile.is_analysis_source.is_(True)))
+            MediaFile.track_id == Track.id, MediaFile.is_analysis_source.is_(True),
+            or_(MediaFile.duration_seconds.is_(None), MediaFile.duration_seconds <= longest)))
         lacks = []
         if not self.skip_sonic:
             if self.force_sonic:

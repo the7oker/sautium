@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 import provenance
-from audio_analysis import load_full_track_48k
+from audio_analysis import TrackTooLong, load_full_track_48k
 from config import settings
 from database import get_db_context
 from models import Embedding, EmbeddingModel, Track, MediaFile
@@ -250,13 +250,18 @@ class AudioEmbeddingGenerator:
 
     def _load_audio(self, file_path: str, cue_start: Optional[float] = None,
                     cue_end: Optional[float] = None,
-                    duration_seconds: Optional[float] = None) -> Optional[np.ndarray]:
+                    duration_seconds: Optional[float] = None,
+                    max_seconds: Optional[float] = None) -> Optional[np.ndarray]:
         """Load the WHOLE track at 48kHz mono (shared scanner decode path) —
         segments cover the full canonical grid; the track-level vector's
         middle window is sliced from the same array. For a CUE slice the
-        bounded decode IS the track, so the grid stays array-relative."""
+        bounded decode IS the track, so the grid stays array-relative. A
+        decode past `max_seconds` raises TrackTooLong; any other failure is
+        None."""
         try:
-            return load_full_track_48k(file_path, cue_start, cue_end, duration_seconds)
+            return load_full_track_48k(file_path, cue_start, cue_end, duration_seconds, max_seconds)
+        except TrackTooLong:
+            raise
         except Exception as e:
             logger.error(f"Failed to load audio {file_path}: {e}")
             return None
@@ -471,9 +476,7 @@ class AudioEmbeddingGenerator:
             # A track longer than this machine can hold now is left out by
             # its known duration (analysis_pace.longest_track_seconds), and
             # counted: the decode and its resample grow with its length
-            params["longest"] = analysis_pace.longest_track_seconds(
-                [analysis_pace.SONIC],
-                reserve_gb=0.0 if self.model is not None else analysis_pace.model_ram_gb("clap"))
+            params["longest"] = analysis_pace.longest_track_seconds([analysis_pace.SONIC])
             stats["too_long"] = db.execute(sa_text(
                 f"SELECT count(*) FROM ({query_sql}{analysis_pace.beyond_reach_sql('q')}) b"),
                 params).scalar()
@@ -517,16 +520,25 @@ class AudioEmbeddingGenerator:
             # decode it, and run librosa where its features are to be made,
             # while the accelerator encodes the batch before it.
             def _plan(batch_rows):
-                """(what to decode, the outcomes of the rest) — the outcomes
-                are counted with the batch, when it is taken."""
+                """(what to decode, the outcomes of the rest, the longest
+                track it may decode) — the outcomes are counted with the
+                batch, when it is taken. What this machine holds is read
+                again here: a model loaded beside the pass since the queue was
+                read (a search's text encoder, the translator) leaves less
+                room, and CLAP, once loaded, is resident and no more to
+                reserve."""
+                longest = analysis_pace.longest_track_seconds([analysis_pace.SONIC])
                 todo, outcomes = [], []
                 for row in batch_rows:
+                    if row.duration_seconds is not None and row.duration_seconds > longest:
+                        outcomes.append("too_long")
+                        continue
                     planned = self._plan_track(db, row, embedding_model, force)
                     if isinstance(planned, str):
                         outcomes.append(planned)
                     else:
                         todo.append(planned)
-                return todo, outcomes
+                return todo, outcomes, longest
 
             # librosa runs beside the decodes and the accelerator: at most the
             # profile's prefetch workers at once, as the features stage ran it
@@ -534,11 +546,15 @@ class AudioEmbeddingGenerator:
             from hardware_profile import resolve as _hw
             librosa_slots = threading.BoundedSemaphore(_hw().prefetch_workers)
 
-            def _load_one(item):
+            def _load_one(item, longest):
                 row, _src, _embed, describe = item
                 local_path = settings.translate_to_local_path(row.file_path)
-                audio = self._load_audio(local_path, row.cue_start_seconds, row.cue_end_seconds,
-                                         row.duration_seconds)
+                try:
+                    audio = self._load_audio(local_path, row.cue_start_seconds, row.cue_end_seconds,
+                                             row.duration_seconds, longest)
+                except TrackTooLong as e:
+                    logger.info(f"Sonic pass: {e} — left to the network")
+                    return item, TrackTooLong, None
                 features = None
                 if audio is not None and describe:
                     try:
@@ -548,21 +564,23 @@ class AudioEmbeddingGenerator:
                         logger.error(f"librosa failed for {row.track_id}: {e}")
                 return item, audio, features
 
-            def _load_batch(todo):
-                """Decode a batch in the I/O pool: (loaded, failed count, when
-                the decode began and ended)."""
+            def _load_batch(todo, longest):
+                """Decode a batch in the I/O pool: (loaded, failed count, too
+                long count, when the decode began and ended)."""
                 began = time.monotonic()
                 loaded = []
-                failed = 0
-                futures = [io_pool.submit(_load_one, item) for item in todo]
+                failed = too_long = 0
+                futures = [io_pool.submit(_load_one, item, longest) for item in todo]
                 for future in as_completed(futures):
                     item, audio, features = future.result()
-                    if audio is not None:
+                    if audio is TrackTooLong:
+                        too_long += 1
+                    elif audio is not None:
                         loaded.append((item, audio, features))
                     else:
                         failed += 1
                         logger.warning(f"Skipping track {item[0].track_id}: audio load failed")
-                return loaded, failed, began, time.monotonic()
+                return loaded, failed, too_long, began, time.monotonic()
 
             # Split into batch slices — bounded by BOTH row count and total
             # audio duration: whole tracks are held decoded in RAM per batch,
@@ -593,9 +611,9 @@ class AudioEmbeddingGenerator:
                 # Pre-submit first batch loading; its registrations commit
                 # first, so the seam below holds no open write
                 batch_began = time.monotonic()
-                planned, outcomes = _plan(batch_slices[0])
+                planned, outcomes, longest = _plan(batch_slices[0])
                 db.commit()
-                prefetch_future = prefetch_pool.submit(_load_batch, planned)
+                prefetch_future = prefetch_pool.submit(_load_batch, planned, longest)
 
                 for batch_idx in tqdm(range(num_batches), desc="Sonic pass", unit="batch"):
                     # What the seam gave to another pass is no time of this one —
@@ -613,25 +631,27 @@ class AudioEmbeddingGenerator:
                             logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
                             break
 
-                    loaded, batch_failed, decode_began, decode_ended = prefetch_future.result()
+                    (loaded, batch_failed, batch_too_long,
+                     decode_began, decode_ended) = prefetch_future.result()
                     overlap = max(0.0, min(seam_ended, decode_ended) - max(seam_began, decode_began))
                     batch_began += (seam_ended - seam_began) - overlap
                     stats["processed"] += len(batch_slices[batch_idx])
                     stats["failed"] += batch_failed
+                    stats["too_long"] += batch_too_long
                     for outcome in outcomes:
                         stats[outcome] += 1
                     # The batch's pace, when every track it worked on runs
                     # the whole pass: a batch of features alone, or of
                     # segments alone, is not the pass's pace, nor one whose
                     # decode failed (time spent on no audio)
-                    whole = not batch_failed and all(
+                    whole = not (batch_failed or batch_too_long) and all(
                         embed and describe for _r, _s, embed, describe in planned)
 
                     # Register the NEXT batch and start loading it (runs while
                     # the accelerator works)
                     if batch_idx + 1 < num_batches:
-                        planned, outcomes = _plan(batch_slices[batch_idx + 1])
-                        prefetch_future = prefetch_pool.submit(_load_batch, planned)
+                        planned, outcomes, longest = _plan(batch_slices[batch_idx + 1])
+                        prefetch_future = prefetch_pool.submit(_load_batch, planned, longest)
 
                     analysed, wrote_any = 0.0, False
                     for item, audio, features in loaded:

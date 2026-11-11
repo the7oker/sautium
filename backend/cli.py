@@ -247,8 +247,10 @@ def sonic_pass(limit, batch_size, newest_first, max_duration,
                                 f" | Vocal score: {row.vocal_score if row.vocal_score is not None else '?'}"
                                 f" | Dance: {row.danceability or '?'}"
                             )
-            except Exception:
-                pass  # sample display is best-effort
+            except Exception as e:
+                # the pass's work is done and counted above; only its sample is missing
+                logger.warning(f"The sample of what the pass wrote could not be shown: {e}",
+                               exc_info=True)
 
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
@@ -795,8 +797,10 @@ def instrument_pass(limit, force, newest_first, max_duration,
                             top3 = sorted(present.items(), key=lambda x: -x[1])[:3]
                             click.echo(f"   • {row.artist} - {row.title}"
                                        f"\n     Instruments: {', '.join(k for k, _v in top3) or 'N/A'}")
-            except Exception:
-                pass  # sample display is best-effort
+            except Exception as e:
+                # the pass's work is done and counted above; only its sample is missing
+                logger.warning(f"The sample of what the pass wrote could not be shown: {e}",
+                               exc_info=True)
 
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)

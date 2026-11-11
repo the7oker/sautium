@@ -217,21 +217,18 @@ class PreviewEnricher:
             ("track_instruments", not held[2] and instruments_on())) if lacking)
         if not kinds:
             return
-        # A track longer than this machine can hold now is not analysed (its
-        # catalog length says, before any decode): the same bound as the
-        # passes', for what this stream would make and the models it would
-        # still load
+        # A stream longer than this machine can hold now is not analysed: its
+        # own decode bounds it (native rate and channels as float32, then
+        # mono, then 48 kHz — analysis_pace.stream_fits, read off the bytes'
+        # header before any decode), within what the models it would still
+        # load, and those that may load beside it, leave
         import analysis_pace
-        tagging = "track_instruments" in kinds
-        reserve = ((analysis_pace.model_ram_gb("tagger")
-                    if tagging and (self._analyzer is None or self._analyzer.ensemble is None) else 0.0)
-                   + (analysis_pace.model_ram_gb("clap") if "embeddings" in kinds and (
-                       self._embedder is None or self._embedder.model is None) else 0.0))
-        longest = analysis_pace.longest_track_seconds(
-            [analysis_pace.INSTRUMENTS if tagging else analysis_pace.SONIC], reserve_gb=reserve)
-        if max(lengths) > longest:
-            logger.info("preview enrich SKIP %s: %.0f min, longer than this machine can hold now "
-                        "(%.0f min)", track_id, max(lengths) / 60, longest / 60)
+        passes = ([analysis_pace.SONIC] if "embeddings" in kinds or "audio_features" in kinds
+                  else []) + ([analysis_pace.INSTRUMENTS] if "track_instruments" in kinds else [])
+        fits, need, room = analysis_pace.stream_fits(flac, lengths, passes)
+        if not fits:
+            logger.info("preview enrich SKIP %s: its analysis would hold %.0f MiB, this machine "
+                        "has room for %.0f now", track_id, need, room)
             return
 
         # Decode the in-memory FLAC to 48k mono and take the SAME middle window

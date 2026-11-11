@@ -356,18 +356,41 @@ whatever the length, computed chunk by chunk since 2026-11-11 (the same
 per-frame values bit for bit, on synthetic signals and the 90 files of the
 lab library) where its whole-signal frame arrays took ~63 MiB a minute — a
 20-minute track then needed ~2 GiB on its own. The instrument pass holds the
-decode and the tagger's two resamples, 18.3 MiB more. So a pass takes a
-track only up to the longest this machine can hold when it reads its queue
-(`analysis_pace.longest_track_seconds`): what is available (within a
-container's limit, its droppable page cache counted free) less 15 % and a
-model the pass still loads (CLAP, the tagger: 1 GB each in RAM, 0.3 on
-CUDA), at 22 MiB a minute for the sonic pass and 30 for the instruments. An
-8 GB Pi 5 with CLAP resident and ~3 GB available holds a track of about 1 h
-45 min in its sonic pass and 45 min in its instrument pass; a 16 GB one with
-~10 GB available, about 6 h and 4 h; a 32 GB desktop, every real track. A
-longer track is left out of the queue by its known duration — never decoded,
-never deleted, counted in the run's statistics and its log, its analysis
-left to the network — and a stream past the same bound is not analysed.
+decode and the tagger's two resamples, 18.3 MiB more. Beside what grows
+with the length, a model's forward over one track's windows holds a
+constant (measured on x86 the same day, fp32, 2 and 16 torch threads):
+CLAP's peak above its loaded size 407-467 MiB for 12 windows and 542-619
+for 24, the most a track has (620 counted); the tagger's 1 720-1 790 MiB
+for a full batch of its 12 windows (1 800 counted) — on CUDA both sit in
+the card's memory. So a pass takes a track only up to the longest this
+machine can hold now (`analysis_pace.longest_track_seconds`): what is
+available (within a container's limit, its droppable page cache counted
+free) less 15 %, less every model not resident in the process that the
+pass loads or that may load beside it while a batch runs — CLAP or the
+tagger (1 GB each in RAM, 0.3 on CUDA), the text encoder (2.1 GB on a CPU),
+and on standard the translator (3 GB), which full pre-warms and lite never
+loads; residency is read off the process-wide model caches — less 64 MiB
+and the forward, at 22 MiB a minute for the sonic pass and 30 for the
+instruments. The bound is read when the queue is read and again as each
+batch is planned, and the decode itself stops past it (a duration a tag
+under-states): a longer track is left out — never deleted, counted in the
+run's statistics and its log, its analysis left to the network. A stream
+is decoded whole at its native rate and channels before its resample
+(`librosa.load`), so its own header bounds it (`analysis_pace.stream_fits`):
+41 MiB a minute for 44.1 kHz/16-bit stereo and 77 for 96/24 in the model,
+where a decode held 33-34 and 66.
+
+Worked from that formula, not measured on a Pi:
+an 8 GB Pi 5 with ~3 GB available and CLAP and the text encoder resident
+holds a track of about 1 h 19 min in its sonic pass, and 19 min in its
+instrument pass with the tagger resident too; with the text encoder not
+yet loaded it holds none — a lite node needs ~4.8 GB available, nothing
+resident, for a 10-minute track's sonic pass and ~6.4 GB for its
+instruments. A 16 GB one with ~10 GB available holds about 3 h 23 min and
+1 h 50 min with nothing resident (5 h 37 min and 3 h 28 min with its
+models resident). A 32 GB desktop with ~20 GB available, standard on a
+CPU, nothing resident: about 7 h 21 min and 4 h 44 min; on CUDA, 9 h 35
+min and 7 h 2 min.
 
 ## 6. Prioritized backlog
 

@@ -114,23 +114,64 @@ def _machine():
 # What one track holds at once while a pass works on it, in MiB per minute of
 # its audio (measured 2026-11-11 on x86, the release image's librosa and soxr):
 # the sonic pass holds the 48 kHz decode (11.0) and its 22 050 Hz resample
-# with the resampler's transient (10.1), the amplitude block a constant ~50
-# MiB whatever the length (audio_analysis.amplitude_frames); the instrument
-# pass holds the decode and the tagger's two resamples, to 16 and 32 kHz,
-# with their transients (18.3). A stream's analysis holds what both hold.
+# with the resampler's transient (10.1); the instrument pass holds the decode
+# and the tagger's two resamples, to 16 and 32 kHz, with their transients
+# (18.3). Beside them, whatever the length: the amplitude block's chunks
+# (~50 MiB, audio_analysis.amplitude_frames) and a model's forward over one
+# track's windows (FORWARD_MB, measured on x86 the same day, the release image
+# and the pinned models in fp32, 2 and 16 torch threads): CLAP's peak above
+# its loaded size was 407-467 MiB for 12 windows and 542-619 for 24, the most
+# a track has; the tagger's grows with the windows of its batch of 12 (one
+# every 30 s) and was 1 720-1 790 MiB for a full batch (an 8-minute track,
+# 1 865-1 933 with its resamples). On a CPU and in unified memory (MPS) that
+# is RAM; on CUDA it sits in the card's memory, and the host keeps a little.
 TRACK_MB_PER_MINUTE = {SONIC: 22.0, INSTRUMENTS: 30.0}
 TRACK_FIXED_MB = 64.0
-# The memory a model a pass will still load takes from what a track may hold,
-# in GB: its weights and runtime in RAM on a CPU and in unified memory (MPS) —
-# the AST+PaSST pair's ~0.9 GiB a lite x86 node's peak rose by with it, CLAP's
-# 0.6 GB of fp32 weights with its runtime — and only their host side on CUDA,
-# where the weights sit in the card's memory.
+FORWARD_MB = {SONIC: {"cpu": 620.0, "mps": 620.0, "cuda": 64.0},
+              INSTRUMENTS: {"cpu": 1800.0, "mps": 1800.0, "cuda": 64.0}}
+
+# The memory a model takes from what a track may hold, in GB, while it is not
+# resident: its weights and runtime in RAM on a CPU and in unified memory
+# (MPS) — the AST+PaSST pair's ~0.9 GiB a lite x86 node's peak rose by with
+# it, CLAP's 0.6 GB of fp32 weights with its runtime, BGE-M3's 2.1 GiB on a
+# Pi 5's CPU, the translator's ~3 GB (CTranslate2 int8, on the CPU on every
+# device) — and only the host side of the torch models on CUDA, where their
+# weights sit in the card's memory.
 MODEL_RAM_GB = {"clap": {"cpu": 1.0, "mps": 1.0, "cuda": 0.3},
-                "tagger": {"cpu": 1.0, "mps": 1.0, "cuda": 0.3}}
+                "tagger": {"cpu": 1.0, "mps": 1.0, "cuda": 0.3},
+                "text": {"cpu": 2.1, "mps": 1.2, "cuda": 0.3},
+                "translate": {"cpu": 3.0, "mps": 3.0, "cuda": 3.0}}
+
+# Each pass's own model; and what may load beside any pass while a batch
+# runs: the text encoder, which a search or the text half loads lazily, and
+# the translator where the profile loads it lazily (standard: on the first
+# non-English Sound query; full pre-warms it; lite never loads it).
+PASS_MODEL = {SONIC: "clap", INSTRUMENTS: "tagger"}
 
 
-def model_ram_gb(model: str) -> float:
-    return MODEL_RAM_GB[model][_machine()[0]]
+def resident(model: str) -> bool:
+    """Whether `model` is loaded in this process now — read off the
+    process-wide caches the models are kept in, never off one pass's
+    instance; a module never imported holds nothing."""
+    import sys
+    if model == "translate":
+        cache = sys.modules.get("model_cache")
+        return bool(cache and cache.is_loaded("translate"))
+    module = sys.modules.get({"clap": "clap_model", "tagger": "instrument_tagger",
+                              "text": "text_embedder"}[model])
+    return bool(module and module._cache)
+
+
+def reserve_gb(kinds) -> float:
+    """What the models the passes `kinds` will still load, and those that may
+    load beside them, take from what a track may hold: every one of them not
+    resident now, at its MODEL_RAM_GB on this device."""
+    from hardware_profile import resolve
+    models = {PASS_MODEL[k] for k in kinds} | {"text"}
+    if resolve().translation_available:
+        models.add("translate")
+    device = _machine()[0]
+    return sum(MODEL_RAM_GB[m][device] for m in models if not resident(m))
 
 
 _CGROUPS = (("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current",
@@ -143,7 +184,9 @@ _CGROUPS = (("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current",
 def _cgroup_room_bytes() -> Optional[int]:
     """What the process's control group still allows — a container's memory
     limit less its use, the page cache it may drop not counted as use — or
-    None where no limit is set."""
+    None where no limit is set. Only the inactive cache counts as droppable:
+    the active cache can be dropped too, so this errs on the side of less
+    room."""
     for limit_path, used_path, stat_path, reclaimable in _CGROUPS:
         try:
             limit = open(limit_path).read().strip()
@@ -183,18 +226,57 @@ def available_memory_gb() -> float:
     return available / 1e9
 
 
-def longest_track_seconds(kinds, reserve_gb: float = 0.0) -> float:
-    """The longest track the passes `kinds` (SONIC, INSTRUMENTS, or both for a
-    stream) may take on this machine now: what one track holds per minute of
-    its audio (TRACK_MB_PER_MINUTE, the larger of the kinds) within what is
-    available, less the usual headroom (as the batch budget leaves 15 %) and
-    a model the pass will still load (`reserve_gb`). The decode and its
-    resample scale with the track's length, so a track past this is left out
-    of the queue by its known duration — never decoded, nothing deleted; its
-    analysis can come from the network."""
+def room_mb(kinds) -> float:
+    """What one track may hold on this machine now, in MiB, for the passes
+    `kinds`: what is available, less the usual headroom (as the batch budget
+    leaves 15 %), the models still to load (reserve_gb) and what a pass
+    holds whatever the length (TRACK_FIXED_MB, the forward)."""
+    device = _machine()[0]
+    return ((available_memory_gb() * 0.85 - reserve_gb(kinds)) * 1e3 / 1.048576
+            - TRACK_FIXED_MB - max(FORWARD_MB[k][device] for k in kinds))
+
+
+def longest_track_seconds(kinds) -> float:
+    """The longest track the passes `kinds` (SONIC, INSTRUMENTS, or both)
+    may take on this machine now: room_mb at what one track holds per minute
+    of its audio (TRACK_MB_PER_MINUTE, the larger of the kinds). The decode
+    and its resamples scale with the track's length, so a track past this is
+    left out — by its known duration where the queue reads it, at each
+    batch's planning where what is available moved since, and by the decode
+    itself where a duration under-stated it (audio_analysis.TrackTooLong) —
+    never deleted; its analysis can come from the network."""
     per_minute = max(TRACK_MB_PER_MINUTE[k] for k in kinds)
-    usable_mb = (available_memory_gb() * 0.85 - reserve_gb) * 1e3 / 1.048576 - TRACK_FIXED_MB
-    return max(0.0, usable_mb / per_minute * 60.0)
+    return max(0.0, room_mb(kinds) / per_minute * 60.0)
+
+
+def stream_fits(data: bytes, lengths, kinds) -> tuple:
+    """(fits, MiB a stream's analysis needs, MiB there is room for): a
+    stream is decoded whole at its native rate and channels as float32,
+    folded to mono and resampled to 48 kHz (librosa.load), so its decode,
+    not a file's, bounds it — read from its own header (frames, rate,
+    channels), which also outranks a catalogue length that lies. Checked
+    against what a decode held (2026-11-11, x86): 33-34 MiB a minute for
+    44.1 kHz/16-bit stereo, 66 for 96/24 stereo, where this model says 41
+    and 77. A header the reader cannot parse, or one that leaves its length
+    unsaid (a FLAC written to a pipe), counts as stereo at 48 kHz over the
+    longest catalogue length. The compressed bytes are held throughout."""
+    import io
+    import soundfile
+    try:
+        info = soundfile.info(io.BytesIO(data))
+        frames, rate, channels = info.frames, info.samplerate, info.channels
+    except RuntimeError:
+        frames = 0
+    if frames <= 0 or frames >= 1 << 62:
+        rate, channels = 48000, 2
+        frames = int(max(lengths) * rate)
+    seconds = frames / rate
+    decode = (frames * 4 * (channels + 1) + seconds * 48000 * 4) / 2 ** 20
+    minutes = seconds / 60.0
+    analysis = max(TRACK_MB_PER_MINUTE[k] for k in kinds) * minutes
+    need = len(data) / 2 ** 20 + max(decode, analysis)
+    room = room_mb(kinds)
+    return need <= room, need, room
 
 
 def _interpolated(points, threads: int) -> float:
@@ -270,12 +352,13 @@ def instruments_pending(db: Session, reanalyze: bool, longest: float) -> tuple:
     machine can hold (`longest`), and the tracks past it."""
     params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS, "reanalyze": reanalyze,
               "unknown": UNKNOWN_SECONDS, "longest": longest}
+    within = "(q.duration_seconds IS NULL OR q.duration_seconds <= :longest)"
     row = db.execute(sa_text(f"""
-        SELECT count(*), COALESCE(sum(COALESCE(q.duration_seconds, :unknown)), 0)
-          FROM ({INSTRUMENTS_PENDING_SQL}{within_reach_sql()}) q"""), params).one()
-    beyond = db.execute(sa_text(f"SELECT count(*) FROM ({INSTRUMENTS_PENDING_SQL}{beyond_reach_sql()}) q"),
-                        params).scalar()
-    return int(row[0]), float(row[1]), int(beyond)
+        SELECT count(*) FILTER (WHERE {within}),
+               COALESCE(sum(COALESCE(q.duration_seconds, :unknown)) FILTER (WHERE {within}), 0),
+               count(*) FILTER (WHERE NOT {within})
+          FROM ({INSTRUMENTS_PENDING_SQL}) q"""), params).one()
+    return int(row[0]), float(row[1]), int(row[2])
 
 
 def estimate(db: Session, reanalyze: bool) -> Dict[str, Any]:
@@ -289,7 +372,7 @@ def estimate(db: Session, reanalyze: bool) -> Dict[str, Any]:
     batch says); `too_long`, the pending tracks this machine cannot hold now,
     left out of the rest."""
     tracks, audio, beyond = instruments_pending(
-        db, reanalyze, longest_track_seconds([INSTRUMENTS], reserve_gb=model_ram_gb("tagger")))
+        db, reanalyze, longest_track_seconds([INSTRUMENTS]))
     measured = pace(db, INSTRUMENTS)
     device, cores = _machine()
     ratio = tagger_to_sonic(device) if measured is None else None

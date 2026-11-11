@@ -301,13 +301,19 @@ implementation details live in the code, DB and git history.
   instruments and removes none; the node still pulls, serves and carries
   those other nodes made. What a pass holds of one track grows with its
   length (the decode, its resamples), so each takes a track only up to the
-  longest this machine can hold when it reads its queue
-  (`analysis_pace.longest_track_seconds`), leaving a longer one out by its
-  known duration, counted and never decoded — lite never ran the bulk pass
-  before, and a 45-minute mix on an 8 GB Pi would have killed the backend
-  on every run. The amplitude block is computed chunk by chunk and the
-  decode read into one array, so the bound is the decode and its resample
-  alone (HARDWARE-TIERS.md § 5's last note has the numbers).
+  longest this machine can hold now (`analysis_pace.longest_track_seconds`),
+  leaving a longer one out, counted and never deleted — lite never ran the
+  bulk pass before, and a 45-minute mix on an 8 GB Pi would have killed the
+  backend on every run. The amplitude block is computed chunk by chunk and
+  the decode read into one array, so the bound is the decode and its
+  resamples, plus a model's forward over one track (a measured constant),
+  within what is available less every model not resident in the process
+  that the pass loads or that may load beside it (the text encoder; the
+  translator on standard). It is read at the queue read and again as each
+  batch is planned, and the decode stops past it, since a tag can
+  under-state a duration; a stream, decoded at its native rate and
+  channels, is bounded by its own header. HARDWARE-TIERS.md § 5's last
+  note has the numbers, worked from the formula, not measured on a Pi.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be

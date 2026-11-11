@@ -1114,8 +1114,7 @@ def _analysis_pending() -> bool:
                                     WHERE af.track_id = mf.track_id))
         ) AS pending
     """, {"min_seconds": provenance.MIN_MATERIAL_SECONDS,
-          "longest": analysis_pace.longest_track_seconds(
-              [analysis_pace.SONIC], reserve_gb=analysis_pace.model_ram_gb("clap"))})
+          "longest": analysis_pace.longest_track_seconds([analysis_pace.SONIC])})
     return bool(row and row.get("pending"))
 
 
