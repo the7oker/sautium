@@ -201,16 +201,17 @@ _BUDGET_PARAMS = {
 }
 
 
-def audio_batch_budget_seconds() -> int:
+def audio_batch_budget_seconds(reserve_gb: float = 0.0) -> int:
     """Per-batch audio-seconds sized to the accelerator's free memory so the
     predicted peak stays under it: big machines get big batches (throughput),
     tight ones get small batches (no swap/OOM). Replaces the static 40/10-min
-    split. Force a fixed value with SAUTIUM_AUDIO_BUDGET_MIN (minutes)."""
+    split. `reserve_gb` is memory a model the pass loads later will take.
+    Force a fixed value with SAUTIUM_AUDIO_BUDGET_MIN (minutes)."""
     override = os.environ.get("SAUTIUM_AUDIO_BUDGET_MIN")
     if override:
         return int(float(override) * 60)
     p = _BUDGET_PARAMS.get(get_device(), _BUDGET_PARAMS["cpu"])
-    usable = available_accel_memory_gb() * 0.85 - p["fixed"]
+    usable = available_accel_memory_gb() * 0.85 - p["fixed"] - reserve_gb
     minutes = usable / p["cost_per_min"] if usable > 0 else 0.0
     minutes = max(p["min_min"], min(p["max_min"], minutes))
     return int(minutes * 60)

@@ -333,11 +333,19 @@ Unsupported: <8 GB RAM, HDD, 32-bit.
 
 Post-bf16 note (2026-07-11): 4 GB NVIDIA cards are now a fully functional
 **lite** (the whole resident model set is 2.68 GB, so warm semantic search
-and trickle stream-enrichment fit) — they are no longer "unsupported", but
-they do NOT get bulk analysis: the audio-batch memory model
-(`device.py` `fixed=4.0`, marked provisional) is uncalibrated on small
-cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
-`sautium bench` data on such hardware says otherwise.
+and trickle stream-enrichment fit) — they are no longer "unsupported". The
+standard-tier VRAM floor stays at ≥5.5 GB until `sautium bench` data on such
+hardware says otherwise: the audio-batch memory model (`device.py`
+`fixed=4.0`, marked provisional) is uncalibrated on small cards. Since
+2026-11-11 such a card, and an 8 GB Apple Silicon Mac (MPS), runs the sonic
+pass in bulk (§6 8a). It does so within what lite nodes already ran for
+streams: CLAP encodes one track's windows at a time (12, 16 or 24 of them
+— the same forward a stream's analysis makes), and the decoded batch is the
+budget's floor (5 minutes of audio) wherever that model leaves less room
+than its fixed part, which on these devices it always does; a forward the
+device refuses fails its track alone. Measured on neither yet: a 4 GB card
+and an 8 GB Mac are owed a sonic pass under a watch of their memory (on the
+Mac, the Metal side as well — MPS keeps a graph per shape).
 
 ## 6. Prioritized backlog
 
@@ -388,13 +396,16 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
     wall seconds per minute of audio, per device and core count), and the
     Library screen shows the instrument pass's pending audio at that pace
     beside the switch — before the first instrument batch, the sonic pace ×
-    8.5 on a CPU (a Pi 5: the tagger 18.9 s per minute against the sonic
-    pass's ~2.2; a 32-core x86 CPU measured 2.7, so there the first estimate
-    runs high) or × 0.3 on CUDA (a laptop RTX 4090: the tagger 0.15–0.19 s
-    per minute against the sonic pass's 0.5–0.8, mostly librosa and fpcalc
-    on the CPU), a reference pace scaled by the cores on a CPU that ran no
-    sonic batch, and "measuring" on MPS, where no ratio was measured. Off computes and signs no instruments and removes none: the
-    node still pulls, serves and carries those other nodes made.
+    the tagger-to-sonic ratio: on a CPU by the tagger's torch threads,
+    linear in their log between a Pi 5 with 2 (the tagger 18.9 s per minute
+    against the sonic pass's ~2.2: 8.5) and a 32-core x86 CPU with 16
+    (2.89 against 1.09: 2.66); × 0.3 on CUDA (a laptop RTX 4090: the tagger
+    0.15–0.19 s per minute against the sonic pass's 0.5–0.8, mostly librosa
+    and fpcalc on the CPU); a reference pace scaled by the cores on a CPU
+    that ran no sonic batch; "measuring" on MPS, where no ratio was
+    measured. The switch is read at every seam of the instrument pass. Off
+    computes no instruments and removes none: the node still pulls, serves
+    and carries those other nodes made.
 9. ✅ `python cli.py bench` — tracks/hour + library ETA + slower-than-realtime
    warning. UI surfacing of the number still TODO.
 10. ✅ Trickle mode in `PreviewEnricher`: bounded backlog (1 running +

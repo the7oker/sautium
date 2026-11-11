@@ -272,24 +272,34 @@ implementation details live in the code, DB and git history.
   (`enrichment.instruments`, a computed default: on for full and standard,
   off for lite), with this machine's estimate beside it — the instrument
   pass's pending audio at the pace the passes record per device and core
-  count after every batch (`analysis_pace`), the sonic pace × 8.5 on a CPU
-  (a Pi 5; a 32-core x86 measured 2.7) or × 0.3 on CUDA — where the GPU's
-  tagger costs less than the sonic pass's CPU work — until the tagger has
-  run here, nothing ("measuring") on MPS where no ratio was measured; no model is loaded for it, and it reaches the
-  screen with the library event. The order rule: every track's sonic pass
+  count after every batch (`analysis_pace`, forgetting past ten hours of
+  audio), the sonic pace × the tagger-to-sonic ratio until the tagger has
+  run here — on a CPU by the tagger's torch threads, linear in their log
+  between a Pi 5's 2 threads (8.5) and a 32-core x86's 16 (2.66), × 0.3 on
+  CUDA, where the GPU's tagger costs less than the sonic pass's CPU work —
+  and nothing ("measuring") on MPS where no ratio was measured. With the
+  switch off no instrument batch ever corrects the figure, and it is the
+  line the owner decides by, hence the threads. No model is loaded for it,
+  and it reaches the screen with the library event. The switch is read
+  where the instruments come up and at every seam of their pass: off stops
+  a pass under way, on adds the pass to a run under way. The order rule: every track's sonic pass
   goes before any track's instruments — the instrument pass asks at each
   batch seam whether a file newer than the sonic pass's queue waits (a scan
   added it) and gives way, as the run gives way to a stream; a file the
   sonic pass saw and could not analyse never calls it back. Both passes
   register before they compute and skip what the material group holds at a
   rank no lower; an embedding without its segments (the legacy mean) holds
-  nothing and is pending for a first-hand pass. Streams decode once, run the
-  sonic part for a track with no embedding and the tagger only with the
-  switch on — a stream of a track whose sonic records are held runs it
-  alone, its record bound to the stream's own row — and "already held" is
-  decided per kind, so a better copy holding no instruments leaves a stream
-  something to add. Off computes and signs no instruments and removes none;
-  the node still pulls, serves and carries those other nodes made.
+  nothing and outranks nothing, so a first-hand pass makes its segments
+  whatever copy made it. Streams decode once and make each kind the track
+  lacks — segments where no embedding has them, features where there are
+  none, instruments only with the switch on — so a phantom with imported
+  segments and no features (the cutover deletes imported features) gains
+  them from its stream, and a stream of a track whose sonic records are
+  held runs the tagger alone, its record bound to the stream's own row;
+  "already held" is decided per kind, so a better copy holding no
+  instruments leaves a stream something to add. Off computes no
+  instruments and removes none; the node still pulls, serves and carries
+  those other nodes made.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be

@@ -144,7 +144,8 @@ devices that cannot sign a request: the media proxy (`8830`, launcher
 - **SQLAlchemy** ORM + `psycopg2` for raw SQL / batch operations
 - **Docker + Docker Compose** (WSL2 on Windows, native on macOS and on Linux arm64)
 - **CUDA or Apple MPS** for GPU work (CLAP embeddings, BGE-M3 text
-  encoding); a CPU-only node imports analysis from peers
+  encoding); a CPU-only node analyses its own files' sound too, and takes the
+  instruments from peers unless its owner switches them on
 - **CLAP** (audio, 512-d) + **BGE-M3** (text, 1024-d) + **librosa** + AST/PaSST
 - **MADLAD-400** on CTranslate2 int8 (CPU) — any-language → English query
   translation for the English-only CLAP text encoder
@@ -165,7 +166,7 @@ never what it stores or plays.
 | RAM | 8 GB | 16 GB | 32 GB (Mac: 24 GB unified) |
 | Disk | 25 GB free, SSD | 40 GB free, SSD | 100 GB+ free, NVMe |
 | GPU | none | NVIDIA ≥ 6 GB (Turing or newer) or Apple Silicon with 16 GB | NVIDIA ≥ 8 GB (Ampere or newer) or an M-Pro-class Mac |
-| What you get | Library, every output, enrichment, the peer network and chat, text and sound search (the first sound query warms the encoder for 1–3 min), similarity over analysis imported from peers. No bulk analysis of your own files — it arrives from the network. | Everything; analysing a large library is an overnight job; instrument tagging optional. | Everything, in hours to a day; serves analysis and catalogue slices to peers. |
+| What you get | Library, every output, enrichment, the peer network and chat, text and sound search (the first sound query warms the encoder for 1–3 min), similarity and radio over your own files' sound analysis (about a day per 5 000 tracks on a Raspberry Pi 5). Instrument recognition is off by default — it arrives from the network — and is yours to switch on, with this machine's estimate beside the switch. | Everything; analysing a large library is an overnight job; instrument recognition on by default, yours to switch off. | Everything, in hours to a day; serves analysis and catalogue slices to peers. |
 
 Unsupported: less than 8 GB RAM, a hard disk (model cold-loads take minutes
 even on a fast one), 32-bit systems. The first run downloads ~6–8 GB of

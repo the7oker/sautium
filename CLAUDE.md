@@ -423,8 +423,8 @@ See:
   sync's whole point is not doing the work twice), `enrichment.instruments`
   ("Recognise instruments" — the instrument pass and the tagging of
   streams; a computed default, on for full and standard, off for lite;
-  off, the node computes and signs no instruments, removes none, and still
-  pulls, serves and carries other authors'), `p2p.gate_mode`
+  off, the node computes no instruments, removes none, and still pulls,
+  serves and carries other authors'), `p2p.gate_mode`
   (`off|shadow|enforce`, default `shadow` — the admission gate prices
   strangers' requests in 64 MiB tasks; arming is a release decision, see
   P2P-SYNC-INTEGRITY.md § "Pricing formula v1"), `support.diagnostics_enabled`

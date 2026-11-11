@@ -15,6 +15,7 @@ instrument pass (audio_analysis) follows it behind the owner's switch.
 """
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
@@ -170,16 +171,18 @@ def newest_file_id(db: Session) -> int:
     return int(db.execute(sa_text("SELECT COALESCE(max(id), 0) FROM media_files")).scalar())
 
 
-def sonic_work_since(db: Session, file_id: int) -> bool:
+def sonic_work_since(db: Session, file_id: int, track_ids: Optional[list] = None) -> bool:
     """Whether a file newer than `file_id` waits for the sonic pass — a scan
-    added it after the pass read its queue. The instrument pass asks at
-    each of its batch seams and gives way: the sonic pass of any track goes
-    before the instruments of any track. A file the pass has seen and could
-    not analyse stays pending without calling it back."""
+    added it after the pass read its queue — among `track_ids` when the run
+    is scoped to them. The instrument pass asks at each of its batch seams
+    and gives way: the sonic pass of any track goes before the instruments of
+    any track. A file the pass has seen and could not analyse stays pending
+    without calling it back."""
+    scope = "" if track_ids is None else " AND p.track_id = ANY(:track_ids)"
     return bool(db.execute(sa_text(
-        f"SELECT EXISTS (SELECT 1 FROM ({PENDING_SQL}) p WHERE p.media_file_id > :since)"),
+        f"SELECT EXISTS (SELECT 1 FROM ({PENDING_SQL}) p WHERE p.media_file_id > :since{scope})"),
         {"since": file_id, "min_seconds": provenance.MIN_MATERIAL_SECONDS,
-         "reanalyze": _reanalyze_imported()}).scalar())
+         "reanalyze": _reanalyze_imported(), "track_ids": track_ids}).scalar())
 
 
 class AudioEmbeddingGenerator:
@@ -355,13 +358,18 @@ class AudioEmbeddingGenerator:
         (provider_id, bit_depth and is_lossless are its claims).
         Replaced segments are deleted, not updated: fresh rows are unsigned by
         construction, which is the seal-invalidation model for segments.
-        Returns False when the existing row outranks the incoming analysis."""
+        Returns False when the existing row outranks the incoming analysis.
+        A portrait without its segments (the legacy mean) outranks nothing,
+        as it holds nothing (provenance.held_in_group): whatever copy made
+        it, the pass that makes segments replaces it."""
         existing = db.execute(sa_text("""
-            SELECT analysis_source_id FROM embeddings
-            WHERE track_id = :tid AND model_id = :mid
+            SELECT e.analysis_source_id,
+                   EXISTS (SELECT 1 FROM embedding_segments g WHERE g.embedding_id = e.id) AS whole
+              FROM embeddings e
+             WHERE e.track_id = :tid AND e.model_id = :mid
         """), {"tid": str(track_id), "mid": str(model.id)}).first()
-        if existing and provenance.outranked(db, existing.analysis_source_id,
-                                             analysis_source_id):
+        if existing and existing.whole and provenance.outranked(
+                db, existing.analysis_source_id, analysis_source_id):
             return False
 
         eid = db.execute(sa_text("""
@@ -392,7 +400,8 @@ class AudioEmbeddingGenerator:
     def sonic_pass(self, limit: Optional[int] = None, order_by_date: bool = False,
                    max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None,
                    worker_id: Optional[int] = None, worker_count: Optional[int] = None,
-                   cancel_flag=None, force: bool = False, on_batch=None) -> Dict[str, int]:
+                   cancel_flag=None, force: bool = False, on_batch=None,
+                   since_file_id: Optional[int] = None) -> Dict[str, int]:
         """The sonic pass over the tracks whose embedding or features are
         pending (PENDING_SQL): the registration of the track's analysis-
         source file (the fingerprint, once per file), one decode, then what
@@ -413,6 +422,9 @@ class AudioEmbeddingGenerator:
             cancel_flag: Asked before every batch; True ends the pass there.
             force: Re-analyse every analysis-source track regardless of state.
             on_batch: Called with (tracks done, tracks queued) after each batch.
+            since_file_id: only files newer than this media_files id — the
+                files a scan added since the run's sonic pass read its queue,
+                when the instrument pass gave way to them.
 
         Returns:
             processed, success (a record saved), failed, skipped (nothing to
@@ -446,6 +458,9 @@ class AudioEmbeddingGenerator:
             if track_ids is not None:
                 query_sql += " AND q.track_id = ANY(:track_ids)"
                 params["track_ids"] = track_ids
+            if since_file_id is not None:
+                query_sql += " AND q.media_file_id > :since"
+                params["since"] = since_file_id
 
             # Gaps first: a track missing a record beats an upgrade
             # (stream→owned, better rip, imported→first-hand) — coverage
@@ -481,14 +496,22 @@ class AudioEmbeddingGenerator:
             # decode it, and run librosa where its features are to be made,
             # while the accelerator encodes the batch before it.
             def _plan(batch_rows):
-                todo = []
+                """(what to decode, the outcomes of the rest) — the outcomes
+                are counted with the batch, when it is taken."""
+                todo, outcomes = [], []
                 for row in batch_rows:
                     planned = self._plan_track(db, row, embedding_model, force)
                     if isinstance(planned, str):
-                        stats[planned] += 1
+                        outcomes.append(planned)
                     else:
                         todo.append(planned)
-                return todo
+                return todo, outcomes
+
+            # librosa runs beside the decodes and the accelerator: at most the
+            # profile's prefetch workers at once, as the features stage ran it
+            # (2 on lite — a Pi's four cores also carry the torch threads)
+            from hardware_profile import resolve as _hw
+            librosa_slots = threading.BoundedSemaphore(_hw().prefetch_workers)
 
             def _load_one(item):
                 row, _src, _embed, describe = item
@@ -497,7 +520,8 @@ class AudioEmbeddingGenerator:
                 features = None
                 if audio is not None and describe:
                     try:
-                        features = analyzer.features_from_array(audio, self.sample_rate)
+                        with librosa_slots:
+                            features = analyzer.features_from_array(audio, self.sample_rate)
                     except Exception as e:
                         logger.error(f"librosa failed for {row.track_id}: {e}")
                 return item, audio, features
@@ -537,21 +561,25 @@ class AudioEmbeddingGenerator:
             # Persistent I/O thread pool. Each worker is a whole ffmpeg
             # subprocess and librosa — 16 of them saturate a 24-core dev box
             # but thrash a 4-core laptop, so the size comes from the profile.
-            from hardware_profile import resolve as _hw
             io_pool = ThreadPoolExecutor(max_workers=_hw().io_workers)
             # Prefetch pool runs _load_batch in background
             prefetch_pool = ThreadPoolExecutor(max_workers=1)
 
             try:
-                # Pre-submit first batch loading
+                # Pre-submit first batch loading; its registrations commit
+                # first, so the seam below holds no open write
                 batch_began = time.monotonic()
-                planned = _plan(batch_slices[0])
+                planned, outcomes = _plan(batch_slices[0])
+                db.commit()
                 prefetch_future = prefetch_pool.submit(_load_batch, planned)
 
                 for batch_idx in tqdm(range(num_batches), desc="Sonic pass", unit="batch"):
+                    # what the seam gave to another pass is no time of this one
+                    seam_began = time.monotonic()
                     if cancel_flag and cancel_flag():
                         logger.info("Sonic pass cancelled")
                         break
+                    batch_began += time.monotonic() - seam_began
 
                     if max_duration_seconds:
                         elapsed = time.time() - start_time
@@ -562,15 +590,19 @@ class AudioEmbeddingGenerator:
                     loaded, batch_failed = prefetch_future.result()
                     stats["processed"] += len(batch_slices[batch_idx])
                     stats["failed"] += batch_failed
+                    for outcome in outcomes:
+                        stats[outcome] += 1
                     # The batch's pace, when every track it worked on runs
                     # the whole pass: a batch of features alone, or of
-                    # segments alone, is not the pass's pace
-                    whole = all(embed and describe for _r, _s, embed, describe in planned)
+                    # segments alone, is not the pass's pace, nor one whose
+                    # decode failed (time spent on no audio)
+                    whole = not batch_failed and all(
+                        embed and describe for _r, _s, embed, describe in planned)
 
                     # Register the NEXT batch and start loading it (runs while
                     # the accelerator works)
                     if batch_idx + 1 < num_batches:
-                        planned = _plan(batch_slices[batch_idx + 1])
+                        planned, outcomes = _plan(batch_slices[batch_idx + 1])
                         prefetch_future = prefetch_pool.submit(_load_batch, planned)
 
                     analysed, wrote_any = 0.0, False

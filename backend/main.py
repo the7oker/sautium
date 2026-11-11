@@ -2113,10 +2113,12 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
             f"Lyrics emb: {lyrics_emb_s.get('success', 0)}",
             f"Bio emb: {bio_emb_s.get('success', 0)}",
         ]
-        # A text pass the device's memory stopped, or one that failed outright,
-        # is no success of the run: what it left waits for the next one
+        # A pass the device's memory stopped, or one that failed outright (the
+        # audio half included), is no success of the run: what it left waits
+        # for the next one
         unfinished = [f"{name} {'stopped (out of memory)' if part.get('stopped') else 'failed'}"
-                      for name, part in (("text", text_s), ("lyrics emb", lyrics_emb_s),
+                      for name, part in (("audio analysis", gpu_s), ("text", text_s),
+                                         ("lyrics emb", lyrics_emb_s),
                                          ("enrichment emb", enrich_emb_s), ("bio emb", bio_emb_s),
                                          ("genre emb", enrich_emb_s.get("genre_descs", {})))
                       if part.get("stopped") or part.get("error")]
@@ -2126,9 +2128,8 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
             parts.append(result["note"])
         state["progress"] = " | ".join(parts)
         state["result"] = {"success": not unfinished, "statistics": result}
-        # Signing moved into run_parallel_enrichment (right after the audio
-        # pipeline commits) so it survives a manual cancel of the slow lyrics
-        # tail and is not gated on the whole run finishing.
+        # The passes wake the notary after every batch they commit, so a
+        # cancelled or failed run has sealed what it saved.
 
     except Exception as e:
         logger.error(f"Enrichment failed: {e}", exc_info=True)

@@ -351,7 +351,7 @@ def run(monkeypatch):
     monkeypatch.setattr(migrations, "normalize_artists", lambda db, pass1: {})
     monkeypatch.setattr(notary, "wake", lambda *a, **kw: None)
     monkeypatch.setattr(embeddings, "newest_file_id", lambda db: 0)
-    monkeypatch.setattr(embeddings, "sonic_work_since", lambda db, since: False)
+    monkeypatch.setattr(embeddings, "sonic_work_since", lambda *a: False)
     monkeypatch.setattr(embeddings, "AudioEmbeddingGenerator", lambda: types.SimpleNamespace(
         sonic_pass=step("sonic")))
     monkeypatch.setattr(audio_analysis, "AudioAnalyzer", lambda: types.SimpleNamespace(

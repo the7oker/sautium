@@ -13619,6 +13619,7 @@
     return `about ${Math.round(seconds / 86400)} days`;
   }
   function _instrumentsLine(ins) {
+    if (ins.tracks == null) return '';           // the estimate could not be read
     const tracks = `${fmtNum(ins.tracks)} ${ins.tracks === 1 ? 'track' : 'tracks'}`;
     if (!ins.tracks) return 'Every track has its instruments.';
     if (ins.enabled) {
@@ -15785,15 +15786,19 @@
           : 'This machine does not analyse audio locally, so embeddings, features and instruments arrive from peers over P2P.'} Last.fm, lyrics and the text embeddings are handled on their own by Background enrichment (Sync &amp; P2P).</div></div>
       </div>
       ${enrichActions}
-      ${!instruments ? '' : `
+    `;
+
+    // The switch governs the tagging of streams as well as the run, so it
+    // stands wherever the node has the ML stack — a node with no files of
+    // its own included, below the empty library's message.
+    const instrumentsRow = !instruments ? '' : `
       <div class="form-group">
         <div class="form-row">
           <span class="form-label">Recognise instruments</span>
-          <button class="toggle ${instruments.enabled ? 'on' : ''}" data-action="toggle-instruments"><span class="knob"></span></button>
+          <button class="toggle ${instruments.enabled ? 'on' : ''}" data-action="toggle-instruments" aria-pressed="${instruments.enabled ? 'true' : 'false'}"><span class="knob"></span></button>
         </div>
         <div class="form-row stacked"><div class="row-stack-sub" data-instruments-line>${escapeProfileHtml(_instrumentsLine(instruments))}</div></div>
-      </div>`}
-    `;
+      </div>`;
 
     const emptyState = !isEmpty ? '' : !isPathSet ? `
       <div class="empty-library">
@@ -15853,6 +15858,7 @@
 
         ${libraryStats}
         ${emptyState}
+        ${instrumentsRow}
         ${actions}
       </section>
     `;
@@ -15890,6 +15896,7 @@
       const el = e.currentTarget;
       const want = !el.classList.contains('on');
       el.classList.toggle('on', want);
+      el.setAttribute('aria-pressed', want ? 'true' : 'false');
       return serialized('library.instruments', () => fetch('/api/settings/library/instruments', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: want }) }));

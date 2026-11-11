@@ -524,9 +524,10 @@ The features and the instruments travel as per-track records
 record's fields, `analysis_version`, its seal and the same `provenance`.
 Whether a node makes instruments is its owner's switch, "Recognise
 instruments" (`enrichment.instruments`, since 2026-11-11: on by default for
-the full and standard profiles, off for lite); off, it computes and signs
-none, and still pulls, serves and carries every author's like any category
-— a lite node takes its instruments from the network.
+the full and standard profiles, off for lite); off, it computes none (it
+keeps, and seals after a shed, those it made before), and still pulls,
+serves and carries every author's like any category — a lite node takes its
+instruments from the network.
 Since 2026-11-10 every record kind has a format version of its own
 (`record_sig.py`): segments v3, features v4 (the nine fields of
 `FEATURE_ORDER` — the zero-shot values are derived by each node from its

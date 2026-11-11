@@ -288,9 +288,9 @@ class ServiceManager:
 
         # PyTorch publishes no macOS x86_64 wheel past 2.2.2, so an Intel Mac
         # cannot have the pinned trio at all. Such a machine has neither CUDA
-        # nor MPS, which makes it `lite` in hardware_profile — no local
-        # analysis, no pre-warm, no translation — so the ML stack has nothing
-        # to do there and the backend runs without it. requirements.txt
+        # nor MPS, which makes it `lite` in hardware_profile, and without the
+        # ML stack it does no local analysis, no pre-warm, no translation —
+        # so the backend runs without it. requirements.txt
         # carries the matching environment marker; skipping here keeps the
         # launcher from reporting a failure for a package it must not install.
         no_ml_wheels = is_macos and platform.machine() == "x86_64"

@@ -44,6 +44,12 @@ PASST_CHECKPOINT_URL = ("https://github.com/kkoutini/PaSST/releases/download/"
 PASST_CHECKPOINT_SHA256 = "302903fa8c4aee817b11dc982da0b29aaf8d11a3e722420476d0a12c9db70c2c"
 
 
+# What the AST+PaSST pair holds once loaded, in GB: 1.80 on CUDA in bf16 (the
+# load's own log, a laptop RTX 4090, 2026-11-11); about 1.6 GiB of RAM on a
+# Pi 5's CPU in fp32. The instrument pass leaves this much room in its
+# batches' budget when it cuts them before the pair is loaded.
+RESIDENT_GB = 2.0
+
 # AudioSet class names (exactly as in the model config) we treat as
 # musical instruments. Curated from
 # https://research.google.com/audioset/ontology/musical_instrument_1.html

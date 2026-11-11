@@ -746,13 +746,13 @@ def instrument_pass(limit, force, newest_first, max_duration,
                                af.bpm, af.key, af.mode,
                                round(z.vocal_score::numeric, 3) AS vocal_score,
                                round(z.danceability::numeric, 3) AS danceability, ti.instruments
-                        FROM audio_features af
-                        JOIN tracks t ON af.track_id = t.id
-                        LEFT JOIN track_instruments ti ON ti.track_id = t.id
+                        FROM track_instruments ti
+                        JOIN tracks t ON ti.track_id = t.id
+                        LEFT JOIN audio_features af ON af.track_id = t.id
                         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
                         JOIN artists a2 ON ta.artist_id = a2.id
                         LEFT JOIN track_zero_shot z ON z.track_id = t.id
-                        ORDER BY af.created_at DESC
+                        ORDER BY ti.updated_at DESC NULLS LAST
                         LIMIT 5
                     """)).fetchall()
 

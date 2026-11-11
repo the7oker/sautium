@@ -143,7 +143,9 @@ A **bottom-up sheet** with a vertical list of entries:
   applies from the next track.
 - Profile (identity, account, hardware profile, audio chain)
 - Library (`#more/library`) — music path, owned counts, enrichment
-  coverage, scan/enrich actions. (Node backup and restore are launcher
+  coverage (instruments among them), scan/enrich actions, and the owner's
+  "Recognise instruments" switch with this machine's estimate (shown
+  wherever the node has the ML stack, owned tracks or not). (Node backup and restore are launcher
   functions — `BACKUP.md`; the Web UI has no backup surface.)
 - Streaming library (`#more/phantoms`) — the catalog the node knows but
   does not own; its own screen because it is its own catalog, with the

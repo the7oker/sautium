@@ -81,12 +81,6 @@ def run_parallel_enrichment(
     if cancel_flag is None:
         cancel_flag = lambda: False
 
-    # The instrument pass is the owner's switch (enrichment.instruments):
-    # off, the run makes none and removes none
-    if not skip_instruments:
-        from routers.settings import instruments_on
-        skip_instruments = not instruments_on()
-
     # Preflight: audio embeddings + analysis decode via the `ffmpeg` binary
     # (audio_analysis.load_full_track_48k). Missing ffmpeg fails every track
     # silently ("0 / N"); surface it once and skip the audio pipeline instead
@@ -201,26 +195,40 @@ def run_parallel_enrichment(
     # instruments of any track. The instrument pass asks at each of its
     # batch seams whether a file newer than the sonic pass's queue waits
     # for it (a scan added files) and gives way, as the run gives way to a
-    # stream; then the sonic pass takes the new files and the instruments
-    # go on. A forced or limited run reads each queue once.
-    can_give_way = not (skip_sonic or force_sonic or force_instruments or limit)
+    # stream; then the sonic pass takes those new files alone, and the
+    # instruments go on without trying again what they already took. A
+    # forced, limited or timed run reads each queue once.
+    can_give_way = not (skip_sonic or force_sonic or force_instruments or limit
+                        or max_duration_seconds)
+
+    def _instruments_wanted():
+        """The owner's switch (enrichment.instruments), read when the
+        instruments come up and at every seam of their pass: off stops a
+        pass under way there, on adds the pass to a run under way. Off, the
+        run makes none and removes none. A forced pass is the owner's
+        request whatever the switch says."""
+        if skip_instruments:
+            return False
+        from routers.settings import instruments_on
+        return force_instruments or instruments_on()
 
     def _audio_half(combined):
+        seen = since = None
+        taken = set()               # the files this run's instrument pass took
         while True:
-            seen = None
             if not skip_sonic:
                 from embeddings import AudioEmbeddingGenerator, newest_file_id
                 with get_db_context() as db:
-                    seen = newest_file_id(db)
+                    since, seen = seen, newest_file_id(db)
                 pipeline_progress["gpu"] = "Sonic analysis..."
                 _update_progress()
                 _counted(combined, "sonic", AudioEmbeddingGenerator().sonic_pass(
-                    **gpu_kwargs, cancel_flag=_seam, force=force_sonic,
+                    **gpu_kwargs, cancel_flag=_seam, force=force_sonic, since_file_id=since,
                     on_batch=_progress("Sonic analysis")))
                 pipeline_progress["gpu"] = f"GPU: {combined['sonic'].get('success', 0)} sonic"
                 _update_progress()
 
-            if _halted() or skip_instruments:
+            if _halted() or not _instruments_wanted():
                 return
 
             gave_way = []
@@ -228,10 +236,13 @@ def run_parallel_enrichment(
             def _instrument_seam():
                 if _seam():
                     return True
+                if not _instruments_wanted():
+                    logger.info("Recognise instruments was switched off: the instrument pass ends")
+                    return True
                 if can_give_way:
                     from embeddings import sonic_work_since
                     with get_db_context() as db:
-                        if sonic_work_since(db, seen):
+                        if sonic_work_since(db, seen, track_ids):
                             gave_way.append(True)
                             return True
                 return False
@@ -240,7 +251,7 @@ def run_parallel_enrichment(
             pipeline_progress["gpu"] = "Recognising instruments..."
             _update_progress()
             _counted(combined, "instruments", AudioAnalyzer().instrument_pass(
-                force=force_instruments, cancel_flag=_instrument_seam,
+                force=force_instruments, cancel_flag=_instrument_seam, attempted=taken,
                 on_batch=_progress("Instruments"), **gpu_kwargs))
             pipeline_progress["gpu"] = (f"GPU: {combined.get('sonic', {}).get('success', 0)} sonic, "
                                         f"{combined['instruments'].get('success', 0)} instruments")
@@ -378,9 +389,9 @@ def run_parallel_enrichment(
         return result_parts
 
     # === Phase 2: Text embeddings (sentence-transformers, needs GPU) ===
-    # Runs on lite too — the tier turns off the audio pipeline, not the text
-    # encoders, and lite's semantic search reads exactly these vectors
-    # (HARDWARE-TIERS §4). Only a node with no ML runtime skips it.
+    # Runs on every profile, lite included — lite's semantic search reads
+    # exactly these vectors (HARDWARE-TIERS §4). Only a node with no ML
+    # runtime skips it.
     if not ml_available:
         logger.info("=== Phase 2 skipped: no ML runtime ===")
         return result_parts
@@ -595,10 +606,6 @@ class TrackEnrichmentPipeline:
     ):
         self.skip_sonic = skip_sonic
         self.skip_lastfm = skip_lastfm
-        # the instrument pass is the owner's switch (enrichment.instruments)
-        if not skip_instruments:
-            from routers.settings import instruments_on
-            skip_instruments = not instruments_on()
         self.skip_instruments = skip_instruments
         self.force_sonic = force_sonic
         self.force_instruments = force_instruments
@@ -630,6 +637,15 @@ class TrackEnrichmentPipeline:
             return 'success'
         return 'failed' if stats.get("failed") else 'skipped'
 
+    def _instruments_wanted(self) -> bool:
+        """The owner's switch (enrichment.instruments), read for every track
+        as the run reads it at every seam; a forced pass is the owner's
+        request whatever it says."""
+        if self.skip_instruments:
+            return False
+        from routers.settings import instruments_on
+        return self.force_instruments or instruments_on()
+
     def _get_lastfm_service(self):
         """Lazy-load Last.fm service."""
         if self._lastfm_service is None:
@@ -647,7 +663,7 @@ class TrackEnrichmentPipeline:
         """
         status = {
             'needs_sonic': not self.skip_sonic,
-            'needs_instruments': not self.skip_instruments,
+            'needs_instruments': self._instruments_wanted(),
         }
 
         # Last.fm data (only check if not skipping)

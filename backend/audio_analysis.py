@@ -272,6 +272,7 @@ class AudioAnalyzer:
         worker_count: Optional[int] = None,
         cancel_flag=None,
         on_batch=None,
+        attempted: Optional[set] = None,
     ) -> Dict[str, int]:
         """The instrument pass over the tracks whose instruments record is
         pending (analysis_pace.INSTRUMENTS_PENDING_SQL): each track's
@@ -298,6 +299,10 @@ class AudioAnalyzer:
             worker_count: Total number of workers for parallel processing.
             cancel_flag: Asked before every batch; True ends the pass there.
             on_batch: Called with (tracks done, tracks queued) after each batch.
+            attempted: media_files ids this run's earlier instrument pass
+                took already — left out, and every file this one takes is
+                added: a pass resumed after giving way does not try again a
+                file it could not address or decode.
 
         Returns:
             processed, success (saved), failed, skipped (the group holds
@@ -342,6 +347,8 @@ class AudioAnalyzer:
                 query_sql += f" LIMIT {limit}"
 
             rows = db.execute(sa_text(query_sql), params).fetchall()
+            if attempted is not None:
+                rows = [r for r in rows if r.media_file_id not in attempted]
             total = len(rows)
             if total == 0:
                 logger.info("No tracks pending the instrument pass")
@@ -353,8 +360,12 @@ class AudioAnalyzer:
             # Batches are cut by BOTH row count and total audio duration —
             # whole tracks are held decoded in RAM for the batch, and 16
             # Schulze-length pieces at once would be ~14GB.
+            # The tagger loads at the first batch that has something to tag;
+            # the batches are cut before that, so the budget leaves room for it
             from device import audio_batch_budget_seconds, empty_cache
-            batch_budget_seconds = audio_batch_budget_seconds()
+            from ensemble_instruments import RESIDENT_GB
+            batch_budget_seconds = audio_batch_budget_seconds(
+                reserve_gb=0.0 if self.ensemble is not None else RESIDENT_GB)
             batches = []
             cur, cur_seconds = [], 0.0
             for row in rows:
@@ -383,6 +394,8 @@ class AudioAnalyzer:
 
                     batch_began = time.monotonic()
                     stats["processed"] += len(batch_rows)
+                    if attempted is not None:
+                        attempted.update(r.media_file_id for r in batch_rows)
                     todo = self._register_batch(db, batch_rows, force, stats)
                     # The registrations commit before the long part, so no
                     # other pass waits on them while the batch is tagged
@@ -396,6 +409,9 @@ class AudioAnalyzer:
                     decoded = list(io_pool.map(self._decode, [row for row, _ in todo]))
                     analysed = 0.0
                     wrote = False
+                    # a decode that failed spent time on no audio: the batch
+                    # says nothing true about the pace
+                    whole = all(audio is not None for audio in decoded)
                     for (row, src_id), audio in zip(todo, decoded):
                         if audio is None:
                             stats["failed"] += 1
@@ -412,8 +428,9 @@ class AudioAnalyzer:
                     # unified memory otherwise holds ~28 GB for the whole run).
                     empty_cache(self.device)
 
-                    analysis_pace.record(db, analysis_pace.INSTRUMENTS,
-                                         time.monotonic() - batch_began, analysed)
+                    if whole:
+                        analysis_pace.record(db, analysis_pace.INSTRUMENTS,
+                                             time.monotonic() - batch_began, analysed)
                     db.commit()
                     if wrote:
                         notary.wake("instrument pass")
@@ -432,17 +449,27 @@ class AudioAnalyzer:
         """The batch's tracks registered before anything is decoded: (row,
         source id) for each that has instruments to make. No fingerprint =
         no address, and nothing is saved (the queue asks again next run, as
-        for a file that fails to decode)."""
+        for a file that fails to decode). Each under a savepoint of its own,
+        as the sonic pass registers: a track renamed or merged by the canon
+        since the queue was read fails alone."""
         todo = []
         for row in batch_rows:
-            src_id = provenance.get_or_create_local(
-                db, row.track_id, row.media_file_id, row.file_path,
-                row.sample_rate, row.bit_depth, row.is_lossless,
-                row.duration_seconds, row.cue_start_seconds, row.cue_end_seconds)
+            try:
+                with db.begin_nested():
+                    src_id = provenance.get_or_create_local(
+                        db, row.track_id, row.media_file_id, row.file_path,
+                        row.sample_rate, row.bit_depth, row.is_lossless,
+                        row.duration_seconds, row.cue_start_seconds, row.cue_end_seconds)
+                    held = src_id is not None and not force and provenance.held_in_group(
+                        db, src_id, "track_instruments")
+            except Exception as e:
+                stats["failed"] += 1
+                logger.error(f"Registration failed for {row.track_id}: {e}")
+                continue
             if src_id is None:
                 stats["failed"] += 1
                 logger.warning(f"Skipping track {row.track_id}: no content address (fingerprint)")
-            elif not force and provenance.held_in_group(db, src_id, "track_instruments"):
+            elif held:
                 stats["skipped"] += 1       # the same material, tagged at a rank no lower
             else:
                 todo.append((row, src_id))

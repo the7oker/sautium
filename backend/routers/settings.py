@@ -296,8 +296,9 @@ _DEFAULTS: Dict[str, Any] = {
     # so the profile answers (HardwareProfile.instruments_by_default: on for
     # full and standard, off for lite, where the tagger costs ~19 s per
     # minute of audio on a Pi) — read through instruments_on(). Off computes
-    # and signs none and removes nothing: the node still pulls, serves and
-    # carries the instruments other nodes made.
+    # none and removes nothing (sign() still seals what the node made
+    # earlier, after a shed): the node still pulls, serves and carries the
+    # instruments other nodes made.
     "enrichment.instruments":    None,
     # The phantom layer — albums and tracks the owner does not have (MB
     # discographies, Last.fm neighbours), browsable and streamable next to
@@ -665,9 +666,17 @@ def _instruments_state() -> Dict[str, Any]:
     read with every library event, so the estimate moves as the pass's
     batches land."""
     import analysis_pace
-    with get_db_context() as db:
-        left = analysis_pace.estimate(db, reanalyze=bool(_read("enrichment.reanalyze_imported")))
-    return {"enabled": instruments_on(), **left}
+    enabled = instruments_on()
+    try:
+        with get_db_context() as db:
+            left = analysis_pace.estimate(db, reanalyze=bool(_read("enrichment.reanalyze_imported")))
+    except Exception as e:
+        # as the stats above: the rest of the screen stands, the row says
+        # nothing of the time
+        logger.warning(f"Instruments estimate failed: {e}")
+        left = {"tracks": None, "audio_seconds": None, "pace": None, "basis": None,
+                "seconds": None}
+    return {"enabled": enabled, **left}
 
 
 def _hqp_endpoint() -> tuple:

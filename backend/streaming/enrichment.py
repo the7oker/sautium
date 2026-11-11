@@ -4,11 +4,12 @@ A phantom track has no local file → no audio embedding → it can't be found b
 audio-similarity search and adds nothing to the P2P feature pool. When we stream
 a preview we already hold the whole FLAC in memory; tee it through the SAME
 analysis the passes run on owned files, keyed to the phantom's track_id, on
-one decode: the sonic part (CLAP 512-d embedding + librosa DSP) for a track
-with no embedding, and the instrument tagger (AST/PaSST) only while the
-owner's switch says so (enrichment.instruments) and the track has no
-instruments — so a stream of a track whose sonic records are held, imported or
-its own, runs the tagger alone.
+one decode, for each kind the track lacks: the segments (CLAP 512-d) for a
+track with no embedding that has them, the features (librosa DSP) for one
+with none, and the instruments (AST/PaSST) only while the owner's switch says
+so (enrichment.instruments) — so a stream of a track whose sonic records are
+held, imported or its own, runs the tagger alone, and one whose features
+alone are missing runs librosa alone.
 
 Provenance: the streamed bytes are content-addressed exactly like a local file
 (analysis_sources row with provider_id = the serving provider's manifest id,
@@ -189,23 +190,33 @@ class PreviewEnricher:
         from config import settings
         from database import SessionLocal
 
-        # Idempotent: a previously-enriched (or owned) track already has an
-        # embedding, and with the switch off or its instruments held, nothing
-        # to add — skip the decode + GPU entirely. A lossy-sourced analysis
-        # is as final as a lossless one: every first-hand stream signs
-        # (sign_audio._SIGNABLE_SRC), and re-deriving it from a later
-        # lossless fetch would only re-spend the GPU and re-seal rows that
-        # peers may already hold.
-        from models import Embedding, TrackInstruments
+        # Idempotent, per kind: what the track already holds of a kind —
+        # an embedding with its segments, the features, the instruments (and
+        # those only while the owner's switch says to make them) — is not
+        # made again; a track holding all it may gain skips the decode + GPU
+        # entirely. A phantom whose segments were imported and whose features
+        # are not (the records' cutover deletes imported features) gains
+        # them from its stream, which may be its one full listen. A
+        # lossy-sourced analysis is as final as a lossless one: every
+        # first-hand stream signs (sign_audio._SIGNABLE_SRC), and re-deriving
+        # it from a later lossless fetch would only re-spend the GPU and
+        # re-seal rows that peers may already hold.
+        from sqlalchemy import text as sa_text
         from routers.settings import instruments_on
         with SessionLocal() as db:
-            sonic = db.query(Embedding.id).filter(Embedding.track_id == track_id).first() is None
-            tag = instruments_on() and db.query(TrackInstruments.id).filter(
-                TrackInstruments.track_id == track_id).first() is None
-        if not (sonic or tag):
+            held = db.execute(sa_text("""
+                SELECT EXISTS (SELECT 1 FROM embeddings e
+                                WHERE e.track_id = CAST(:t AS uuid)
+                                  AND EXISTS (SELECT 1 FROM embedding_segments g
+                                               WHERE g.embedding_id = e.id)),
+                       EXISTS (SELECT 1 FROM audio_features WHERE track_id = CAST(:t AS uuid)),
+                       EXISTS (SELECT 1 FROM track_instruments WHERE track_id = CAST(:t AS uuid))
+            """), {"t": str(track_id)}).one()
+        kinds = tuple(kind for kind, lacking in (
+            ("embeddings", not held[0]), ("audio_features", not held[1]),
+            ("track_instruments", not held[2] and instruments_on())) if lacking)
+        if not kinds:
             return
-        kinds = (("embeddings", "audio_features") if sonic else ()) + (
-            ("track_instruments",) if tag else ())
 
         # Decode the in-memory FLAC to 48k mono and take the SAME middle window
         # the scanner uses, so the embedding is comparable to owned tracks.
@@ -254,7 +265,7 @@ class PreviewEnricher:
         with heavy_pass("a stream's analysis") as held:
             if not held:        # the node stops
                 return
-            embedder, analyzer = self._models(sonic="embeddings" in make or "audio_features" in make,
+            embedder, analyzer = self._models(sonic="embeddings" in make,
                                               tag="track_instruments" in make)
             # Full-track methodology, same as owned scans: amplitude block +
             # windowed instruments over the whole streamed audio, bpm/key from
@@ -300,7 +311,7 @@ class PreviewEnricher:
 
     def _models(self, sonic: bool, tag: bool):
         # Lazy: load the singletons a preview needs on first use (CLAP for
-        # the sonic part, AST/PaSST for the tagger). Reused across previews;
+        # the segments — librosa needs no model — AST/PaSST for the tagger). Reused across previews;
         # the same process-wide models the passes use.
         if self._embedder is None:
             from embeddings import AudioEmbeddingGenerator

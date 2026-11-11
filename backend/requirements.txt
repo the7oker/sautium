@@ -56,8 +56,9 @@ imagehash>=4.3.1
 # leaving these unmarked left such a node without fastapi either.
 #
 # Nothing is lost by dropping them there. Those machines have neither CUDA
-# nor MPS, so hardware_profile resolves `lite` — no local analysis, no
-# pre-warm, no translation; analysis arrives over P2P. Every module that
+# nor MPS, and without the ML stack hardware_profile resolves `lite` with no
+# local analysis (`ml_available` False), no pre-warm, no translation;
+# analysis arrives over P2P. Every module that
 # imports torch or librosa sits on an analysis path gated by that profile.
 # Anything that imports either needs the same marker, or it drags the
 # unsatisfiable pin back in as a transitive dependency.

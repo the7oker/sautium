@@ -19,8 +19,9 @@ The models are fakes (CLAP one unit vector, librosa a fixed map, the tagger
 fixed scores), as fpcalc and ffprobe are where a registration would decode."""
 
 import asyncio
-import os
+import math
 import sys
+import time
 import types
 import uuid
 from pathlib import Path
@@ -120,7 +121,8 @@ def models(monkeypatch):
     calls = []
     silence = np.zeros(48000 * 20, dtype=np.float32)
     gen = embeddings.AudioEmbeddingGenerator
-    ns = types.SimpleNamespace(calls=calls, wakes=[], tagger=_Tagger({"piano": 0.62}))
+    ns = types.SimpleNamespace(calls=calls, wakes=[], tagger=_Tagger({"piano": 0.62}),
+                               on_clap=None, tagger_load_seconds=0.0)
 
     def decoded(kind):
         def load(*args):
@@ -133,8 +135,12 @@ def models(monkeypatch):
     monkeypatch.setattr(notary, "wake", lambda reason, **kw: ns.wakes.append(reason))
     monkeypatch.setattr(gen, "load_model", lambda self: calls.append(("load", "CLAP")))
     monkeypatch.setattr(gen, "_load_audio", lambda self, *a: decoded("sonic decode")(*a))
-    monkeypatch.setattr(gen, "_compute_segments", lambda self, audio: (
-        calls.append(("CLAP", None)), ([0], np.stack([UNIT]), UNIT))[1])
+    def clap(self, audio):
+        calls.append(("CLAP", None))
+        if ns.on_clap:
+            ns.on_clap()
+        return [0], np.stack([UNIT]), UNIT
+    monkeypatch.setattr(gen, "_compute_segments", clap)
     monkeypatch.setattr(audio_analysis.AudioAnalyzer, "features_from_array",
                         lambda self, audio, sr=48000: (calls.append(("librosa", None)),
                                                        {"bpm": 77.0, "energy": 0.5})[1])
@@ -142,6 +148,7 @@ def models(monkeypatch):
 
     def load_tagger(self):
         calls.append(("load", "AST+PaSST"))
+        time.sleep(ns.tagger_load_seconds)
         self.ensemble = ns.tagger
     monkeypatch.setattr(audio_analysis.AudioAnalyzer, "load_model", load_tagger)
     ns.sonic = lambda track_ids=None, **kw: gen(model_name="clap", device="cpu").sonic_pass(
@@ -405,7 +412,7 @@ def run(cur, prints, models, monkeypatch):
     import text_embeddings
     import track_enrichment
     from canon import migrations
-    monkeypatch.setattr(device, "audio_batch_budget_seconds", lambda: 1.0)
+    monkeypatch.setattr(device, "audio_batch_budget_seconds", lambda **kw: 1.0)
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(migrations, "normalize_artists", lambda db, pass1: {})
     monkeypatch.setattr(instrument_tagger, "release_instrument_tagger", lambda dev: None)
@@ -417,7 +424,8 @@ def run(cur, prints, models, monkeypatch):
     switch = {"on": True}
     monkeypatch.setattr(settings_router, "instruments_on", lambda: switch["on"])
     return types.SimpleNamespace(
-        go=lambda: track_enrichment.run_parallel_enrichment(skip_lastfm=True, skip_lyrics=True),
+        go=lambda **kw: track_enrichment.run_parallel_enrichment(skip_lastfm=True, skip_lyrics=True,
+                                                                **kw),
         switch=switch)
 
 
@@ -566,15 +574,17 @@ def _pending_files(cur, durations):
         _file(cur, _track(cur), f"/music/p{i}.flac", duration=d)
 
 
-def _estimate(device="cpu", cores=4):
+def _estimate(device="cpu", cores=4, threads=2):
     with database.get_db_context() as db:
         analysis_pace._machine = lambda: (device, cores)
+        analysis_pace._tagger_threads = lambda: threads
         return analysis_pace.estimate(db, reanalyze=False)
 
 
 @pytest.fixture
 def machine(monkeypatch):
     monkeypatch.setattr(analysis_pace, "_machine", analysis_pace._machine)
+    monkeypatch.setattr(analysis_pace, "_tagger_threads", analysis_pace._tagger_threads)
 
 
 def test_the_estimate_before_any_batch_is_the_measured_reference_scaled_by_the_cores(
@@ -627,7 +637,7 @@ def test_on_cuda_the_estimate_waits_for_a_sonic_batch_then_takes_its_ratio(cur, 
         analysis_pace._machine = lambda: ("cuda", 16)
         analysis_pace.record(db, analysis_pace.SONIC, 2.0, 240.0)          # 0.5 s a minute
     e = _estimate(device="cuda", cores=16)
-    assert (e["basis"], e["pace"]) == ("sonic", pytest.approx(0.5 * analysis_pace.TAGGER_TO_SONIC["cuda"]))
+    assert (e["basis"], e["pace"]) == ("sonic", pytest.approx(0.5 * analysis_pace.CUDA_RATIO))
 
 
 def test_nothing_pending_is_no_time_at_all(cur, no_model, machine):
@@ -745,3 +755,311 @@ def test_the_per_track_pipeline_runs_the_sonic_pass_then_the_instruments(
     assert models.wakes == ["sonic pass"] + (["instrument pass"] if switch else [])
     assert set(_records(cur, track)) == ({"embeddings", "features", "instruments"} if switch
                                          else {"embeddings", "features"})
+
+
+# -- Review round 1 -------------------------------------------------------------
+
+def _three(cur, prints, names=("a", "b", "c"), fixed=False):
+    """Three owned tracks, a file each, in the queue's order when `fixed`."""
+    tracks = {}
+    for i, n in enumerate(names, 1):
+        if fixed:
+            tracks[n] = f"00000000-0000-4000-8000-00000000000{i}"
+            cur.execute("INSERT INTO tracks (id, title) VALUES (%s, %s)", (tracks[n], n))
+        else:
+            tracks[n] = _track(cur, n)
+        _file(cur, tracks[n], f"/music/{n}.flac")
+        prints[f"/music/{n}.flac"] = encode(noise(950, ord(n[0]) + 7 * i))
+    return tracks
+
+
+@pytest.fixture
+def one_a_batch(monkeypatch):
+    import device
+    monkeypatch.setattr(device, "audio_batch_budget_seconds", lambda **kw: 1.0)
+
+
+def test_a_track_renamed_under_the_instrument_pass_fails_alone(cur, prints, models, one_a_batch):
+    """Probe P1: the canon renamed a queued track (ON UPDATE CASCADE) while
+    the batch before it was tagged; its registration's insert named a track
+    that was gone and ended the whole pass. Now it fails alone."""
+    tracks = _three(cur, prints, fixed=True)
+    models.sonic()
+    renamed = str(uuid.uuid4())
+
+    def the_canon_renames_b(call):
+        if call == 1:
+            cur.execute("UPDATE tracks SET id = %s WHERE id = %s", (renamed, tracks["b"]))
+    models.tagger.on_tag = the_canon_renames_b
+    stats = models.instruments()
+    assert (stats["success"], stats["failed"]) == (2, 1)
+    assert "instruments" in _records(cur, tracks["c"])
+
+
+def test_a_registration_that_raises_fails_its_track_alone_in_both_passes(cur, prints, models,
+                                                                        monkeypatch, one_a_batch):
+    """Probe P1b: the same error for one track — the sonic pass counted it
+    failed and went on, the instrument pass ended."""
+    tracks = _three(cur, prints, fixed=True)
+    real = provenance.get_or_create_local
+
+    def flaky(db, track_id, *a, **kw):
+        if str(track_id) == tracks["b"]:
+            raise RuntimeError("the analysis source of the track changed under two registrations")
+        return real(db, track_id, *a, **kw)
+    monkeypatch.setattr(provenance, "get_or_create_local", flaky)
+    sonic = models.sonic()
+    assert (sonic["success"], sonic["failed"]) == (2, 1)
+    stats = models.instruments()
+    assert (stats["success"], stats["failed"]) == (2, 1)
+    assert [n for n in tracks if "instruments" in _records(cur, tracks[n])] == ["a", "c"]
+
+
+def test_an_audio_half_that_failed_is_no_success_of_the_run(monkeypatch):
+    monkeypatch.chdir(BACKEND)
+    import main
+    import track_enrichment
+    monkeypatch.setattr(track_enrichment, "run_parallel_enrichment", lambda **kw: {
+        "gpu": {"error": "ForeignKeyViolation"}, "text_embeddings": {"success": 2}})
+    monkeypatch.setattr(main, "_notify_library_subs_safe", lambda: None)
+    monkeypatch.setattr(main, "_enrich_state", {**main._enrich_state, "running": True})
+    main._enrich_worker(None, True)
+    assert main._enrich_state["result"]["success"] is False
+    assert "not finished: audio analysis failed" in main._enrich_state["progress"]
+
+
+def test_switched_off_under_way_the_instrument_pass_ends_at_its_next_seam(cur, prints, models,
+                                                                         run):
+    """Probe P2: off after the first track, the run tagged the other two."""
+    _three(cur, prints)
+
+    def the_owner_switches_off(call):
+        if call == 1:
+            run.switch["on"] = False
+    models.tagger.on_tag = the_owner_switches_off
+    result = run.go()
+    assert models.tagger.calls == 1 and result["gpu"]["instruments"]["success"] == 1
+
+
+def test_switched_on_during_the_sonic_pass_the_run_recognises_instruments(cur, prints, models,
+                                                                          run):
+    _three(cur, prints)
+    run.switch["on"] = False
+    models.on_clap = lambda: run.switch.update(on=True)
+    result = run.go()
+    assert result["gpu"]["instruments"]["success"] == 3
+
+
+def test_a_forced_instrument_pass_is_the_owners_whatever_the_switch_says(cur, prints, models, run):
+    _three(cur, prints)
+    run.switch["on"] = False
+    result = run.go(force_instruments=True)
+    assert result["gpu"]["instruments"]["success"] == 3
+
+
+def test_the_per_track_pipeline_reads_the_switch_for_every_track(cur, prints, models,
+                                                                 monkeypatch):
+    import track_enrichment
+    switch = {"on": True}
+    monkeypatch.setattr(settings_router, "instruments_on", lambda: switch["on"])
+    _on_cpu(monkeypatch)
+    tracks = _three(cur, prints)
+
+    def the_owner_switches_off(call):
+        switch["on"] = False
+    models.tagger.on_tag = the_owner_switches_off
+    stats = track_enrichment.TrackEnrichmentPipeline(skip_lastfm=True).enrich_tracks()
+    assert (stats["sonic_success"], stats["instruments_success"]) == (3, 1)
+    assert sum("instruments" in _records(cur, t) for t in tracks.values()) == 1
+
+
+def test_a_legacy_mean_of_a_better_copy_is_replaced_once(cur, prints, models):
+    """Probe P3: the CD's portrait of before 2026-07-05 (no segments), its
+    file gone, a 24-bit copy elected: computed and refused on every run. A
+    portrait without its segments outranks nothing."""
+    track = _track(cur)
+    cd = _source(cur, track, FP, bit_depth=16)
+    _embedding(cur, track, cd, segments=False)
+    _features(cur, track, cd)
+    _file(cur, track, "/music/hr.flac", bit_depth=24)
+    prints["/music/hr.flac"] = NEAR
+    stats = models.sonic([uuid.UUID(track)])
+    assert (stats["embeddings"], stats["features"]) == (1, 0)
+    assert _queued(track)["embeddings"] is False
+    cur.execute("SELECT count(*) FROM embedding_segments s JOIN embeddings e ON e.id = s.embedding_id "
+                "WHERE e.track_id = %s", (track,))
+    assert cur.fetchone() == (1,)
+    assert models.sonic([uuid.UUID(track)])["processed"] == 0
+    assert sum(1 for c in models.calls if c[0] == "CLAP") == 1
+
+
+@pytest.mark.parametrize("switch", [False, True])
+def test_a_stream_of_a_phantom_with_imported_segments_makes_its_features(cur, models, stream,
+                                                                         switch):
+    """Probe P4: after the records' cutover a phantom holds imported segments
+    and no features; its stream — maybe its one full listen — made none.
+    Per kind now: librosa alone, the tagger too with the switch on."""
+    track = _track(cur)
+    twin = _source(cur, track, NEAR, imported=True, duration=60)
+    _embedding(cur, track, twin)
+    stream.switch["on"] = switch
+    stream.run(track)
+    records = _records(cur, track)
+    assert records["embeddings"] == twin
+    assert "features" in records and records["features"] != twin
+    assert ("CLAP", None) not in models.calls
+    assert models.tagger.calls == int(switch) and ("instruments" in records) is switch
+
+
+def test_a_stream_of_a_phantom_with_a_legacy_mean_makes_its_segments(cur, models, stream):
+    track = _track(cur)
+    own = _source(cur, track, NEAR, provider="lossless-test", duration=60)
+    eid = _embedding(cur, track, own, segments=False)
+    _features(cur, track, own)
+    stream.switch["on"] = False
+    stream.run(track)
+    cur.execute("SELECT count(*) FROM embedding_segments WHERE embedding_id = %s", (eid,))
+    assert cur.fetchone() == (1,) and ("librosa", None) not in models.calls
+
+
+def test_a_give_way_takes_only_the_new_files_and_tries_nothing_twice(cur, prints, models, run,
+                                                                     monkeypatch):
+    """Probe P6: every give-way read the whole sonic queue again, and the
+    resumed instrument pass the whole instrument queue: three files no
+    fingerprint addresses were fingerprinted 5-6 times in one run."""
+    for n in ("a", "b"):
+        _file(cur, _track(cur, n), f"/music/{n}.flac")
+        prints[f"/music/{n}.flac"] = encode(noise(950, ord(n)))
+    for n in ("x1", "x2", "x3"):
+        _file(cur, _track(cur, n), f"/music/{n}.flac")
+    asked = []
+    real = provenance.chromaprint_file
+    monkeypatch.setattr(provenance, "chromaprint_file",
+                        lambda path, *a: (asked.append(path.rsplit("/", 1)[-1]), real(path, *a))[1])
+
+    def a_scan_adds_files(call):
+        if call in (1, 2):
+            prints[f"/music/n{call}.flac"] = encode(noise(950, 100 + call))
+            _file(cur, _track(cur, f"n{call}"), f"/music/n{call}.flac")
+    models.tagger.on_tag = a_scan_adds_files
+    result = run.go()
+    assert {n: asked.count(f"{n}.flac") for n in ("x1", "x2", "x3")} == {"x1": 2, "x2": 2, "x3": 2}
+    assert result["gpu"]["instruments"]["success"] == 4
+    assert sorted(d for d in _decodes(models) if d[0] == "sonic") == [
+        ("sonic", n) for n in ("a.flac", "b.flac", "n1.flac", "n2.flac")]
+
+
+def test_the_give_way_asks_only_within_the_runs_scope(cur):
+    """A run scoped to some tracks gives way to new files of those alone."""
+    mine, analysed = _track(cur), _track(cur)
+    _file(cur, _track(cur), "/music/elsewhere.flac")         # a new file outside the scope
+    mf = _file(cur, analysed, "/music/a.flac")
+    _sonic(cur, analysed, _source(cur, analysed, FP, media_file=mf))
+    with database.get_db_context() as db:
+        assert embeddings.sonic_work_since(db, 0)
+        assert not embeddings.sonic_work_since(db, 0, [uuid.UUID(mine), uuid.UUID(analysed)])
+    _file(cur, mine, "/music/b.flac")
+    with database.get_db_context() as db:
+        assert embeddings.sonic_work_since(db, 0, [uuid.UUID(mine), uuid.UUID(analysed)])
+
+
+def test_the_paces_leave_out_the_seams_waits_and_the_tagger_load(cur, prints, models, one_a_batch):
+    """Probe P7: three one-second seam waits gave the sonic pace 3 s of no
+    work; the instrument pace must not take the tagger's load either."""
+    _three(cur, prints)
+
+    def a_stream_goes_first():
+        time.sleep(1.0)
+        return False
+    models.tagger_load_seconds = 1.0
+    models.sonic(cancel_flag=a_stream_goes_first)
+    models.instruments(cancel_flag=a_stream_goes_first)
+    cur.execute("SELECT pass::text, batches, wall_seconds FROM analysis_pace")
+    rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    assert rows["sonic"][0] == 3 and rows["sonic"][1] < 0.5
+    assert rows["instruments"][0] == 3 and rows["instruments"][1] < 0.5
+
+
+def test_a_batch_of_features_alone_is_no_sonic_pace(cur, prints, models):
+    track = _track(cur)
+    mf = _file(cur, track, "/music/a.flac")
+    prints["/music/a.flac"] = FP
+    _embedding(cur, track, _source(cur, track, FP, media_file=mf))
+    assert models.sonic([uuid.UUID(track)])["features"] == 1
+    cur.execute("SELECT count(*) FROM analysis_pace")
+    assert cur.fetchone() == (0,)
+
+
+def test_the_first_seam_of_the_sonic_pass_holds_no_open_write(cur, prints, models, one_a_batch):
+    """A seam may wait for another pass, which may write the same rows: the
+    first batch's registrations are committed before it."""
+    _three(cur, prints)
+    seen = []
+
+    def seam():
+        cur.execute("SELECT count(*) FROM analysis_sources")
+        seen.append(cur.fetchone()[0])
+        return False
+    models.sonic(cancel_flag=seam)
+    assert seen[0] == 1
+
+
+def test_the_running_mean_forgets_the_machine_it_was(cur, machine):
+    with database.get_db_context() as db:
+        analysis_pace._machine = lambda: ("cuda", 16)
+        analysis_pace.record(db, analysis_pace.SONIC, 36000.0, 360000.0)     # 6 s a minute
+        for _ in range(30):
+            analysis_pace.record(db, analysis_pace.SONIC, 60.0, 3600.0)      # 1 s a minute
+        assert analysis_pace.pace(db, analysis_pace.SONIC) < 1.5
+
+
+@pytest.mark.parametrize("threads,ratio", [
+    (1, 8.5), (2, 8.5), (4, 8.5 - (8.5 - 2.66) / 3), (8, 8.5 - 2 * (8.5 - 2.66) / 3),
+    (16, 2.66), (64, 2.66),
+])
+def test_the_cpu_ratio_follows_the_taggers_threads(no_model, machine, threads, ratio):
+    analysis_pace._tagger_threads = lambda: threads
+    assert analysis_pace.tagger_to_sonic("cpu") == pytest.approx(ratio)
+    assert analysis_pace.tagger_to_sonic("cuda") == analysis_pace.CUDA_RATIO
+    assert analysis_pace.tagger_to_sonic("mps") is None
+
+
+def test_the_tagger_threads_are_the_profiles(monkeypatch):
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("lite", cores=4))
+    assert analysis_pace._tagger_threads() == 2                # the Pi: the 8.5 point
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("lite", cores=32))
+    assert analysis_pace._tagger_threads() == 16
+
+
+@pytest.mark.parametrize("device,memory,reserve,minutes", [
+    ("cuda", 4.0, 0.0, 5),            # a lite card: the budget's floor
+    ("mps", 5.3, 0.0, 5),             # an 8 GB Mac's working set: the floor
+    ("cuda", 8.0, 0.0, (8.0 * 0.85 - 4.0) / 0.12),
+    ("cuda", 8.0, 2.0, (8.0 * 0.85 - 4.0 - 2.0) / 0.12),
+])
+def test_the_batch_budget_on_small_devices_and_with_the_tagger_to_come(monkeypatch, device, memory,
+                                                                      reserve, minutes):
+    import device as device_module
+    monkeypatch.delenv("SAUTIUM_AUDIO_BUDGET_MIN", raising=False)
+    monkeypatch.setenv("SAUTIUM_ACCEL_MEMORY_GB", str(memory))
+    monkeypatch.setattr(device_module, "get_device", lambda: device)
+    assert device_module.audio_batch_budget_seconds(reserve_gb=reserve) == int(minutes * 60)
+
+
+def test_the_switch_is_refused_without_the_ml_stack(cur, monkeypatch):
+    from fastapi import HTTPException
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("lite", ml=False))
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(settings_router.set_instruments(settings_router.InstrumentsReq(enabled=True)))
+    assert refused.value.status_code == 400
+    cur.execute("SELECT count(*) FROM user_settings WHERE key = 'enrichment.instruments'")
+    assert cur.fetchone() == (0,)
+
+
+def test_an_estimate_that_fails_leaves_the_library_screen_standing(cur, monkeypatch):
+    def broken(db, reanalyze):
+        raise RuntimeError("the estimate's query failed")
+    monkeypatch.setattr(analysis_pace, "estimate", broken)
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("full"))
+    state = settings_router._instruments_state()
+    assert state["enabled"] is True and state["tracks"] is None and state["seconds"] is None
