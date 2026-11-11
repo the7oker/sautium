@@ -973,14 +973,15 @@ def test_the_cli_filters_by_the_artist_and_shows_the_score(library, readers, mon
         assert row.split()[4] == shown, row                 # '#', BPM, key, mode, the score
         assert not {"vocal", "instrumental", "mixed"} & set(row.split()[:6])
 
-    # the analysis command's sample of what it wrote
-    audio_analysis = pytest.importorskip("audio_analysis")
-
-    class _Analysed:
-        def analyze_all(self, **_kw):
-            return {"processed": 6, "success": 6, "failed": 0}
-    monkeypatch.setattr(audio_analysis, "AudioAnalyzer", _Analysed)
-    sample = runner.invoke(cli.cli, ["analyze-audio"])
+    # the sonic pass's sample of what it wrote: the features, and the scores
+    # the database derives from its segments
+    embeddings = pytest.importorskip("embeddings")
+    hardware_profile = pytest.importorskip("hardware_profile")
+    monkeypatch.setattr(hardware_profile, "cap_torch_threads", lambda *a: None)
+    monkeypatch.setattr(embeddings, "sonic_pass", lambda **_kw: {
+        "processed": 6, "success": 6, "failed": 0, "skipped": 0, "embeddings": 6, "features": 6,
+        "too_long": 0})
+    sample = runner.invoke(cli.cli, ["sonic-pass"])
     assert sample.exit_code == 0, sample.output
     shown = [line for line in sample.output.splitlines() if "BPM:" in line]
     assert len(shown) == 5 and all("Vocal score:" in line for line in shown), sample.output

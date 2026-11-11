@@ -214,9 +214,41 @@ def sonic_pass(limit, batch_size, newest_first, max_duration,
         click.echo(f"   • Success: {stats['success']} tracks "
                    f"({stats['embeddings']} embeddings, {stats['features']} features)")
         click.echo(f"   • Failed: {stats['failed']} tracks")
+        if stats.get("too_long"):
+            click.echo(f"   • Too long for this machine now: {stats['too_long']} tracks")
 
         if stats['failed'] > 0:
             click.echo(f"\n⚠️  Check logs for error details")
+
+        # Show sample results: the features the pass just made, and the
+        # scores the database derives from its segments
+        if stats['success'] > 0:
+            try:
+                with get_db_context() as db:
+                    rows = db.execute(text("""
+                        SELECT t.title, a2.name as artist,
+                               af.bpm, af.key, af.mode,
+                               round(z.vocal_score::numeric, 3) AS vocal_score,
+                               round(z.danceability::numeric, 3) AS danceability
+                        FROM audio_features af
+                        JOIN tracks t ON af.track_id = t.id
+                        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                        JOIN artists a2 ON ta.artist_id = a2.id
+                        LEFT JOIN track_zero_shot z ON z.track_id = t.id
+                        ORDER BY af.updated_at DESC NULLS LAST
+                        LIMIT 5
+                    """)).fetchall()
+                    if rows:
+                        click.echo(f"\n🎧 Sample results:")
+                        for row in rows:
+                            click.echo(
+                                f"   • {row.artist} - {row.title}"
+                                f"\n     BPM: {row.bpm or '?'} | Key: {row.key or '?'} {row.mode or ''}"
+                                f" | Vocal score: {row.vocal_score if row.vocal_score is not None else '?'}"
+                                f" | Dance: {row.danceability or '?'}"
+                            )
+            except Exception:
+                pass  # sample display is best-effort
 
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
@@ -740,41 +772,29 @@ def instrument_pass(limit, force, newest_first, max_duration,
         click.echo(f"   • Processed: {stats['processed']} tracks")
         click.echo(f"   • Success: {stats['success']}")
         click.echo(f"   • Failed: {stats['failed']}")
+        if stats.get("too_long"):
+            click.echo(f"   • Too long for this machine now: {stats['too_long']}")
 
-        # Show sample results
+        # Show sample results: the instruments the pass just recognised
         if stats['success'] > 0:
             try:
                 with get_db_context() as db:
                     rows = db.execute(text("""
-                        SELECT t.title, a2.name as artist,
-                               af.bpm, af.key, af.mode,
-                               round(z.vocal_score::numeric, 3) AS vocal_score,
-                               round(z.danceability::numeric, 3) AS danceability, ti.instruments
+                        SELECT t.title, a2.name as artist, ti.instruments
                         FROM track_instruments ti
                         JOIN tracks t ON ti.track_id = t.id
-                        LEFT JOIN audio_features af ON af.track_id = t.id
                         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
                         JOIN artists a2 ON ta.artist_id = a2.id
-                        LEFT JOIN track_zero_shot z ON z.track_id = t.id
                         ORDER BY ti.updated_at DESC NULLS LAST
                         LIMIT 5
                     """)).fetchall()
-
                     if rows:
                         click.echo(f"\n🎧 Sample results:")
                         for row in rows:
-                            instruments = ""
-                            if row.instruments:
-                                present = present_instruments(row.instruments)
-                                top3 = sorted(present.items(), key=lambda x: -x[1])[:3]
-                                instruments = ", ".join(k for k, v in top3)
-                            click.echo(
-                                f"   • {row.artist} - {row.title}"
-                                f"\n     BPM: {row.bpm or '?'} | Key: {row.key or '?'} {row.mode or ''}"
-                                f" | Vocal score: {row.vocal_score if row.vocal_score is not None else '?'}"
-                                f" | Dance: {row.danceability or '?'}"
-                                f"\n     Instruments: {instruments or 'N/A'}"
-                            )
+                            present = present_instruments(row.instruments or {})
+                            top3 = sorted(present.items(), key=lambda x: -x[1])[:3]
+                            click.echo(f"   • {row.artist} - {row.title}"
+                                       f"\n     Instruments: {', '.join(k for k, _v in top3) or 'N/A'}")
             except Exception:
                 pass  # sample display is best-effort
 
