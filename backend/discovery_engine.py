@@ -292,15 +292,22 @@ TOOLS: dict[str, Tool] = {
                is_gate=True,
                expand=lambda v: _expand_instruments(v)),)),
     # moods and danceable are DERIVED scores (zero_shot_scores, by the
-    # embedding's segments); presence is a read-time threshold (zero_shot.py)
-    # — each mood's own, bound as {key: threshold} for the moods asked for —
-    # and (label_id, score) is the index both gates ride.
+    # embedding's segments); presence is a read-time threshold (zero_shot.py).
+    # danceable rides (label_id, score). Each mood has its own threshold,
+    # bound as {key: threshold} for the moods asked for and compared through
+    # a join — a filter no index serves — so a coarse arm stands in front of
+    # it, as `?|` stands in front of the instruments' score check: the labels
+    # asked for at the LOWEST of their thresholds, which (label_id, score)
+    # serves.
     "moods": Tool("moods", sources=(
         Source("moods", "zero_shot_scores",
-               "EXISTS (SELECT 1 FROM zero_shot_labels zl "
+               "(zs.score >= :moods_floor AND zs.label_id IN "
+               "(SELECT zl.id FROM zero_shot_labels zl "
+               f"WHERE zl.label_set = '{zero_shot.MOODS}' AND zl.key = ANY(:moods)) "
+               "AND EXISTS (SELECT 1 FROM zero_shot_labels zl "
                "JOIN jsonb_each_text(CAST(:moods_min AS jsonb)) th ON th.key = zl.key "
                f"WHERE zl.id = zs.label_id AND zl.label_set = '{zero_shot.MOODS}' "
-               "AND zs.score >= th.value::float8)",
+               "AND zs.score >= th.value::float8))",
                is_gate=True),)),
     "bpm": Tool("bpm", sources=(
         Source("bpm", "audio_features", "af.bpm BETWEEN :bpm_min AND :bpm_max",
@@ -1080,7 +1087,11 @@ def _bind_params(tools, active: dict) -> dict:
         elif tool.key == "genre":
             p["genre"] = list(v) if isinstance(v, (list, tuple)) else [v]
         elif tool.key == "moods":
-            p["moods_min"] = zero_shot.mood_thresholds(v if isinstance(v, (list, tuple)) else [v])
+            import json
+            floors = zero_shot.mood_thresholds(v if isinstance(v, (list, tuple)) else [v])
+            p["moods"] = list(floors)
+            p["moods_min"] = json.dumps(floors)
+            p["moods_floor"] = min(floors.values(), default=None)
         elif tool.key == "danceable":
             p["danceable_min"] = zero_shot.DANCEABLE_MIN
         elif tool.key == "instruments":

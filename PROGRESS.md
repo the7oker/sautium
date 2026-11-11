@@ -198,7 +198,8 @@ implementation details live in the code, DB and git history.
   threshold of its own (`zero_shot.MOOD_MIN`, a map): the one at which its
   gate passes the share of that library's tracks the stored value passed
   (stored above 0.05 of one random crop), so each gate keeps its share
-  there by construction — 0.048 for "romantic and dreamy" up to 0.089 for
+  there by construction, to the rounding of the threshold to three decimals
+  (under 0.2 points of share) — 0.048 for "romantic and dreamy" up to 0.089 for
   "aggressive and angry". One threshold for all eight was tried first and
   dropped the same day: how high a prompt scores is the model's and the
   prompt's doing, and at the median, 0.06, "romantic and dreamy" would

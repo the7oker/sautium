@@ -103,7 +103,7 @@ def test_the_moods_present_are_those_at_their_own_thresholds_strongest_first():
 def test_every_mood_of_the_labels_has_a_threshold_and_nothing_else_does():
     assert set(zero_shot.MOOD_MIN) == set(zero_shot.label_keys(zero_shot.MOODS))
     assert all(0 < value < 1 for value in zero_shot.MOOD_MIN.values())
-    assert json.loads(zero_shot.mood_thresholds(["calm and relaxing", "no such mood"])) == {
+    assert zero_shot.mood_thresholds(["calm and relaxing", "no such mood"]) == {
         "calm and relaxing": zero_shot.MOOD_MIN["calm and relaxing"]}
 
 

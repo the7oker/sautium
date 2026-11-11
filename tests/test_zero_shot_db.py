@@ -874,7 +874,8 @@ def test_no_reader_makes_a_class_of_the_vocal_score(library, session, readers):
              "instrumental": "Artist sings: no (from the artist's bio)", "unknown": None}
     for name, track in tracks.items():
         row = assistant_queries.track_info(readers.db_query, track)
-        assert (row["artist"], row["artist_is_vocalist"]) == (f"the {by[name]} one", by[name])
+        assert (row["artist"], row["artist_is_vocalist"]) == (
+            f"the {by[name]} one", by[name] if by[name] != "unknown" else None)
         features = assistant_queries.track_features(readers.db_query, track)
         assert not {"vocal_instrumental", "artist_is_vocalist"} & set(features)
         said = assistant_queries.format_track_info(row, features).splitlines()
@@ -890,6 +891,55 @@ def test_no_reader_makes_a_class_of_the_vocal_score(library, session, readers):
     # the identity line stands with no analysis at all
     with_no_analysis = dict(assistant_queries.track_info(readers.db_query, tracks["dance"]))
     assert lines["vocal"] in assistant_queries.format_track_info(with_no_analysis, None)
+
+
+def test_the_artist_line_speaks_for_every_primary_artist_as_the_filter_does(
+        library, cur, session, readers):
+    """A track's primary artists may differ: the line says yes when any of
+    them sings — the tracks `--vocal` lists — no when every one that is
+    known is instrumental, and nothing when none is known; a featured artist
+    is not asked. The name is the first primary artist's, by name."""
+    search = pytest.importorskip("search")
+    import assistant_queries
+
+    artists = library["artists"]
+    made = {  # title → (primary, featured)
+        "duo": (("instrumental", "vocal"), ()),
+        "pair": (("instrumental", "unknown"), ()),
+        "guest": ((), ("vocal",)),
+        "nobody": ((), ()),
+    }
+    cur.execute("SELECT id FROM album_variants LIMIT 1")
+    variant = cur.fetchone()[0]
+    tracks = {}
+    try:
+        for n, (title, (primary, featured)) in enumerate(made.items()):
+            track = tracks[title] = _track(cur, title)
+            for role, flags in (("primary", primary), ("featured", featured)):
+                for flag in flags:
+                    cur.execute("INSERT INTO track_artists (track_id, artist_id, role) VALUES (%s, %s, %s)",
+                                (track, artists[flag], role))
+            cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, track_number, "
+                        "duration_seconds) VALUES (%s, %s, %s, %s, 200)",
+                        (track, variant, f"/lib/small/{title}.flac", 50 + n))
+            cur.execute("INSERT INTO audio_features (track_id, bpm) VALUES (%s, %s)", (track, 150 + n))
+        said = {}
+        for title, track in tracks.items():
+            row = assistant_queries.track_info(readers.db_query, track)
+            lines = assistant_queries.format_track_info(row, None).splitlines()
+            said[title] = (row["artist"], [line for line in lines if line.startswith("Artist sings")])
+        assert said == {
+            "duo": ("the instrumental one", ["Artist sings: yes (from the artist's bio)"]),
+            "pair": ("the instrumental one", ["Artist sings: no (from the artist's bio)"]),
+            "guest": (None, []),
+            "nobody": (None, []),
+        }
+        with session() as db:
+            listed = {flt: {r["title"] for r in search.search_by_features(db, {"vocalist": flt})["results"]}
+                      & set(tracks) for flt in ("vocal", "instrumental")}
+        assert listed == {"vocal": {"duo"}, "instrumental": {"duo", "pair"}}
+    finally:
+        cur.execute("DELETE FROM tracks WHERE id = ANY(%s::uuid[])", (list(tracks.values()),))
 
 
 def _listed(output: str, tracks) -> set:

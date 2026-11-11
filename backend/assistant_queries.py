@@ -340,12 +340,16 @@ def track_info(q, track_uuid: str):
         FROM tracks t
         {_OWN_LATERAL}
         {_PH_LATERAL}
-        -- one artist for the name and for what is said of them
+        -- the name of the first primary artist; whether they sing, of all of
+        -- them, as the vocalist filter joins every one: vocal when any is,
+        -- instrumental when every one that is known is
         LEFT JOIN LATERAL (
-            SELECT a.name, a.is_vocalist::text AS is_vocalist
+            SELECT (array_agg(a.name ORDER BY a.name, a.id))[1] AS name,
+                   CASE WHEN bool_or(a.is_vocalist = 'vocal') THEN 'vocal'
+                        WHEN bool_or(a.is_vocalist = 'instrumental') THEN 'instrumental'
+                   END AS is_vocalist
             FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
-            WHERE ta.track_id = t.id AND ta.role = 'primary'
-            ORDER BY a.name, a.id LIMIT 1) art ON true
+            WHERE ta.track_id = t.id AND ta.role = 'primary') art ON true
         WHERE t.id = %(track_id)s::uuid
     """, {"track_id": track_uuid,
           "hqp_id": active_hqp_endpoint(q)})

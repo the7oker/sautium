@@ -274,9 +274,11 @@ See:
   2026-11-11 from a measurement on a real library of ~41 000 tracks: one
   per mood (`MOOD_MIN`, a map, 0.048..0.089) and 0.48 for danceable, each
   the threshold at which its gate passes the share of that library's
-  tracks the stored value passed. **There is no vocal/instrumental class**: the vocal score
-  does not separate singing artists' tracks from instrumental ones (AUC
-  0.67), so it is shown as a number and nothing derives a class from it —
+  tracks the stored value passed, to the rounding of the threshold to three
+  decimals (under 0.2 points of share). **There is no vocal/instrumental
+  class**: the vocal score does not separate singing artists' tracks from
+  instrumental ones (AUC 0.67), so it is shown as a number and nothing
+  derives a class from it —
   for vocal/instrumental queries, use `artists.is_vocalist` (classified from
   bio keywords). See `PROGRESS.md` design decisions.
 - **A record version per kind** (since 2026-11-10, `record_sig.py`): the

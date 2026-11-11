@@ -35,7 +35,8 @@ DANCEABLE = "danceable"
 # each threshold is the one at which the gate passes the share of that
 # library's tracks the stored value it replaces passed (a mood stored above
 # 0.05 of one random crop; danceable at 0.5) — so each gate keeps its share
-# there by construction. One threshold per mood: how high a prompt scores is
+# there by construction, to the rounding of the threshold to three decimals
+# (under 0.2 points of share). One threshold per mood: how high a prompt scores is
 # the model's and the prompt's doing, and the eight differ nearly twofold.
 # A mood with no threshold here is never present.
 MOOD_MIN = {
@@ -88,10 +89,10 @@ def present_moods(moods: Optional[Dict[str, float]]) -> Dict[str, float]:
             if k in MOOD_MIN and v >= MOOD_MIN[k]}
 
 
-def mood_thresholds(moods) -> str:
-    """The thresholds of the moods asked for, as the JSON object the mood
-    gate binds ({key: threshold}; a name that is no mood has none)."""
-    return json.dumps({m: MOOD_MIN[m] for m in moods if m in MOOD_MIN})
+def mood_thresholds(moods) -> Dict[str, float]:
+    """The thresholds of the moods asked for, {key: threshold}, as the mood
+    gate binds them; a name that is no mood has none."""
+    return {m: MOOD_MIN[m] for m in moods if m in MOOD_MIN}
 
 
 def track_gate_sql(track: str, key: str, bound: str) -> str:

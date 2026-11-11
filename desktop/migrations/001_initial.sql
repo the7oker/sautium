@@ -1059,11 +1059,13 @@ FOR EACH STATEMENT EXECUTE FUNCTION zero_shot_scores_refresh();
 -- A track's scores in the shape the stored values had, for display and for
 -- the assistant: the raw distribution, every mood included. Scalar
 -- subqueries, not a GROUP BY, so a join on track_id reads only the rows and
--- the columns it asks for. The gates read zero_shot_scores itself, by
--- (label_id, score). One row per labelled embedding: per track while one
--- audio model has labels, as every reader that joins it by track_id alone
--- assumes (as the readers of embeddings do) — labels for a second model
--- make those readers name the model.
+-- the columns it asks for. The gates read zero_shot_scores itself:
+-- danceable by (label_id, score), and so the mood gate's first arm (the
+-- labels asked for at the lowest of their thresholds), each mood's own
+-- threshold then a filter on what that arm found. One row per labelled
+-- embedding: per track while one audio model has labels, as every reader
+-- that joins it by track_id alone assumes (as the readers of embeddings
+-- do) — labels for a second model make those readers name the model.
 CREATE OR REPLACE VIEW track_zero_shot AS
 SELECT e.track_id, e.model_id,
        (SELECT jsonb_object_agg(l.key, s.score)
