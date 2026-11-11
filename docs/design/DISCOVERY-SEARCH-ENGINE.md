@@ -105,8 +105,8 @@ level — typically `EXISTS`).
 | `bpm_min/max` | track | `audio_features.bpm` (99.8% populated) |
 | `key`, `mode` | track | 100% populated |
 | `energy` | track | `energy_db` buckets low/mid/high (100%) |
-| `danceable` | track | `zero_shot_scores`, the `danceable` label at `zero_shot.DANCEABLE_MIN` (0.48 since 2026-11-11) — derived from the track's segments since 2026-11-10, so present wherever segments are |
-| `moods` | track | `zero_shot_scores` (derived from the track's segments since 2026-11-10; a mood is present at `zero_shot.MOOD_MIN`, 0.06 since 2026-11-11), fixed 8-label set ("happy and upbeat", "sad and melancholic", "energetic and intense", "calm and relaxing", "dark and ominous", "romantic and dreamy", "aggressive and angry", "mysterious and atmospheric"). A tool in the engine registry; not exposed by the endpoint or the UI. |
+| `danceable` | track | `zero_shot_scores`, the `danceable` label at `zero_shot.DANCEABLE_MIN` (0.48 since 2026-11-11, the threshold that keeps the stored share of that library) — derived from the track's segments since 2026-11-10, so present wherever segments are |
+| `moods` | track | `zero_shot_scores` (derived from the track's segments since 2026-11-10; a mood is present at its own threshold, `zero_shot.MOOD_MIN[key]`, 0.048..0.089, set 2026-11-11 so that each gate keeps the share of a ~41 000-track library the stored value passed), fixed 8-label set ("happy and upbeat", "sad and melancholic", "energetic and intense", "calm and relaxing", "dark and ominous", "romantic and dreamy", "aggressive and angry", "mysterious and atmospheric"). A tool in the engine registry; not exposed by the endpoint or the UI. |
 | `instruments` | track | `track_instruments.instruments` JSONB `?|` (the instruments record, apart from the features since 2026-11-10). **Sparse by catalog nature** (54% empty — ambient). Valid filter where present; pair with `clap` for recall. |
 | `genre` | **album** | **album-grain now** via `album_genres` (track_genres dropped). `EXISTS (album_genres ⋈ genres)`. Present on phantoms too (mb source). |
 | `year` | album | `albums.release_year` |

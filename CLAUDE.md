@@ -271,9 +271,10 @@ See:
   import gate refuses one. Discovery, search, Now Playing, the assistant and
   the CLI read these; no analysis writes them and no record carries them
   (since 2026-11-10, the records' cutover below). The thresholds were set
-  2026-11-11 from a measurement on a real library (a mood at 0.06,
-  danceable at 0.48: each gate passes about the share of tracks the stored
-  values did). **There is no vocal/instrumental class**: the vocal score
+  2026-11-11 from a measurement on a real library of ~41 000 tracks: one
+  per mood (`MOOD_MIN`, a map, 0.048..0.089) and 0.48 for danceable, each
+  the threshold at which its gate passes the share of that library's
+  tracks the stored value passed. **There is no vocal/instrumental class**: the vocal score
   does not separate singing artists' tracks from instrumental ones (AUC
   0.67), so it is shown as a number and nothing derives a class from it —
   for vocal/instrumental queries, use `artists.is_vocalist` (classified from

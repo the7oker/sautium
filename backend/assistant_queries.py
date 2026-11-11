@@ -333,14 +333,19 @@ def track_info(q, track_uuid: str):
                COALESCE(own.duration_seconds, ph.length_ms / 1000.0) AS duration_seconds,
                COALESCE(own.album, ph.album) AS album,
                COALESCE(own.release_year, ph.release_year) AS release_year,
-               (SELECT a.name FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
-                WHERE ta.track_id = t.id AND ta.role = 'primary' LIMIT 1) AS artist,
+               art.name AS artist, art.is_vocalist AS artist_is_vocalist,
                (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
                 WHERE ag.album_id = COALESCE(own.album_id, ph.album_id)
                 ORDER BY ag.count DESC NULLS LAST LIMIT 1) AS genre
         FROM tracks t
         {_OWN_LATERAL}
         {_PH_LATERAL}
+        -- one artist for the name and for what is said of them
+        LEFT JOIN LATERAL (
+            SELECT a.name, a.is_vocalist::text AS is_vocalist
+            FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+            WHERE ta.track_id = t.id AND ta.role = 'primary'
+            ORDER BY a.name, a.id LIMIT 1) art ON true
         WHERE t.id = %(track_id)s::uuid
     """, {"track_id": track_uuid,
           "hqp_id": active_hqp_endpoint(q)})
@@ -351,14 +356,11 @@ def track_features(q, track_uuid: str):
     """The track's analysis for display: the features and the instruments
     records, with the danceability and the vocal score derived from its
     segments (zero_shot.py) — any of the three may be missing. The score is
-    no vocal/instrumental verdict; whether the artist sings is the artist's
-    own `is_vocalist`, given beside it."""
+    no vocal/instrumental verdict: whether the artist sings is the artist's
+    own `is_vocalist`, which track_info gives."""
     rows = q("""
         SELECT af.bpm, af.key, af.mode, af.energy_db, ti.instruments,
-               z.danceability, z.vocal_score,
-               (SELECT a.is_vocalist::text FROM track_artists ta
-                  JOIN artists a ON a.id = ta.artist_id
-                 WHERE ta.track_id = t.id AND ta.role = 'primary' LIMIT 1) AS artist_is_vocalist
+               z.danceability, z.vocal_score
         FROM tracks t
         LEFT JOIN audio_features af ON af.track_id = t.id
         LEFT JOIN track_instruments ti ON ti.track_id = t.id
@@ -450,6 +452,9 @@ def format_genre_list(rows: list[dict], header: str) -> str:
 def format_track_info(row: dict, features: dict | None) -> str:
     """The get_track_info answer."""
     lines = [f"{row['artist']} - {row['title']}", f"Album: {row['album']}"]
+    sings = {"vocal": "yes", "instrumental": "no"}.get(row.get("artist_is_vocalist"))
+    if sings:
+        lines.append(f"Artist sings: {sings} (from the artist's bio)")
     if row.get("release_year"):
         lines.append(f"Year: {row['release_year']}")
     if row.get("genre"):
@@ -481,8 +486,6 @@ def format_track_info(row: dict, features: dict | None) -> str:
         if features.get("vocal_score") is not None:
             lines.append(f"  Vocal score: {float(features['vocal_score']):.2f} "
                          "(zero-shot, no vocal/instrumental verdict)")
-        if features.get("artist_is_vocalist") in ("vocal", "instrumental"):
-            lines.append(f"  Artist: {features['artist_is_vocalist']}")
         if features.get("instruments"):
             # storage is the raw top-20 score distribution — show only labels
             # above their read thresholds

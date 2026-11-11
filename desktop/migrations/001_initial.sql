@@ -925,8 +925,8 @@ CREATE INDEX IF NOT EXISTS idx_embedding_segments_vector
 -- set, of logit_scale × (segment · label); per embedding: the mean of those
 -- over its segments. The label embeddings are constants of the release
 -- (backend/zero_shot_labels/labels.json, loaded by db_migrate's
--- zero_shot_labels_v1 step); what a score MEANS — a mood present, danceable,
--- the vocal class — is a read-time threshold (backend/zero_shot.py). Two
+-- zero_shot_labels_v1 step); what a score MEANS — a mood present, danceable
+-- — is a read-time threshold (backend/zero_shot.py). Two
 -- holders of the same signed segments derive the same scores to ~1e-7, so
 -- the scores never travel and are never signed.
 -- ============================================================

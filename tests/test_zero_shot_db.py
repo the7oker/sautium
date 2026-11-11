@@ -753,21 +753,30 @@ def test_the_delta_lands_on_a_node_that_ran_the_earlier_files_and_holds_segments
 
 # ── the readers ─────────────────────────────────────────────────────────────
 
+def _present(want: dict, mood: str) -> bool:
+    return want[mood] >= zero_shot.MOOD_MIN[mood]
+
+
 @pytest.fixture(scope="module")
 def library(cur):
-    """Six owned tracks of one artist known as instrumental: five whose
-    segments are label vectors, so every score the readers gate on is far
-    from its threshold — and the vocal score spans 0 to 1 under that one
-    artist — and one with features alone."""
+    """Six owned tracks: five whose segments are label vectors, so every
+    score the readers gate on is far from its threshold, and one with
+    features alone. Three artists, by what their bios say — and the vocal
+    score says the opposite: the instrumental artist's "sung" scores 1.0,
+    the vocal artist's "dance" 0.0."""
     cur.execute("TRUNCATE tracks, albums, artists CASCADE")
     made = {"dance": ["danceable"], "sung": ["vocal"], "still": ["not_danceable"],
-            "calm": ["calm and relaxing"], "mixed": ["vocal", "instrumental"], "bare": []}
-    artist, album = str(uuid.uuid4()), str(uuid.uuid4())
-    cur.execute("INSERT INTO artists (id, name, is_vocalist) VALUES (%s, 'the reader', 'instrumental')",
-                (artist,))
+            "calm": ["calm and relaxing"], "half": ["vocal", "instrumental"], "bare": []}
+    by = {"dance": "vocal", "half": "vocal", "sung": "instrumental", "calm": "instrumental",
+          "bare": "instrumental", "still": "unknown"}
+    artists = {flag: str(uuid.uuid4()) for flag in ("instrumental", "vocal", "unknown")}
+    for flag, artist in artists.items():
+        cur.execute("INSERT INTO artists (id, name, is_vocalist) VALUES (%s, %s, %s)",
+                    (artist, f"the {flag} one", flag))
+    album = str(uuid.uuid4())
     cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'small library')", (album,))
     cur.execute("INSERT INTO album_artists (album_id, artist_id, role) VALUES (%s, %s, 'primary')",
-                (album, artist))
+                (album, artists["instrumental"]))
     cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, '/lib/small') "
                 "RETURNING id", (album,))
     variant = cur.fetchone()[0]
@@ -776,7 +785,7 @@ def library(cur):
         segments = [_f32(LABEL[key]) for key in keys]
         track = tracks[name] = _track(cur, name)
         cur.execute("INSERT INTO track_artists (track_id, artist_id, role) VALUES (%s, %s, 'primary')",
-                    (track, artist))
+                    (track, artists[by[name]]))
         cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, track_number, "
                     "duration_seconds) VALUES (%s, %s, %s, %s, 200)",
                     (track, variant, f"/lib/small/{name}.flac", n + 1))
@@ -789,11 +798,12 @@ def library(cur):
     scored = [n for n in want if want[n]]
     assert want["dance"]["danceable"] > zero_shot.DANCEABLE_MIN + 0.1
     assert all(want[n]["danceable"] < zero_shot.DANCEABLE_MIN - 0.1 for n in scored if n != "dance")
-    assert want["sung"]["vocal"] > 0.99 and want["still"]["vocal"] < 0.01
-    assert 0.4 < want["mixed"]["vocal"] < 0.6
-    assert all(abs(score - zero_shot.MOOD_MIN) > 1e-4
-               for n in scored for key, score in want[n].items() if key in dict(SETS["moods"]))
-    return {"tracks": tracks, "want": want, "artist": artist, "album": album}
+    assert want["sung"]["vocal"] > 0.99 and want["dance"]["vocal"] < 0.01
+    assert 0.4 < want["half"]["vocal"] < 0.6
+    assert all(abs(want[n][mood] - floor) > 1e-4
+               for n in scored for mood, floor in zero_shot.MOOD_MIN.items())
+    return {"tracks": tracks, "want": want, "artist": artists["instrumental"], "artists": artists,
+            "by": by, "album": album}
 
 
 @pytest.fixture(scope="module")
@@ -826,41 +836,105 @@ def test_search_filters_by_the_danceable_score_and_shows_the_derived_values(libr
     assert every["bare"]["danceability"] is None and every["bare"]["vocal_score"] is None
 
 
-def test_no_reader_makes_a_class_of_the_vocal_score(library, session, scratch_dsn, monkeypatch):
-    """The score is shown as a number; vocal or instrumental is the artist's
-    is_vocalist — here 'instrumental' for every track, the one scoring 1.0
-    included."""
-    search = pytest.importorskip("search")
-    import assistant_queries
+@pytest.fixture
+def readers(scratch_dsn, monkeypatch):
+    """db_pool and the SQLAlchemy sessions of the process on the module's
+    database, as the assistant's tools and the CLI reach it."""
+    database = pytest.importorskip("database")
     import db_pool
     import psycopg2.pool
+    from sqlalchemy.orm import sessionmaker
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
+    engine = database.make_engine(scratch_dsn)
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
+    yield db_pool
+    pool.closeall()
+    engine.dispose()
+
+
+def test_no_reader_makes_a_class_of_the_vocal_score(library, session, readers):
+    """The score is shown as a number. Whether the artist sings is the
+    artist's is_vocalist, whatever the score says: "sung" scores 1.0 under
+    an instrumental artist, "dance" 0.0 under a vocal one, and of an artist
+    nothing is known of nothing is said."""
+    search = pytest.importorskip("search")
+    import assistant_queries
 
     assert not {"VOCAL_MIN", "INSTRUMENTAL_MAX", "vocal_class_sql"} & set(dir(zero_shot))
-    want, tracks = library["want"], library["tracks"]
+    want, tracks, by = library["want"], library["tracks"], library["by"]
     with session() as db:
         every = search.search_by_features(db, {"bpm_min": 1})["results"]
         by_artist = {flt: {r["title"] for r in search.search_by_features(db, {"vocalist": flt})["results"]}
                      for flt in ("instrumental", "vocal")}
     assert all("vocal_instrumental" not in r for r in every)
-    assert by_artist == {"instrumental": set(tracks), "vocal": set()}
+    assert by_artist == {flag: {n for n in tracks if by[n] == flag} for flag in ("instrumental", "vocal")}
 
-    pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
-    monkeypatch.setattr(db_pool, "_pool", pool)
-    try:
-        for name in ("sung", "still"):
-            features = assistant_queries.track_features(db_pool.db_query, tracks[name])
-            assert "vocal_instrumental" not in features
-            assert float(features["vocal_score"]) == pytest.approx(want[name]["vocal"], abs=1e-6)
-            assert features["artist_is_vocalist"] == "instrumental"
-            said = assistant_queries.format_track_info(
-                {"artist": "the reader", "title": name, "album": "small library",
-                 "track_id": tracks[name]}, features)
-            assert f"Vocal score: {want[name]['vocal']:.2f} (zero-shot, no vocal/instrumental verdict)" in said
-            assert "Artist: instrumental" in said and "Type:" not in said
-        bare = assistant_queries.track_features(db_pool.db_query, tracks["bare"])
-        assert bare["vocal_score"] is None and bare["artist_is_vocalist"] == "instrumental"
-    finally:
-        pool.closeall()
+    lines = {"vocal": "Artist sings: yes (from the artist's bio)",
+             "instrumental": "Artist sings: no (from the artist's bio)", "unknown": None}
+    for name, track in tracks.items():
+        row = assistant_queries.track_info(readers.db_query, track)
+        assert (row["artist"], row["artist_is_vocalist"]) == (f"the {by[name]} one", by[name])
+        features = assistant_queries.track_features(readers.db_query, track)
+        assert not {"vocal_instrumental", "artist_is_vocalist"} & set(features)
+        said = assistant_queries.format_track_info(row, features).splitlines()
+        assert [line for line in said if line.startswith("Artist sings")] == \
+            ([lines[by[name]]] if lines[by[name]] else []), name
+        assert not any(line.strip().startswith(("Type:", "Artist:")) for line in said)
+        score = [line.strip() for line in said if "Vocal score" in line]
+        if want[name] is None:
+            assert score == [] and features["vocal_score"] is None
+        else:
+            assert score == [f"Vocal score: {want[name]['vocal']:.2f} "
+                             "(zero-shot, no vocal/instrumental verdict)"]
+    # the identity line stands with no analysis at all
+    with_no_analysis = dict(assistant_queries.track_info(readers.db_query, tracks["dance"]))
+    assert lines["vocal"] in assistant_queries.format_track_info(with_no_analysis, None)
+
+
+def _listed(output: str, tracks) -> set:
+    """The tracks a search-features table lists (its rows end with the title)."""
+    return {name for name in tracks for line in output.splitlines() if line.rstrip().endswith(" " + name)}
+
+
+def test_the_cli_filters_by_the_artist_and_shows_the_score(library, readers, monkeypatch):
+    cli = pytest.importorskip("cli")
+    from click.testing import CliRunner
+
+    want, tracks, by = library["want"], library["tracks"], library["by"]
+    runner = CliRunner()
+    for flag in ("vocal", "instrumental"):
+        result = runner.invoke(cli.cli, ["search-features", f"--{flag}"])
+        assert result.exit_code == 0, result.output
+        assert _listed(result.output, tracks) == {n for n in tracks if by[n] == flag}, result.output
+        assert f"{flag} artists" in result.output.splitlines()[0]
+    both = runner.invoke(cli.cli, ["search-features", "--vocal", "--instrumental"])
+    assert both.exit_code == 2 and "pass one" in both.output
+    assert _listed(runner.invoke(cli.cli, ["search-features", "--vocal", "--danceable"]).output,
+                   tracks) == {"dance"}
+
+    table = runner.invoke(cli.cli, ["search-features", "--bpm-min", "1"])
+    assert table.exit_code == 0 and _listed(table.output, tracks) == set(tracks)
+    header, rows = table.output.splitlines()[2], table.output.splitlines()[4:]
+    assert "Vocal score" in header
+    for name in tracks:
+        row = next(line for line in rows if line.rstrip().endswith(" " + name))
+        shown = "?" if want[name] is None else f"{want[name]['vocal']:.2f}"
+        assert row.split()[4] == shown, row                 # '#', BPM, key, mode, the score
+        assert not {"vocal", "instrumental", "mixed"} & set(row.split()[:6])
+
+    # the analysis command's sample of what it wrote
+    audio_analysis = pytest.importorskip("audio_analysis")
+
+    class _Analysed:
+        def analyze_all(self, **_kw):
+            return {"processed": 6, "success": 6, "failed": 0}
+    monkeypatch.setattr(audio_analysis, "AudioAnalyzer", _Analysed)
+    sample = runner.invoke(cli.cli, ["analyze-audio"])
+    assert sample.exit_code == 0, sample.output
+    shown = [line for line in sample.output.splitlines() if "BPM:" in line]
+    assert len(shown) == 5 and all("Vocal score:" in line for line in shown), sample.output
+    assert not any(word in line for line in shown for word in (" | vocal", " | instrumental", " | mixed"))
 
 
 def test_the_discovery_gates_read_the_scores_at_every_level(library, session):
@@ -877,17 +951,18 @@ def test_the_discovery_gates_read_the_scores_at_every_level(library, session):
     assert found({"danceable": True}) == {
         tracks[n] for n in scored if want[n]["danceable"] >= zero_shot.DANCEABLE_MIN}
     moods = {key for key, _v in SETS["moods"]}
-    split = [m for m in moods if len({want[n][m] >= zero_shot.MOOD_MIN for n in scored}) == 2]
+    split = [m for m in moods if len({_present(want[n], m) for n in scored}) == 2]
     assert split, "the fixture has no mood present on one track and absent on another"
     for mood in sorted(moods):
         assert found({"moods": [mood]}) == {
-            tracks[n] for n in scored if want[n][mood] >= zero_shot.MOOD_MIN}, mood
+            tracks[n] for n in scored if _present(want[n], mood)}, mood
     assert found({"moods": split[:1], "danceable": True}) == {
         tracks[n] for n in scored
-        if want[n][split[0]] >= zero_shot.MOOD_MIN and want[n]["danceable"] >= zero_shot.DANCEABLE_MIN}
+        if _present(want[n], split[0]) and want[n]["danceable"] >= zero_shot.DANCEABLE_MIN}
     # promoted over the bridge: the album and the artist that have such a track
     assert found({"moods": ["calm and relaxing"]}, "album") == {library["album"]}
-    assert found({"moods": ["calm and relaxing"]}, "artist") == {library["artist"]}
+    assert found({"moods": ["calm and relaxing"]}, "artist") == {
+        library["artists"][library["by"][n]] for n in scored if _present(want[n], "calm and relaxing")}
     assert found({"moods": ["no such mood"]}) == set()
 
 
@@ -905,7 +980,7 @@ def test_now_playing_and_the_assistant_show_the_derived_values(library, conn, sc
             detail = player._zero_shot_detail(tracks[name])
             assert detail["danceability"] == pytest.approx(want[name]["danceable"], abs=6e-4)
             present = {k: want[name][k] for k, _v in SETS["moods"]
-                       if want[name][k] >= zero_shot.MOOD_MIN}
+                       if _present(want[name], k)}
             assert 0 < len(present) < 8
             assert detail["moods"] == pytest.approx(present, abs=6e-4)
             assert list(detail["moods"].values()) == sorted(detail["moods"].values(), reverse=True)
@@ -917,7 +992,7 @@ def test_now_playing_and_the_assistant_show_the_derived_values(library, conn, sc
         bare = assistant_queries.track_features(db_pool.db_query, tracks["bare"])
         assert bare["danceability"] is None
         assert f"Danceability: {want['still']['danceable']:.2f}" in assistant_queries.format_track_info(
-            {"artist": "the reader", "title": "still", "album": "small library",
+            {"artist": "the unknown one", "title": "still", "album": "small library",
              "track_id": tracks["still"]}, features)
         assert assistant_queries.track_features(db_pool.db_query, str(uuid.uuid4())) is None
     finally:
@@ -933,14 +1008,18 @@ def test_the_gate_helper_says_what_the_threshold_says(library, cur):
         assert gate == (want[name] is not None and want[name]["danceable"] >= zero_shot.DANCEABLE_MIN)
 
 
-def test_a_score_exactly_at_its_threshold_passes_its_gate(library, cur, session):
-    """Present AT the threshold, not above it: the gates are >=."""
+def test_a_score_exactly_at_its_threshold_passes_its_gate(library, cur, session, readers):
+    """Present AT the threshold, not above it — and each mood at its OWN:
+    a score between two moods' thresholds is one mood present, the other not."""
     engine = pytest.importorskip("discovery_engine")
     search = pytest.importorskip("search")
+    player = pytest.importorskip("routers.player")
     from sqlalchemy import text
-    track = library["tracks"]["still"]                      # far under both thresholds as made
-    mood = "aggressive and angry"
-    assert library["want"]["still"][mood] < zero_shot.MOOD_MIN
+    track = library["tracks"]["still"]
+    low, high = "romantic and dreamy", "aggressive and angry"
+    floor = zero_shot.MOOD_MIN
+    between = (floor[low] + floor[high]) / 2
+    assert floor[low] < between < floor[high]
 
     def put(key: str, score: float) -> None:
         cur.execute("""UPDATE zero_shot_scores s SET score = %s FROM zero_shot_labels l, embeddings e
@@ -957,19 +1036,32 @@ def test_a_score_exactly_at_its_threshold_passes_its_gate(library, cur, session)
         with session() as db:
             return "still" in {r["title"] for r in search.search_by_features(db, {flt: True})["results"]}
 
+    def shown() -> set:
+        return set(player._zero_shot_detail(track)["moods"] or ()) & {low, high}
+
     kept = _scores(cur, _library_embedding(cur, track))
     try:
         put("danceable", zero_shot.DANCEABLE_MIN)
-        put(mood, zero_shot.MOOD_MIN)
-        assert found({"danceable": True}) and found({"moods": [mood]})
+        put(low, floor[low])
+        put(high, floor[high])
+        assert found({"danceable": True}) and found({"moods": [low]}) and found({"moods": [high]})
         assert searched("danceable") and not searched("not_danceable")
+        assert shown() == {low, high}
         put("danceable", math.nextafter(zero_shot.DANCEABLE_MIN, 0))
-        put(mood, math.nextafter(zero_shot.MOOD_MIN, 0))
-        assert not found({"danceable": True}) and not found({"moods": [mood]})
+        put(low, math.nextafter(floor[low], 0))
+        put(high, math.nextafter(floor[high], 0))
+        assert not found({"danceable": True}) and not found({"moods": [low]})
+        assert not found({"moods": [high]}) and not found({"moods": [low, high]})
         assert searched("not_danceable") and not searched("danceable")
+        assert shown() == set()
+        put(low, between)                                   # one score, two verdicts
+        put(high, between)
+        assert found({"moods": [low]}) and not found({"moods": [high]})
+        assert found({"moods": [low, high]})                # any of the moods asked for
+        assert shown() == {low}
     finally:
-        put("danceable", kept["danceable"])
-        put(mood, kept[mood])
+        for key in ("danceable", low, high):
+            put(key, kept[key])
 
 
 def _library_embedding(cur, track: str) -> int:

@@ -150,7 +150,9 @@ implementation details live in the code, DB and git history.
   Nov 27, 2024. Replaced with own pipeline: librosa (tempo, key/mode,
   energy, brightness, dynamic range) + CLAP zero-shot (moods,
   vocal/instrumental, danceability); instruments moved to the AST + PaSST
-  ensemble on 2026-04-19.
+  ensemble on 2026-04-19. Since 2026-11-10 the zero-shot values are derived
+  from the stored segments, not analysed, and since 2026-11-11 no
+  vocal/instrumental class is made of them (the entries below).
 - **CLAP zero-shot instead of essentia**. essentia brings TensorFlow dependency
   and trained models; CLAP already loaded, works out of the box with text
   prompts ("energetic rock song", "ambient pad"). Simpler, no TF.
@@ -192,12 +194,16 @@ implementation details live in the code, DB and git history.
 - **The derived thresholds set from a real library; the vocal class gone
   (2026-11-11).** Measured read-only on a library of ~41 000 analysed
   tracks (504 000 segments), the derived scores against the values the
-  analyser had stored and against `artists.is_vocalist`. A mood counts at
-  0.06: the thresholds that keep each mood's share of tracks where the
-  stored values (above 0.05 of one random crop) had it run from 0.048 to
-  0.089, median 0.060, and at 0.06 the eight gates pass between 6 points
-  fewer and 8 more than before. Danceable counts at 0.48, which keeps its
-  share at 0.79 (0.5 would pass 0.77). The vocal score separates nothing:
+  analyser had stored and against `artists.is_vocalist`. Each mood has a
+  threshold of its own (`zero_shot.MOOD_MIN`, a map): the one at which its
+  gate passes the share of that library's tracks the stored value passed
+  (stored above 0.05 of one random crop), so each gate keeps its share
+  there by construction — 0.048 for "romantic and dreamy" up to 0.089 for
+  "aggressive and angry". One threshold for all eight was tried first and
+  dropped the same day: how high a prompt scores is the model's and the
+  prompt's doing, and at the median, 0.06, "romantic and dreamy" would
+  pass about half the tracks it did. Danceable counts at 0.48, which keeps
+  its share at 0.79 (0.5 would pass 0.77). The vocal score separates nothing:
   AUC of singing artists' tracks against instrumental artists' is 0.67
   (0.70 for the stored crop), the medians are 0.038 against 0.014, and at
   the old 0.65 / 0.35 lines 95 % of singing artists' tracks read

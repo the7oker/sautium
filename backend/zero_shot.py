@@ -31,18 +31,28 @@ LABELS_DIGEST = "8dddc91e69bc9f16a65a521a55ec89e41a0b9cc3e4abcdf8b226c2b5606a3af
 MOODS = "moods"
 DANCEABLE = "danceable"
 
-# Set 2026-11-11 from a measurement on a real library of ~41 000 tracks, so
-# each gate passes about the share of tracks the stored values it replaces
-# did (a mood was stored above 0.05 of one random crop; danceable at 0.5).
-# MOOD_MIN is the median of the eight thresholds that keep each mood's share
-# (they run 0.048..0.089; at 0.06 the gates pass between 6 points fewer and
-# 8 more than before). DANCEABLE_MIN keeps the share at 0.79.
+# Set 2026-11-11 from a measurement on a real library of ~41 000 tracks:
+# each threshold is the one at which the gate passes the share of that
+# library's tracks the stored value it replaces passed (a mood stored above
+# 0.05 of one random crop; danceable at 0.5) — so each gate keeps its share
+# there by construction. One threshold per mood: how high a prompt scores is
+# the model's and the prompt's doing, and the eight differ nearly twofold.
+# A mood with no threshold here is never present.
+MOOD_MIN = {
+    "happy and upbeat": 0.068,
+    "sad and melancholic": 0.063,
+    "energetic and intense": 0.054,
+    "calm and relaxing": 0.081,
+    "dark and ominous": 0.056,
+    "romantic and dreamy": 0.048,
+    "aggressive and angry": 0.089,
+    "mysterious and atmospheric": 0.051,
+}
+DANCEABLE_MIN = 0.48
 # There is no vocal/instrumental class: the vocal score does not separate
 # the tracks of singing artists from those of instrumental ones (AUC 0.67;
 # medians 0.038 against 0.014), so it stays a number — whether an artist
 # sings is artists.is_vocalist.
-MOOD_MIN = 0.06
-DANCEABLE_MIN = 0.48
 
 
 def labels_digest(doc: dict) -> str:
@@ -70,16 +80,23 @@ def label_keys(label_set: str) -> tuple:
 
 
 def present_moods(moods: Optional[Dict[str, float]]) -> Dict[str, float]:
-    """A track's raw mood scores → the moods present, strongest first."""
+    """A track's raw mood scores → the moods present, each at its own
+    threshold, strongest first."""
     if not moods:
         return {}
     return {k: round(v, 3) for k, v in sorted(moods.items(), key=lambda kv: -kv[1])
-            if v >= MOOD_MIN}
+            if k in MOOD_MIN and v >= MOOD_MIN[k]}
+
+
+def mood_thresholds(moods) -> str:
+    """The thresholds of the moods asked for, as the JSON object the mood
+    gate binds ({key: threshold}; a name that is no mood has none)."""
+    return json.dumps({m: MOOD_MIN[m] for m in moods if m in MOOD_MIN})
 
 
 def track_gate_sql(track: str, key: str, bound: str) -> str:
     """SQL predicate: the track whose id is `track` has the label `key`
-    scored within `bound` (">= 0.5")."""
+    scored within `bound` (">= :danceable_min")."""
     return ("EXISTS (SELECT 1 FROM embeddings zse"
             " JOIN zero_shot_scores zs ON zs.embedding_id = zse.id"
             " JOIN zero_shot_labels zl ON zl.id = zs.label_id"

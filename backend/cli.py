@@ -954,6 +954,8 @@ def search_features(bpm_min, bpm_max, key, instrument, vocal, instrumental, danc
         filters["bpm_max"] = bpm_max
     if instrument:
         filters["instrument"] = instrument
+    if vocal and instrumental:
+        raise click.UsageError("--vocal and --instrumental name two kinds of artist: pass one")
     if vocal:
         filters["vocalist"] = "vocal"
     elif instrumental:

@@ -36,11 +36,12 @@ _ZERO_SHOT_NOTE = (
     "(per audio model, and one model has labels). "
     "Raw scores; what counts as present is the threshold given here.\n"
     "  - `moods`: the whole distribution over the moods (it sums to 1), e.g. "
-    '`{"happy and upbeat": 0.35, "energetic and intense": 0.28, ...}`. Keys: '
-    + ", ".join(zero_shot.label_keys(zero_shot.MOODS))
-    + f". A mood is present at >= {zero_shot.MOOD_MIN}: "
-    f"`WHERE (z.moods->>'calm and relaxing')::float >= {zero_shot.MOOD_MIN}`; "
-    'order by the score for "the most".\n'
+    '`{"happy and upbeat": 0.35, "energetic and intense": 0.28, ...}`. '
+    "A mood is present at ITS OWN threshold (the moods' prompts do not score alike): "
+    + ", ".join(f"{key} >= {zero_shot.MOOD_MIN[key]}" for key in zero_shot.label_keys(zero_shot.MOODS))
+    + ". E.g. "
+    f"`WHERE (z.moods->>'calm and relaxing')::float >= {zero_shot.MOOD_MIN['calm and relaxing']}`; "
+    'order by that mood\'s score for "the most".\n'
     f"  - `danceability`: 0..1, danceable at >= {zero_shot.DANCEABLE_MIN}.\n"
     "  - `vocal_score`: a number, NOT a vocal/instrumental class: it does not separate the tracks "
     "of singing artists from instrumental ones (most vocal tracks score under 0.1), and no class is "

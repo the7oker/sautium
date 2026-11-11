@@ -88,13 +88,23 @@ def test_the_digest_a_file_states_about_itself_decides_nothing(tmp_path, monkeyp
         zero_shot.load_labels()
 
 
-def test_the_moods_present_are_those_at_the_threshold_strongest_first():
-    raw = {"calm and relaxing": 0.61234, "dark and ominous": zero_shot.MOOD_MIN,
-           "happy and upbeat": zero_shot.MOOD_MIN - 1e-9, "sad and melancholic": 0.3}
+def test_the_moods_present_are_those_at_their_own_thresholds_strongest_first():
+    low, high = "romantic and dreamy", "aggressive and angry"
+    assert zero_shot.MOOD_MIN[low] < 0.07 < zero_shot.MOOD_MIN[high]
+    raw = {"calm and relaxing": 0.61234, "dark and ominous": zero_shot.MOOD_MIN["dark and ominous"],
+           "happy and upbeat": zero_shot.MOOD_MIN["happy and upbeat"] - 1e-9,
+           "sad and melancholic": 0.3, low: 0.07, high: 0.07, "no such mood": 0.9}
     assert list(zero_shot.present_moods(raw).items()) == [
-        ("calm and relaxing", 0.612), ("sad and melancholic", 0.3),
-        ("dark and ominous", round(zero_shot.MOOD_MIN, 3))]
+        ("calm and relaxing", 0.612), ("sad and melancholic", 0.3), (low, 0.07),
+        ("dark and ominous", zero_shot.MOOD_MIN["dark and ominous"])]
     assert zero_shot.present_moods(None) == {} == zero_shot.present_moods({})
+
+
+def test_every_mood_of_the_labels_has_a_threshold_and_nothing_else_does():
+    assert set(zero_shot.MOOD_MIN) == set(zero_shot.label_keys(zero_shot.MOODS))
+    assert all(0 < value < 1 for value in zero_shot.MOOD_MIN.values())
+    assert json.loads(zero_shot.mood_thresholds(["calm and relaxing", "no such mood"])) == {
+        "calm and relaxing": zero_shot.MOOD_MIN["calm and relaxing"]}
 
 
 def test_the_importers_model_id_is_the_backends():
