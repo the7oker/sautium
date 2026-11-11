@@ -13618,13 +13618,13 @@
     if (hours < 48) return `about ${hours} ${hours === 1 ? 'hour' : 'hours'}`;
     return `about ${Math.round(seconds / 86400)} days`;
   }
-  function _instrumentsLine(ins, analysable) {
+  function _instrumentsLine(ins, owned) {
     if (ins.tracks == null) return '';           // the estimate could not be read
-    if (!analysable) return 'No tracks of your own yet. The switch also decides whether streamed tracks are tagged.';
+    if (!owned) return 'No tracks of your own yet. The switch also decides whether streamed tracks are tagged.';
     const count = (n, one, many) => `${fmtNum(n)} ${n === 1 ? one : many}`;
     const tracks = count(ins.tracks, 'track', 'tracks');
     // tracks longer than this machine can hold now are in no queue
-    const beyond = !ins.too_long ? '' : `${count(ins.too_long, 'longer track is', 'longer tracks are')} past what this machine can hold now: their instruments come from peers.`;
+    const beyond = !ins.too_long ? '' : `${count(ins.too_long, 'longer track is', 'longer tracks are')} past what this machine can hold now: their instruments can come from peers.`;
     const withBeyond = text => beyond ? `${text} ${beyond}` : text;
     if (!ins.tracks) return beyond || 'Every track has its instruments.';
     if (ins.enabled) {
@@ -13640,6 +13640,11 @@
      and the payload repaints it once no write of this tab is in flight —
      another tab's change, or a write that failed, lands there too. */
   let _instrumentsWrites = 0;
+  // every tap's number: a payload asked for before a tap says nothing of it
+  let _instrumentsTaps = 0;
+  function _instrumentsPaintable(tapsAtAsk) {
+    return !_instrumentsWrites && tapsAtAsk === _instrumentsTaps;
+  }
   function _paintInstrumentsToggle(root, enabled) {
     const el = root.querySelector('[data-action="toggle-instruments"]');
     if (!el) return;
@@ -15813,7 +15818,7 @@
           <span class="form-label">Recognise instruments</span>
           <button class="toggle ${instruments.enabled ? 'on' : ''}" data-action="toggle-instruments" aria-pressed="${instruments.enabled ? 'true' : 'false'}"><span class="knob"></span></button>
         </div>
-        <div class="form-row stacked"><div class="row-stack-sub" data-instruments-line>${escapeProfileHtml(_instrumentsLine(instruments, lib.analysable_tracks))}</div></div>
+        <div class="form-row stacked"><div class="row-stack-sub" data-instruments-line>${escapeProfileHtml(_instrumentsLine(instruments, lib.total_tracks))}</div></div>
       </div>`;
 
     const emptyState = !isEmpty ? '' : !isPathSet ? `
@@ -15912,6 +15917,7 @@
       const want = !e.currentTarget.classList.contains('on');
       _paintInstrumentsToggle(root, want);
       _instrumentsWrites += 1;
+      _instrumentsTaps += 1;
       return serialized('library.instruments', async () => {
         let ok = false;
         try {
@@ -15919,15 +15925,22 @@
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: want }) });
           ok = r.ok;
-        } catch (_) {}
+        } catch (err) {
+          console.warn('Recognise instruments: the switch could not be written', err);
+        }
         _instrumentsWrites -= 1;
         // a write that landed sends the library event; one that failed does
         // not, so the switch goes back to what the node says
         if (!ok && !_instrumentsWrites) {
+          const taps = _instrumentsTaps;
           try {
             const lib = await (await fetch('/api/settings/library')).json();
-            if (lib.instruments && !_instrumentsWrites) _paintInstrumentsToggle(root, lib.instruments.enabled);
-          } catch (_) {}
+            if (lib.instruments && _instrumentsPaintable(taps)) {
+              _paintInstrumentsToggle(root, lib.instruments.enabled);
+            }
+          } catch (err) {
+            console.warn('Recognise instruments: the node\'s state could not be read again', err);
+          }
         }
       });
     });
@@ -15955,6 +15968,7 @@
         _libraryStreamCtrl = null;
         return;
       }
+      const tapsAtAsk = _instrumentsTaps;
       let lib;
       try {
         const r = await fetch('/api/settings/library');
@@ -15980,9 +15994,11 @@
       _refreshEnrichRow(root, 'instruments', lib.instruments_done, lib.analysable_tracks);
       const instrumentsLine = root.querySelector('[data-instruments-line]');
       if (instrumentsLine && lib.instruments) {
-        const line = _instrumentsLine(lib.instruments, lib.analysable_tracks);
+        const line = _instrumentsLine(lib.instruments, lib.total_tracks);
         if (instrumentsLine.textContent !== line) instrumentsLine.textContent = line;
-        if (!_instrumentsWrites) _paintInstrumentsToggle(root, lib.instruments.enabled);
+        if (_instrumentsPaintable(tapsAtAsk)) {
+          _paintInstrumentsToggle(root, lib.instruments.enabled);
+        }
       }
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
