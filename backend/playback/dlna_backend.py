@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from config import settings
 from hqplayer_client import format_time
 
-from playback.base import Capabilities, PlaybackStatus, PlayerBackend
+from playback.base import Capabilities, PlaybackStatus, PlayerBackend, new_id
 from playback.queue import CanonicalQueue, QueueItem
 from streaming import transcode
 from streaming.media_host import media_host, through_tunnel
@@ -555,6 +555,14 @@ class DlnaBackend(PlayerBackend):
         # queue — until a load of ours (_taken_by_another), or a URI of ours
         # it plays again by itself (_ours_again)
         self._external = False
+        # What another controller did to the renderer, as the status says it
+        # while its state stands, each an event's id every page tells once
+        # (_output_event, ROON-COEX §12.6): a takeover that left a spot
+        # (_taken_by_another), while another controller holds the renderer;
+        # the renderer's own pause of our track (`paused_on_device`), from the
+        # emit that first says it until one that does not
+        self._takeover: Optional[int] = None
+        self._device_pause: Optional[int] = None
         # A URI of ours the renderer plays again by itself whose token names no
         # slot of the queue — a track since removed, an earlier attachment's
         # (ROON-COEX §6.1 P11, round 3's H6): ours at no slot, named by the
@@ -1129,6 +1137,9 @@ class DlnaBackend(PlayerBackend):
             # stays — said as the renderer's, so the person knows it was not
             # Sautium (ROON-COEX, the design session's answer to §10.3 B1)
             extra["paused_on_device"] = True
+        event = self._output_event(bool(extra.get("paused_on_device")), extra.get("resume"))
+        if event is not None:
+            extra["output_event"] = event
         self._said = state
         if self._corrected:
             extra["corrected"], self._corrected = True, False
@@ -1145,6 +1156,25 @@ class DlnaBackend(PlayerBackend):
             volume=vol,
             extra=extra,
         ))
+
+    def _output_event(self, device_pause: bool, spot: Optional[dict]) -> Optional[dict]:
+        """What another controller did to the renderer, as this status says
+        it (ROON-COEX §12.6): it took the renderer and left a spot (`spot`,
+        the status's `resume`) — said while it holds the renderer and that
+        spot stands; or the renderer paused our track by no word of the
+        node's (`device_pause`: the KANN under Roon's RAAT, its own remote) —
+        one event from the status that first says so until one that does
+        not. Another controller on a renderer the node was not playing on
+        left no spot and is no event."""
+        if not device_pause:
+            self._device_pause = None
+        elif self._device_pause is None:
+            self._device_pause = new_id()
+        if self._external and self._takeover is not None and spot is not None:
+            return {"id": self._takeover, "kind": "took"}
+        if self._device_pause is not None:
+            return {"id": self._device_pause, "kind": "paused"}
+        return None
 
     def _on_gena_event(self, service, state_variables) -> None:
         """Transport-state changes arrive here (renderer's own remote
@@ -1490,11 +1520,18 @@ class DlnaBackend(PlayerBackend):
         said — it cut that listen: the spot stays at the slot and its last
         own second, Now Playing names its track saying another app took the
         renderer (_emit_now), and Play loads it there; erased as any spot
-        is, with its item or once a start from it is taken. Taken from a
-        stop, no listen was cut: no spot. A play that waited for its slot's
-        stream (_parked) is over: the other controller's word is newer — its
-        track and second are the spot, as a Stop leaves them. Its callers
-        end the position poll. Runs on the dlna-loop."""
+        is, with its item or once a start from it is taken. Taken within the
+        end's slack of our track (_TRACK_END_SLACK, what a Stop there reads
+        as finished), the track counted as played: no listen is held, and the
+        spot is the slot after it, at 0 — Play goes on where the queue would
+        have gone; at the queue's last slot none follows, no spot, and Play
+        does what it does at the queue's end (as on HQPlayer: ROON-COEX
+        §12.5). Taken from a stop, no listen was cut: no spot. A play that
+        waited for its slot's stream (_parked) is over: the other
+        controller's word is newer — its track and second are the spot, as a
+        Stop leaves them. A takeover that leaves a spot is an event the
+        status says while it stands (`_takeover`: _output_event). Its callers end
+        the position poll. Runs on the dlna-loop."""
         logger.info("another controller took %s — slot %d let go at %.0f s",
                     self.label, self._index, self._position)
         parked, self._parked = self._parked, None
@@ -1502,8 +1539,13 @@ class DlnaBackend(PlayerBackend):
         if slot is not None:
             self._index, self._resume = slot, parked[1]
         elif self._said in ("playing", "paused") and self._unslotted is None:
-            self._resume = self._position
-            self._cut = self._queue.item_at(self._index)
+            if not (self._length > 0 and self._position >= self._length - _TRACK_END_SLACK):
+                self._resume = self._position
+                self._cut = self._queue.item_at(self._index)
+            elif (after := self._queue.item_at(self._index + 1)) is not None:
+                self._index, self._resume = self._index + 1, 0.0
+                self._length = after.duration_seconds or 0.0
+        self._takeover = new_id() if self._resume is not None else None
         self._held_item = self._queue.item_at(self._index)
         self._external, self._unslotted = True, None
         self._current_url = self._next_url = None

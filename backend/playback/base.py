@@ -16,6 +16,8 @@ defaults.
 """
 
 import logging
+import threading
+import time
 from abc import ABC, abstractmethod
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -25,6 +27,21 @@ if TYPE_CHECKING:
     from playback.queue import QueueItem
 
 logger = logging.getLogger(__name__)
+
+_id_lock = threading.Lock()
+_last_id = 0
+
+
+def new_id() -> int:
+    """An id for what an output says of itself once — a play attempt
+    (playback.hqp_diagnostics), an event another controller caused
+    (`output_event`): the clock's milliseconds, never the same twice in a
+    process, a later one larger. A page tells an event by it, whichever
+    output said it."""
+    global _last_id
+    with _id_lock:
+        _last_id = max(_last_id + 1, int(time.time() * 1000))
+        return _last_id
 
 
 @dataclass

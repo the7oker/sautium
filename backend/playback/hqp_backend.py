@@ -57,7 +57,7 @@ from playback import hqp_load
 from playback import hqp_meter
 from playback import queue as queue_mod
 from playback.base import (Capabilities, OutputRefused, PlaybackStatus, PlayerBackend,
-                           ReorderPlan)
+                           ReorderPlan, new_id)
 from playback import hqp_benchmark
 from playback.hqp_benchmark import _building
 from playback.hqp_link import (NOT_ANSWERING, QUESTION_WAIT_S, UNFINISHED, Building, Dropped,
@@ -1250,6 +1250,17 @@ class HqpBackend(PlayerBackend):
         # (ROON-COEX F6) — until HQPlayer plays or pauses an entry of ours
         # again, or the item leaves the queue (_listen_held). The poller's alone
         self._cut: Optional[QueueItem] = None
+        # A takeover's verdict left the spot — its cut listen's, or the slot
+        # after a track that had played out (_leave_spot) — and HQPlayer has
+        # played or paused no entry of ours since: a playlist it rests on
+        # meanwhile is that controller's, whatever the spot names
+        # (_rests_on_another, _step). And the event of a takeover that left a
+        # spot, a start that waited among them (_taken_over), as (its id, the
+        # spot's generation it left): what the status says once to every
+        # page while that very spot stands (_output_event). The poller's
+        # alone to write
+        self._takeover = False
+        self._took_event: Optional[tuple] = None
         # Whether the playlist the canary last read holds an entry the node
         # never gave HQPlayer (_judge_mirror): another controller's. The
         # poller's to write; a press reads it while the mirror drifts (_step)
@@ -2496,7 +2507,7 @@ class HqpBackend(PlayerBackend):
             att = self._attempt
             parked = self._rate_refused     # parked before this tick's status is asked for
             try:
-                hqp_playlist = None
+                hqp_playlist = listed = None
                 with link.asking(until=lambda: not self._running) as hqp:
                     status = hqp.get_status(wait=QUESTION_WAIT_S)
                     if status is None and not hqp.timed_out:
@@ -2558,6 +2569,8 @@ class HqpBackend(PlayerBackend):
                         _, version, pending = self._queue.view()
                         mirror = self._mirror_moves
                         hqp_playlist = hqp.get_playlist()
+                        if hqp.last_error is None:
+                            listed = [t.get("uri") or "" for t in hqp_playlist]
                         # Judged against the queue and the mirror's state it
                         # was read with — never a read made while a mutation
                         # was in flight or a play press takes the queue
@@ -2595,7 +2608,7 @@ class HqpBackend(PlayerBackend):
                                           "filters": hqp.get_filters(),
                                           "shapers": hqp.get_shapers()}
                     if att is None and status is not None:
-                        att = self._advance(status, read_at)
+                        att = self._advance(status, read_at, listed)
                     if att is not None and status is not None:
                         att.tick(status, STATE_NAMES.get(status.state, "unknown"), read_at,
                                  hqp_meter.meter.seen())
@@ -2731,16 +2744,22 @@ class HqpBackend(PlayerBackend):
                         self._held_by_another, self._held_read_at = playing[2], read_at
                         self._held_paused = playing[2] and status.state == PlaybackState.PAUSED
                         self._verdict_playlist = [t.get("uri") for t in hqp_playlist or ()]
-                        if self._note_listen(status, playing, position, read_at, prev_at, edited=edited,
-                                             moving=moving and not runs_on):
+                        took = self._note_listen(status, playing, position, read_at, prev_at, edited=edited,
+                                                 moving=moving and not runs_on)
+                        if took:
                             # The spot set on this tick: what HQPlayer reads, seen as the next tick sees it
                             playing = self._playing(status) or playing
-                            if att is not None and att.t0 is not None:
-                                # The start watched, taken over in its window:
-                                # judged on what HQPlayer did with it before,
-                                # never on the other controller's playlist
-                                att.request_end("superseded")
-                                reads = None
+                        if att is not None and att.t0 is not None and (
+                                took or (att.advance is not None and playing[2])):
+                            # The start watched, taken over in its window:
+                            # judged on what HQPlayer did with it before,
+                            # never on the other controller's playlist — and
+                            # HQPlayer's own advance the same, once it plays or
+                            # pauses an entry not ours: a take that moved onto
+                            # an entry the node never gave is a takeover, never
+                            # an advance of ours (ROON-COEX §12.5)
+                            att.request_end("superseded")
+                            reads = None
                         self._taken_over(playing)
                         if moving and not runs_on:
                             # A transit answer's position is the entry before's,
@@ -2956,30 +2975,43 @@ class HqpBackend(PlayerBackend):
     def _unexplained_take(self, status) -> bool:
         """Did HQPlayer's take move (its track_serial past the tick before's)
         with no command of the node's that makes it take an entry sent since
-        that tick was asked for (_TAKES), and no advance of its own from an
-        entry of ours (_ends_ours)? Then its playlist is read at this tick:
-        another controller's start (Roon's) hands it an entry its Status may
-        not name, which the layout would read as the queue's slot until the
-        canary — a listen and a scrobble of a track that did not sound. It
-        reads, never assumes: a natural advance through our own playlist
-        reads as ours, at the cost of one PlaylistGet. Called on the
-        poller."""
+        that tick was asked for (_TAKES)? Then its playlist is read at this
+        tick: another controller's start (Roon's) hands it an entry its
+        Status may not name, which the layout would read as the queue's slot
+        until the canary — a listen and a scrobble of a track that did not
+        sound. It reads, never assumes: a natural advance through our own
+        playlist reads as ours, at the cost of one PlaylistGet — the stopped
+        tick of HQPlayer's own advance from an entry of ours (_ends_ours)
+        among them: the entry it moved onto may be one another controller
+        put behind ours (Roon's Play Now on a link it kept, ROON-COEX F9),
+        and only the playlist tells (_advance). Called on the poller."""
         before = self._before[0] if self._before is not None else None
         return (before is not None and status.track_serial is not None
                 and before.track_serial is not None and status.track_serial > before.track_serial
-                and self._took_at <= self._before_at and not self._ends_ours(status))
+                and self._took_at <= self._before_at)
 
-    def _advance(self, status, read_at: float) -> Optional[diag.Attempt]:
+    def _advance(self, status, read_at: float, playlist: Optional[list]) -> Optional[diag.Attempt]:
         """HQPlayer's own advance as an attempt of its own (diag.advance):
         this tick stopped, its track_serial one more than the tick before,
         which played an entry of ours to its last seconds with one after it
         (_ends_ours) — while no intent of ours is watched and no mutation or
         play press runs, watched from `read_at`, when this tick's status was
-        asked for. On this machine its log is followed while the attempt
-        waits (diag.LogFollower). Called on the poller."""
+        asked for. Only onto an entry the node gave: `playlist`, HQPlayer's
+        as this tick read it (None: not answered), holds the entry after the
+        one it played, and one another controller put there — or none, its
+        playlist cleared since — is no advance of ours: the take moved onto
+        an entry the node never gave, a takeover (_note_listen), and an
+        attempt opened for it was judged on that controller's playlist
+        ("HQPlayer refused the file", ROON-COEX §12.5). On this machine its
+        log is followed while the attempt waits (diag.LogFollower). Called
+        on the poller."""
         if not self._ends_ours(status) or self._pressed is not None or self._queue.view()[2]:
             return None
         before, playing = self._before
+        if playlist is not None:
+            onto = playlist[before.track_index] if before.track_index < len(playlist) else ""
+            if not onto or not self.gave(onto, self._layout()):
+                return None
         att = diag.advance(before.track_index, status.track_serial, before.output_delay, read_at)
         if self._mirror in ("step", "tail"):
             # The slot after the one it played, found by its item in the queue
@@ -3168,18 +3200,25 @@ class HqpBackend(PlayerBackend):
         the spot stays at that slot and second: Now Playing names its track,
         saying another app took HQPlayer (_status_of), Play takes HQPlayer
         back there, and it is erased as any spot is, with its item or once a
-        start from it is taken. A listen that ended before cut nothing — a
-        Stop, a start, a Seek or a clear of ours ended it, and so did
-        HQPlayer moving on by itself first (the other controller's start then
-        two takes past the listen's), and one read in its last seconds — or,
-        where HQPlayer names no take, long enough ago to have played them —
-        is HQPlayer's own advance (onto
-        an entry the queue no longer names, read as not ours) or close
-        enough to it; a verdict that turned on the same take is no start of
-        anyone's. Another controller then took an idle HQPlayer: no spot,
-        and Play starts as from a stop. Ticks between that find neither —
-        the other controller's Stop on our entry, its cleared playlist —
-        leave the listen as it was.
+        start from it is taken. A listen the node's own word ended before
+        cut nothing — a Stop, a start, a Seek or a clear of ours — and nor
+        did one HQPlayer moved on from by itself first (the other
+        controller's start then two takes past the listen's); a verdict that
+        turned on the same take is no start of anyone's. Another controller
+        then took an idle HQPlayer: no spot, and Play starts as from a stop.
+        A listen that played out — read in its last seconds, or, where
+        HQPlayer names no take, long enough ago to have played them
+        (_played_out) — cut nothing either, but its track counted as played:
+        the takeover after it, whatever take it is on past the listen's
+        (HQPlayer's own advance first, onto our next entry or onto one the
+        other controller put behind ours; the other controller's Stop inside
+        those seconds), leaves the spot at the slot after it, at 0 — Play
+        goes on where the queue would have gone, never from its head (the
+        owner's listening check, ROON-COEX §12.5) — and no listen is held;
+        at the queue's last slot none follows: no spot, and Play does what it
+        does at the queue's end. Ticks between that find neither — the other
+        controller's Stop on our entry, its cleared playlist — leave the
+        listen as it was.
 
         The takeover is the node's too where nothing of the other
         controller's ever plays (ROON-COEX F7: a rate HQPlayer's output
@@ -3192,13 +3231,16 @@ class HqpBackend(PlayerBackend):
         tick that sees it move. Where HQPlayer names no take (HQPlayer 5),
         only a listen read while the playlist was the queue's mirror is
         judged so: an entry already there then is no newer word than the
-        listen. Either verdict marks the cut listen's item (`_cut`): the
-        play tracker holds that listen, as a pause holds it, until HQPlayer
-        plays or pauses an entry of ours again (_listen_held). Whether this
-        tick set the spot. Called on the poller."""
+        listen. Either verdict on a listen it cut marks that listen's item
+        (`_cut`): the play tracker holds that listen, as a pause holds it,
+        until HQPlayer plays or pauses an entry of ours again (_listen_held);
+        and every verdict that leaves a spot stands until then (`_takeover`:
+        _leave_spot). Whether this tick judged a takeover. Called on the
+        poller."""
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
         if busy and playing[1] is not None and not playing[2]:
-            self._cut = None                # HQPlayer reads an entry of ours again
+            # HQPlayer reads an entry of ours again
+            self._cut, self._takeover, self._took_event = None, False, None
             listen = self._listen
             if playing[0] and self._readings(status.uri):
                 same = listen is not None and listen.item is playing[1] and listen.take == status.track_serial
@@ -3211,17 +3253,21 @@ class HqpBackend(PlayerBackend):
         listen = self._listen
         if listen is None:
             return False
+        out = self._played_out(listen, read_at, status.track_serial)
         if playing[2]:
             self._listen = None
-            if self._ended(listen, read_at, status.track_serial) or self._spot_gen != listen.spot_gen:
+            if self._ended_by_node(listen) or self._spot_gen != listen.spot_gen:
                 return False
-            if listen.take is not None and status.track_serial is not None:
+            if out:
+                if listen.take is not None and status.track_serial == listen.take:
+                    return False
+            elif listen.take is not None and status.track_serial is not None:
                 if status.track_serial != listen.take + 1:
                     return False
             elif listen.at != prev_at:
                 return False
         elif edited:
-            if self._ended(listen, read_at, status.track_serial) or self._spot_gen != listen.spot_gen:
+            if self._ended_by_node(listen) or self._spot_gen != listen.spot_gen:
                 self._listen = None
                 return False
             if listen.take is not None and status.track_serial is not None:
@@ -3236,23 +3282,43 @@ class HqpBackend(PlayerBackend):
         slot = self._queue.index_of(listen.item)
         if slot is None:
             return False
-        self._set_spot(listen.item, int(listen.second))
-        self._cut = listen.item
-        logger.info("another controller took HQPlayer at slot %d, %d s — Play takes it back there",
-                    slot, int(listen.second))
-        # The other app's refused tracks under this spot (F7's answer: a
-        # refusal during another controller's playback is said): stopped on
-        # its entry (F7), why, from HQPlayer's log — off the poller, as a
-        # failed attempt's log is read; after a track it plays (D3), at its
-        # first refused one; again for each after it (_read_refusal_again)
+        if not out:
+            self._cut = listen.item
+            self._leave_spot(listen.item, int(listen.second), status, edited)
+            logger.info("another controller took HQPlayer at slot %d, %d s — Play takes it back there",
+                        slot, int(listen.second))
+            return True
+        after = self._queue.item_at(slot + 1)
+        if after is None:
+            logger.info("another controller took HQPlayer once slot %d, the queue's last, had played out", slot)
+            return True
+        self._leave_spot(after, 0, status, edited)
+        logger.info("another controller took HQPlayer once slot %d had played out — Play goes on at slot %d",
+                    slot, slot + 1)
+        return True
+
+    def _leave_spot(self, item: QueueItem, second: int, status, edited: bool) -> None:
+        """A takeover's verdict leaves the spot at `item` and `second`
+        (_note_listen: the listen it cut; the slot after a track that had
+        played out, at 0), and stands from here until HQPlayer plays or
+        pauses an entry of ours again (`_takeover`): a playlist HQPlayer
+        rests on meanwhile is the other controller's whatever the spot names
+        (_rests_on_another). Its event is minted here (`_took_event`), said
+        by the status while this very spot stands. The other app's refused
+        tracks under this spot (F7's answer: a refusal during another
+        controller's playback is said): stopped on its entry (F7), why, from
+        HQPlayer's log — off the poller, as a failed attempt's log is read;
+        after a track it plays (D3), at its first refused one; again for
+        each after it (_read_refusal_again). Called on the poller."""
         token = object() if edited and status.state == PlaybackState.STOPPED else None
         with self._spot_lock:
+            self._spot, self._spot_gen = (item, second), self._spot_gen + 1
             gen = self._spot_gen
             self._refusal_read = _RefusalReads(None, status.track_serial, gen, token, None)
+        self._takeover, self._took_event = True, (new_id(), gen)
         if token is not None:
             threading.Thread(target=self._other_refused_log, args=(status.uri, token, gen, self._verdict_playlist),
                              daemon=True, name="hqp-log").start()
-        return True
 
     def _read_refusal_again(self, status, uris: list) -> None:
         """The other controller's next refused track in F7's state (ROON-COEX
@@ -3344,17 +3410,26 @@ class HqpBackend(PlayerBackend):
 
     def _ended(self, listen: _Listen, read_at: float, take: Optional[int]) -> bool:
         """Had the node's own listen ended, by a tick asked at `read_at` that
-        names the take `take`, with no one cutting it: read in its last
-        seconds, a Stop, a start, a Seek or a clear of the node's sent after
-        that reading — or, where HQPlayer names no take to tell HQPlayer's
-        own end by (HQPlayer 5), the time since that reading enough for the
-        entry to have played to its last seconds (one of no known length
-        never does)? Wall time is no player's: HQPlayer silent through a
-        build plays nothing meanwhile."""
-        if listen.near_end or max(self._stopped_at, self._moved_at, self._cleared_at) > listen.at:
-            return True
-        return ((listen.take is None or take is None) and listen.length > 0
-                and listen.second + (read_at - listen.at) >= listen.length - diag.ADVANCE_END_S)
+        names the take `take`, with no one cutting it: by the node's own word
+        (_ended_by_node), or by playing out (_played_out)?"""
+        return self._ended_by_node(listen) or self._played_out(listen, read_at, take)
+
+    def _ended_by_node(self, listen: _Listen) -> bool:
+        """Did the node's own word end the listen: a Stop, a start, a Seek
+        or a clear of the node's sent after its last reading?"""
+        return max(self._stopped_at, self._moved_at, self._cleared_at) > listen.at
+
+    def _played_out(self, listen: _Listen, read_at: float, take: Optional[int]) -> bool:
+        """Had the listen's track played out, by a tick asked at `read_at`
+        that names the take `take`: read in its last seconds — or, where
+        HQPlayer names no take to tell HQPlayer's own end by (HQPlayer 5),
+        the time since that reading enough for the entry to have played to
+        its last seconds (one of no known length never does)? Wall time is
+        no player's: HQPlayer silent through a build plays nothing
+        meanwhile. Its track counted as played (_note_listen)."""
+        return listen.near_end or ((listen.take is None or take is None) and listen.length > 0
+                                   and listen.second + (read_at - listen.at)
+                                   >= listen.length - diag.ADVANCE_END_S)
 
     def _listen_held(self, status, playing: tuple, read_at: float) -> bool:
         """Whether a tick asked at `read_at` holds the node's own listen for
@@ -3406,6 +3481,7 @@ class HqpBackend(PlayerBackend):
             slot = self._queue.index_of(park.item)
             if slot is not None:
                 self._spot, self._spot_gen = (park.item, park.second), self._spot_gen + 1
+                self._took_event = (new_id(), self._spot_gen)
         logger.info("another controller took HQPlayer while slot %s waited for its stream — "
                     "Play starts it there", slot)
 
@@ -3451,12 +3527,13 @@ class HqpBackend(PlayerBackend):
         an entry the node never gave (_edited), nothing of ours read: Roon's
         stream before its Play (ROON-COEX §6.1 P1)? What goes behind it
         would play inside that controller's session, as while it holds
-        HQPlayer (_taken) — or since its takeover cut the node's listen
-        (_cut): the spot it left names the status's track, never what
-        HQPlayer reads (F7's refused stream, Roon's Play sent again)."""
+        HQPlayer (_taken) — or since its takeover's verdict left a spot
+        (_takeover: the listen it cut, the slot after a track that had played
+        out): the spot names the status's track, never what HQPlayer reads
+        (F7's refused stream, Roon's Play sent again)."""
         last = self._last_tick
         return self._mirror == "drift" and self._edited and (last is None or last.item is None
-                                                             or self._cut is not None)
+                                                             or self._takeover)
 
     def _foreign_in_step(self, status) -> Optional[tuple]:
         """Does HQPlayer read an entry of no queue slot while its playlist is
@@ -3615,7 +3692,12 @@ class HqpBackend(PlayerBackend):
         not ours is reported as external playback (slot 0), so nothing is
         tracked against a queued track — and, while a spot stands (another
         controller cut the node's own listen there: _note_listen), as that
-        spot: its track, stopped at its second, external still."""
+        spot: its track, stopped at its second, external still. Stopped at a
+        spot, the status is at the spot's second of its track's length, as a
+        renderer's is (HQPlayer stopped gives 0 for both: Now Playing's bar
+        read 00:00 / 00:00 beside "Play resumes at 0:05"). What another
+        controller did to the output is said as `output_event` while the
+        state it led to stands (_output_event)."""
         idx, item, foreign = playing
         extra = {"genre": status.genre, "process_speed": status.process_speed,
                  "limited": status.limited, "active_mode": status.active_mode,
@@ -3657,6 +3739,9 @@ class HqpBackend(PlayerBackend):
                                   "track_id": None, "failing": False}
         elif diagnosis is not None:
             extra["diagnosis"] = diagnosis
+        event = self._output_event(extra.get("diagnosis"), extra.get("other_refused"))
+        if event is not None:
+            extra["output_event"] = event
         watch = self._link.build
         if watch.state is not None and watch.state.get("not_answering"):
             extra["not_answering"] = NOT_ANSWERING
@@ -3679,7 +3764,8 @@ class HqpBackend(PlayerBackend):
             # A start waiting for its stream (_park): the slot it waits on,
             # loading, at its second — what HQPlayer plays meanwhile is none of
             # this status's words
-            for key in ("artist", "album", "song", "source", "resume", "diagnosis", "other_refused", "starting"):
+            for key in ("artist", "album", "song", "source", "resume", "diagnosis", "other_refused",
+                        "output_event", "starting"):
                 extra.pop(key, None)
             return PlaybackStatus(state="loading", position=float(parked.second),
                                   length=parked.item.duration_seconds or 0.0, queue_index=slot,
@@ -3695,11 +3781,36 @@ class HqpBackend(PlayerBackend):
             return PlaybackStatus(state="stopped", position=float(spot[1]),
                                   length=held.duration_seconds or 0.0, queue_index=spot[0],
                                   volume=status.volume, extra=extra, item=held)
+        if spot is not None and idx == spot[0] and item is not None and status.state == PlaybackState.STOPPED:
+            position, length = float(spot[1]), item.duration_seconds or 0.0
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
             position=status.position if position is None else position,
             length=status.length if length is None else length,
             queue_index=idx, volume=status.volume, extra=extra, item=item, out_after=out_after)
+
+    def _output_event(self, diagnosis: Optional[dict], refused: Optional[str]) -> Optional[dict]:
+        """What another controller did to the output, as the status says it
+        while the state it led to stands — one event, the newest: every page
+        tells it once, by its id (ROON-COEX §12.6). HQPlayer refused the
+        other app's track (`refused`, the node's sentence, while its row is
+        said: the attempt record_other_refused kept); the other app stopped a
+        take-back (the `other_stopped` diagnosis, while Now Playing offers
+        it); it took HQPlayer and left a spot (_took_event, while that very
+        spot stands: one set or moved since is the node's or the person's
+        newer word, and an event from before it is told to no page that
+        connects later). Another controller playing through an HQPlayer it
+        took idle left no spot and is no event: nothing of the person's was
+        taken."""
+        code = (diagnosis or {}).get("code")
+        if refused and code == "other_refused":
+            return {"id": diagnosis["id"], "kind": "refused", "attempt": diagnosis["id"], "reason": refused}
+        if code == "other_stopped":
+            return {"id": diagnosis["id"], "kind": "stopped", "attempt": diagnosis["id"]}
+        took = self._took_event
+        if took is not None and took[1] == self._spot_gen and self._spot_at() is not None:
+            return {"id": took[0], "kind": "took"}
+        return None
 
     def _diagnosis(self, status) -> Optional[dict]:
         """The failed attempt Now Playing offers to explain: this backend's
@@ -4927,7 +5038,7 @@ class HqpBackend(PlayerBackend):
         slot after or before that this HQPlayer holds, at its start: a start
         of their own (_press); at either end of the queue it stays. At a
         spot while another controller holds HQPlayer, or while its playlist
-        rests there since its takeover cut the node's listen (_cut, the
+        rests there since its takeover left that spot (_takeover, the
         mirror drifted or lost), they start the slot beside it, from its
         start, as a tap there — a press that starts playback takes HQPlayer
         back (ROON-COEX L11; at either end of the queue it stays). Stopped at
@@ -4972,9 +5083,9 @@ class HqpBackend(PlayerBackend):
             return self.select(self._queue.index_of(target), target.track_id)
         held, spot = self._spot, self._spot_at()
         last = self._last_tick
-        if spot is not None and (self._taken() or (self._cut is not None and self._mirror in ("drift", "lost"))):
+        if spot is not None and (self._taken() or (self._takeover and self._mirror in ("drift", "lost"))):
             # Another controller holds HQPlayer, or its playlist rests there
-            # since its takeover cut the node's listen: a press that starts
+            # since its takeover left the spot: a press that starts
             # playback takes HQPlayer back (ROON-COEX L11) — the slot beside
             # the spot, from its start, as a tap there (at either end it
             # stays). The node's own playlist again (a take-back HQPlayer

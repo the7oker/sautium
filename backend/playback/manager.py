@@ -983,6 +983,11 @@ class PlaybackManager:
         # remote, a controller past UPnP: said as the renderer's pause
         if s.extra.get("paused_on_device"):
             new_data["paused_on_device"] = True
+        # What another controller did to the output — took it, stopped it, had
+        # its track refused, paused the renderer: one event with an id, said
+        # while its state stands, told once by every page (ROON-COEX §12.6)
+        if s.extra.get("output_event"):
+            new_data["output_event"] = s.extra["output_event"]
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the

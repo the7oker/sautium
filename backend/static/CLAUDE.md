@@ -546,6 +546,18 @@ the tab meets later with a `since` it does not hold toasts once, however
 old. Wake the channel
 with `NOTIFY sautium_notices` after changing a source.
 
+What another app did to the audio output — took it, stopped it, had its
+own track refused by HQPlayer, paused the renderer — is no notice (no row,
+no trail) but an **event on the status** (`output_event`, since 2026-11-11):
+`onOutputEvent` in `app-shell.js` toasts an id the page has not met, once,
+under one key (`player.other_app`), in the output-unavailable toast's form
+with a Why? that opens its sheet. The status a connection opens with is
+flagged `initial` and paints state only, exactly as the connect-time notices
+snapshot does; Now Playing's line (`outputLine`) keeps the state, the action
+first, and wraps rather than clips. The rule for when an event exists and how
+long the status carries it lives in the backends
+(`docs/HQPLAYER_INTEGRATION.md` § "Output events").
+
 `title` and `text` are HTML — escape anything user-controlled, exactly
 as for the dialogs. Transport commands (next, previous, volume) get no
 toast: their feedback is the control's own pressed state.

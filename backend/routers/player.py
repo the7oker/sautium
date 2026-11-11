@@ -1338,8 +1338,12 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
         meter = hqp_meter.register(tab, meter_evt, loop) if tab else None
         try:
             yield 'data: {"t": "hello"}\n\n'
+            # The connect-time status is flagged, as the notices' copy below
+            # is: what it says happened before this connection — it paints
+            # state, and an event it carries (`output_event`) is no news
             yield ("data: "
-                   + json.dumps({"t": "status", "d": manager.latest_status})
+                   + json.dumps({"t": "status",
+                                 "d": {**manager.latest_status, "initial": True}})
                    + "\n\n")
             last_version = manager.status_version
             # Notices travel as the whole active set, never as single

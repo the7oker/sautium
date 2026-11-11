@@ -1048,7 +1048,6 @@
       this.qBadge = document.getElementById('npQBadge');
       this.excerptBadge = document.getElementById('npExcerptBadge');
       this.whyBtn = document.getElementById('npWhy');
-      this.hqpNote = document.getElementById('npHqpNote');
       this.hqpTag = document.getElementById('npHqpTag');
       this.keyPill = document.getElementById('npKeyPill');
       this.bpm = document.getElementById('npBpm');
@@ -1078,11 +1077,6 @@
         e.stopPropagation();
         if (e.detail > 1) return;
         onceInFlight(this.whyBtn, () => openHqpDiagnosis(this.whyBtn.dataset.attempt));
-      });
-      this.hqpNote.addEventListener('click', e => {
-        e.stopPropagation();
-        if (e.detail > 1) return;
-        onceInFlight(this.hqpNote, () => openHqpDiagnosis(this.hqpNote.dataset.attempt));
       });
       this.playPause.addEventListener('click', e => {
         e.stopPropagation();
@@ -1346,47 +1340,15 @@
       if (this.excerptBadge) this.excerptBadge.hidden = !data.excerpt;
       // The HQPlayer output judged the last play of this track failed
       // (playback/hqp_diagnostics.py) — offered beside the track it is about,
-      // never beside the queue head a stopped status falls back to.
+      // never beside the queue head a stopped status falls back to. Another
+      // app's track HQPlayer refused is none of this track's plays: its
+      // toast says it and opens its sheet (output events, below)
       const diag = data.diagnosis;
-      const why = !!diag && (!diag.track_id || diag.track_id === data.track_id);
-      // Another app's track HQPlayer refused under the takeover's spot
-      // (ROON-COEX P7/P12): a row of its own that opens the same sheet, the
-      // Why button standing down beside it
-      const note = why && data.other_refused
-        ? `HQPlayer refused the other app's track: ${data.other_refused}` : '';
-      this.hqpNote.hidden = !note;
-      if (this.hqpNote.textContent !== note) this.hqpNote.textContent = note;
-      this.hqpNote.dataset.attempt = note ? diag.id : '';
-      this.whyBtn.hidden = !why || !!note;
+      const why = !!diag && diag.code !== 'other_refused'
+        && (!diag.track_id || diag.track_id === data.track_id);
+      this.whyBtn.hidden = !why;
       this.whyBtn.dataset.attempt = why ? diag.id : '';
-      // What the HQPlayer output says beside the track: the build it is in —
-      // its transport waits meanwhile — a silence no build of ours explains,
-      // or, for a stopped HQPlayer, the spot the play press resumes (a
-      // paused one whose playlist was taken afresh is left stopped: never
-      // "paused"). Another app on the output (`source` external): the track
-      // its takeover cut, at the second Play takes the output back at. A
-      // renderer that paused our track by no word of the node's (its own
-      // remote, a controller past UPnP): its pause, not Sautium's. A
-      // renderer being attached again where it answers now (`connecting`,
-      // its name): said while it lasts, so a press waiting on it is seen.
-      // A take-back the app it took the output from stopped (its own Stop
-      // after its Pause, ROON-COEX P6): that app's stop, at the same spot —
-      // its start too (a tap, Next, a new queue: 0:00).
-      const b = data.building, r = data.resume;
-      const out = (data.output && data.output.label) || 'this output';
-      const stoppedBy = why && diag.code === 'other_stopped';
-      const tag = data.connecting ? `Connecting to ${data.connecting}…`
-        : b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
-        : data.not_answering ? 'HQPlayer is not answering'
-        : data.rebuilding ? 'HQPlayer is taking the queue again'
-        : data.source === 'external'
-          ? (r ? `Another app took ${out} — Play takes it back at ${fmtDuration(r.position)}`
-            : `Another app is playing through ${out} — Play takes it back`)
-        : data.paused_on_device && data.state === 'paused' ? `Paused on ${out}`
-        : r && stoppedBy && data.state === 'stopped'
-          ? `Another app stopped ${out} — Play resumes at ${fmtDuration(r.position)}`
-        : r && r.position > 0 && data.state === 'stopped'
-          ? `Stopped at ${fmtDuration(r.position)} — Play resumes here` : '';
+      const tag = outputLine(data, why ? diag : null);
       this.hqpTag.hidden = !tag;
       this.hqpTag.textContent = tag;
 
@@ -6309,6 +6271,124 @@
     return () => _freshSeq.get(key) === n;
   }
 
+  /* ---- Output events: what another app did to the output -----------------
+     Another app that also controls the output (Roon on the same HQPlayer,
+     on the same renderer) took it, stopped it just after Sautium took it
+     back, had its own track refused by HQPlayer, or paused the renderer —
+     wherever the person is in the UI they learn it from a toast in the form
+     of the output-unavailable one, and Now Playing keeps the state in one
+     line (ROON-COEX, the owner's decision of 2026-11-11).
+
+     One toast per event and page. The backend mints an event once and says
+     it on the status as `output_event` ({id, kind, attempt?, reason?}) for
+     as long as the state it led to stands, so no page misses it to a
+     coalesced status; a page tells an id it has not met, once — a poll, a
+     second read of the state, the next status are the same id. The status
+     a connection opens with (`initial`, flagged by the server as the
+     connect-time notices are) paints state only: its event becomes known
+     without a toast, so a page opened after the event, a reload and a
+     stream that reconnects (a phone tab back from the background) see the
+     line on Now Playing, never a stale toast. The words are drafts for the
+     owner's words review. */
+
+  // What the output says beside the track on Now Playing, the action first
+  // — the part a narrow screen must not lose: the build it is in (its
+  // transport waits meanwhile), a silence no build of ours explains, or,
+  // for a stopped HQPlayer, the second the play press resumes at (a paused
+  // one whose playlist was taken afresh is left stopped: never "paused").
+  // Another app on the output (`source` external): what Play does there,
+  // then whose it is. A renderer that paused our track by no word of the
+  // node's (its own remote, a controller past UPnP): its pause, not
+  // Sautium's. A renderer being attached again where it answers now
+  // (`connecting`, its name): said while it lasts, so a press waiting on it
+  // is seen. A take-back the app it took the output from stopped (its own
+  // Stop after its Pause, ROON-COEX P6; `diag`, the diagnosis offered
+  // beside this track): that app's stop, at the same spot — its start too
+  // (a tap, Next, a new queue: 0:00).
+  function outputLine(data, diag) {
+    const b = data.building, r = data.resume;
+    const out = (data.output && data.output.label) || 'this output';
+    const stoppedBy = !!diag && diag.code === 'other_stopped';
+    return data.connecting ? `Connecting to ${data.connecting}…`
+      : b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
+      : data.not_answering ? 'HQPlayer is not answering'
+      : data.rebuilding ? 'HQPlayer is taking the queue again'
+      : data.source === 'external'
+        ? (r ? `Play resumes at ${fmtDuration(r.position)} · another app has ${out}`
+          : `Play takes it back · another app has ${out}`)
+      : data.paused_on_device && data.state === 'paused' ? `Paused on ${out}`
+      : r && stoppedBy && data.state === 'stopped'
+        ? `Play resumes at ${fmtDuration(r.position)} · another app stopped ${out}`
+      : r && r.position > 0 && data.state === 'stopped'
+        ? `Play resumes at ${fmtDuration(r.position)}` : '';
+  }
+
+  // An event's words: the toast's title and text (HTML — the output's name
+  // is a device's own, and the reason HQPlayer's log's: escaped), and, for
+  // an event with no attempt of its own, its sheet's two sentences.
+  function outputEventCopy(ev, data) {
+    const out = escapeProfileHtml((data.output && data.output.label) || 'this output');
+    const r = data.resume;
+    const at = r ? `<span class="num">${fmtDuration(r.position)}</span>` : '';
+    if (ev.kind === 'took') {
+      return { kind: 'info', title: `Another app took ${out}`,
+               text: at ? `Play takes it back and resumes at ${at}.` : 'Play takes it back.',
+               why: `Another app that also controls ${out} started playing through it. Sautium sends ${out} nothing while that app plays, and keeps your place in the queue.`,
+               next: `Press Play to take ${out} back: playback resumes${at ? ` at ${at}` : ''} and the other app's playback stops.` };
+    }
+    if (ev.kind === 'stopped') {
+      return { kind: 'error', title: `Another app stopped ${out}`,
+               text: at ? `Play resumes at ${at}.` : 'Play starts it again.' };
+    }
+    if (ev.kind === 'refused') {
+      const reason = String(ev.reason || '');
+      const said = reason ? `${escapeProfileHtml(reason[0].toUpperCase() + reason.slice(1))}. ` : '';
+      return { kind: 'info', title: "HQPlayer refused the other app's track",
+               text: `${said}Play takes ${out} back${at ? ` at ${at}` : ''}.` };
+    }
+    if (ev.kind === 'paused') {
+      return { kind: 'info', title: `Paused on ${out}`,
+               text: 'Not by Sautium: the device itself, or another app that plays to it. Play resumes.',
+               why: `${out} paused this track by itself: its own remote, or another app that plays to it (Roon shows its playback this way on some devices). Sautium did not send this pause.`,
+               next: 'Press Play to resume here.' };
+    }
+    return null;
+  }
+
+  // The Why sheet of an event that has no attempt of its own (a takeover,
+  // a renderer's own pause): the attempt sheet's shell, the node's words.
+  function openOutputEventSheet(c) {
+    const { el, close } = openModal(`
+      <div class="confirm-sheet hqp-diag">
+        <h2 class="confirm-title">${c.title}</h2>
+        <p class="confirm-message">${c.why}</p>
+        <p class="hqp-diag-next">${c.next}</p>
+        <div class="confirm-actions single">
+          <button class="profile-btn primary" type="button" data-close>Close</button>
+        </div>
+      </div>`, () => {}, null);
+    el.querySelector('[data-close]').addEventListener('click', () => close());
+    el.querySelector('[data-close]').focus();
+  }
+
+  const outputEventsMet = new Set();
+  function onOutputEvent(data) {
+    const ev = data && data.output_event;
+    if (!ev || outputEventsMet.has(ev.id)) return;
+    outputEventsMet.add(ev.id);
+    if (data.initial) return;
+    const c = outputEventCopy(ev, data);
+    if (!c) return;
+    // Its attempt's failure is said here: the play route's answer for the
+    // same attempt, should one follow, says nothing more (answerSays)
+    if (ev.attempt != null) saidAttempts.add(ev.attempt);
+    notices.toast({ kind: c.kind, key: 'player.other_app', title: c.title, text: c.text,
+                    action: { label: 'Why?', run: () => (ev.attempt != null
+                      ? openHqpDiagnosis(ev.attempt) : openOutputEventSheet(c)) } });
+  }
+  document.addEventListener('np-update', (e) => onOutputEvent(e.detail));
+  /* ---- Output events: end ---- */
+
   // Playback 503 = the configured output can't take the command (a dozing
   // renderer, a closed HQPlayer, no output at all). Nothing to decide, so
   // no dialog: the toast with the one useful action — the Output picker.
@@ -6366,8 +6446,10 @@
   // `hqplayer.failing` notice speaks then (`failing`, decided by the server,
   // a flag of the run: when the run ends the same attempt comes back
   // without it) — and not for an HQPlayer that did not answer: the play
-  // route's 503 already said so. The status a tab connects with paints the
-  // tag only, never a stale toast.
+  // route's 503 already said so — nor for what another app did (its stop of
+  // a take-back, its own track HQPlayer refused): that event's toast says it
+  // (onOutputEvent). The status a tab connects with paints the tag only,
+  // never a stale toast.
   let lastDiagnosisSeen;
   const metDiagnoses = new Set();
   document.addEventListener('np-update', (e) => {
@@ -6378,7 +6460,8 @@
     lastDiagnosisSeen = id;
     if (!d || metDiagnoses.has(d.id)) return;
     metDiagnoses.add(d.id);
-    if (first || d.failing || d.code === 'unreachable') return;
+    if (first || d.failing || d.code === 'unreachable'
+        || d.code === 'other_stopped' || d.code === 'other_refused') return;
     saidAttempts.add(d.id);
     notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: escapeHtml(d.title),
                     text: escapeHtml(d.next || ''),

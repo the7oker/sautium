@@ -486,7 +486,7 @@ const button = () => {
 };
 const el = () => ({ hidden: false, textContent: '', dataset: {}, setAttribute() {} });
 const npBtn = button(), mpBtn = button();
-const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), hqpNote: el(), timeCurrent: el(), timeTotal: el(),
+const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), timeCurrent: el(), timeTotal: el(),
              radioBtn: el(),
              playPauseIcon: { setAttribute() {}, closest: () => npBtn },
              _paintProgress() {}, tryFetchDetail() {}, lastTrackKey: 'Song|Artist' };
@@ -498,6 +498,8 @@ const ctx = { document: { body: { classList: { add() {}, remove() {} } } },
 vm.createContext(ctx);
 vm.runInContext([
   cut('  function transportBusy(data) {', '\n  const sheet = {'),
+  cut('  function fmtDuration(seconds) {', '\n  function fmtDurationLong(seconds) {'),
+  cut('  function outputLine(data, diag) {', "\n  // An event's words:"),
   'this.__np = { ' + cut('    onStatus(data) {', '\n    // One similar path for owned AND preview') + ' };',
   'this.__mp = { ' + cut('    update(data) {', '\n    setCover(detail) {') + ' };',
   'this.__npWire = function () { ' + cut("      this.playPause.addEventListener('click', e => {",
@@ -548,7 +550,7 @@ def test_the_transport_button_spins_while_a_start_is_in_flight_in_now_playing_an
 # Another app holding the output (`source` external): what plays is none of
 # the queue's, so the transport offers Play — the toggle sends play, and the
 # button of Now Playing and of the mini player draws the play triangle —
-# while its tag says "Play takes it back"
+# while its line says what Play does first, then whose the output is
 
 _TOGGLE = r"""
 const fs = require('node:fs'), vm = require('node:vm');
@@ -590,7 +592,7 @@ const drawn = { np: null, mp: null };
 const icon = key => ({ setAttribute(k, v) { if (k === 'd') drawn[key] = v; },
                        closest: () => ({ classList: { toggle() {} } }) });
 const el = () => ({ hidden: false, textContent: '', dataset: {}, setAttribute() {} });
-const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), hqpNote: el(), timeCurrent: el(), timeTotal: el(),
+const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), timeCurrent: el(), timeTotal: el(),
              radioBtn: el(),
              playPauseIcon: icon('np'), _paintProgress() {}, tryFetchDetail() {}, lastTrackKey: 'Song|Artist' };
 const mp = { el: el(), title: el(), artist: el(), playPauseIcon: icon('mp'), lastSongKey: 'Song|Album' };
@@ -599,6 +601,7 @@ vm.createContext(ctx);
 vm.runInContext([
   cut('  function transportBusy(data) {', '\n  const sheet = {'),
   cut('  function fmtDuration(seconds) {', '\n  function fmtDurationLong(seconds) {'),
+  cut('  function outputLine(data, diag) {', "\n  // An event's words:"),
   'this.__np = { ' + cut('    onStatus(data) {', '\n    // One similar path for owned AND preview') + ' };',
   'this.__mp = { ' + cut('    update(data) {', '\n    setCover(detail) {') + ' };',
 ].join('\n'), ctx);
@@ -607,7 +610,7 @@ for (const status of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   ctx.__np.onStatus.call(np, status);
   ctx.__mp.update.call(mp, status);
   out.push([drawn.np.startsWith('M9 5v20'), drawn.mp.startsWith('M8 5v14'), np.hqpTag.textContent,
-            np.hqpNote.hidden ? null : np.hqpNote.textContent, np.whyBtn.hidden, np.hqpNote.dataset.attempt]);
+            np.whyBtn.hidden, np.whyBtn.dataset.attempt]);
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -632,17 +635,18 @@ def test_the_transport_offers_play_while_another_app_holds_the_output():
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     assert json.loads(proc.stdout) == [
-        [True, True, "Another app is playing through HQPlayer Desktop — Play takes it back", None, True, ""],
-        [True, True, "Another app took HQPlayer Desktop — Play takes it back at 1:23", None, True, ""],
-        [False, False, "", None, True, ""]]
+        [True, True, "Play takes it back · another app has HQPlayer Desktop", True, ""],
+        [True, True, "Play resumes at 1:23 · another app has HQPlayer Desktop", True, ""],
+        [False, False, "", True, ""]]
 
 
-def test_another_apps_refused_track_is_a_row_of_its_own_that_opens_the_why_sheet():
-    """ROON-COEX §6.1 P7/P12 (a): beside the spot the takeover left, HQPlayer
-    stopped on another app's track it refused — the node's sentence for the
-    cause in a row of its own under the meta row (opening the Why sheet), the
-    Why button standing down beside it; a failed play of the node's own
-    keeps its Why button and no row."""
+def test_another_apps_refused_track_is_no_word_beside_our_track_on_now_playing():
+    """ROON-COEX §12.6 (the owner's decision of 2026-11-11, in place of P12
+    (a)'s row): beside the spot the takeover left, HQPlayer stopped on
+    another app's track it refused — its toast says so and opens its sheet;
+    Now Playing keeps the state alone, the action first, and no "Why didn't
+    it play?" beside our track, which did not fail. A failed play of the
+    node's own keeps its Why button."""
     base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
             "position_formatted": "0:00", "length_formatted": "5:00",
             "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
@@ -657,19 +661,16 @@ def test_another_apps_refused_track_is_a_row_of_its_own_that_opens_the_why_sheet
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     rows = json.loads(proc.stdout)
-    assert rows[0][2:5] == ["Stopped at 0:17 — Play resumes here",
-                            "HQPlayer refused the other app's track: no output rate for 96 kHz in its output family",
-                            True]
-    assert str(rows[0][5]) == "7"          # the row opens that attempt's sheet (a DOM dataset holds it as text)
-    assert rows[1][3:] == [None, False, ""]
+    assert rows[0][2:] == ["Play resumes at 0:17", True, ""]
+    assert rows[1][2:4] == ["", False] and str(rows[1][4]) == "8"    # a DOM dataset holds the attempt as text
 
 
 def test_a_take_back_the_other_app_stopped_says_so_at_its_spot():
     """ROON-COEX §6.2 P6: Roon's own Stop, 5 s after its Pause, lands on the
-    node's take-back. Now Playing says another app stopped the output and
-    that Play resumes at the spot, the Why button beside it for the sheet —
-    never the plain "Stopped at … — Play resumes here" of a stop of the
-    node's own; a verdict about another track says nothing of the kind."""
+    node's take-back. Now Playing says that Play resumes at the spot and
+    that another app stopped the output, the Why button beside it for the
+    sheet — never the plain "Play resumes at …" of a stop of the node's
+    own; a verdict about another track says nothing of the kind."""
     base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
             "position_formatted": "0:00", "length_formatted": "5:00",
             "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
@@ -683,8 +684,8 @@ def test_a_take_back_the_other_app_stopped_says_so_at_its_spot():
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     rows = json.loads(proc.stdout)
-    assert rows[0][2:5] == ["Another app stopped HQPlayer Desktop — Play resumes at 0:46", None, False]
-    assert rows[1][2] == rows[2][2] == "Stopped at 0:46 — Play resumes here"
+    assert rows[0][2:4] == ["Play resumes at 0:46 · another app stopped HQPlayer Desktop", False]
+    assert rows[1][2] == rows[2][2] == "Play resumes at 0:46"
 
 
 def test_a_take_back_the_other_app_stopped_at_its_start_says_so_too():
@@ -705,7 +706,7 @@ def test_a_take_back_the_other_app_stopped_at_its_start_says_so_too():
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     rows = json.loads(proc.stdout)
-    assert rows[0][2] == "Another app stopped HQPlayer Desktop — Play resumes at 0:00"
+    assert rows[0][2] == "Play resumes at 0:00 · another app stopped HQPlayer Desktop"
     assert rows[1][2] == ""
 
 

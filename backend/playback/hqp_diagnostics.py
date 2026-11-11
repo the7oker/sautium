@@ -44,6 +44,7 @@ from typing import Mapping, Optional
 import hqp_rate_check as rc
 from hqp_atlas import rate_name
 from hqplayer_client import CommandOutcome, redact_path, redact_uri, uri_to_file_path
+from playback.base import new_id as _new_id
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,6 @@ _lock = threading.Lock()
 _ring: deque = deque(maxlen=RING_SIZE)
 _ledger: "OrderedDict[str, dict]" = OrderedDict()   # handed URI → how and with what outcome
 _by_slot: "OrderedDict[tuple, str]" = OrderedDict()  # slot key → the URI it was last handed as
-_last_id = 0
 _run_key = None
 _follower: Optional["LogFollower"] = None   # the newest advance's log reader
 
@@ -169,13 +169,6 @@ def handed_uri(key: tuple) -> Optional[str]:
 
 
 # -- Attempts ---------------------------------------------------------------------
-
-def _new_id() -> int:
-    global _last_id
-    with _lock:
-        _last_id = max(_last_id + 1, int(time.time() * 1000))
-        return _last_id
-
 
 @dataclass
 class Attempt:

@@ -204,13 +204,20 @@
   // black-holed network can outlive the disconnect grace, and the
   // "disconnected" paint bumps the sequence so the pre-drop status that
   // finally resolves is dropped instead of repainted over it.
+  // The status a connection opens with is flagged by the server (`initial`):
+  // what it says happened before this connection, so it paints state and
+  // toasts nothing (app-shell.js, output events). The flag is the
+  // connection's, not that message's: a newer status that supersedes it
+  // while it waits for the playlist is this page's first view all the same.
   let _sseChain = Promise.resolve();
   let _statusSeq = 0;
+  let _initialOwed = false;
   function handleStatusEvent(data) {
     // A real message means the stream is back — the pending
     // "disconnected" paint is no longer true.
     if (_disconnectPaint) { clearTimeout(_disconnectPaint); _disconnectPaint = null; }
     announceLink(true);
+    if (data.initial) _initialOwed = true;
     const seq = ++_statusSeq;
     _sseChain = _sseChain
       .then(() => processStatusEvent(data, seq))
@@ -289,6 +296,10 @@
     // on the status, so any screen can read it off window.currentStatus or
     // the np-update detail.
     data = withQueueFallback(data);
+    if (_initialOwed || data.initial) {
+      _initialOwed = false;
+      data = { ...data, initial: true };
+    }
     window.currentStatus = data;
     document.dispatchEvent(new CustomEvent('np-update', { detail: data }));
   }
