@@ -13609,6 +13609,27 @@
         <span class="${v.className}">${v.html}</span>
       </div>`;
   }
+  /* The line under "Recognise instruments": what the instrument pass has
+     left on this machine, at its pace (GET /api/settings/library →
+     instruments). Hours below two days, days above. */
+  function _analysisTime(seconds) {
+    if (seconds < 3600) return 'less than an hour';
+    const hours = Math.round(seconds / 3600);
+    if (hours < 48) return `about ${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+    return `about ${Math.round(seconds / 86400)} days`;
+  }
+  function _instrumentsLine(ins) {
+    const tracks = `${fmtNum(ins.tracks)} ${ins.tracks === 1 ? 'track' : 'tracks'}`;
+    if (!ins.tracks) return 'Every track has its instruments.';
+    if (ins.enabled) {
+      return ins.seconds == null
+        ? `${tracks} to go. Measuring this machine's pace: the estimate follows the first tracks.`
+        : `${tracks} to go: ${_analysisTime(ins.seconds)} of analysis on this machine.`;
+    }
+    return ins.seconds == null
+      ? `Off: instruments come only from peers that recognised them.`
+      : `Off: instruments come only from peers. Here, ${tracks} would take ${_analysisTime(ins.seconds)} of analysis.`;
+  }
   function _refreshEnrichRow(root, key, done, total) {
     const row = root.querySelector(`[data-enrich-row="${key}"]`);
     if (!row) return;
@@ -15721,12 +15742,12 @@
     `;
 
     // No ML runtime → no button: the run would be a no-op there (analysis
-    // arrives over P2P) and the backend refuses it. Lite keeps the button —
-    // it is the manual path for the text side when Background enrichment is
-    // switched off — but skips the audio phase, so on lite embeddings and
-    // features stay a P2P gap and the screen must not promise otherwise.
+    // arrives over P2P) and the backend refuses it. Every profile with it
+    // runs the sonic pass, lite included; the instruments are the owner's
+    // switch below the button, with this machine's estimate beside it.
     const analysisAvailable = !!lib.analysis_available;
     const localAnalysis     = !!lib.local_analysis;
+    const instruments       = lib.instruments;
     const enrichActions = !analysisAvailable ? '' : enrichRunning ? `
       <div class="btn-row single">
         <button class="btn btn-danger" data-cancel-enrich ${enrichCancelling ? 'disabled' : ''}>${enrichCancelling ? 'Cancelling…' : 'Cancel analysis'}</button>
@@ -15756,13 +15777,22 @@
       <div class="form-group">
         ${_enrichRow('embeddings', 'Embeddings', lib.embeddings_done, lib.analysable_tracks)}
         ${_enrichRow('features',   'Features',   lib.features_done,   lib.analysable_tracks)}
+        ${_enrichRow('instruments', 'Instruments', lib.instruments_done, lib.analysable_tracks)}
         ${_enrichRow('lastfm',     'Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
         ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.total_tracks)}
         <div class="form-row stacked"><div class="row-stack-sub">${localAnalysis
-          ? 'Analyse library computes embeddings and features on this machine.'
-          : 'This machine does not analyse audio locally, so embeddings and features arrive from peers over P2P.'} Last.fm, lyrics and the text embeddings are handled on their own by Background enrichment (Sync &amp; P2P).</div></div>
+          ? 'Analyse library computes embeddings and features on this machine, and instruments while Recognise instruments is on.'
+          : 'This machine does not analyse audio locally, so embeddings, features and instruments arrive from peers over P2P.'} Last.fm, lyrics and the text embeddings are handled on their own by Background enrichment (Sync &amp; P2P).</div></div>
       </div>
       ${enrichActions}
+      ${!instruments ? '' : `
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">Recognise instruments</span>
+          <button class="toggle ${instruments.enabled ? 'on' : ''}" data-action="toggle-instruments"><span class="knob"></span></button>
+        </div>
+        <div class="form-row stacked"><div class="row-stack-sub" data-instruments-line>${escapeProfileHtml(_instrumentsLine(instruments))}</div></div>
+      </div>`}
     `;
 
     const emptyState = !isEmpty ? '' : !isPathSet ? `
@@ -15853,6 +15883,17 @@
       render();
     }));
     onAction('[data-action="enrich"]',     async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
+    // The switch reads its own state, and its writes are chained, so rapid
+    // on-off-on ends where the finger left it; the line under it follows
+    // with the library event the write sends.
+    onAction('[data-action="toggle-instruments"]', e => {
+      const el = e.currentTarget;
+      const want = !el.classList.contains('on');
+      el.classList.toggle('on', want);
+      return serialized('library.instruments', () => fetch('/api/settings/library/instruments', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: want }) }));
+    });
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
     guide.paint();
@@ -15899,6 +15940,12 @@
       }
       _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.analysable_tracks);
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
+      _refreshEnrichRow(root, 'instruments', lib.instruments_done, lib.analysable_tracks);
+      const instrumentsLine = root.querySelector('[data-instruments-line]');
+      if (instrumentsLine && lib.instruments) {
+        const line = _instrumentsLine(lib.instruments);
+        if (instrumentsLine.textContent !== line) instrumentsLine.textContent = line;
+      }
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
       _askPrunePlan(lib.scan && lib.scan.prune_plan);

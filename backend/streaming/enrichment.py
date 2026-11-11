@@ -3,8 +3,12 @@
 A phantom track has no local file → no audio embedding → it can't be found by
 audio-similarity search and adds nothing to the P2P feature pool. When we stream
 a preview we already hold the whole FLAC in memory; tee it through the SAME
-analysis the scanner runs on owned files (CLAP 512-d embedding + librosa DSP +
-AST/PaSST instruments), keyed to the phantom's track_id.
+analysis the passes run on owned files, keyed to the phantom's track_id, on
+one decode: the sonic part (CLAP 512-d embedding + librosa DSP) for a track
+with no embedding, and the instrument tagger (AST/PaSST) only while the
+owner's switch says so (enrichment.instruments) and the track has no
+instruments — so a stream of a track whose sonic records are held, imported or
+its own, runs the tagger alone.
 
 Provenance: the streamed bytes are content-addressed exactly like a local file
 (analysis_sources row with provider_id = the serving provider's manifest id,
@@ -148,12 +152,12 @@ class PreviewEnricher:
         self._idle_release()
 
     def _idle_release(self) -> None:
-        """Drops the analyzer so its AST+PaSST reference dies, then releases
-        the singleton weights — as a pass of the accelerator: the analysis run
+        """Drops the analyzer's AST+PaSST reference, then releases the
+        singleton weights — as a pass of the accelerator: the analysis run
         tags with the same pair, and a release under its batches would leave
         them without instruments. A busy accelerator puts the release after
         its passes; a job or a newer timer that came meanwhile takes it over."""
-        if self._analyzer is None:      # nothing loaded: a torch-less node's every timer
+        if self._analyzer is None or self._analyzer.ensemble is None:   # no tagger loaded
             return
         from device import call_when_idle, get_device, heavy_pass
         with heavy_pass("the preview's idle release", wait=False) as held:
@@ -163,11 +167,10 @@ class PreviewEnricher:
             with self._lock:
                 if self._inflight or self._idle_timer is not None:
                     return
-                analyzer, self._analyzer = self._analyzer, None
-            if analyzer is not None:
-                from instrument_tagger import release_instrument_tagger
-                release_instrument_tagger(get_device())
-                logger.info("preview enrich idle — instrument models released")
+                self._analyzer.ensemble = None
+            from instrument_tagger import release_instrument_tagger
+            release_instrument_tagger(get_device())
+            logger.info("preview enrich idle — instrument models released")
 
     def stop(self) -> None:
         """The node stops: no job is taken, the queued ones go with the
@@ -187,15 +190,22 @@ class PreviewEnricher:
         from database import SessionLocal
 
         # Idempotent: a previously-enriched (or owned) track already has an
-        # embedding — skip the decode + GPU entirely. A lossy-sourced analysis
+        # embedding, and with the switch off or its instruments held, nothing
+        # to add — skip the decode + GPU entirely. A lossy-sourced analysis
         # is as final as a lossless one: every first-hand stream signs
         # (sign_audio._SIGNABLE_SRC), and re-deriving it from a later
         # lossless fetch would only re-spend the GPU and re-seal rows that
         # peers may already hold.
-        from models import Embedding
+        from models import Embedding, TrackInstruments
+        from routers.settings import instruments_on
         with SessionLocal() as db:
-            if db.query(Embedding.id).filter(Embedding.track_id == track_id).first():
-                return
+            sonic = db.query(Embedding.id).filter(Embedding.track_id == track_id).first() is None
+            tag = instruments_on() and db.query(TrackInstruments.id).filter(
+                TrackInstruments.track_id == track_id).first() is None
+        if not (sonic or tag):
+            return
+        kinds = (("embeddings", "audio_features") if sonic else ()) + (
+            ("track_instruments",) if tag else ())
 
         # Decode the in-memory FLAC to 48k mono and take the SAME middle window
         # the scanner uses, so the embedding is comparable to owned tracks.
@@ -223,69 +233,84 @@ class PreviewEnricher:
             return
 
         # Content-address the STREAMED bytes before any model work: no
-        # fingerprint, or the material already registered here at a higher
-        # rank, means nothing to save — and nothing to spend GPU on. The row
-        # commits on its own; an analysis that then fails leaves a source
-        # nothing links to, which the next registration reuses.
+        # fingerprint, or every kind it would make already held here at a
+        # higher rank, means nothing to save — and nothing to spend GPU on.
+        # Then each kind its material group already holds at a rank no lower
+        # is not made (held_in_group, as the passes skip). The row commits on
+        # its own; an analysis that then fails leaves a source nothing links
+        # to, which the next registration reuses.
         with SessionLocal() as db:
             src_id = provenance.create_stream_source(
-                db, track_id, flac, provider_id, lossless)
+                db, track_id, flac, provider_id, lossless, kinds)
             if src_id is None:
                 db.rollback()
                 return
+            make = {k for k in kinds if not provenance.held_in_group(db, src_id, k)}
             db.commit()
+        if not make:
+            return
 
         from device import heavy_pass
         with heavy_pass("a stream's analysis") as held:
             if not held:        # the node stops
                 return
-            embedder, analyzer = self._models()
+            embedder, analyzer = self._models(sonic="embeddings" in make or "audio_features" in make,
+                                              tag="track_instruments" in make)
             # Full-track methodology, same as owned scans: amplitude block +
             # windowed instruments over the whole streamed audio, bpm/key from
-            # its middle (analyze_from_array slices that itself).
-            feats = analyzer.analyze_from_array(audio, sr=48000)   # dict | None
+            # its middle (_librosa_features slices that itself).
+            feats = (analyzer.features_from_array(audio, sr=48000)
+                     if "audio_features" in make else None)
+            instruments = self._tag(analyzer, track_id, audio) if "track_instruments" in make else None
             # Balanced-grid segments from the full streamed audio; the track
             # vector is their normalized mean.
-            computed = embedder._compute_segments(audio)
+            computed = embedder._compute_segments(audio) if "embeddings" in make else None
 
+        from audio_analysis import save_features, save_instruments
         with SessionLocal() as db:
-            model = embedder._get_or_create_embedding_model(db)
             # Each save decides the overwrite by material rank BEFORE writing
             # (provenance.outranked), so a preview never touches a real-file
             # analysis of any kind (segments included).
-            saved = False
+            saved = []
             if computed is not None:
-                idxs, vecs, portrait = computed
-                saved = embedder._persist_analysis(
-                    db, track_id, model, idxs, vecs, portrait, src_id)
-            if feats:
-                from audio_analysis import save_features, save_instruments
-                save_features(db, track_id, feats, src_id)
-                if feats.get("instruments") is not None:
-                    save_instruments(db, track_id, feats["instruments"], src_id)
+                model = embedder._get_or_create_embedding_model(db)
+                if embedder._persist_analysis(db, track_id, model, *computed, src_id):
+                    saved.append("embedding")
+            if feats and save_features(db, track_id, feats, src_id):
+                saved.append("features")
+            if instruments is not None and save_instruments(db, track_id, instruments, src_id):
+                saved.append("instruments")
             db.commit()
 
-        if saved or feats:
+        if saved:
             import notary
             notary.wake("preview analysis")
         preview_events.ping()   # features committed → open album page re-fetches key·bpm
-        logger.info("preview enriched %s (embedding=%s features=%s)",
-                    track_id, saved, bool(feats))
+        logger.info("preview enriched %s (%s)", track_id, ", ".join(saved) or "nothing saved")
 
-    def _models(self):
-        # Lazy: load the singletons on first preview (CLAP + AST/PaSST). Reused
-        # across previews; the same process-wide models the scanner uses.
+    @staticmethod
+    def _tag(analyzer, track_id: str, audio) -> Optional[dict]:
+        """The tagger's scores, or None when it failed on the stream — its
+        sonic records are saved all the same."""
+        try:
+            return analyzer.ensemble.tag_full_track(audio)
+        except Exception as e:
+            logger.warning("preview instrument tagging failed for %s: %s", track_id, e)
+            return None
+
+    def _models(self, sonic: bool, tag: bool):
+        # Lazy: load the singletons a preview needs on first use (CLAP for
+        # the sonic part, AST/PaSST for the tagger). Reused across previews;
+        # the same process-wide models the passes use.
         if self._embedder is None:
             from embeddings import AudioEmbeddingGenerator
-            emb = AudioEmbeddingGenerator()
-            emb.load_model()
-            self._embedder = emb
+            self._embedder = AudioEmbeddingGenerator()
+        if sonic:
+            self._embedder.load_model()
         if self._analyzer is None:
             from audio_analysis import AudioAnalyzer
-            an = AudioAnalyzer()
-            an.load_model()
-            self._analyzer = an
-        else:
+            self._analyzer = AudioAnalyzer()
+        if tag:
             # The analysis run releases AST+PaSST at its end where the profile
             # wants the memory back: the pair is taken anew, loaded again if so
             from instrument_tagger import get_instrument_tagger

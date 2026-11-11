@@ -1,7 +1,7 @@
 """
-Audio feature extraction using librosa (DSP) + the AST/PaSST ensemble.
+The features (librosa) and the instruments (the AST + PaSST ensemble) of a
+track, from its whole decoded audio.
 
-Extracts (full-track methodology):
 - librosa amplitude block (energy, brightness, dynamic range, ZCR): the
   WHOLE track — the middle 30s systematically overstates energy and
   understates dynamic range on quiet-intro/loud-climax pieces
@@ -19,7 +19,12 @@ CLAP's zero-shot values — moods, the vocal score, danceability — are no
 analysis here since 2026-11-10: the database derives them from the segment
 embeddings a node holds (zero_shot_scores).
 
-Operates on tracks (one analysis per track), using the analysis source media file.
+The two passes over the library are split by what they make (2026-11-11):
+the features go with the segments in the sonic pass
+(embeddings.AudioEmbeddingGenerator.sonic_pass, which calls
+features_from_array on its one decode), the instruments in the instrument
+pass here (AudioAnalyzer.instrument_pass), after it and behind the owner's
+switch (enrichment.instruments). Each decodes a track once.
 """
 
 import logging
@@ -124,40 +129,6 @@ def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
     return features
 
 
-
-# Pending = no features yet, OR unlinked provenance (legacy rows), OR made
-# from material other than the current analysis source holds at its rank
-# (provenance.file_in_group_sql: source moved to a better rip, or a stream
-# preview awaiting its owned upgrade — see embeddings.PENDING_SQL). Material
-# under one grid window is never pending (provenance.MIN_MATERIAL_SECONDS),
-# nor is a file of a copy that is away (album_variants.absent_since).
-# P2P-imported analysis re-enters only when the enrichment.reanalyze_imported
-# toggle says so — see the policy comment in embeddings.py, which owns the
-# flag. A file that returned after a prune is linked back to its analysis
-# (provenance.relink_returned_files) after the import's canon and again before
-# each pass reads this queue, so it is not pending here. This pass registers
-# only at its save, after the compute, so it has no compute to skip by the
-# group (provenance.held_in_group, asked by a pass that registers first).
-PENDING_SQL = f"""
-    SELECT t.id as track_id, mf.id as media_file_id,
-           mf.file_path, mf.bit_depth,
-           mf.sample_rate as mf_sample_rate, mf.is_lossless,
-           mf.duration_seconds,
-           mf.cue_start_seconds, mf.cue_end_seconds
-    FROM media_files mf
-    JOIN tracks t ON t.id = mf.track_id
-    JOIN album_variants av ON av.id = mf.album_variant_id
-    LEFT JOIN audio_features af ON af.track_id = t.id
-    LEFT JOIN analysis_sources asrc ON asrc.id = af.analysis_source_id
-    WHERE mf.is_analysis_source = true
-      AND av.absent_since IS NULL
-      AND (mf.duration_seconds IS NULL
-           OR mf.duration_seconds >= :min_seconds)
-      AND (af.id IS NULL
-           OR af.analysis_source_id IS NULL
-           OR (NOT {provenance.file_in_group_sql()}
-               AND (:reanalyze OR NOT asrc.imported)))
-"""
 
 def save_features(db: Session, track_id, features: Dict[str, Any], src_id: int) -> bool:
     """The track's features record from the copy `src_id` describes — the
@@ -282,82 +253,61 @@ class AudioAnalyzer:
         features.update(amplitude_features(y22_full, self.librosa_sr))
         return features
 
-    # --- Main analysis pipeline ---
+    # --- The two passes' parts ---
 
-    def analyze_from_array(self, audio: np.ndarray, sr: int = DECODE_SR) -> Optional[Dict[str, Any]]:
-        """A track's analysis from its whole decoded audio: the features, and
-        under "instruments" the tagger's scores once load_model() has run."""
+    def features_from_array(self, audio: np.ndarray, sr: int = DECODE_SR) -> Dict[str, Any]:
+        """A track's features from its whole decoded audio — the sonic
+        pass's librosa part, and the stream enricher's."""
         y_librosa = librosa.resample(audio, orig_sr=sr, target_sr=self.librosa_sr)
-        features = self._librosa_features(y_librosa)
-        del y_librosa
+        return self._librosa_features(y_librosa)
 
-        if self.ensemble is not None:
-            y48 = audio if sr == DECODE_SR else librosa.resample(audio, orig_sr=sr,
-                                                                 target_sr=DECODE_SR)
-            features["instruments"] = self.ensemble.tag_full_track(y48)
-        return features
-
-    def _load_and_extract_librosa(self, file_path: str, duration_seconds: float = None,
-                                  cue_start: float = None, cue_end: float = None) -> Optional[Dict]:
-        """Load the whole track + extract librosa features (I/O + CPU).
-        Thread-safe."""
-        try:
-            local_path = settings.translate_to_local_path(file_path)
-            y_48k = load_full_track_48k(local_path, cue_start, cue_end)
-            y_librosa = librosa.resample(y_48k, orig_sr=DECODE_SR, target_sr=self.librosa_sr)
-            librosa_features = self._librosa_features(y_librosa)
-            del y_librosa
-
-            return {"audio_48k": y_48k, "librosa_features": librosa_features}
-        except Exception as e:
-            logger.error(f"Load+librosa failed for {file_path}: {e}")
-            return None
-
-    def _tag(self, track_id, audio_48k: np.ndarray) -> Optional[Dict[str, float]]:
-        """The tagger's scores for one track, or None when it failed on it —
-        the track's features are saved all the same."""
-        try:
-            return self.ensemble.tag_full_track(audio_48k)
-        except Exception as e:
-            logger.warning(f"Instrument tagging failed for {track_id}: {e}")
-            return None
-
-    def analyze_all(
+    def instrument_pass(
         self,
         limit: Optional[int] = None,
         force: bool = False,
         order_by_date: bool = False,
-        librosa_only: bool = False,
         max_duration_seconds: Optional[int] = None,
         track_ids: Optional[list] = None,
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
         cancel_flag=None,
+        on_batch=None,
     ) -> Dict[str, int]:
-        """
-        Batch analyze tracks with pipelined I/O, CPU, and GPU.
+        """The instrument pass over the tracks whose instruments record is
+        pending (analysis_pace.INSTRUMENTS_PENDING_SQL): each track's
+        analysis-source file registered first (the sonic pass before it
+        normally has), skipped when the file's material group already holds
+        instruments at a rank no lower (provenance.held_in_group), then one
+        decode and the tagger, saved by the rank (save_instruments). After
+        each batch: the pace (analysis_pace) and the notary's wake — sign()
+        leaves a record re-saved while it signed unsigned until the next
+        wake.
 
-        Architecture:
-          - ThreadPool (4 workers): load files + librosa features (I/O + CPU)
-          - Main thread: collect batch → the instrument tagger on the
-            accelerator → save both records to DB
+        Architecture: a batch is registered in the main thread, decoded in
+        the profile's prefetch pool, tagged one whole track at a time on the
+        accelerator (its windows are batched inside), saved with a savepoint
+        per track and committed per batch.
 
         Args:
             limit: Max tracks to process.
-            force: Re-analyze even if features exist.
+            force: Re-tag every analysis-source track regardless of state.
             order_by_date: Process newest tracks first.
-            librosa_only: Skip the instrument tagger (faster, DSP only).
             max_duration_seconds: Maximum duration in seconds.
             track_ids: If provided, only process these track IDs.
             worker_id: Worker index (0-based) for parallel processing.
             worker_count: Total number of workers for parallel processing.
+            cancel_flag: Asked before every batch; True ends the pass there.
+            on_batch: Called with (tracks done, tracks queued) after each batch.
 
         Returns:
-            Statistics dict: processed, success (features saved), failed,
-            skipped (a better copy's features stand), instruments (saved).
+            processed, success (saved), failed, skipped (the group holds
+            them, or a better copy's record stands).
         """
         import time
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor
+
+        import analysis_pace
+        import notary
 
         provenance.require_fingerprinter()
         if not force:
@@ -367,76 +317,48 @@ class AudioAnalyzer:
                 provenance.relink_returned_files(track_ids, cancel_check=cancel_flag)
             except Exception as e:
                 logger.error(f"Re-link before the pass failed: {e}", exc_info=True)
-        stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0, "instruments": 0}
+        stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
         batch_size = 16
         from hardware_profile import resolve as _hw
         prefetch_workers = _hw().prefetch_workers
 
         with get_db_context() as db:
-            # Query tracks to analyze
-            if force:
-                query_sql = """
-                    SELECT t.id as track_id, mf.id as media_file_id,
-                           mf.file_path, mf.bit_depth,
-                           mf.sample_rate as mf_sample_rate, mf.is_lossless,
-                           mf.duration_seconds,
-                           mf.cue_start_seconds, mf.cue_end_seconds
-                    FROM media_files mf
-                    JOIN tracks t ON t.id = mf.track_id
-                    JOIN album_variants av ON av.id = mf.album_variant_id
-                    WHERE mf.is_analysis_source = true
-                      AND av.absent_since IS NULL
-                      AND (mf.duration_seconds IS NULL
-                           OR mf.duration_seconds >= :min_seconds)
-                """
-            else:
-                query_sql = PENDING_SQL
-
-            params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS}
-            if not force:
-                from embeddings import _reanalyze_imported
-                params["reanalyze"] = _reanalyze_imported()
-
+            from embeddings import _reanalyze_imported
+            query_sql = (analysis_pace.INSTRUMENTS_ROWS_SQL if force
+                         else analysis_pace.INSTRUMENTS_PENDING_SQL)
+            params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS,
+                      "reanalyze": _reanalyze_imported()}
             if track_ids is not None:
-                query_sql += " AND t.id = ANY(:track_ids)"
+                query_sql += " AND mf.track_id = ANY(:track_ids)"
                 params["track_ids"] = track_ids
 
-            # Gaps first — coverage before recomputation (mirrors embeddings)
-            gap_first = "" if force else "(af.id IS NOT NULL), "
+            # Gaps first — coverage before recomputation (as the sonic pass)
             if order_by_date:
-                query_sql += (f" ORDER BY {gap_first}"
-                              "mf.file_modified_at DESC NULLS LAST")
+                query_sql += " ORDER BY gap DESC, mf.file_modified_at DESC NULLS LAST"
             else:
-                query_sql += f" ORDER BY {gap_first}t.id"
-
+                query_sql += " ORDER BY gap DESC, mf.track_id"
             if limit:
                 query_sql += f" LIMIT {limit}"
 
             rows = db.execute(sa_text(query_sql), params).fetchall()
             total = len(rows)
-
             if total == 0:
-                logger.info("No tracks pending audio analysis")
+                logger.info("No tracks pending the instrument pass")
                 return stats
 
-            if not librosa_only:
-                self.load_model()
+            logger.info(f"Instrument pass: {total} tracks "
+                        f"(prefetch={prefetch_workers}, batch={batch_size})")
 
-            logger.info(f"Analyzing {total} tracks (librosa_only={librosa_only}, "
-                        f"prefetch={prefetch_workers}, batch={batch_size})")
-
-            # Process in batches: prefetch + librosa in threads, the tagger
-            # on the accelerator.
             # Batches are cut by BOTH row count and total audio duration —
             # whole tracks are held decoded in RAM for the batch, and 16
             # Schulze-length pieces at once would be ~14GB.
-            from device import audio_batch_budget_seconds
+            from device import audio_batch_budget_seconds, empty_cache
             batch_budget_seconds = audio_batch_budget_seconds()
             batches = []
             cur, cur_seconds = [], 0.0
             for row in rows:
-                dur = float(row.duration_seconds) if row.duration_seconds else 300.0
+                dur = float(row.duration_seconds) if row.duration_seconds else analysis_pace.UNKNOWN_SECONDS
                 if cur and (len(cur) >= batch_size
                             or cur_seconds + dur > batch_budget_seconds):
                     batches.append(cur)
@@ -446,109 +368,106 @@ class AudioAnalyzer:
             if cur:
                 batches.append(cur)
 
-            pbar = tqdm(total=total, desc="Analyzing audio", unit="track")
-            # Single thread pool for all batches (avoid 2000+ pool creations)
-            _io_pool = ThreadPoolExecutor(max_workers=prefetch_workers)
-
-            for batch_rows in batches:
-                if cancel_flag and cancel_flag():
-                    logger.info("Audio analysis cancelled by user")
-                    break
-
-                if max_duration_seconds:
-                    elapsed = time.time() - start_time
-                    if elapsed >= max_duration_seconds:
-                        logger.info(f"Time limit reached ({elapsed:.1f}s), stopping")
+            pbar = tqdm(total=total, desc="Instrument pass", unit="track")
+            io_pool = ThreadPoolExecutor(max_workers=prefetch_workers)
+            try:
+                for batch_rows in batches:
+                    if cancel_flag and cancel_flag():
+                        logger.info("Instrument pass cancelled")
                         break
+                    if max_duration_seconds:
+                        elapsed = time.time() - start_time
+                        if elapsed >= max_duration_seconds:
+                            logger.info(f"Time limit reached ({elapsed:.1f}s), stopping")
+                            break
 
-                # Phase 1: parallel load + librosa (I/O + CPU)
-                prepared = []  # (row, librosa_features, audio_48k)
-                future_to_row = {
-                    _io_pool.submit(
-                        self._load_and_extract_librosa, row.file_path,
-                        float(row.duration_seconds) if row.duration_seconds else None,
-                        row.cue_start_seconds, row.cue_end_seconds,
-                    ): row
-                    for row in batch_rows
-                }
-                for future in as_completed(future_to_row):
-                    row = future_to_row[future]
-                    stats["processed"] += 1
-                    try:
-                        result = future.result()
-                        if result is not None:
-                            prepared.append((row, result))
-                        else:
+                    batch_began = time.monotonic()
+                    stats["processed"] += len(batch_rows)
+                    todo = self._register_batch(db, batch_rows, force, stats)
+                    # The registrations commit before the long part, so no
+                    # other pass waits on them while the batch is tagged
+                    db.commit()
+                    if todo and self.ensemble is None:
+                        # loaded once there is something to tag: a queue the
+                        # groups hold whole never takes the pair's memory
+                        self.load_model()
+                        batch_began = time.monotonic()
+
+                    decoded = list(io_pool.map(self._decode, [row for row, _ in todo]))
+                    analysed = 0.0
+                    wrote = False
+                    for (row, src_id), audio in zip(todo, decoded):
+                        if audio is None:
                             stats["failed"] += 1
-                    except Exception as e:
-                        stats["failed"] += 1
-                        logger.error(f"Prefetch failed for {row.track_id}: {e}")
+                            continue
+                        outcome = self._tag_track(db, row, src_id, audio)
+                        stats[outcome] += 1
+                        wrote = wrote or outcome == "success"
+                        if outcome != "failed":
+                            analysed += len(audio) / DECODE_SR
+                    del decoded
+                    # Batch GPU work (AST/PaSST) is done — return the
+                    # allocator's free blocks so the footprint tracks the live
+                    # per-batch working set, not the run's cumulative peak (MPS
+                    # unified memory otherwise holds ~28 GB for the whole run).
+                    empty_cache(self.device)
 
-                if not prepared:
+                    analysis_pace.record(db, analysis_pace.INSTRUMENTS,
+                                         time.monotonic() - batch_began, analysed)
+                    db.commit()
+                    if wrote:
+                        notary.wake("instrument pass")
+                    if on_batch:
+                        on_batch(stats["processed"], total)
                     pbar.update(len(batch_rows))
-                    continue
-
-                # Phase 2: the instrument tagger, one whole track at a time
-                # (its windows are batched inside)
-                if not librosa_only and self.ensemble is not None:
-                    tagged = [self._tag(row.track_id, prep["audio_48k"])
-                              for row, prep in prepared]
-                else:
-                    tagged = [None] * len(prepared)
-
-                # Free audio arrays
-                for _, prep in prepared:
-                    del prep["audio_48k"]
-
-                # Batch GPU work (AST/PaSST) is done — return the
-                # allocator's free blocks so the footprint tracks the live
-                # per-batch working set, not the run's cumulative peak (MPS
-                # unified memory otherwise holds ~28 GB for the whole run).
-                from device import empty_cache
-                empty_cache(self.device)
-
-                # Phase 3: save both records (savepoint per track, commit per batch)
-                for (row, prep), instruments in zip(prepared, tagged):
-                    try:
-                        savepoint = db.begin_nested()
-                        try:
-                            # Registered before the results it describes; no
-                            # fingerprint = no address, and the row is not
-                            # saved (the pending predicate retries next run,
-                            # as for a file that fails to decode).
-                            src_id = provenance.get_or_create_local(
-                                db, row.track_id, row.media_file_id,
-                                row.file_path, row.mf_sample_rate,
-                                row.bit_depth, row.is_lossless,
-                                row.duration_seconds,
-                                row.cue_start_seconds, row.cue_end_seconds)
-                            if src_id is None:
-                                raise RuntimeError("no content address (fingerprint)")
-                            # a better copy's records stay, as the embedding
-                            # save keeps a better copy's embedding
-                            saved = save_features(db, row.track_id, prep["librosa_features"],
-                                                  src_id)
-                            if instruments is not None and save_instruments(
-                                    db, row.track_id, instruments, src_id):
-                                stats["instruments"] += 1
-                            savepoint.commit()
-                        except Exception:
-                            savepoint.rollback()
-                            raise
-                        stats["success" if saved else "skipped"] += 1
-
-                    except Exception as e:
-                        stats["failed"] += 1
-                        logger.error(f"Failed to save features for {row.track_id}: {e}")
-
-                db.commit()
-                pbar.update(len(batch_rows))
-
-            _io_pool.shutdown(wait=True, cancel_futures=True)
-            pbar.close()
-            logger.info(
-                f"Audio analysis complete: {stats['success']} success, {stats['failed']} failed"
-            )
-
+            finally:
+                io_pool.shutdown(wait=True, cancel_futures=True)
+                pbar.close()
+            logger.info(f"Instrument pass complete: {stats['success']} success, "
+                        f"{stats['skipped']} skipped, {stats['failed']} failed")
 
         return stats
+
+    def _register_batch(self, db: Session, batch_rows, force: bool, stats: Dict[str, int]) -> list:
+        """The batch's tracks registered before anything is decoded: (row,
+        source id) for each that has instruments to make. No fingerprint =
+        no address, and nothing is saved (the queue asks again next run, as
+        for a file that fails to decode)."""
+        todo = []
+        for row in batch_rows:
+            src_id = provenance.get_or_create_local(
+                db, row.track_id, row.media_file_id, row.file_path,
+                row.sample_rate, row.bit_depth, row.is_lossless,
+                row.duration_seconds, row.cue_start_seconds, row.cue_end_seconds)
+            if src_id is None:
+                stats["failed"] += 1
+                logger.warning(f"Skipping track {row.track_id}: no content address (fingerprint)")
+            elif not force and provenance.held_in_group(db, src_id, "track_instruments"):
+                stats["skipped"] += 1       # the same material, tagged at a rank no lower
+            else:
+                todo.append((row, src_id))
+        return todo
+
+    def _decode(self, row) -> Optional[np.ndarray]:
+        try:
+            return load_full_track_48k(settings.translate_to_local_path(row.file_path),
+                                       row.cue_start_seconds, row.cue_end_seconds)
+        except Exception as e:
+            logger.error(f"Decode failed for {row.file_path}: {e}")
+            return None
+
+    def _tag_track(self, db: Session, row, src_id: int, audio: np.ndarray) -> str:
+        """One decoded track tagged and saved under a savepoint of its own:
+        success, skipped (a better copy's record stands) or failed."""
+        try:
+            instruments = self.ensemble.tag_full_track(audio)
+        except Exception as e:
+            logger.warning(f"Instrument tagging failed for {row.track_id}: {e}")
+            return "failed"
+        try:
+            with db.begin_nested():
+                saved = save_instruments(db, row.track_id, instruments, src_id)
+        except Exception as e:
+            logger.error(f"Failed to save instruments for {row.track_id}: {e}")
+            return "failed"
+        return "success" if saved else "skipped"

@@ -7,7 +7,7 @@ Verified live on the reference rig: profile auto-resolves to `full`
 (cuda 17.2 GB / 16.6 GB RAM / 32 cores), BGE-M3 loads bf16 (−1.1 GB weights,
 whole-GPU −0.7 GB observed), PaSST-net bf16 scores match the fp32 baseline to
 ±0.001 on a reference track, `SAUTIUM_PROFILE=lite` resolves prewarm=none /
-analysis-off / trickle / io=4, Discovery semantic search returns sane results
+analysis-off (lite runs the sonic pass since 2026-11-11, §6.8a) / trickle / io=4, Discovery semantic search returns sane results
 end-to-end, `/api/settings/hardware` serves the UI block.
 **Method:** full code audit (4 parallel deep-dives: ML paths, background processes,
 DB footprint, launcher/install) + live measurements on the reference rig
@@ -229,7 +229,10 @@ zero-shot + AST/PaSST windows + librosa) on a mid 4-core is ~0.5–3 min per
   real caller for `unload()`); on an 8 GB node the ~2–2.5 GB fp32 model set is
   the peak consumer, so it must be transient;
 - keep the full pipeline per track (no partial features rows — they'd complicate
-  `analysis_version` semantics and signing);
+  `analysis_version` semantics and signing). Since 2026-11-11 the instruments
+  are a record of their own and the tagger runs on a stream only while the
+  instruments switch is on (`enrichment.instruments`, §6.8a): a stream of a
+  track whose sonic records are held runs the tagger alone;
 - user-facing off-switch stays (`streaming_preview_analyze`), plus an optional
   "pause on battery" nicety for laptops.
 
@@ -264,10 +267,11 @@ override). Auto-detection via `mem_get_info`/psutil at backend startup:
 - NVIDIA ≥6 GB (5.5 GiB) or Apple Silicon ≥16 GB (15 GiB) → **standard**
 - a machine with less than 12 GB of system RAM drops one tier
 - else → **lite** — a smaller GPU, and every CPU-only machine, whatever its RAM. (`standard`
-  there would switch on bulk local analysis, and CLAP on CPU takes days for
-  a 35k library. This doc used to promise `standard` to ≥16 GB CPU-only
-  boxes; the code never did, and since the phantom layer left the tier
-  matrix — see §6.14 — `lite` costs no data, so the code's rule stands.)
+  there would switch the instrument tagger on by default, which costs ~19 s
+  per minute of audio on a Pi 5 — about five days for 5 000 tracks. This doc
+  used to promise `standard` to ≥16 GB CPU-only boxes; the code never did,
+  and since the phantom layer left the tier matrix — see §6.14 — `lite`
+  costs no data, so the code's rule stands.)
 
 A small resolver (`hardware_profile.py`) expands the profile into effective
 flags consumed at the existing seams (most gates already exist — this is mostly
@@ -276,10 +280,10 @@ wiring, not new machinery):
 | Feature | full | standard | lite |
 |---|---|---|---|
 | Prewarm at boot | all 4 | CLAP + BGE; the translator lazy on the first non-ASCII Sound query | none — everything lazy |
-| Local audio analysis (CLAP+librosa) | on | on, smaller budgets | **off — P2P import only** |
-| Instruments (AST+PaSST) | on | on + call `unload()` after each run | off |
-| `embedding_segments` (local computation) | balanced K | balanced K | none — no local analysis; segments arrive by P2P import instead (§2.4) |
-| Stream enrichment (`streaming_preview_analyze`) | on (GPU, as today) | on (GPU) / trickle (CPU-only) | **trickle** (§2.7) — off only by user switch or below floor |
+| Local audio analysis — the sonic pass (CLAP+librosa) | on | on, smaller budgets | **on** (since 2026-11-11; ~10 s a 4.5-min track on a Pi 5) |
+| Instruments — the instrument pass (AST+PaSST) | the owner's switch, **on** by default | the owner's switch, **on** by default; `unload()` after each run | the owner's switch, **off** by default (since 2026-11-11; it was off with no switch) |
+| `embedding_segments` (local computation) | balanced K | balanced K | balanced K (the sonic pass); a gap a peer holds arrives by P2P import too (§2.4) |
+| Stream enrichment (`streaming_preview_analyze`) | on (GPU, as today) | on (GPU) / trickle (CPU-only) | **trickle** (§2.7) — off only by user switch or below floor; the tagger runs on a stream only while the instruments switch is on |
 | Phantom layer (similars / missing albums) | **owner's switch, on in all profiles** — `discovery.phantom_layer` (off = nothing new minted, existing rows stay); removal only by the explicit Settings action, never by tier | | |
 | Background enrichment | on | on | on — since 2026-09-05 the manual button is analysis-only, so the loop is the sole network path on every profile |
 | Player status loop | owned by the active output backend (§2.6) — no configured output, no loop | | |
@@ -304,12 +308,16 @@ Silicon / a 64-bit Arm Linux board such as a Raspberry Pi 5 (Docker,
 take minutes even on NTFS SSD); no GPU; broadband (first run downloads ~6–8 GB).
 Works: library, player/HQPlayer, metadata enrichment, P2P sync/chat, text +
 semantic search (first semantic query warms the encoder for 1–3 min), similarity
-/radio over imported embeddings; stream enrichment in CPU trickle mode (§2.7 —
-the node still contributes phantom analysis to the network); phantom discovery
+/radio over its own or imported embeddings; the sonic pass over the library
+(since 2026-11-11: CLAP segments and librosa features, about a day per 5 000
+tracks on a Pi 5); stream enrichment in CPU trickle mode (§2.7 — the node
+still contributes phantom analysis to the network); phantom discovery
 (the layer is the owner's switch, `discovery.phantom_layer`, sized by what they
-listen to — never by tier). Not available:
-bulk local library analysis (P2P import instead; an explicit opt-in with a
-bench-estimated ETA can stay for small libraries). MB dump technically possible but infeasible at this disk
+listen to — never by tier). Off by default, the owner's to switch on:
+recognising instruments (Settings › Library › "Recognise instruments",
+`enrichment.instruments`, with this machine's estimate beside it — about five
+days per 5 000 tracks on a Pi 5); off, the instruments arrive from peers.
+MB dump technically possible but infeasible at this disk
 size (+21 GB) — slices via P2P cover canon needs.
 
 **Recommended ("Standard"):** 6+ cores; **16 GB RAM**; 40 GB SSD; NVIDIA ≥6 GB
@@ -361,6 +369,30 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
    encoder's CPU copy) + I/O pool (was hardcoded 16) and analysis prefetch sized
    from profile × cores.
 8. ✅ `release_instrument_tagger()` after bulk runs on standard/lite.
+8a. ✅ Two passes on every profile, the instruments behind a switch
+    (SHIPPED 2026-11-11). The run already decoded every track twice, one
+    decode per stage; the stages are now split by what they make. The
+    **sonic pass** (`embeddings.AudioEmbeddingGenerator.sonic_pass`: the
+    fingerprint, the balanced grid, CLAP and librosa — segments v3 and
+    features v4, the zero-shot scores following by trigger) runs on every
+    profile with the ML stack, lite included (`HardwareProfile.local_analysis`
+    = `ml_available`). The **instrument pass**
+    (`audio_analysis.AudioAnalyzer.instrument_pass`: the AST+PaSST tagger —
+    instruments v1) follows it while `enrichment.instruments` is on — a
+    computed default: on for full and standard, off for lite
+    (`instruments_by_default`). Every track's sonic pass goes before any
+    track's instruments: the instrument pass gives way at its batch seams to
+    files a scan added after the sonic pass read its queue. Both passes
+    register before they compute and skip what the material group holds at a
+    rank no lower. Each records its pace after every batch (`analysis_pace`:
+    wall seconds per minute of audio, per device and core count), and the
+    Library screen shows the instrument pass's pending audio at that pace
+    beside the switch — before the first instrument batch, the sonic pace ×
+    8.5 on a CPU (a Pi 5: the tagger 18.9 s per minute against the sonic
+    pass's ~2.2), a reference pace scaled by the cores on a CPU that ran no
+    sonic batch, and "measuring" on CUDA and MPS, where no ratio was
+    measured. Off computes and signs no instruments and removes none: the
+    node still pulls, serves and carries those other nodes made.
 9. ✅ `python cli.py bench` — tracks/hour + library ETA + slower-than-realtime
    warning. UI surfacing of the number still TODO.
 10. ✅ Trickle mode in `PreviewEnricher`: bounded backlog (1 running +

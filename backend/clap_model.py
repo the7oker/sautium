@@ -1,8 +1,8 @@
 """Process-wide singleton for CLAP (laion/clap-htsat-unfused) processor + model.
 
 CLAP takes ~3s to load and ~1.5GB on GPU. Multiple subsystems need it:
-AudioEmbeddingGenerator (audio embeddings 512d), AudioAnalyzer (zero-shot
-mood/vocal/dance classification), and search/discovery handlers. The model
+AudioEmbeddingGenerator (the sonic pass's 512d segment embeddings, and the
+stream enricher's) and search/discovery handlers. The model
 is loaded once on first acquire and kept resident for the process lifetime
 — enrichment is bursty and the load/unload cycle leaves PyTorch caching
 allocator fragmentation that nvidia-smi reports as growing VRAM.

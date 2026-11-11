@@ -732,7 +732,8 @@ def _flac(path: Path, seed: int, title: str, artist: str = "Ostrava Unit",
 def _analyse(cur, title):
     """The analysis passes' record of a track, as they write it: the source
     registered by its fingerprint (provenance.get_or_create_local), then an
-    embedding and the features linked to it."""
+    embedding with its segment, the features and the instruments linked to
+    it."""
     import provenance
     from database import get_db_context
     cur.execute("""
@@ -747,25 +748,31 @@ def _analyse(cur, title):
     cur.execute("INSERT INTO embedding_models (id, name, dimension) "
                 "VALUES (%s, 'root-1 test model', 512) ON CONFLICT (name) DO NOTHING",
                 (str(uuid.uuid4()),))
+    vector = "[" + ",".join(["0.1"] * 512) + "]"
     cur.execute("INSERT INTO embeddings (vector, model_id, track_id, analysis_source_id) "
                 "SELECT %s::vector, id, %s, %s FROM embedding_models "
-                "WHERE name = 'root-1 test model'",
-                ("[" + ",".join(["0.1"] * 512) + "]", track_id, sid))
+                "WHERE name = 'root-1 test model' RETURNING id",
+                (vector, track_id, sid))
+    cur.execute("INSERT INTO embedding_segments (embedding_id, segment_index, vector) "
+                "VALUES (%s, 0, %s::vector)", (cur.fetchone()[0], vector))
     cur.execute("INSERT INTO audio_features (track_id, analysis_source_id) VALUES (%s, %s)",
                 (track_id, sid))
+    cur.execute("INSERT INTO track_instruments (track_id, instruments, analysis_source_id, "
+                "analysis_version) VALUES (%s, '{}', %s, 2)", (track_id, sid))
     return str(track_id), sid
 
 
 def _queued(cur, title):
     """Is the track in the queue of either analysis pass — their own SQL."""
     from database import get_db_context
-    import audio_analysis
+    import analysis_pace
     import embeddings
     params = {"min_seconds": 10, "reanalyze": False}
     out = {}
     with get_db_context() as db:
-        for name, sql in (("embeddings", embeddings.PENDING_SQL),
-                          ("features", audio_analysis.PENDING_SQL)):
+        for name, sql in (("embeddings", embeddings.PENDING_SQL + " AND q.embedding_pending"),
+                          ("features", embeddings.PENDING_SQL + " AND q.features_pending"),
+                          ("instruments", analysis_pace.INSTRUMENTS_PENDING_SQL)):
             rows = db.execute(text(f"SELECT 1 FROM ({sql}) q JOIN tracks tt "
                                    f"ON tt.id = q.track_id WHERE tt.title = :title"),
                               {**params, "title": title}).fetchall()
@@ -791,8 +798,8 @@ def scanned_library(cur, library, main_module, monkeypatch):
     _scan(main_module, monkeypatch, False)
     analysed = {t: _analyse(cur, t) for t in ("Carrier", "Relay")}
     for t in ("Carrier", "Relay"):
-        assert _queued(cur, t) == {"embeddings": False, "features": False}
-    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True}
+        assert _queued(cur, t) == {"embeddings": False, "features": False, "instruments": False}
+    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True, "instruments": True}
     return analysed
 
 
@@ -838,7 +845,7 @@ def test_a_folder_that_goes_and_comes_back_loses_nothing(
     assert cur.fetchall() == albums               # the albums, their MusicBrainz match
     assert asyncio.run(settings_router._library_state())["away"] == {"albums": 2, "copies": 2}
     for title in ("Carrier", "Relay", "Probe B"):  # nothing reads a copy that is away
-        assert _queued(cur, title) == {"embeddings": False, "features": False}
+        assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
 
     _move(away / "Ostrava Unit", library / "Ostrava Unit")
     _move(away / "Q2 Probe", library / "Q2 Probe")
@@ -849,8 +856,8 @@ def test_a_folder_that_goes_and_comes_back_loses_nothing(
     for title, (track_id, sid) in scanned_library.items():
         [(mf_id, path)] = _sources(cur, track_id)
         assert path.endswith(f"Pulse Archive/0{1 if title == 'Carrier' else 2}.flac")
-        assert _queued(cur, title) == {"embeddings": False, "features": False}
-    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True}
+        assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
+    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True, "instruments": True}
 
 
 def test_a_copy_found_again_elsewhere_is_asked_about_apart_and_its_analysis_follows(
@@ -872,7 +879,7 @@ def test_a_copy_found_again_elsewhere_is_asked_about_apart_and_its_analysis_foll
         assert "Pulse Archive (2019)/" in path
         cur.execute("SELECT is_analysis_source FROM media_files WHERE id = %s", (mf_id,))
         assert cur.fetchone()[0] is True
-        assert _queued(cur, title) == {"embeddings": False, "features": False}
+        assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
     cur.execute("SELECT count(*) FROM album_variants av JOIN albums a ON a.id = av.album_id "
                 "WHERE a.title = 'Pulse Archive'")
     assert cur.fetchone()[0] == 1
@@ -897,7 +904,7 @@ def test_a_copy_away_while_another_is_found_keeps_one_analysis(
     for title, (track_id, _sid) in scanned_library.items():
         [(mf_id, path)] = _sources(cur, track_id)
         assert "Ostrava Unit/Pulse Archive/" in path
-        assert _queued(cur, title) == {"embeddings": False, "features": False}
+        assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
     # a play of the album takes the copy found, not the one away
     from routers import player
     cur.execute("SELECT id FROM albums WHERE title = 'Pulse Archive'")
@@ -914,7 +921,7 @@ def test_a_copy_away_while_another_is_found_keeps_one_analysis(
     for title, (track_id, _sid) in scanned_library.items():
         [(mf_id, path)] = _sources(cur, track_id)
         assert "Disk/Pulse Archive/" in path
-        assert _queued(cur, title) == {"embeddings": False, "features": False}
+        assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
 
 
 def test_an_equal_copy_back_leaves_the_analysis_where_it_is(
@@ -934,7 +941,7 @@ def test_an_equal_copy_back_leaves_the_analysis_where_it_is(
 
     assert state["result"]["back"] == 1
     for title in ("Carrier", "Relay"):
-        assert _queued(cur, title) == {"embeddings": False, "features": False}
+        assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
 
 
 def test_a_track_away_plays_as_a_missing_file_and_a_present_copy_first(
@@ -997,8 +1004,8 @@ def test_another_master_at_the_old_place_is_analysed_as_new(
     state = _scan(main_module, monkeypatch, False)
 
     assert state["result"]["relinked"] == 1
-    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
-    assert _queued(cur, "Relay") == {"embeddings": False, "features": False}
+    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True, "instruments": True}
+    assert _queued(cur, "Relay") == {"embeddings": False, "features": False, "instruments": False}
 
 
 def _away_and_removed(main_module, monkeypatch, library, tmp_path, folder="Ostrava Unit"):
@@ -1049,7 +1056,7 @@ def test_a_returned_file_the_canon_re_keys_gets_its_analysis_back(
     assert state["result"]["relinked"] == 1
     [(mf_id, path)] = _sources(cur, track_id)
     assert path.endswith("Vespertine/01.flac")
-    assert _queued(cur, "Hidden Place") == {"embeddings": False, "features": False}
+    assert _queued(cur, "Hidden Place") == {"embeddings": False, "features": False, "instruments": False}
 
 
 def test_what_a_scan_left_unlinked_the_next_scan_links(
@@ -1066,14 +1073,14 @@ def test_what_a_scan_left_unlinked_the_next_scan_links(
 
     state = _scan(main_module, monkeypatch, False)
     assert "relinked" not in state["result"]
-    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
+    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True, "instruments": True}
 
     monkeypatch.setattr(provenance.shutil, "which", real_which)
     state = _scan(main_module, monkeypatch, False)
 
     assert state["result"]["added"] == 0
     assert state["result"]["relinked"] == 2
-    assert _queued(cur, "Carrier") == {"embeddings": False, "features": False}
+    assert _queued(cur, "Carrier") == {"embeddings": False, "features": False, "instruments": False}
 
 
 def test_another_length_under_the_same_fingerprint_is_not_linked(
@@ -1090,8 +1097,8 @@ def test_another_length_under_the_same_fingerprint_is_not_linked(
     state = _scan(main_module, monkeypatch, False)
 
     assert state["result"]["relinked"] == 1       # Relay; Carrier's length differs
-    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
-    assert _queued(cur, "Relay") == {"embeddings": False, "features": False}
+    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True, "instruments": True}
+    assert _queued(cur, "Relay") == {"embeddings": False, "features": False, "instruments": False}
 
 
 def test_the_import_links_after_its_canon_and_before_the_notary(monkeypatch):
@@ -1121,8 +1128,8 @@ class _QueueRead(Exception):
 
 
 @pytest.mark.parametrize("module, cls, method", [
-    ("embeddings", "AudioEmbeddingGenerator", "generate_embeddings"),
-    ("audio_analysis", "AudioAnalyzer", "analyze_all"),
+    ("embeddings", "AudioEmbeddingGenerator", "sonic_pass"),
+    ("audio_analysis", "AudioAnalyzer", "instrument_pass"),
 ])
 def test_each_analysis_pass_links_returned_files_before_it_reads_its_queue(
         monkeypatch, module, cls, method):
@@ -1198,7 +1205,7 @@ def test_a_file_that_matched_nothing_is_not_fingerprinted_again(
     assert provenance.relink_returned_files() == 0
 
     assert decoded == []
-    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True}
+    assert _queued(cur, "Carrier") == {"embeddings": True, "features": True, "instruments": True}
 
 
 def test_a_new_file_in_a_folder_away_brings_its_copy_back(
@@ -1289,9 +1296,9 @@ def test_a_track_another_album_holds_is_analysed_there_only_while_it_lacks_analy
     _rescan(main_module, monkeypatch)
 
     assert "Compilation/Probes/01.flac" in _elected(cur, "Probe B")
-    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True}
+    assert _queued(cur, "Probe B") == {"embeddings": True, "features": True, "instruments": True}
     assert "Pulse Archive/01.flac" in _elected(cur, "Carrier")
-    assert _queued(cur, "Carrier") == {"embeddings": False, "features": False}
+    assert _queued(cur, "Carrier") == {"embeddings": False, "features": False, "instruments": False}
 
     _move(tmp_path / "card" / "Q2 Probe", library / "Q2 Probe")
     _scan(main_module, monkeypatch, False)

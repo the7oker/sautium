@@ -17,7 +17,9 @@ the box and the spec sheet use: a "16 GB" card is 16 GiB, and printing
 it as 17.2 decimal GB made the owner ask where the number came from.
 - CUDA:  >=7.5 GiB VRAM -> full, >=5.5 GiB -> standard, else lite
 - MPS:   >=23 GiB unified -> full, >=15 GiB -> standard, else lite
-- CPU-only -> lite (bulk analysis at 30-100x GPU time is not a product)
+- CPU-only -> lite (a CPU runs the sonic pass at a few seconds per minute of
+  audio, and the instrument tagger at about nine times that: lite keeps
+  the tagger behind the owner's switch, off by default)
 A machine with <12 GB system RAM is demoted one tier: on CUDA the
 whole-track audio buffers live in system RAM, and the model set +
 Postgres + OS don't fit a full/standard working set below that.
@@ -73,8 +75,20 @@ class HardwareProfile:
 
     @property
     def local_analysis(self) -> bool:
-        """Bulk library analysis (embeddings + features) is a product on
-        this machine. False on lite — analysis arrives via P2P import."""
+        """The sonic pass runs here — the segment grid, CLAP and librosa,
+        the cheap part of the analysis — on every profile with the ML
+        stack, lite included (a Pi analyses a 5 000-track library in about
+        a day). The instrument pass follows the owner's switch
+        (routers.settings.instruments_on)."""
+        return self.ml_available
+
+    @property
+    def instruments_by_default(self) -> bool:
+        """The switch's value while the owner never set it
+        (enrichment.instruments): on for full and standard, off for lite,
+        where the tagger costs ~19 s per minute of audio on a Pi — five days
+        for 5 000 tracks. A profile decides what the node computes, never
+        what it keeps: off, nothing stored is removed."""
         return self.ml_available and self.name != "lite"
 
     @property
@@ -142,6 +156,7 @@ class HardwareProfile:
             "effective": {
                 "prewarm": list(self.prewarm_keys),
                 "local_analysis": self.local_analysis,
+                "instruments_by_default": self.instruments_by_default,
                 "stream_enrich_mode": self.stream_enrich_mode,
                 "io_workers": self.io_workers,
             },

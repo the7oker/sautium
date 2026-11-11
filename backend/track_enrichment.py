@@ -2,9 +2,10 @@
 Comprehensive track enrichment pipeline.
 
 Orchestrates all data aggregation steps in the correct order:
-1. Audio Embedding (CLAP) - base audio feature
+1. The sonic pass - CLAP segments + librosa features, one decode
 2. Last.fm Artist Info - artist metadata
-3. Audio Analysis - DSP features + the instrument tagger
+3. The instrument pass - the AST+PaSST tagger, one decode, while the
+   owner's switch is on (enrichment.instruments)
 
 Each step is conditional - only runs if data is missing.
 Supports filters, limits, time constraints, and graceful error handling.
@@ -30,7 +31,7 @@ from sql_queries import ARTIST_ENGAGED
 from models import (
     Track, MediaFile, Album, Artist, TrackArtist,
     AudioFeature, Embedding, SimilarArtist, ArtistBio,
-    ExternalMetadata,
+    ExternalMetadata, TrackInstruments,
 )
 # embeddings / audio_analysis are imported where they are constructed, not
 # here: both pull torch + librosa at module scope, which a torch-less node
@@ -44,12 +45,12 @@ logger = logging.getLogger(__name__)
 
 def run_parallel_enrichment(
     limit: Optional[int] = None,
-    skip_embeddings: bool = False,
+    skip_sonic: bool = False,
     skip_lastfm: bool = False,
-    skip_audio_analysis: bool = False,
+    skip_instruments: bool = False,
     skip_lyrics: bool = False,
-    force_embeddings: bool = False,
-    force_audio_analysis: bool = False,
+    force_sonic: bool = False,
+    force_instruments: bool = False,
     cancel_flag: Optional[Callable] = None,
     progress_cb: Optional[Callable] = None,
     track_ids: Optional[List] = None,
@@ -61,7 +62,9 @@ def run_parallel_enrichment(
     """Run enrichment with parallel pipelines.
 
     Phase 1 (parallel via ThreadPoolExecutor):
-      A) GPU: audio embeddings (batched) → audio features (CLAP classify)
+      A) GPU: the sonic pass (segments + features), then the instrument
+         pass while the owner's switch is on — every track's sonic pass
+         before any track's instruments
       B) Network: Last.fm artist bios (engagement-gated)
       C) Network: Lyrics fetching (lrclib/genius)
     Phase 2 (sequential, GPU):
@@ -78,29 +81,35 @@ def run_parallel_enrichment(
     if cancel_flag is None:
         cancel_flag = lambda: False
 
+    # The instrument pass is the owner's switch (enrichment.instruments):
+    # off, the run makes none and removes none
+    if not skip_instruments:
+        from routers.settings import instruments_on
+        skip_instruments = not instruments_on()
+
     # Preflight: audio embeddings + analysis decode via the `ffmpeg` binary
     # (audio_analysis.load_full_track_48k). Missing ffmpeg fails every track
     # silently ("0 / N"); surface it once and skip the audio pipeline instead
     # of logging N identical per-file errors. Metadata enrichment still runs.
     import shutil
-    if (not skip_embeddings or not skip_audio_analysis) and not shutil.which("ffmpeg"):
+    if (not skip_sonic or not skip_instruments) and not shutil.which("ffmpeg"):
         logger.error(
             "ffmpeg not found on PATH — audio embeddings and analysis disabled "
             "for this run. Install ffmpeg (macOS: brew install ffmpeg) and re-run."
         )
-        skip_embeddings = True
-        skip_audio_analysis = True
+        skip_sonic = True
+        skip_instruments = True
 
     # Same shape for the node that has no ML runtime at all: state it once and
     # skip, rather than let every model step raise its own ImportError
     # traceback. The metadata pipelines below are the whole run there.
     from hardware_profile import resolve as _hw
     ml_available = _hw().ml_available
-    if not ml_available and not (skip_embeddings and skip_audio_analysis):
+    if not ml_available and not (skip_sonic and skip_instruments):
         logger.info("torch-less node — audio embeddings and analysis skipped; "
                     "they arrive via P2P import")
-        skip_embeddings = True
-        skip_audio_analysis = True
+        skip_sonic = True
+        skip_instruments = True
 
     _skip_lastfm = skip_lastfm or not settings.lastfm_api_key
 
@@ -154,11 +163,11 @@ def run_parallel_enrichment(
     def _halted():
         return bool(left_the_lane) or cancel_flag()
 
-    # --- Pipeline A: GPU (audio embeddings + audio features) ---
+    # --- Pipeline A: GPU (the sonic pass, then the instrument pass) ---
     def _run_gpu_pipeline():
-        logger.info("Pipeline A (GPU): starting audio embeddings + features")
+        logger.info("Pipeline A (GPU): starting the sonic and instrument passes")
         combined = {}
-        if not (skip_embeddings and skip_audio_analysis):
+        if not (skip_sonic and skip_instruments):
             from device import get_device, heavy_pass
             with heavy_pass("the analysis run's audio half") as held:
                 if not held:        # the node stops
@@ -178,32 +187,67 @@ def run_parallel_enrichment(
         _update_progress()
         return combined
 
+    def _counted(combined, part, stats):
+        for key, value in stats.items():
+            combined.setdefault(part, {})[key] = combined.get(part, {}).get(key, 0) + value
+
+    def _progress(what):
+        def on_batch(done, total):
+            pipeline_progress["gpu"] = f"{what}: {done} of {total} tracks"
+            _update_progress()
+        return on_batch
+
+    # The order rule: the sonic pass of any track goes before the
+    # instruments of any track. The instrument pass asks at each of its
+    # batch seams whether a file newer than the sonic pass's queue waits
+    # for it (a scan added files) and gives way, as the run gives way to a
+    # stream; then the sonic pass takes the new files and the instruments
+    # go on. A forced or limited run reads each queue once.
+    can_give_way = not (skip_sonic or force_sonic or force_instruments or limit)
+
     def _audio_half(combined):
-        if not skip_embeddings:
-            from embeddings import AudioEmbeddingGenerator
-            pipeline_progress["gpu"] = "GPU: embeddings..."
-            _update_progress()
-            emb_stats = AudioEmbeddingGenerator().generate_embeddings(
-                **gpu_kwargs, cancel_flag=_seam, force=force_embeddings
-            )
-            combined["embeddings"] = emb_stats
-            pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
-            _update_progress()
+        while True:
+            seen = None
+            if not skip_sonic:
+                from embeddings import AudioEmbeddingGenerator, newest_file_id
+                with get_db_context() as db:
+                    seen = newest_file_id(db)
+                pipeline_progress["gpu"] = "Sonic analysis..."
+                _update_progress()
+                _counted(combined, "sonic", AudioEmbeddingGenerator().sonic_pass(
+                    **gpu_kwargs, cancel_flag=_seam, force=force_sonic,
+                    on_batch=_progress("Sonic analysis")))
+                pipeline_progress["gpu"] = f"GPU: {combined['sonic'].get('success', 0)} sonic"
+                _update_progress()
 
-        if _halted():
-            return
+            if _halted() or skip_instruments:
+                return
 
-        if not skip_audio_analysis:
+            gave_way = []
+
+            def _instrument_seam():
+                if _seam():
+                    return True
+                if can_give_way:
+                    from embeddings import sonic_work_since
+                    with get_db_context() as db:
+                        if sonic_work_since(db, seen):
+                            gave_way.append(True)
+                            return True
+                return False
+
             from audio_analysis import AudioAnalyzer
-            pipeline_progress["gpu"] = "GPU: audio analysis..."
+            pipeline_progress["gpu"] = "Recognising instruments..."
             _update_progress()
-            af_stats = AudioAnalyzer().analyze_all(
-                force=force_audio_analysis, cancel_flag=_seam,
-                **gpu_kwargs
-            )
-            combined["audio_features"] = af_stats
-            pipeline_progress["gpu"] = f"GPU: {af_stats.get('success', 0)} features"
+            _counted(combined, "instruments", AudioAnalyzer().instrument_pass(
+                force=force_instruments, cancel_flag=_instrument_seam,
+                on_batch=_progress("Instruments"), **gpu_kwargs))
+            pipeline_progress["gpu"] = (f"GPU: {combined.get('sonic', {}).get('success', 0)} sonic, "
+                                        f"{combined['instruments'].get('success', 0)} instruments")
             _update_progress()
+            if not gave_way or _halted():
+                return
+            logger.info("The instrument pass gives way: new files wait for the sonic pass")
 
     # --- Pipeline B: Last.fm enrichment (by artist + album, not per-track) ---
     def _run_lastfm_pipeline():
@@ -293,7 +337,7 @@ def run_parallel_enrichment(
     if not skip_lyrics:
         network_pipelines["lyrics"] = _run_lyrics_pipeline
     phase1 = [name for name, on in (
-        ("GPU", not (skip_embeddings and skip_audio_analysis)),
+        ("GPU", not (skip_sonic and skip_instruments)),
         ("Last.fm", "lastfm" in network_pipelines),
         ("Lyrics", "lyrics" in network_pipelines),
     ) if on]
@@ -316,15 +360,8 @@ def run_parallel_enrichment(
         except Exception as e:
             logger.error(f"Pipeline gpu failed: {e}", exc_info=True)
             result_parts["gpu"] = {"error": str(e)}
-        finally:
-            # The audio pipeline's commits are signable state — wake the
-            # sealing owner the moment they land, BEFORE the slow lyrics tail
-            # (minutes) and independent of any later manual cancel of it.
-            # _run_gpu_pipeline returns what it committed even on
-            # cancel/error, so a mid-run stop still seals its completed tracks.
-            if not (skip_embeddings and skip_audio_analysis):
-                import notary
-                notary.wake("analysis run")
+        # Each pass wakes the sealing owner after every batch it commits,
+        # so a mid-run stop has sealed what it saved.
 
         for future in as_completed(futures):
             name = futures[future]
@@ -550,19 +587,23 @@ class TrackEnrichmentPipeline:
 
     def __init__(
         self,
-        skip_embeddings: bool = False,
+        skip_sonic: bool = False,
         skip_lastfm: bool = False,
-        skip_audio_analysis: bool = False,
-        force_embeddings: bool = False,
-        force_audio_analysis: bool = False,
+        skip_instruments: bool = False,
+        force_sonic: bool = False,
+        force_instruments: bool = False,
     ):
-        self.skip_embeddings = skip_embeddings
+        self.skip_sonic = skip_sonic
         self.skip_lastfm = skip_lastfm
-        self.skip_audio_analysis = skip_audio_analysis
-        self.force_embeddings = force_embeddings
-        self.force_audio_analysis = force_audio_analysis
+        # the instrument pass is the owner's switch (enrichment.instruments)
+        if not skip_instruments:
+            from routers.settings import instruments_on
+            skip_instruments = not instruments_on()
+        self.skip_instruments = skip_instruments
+        self.force_sonic = force_sonic
+        self.force_instruments = force_instruments
 
-        # Lazy-loaded components: the run's own audio stages (each loads its
+        # Lazy-loaded components: the run's own two passes (each loads its
         # models on first use) and Last.fm
         self._audio_embedding_generator = None
         self._audio_analyzer = None
@@ -582,7 +623,7 @@ class TrackEnrichmentPipeline:
 
     @staticmethod
     def _stage_result(stats: Dict[str, int]) -> str:
-        """A stage's statistics for one track as the pipeline's step result:
+        """A pass's statistics for one track as the pipeline's step result:
         nothing pending (no file to analyse, a better copy's records stand)
         is a skip."""
         if stats.get("success"):
@@ -600,22 +641,14 @@ class TrackEnrichmentPipeline:
         """
         Check what data is missing for a track.
 
-        Returns dict with keys: needs_audio_embedding, needs_artist_info,
-        needs_audio_features
+        Returns dict with keys: needs_sonic, needs_artist_info,
+        needs_instruments. Each pass's own queue decides what of it the
+        track lacks.
         """
-        status = {}
-
-        # Audio embedding: check via relationship
-        status['needs_audio_embedding'] = (
-            not self.skip_embeddings and
-            (self.force_embeddings or track.embedding is None)
-        )
-
-        # Audio features: check via relationship
-        status['needs_audio_features'] = (
-            not self.skip_audio_analysis and
-            (self.force_audio_analysis or track.audio_feature is None)
-        )
+        status = {
+            'needs_sonic': not self.skip_sonic,
+            'needs_instruments': not self.skip_instruments,
+        }
 
         # Last.fm data (only check if not skipping)
         if not self.skip_lastfm:
@@ -660,30 +693,31 @@ class TrackEnrichmentPipeline:
         """
         Enrich a single track with missing data.
 
-        The audio steps are the run's own stages scoped to this track
-        (embeddings.generate_embeddings, audio_analysis.AudioAnalyzer.
-        analyze_all): the elected analysis-source file, its decode, its
-        registration, the rank every save replaces by and both records'
-        saves are theirs, so this per-track path writes exactly what the bulk
-        run writes.
+        The audio steps are the run's own passes scoped to this track
+        (embeddings.AudioEmbeddingGenerator.sonic_pass, then
+        audio_analysis.AudioAnalyzer.instrument_pass — the sonic pass
+        before the instruments, as in the run): the elected analysis-source
+        file, its decode, its registration, the rank every save replaces by,
+        the records' saves and the notary's wake are theirs, so this
+        per-track path writes exactly what the bulk run writes.
 
         Returns dict with step results (success/failed/skipped).
         """
         results = {}
 
-        # Step 1: Audio Embedding
-        if status['needs_audio_embedding']:
+        # Step 1: the sonic pass
+        if status['needs_sonic']:
             if progress_callback:
-                progress_callback("Audio embedding")
+                progress_callback("Sonic analysis")
             try:
-                results['audio_embedding'] = self._stage_result(
-                    self._get_audio_embedding_generator().generate_embeddings(
-                        track_ids=[track.id], force=self.force_embeddings))
+                results['sonic'] = self._stage_result(
+                    self._get_audio_embedding_generator().sonic_pass(
+                        track_ids=[track.id], force=self.force_sonic))
             except Exception as e:
-                logger.error(f"Audio embedding failed for track {track.id}: {e}")
-                results['audio_embedding'] = 'failed'
+                logger.error(f"Sonic pass failed for track {track.id}: {e}")
+                results['sonic'] = 'failed'
         else:
-            results['audio_embedding'] = 'skipped'
+            results['sonic'] = 'skipped'
 
         # Step 2-4: Last.fm enrichment (if not skipping)
         if not self.skip_lastfm:
@@ -706,19 +740,19 @@ class TrackEnrichmentPipeline:
             else:
                 results['lastfm_artist'] = 'skipped'
 
-        # Step 5: Audio Analysis — the features and the instruments
-        if status['needs_audio_features']:
+        # Step 5: the instrument pass
+        if status['needs_instruments']:
             if progress_callback:
-                progress_callback("Audio analysis")
+                progress_callback("Instruments")
             try:
-                results['audio_features'] = self._stage_result(
-                    self._get_audio_analyzer().analyze_all(
-                        track_ids=[track.id], force=self.force_audio_analysis))
+                results['instruments'] = self._stage_result(
+                    self._get_audio_analyzer().instrument_pass(
+                        track_ids=[track.id], force=self.force_instruments))
             except Exception as e:
-                logger.error(f"Audio analysis failed for track {track.id}: {e}")
-                results['audio_features'] = 'failed'
+                logger.error(f"Instrument pass failed for track {track.id}: {e}")
+                results['instruments'] = 'failed'
         else:
-            results['audio_features'] = 'skipped'
+            results['instruments'] = 'skipped'
 
         return results
 
@@ -732,31 +766,28 @@ class TrackEnrichmentPipeline:
         """
         conditions = []
 
-        # Audio embedding: no Embedding row for this track
-        if not self.skip_embeddings:
-            if self.force_embeddings:
-                conditions.append(True)
+        # The passes: an owned track with an analysis-source file (the
+        # passes' own queues read nothing else) lacking a record one of them
+        # makes — driven from the file, never from every track: the phantom
+        # layer is millions of them
+        analysed = exists(select(MediaFile.id).where(
+            MediaFile.track_id == Track.id, MediaFile.is_analysis_source.is_(True)))
+        lacks = []
+        if not self.skip_sonic:
+            if self.force_sonic:
+                lacks.append(True)
             else:
-                conditions.append(
-                    ~exists(
-                        select(Embedding.id).where(
-                            Embedding.track_id == Track.id
-                        )
-                    )
-                )
-
-        # Audio features: no AudioFeature row for this track
-        if not self.skip_audio_analysis:
-            if self.force_audio_analysis:
-                conditions.append(True)
+                lacks.append(~exists(select(Embedding.id).where(Embedding.track_id == Track.id)))
+                lacks.append(~exists(select(AudioFeature.id).where(AudioFeature.track_id == Track.id)))
+        if not self.skip_instruments:
+            if self.force_instruments:
+                lacks.append(True)
             else:
-                conditions.append(
-                    ~exists(
-                        select(AudioFeature.id).where(
-                            AudioFeature.track_id == Track.id
-                        )
-                    )
-                )
+                lacks.append(~exists(select(TrackInstruments.id).where(
+                    TrackInstruments.track_id == Track.id)))
+        if lacks:
+            conditions.append(analysed if any(c is True for c in lacks)
+                              else and_(analysed, or_(*lacks)))
 
         # Last.fm enrichment: check both normalized tables AND ExternalMetadata
         if not self.skip_lastfm:
@@ -815,17 +846,17 @@ class TrackEnrichmentPipeline:
         Returns:
             Statistics dict with counts per step
         """
-        if not (self.skip_embeddings and self.skip_audio_analysis):
+        if not (self.skip_sonic and self.skip_instruments):
             import provenance
             provenance.require_fingerprinter()
         stats = {
             'processed': 0,
-            'audio_embedding_success': 0,
-            'audio_embedding_failed': 0,
+            'sonic_success': 0,
+            'sonic_failed': 0,
             'lastfm_artist_success': 0,
             'lastfm_album_success': 0,
-            'audio_features_success': 0,
-            'audio_features_failed': 0,
+            'instruments_success': 0,
+            'instruments_failed': 0,
         }
 
         start_time = time.time()
@@ -903,20 +934,20 @@ class TrackEnrichmentPipeline:
                 status = self._check_track_status(db, track)
                 results = self._enrich_track(db, track, status)
 
-                if results.get('audio_embedding') == 'success':
-                    stats['audio_embedding_success'] += 1
-                elif results.get('audio_embedding') == 'failed':
-                    stats['audio_embedding_failed'] += 1
+                if results.get('sonic') == 'success':
+                    stats['sonic_success'] += 1
+                elif results.get('sonic') == 'failed':
+                    stats['sonic_failed'] += 1
 
                 if results.get('lastfm_artist') == 'success':
                     stats['lastfm_artist_success'] += 1
                 if results.get('lastfm_album') == 'success':
                     stats['lastfm_album_success'] += 1
 
-                if results.get('audio_features') == 'success':
-                    stats['audio_features_success'] += 1
-                elif results.get('audio_features') == 'failed':
-                    stats['audio_features_failed'] += 1
+                if results.get('instruments') == 'success':
+                    stats['instruments_success'] += 1
+                elif results.get('instruments') == 'failed':
+                    stats['instruments_failed'] += 1
 
             logger.info(f"Enrichment complete: {stats['processed']} tracks processed")
 

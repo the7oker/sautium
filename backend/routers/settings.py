@@ -291,6 +291,14 @@ _DEFAULTS: Dict[str, Any] = {
     # poison detector). Read by embeddings.py / audio_analysis.py pending
     # queries.
     "enrichment.reanalyze_imported": False,
+    # "Recognise instruments": the instrument pass (the AST+PaSST tagger,
+    # after the sonic pass) and the tagging of streams. None = never set,
+    # so the profile answers (HardwareProfile.instruments_by_default: on for
+    # full and standard, off for lite, where the tagger costs ~19 s per
+    # minute of audio on a Pi) — read through instruments_on(). Off computes
+    # and signs none and removes nothing: the node still pulls, serves and
+    # carries the instruments other nodes made.
+    "enrichment.instruments":    None,
     # The phantom layer — albums and tracks the owner does not have (MB
     # discographies, Last.fm neighbours), browsable and streamable next to
     # the library. Its size is the OWNER's call, never the hardware
@@ -369,6 +377,18 @@ def _read(key: str) -> Any:
     if row is None:
         return _DEFAULTS.get(key)
     return row.get("value")
+
+
+def instruments_on() -> bool:
+    """Whether this node recognises instruments: the owner's switch, or the
+    profile's value while it was never set — and never on a node without
+    the ML stack."""
+    import hardware_profile
+    profile = hardware_profile.resolve()
+    value = _read("enrichment.instruments")
+    if value is None:
+        return profile.instruments_by_default
+    return profile.ml_available and bool(value)
 
 
 def _write(key: str, value: Any) -> None:
@@ -623,6 +643,7 @@ async def _library_state() -> Dict[str, Any]:
         "analysable_tracks":  stats.get("analysable_tracks", 0),
         "embeddings_done":    stats.get("tracks_with_embeddings", 0),
         "features_done":      stats.get("tracks_with_features", 0),
+        "instruments_done":   stats.get("tracks_with_instruments", 0),
         "lyrics_done":        stats.get("tracks_with_lyrics", 0),
         "lastfm_done":        stats.get("artists_with_lastfm", 0),
         "lastfm_total":       stats.get("library_artists", 0),
@@ -633,8 +654,20 @@ async def _library_state() -> Dict[str, Any]:
         "scan":               scan,
         "enrich":             enrich,
         "away":               {"albums": int(away["albums"]), "copies": int(away["copies"])},
+        "instruments":        _instruments_state() if stats.get("analysis_available") else None,
         "hqp_library":        _hqp_library_state(),
     }
+
+
+def _instruments_state() -> Dict[str, Any]:
+    """The "Recognise instruments" row: the switch and what the instrument
+    pass has left here at this machine's pace (analysis_pace.estimate) —
+    read with every library event, so the estimate moves as the pass's
+    batches land."""
+    import analysis_pace
+    with get_db_context() as db:
+        left = analysis_pace.estimate(db, reanalyze=bool(_read("enrichment.reanalyze_imported")))
+    return {"enabled": instruments_on(), **left}
 
 
 def _hqp_endpoint() -> tuple:
@@ -1041,11 +1074,13 @@ _SIGNIN_NOTICES = {"claude_code.signed_out", "codex.signed_out"}
 
 
 def _analysis_pending() -> bool:
-    """Any owned track the audio passes would still analyse: an analysis-
+    """Any owned track the sonic pass would still analyse: an analysis-
     source file at or above the material floor (the queues' own predicate
     — under one grid window nothing is analysed, provenance.
     MIN_MATERIAL_SECONDS — and not of a copy that is away) without
-    embeddings or without features. EXISTS,
+    embeddings or without features. The instruments are not the trail's:
+    their pass is the owner's switch, and their progress shows in their own
+    row of the Library screen. EXISTS,
     not a count — the trail is a boolean, so the query stops at the
     first hit. Driven from media_files, never from tracks: the phantom
     layer makes `tracks` three million rows, and the owned-first shape
@@ -1100,11 +1135,10 @@ def _guidance_state() -> Dict[str, Any]:
     if _read("output.type") is None and not _read("guidance.audio_output_seen"):
         tasks.append("audio_output")
 
-    # `local_analysis`, not `ml_available`. A lite node with torch keeps the
-    # button — the run still does the text encoders there — but SKIPS the
-    # audio phase: its embeddings and features arrive over P2P import. The
-    # gap this trail points at never closes locally on lite, so a mark there
-    # would nag forever. A node with no ML runtime has no button at all.
+    # `local_analysis`: the sonic pass runs on every profile with the ML
+    # stack, lite included since 2026-11-11, so the gap this trail points at
+    # closes locally wherever the button exists. A node with no ML runtime
+    # has no button at all.
     if not _scan_state.get("running") and not _enrich_state.get("running"):
         import hardware_profile
         if (hardware_profile.resolve().local_analysis
@@ -2611,6 +2645,23 @@ async def answer_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
 async def cancel_scan() -> Dict[str, Any]:
     from main import scan_cancel
     return await scan_cancel()
+
+
+class InstrumentsReq(BaseModel):
+    enabled: bool
+
+
+@router.put("/library/instruments")
+async def set_instruments(req: InstrumentsReq) -> Dict[str, Any]:
+    """The owner's "Recognise instruments" switch. On, the analysis run's
+    instrument pass follows its sonic pass and streams are tagged as they
+    are analysed; off, neither, and nothing stored is removed."""
+    import hardware_profile
+    if not hardware_profile.resolve().ml_available:
+        raise HTTPException(status_code=400, detail="No ML runtime on this node")
+    _write("enrichment.instruments", req.enabled)
+    notify_library_subscribers()
+    return {"success": True, "enabled": instruments_on()}
 
 
 @router.post("/library/enrich")

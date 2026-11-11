@@ -150,23 +150,23 @@ def scan(limit, no_skip, path, prune, yes):
             logger.exception("Prune failed")
 
 
-@cli.command("generate-embeddings")
+@cli.command("sonic-pass")
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process (for testing)")
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
 @click.option("--worker-id", type=int, default=None, help="Worker index (0-based) for parallel processing")
 @click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing")
-@click.option("--force", is_flag=True, help="Re-embed every analysis-source track regardless of state")
+@click.option("--force", is_flag=True, help="Re-analyse every analysis-source track regardless of state")
 @track_filter_options
-def generate_embeddings(limit, batch_size, newest_first, max_duration,
-                        worker_id, worker_count, force,
-                        filter_artist, filter_album, filter_genre, filter_path,
-                        filter_tag, filter_track_number, filter_lossless):
-    """Generate audio embeddings for tracks using CLAP model."""
-    from embeddings import generate_embeddings as do_generate
+def sonic_pass(limit, batch_size, newest_first, max_duration,
+               worker_id, worker_count, force,
+               filter_artist, filter_album, filter_genre, filter_path,
+               filter_tag, filter_track_number, filter_lossless):
+    """The sonic pass: CLAP segments and librosa features, one decode a track."""
+    from embeddings import sonic_pass as do_generate
 
-    click.echo("🎵 Starting audio embedding generation...")
+    click.echo("🎵 Starting the sonic pass...")
     click.echo(f"🖥️  Model: {settings.embedding_model}")
     click.echo(f"📦 Batch size: {batch_size or settings.embedding_batch_size}")
 
@@ -206,10 +206,11 @@ def generate_embeddings(limit, batch_size, newest_first, max_duration,
     try:
         stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first, max_duration_seconds=max_duration, track_ids=track_ids, worker_id=worker_id, worker_count=worker_count, force=force)
 
-        click.echo("\n✅ Embedding generation complete!")
+        click.echo("\n✅ Sonic pass complete!")
         click.echo(f"📊 Statistics:")
         click.echo(f"   • Processed: {stats['processed']} tracks")
-        click.echo(f"   • Success: {stats['success']} embeddings")
+        click.echo(f"   • Success: {stats['success']} tracks "
+                   f"({stats['embeddings']} embeddings, {stats['features']} features)")
         click.echo(f"   • Failed: {stats['failed']} tracks")
 
         if stats['failed'] > 0:
@@ -217,7 +218,7 @@ def generate_embeddings(limit, batch_size, newest_first, max_duration,
 
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
-        logger.exception("Embedding generation failed")
+        logger.exception("The sonic pass failed")
         sys.exit(1)
 
 
@@ -674,34 +675,30 @@ def enrich_lastfm(limit, artist, genres, no_skip):
         sys.exit(1)
 
 
-@cli.command("analyze-audio")
+@cli.command("instrument-pass")
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
-@click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
-@click.option("--force", is_flag=True, help="Re-analyze tracks that already have features")
+@click.option("--force", is_flag=True, help="Re-tag tracks that already have instruments")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
-@click.option("--librosa-only", is_flag=True, help="Skip CLAP classification (faster, DSP features only)")
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
 @click.option("--worker-id", type=int, default=None, help="Worker index (0-based) for parallel processing")
 @click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing")
 @track_filter_options
-def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_duration,
-                  worker_id, worker_count,
-                  filter_artist, filter_album, filter_genre, filter_path,
-                  filter_tag, filter_track_number, filter_lossless):
-    """Extract audio features (BPM, key, instruments, mood, etc.) from tracks."""
+def instrument_pass(limit, force, newest_first, max_duration,
+                    worker_id, worker_count,
+                    filter_artist, filter_album, filter_genre, filter_path,
+                    filter_tag, filter_track_number, filter_lossless):
+    """The instrument pass: the AST+PaSST tagger, one decode a track — whatever
+    the Recognise instruments switch says (a run by hand is the owner's)."""
     from audio_analysis import AudioAnalyzer
 
-    click.echo("🎵 Starting audio feature extraction...")
-    click.echo(f"🖥️  librosa DSP + {'CLAP zero-shot' if not librosa_only else 'librosa only'}")
+    click.echo("🎵 Starting the instrument pass...")
 
     if limit:
         click.echo(f"⚠️  Limited to {limit} tracks")
     if force:
-        click.echo(f"⚠️  Force mode: re-analyzing all tracks")
+        click.echo(f"⚠️  Force mode: re-tagging all tracks")
     if newest_first:
         click.echo(f"🆕 Processing newest tracks first")
-    if librosa_only:
-        click.echo(f"⚡ Skipping CLAP classification (DSP features only)")
     if max_duration:
         click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
@@ -728,14 +725,13 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
 
     try:
         analyzer = AudioAnalyzer()
-        stats = analyzer.analyze_all(
-            limit=limit, force=force,
-            order_by_date=newest_first, librosa_only=librosa_only,
+        stats = analyzer.instrument_pass(
+            limit=limit, force=force, order_by_date=newest_first,
             max_duration_seconds=max_duration, track_ids=track_ids,
             worker_id=worker_id, worker_count=worker_count,
         )
 
-        click.echo("\n✅ Audio analysis complete!")
+        click.echo("\n✅ Instrument pass complete!")
         click.echo(f"📊 Statistics:")
         click.echo(f"   • Processed: {stats['processed']} tracks")
         click.echo(f"   • Success: {stats['success']}")
@@ -780,7 +776,7 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
 
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
-        logger.exception("Audio analysis failed")
+        logger.exception("The instrument pass failed")
         sys.exit(1)
 
 
@@ -788,18 +784,18 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
-@click.option("--skip-embeddings", is_flag=True, help="Skip audio embedding generation")
+@click.option("--skip-sonic", is_flag=True, help="Skip the sonic pass (CLAP segments + librosa features)")
 @click.option("--skip-lastfm", is_flag=True, help="Skip Last.fm enrichment (artist, album, track)")
 @click.option("--skip-lyrics", is_flag=True, help="Skip lyrics fetching (lrclib/genius)")
-@click.option("--skip-audio-analysis", is_flag=True, help="Skip audio feature extraction")
-@click.option("--force-embeddings", is_flag=True, help="Regenerate audio embeddings even if exist")
-@click.option("--force-audio-analysis", is_flag=True, help="Re-analyze audio even if features exist")
+@click.option("--skip-instruments", is_flag=True, help="Skip the instrument pass (it follows the Recognise instruments switch otherwise)")
+@click.option("--force-sonic", is_flag=True, help="Re-run the sonic pass even where its records exist")
+@click.option("--force-instruments", is_flag=True, help="Re-tag instruments even where they exist")
 @click.option("--worker-id", type=int, default=None, help="Worker ID for parallel processing (0-indexed, use with --worker-count)")
 @click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing (use with --worker-id)")
 @track_filter_options
-def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastfm,
-                  skip_lyrics, skip_audio_analysis, force_embeddings,
-                  force_audio_analysis,
+def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
+                  skip_lyrics, skip_instruments, force_sonic,
+                  force_instruments,
                   worker_id, worker_count,
                   filter_artist, filter_album, filter_genre, filter_path,
                   filter_tag, filter_track_number, filter_lossless):
@@ -807,7 +803,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
     Comprehensive track enrichment with parallel pipelines.
 
     Phase 1 (parallel):
-      A) GPU: audio embeddings + audio features (batched)
+      A) GPU: the sonic pass, then the instrument pass (batched)
       B) Network: Last.fm artist bios
       C) Network: Lyrics fetching (lrclib/genius)
     Phase 2 (sequential):
@@ -838,23 +834,23 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
 
     # Show configuration
     skip_steps = []
-    if skip_embeddings:
-        skip_steps.append("audio embeddings")
+    if skip_sonic:
+        skip_steps.append("the sonic pass")
     if skip_lastfm:
         skip_steps.append("Last.fm")
     if skip_lyrics:
         skip_steps.append("lyrics")
-    if skip_audio_analysis:
-        skip_steps.append("audio analysis")
+    if skip_instruments:
+        skip_steps.append("the instrument pass")
 
     if skip_steps:
         click.echo(f"⚠️  Skipping: {', '.join(skip_steps)}")
 
     force_steps = []
-    if force_embeddings:
-        force_steps.append("audio embeddings")
-    if force_audio_analysis:
-        force_steps.append("audio analysis")
+    if force_sonic:
+        force_steps.append("the sonic pass")
+    if force_instruments:
+        force_steps.append("the instrument pass")
 
     if force_steps:
         click.echo(f"🔄 Force regenerating: {', '.join(force_steps)}")
@@ -882,12 +878,12 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
     try:
         result = run_parallel_enrichment(
             limit=limit,
-            skip_embeddings=skip_embeddings,
+            skip_sonic=skip_sonic,
             skip_lastfm=skip_lastfm,
             skip_lyrics=skip_lyrics,
-            skip_audio_analysis=skip_audio_analysis,
-            force_embeddings=force_embeddings,
-            force_audio_analysis=force_audio_analysis,
+            skip_instruments=skip_instruments,
+            force_sonic=force_sonic,
+            force_instruments=force_instruments,
             progress_cb=_print_progress,
             track_ids=track_ids,
             order_by_date=newest_first,
@@ -901,12 +897,12 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
 
         # GPU stats
         gpu = result.get("gpu", {})
-        emb = gpu.get("embeddings", {})
-        af = gpu.get("audio_features", {})
-        if not skip_embeddings:
-            click.echo(f"   • Audio embeddings: {emb.get('success', 0)} success, {emb.get('failed', 0)} failed")
-        if not skip_audio_analysis:
-            click.echo(f"   • Audio features: {af.get('success', 0)} success, {af.get('failed', 0)} failed")
+        sonic = gpu.get("sonic", {})
+        instruments = gpu.get("instruments")
+        if not skip_sonic:
+            click.echo(f"   • Sonic pass: {sonic.get('success', 0)} success, {sonic.get('failed', 0)} failed")
+        if instruments is not None:
+            click.echo(f"   • Instruments: {instruments.get('success', 0)} success, {instruments.get('failed', 0)} failed")
 
         # Last.fm stats
         lastfm = result.get("lastfm", {})
@@ -1595,8 +1591,9 @@ def fix_analysis_source(dry_run):
 def bench(tracks):
     """Measure the full per-track analysis pipeline on THIS machine.
 
-    Times decode + CLAP segments + librosa features + AST/PaSST instruments
-    on a random sample and prints tracks/hour plus a whole-library ETA —
+    Times decode + CLAP segments + librosa features (the sonic pass) +
+    AST/PaSST instruments (the instrument pass) on a random sample and
+    prints tracks/hour plus a whole-library ETA —
     the honest number behind the "analyze locally vs import via P2P"
     decision (docs/design/HARDWARE-TIERS.md)."""
     import time as _time
@@ -1645,7 +1642,8 @@ def bench(tracks):
             audio = load_full_track_48k(local_path, row.cue_start_seconds,
                                         row.cue_end_seconds)
             embedder._compute_segments(audio)
-            analyzer.analyze_from_array(audio, sr=48000)
+            analyzer.features_from_array(audio, sr=48000)
+            analyzer.ensemble.tag_full_track(audio)
         except Exception as e:
             click.echo(f"  SKIP {local_path[-60:]}: {e}")
             continue

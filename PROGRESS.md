@@ -258,14 +258,46 @@ implementation details live in the code, DB and git history.
   later seal from, and leaves the row for the next pass. sign() reports what
   it wrote and what it tried, and the notary drains a capped backlog by the
   second.
+- **Two passes on every profile; the instruments are the owner's
+  (2026-11-11).** The analysis run already decoded every track twice, once
+  per stage, so splitting its stages by what they make costs no node a
+  decode: the **sonic pass** (the fingerprint, the balanced grid, CLAP and
+  librosa — segments and features, the zero-shot scores following by
+  trigger) and the **instrument pass** (the AST+PaSST tagger alone). A fused
+  pass would save one decode a track on GPU nodes only, for a second code
+  path. On a Pi 5 the sonic pass costs ~10 s a 4.5-minute track and the
+  tagger ~86 s, and the sonic part carries most of the value (similarity,
+  radio, Sound search, the derived moods), so lite runs the sonic pass
+  itself and the instruments sit behind a switch, "Recognise instruments"
+  (`enrichment.instruments`, a computed default: on for full and standard,
+  off for lite), with this machine's estimate beside it — the instrument
+  pass's pending audio at the pace the passes record per device and core
+  count after every batch (`analysis_pace`), the sonic pace × 8.5 on a CPU
+  until the tagger has run here, nothing ("measuring") on CUDA or MPS where
+  no ratio was measured; no model is loaded for it, and it reaches the
+  screen with the library event. The order rule: every track's sonic pass
+  goes before any track's instruments — the instrument pass asks at each
+  batch seam whether a file newer than the sonic pass's queue waits (a scan
+  added it) and gives way, as the run gives way to a stream; a file the
+  sonic pass saw and could not analyse never calls it back. Both passes
+  register before they compute and skip what the material group holds at a
+  rank no lower; an embedding without its segments (the legacy mean) holds
+  nothing and is pending for a first-hand pass. Streams decode once, run the
+  sonic part for a track with no embedding and the tagger only with the
+  switch on — a stream of a track whose sonic records are held runs it
+  alone, its record bound to the stream's own row — and "already held" is
+  decided per kind, so a better copy holding no instruments leaves a stream
+  something to add. Off computes and signs no instruments and removes none;
+  the node still pulls, serves and carries those other nodes made.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be
   safe.
 - **Manual run = analysis only; network enrichment lives in the background
   loop (2026-09-05).** "Analyse Library" (launcher) / "Analyse library"
-  (More → Library) run audio embeddings + features, seal them, then the text
-  encoders. Last.fm bios/stats/similars and lyrics are fetched only by
+  (More → Library) run audio embeddings + features — since 2026-11-11 the
+  sonic pass, then the instrument pass while "Recognise instruments" is on
+  — seal them, then the text encoders. Last.fm bios/stats/similars and lyrics are fetched only by
   `background_enrichment.py`, on every profile — lite's "manual button"
   exception went with the split. Its network steps drain a backlog
   pass-to-pass (a full batch means more behind it; a short batch, or one
@@ -302,10 +334,11 @@ implementation details live in the code, DB and git history.
   (`sync.last_at >= library.last_scan_at`, or immediately with P2P off),
   the node analyses audio locally, no scan/enrich is running, and an owned
   track still lacks embeddings or features. It retires itself when the gap
-  closes. The gate is `profile.local_analysis`, not `ml_available`: a lite
-  node keeps the button (the run does its text encoders) but skips the audio
-  phase, so the gap the trail points at never closes there and the mark
-  would nag forever.
+  closes. The gate is `profile.local_analysis`: until 2026-11-11 a lite
+  node skipped the audio phase, so the gap would never have closed there;
+  since then every profile with the ML stack runs the sonic pass, and the
+  trail is the sonic pass's — the instruments' progress shows in their own
+  row.
   The pending probe is driven from `media_files`, never from `tracks` —
   the phantom layer makes the tracks-first shape 2.9 s against 46 ms.
 - **The text half of the analysis drains itself (2026-09-09).** Steps 6-8

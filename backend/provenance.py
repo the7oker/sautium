@@ -31,8 +31,9 @@ the print, a lossy copy (desktop/p2p/material.py, the material rule). A track's
 rows of one material form a group (analysis_sources.material_of → the
 group's root): a registration joins its group, a pass skips the compute the
 group already holds at a rank no lower (held_in_group, file_in_group_sql),
-a stream the group holds higher is already held, and a returned file is
-re-linked to its analysis by the rule rather than by the equal digest.
+a stream whose every kind the group holds higher is already held, and a
+returned file is re-linked to its analysis by the rule rather than by the
+equal digest.
 """
 
 import json
@@ -128,23 +129,42 @@ def file_in_group_sql(source: str = "asrc", file: str = "mf") -> str:
                           AND r.copy_rank <= {source}.copy_rank)"""
 
 
+# An embedding holds its kind only with its segments: a portrait without them
+# is the legacy mean of before 2026-07-05, which nothing derives scores from
+# (zero_shot_scores) and the sonic pass makes again.
+_HOLDS = {"embeddings": "AND EXISTS (SELECT 1 FROM embedding_segments g WHERE g.embedding_id = x.id)"}
+
+
 def held_in_group(db: Session, source_id: int, table: str, model_id=None) -> bool:
     """Whether the analysis of `table` (embeddings, audio_features,
-    track_instruments — for a pass that registers before it computes) on
-    the source's track is linked to a row of the source's material group
-    that ranks at least as high — the pass that just registered `source_id`
-    then has nothing to compute: the better version replaces the worse,
-    never the reverse. `model_id` narrows embeddings to the pass's model."""
+    track_instruments — every pass registers before it computes) on the
+    source's track is linked to a row of the source's material group that
+    ranks at least as high — the pass that just registered `source_id` then
+    has nothing to compute of that kind: the better version replaces the
+    worse, never the reverse. `model_id` narrows embeddings to the pass's
+    model."""
     by_model = "AND x.model_id = :mid" if model_id is not None else ""
     return bool(db.execute(sa_text(f"""
         SELECT EXISTS (
             SELECT 1 FROM {table} x
               JOIN analysis_sources a ON a.id = x.analysis_source_id
               JOIN analysis_sources n ON n.id = :sid
-             WHERE x.track_id = n.track_id {by_model}
+             WHERE x.track_id = n.track_id {by_model} {_HOLDS.get(table, "")}
                AND {_group_sql('a')} = {_group_sql('n')}
                AND a.copy_rank >= n.copy_rank)"""),
         {"sid": source_id, "mid": str(model_id) if model_id is not None else None}).scalar())
+
+
+def _held_above(db: Session, track_id: str, group: int, rank: int, table: str) -> bool:
+    """Whether a record of `table` on the track is linked to a row of the
+    material group `group` that ranks above `rank`."""
+    return bool(db.execute(sa_text(f"""
+        SELECT EXISTS (
+            SELECT 1 FROM {table} x
+              JOIN analysis_sources a ON a.id = x.analysis_source_id
+             WHERE x.track_id = CAST(:tid AS uuid) {_HOLDS.get(table, "")}
+               AND {_group_sql('a')} = :g AND a.copy_rank > :rank)"""),
+        {"tid": track_id, "g": group, "rank": rank}).scalar())
 
 
 def outranked(db: Session, existing_id: Optional[int], source_id: int) -> bool:
@@ -207,10 +227,13 @@ def _held_root(db: Session, root: Optional[int]) -> Optional[int]:
 
 
 def _register(db: Session, track_id, fp: str, *, provider_id, media_file_id,
-              duration, sample_rate, bit_depth, is_lossless) -> Optional[int]:
+              duration, sample_rate, bit_depth, is_lossless, kinds=()) -> Optional[int]:
     """The first-hand row of `fp`, `duration` and this copy on the track;
-    None when a stream's material is already held here by a better copy in
-    its material group.
+    None when a stream's material is already held here: every kind of
+    record the stream would make (`kinds`, the record tables) is linked to a
+    better copy in its material group. "Held" is per kind, so a better copy
+    whose row holds no instruments leaves a stream that tags them something
+    to add.
 
     A row describes the copy its records were made from, and a record is
     sealed with its row's declaration, so nothing rewrites a row: another
@@ -234,8 +257,8 @@ def _register(db: Session, track_id, fp: str, *, provider_id, media_file_id,
             return own.id
         group = material.root_among(
             fp, duration, [(r.id, r.material_of, r.chromaprint, r.duration_seconds) for r in rows])
-        if provider_id is not None and group is not None and any(
-                (r.material_of or r.id) == group and r.copy_rank > mine for r in rows):
+        if provider_id is not None and group is not None and all(
+                _held_above(db, tid, group, mine, table) for table in kinds):
             return None
         sid = db.execute(_INSERT_SQL, {
             "tid": tid, "pid": provider_id, "mfid": media_file_id, "fp": fp, "dur": duration,
@@ -627,15 +650,16 @@ def _relink_one(db: Session, f, fp: str) -> bool:
 
 
 def create_stream_source(db: Session, track_id, audio_bytes: bytes,
-                         provider_id: str, is_lossless: bool) -> Optional[int]:
+                         provider_id: str, is_lossless: bool, kinds) -> Optional[int]:
     """analysis_sources.id for streamed provider audio held in memory. None
-    when the bytes yield no fingerprint, or when the same material is already
-    registered here at a higher rank (the node's own file, or a lossless
-    stream over a lossy one) — under the stream's address or a similar one
-    of its material group — so the stream has nothing to add and the caller
-    skips the analysis. provider_id is the serving provider's manifest
-    id — registered in stream_providers at start, which is what the row's FK
-    holds it to."""
+    when the bytes yield no fingerprint, or when every kind of record the
+    stream would make (`kinds`: embeddings, audio_features,
+    track_instruments) is already held here at a higher rank (the node's
+    own file, or a lossless stream over a lossy one) — under the stream's
+    address or a similar one of its material group — so the stream has
+    nothing to add and the caller skips the analysis. provider_id is the
+    serving provider's manifest id — registered in stream_providers at
+    start, which is what the row's FK holds it to."""
     tmp = tempfile.NamedTemporaryFile(suffix=".audio", delete=False)
     try:
         tmp.write(audio_bytes)
@@ -654,10 +678,10 @@ def create_stream_source(db: Session, track_id, audio_bytes: bytes,
 
     sid = _register(db, track_id, fp, provider_id=provider_id, media_file_id=None,
                     duration=duration, sample_rate=sample_rate, bit_depth=bit_depth,
-                    is_lossless=is_lossless)
+                    is_lossless=is_lossless, kinds=tuple(kinds))
     if sid is None:
-        logger.info("stream provenance for track %s (%s): the material is already "
-                    "registered first-hand at a higher rank — nothing to add",
+        logger.info("stream provenance for track %s (%s): what it would make is already "
+                    "held first-hand at a higher rank — nothing to add",
                     track_id, provider_id)
     return sid
 

@@ -49,7 +49,8 @@ code disagree, the code is what this file records and § 14 names the doc.
 - [auto] Zero-shot scores: 8 moods, the vocal score, danceability — derived in the database from the segments a node holds, against label embeddings shipped with the release — `zero_shot.py`; `001_initial.sql: zero_shot_derive`
 - [auto] Instruments: AST + PaSST ensemble over the whole track — `ensemble_instruments.py: InstrumentEnsembleTagger`
 - [auto] Text embeddings (BGE-M3, 1024-d) of track metadata, lyrics, artist bios, genre descriptions — `text_embeddings.py`, `lyrics_embeddings.py`, `enrichment_embeddings.py`
-- [UI] "Analyse library": audio analysis, then the text encoders; Lite skips the audio phase — `POST /api/settings/library/enrich`, `/enrich/cancel`
+- [UI] "Analyse library": the sonic pass (segments + features) on every tier, the instrument pass after it while "Recognise instruments" is on, then the text encoders — `POST /api/settings/library/enrich`, `/enrich/cancel`; `embeddings.py: sonic_pass`; `audio_analysis.py: instrument_pass`
+- [UI] "Recognise instruments": the owner's switch for the instrument pass and the tagging of streams, on by default for Curator and Standard, off for Lite, with this machine's estimate of what is left — `PUT /api/settings/library/instruments`; `analysis_pace.py: estimate`
 - [auto] Last.fm per artist: bio, top 30 tags, listeners, up to 20 similar artists (engaged artists only); genre descriptions — `lastfm.py: enrich_artist`, `backfill_similar`, `enrich_genre`
 - [auto] Gender and vocalist classified from the bio — `lastfm.py: _update_artist_gender`, `_update_artist_is_vocalist`
 - [UI] An album page shows a description where one exists; today they come with the cold-start picks and travel in a share file — nothing fetches or writes a new one — `routers/albums.py: _album_description`; `seed_import.py: apply_seed`
@@ -238,7 +239,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 - [L] Setup wizard: welcome, identity (or restore from a backup), AI provider, Last.fm, Music catalogue, summary — `desktop/wizard.py: SetupWizard.steps`
 - [L] Self-update mirrors `origin/main`; hand edits in an installed tree are set aside as a patch; a Docker node does not update itself — `desktop/updater.py: reset_to_origin`, `is_managed_install`
 - [auto] Hardware tier is detected, never picked: CUDA ≥ 7.5 GiB or MPS ≥ 23 GiB is Curator, ≥ 5.5 / ≥ 15 GiB Standard, the rest and every CPU-only machine Lite; under 12 GB of RAM drops one tier — `hardware_profile.py: _auto_tier`
-- [auto] A tier decides what the node computes (local analysis, pre-warm, thread caps), never what it stores — `hardware_profile.py: _PREWARM`, `local_analysis`
+- [auto] A tier decides what the node computes (pre-warm, thread caps, whether instruments are recognised by default), never what it stores — `hardware_profile.py: _PREWARM`, `instruments_by_default`
 - [UI] Sign-in by account password, by a pairing code, or by creating the account on a fresh node with the setup code it wrote at its start; sign out everywhere — `POST /api/auth/login`, `/pair`, `/create-account`, `/logout-all`
 - [L] The pairing code reaches a phone as a QR code or link from the launcher; valid 5 minutes, burned after 5 wrong tries — `desktop/launcher.py: _draw_pairing_qr`; `device_auth.py: PIN_TTL_SECONDS`, `MAX_PIN_ATTEMPTS`
 - [auto] Every request is signed (HMAC-SHA256, 60 s window) with a device token that is derived, never stored — `auth_hmac.py: HMACAuthMiddleware`, `REPLAY_WINDOW_SECONDS`; `device_auth.py: current_token`

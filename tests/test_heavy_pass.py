@@ -343,15 +343,19 @@ def run(monkeypatch):
             return steps.get(what, lambda cancel: {"success": 1})(kw.get("cancel_flag"))
         return call
 
+    from routers import settings as settings_router
     monkeypatch.setattr(hardware_profile, "resolve", lambda: types.SimpleNamespace(
         ml_available=True, unload_instruments_after_run=True))
+    monkeypatch.setattr(settings_router, "instruments_on", lambda: True)
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(migrations, "normalize_artists", lambda db, pass1: {})
     monkeypatch.setattr(notary, "wake", lambda *a, **kw: None)
+    monkeypatch.setattr(embeddings, "newest_file_id", lambda db: 0)
+    monkeypatch.setattr(embeddings, "sonic_work_since", lambda db, since: False)
     monkeypatch.setattr(embeddings, "AudioEmbeddingGenerator", lambda: types.SimpleNamespace(
-        generate_embeddings=step("embeddings")))
+        sonic_pass=step("sonic")))
     monkeypatch.setattr(audio_analysis, "AudioAnalyzer", lambda: types.SimpleNamespace(
-        analyze_all=step("features")))
+        instrument_pass=step("instruments")))
     monkeypatch.setattr(instrument_tagger, "release_instrument_tagger",
                         lambda dev: seen.append(("AST+PaSST released", _holder())))
     monkeypatch.setattr(text_embeddings, "generate_text_embeddings", step("titles"))
@@ -366,7 +370,7 @@ def run(monkeypatch):
 
 def test_the_analysis_run_holds_the_accelerator_for_each_of_its_halves(run, lane):
     run.go()
-    assert run.seen == [("embeddings", AUDIO), ("features", AUDIO), ("AST+PaSST released", AUDIO),
+    assert run.seen == [("sonic", AUDIO), ("instruments", AUDIO), ("AST+PaSST released", AUDIO),
                         ("titles", TEXT), ("lyrics", TEXT), ("bios and genres", TEXT)]
     assert lane == [AUDIO, TEXT] and _holder() is None
 
@@ -397,7 +401,7 @@ def test_a_streams_analysis_waits_one_batch_of_the_run_not_the_run(run):
         job.start()
         _until(device.heavy_pass_wanted)
 
-    run.steps["embeddings"] = _batches(events, 3, after_first=asked_mid_run)
+    run.steps["sonic"] = _batches(events, 3, after_first=asked_mid_run)
     run.go()
     job.join(WAIT)
     assert events == ["batch 1", ("stream", True, "a stream's analysis"), "batch 2", "batch 3"]
@@ -408,10 +412,10 @@ def test_a_stopping_node_ends_the_run_at_its_next_batch(run):
     instrument pair, which a stream's analysis let in at that seam may be
     using, is not the run's to release."""
     events = []
-    run.steps["embeddings"] = _batches(events, 3, after_first=device.close_heavy_passes)
+    run.steps["sonic"] = _batches(events, 3, after_first=device.close_heavy_passes)
     run.go()
     assert events == ["batch 1"]
-    assert run.seen == [("embeddings", AUDIO)]
+    assert run.seen == [("sonic", AUDIO)]
 
 
 def test_a_cancelled_run_ends_at_its_next_batch_and_gives_the_pair_back(run):
@@ -431,11 +435,11 @@ def test_a_cancelled_run_ends_at_its_next_batch_and_gives_the_pair_back(run):
         job.start()
         _until(device.heavy_pass_wanted)
 
-    run.steps["embeddings"] = _batches(events, 3, after_first=cancelled_with_a_stream_waiting)
+    run.steps["sonic"] = _batches(events, 3, after_first=cancelled_with_a_stream_waiting)
     run.go(cancel=lambda: bool(cancelled))
     job.join(WAIT)
     assert events == ["batch 1"]
-    assert run.seen == [("embeddings", AUDIO), ("AST+PaSST released", AUDIO),
+    assert run.seen == [("sonic", AUDIO), ("AST+PaSST released", AUDIO),
                         ("a stream's analysis", "a stream's analysis")]
 
 
@@ -486,8 +490,12 @@ def stream(monkeypatch):
 
     seen = []
 
+    from routers import settings as settings_router
+
     class Models:
-        def analyze_from_array(self, audio, sr):
+        ensemble = None
+
+        def features_from_array(self, audio, sr):
             seen.append(("features", _holder()))
 
         def _compute_segments(self, audio):
@@ -498,9 +506,11 @@ def stream(monkeypatch):
 
     monkeypatch.setattr(librosa, "load",
                         lambda f, sr, mono: (np.zeros(48000 * 60, dtype=np.float32), sr))
+    monkeypatch.setattr(settings_router, "instruments_on", lambda: False)
     monkeypatch.setattr(provenance, "create_stream_source", lambda *a: 1)
+    monkeypatch.setattr(provenance, "held_in_group", lambda *a, **kw: False)
     enricher = enrichment.PreviewEnricher()
-    monkeypatch.setattr(enricher, "_models", lambda: (Models(), Models()))
+    monkeypatch.setattr(enricher, "_models", lambda sonic, tag: (Models(), Models()))
     job = threading.Thread(target=enricher._enrich, daemon=True,
                            args=(str(uuid.uuid4()), b"stream", (60.0,), True, "youtube"))
     return types.SimpleNamespace(enricher=enricher, seen=seen, job=job)
@@ -586,7 +596,7 @@ def test_a_streams_analyser_takes_the_instrument_pair_anew_for_every_job(monkeyp
     enricher._embedder = object()
     # the run released the pair this analyser was given
     enricher._analyzer = types.SimpleNamespace(device="cpu", ensemble="a released pair")
-    _, analyzer = enricher._models()
+    _, analyzer = enricher._models(sonic=False, tag=True)
     assert analyzer.ensemble == "the pair as it is now on cpu"
 
 
@@ -602,7 +612,7 @@ def released(monkeypatch):
 def _enricher_holding_the_pair():
     from streaming import enrichment
     enricher = enrichment.PreviewEnricher()
-    enricher._analyzer = object()
+    enricher._analyzer = types.SimpleNamespace(device="cpu", ensemble=object())
     return enricher
 
 
@@ -610,9 +620,9 @@ def test_the_idle_release_of_the_instrument_pair_comes_after_the_accelerators_pa
     enricher = _enricher_holding_the_pair()
     analysis = Pass(AUDIO).begin()       # the run tags with the same pair
     enricher._idle_release()
-    assert released == [] and enricher._analyzer is not None
+    assert released == [] and enricher._analyzer.ensemble is not None
     analysis.finish()
-    assert released == ["the preview's idle release"] and enricher._analyzer is None
+    assert released == ["the preview's idle release"] and enricher._analyzer.ensemble is None
 
 
 def test_an_idle_release_that_waited_leaves_the_pair_to_a_job_that_came_meanwhile(released):
@@ -621,7 +631,7 @@ def test_an_idle_release_that_waited_leaves_the_pair_to_a_job_that_came_meanwhil
     enricher._idle_release()
     enricher._inflight.add("a track streamed meanwhile")
     analysis.finish()
-    assert released == [] and enricher._analyzer is not None
+    assert released == [] and enricher._analyzer.ensemble is not None
 
 
 def test_an_idle_release_that_waited_leaves_the_pair_to_a_newer_timer(released):
@@ -631,7 +641,7 @@ def test_an_idle_release_that_waited_leaves_the_pair_to_a_newer_timer(released):
     # a job came and went meanwhile: its own timer counts from its end
     enricher._idle_timer = threading.Timer(600, enricher._on_idle_timer)
     analysis.finish()
-    assert released == [] and enricher._analyzer is not None
+    assert released == [] and enricher._analyzer.ensemble is not None
     # and a timer that is not the one armed last releases nothing either
     enricher._on_idle_timer()
     assert released == [] and enricher._idle_timer is not None

@@ -1271,7 +1271,7 @@ async def get_stats() -> Dict[str, Any]:
         "tracks_with_lyrics": 0, "total_duration_seconds": 0,
         "total_file_size_bytes": 0, "unique_genres": 0,
         # Enrichment coverage
-        "tracks_with_features": 0, "analysable_tracks": 0,
+        "tracks_with_features": 0, "tracks_with_instruments": 0, "analysable_tracks": 0,
         "library_artists": 0, "artists_with_lastfm": 0,
         "library_albums": 0,
     }
@@ -1315,6 +1315,9 @@ async def get_stats() -> Dict[str, Any]:
                 (SELECT COUNT(*) FROM analysable a
                   WHERE EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = a.id)
                 ) as tracks_with_features,
+                (SELECT COUNT(*) FROM analysable a
+                  WHERE EXISTS (SELECT 1 FROM track_instruments ti WHERE ti.track_id = a.id)
+                ) as tracks_with_instruments,
                 -- Engaged artists only, for the same reason the track figures
                 -- are owned-only: a raw track_artists count is dominated by
                 -- phantom tracklist credits, which the Last.fm pipeline will
@@ -1339,13 +1342,10 @@ async def get_stats() -> Dict[str, Any]:
                 row.update(dict(enr._mapping))
 
             # Not DB figures, but this payload feeds the Library screen,
-            # which owns the "Analyse library" button. Two axes, and they
-            # are not the same question: with no ML runtime the run is a
-            # no-op, so the button must not exist; on lite the run still
-            # does its text side (BGE-M3 over titles, lyrics, bios, genre
-            # descriptions — local-only data no peer carries) but SKIPS the
-            # audio phase, so the screen must not promise embeddings and
-            # features it will never compute.
+            # which owns the "Analyse library" button: with no ML runtime
+            # the run is a no-op, so the button must not exist. Every
+            # profile with it runs the sonic pass (lite included since
+            # 2026-11-11); the instrument pass is the owner's switch.
             import hardware_profile
             _profile = hardware_profile.resolve()
             row["analysis_available"] = _profile.ml_available
@@ -2024,20 +2024,20 @@ async def generate_embeddings_endpoint(
     batch_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Generate audio embeddings for tracks without embeddings.
+    Run the sonic pass (segments + features) over the tracks that lack them.
 
     Args:
         limit: Maximum number of tracks to process.
         batch_size: Override default batch size.
 
     Returns:
-        Statistics about the generation run.
+        Statistics about the pass.
     """
-    from embeddings import generate_embeddings as do_generate
+    from embeddings import sonic_pass
 
     try:
-        logger.info(f"Starting embedding generation (limit={limit}, batch_size={batch_size})")
-        stats = do_generate(limit=limit, batch_size=batch_size)
+        logger.info(f"Starting the sonic pass (limit={limit}, batch_size={batch_size})")
+        stats = sonic_pass(limit=limit, batch_size=batch_size)
         return {
             "success": True,
             "statistics": stats,
@@ -2069,7 +2069,8 @@ def _notify_library_subs_safe():
 
 def _enrich_worker(limit: Optional[int], local_analysis: bool):
     """Background worker for the analysis run: run_parallel_enrichment with
-    the network pipelines off (Last.fm and lyrics are background_enrichment's)."""
+    the network pipelines off (Last.fm and lyrics are background_enrichment's);
+    its instrument pass follows the owner's switch."""
     state = _enrich_state
 
     def _progress_cb(msg):
@@ -2089,8 +2090,8 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
         from track_enrichment import run_parallel_enrichment
         result = run_parallel_enrichment(
             limit=limit,
-            skip_embeddings=not local_analysis,
-            skip_audio_analysis=not local_analysis,
+            skip_sonic=not local_analysis,
+            skip_instruments=not local_analysis,
             skip_lastfm=True,
             skip_lyrics=True,
             cancel_flag=_cancel_flag,
@@ -2099,15 +2100,15 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
 
         # Build summary for status endpoint
         gpu_s = result.get("gpu", {})
-        emb_s = gpu_s.get("embeddings", {})
-        af_s = gpu_s.get("audio_features", {})
+        sonic_s = gpu_s.get("sonic", {})
+        instr_s = gpu_s.get("instruments")
         text_s = result.get("text_embeddings", {})
         lyrics_emb_s = result.get("lyrics_embeddings", {})
         enrich_emb_s = result.get("enrichment_embeddings", {})
         bio_emb_s = enrich_emb_s.get("artist_bios", {})
         parts = [
-            f"Emb: {emb_s.get('success', 0)}",
-            f"Features: {af_s.get('success', 0)}",
+            f"Sonic: {sonic_s.get('success', 0)}",
+            *([f"Instruments: {instr_s.get('success', 0)}"] if instr_s is not None else []),
             f"Text: {text_s.get('success', 0)}",
             f"Lyrics emb: {lyrics_emb_s.get('success', 0)}",
             f"Bio emb: {bio_emb_s.get('success', 0)}",
@@ -2151,13 +2152,14 @@ def _fetch_lyrics_sync(limit=None, cancel_flag=None, progress_cb=None):
 async def enrich_start(limit: Optional[int] = None) -> Dict[str, Any]:
     """Start the analysis run as a background task; poll /enrich/status.
 
-    Audio embeddings + features, sealed, then the text encoders (titles,
-    lyrics, bios, genres). Network enrichment — Last.fm, lyrics — is not
-    part of this run on purpose: background_enrichment.py fetches it on
-    its own cadence, on every profile. Lite skips the audio phase (its
-    analysis arrives via P2P import) and still runs the text encoders; a
-    node with no ML runtime at all is refused — both UIs hide the button
-    there (`/stats` → analysis_available).
+    The sonic pass (segments + features), then the instrument pass while
+    the owner's switch is on (enrichment.instruments), each sealed as it
+    lands, then the text encoders (titles, lyrics, bios, genres). Network
+    enrichment — Last.fm, lyrics — is not part of this run on purpose:
+    background_enrichment.py fetches it on its own cadence, on every
+    profile. Every profile runs the sonic pass, lite included; a node with
+    no ML runtime at all is refused — both UIs hide the button there
+    (`/stats` → analysis_available).
     """
     import hardware_profile
     profile = hardware_profile.resolve()
@@ -2210,20 +2212,21 @@ async def enrich_status() -> Dict[str, Any]:
 @app.post("/enrich")
 async def enrich_tracks_endpoint(
     limit: Optional[int] = None,
-    skip_embeddings: bool = False,
+    skip_sonic: bool = False,
     skip_lastfm: bool = False,
-    skip_audio_analysis: bool = False,
+    skip_instruments: bool = False,
 ) -> Dict[str, Any]:
-    """Run enrichment synchronously (for CLI/Docker use). Prefer /enrich/start for UI."""
+    """Run enrichment synchronously (for CLI/Docker use). Prefer /enrich/start for UI.
+    The instrument pass follows the owner's switch unless skipped here."""
     import asyncio
     from track_enrichment import TrackEnrichmentPipeline
 
     def _run():
         _skip_lastfm = skip_lastfm or not settings.lastfm_api_key
         pipeline = TrackEnrichmentPipeline(
-            skip_embeddings=skip_embeddings,
+            skip_sonic=skip_sonic,
             skip_lastfm=_skip_lastfm,
-            skip_audio_analysis=skip_audio_analysis,
+            skip_instruments=skip_instruments,
         )
         return pipeline.enrich_tracks(limit=limit)
 

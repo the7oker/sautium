@@ -20,6 +20,7 @@ Fingerprints are generated (tests/p2p/fingerprints.py); fpcalc and ffprobe
 are stood in for where a registration would decode."""
 
 import sys
+import types
 import uuid
 from pathlib import Path
 
@@ -281,7 +282,8 @@ def test_a_stream_registered_over_an_imported_address_makes_its_own_twin(conn, s
         track = _track(cur)
         foreign = _source(cur, track, FP, imported=True)
     prints.update(stream=FP, stream_dur=240)
-    sid = provenance.create_stream_source(session, track, b"audio", "lossless-test", True)
+    sid = provenance.create_stream_source(session, track, b"audio", "lossless-test", True,
+                                          ("embeddings", "audio_features"))
     session.commit()
     with conn.cursor() as cur:
         assert [(r[0], r[1], r[2], r[4]) for r in _rows(cur, track)] == [
@@ -551,6 +553,11 @@ def test_a_merge_moves_each_kind_the_target_lacks_and_sheds_only_the_moved_seals
 
 # -- The passes: the skip by rank, the predicates' group arm -----------------
 
+# The sonic pass's queue, by the record each row lacks
+EMBEDDINGS = embeddings.PENDING_SQL + " AND q.embedding_pending"
+FEATURES = embeddings.PENDING_SQL + " AND q.features_pending"
+
+
 def _pending(session, track, sql, reanalyze=False) -> bool:
     from sqlalchemy import text
     return bool(session.execute(text(f"SELECT 1 FROM ({sql}) q WHERE q.track_id = :t"),
@@ -582,14 +589,14 @@ def test_a_file_of_the_analysed_material_skips_by_rank_and_stays_done(
         cur.execute("INSERT INTO audio_features (track_id, bpm, analysis_source_id) "
                     "VALUES (%s, 99, %s)", (track, first))
         _elect(cur, track, b)
-    for sql in (embeddings.PENDING_SQL, audio_analysis.PENDING_SQL):
+    for sql in (EMBEDDINGS, FEATURES):
         assert _pending(session, track, sql)                    # unregistered: asked once
     second = _register(session, conn, track, b)
     with conn.cursor() as cur:
         assert [r[2] for r in _rows(cur, track)] == [None, first]
     assert provenance.held_in_group(session, second, "embeddings", model_id=MODEL) is skips
     assert provenance.held_in_group(session, second, "audio_features") is skips
-    for sql in (embeddings.PENDING_SQL, audio_analysis.PENDING_SQL):
+    for sql in (EMBEDDINGS, FEATURES):
         assert _pending(session, track, sql) is not skips
 
 
@@ -605,7 +612,7 @@ def test_another_material_on_the_track_is_analysed(conn, session, prints):
         _elect(cur, track, b)
     second = _register(session, conn, track, b)
     assert not provenance.held_in_group(session, second, "embeddings", model_id=MODEL)
-    assert _pending(session, track, embeddings.PENDING_SQL)
+    assert _pending(session, track, EMBEDDINGS)
 
 
 def test_imported_analysis_never_skips_a_first_hand_pass_and_stays_the_policys(
@@ -618,13 +625,13 @@ def test_imported_analysis_never_skips_a_first_hand_pass_and_stays_the_policys(
         _embedding(cur, track, foreign)
         mf = _file(cur, track, "/music/a.flac")
     prints["/music/a.flac"] = FP
-    assert not _pending(session, track, embeddings.PENDING_SQL)
-    assert _pending(session, track, embeddings.PENDING_SQL, reanalyze=True)
+    assert not _pending(session, track, EMBEDDINGS)
+    assert _pending(session, track, EMBEDDINGS, reanalyze=True)
     sid = _register(session, conn, track, mf)
     with conn.cursor() as cur:
         assert [r[2] for r in _rows(cur, track)] == [None, foreign]
     assert not provenance.held_in_group(session, sid, "embeddings", model_id=MODEL)
-    assert _pending(session, track, embeddings.PENDING_SQL, reanalyze=True)
+    assert _pending(session, track, EMBEDDINGS, reanalyze=True)
 
 
 # -- A stream already held ---------------------------------------------------
@@ -634,22 +641,61 @@ def test_a_stream_of_material_held_higher_in_its_group_is_already_held(conn, ses
         track = _track(cur)
         mf = _file(cur, track, "/music/a.flac")
     prints.update({"/music/a.flac": FP, "stream": NEAR, "stream_dur": 241})
-    _register(session, conn, track, mf)
-    assert provenance.create_stream_source(session, track, b"audio", "lossless-test", True) is None
+    own = _register(session, conn, track, mf)
+    with conn.cursor() as cur:
+        _embedding(cur, track, own)
+        _features(cur, track, own)
+    assert provenance.create_stream_source(session, track, b"audio", "lossless-test", True,
+                                           ("embeddings", "audio_features")) is None
     session.rollback()
     with conn.cursor() as cur:
         assert len(_rows(cur, track)) == 1
+
+
+@pytest.mark.parametrize("held", [(), ("embeddings",), ("audio_features",)])
+def test_a_stream_is_already_held_only_for_the_kinds_a_better_copy_holds(
+        conn, session, prints, held):
+    """Held per kind (the tagger-alone path): the owned file's row holding
+    the sonic records, or some of them, leaves the stream the kinds it does
+    not hold — the instruments of a track whose file was never tagged here
+    among them — and an embedding without its segments holds nothing."""
+    with conn.cursor() as cur:
+        track = _track(cur)
+        mf = _file(cur, track, "/music/a.flac")
+    prints.update({"/music/a.flac": FP, "stream": NEAR, "stream_dur": 241})
+    own = _register(session, conn, track, mf)
+    with conn.cursor() as cur:
+        if "embeddings" in held:
+            _embedding(cur, track, own)
+        else:       # a legacy mean, its segments never made
+            cur.execute("""INSERT INTO embeddings (track_id, model_id, vector, analysis_source_id,
+                                                   analysis_version)
+                           VALUES (%s, %s, %s::vector, %s, 2)""",
+                        (track, MODEL, "[" + ",".join(["0.03"] * 512) + "]", own))
+        if "audio_features" in held:
+            _features(cur, track, own)
+    for kinds in (("embeddings", "audio_features"), ("track_instruments",),
+                  ("embeddings", "audio_features", "track_instruments")):
+        sid = provenance.create_stream_source(session, track, b"audio", "lossless-test", True,
+                                              kinds)
+        assert (sid is None) is all(k in held for k in kinds)
+        if sid is not None:
+            for k in kinds:
+                assert provenance.held_in_group(session, sid, k) is (k in held)
+        session.rollback()
 
 
 def test_a_lossy_stream_under_a_lossless_one_is_held_and_a_better_stream_is_not(
         conn, session, prints):
     with conn.cursor() as cur:
         lossless, lossy = _track(cur), _track(cur)
-        _source(cur, lossless, FP, provider="lossless-test")
-        _source(cur, lossy, FP, provider="lossy-test", lossless=False)
+        _features(cur, lossless, _source(cur, lossless, FP, provider="lossless-test"))
+        _features(cur, lossy, _source(cur, lossy, FP, provider="lossy-test", lossless=False))
     prints.update(stream=NEAR, stream_dur=240)
-    assert provenance.create_stream_source(session, lossless, b"a", "lossy-test", False) is None
-    better = provenance.create_stream_source(session, lossy, b"a", "lossless-test", True)
+    assert provenance.create_stream_source(session, lossless, b"a", "lossy-test", False,
+                                           ("audio_features",)) is None
+    better = provenance.create_stream_source(session, lossy, b"a", "lossless-test", True,
+                                             ("audio_features",))
     session.commit()
     with conn.cursor() as cur:
         assert [r[2] for r in _rows(cur, lossy)][-1] is not None and better is not None
@@ -660,7 +706,8 @@ def test_an_imported_twin_holds_nothing_against_a_stream(conn, session, prints):
         track = _track(cur)
         _source(cur, track, NEAR, imported=True)
     prints.update(stream=FP, stream_dur=240)
-    assert provenance.create_stream_source(session, track, b"a", "lossy-test", False) is not None
+    assert provenance.create_stream_source(session, track, b"a", "lossy-test", False,
+                                           ("embeddings", "audio_features")) is not None
 
 
 # -- A declaration never changes under its records -----------------------------
@@ -748,7 +795,7 @@ def test_an_edit_with_the_albums_opening_is_another_material_and_analysed(
         assert cur.fetchone() == (245,)
         assert _verifies(cur, eid, track, FP)
     assert not provenance.held_in_group(session, second, "embeddings", model_id=MODEL)
-    assert _pending(session, track, embeddings.PENDING_SQL)
+    assert _pending(session, track, EMBEDDINGS)
     assert _sign(scratch_dsn) == 0                                   # nothing to seal again
 
 
@@ -836,8 +883,8 @@ def test_a_better_copy_of_one_declaration_is_a_row_of_its_own_and_its_passes_rep
         assert cur.fetchone() == claims
         assert _linked(cur, track) == {"embeddings": False, "features": False}
     assert not provenance.held_in_group(session, second, "embeddings", model_id=MODEL)
-    assert _pending(session, track, embeddings.PENDING_SQL)
-    assert _pending(session, track, audio_analysis.PENDING_SQL)
+    assert _pending(session, track, EMBEDDINGS)
+    assert _pending(session, track, FEATURES)
     assert not provenance.outranked(session, first, second)     # the passes' saves replace
     assert provenance.outranked(session, second, first)
 
@@ -860,8 +907,8 @@ def test_a_lesser_copy_of_one_declaration_is_a_row_of_its_own_and_skips(conn, se
             (first, None, cd), (second, first, hires)]
         assert _linked(cur, track) == {"embeddings": False, "features": False}
     assert provenance.held_in_group(session, second, "embeddings", model_id=MODEL)
-    assert not _pending(session, track, embeddings.PENDING_SQL)
-    assert not _pending(session, track, audio_analysis.PENDING_SQL)
+    assert not _pending(session, track, EMBEDDINGS)
+    assert not _pending(session, track, FEATURES)
 
 
 def test_an_equal_copy_registered_again_takes_only_the_rows_file(conn, session, prints):
@@ -983,8 +1030,8 @@ def test_a_better_file_of_the_material_is_not_relinked_to_a_lesser_copys_analysi
             flac = _file(cur, track, "/music/flac/a.flac")
     prints["/music/a.flac"] = NEAR
     assert provenance.relink_returned_files([track]) == 0
-    assert _pending(session, track, embeddings.PENDING_SQL)
-    assert _pending(session, track, audio_analysis.PENDING_SQL)
+    assert _pending(session, track, EMBEDDINGS)
+    assert _pending(session, track, FEATURES)
     second = _register(session, conn, track, flac)
     with conn.cursor() as cur:
         assert [r[2] for r in _rows(cur, track)] == [None, first]
@@ -1031,7 +1078,7 @@ def test_a_lesser_file_is_never_relinked_to_a_better_copys_row(conn, session, pr
         cur.execute("UPDATE media_files SET is_analysis_source = false WHERE id = %s", (mp3,))
         cd2 = _file(cur, track, "/music/cd2.flac", bit_depth=16)
     assert _register(session, conn, track, cd2) == row     # the CD back: its own row
-    assert _pending(session, track, audio_analysis.PENDING_SQL)   # the CD's features
+    assert _pending(session, track, FEATURES)   # the CD's features
     assert not provenance.outranked(session, src, row)
 
 
@@ -1315,7 +1362,7 @@ def test_a_merged_lossy_streams_features_never_stand_for_the_targets_cd(conn, se
         assert [(r[0], r[2]) for r in _rows(cur, new)] == [(stream, own), (own, None)]
         cur.execute("SELECT analysis_source_id FROM audio_features WHERE track_id = %s", (new,))
         assert cur.fetchone() == (stream,)
-    assert _pending(session, new, audio_analysis.PENDING_SQL)
+    assert _pending(session, new, FEATURES)
 
 
 def test_the_join_of_rows_registered_before_the_groups(conn, session):
@@ -1379,7 +1426,8 @@ def test_a_better_stream_of_one_declaration_deletes_nothing_and_its_save_replace
         lossy = _source(cur, track, FP, provider="lossy-test", lossless=False, bit_depth=None)
         _features(cur, track, lossy)
     prints.update(stream=FP, stream_dur=240)
-    better = provenance.create_stream_source(session, track, b"a", "lossless-test", True)
+    better = provenance.create_stream_source(session, track, b"a", "lossless-test", True,
+                                             ("audio_features",))
     session.commit()
     with conn.cursor() as cur:
         assert better != lossy
@@ -1407,7 +1455,8 @@ def test_a_lesser_lossless_stream_of_one_declaration_is_already_held(conn, sessi
         _features(cur, track, cd)
     monkeypatch.setattr(provenance, "_probe_audio", lambda path: (96000, 24, 240))
     prints.update(stream=FP)
-    assert provenance.create_stream_source(session, track, b"a", "lossless-test", True) is None
+    assert provenance.create_stream_source(session, track, b"a", "lossless-test", True,
+                                           ("audio_features",)) is None
     session.rollback()
 
 
@@ -1635,16 +1684,32 @@ def test_a_page_is_written_under_one_savepoint_and_item_by_item_only_when_refuse
 
 # -- The features saves keep a better copy's features (round 3) ---------------
 
-def _run_features_pass(monkeypatch, track, force):
+def _passes(monkeypatch, features=None, tagger=None):
+    """The two analysis passes with their models stood in for: every decode
+    twenty seconds of silence, CLAP one unit vector, librosa `features`, the
+    tagger `tagger`."""
+    import notary
+    import numpy as np
     monkeypatch.setattr(provenance, "fingerprinter",
                         lambda: provenance.Fingerprinter("ok", "/usr/bin/fpcalc"))
     monkeypatch.setattr(embeddings, "_reanalyze_imported", lambda: False)
-    monkeypatch.setattr(
-        audio_analysis.AudioAnalyzer, "_load_and_extract_librosa",
-        lambda self, path, *a: {"audio_48k": None,
-                                "librosa_features": {"bpm": 77.0, "energy": 0.5}})
-    return audio_analysis.AudioAnalyzer(device="cpu").analyze_all(
-        force=force, librosa_only=True, track_ids=[uuid.UUID(track)])
+    monkeypatch.setattr(notary, "wake", lambda reason: None)
+    silence = lambda *a: np.zeros(48000 * 20, dtype=np.float32)   # noqa: E731
+    vec = np.full(512, 1 / np.sqrt(512), dtype=np.float32)
+    gen = embeddings.AudioEmbeddingGenerator
+    monkeypatch.setattr(gen, "load_model", lambda self: None)
+    monkeypatch.setattr(gen, "_load_audio", lambda self, path, *a: silence())
+    monkeypatch.setattr(gen, "_compute_segments", lambda self, audio: ([0], np.stack([vec]), vec))
+    monkeypatch.setattr(audio_analysis.AudioAnalyzer, "features_from_array",
+                        lambda self, audio, sr=48000: dict(features or {"bpm": 77.0, "energy": 0.5}))
+    monkeypatch.setattr(audio_analysis, "load_full_track_48k", silence)
+    monkeypatch.setattr(audio_analysis.AudioAnalyzer, "load_model",
+                        lambda self: setattr(self, "ensemble", tagger))
+    return types.SimpleNamespace(
+        sonic=lambda track, force=False: gen(model_name="clap", device="cpu").sonic_pass(
+            force=force, track_ids=[uuid.UUID(track)]),
+        instruments=lambda track, force=False: audio_analysis.AudioAnalyzer(
+            device="cpu").instrument_pass(force=force, track_ids=[uuid.UUID(track)]))
 
 
 def _cd_analysed_then_a_24_bit_copy_elected(conn, session, prints):
@@ -1674,7 +1739,7 @@ def test_the_features_pass_keeps_a_better_copys_features_as_the_embedding_save_d
         prints.pop("/music/hr.flac")
         assert provenance.relink_returned_files([track]) == 0      # cached as unmatched
         prints["/music/hr.flac"] = NEAR
-    stats = _run_features_pass(monkeypatch, track, force=force)
+    stats = _passes(monkeypatch).sonic(track, force=force)
     assert (stats["success"], stats["skipped"]) == (0, 1)
     with conn.cursor() as cur:
         cur.execute("""SELECT (SELECT analysis_source_id FROM embeddings WHERE track_id = %(t)s),
@@ -1756,54 +1821,42 @@ class _Tagger:
         return dict(self.scores)
 
 
-def _run_both_records(monkeypatch, track, tagger, librosa_only=False, force=False):
-    import numpy as np
-    monkeypatch.setattr(provenance, "fingerprinter",
-                        lambda: provenance.Fingerprinter("ok", "/usr/bin/fpcalc"))
-    monkeypatch.setattr(embeddings, "_reanalyze_imported", lambda: False)
-    monkeypatch.setattr(
-        audio_analysis.AudioAnalyzer, "_load_and_extract_librosa",
-        lambda self, path, *a: {"audio_48k": np.zeros(48000, dtype=np.float32),
-                                "librosa_features": {"bpm": 77.0, "energy": 0.5}})
-    monkeypatch.setattr(audio_analysis.AudioAnalyzer, "load_model",
-                        lambda self: setattr(self, "ensemble", tagger))
-    return audio_analysis.AudioAnalyzer(device="cpu").analyze_all(
-        force=force, librosa_only=librosa_only, track_ids=[uuid.UUID(track)])
-
-
-@pytest.mark.parametrize("scores,librosa_only", [({"piano": 0.62, "organ": 0.011}, False),
-                                                 ({}, False), (None, False),
-                                                 ({"piano": 0.62}, True)])
-def test_the_pass_saves_the_instruments_beside_the_features_under_one_row(
-        conn, prints, monkeypatch, scores, librosa_only):
-    """The tagger's scores are a record of their own, saved beside the
-    features under the file's row at the tagger's methodology; a tagger that
-    fails on a track, or a pass without it, leaves the features saved and
-    no instruments."""
+@pytest.mark.parametrize("scores", [{"piano": 0.62, "organ": 0.011}, {}, None])
+def test_the_passes_save_the_instruments_beside_the_features_under_one_row(
+        conn, prints, monkeypatch, scores):
+    """The tagger's scores are a record of their own, saved by the
+    instrument pass under the file's row the sonic pass registered, at the
+    tagger's methodology; a tagger that fails on a track leaves the sonic
+    records and no instruments."""
     import ensemble_instruments
     with conn.cursor() as cur:
         track = _track(cur)
         _file(cur, track, "/music/a.flac")
     prints["/music/a.flac"] = FP
-    stats = _run_both_records(monkeypatch, track, _Tagger(scores), librosa_only=librosa_only)
-    tagged = scores is not None and not librosa_only
-    assert (stats["success"], stats["instruments"]) == (1, int(tagged))
+    passes = _passes(monkeypatch, tagger=_Tagger(scores))
+    sonic = passes.sonic(track)
+    assert (sonic["success"], sonic["embeddings"], sonic["features"]) == (1, 1, 1)
+    stats = passes.instruments(track)
+    tagged = scores is not None
+    assert (stats["success"], stats["failed"]) == (int(tagged), int(not tagged))
     with conn.cursor() as cur:
         cur.execute("""SELECT a.analysis_source_id, a.bpm, a.analysis_version, s.media_file_id
                          FROM audio_features a JOIN analysis_sources s ON s.id = a.analysis_source_id
                         WHERE a.track_id = %s""", (track,))
         row, bpm, version, mf = cur.fetchone()
         assert (bpm, version) == (77.0, audio_analysis.ANALYSIS_VERSION) and mf is not None
+        cur.execute("SELECT analysis_source_id FROM embeddings WHERE track_id = %s", (track,))
+        assert cur.fetchall() == [(row,)]
         cur.execute("""SELECT instruments, analysis_source_id, analysis_version
                          FROM track_instruments WHERE track_id = %s""", (track,))
         assert cur.fetchall() == ([(scores, row, ensemble_instruments.INSTRUMENTS_ANALYSIS_VERSION)]
                                   if tagged else [])
 
 
-def test_the_pass_keeps_a_better_copys_instruments_as_its_features(conn, session, prints,
-                                                                     monkeypatch):
-    """Each save replaces its own kind by the rank: a lesser copy's pass
-    replaces neither record of the better copy."""
+def test_the_instrument_pass_keeps_a_better_copys_instruments_as_the_sonic_pass_its_features(
+        conn, session, prints, monkeypatch):
+    """Each save replaces its own kind by the rank: a lesser copy's passes
+    replace neither record of the better copy."""
     with conn.cursor() as cur:
         track = _track(cur)
         better = _source(cur, track, FP, duration=240, bit_depth=16)
@@ -1813,12 +1866,16 @@ def test_the_pass_keeps_a_better_copys_instruments_as_its_features(conn, session
                        VALUES (%s, '{"piano": 0.5}', %s, 2)""", (track, better))
         _file(cur, track, "/music/lossy.mp3", lossless=False, bit_depth=None)
     prints["/music/lossy.mp3"] = FP
-    stats = _run_both_records(monkeypatch, track, _Tagger({"kazoo": 0.9}), force=True)
-    assert (stats["success"], stats["skipped"], stats["instruments"]) == (0, 1, 0)
+    passes = _passes(monkeypatch, tagger=_Tagger({"kazoo": 0.9}))
+    assert passes.sonic(track, force=True)["features"] == 0
+    stats = passes.instruments(track, force=True)
+    assert (stats["success"], stats["skipped"]) == (0, 1)
     with conn.cursor() as cur:
         cur.execute("SELECT instruments, analysis_source_id FROM track_instruments WHERE track_id = %s",
                     (track,))
         assert cur.fetchone() == ({"piano": 0.5}, better)
+        cur.execute("SELECT analysis_source_id FROM audio_features WHERE track_id = %s", (track,))
+        assert cur.fetchone() == (better,)
 
 
 def test_a_streams_analysis_saves_both_records_under_the_streams_row(conn, monkeypatch):
@@ -1826,11 +1883,14 @@ def test_a_streams_analysis_saves_both_records_under_the_streams_row(conn, monke
     import librosa
     import notary
     import numpy as np
+    from routers import settings as settings_router
     from streaming import enrichment
 
     class Analyzer:
-        def analyze_from_array(self, audio, sr):
-            return {"bpm": 101.0, "energy": 0.4, "instruments": {"piano": 0.7}}
+        ensemble = _Tagger({"piano": 0.7})
+
+        def features_from_array(self, audio, sr):
+            return {"bpm": 101.0, "energy": 0.4}
 
     class Embedder:
         def _compute_segments(self, audio):
@@ -1846,8 +1906,9 @@ def test_a_streams_analysis_saves_both_records_under_the_streams_row(conn, monke
                         lambda f, sr, mono: (np.zeros(48000 * 60, dtype=np.float32), sr))
     monkeypatch.setattr(provenance, "create_stream_source", lambda *a: stream)
     monkeypatch.setattr(notary, "wake", lambda reason: None)
+    monkeypatch.setattr(settings_router, "instruments_on", lambda: True)
     enricher = enrichment.PreviewEnricher()
-    monkeypatch.setattr(enricher, "_models", lambda: (Embedder(), Analyzer()))
+    monkeypatch.setattr(enricher, "_models", lambda sonic, tag: (Embedder(), Analyzer()))
     enricher._enrich(track, b"stream", (60.0,), True, "lossless-test")
     with conn.cursor() as cur:
         cur.execute("""SELECT instruments, analysis_source_id, analysis_version

@@ -1,11 +1,17 @@
 """
-Audio embedding generation using CLAP model.
-Generates 512-dimensional audio embeddings for tracks using laion/clap-htsat-unfused.
+Audio embeddings using the CLAP model (laion/clap-htsat-unfused, 512-d), and
+the sonic pass that makes them.
 
 Uses the analysis source media file (is_analysis_source=TRUE) for each track.
 Per track: the track-level embedding (search vector; becomes the materialized
 mean of segments after the Stage-2b flip) + windowed segment embeddings on
 the canonical 10s grid (embedding_segments).
+
+The sonic pass (AudioEmbeddingGenerator.sonic_pass, 2026-11-11) is the first
+of a node's two analysis passes: one decode a track, the fingerprint, the
+segments and the features (librosa, audio_analysis.AudioAnalyzer.
+features_from_array) — every profile with the ML stack runs it. The
+instrument pass (audio_analysis) follows it behind the owner's switch.
 """
 
 import logging
@@ -95,37 +101,26 @@ def _padded_to_rung(inputs, pad_token_id: int) -> dict:
 
 
 
-# Driven from media_files (is_analysis_source) — the OWNED set. tracks holds
-# millions of trackless phantom rows; driving from tracks would scan them all
-# to find owned ones needing an embedding. Material under one grid window is
-# never queued: no fingerprint, no address, no analysis
-# (provenance.MIN_MATERIAL_SECONDS), nor is a file of a copy that is away
-# (album_variants.absent_since): nothing can read it until it is back.
-SOURCE_FILES_SQL = """
-    SELECT t.id as track_id, mf.id as media_file_id,
-           mf.file_path, mf.bit_depth,
-           mf.sample_rate, mf.is_lossless,
-           mf.duration_seconds,
-           mf.cue_start_seconds, mf.cue_end_seconds
-    FROM media_files mf
-    JOIN tracks t ON t.id = mf.track_id
-    JOIN album_variants av ON av.id = mf.album_variant_id
-    LEFT JOIN embeddings e ON e.track_id = t.id
-    LEFT JOIN analysis_sources asrc ON asrc.id = e.analysis_source_id
-    WHERE mf.is_analysis_source = true
-      AND av.absent_since IS NULL
-      AND (mf.duration_seconds IS NULL
-           OR mf.duration_seconds >= :min_seconds)
-"""
-
-# Pending = no embedding yet, OR unlinked provenance (legacy rows —
-# re-analysis links them), OR made from material other than the current
-# analysis source holds at its rank: no row of this file in the material
-# group of the analysis's row ranks no higher than it (provenance.
-# file_in_group_sql — the source moved to a better rip, or a stream preview
-# awaits its owned upgrade; a file that is the same material at a rank no
-# higher, which the pass registered and skipped, is not asked again).
-# Analysis that arrived over P2P (asrc.imported) also matches that third arm
+# The sonic pass's queue, driven from media_files (is_analysis_source) — the
+# OWNED set. tracks holds millions of trackless phantom rows; driving from
+# tracks would scan them all to find owned ones needing analysis. Material
+# under one grid window is never queued: no fingerprint, no address, no
+# analysis (provenance.MIN_MATERIAL_SECONDS), nor is a file of a copy that is
+# away (album_variants.absent_since): nothing can read it until it is back.
+# Each row says which of the pass's two records it lacks, so one decode makes
+# exactly those.
+#
+# A record is pending when there is none, when it is linked to no source
+# (legacy rows — re-analysis links them), or when it was made from material
+# other than the current analysis source holds at its rank: no row of this
+# file in the material group of the record's row ranks no higher than it
+# (provenance.file_in_group_sql — the source moved to a better rip, or a
+# stream preview awaits its owned upgrade; a file that is the same material
+# at a rank no higher, which the pass registered and skipped, is not asked
+# again). An embedding is pending, too, while it is a portrait without its
+# segments — the legacy mean of before 2026-07-05, from which no zero-shot
+# score is derived — unless it was imported: the sync fills that gap.
+# Analysis that arrived over P2P (asrc.imported) also matches the third arm
 # — it ranks below every file — but re-deriving it from the owned file is a
 # POLICY, not a repair: first-hand matches this node's actual rip and is the
 # network's poison detector, yet it re-spends GPU on tracks that already
@@ -133,12 +128,59 @@ SOURCE_FILES_SQL = """
 # that returned after a prune is linked back to its analysis
 # (provenance.relink_returned_files) after the import's canon and again
 # before each pass reads this queue, so it is not pending here.
-PENDING_SQL = SOURCE_FILES_SQL + f"""
-      AND (e.id IS NULL
-           OR e.analysis_source_id IS NULL
-           OR (NOT {provenance.file_in_group_sql()}
-               AND (:reanalyze OR NOT asrc.imported)))
+_SONIC_ROWS_SQL = f"""
+    SELECT mf.track_id, mf.id AS media_file_id,
+           mf.file_path, mf.bit_depth,
+           mf.sample_rate, mf.is_lossless,
+           mf.duration_seconds,
+           mf.cue_start_seconds, mf.cue_end_seconds, mf.file_modified_at,
+           (e.id IS NULL OR af.id IS NULL) AS gap,
+           (e.id IS NULL
+            OR e.analysis_source_id IS NULL
+            OR (NOT {provenance.file_in_group_sql("easrc")}
+                AND (:reanalyze OR NOT easrc.imported))
+            OR (NOT easrc.imported
+                AND NOT EXISTS (SELECT 1 FROM embedding_segments g
+                                 WHERE g.embedding_id = e.id))) AS embedding_pending,
+           (af.id IS NULL
+            OR af.analysis_source_id IS NULL
+            OR (NOT {provenance.file_in_group_sql("fasrc")}
+                AND (:reanalyze OR NOT fasrc.imported))) AS features_pending
+    FROM media_files mf
+    JOIN album_variants av ON av.id = mf.album_variant_id
+    LEFT JOIN embeddings e ON e.track_id = mf.track_id
+    LEFT JOIN analysis_sources easrc ON easrc.id = e.analysis_source_id
+    LEFT JOIN audio_features af ON af.track_id = mf.track_id
+    LEFT JOIN analysis_sources fasrc ON fasrc.id = af.analysis_source_id
+    WHERE mf.is_analysis_source = true
+      AND av.absent_since IS NULL
+      AND (mf.duration_seconds IS NULL
+           OR mf.duration_seconds >= :min_seconds)
 """
+
+SOURCE_FILES_SQL = f"SELECT * FROM ({_SONIC_ROWS_SQL}) q WHERE true"
+
+PENDING_SQL = (f"SELECT * FROM ({_SONIC_ROWS_SQL}) q"
+               " WHERE (q.embedding_pending OR q.features_pending)")
+
+
+def newest_file_id(db: Session) -> int:
+    """The newest media_files row: what a sonic pass that reads its queue
+    now has seen."""
+    return int(db.execute(sa_text("SELECT COALESCE(max(id), 0) FROM media_files")).scalar())
+
+
+def sonic_work_since(db: Session, file_id: int) -> bool:
+    """Whether a file newer than `file_id` waits for the sonic pass — a scan
+    added it after the pass read its queue. The instrument pass asks at
+    each of its batch seams and gives way: the sonic pass of any track goes
+    before the instruments of any track. A file the pass has seen and could
+    not analyse stays pending without calling it back."""
+    return bool(db.execute(sa_text(
+        f"SELECT EXISTS (SELECT 1 FROM ({PENDING_SQL}) p WHERE p.media_file_id > :since)"),
+        {"since": file_id, "min_seconds": provenance.MIN_MATERIAL_SECONDS,
+         "reanalyze": _reanalyze_imported()}).scalar())
+
 
 class AudioEmbeddingGenerator:
     """Generate audio embeddings using CLAP model on GPU."""
@@ -347,38 +389,19 @@ class AudioEmbeddingGenerator:
                "vecs": [str(v.tolist()) for v in vecs]})
         return True
 
-    def embed_track(self, db: Session, track_id, media_file,
-                    audio_full: Optional[np.ndarray] = None) -> bool:
-        """Full per-track pipeline for a local file: provenance + balanced-grid
-        segments + mean portrait. `media_file` is a MediaFile row/namespace
-        (id, file_path, sample_rate, bit_depth, is_lossless); audio decodes
-        here unless the caller already holds it."""
-        if audio_full is None:
-            audio_full = self._load_audio(
-                settings.translate_to_local_path(media_file.file_path),
-                media_file.cue_start_seconds, media_file.cue_end_seconds)
-            if audio_full is None:
-                return False
-        model = self._get_or_create_embedding_model(db)
-        src_id = provenance.get_or_create_local(
-            db, track_id, media_file.id, media_file.file_path,
-            media_file.sample_rate, media_file.bit_depth,
-            media_file.is_lossless, media_file.duration_seconds,
-            media_file.cue_start_seconds, media_file.cue_end_seconds)
-        if src_id is None:
-            return False
-        computed = self._compute_segments(audio_full)
-        if computed is None:
-            return False
-        idxs, vecs, portrait = computed
-        return self._persist_analysis(db, track_id, model, idxs, vecs, portrait, src_id)
-
-    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None, cancel_flag=None, force: bool = False) -> Dict[str, int]:
-        """
-        Generate embeddings for tracks that don't have them yet.
-
-        Queries tracks without embeddings, picks the analysis source media file
-        (is_analysis_source=TRUE) for audio loading.
+    def sonic_pass(self, limit: Optional[int] = None, order_by_date: bool = False,
+                   max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None,
+                   worker_id: Optional[int] = None, worker_count: Optional[int] = None,
+                   cancel_flag=None, force: bool = False, on_batch=None) -> Dict[str, int]:
+        """The sonic pass over the tracks whose embedding or features are
+        pending (PENDING_SQL): the registration of the track's analysis-
+        source file (the fingerprint, once per file), one decode, then what
+        the track lacks of its two records — the balanced-grid segments with
+        their mean portrait (CLAP; the database derives the zero-shot scores
+        from the segments) and the features (librosa) — each skipped when
+        the file's material group already holds it at a rank no lower
+        (provenance.held_in_group), each saved by the rank. The instrument
+        pass (audio_analysis) is the other pass, after this one.
 
         Args:
             limit: Maximum number of tracks to process.
@@ -387,15 +410,23 @@ class AudioEmbeddingGenerator:
             track_ids: If provided, only process these track IDs.
             worker_id: Worker index (0-based) for parallel processing.
             worker_count: Total number of workers for parallel processing.
-            force: Re-embed every analysis-source track regardless of state.
+            cancel_flag: Asked before every batch; True ends the pass there.
+            force: Re-analyse every analysis-source track regardless of state.
+            on_batch: Called with (tracks done, tracks queued) after each batch.
 
         Returns:
-            Statistics dict with keys: processed, success, failed, skipped.
+            processed, success (a record saved), failed, skipped (nothing to
+            make: the group holds it, or a better copy's records stand),
+            embeddings and features (the records saved).
         """
         import time
+        import notary
+        import analysis_pace
+        from audio_analysis import AudioAnalyzer, save_features
 
         provenance.require_fingerprinter()
-        stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
+        stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0,
+                 "embeddings": 0, "features": 0}
         start_time = time.time()
         if not force:
             # A failed look costs only the work it would have saved: the
@@ -409,22 +440,20 @@ class AudioEmbeddingGenerator:
             embedding_model = self._get_or_create_embedding_model(db)
 
             query_sql = SOURCE_FILES_SQL if force else PENDING_SQL
-            params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS}
-            if not force:
-                params["reanalyze"] = _reanalyze_imported()
+            params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS,
+                      "reanalyze": _reanalyze_imported()}
 
             if track_ids is not None:
-                query_sql += " AND t.id = ANY(:track_ids)"
+                query_sql += " AND q.track_id = ANY(:track_ids)"
                 params["track_ids"] = track_ids
 
-            # Gaps first: a track with no embedding at all beats an upgrade
+            # Gaps first: a track missing a record beats an upgrade
             # (stream→owned, better rip, imported→first-hand) — coverage
             # before recomputation.
             if order_by_date:
-                query_sql += (" ORDER BY (e.id IS NOT NULL),"
-                              " mf.file_modified_at DESC NULLS LAST")
+                query_sql += " ORDER BY q.gap DESC, q.file_modified_at DESC NULLS LAST"
             else:
-                query_sql += " ORDER BY (e.id IS NOT NULL), t.id"
+                query_sql += " ORDER BY q.gap DESC, q.track_id"
 
             if limit:
                 query_sql += f" LIMIT {limit}"
@@ -433,39 +462,59 @@ class AudioEmbeddingGenerator:
             total = len(rows)
 
             if total == 0:
-                logger.info("No tracks pending embedding generation")
+                logger.info("No tracks pending the sonic pass")
                 return stats
 
-            self.load_model()
+            # CLAP only for a queue that holds an embedding to make: after the
+            # features alone went (an imported record deleted), librosa is all
+            if force or any(r.embedding_pending for r in rows):
+                self.load_model()
+            analyzer = AudioAnalyzer(device=self.device)
 
-            logger.info(
-                f"Processing {total} tracks (batch_size={self.batch_size})"
-            )
+            logger.info(f"Sonic pass: {total} tracks (batch_size={self.batch_size})")
             if max_duration_seconds:
                 logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
 
             # --- Pipelined batch processing ---
-            # CPU threads decode batch N+1 while GPU processes batch N
-            def _load_one(row):
-                local_path = settings.translate_to_local_path(row.file_path)
-                return row, self._load_audio(local_path, row.cue_start_seconds,
-                                             row.cue_end_seconds)
+            # A batch is registered first (the fingerprint, once per file) and
+            # what its group already holds is left out; then CPU threads
+            # decode it, and run librosa where its features are to be made,
+            # while the accelerator encodes the batch before it.
+            def _plan(batch_rows):
+                todo = []
+                for row in batch_rows:
+                    planned = self._plan_track(db, row, embedding_model, force)
+                    if isinstance(planned, str):
+                        stats[planned] += 1
+                    else:
+                        todo.append(planned)
+                return todo
 
-            def _load_batch(batch_rows):
-                """Load audio for a batch using thread pool. Returns (valid_rows, audio_arrays, failed_count)."""
-                audio_arrays = []
-                valid_rows = []
+            def _load_one(item):
+                row, _src, _embed, describe = item
+                local_path = settings.translate_to_local_path(row.file_path)
+                audio = self._load_audio(local_path, row.cue_start_seconds, row.cue_end_seconds)
+                features = None
+                if audio is not None and describe:
+                    try:
+                        features = analyzer.features_from_array(audio, self.sample_rate)
+                    except Exception as e:
+                        logger.error(f"librosa failed for {row.track_id}: {e}")
+                return item, audio, features
+
+            def _load_batch(todo):
+                """Decode a batch in the I/O pool: (loaded, failed count)."""
+                loaded = []
                 failed = 0
-                futures = [io_pool.submit(_load_one, row) for row in batch_rows]
+                futures = [io_pool.submit(_load_one, item) for item in todo]
                 for future in as_completed(futures):
-                    row, audio = future.result()
+                    item, audio, features = future.result()
                     if audio is not None:
-                        audio_arrays.append(audio)
-                        valid_rows.append(row)
+                        loaded.append((item, audio, features))
                     else:
                         failed += 1
-                        logger.warning(f"Skipping track {row.track_id}: audio load failed")
-                return valid_rows, audio_arrays, failed
+                        logger.warning(f"Skipping track {item[0].track_id}: audio load failed")
+                return loaded, failed
 
             # Split into batch slices — bounded by BOTH row count and total
             # audio duration: whole tracks are held decoded in RAM per batch,
@@ -474,7 +523,7 @@ class AudioEmbeddingGenerator:
             batch_budget_seconds = audio_batch_budget_seconds()
             batch_slices, cur, cur_seconds = [], [], 0.0
             for row in rows:
-                dur = float(row.duration_seconds) if row.duration_seconds else 300.0
+                dur = float(row.duration_seconds) if row.duration_seconds else analysis_pace.UNKNOWN_SECONDS
                 if cur and (len(cur) >= self.batch_size
                             or cur_seconds + dur > batch_budget_seconds):
                     batch_slices.append(cur)
@@ -486,8 +535,8 @@ class AudioEmbeddingGenerator:
             num_batches = len(batch_slices)
 
             # Persistent I/O thread pool. Each worker is a whole ffmpeg
-            # subprocess — 16 of them saturate a 24-core dev box but thrash
-            # a 4-core laptop, so the size comes from the hardware profile.
+            # subprocess and librosa — 16 of them saturate a 24-core dev box
+            # but thrash a 4-core laptop, so the size comes from the profile.
             from hardware_profile import resolve as _hw
             io_pool = ThreadPoolExecutor(max_workers=_hw().io_workers)
             # Prefetch pool runs _load_batch in background
@@ -495,66 +544,57 @@ class AudioEmbeddingGenerator:
 
             try:
                 # Pre-submit first batch loading
-                prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[0])
+                batch_began = time.monotonic()
+                planned = _plan(batch_slices[0])
+                prefetch_future = prefetch_pool.submit(_load_batch, planned)
 
-                for batch_idx in tqdm(range(num_batches), desc="Generating embeddings", unit="batch"):
-                    # Check cancellation
+                for batch_idx in tqdm(range(num_batches), desc="Sonic pass", unit="batch"):
                     if cancel_flag and cancel_flag():
-                        logger.info("Embedding generation cancelled by user")
+                        logger.info("Sonic pass cancelled")
                         break
 
-                    # Check time limit
                     if max_duration_seconds:
                         elapsed = time.time() - start_time
                         if elapsed >= max_duration_seconds:
                             logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
                             break
 
-                    # Wait for current batch audio (should already be ready or nearly ready)
-                    valid_rows, audio_arrays, batch_failed = prefetch_future.result()
+                    loaded, batch_failed = prefetch_future.result()
                     stats["processed"] += len(batch_slices[batch_idx])
                     stats["failed"] += batch_failed
+                    # The batch's pace, when every track it worked on runs
+                    # the whole pass: a batch of features alone, or of
+                    # segments alone, is not the pass's pace
+                    whole = all(embed and describe for _r, _s, embed, describe in planned)
 
-                    # Start loading NEXT batch immediately (runs while GPU works)
+                    # Register the NEXT batch and start loading it (runs while
+                    # the accelerator works)
                     if batch_idx + 1 < num_batches:
-                        prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[batch_idx + 1])
+                        planned = _plan(batch_slices[batch_idx + 1])
+                        prefetch_future = prefetch_pool.submit(_load_batch, planned)
 
-                    if not audio_arrays:
-                        continue
+                    analysed, wrote_any = 0.0, False
+                    for item, audio, features in loaded:
+                        outcome, made = self._sonic_track(db, item, audio, features,
+                                                          embedding_model, save_features)
+                        stats[outcome] += 1
+                        stats["embeddings"] += made.count("embeddings")
+                        stats["features"] += made.count("features")
+                        wrote_any = wrote_any or bool(made)
+                        whole = whole and outcome == "success" and len(made) == 2
+                        analysed += len(audio) / self.sample_rate
 
-                    # Per track: balanced-grid segments (one batched GPU pass
-                    # per track) → the track-level vector is their normalized
-                    # mean. Next batch decodes in parallel with the GPU work.
-                    for row, audio in zip(valid_rows, audio_arrays):
-                        src_id = provenance.get_or_create_local(
-                            db, row.track_id, row.media_file_id, row.file_path,
-                            row.sample_rate, row.bit_depth, row.is_lossless,
-                            row.duration_seconds,
-                            row.cue_start_seconds, row.cue_end_seconds)
-                        if src_id is None:
-                            stats["failed"] += 1
-                            logger.warning(f"Skipping track {row.track_id}: "
-                                           "no content address (fingerprint)")
-                            continue
-                        if not force and provenance.held_in_group(
-                                db, src_id, "embeddings", model_id=embedding_model.id):
-                            # the same material, analysed at a rank no lower
-                            stats["skipped"] += 1
-                            continue
-                        computed = self._compute_segments(audio)
-                        if computed is None:
-                            stats["failed"] += 1
-                            logger.error(f"Failed embedding for track {row.track_id}")
-                            continue
-                        idxs, vecs, portrait = computed
-                        if self._persist_analysis(
-                                db, row.track_id, embedding_model, idxs, vecs,
-                                portrait, src_id):
-                            stats["success"] += 1
-                        else:
-                            stats["skipped"] += 1
-
+                    # A batch's wall time runs from the end of the one before:
+                    # the batches overlap, and their walls add up to the pass's
+                    if whole:
+                        analysis_pace.record(db, analysis_pace.SONIC,
+                                             time.monotonic() - batch_began, analysed)
                     db.commit()
+                    batch_began = time.monotonic()
+                    if wrote_any:
+                        notary.wake("sonic pass")
+                    if on_batch:
+                        on_batch(stats["processed"], total)
                     # Hand the allocator's free blocks back each batch — else
                     # the caching allocator holds its peak for the whole run
                     # (~28 GB on MPS unified memory; heavy swap on a 16 GB Mac).
@@ -565,33 +605,76 @@ class AudioEmbeddingGenerator:
                 prefetch_pool.shutdown(wait=True, cancel_futures=True)
 
             logger.info(
-                f"Embedding generation complete: "
-                f"{stats['success']} success, {stats['failed']} failed"
+                f"Sonic pass complete: {stats['success']} success, {stats['failed']} failed, "
+                f"{stats['embeddings']} embeddings, {stats['features']} features"
             )
-
 
         return stats
 
+    def _plan_track(self, db: Session, row, model, force: bool):
+        """A queued track registered before anything is decoded or computed:
+        (row, source id, make the segments, make the features), or the
+        outcome when there is nothing to make — "failed" with no fingerprint
+        (no address: nothing is saved, and the queue asks again next run, as
+        for a file that fails to decode), "skipped" when the file's material
+        group already holds both records at a rank no lower."""
+        try:
+            with db.begin_nested():
+                src_id = provenance.get_or_create_local(
+                    db, row.track_id, row.media_file_id, row.file_path,
+                    row.sample_rate, row.bit_depth, row.is_lossless,
+                    row.duration_seconds, row.cue_start_seconds, row.cue_end_seconds)
+                if src_id is None:
+                    logger.warning(f"Skipping track {row.track_id}: no content address (fingerprint)")
+                    return "failed"
+                embed = force or (row.embedding_pending and not provenance.held_in_group(
+                    db, src_id, "embeddings", model_id=model.id))
+                describe = force or (row.features_pending and not provenance.held_in_group(
+                    db, src_id, "audio_features"))
+        except Exception as e:
+            logger.error(f"Registration failed for {row.track_id}: {e}")
+            return "failed"
+        if not (embed or describe):
+            return "skipped"
+        return row, src_id, embed, describe
 
-def generate_embeddings(
-    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None,
+    def _sonic_track(self, db: Session, item, audio, features, model, save_features):
+        """One decoded track of the sonic pass, its records made and saved
+        under a savepoint of its own. Returns the outcome (success, failed,
+        skipped: a better copy's records stand) and the kinds saved."""
+        row, src_id, embed, describe = item
+        made, failed = [], False
+        try:
+            with db.begin_nested():
+                if embed:
+                    computed = self._compute_segments(audio)
+                    if computed is None:
+                        failed = True
+                        logger.error(f"Failed embedding for track {row.track_id}")
+                    elif self._persist_analysis(db, row.track_id, model, *computed, src_id):
+                        made.append("embeddings")
+                if describe:
+                    if features is None:
+                        failed = True
+                    elif save_features(db, row.track_id, features, src_id):
+                        made.append("features")
+        except Exception as e:
+            logger.error(f"Sonic pass failed for {row.track_id}: {e}")
+            return "failed", []
+        if made:
+            return "success", made
+        return ("failed" if failed else "skipped"), made
+
+
+def sonic_pass(
+    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False,
+    max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None,
     worker_id: Optional[int] = None, worker_count: Optional[int] = None,
     force: bool = False,
 ) -> Dict[str, int]:
-    """
-    Convenience function to generate embeddings.
-
-    Args:
-        limit: Maximum number of tracks to process.
-        batch_size: Override default batch size.
-        order_by_date: If True, process newest tracks first.
-        max_duration_seconds: Maximum duration in seconds.
-        track_ids: If provided, only process these track IDs.
-        worker_id: Worker index (0-based) for parallel processing.
-        worker_count: Total number of workers for parallel processing.
-
-    Returns:
-        Statistics dictionary.
-    """
+    """The sonic pass (AudioEmbeddingGenerator.sonic_pass) with the default
+    model; `batch_size` overrides the configured one."""
     generator = AudioEmbeddingGenerator(batch_size=batch_size)
-    return generator.generate_embeddings(limit=limit, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds, track_ids=track_ids, worker_id=worker_id, worker_count=worker_count, force=force)
+    return generator.sonic_pass(limit=limit, order_by_date=order_by_date,
+                                max_duration_seconds=max_duration_seconds, track_ids=track_ids,
+                                worker_id=worker_id, worker_count=worker_count, force=force)

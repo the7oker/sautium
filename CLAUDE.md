@@ -298,6 +298,13 @@ See:
   the methodology this release computes (`record_sig.FEATURES_ANALYSIS_VERSION`,
   `INSTRUMENTS_ANALYSIS_VERSION`): the gate refuses a newer one, so no seal
   over a version no release makes replaces every imported record of its kind.
+  Two passes make them, one decode a track each (since 2026-11-11): the
+  **sonic pass** (segments + features — `embeddings.AudioEmbeddingGenerator.
+  sonic_pass`, every profile with the ML stack, lite included) and, after
+  every track's sonic pass, the **instrument pass**
+  (`audio_analysis.AudioAnalyzer.instrument_pass`) behind the owner's switch
+  `enrichment.instruments`; each registers before it computes and skips what
+  the material group holds at a rank no lower (`provenance.held_in_group`).
 - **A copy at the HQPlayer is a VARIANT, and "owned" means `owned_files`.**
   Since 2026-09-27 an album's copy in the library of the HQPlayer the node
   drives (a disk on an Embedded box, a mounted share, a hi-res subset copied
@@ -413,7 +420,11 @@ See:
   computed `p2p.rare_mode`), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
   each), `p2p.relay_enabled` (relay role), `enrichment.reanalyze_imported`
   (re-derive first-hand analysis over P2P-imported — default off: the
-  sync's whole point is not doing the work twice), `p2p.gate_mode`
+  sync's whole point is not doing the work twice), `enrichment.instruments`
+  ("Recognise instruments" — the instrument pass and the tagging of
+  streams; a computed default, on for full and standard, off for lite;
+  off, the node computes and signs no instruments, removes none, and still
+  pulls, serves and carries other authors'), `p2p.gate_mode`
   (`off|shadow|enforce`, default `shadow` — the admission gate prices
   strangers' requests in 64 MiB tasks; arming is a release decision, see
   P2P-SYNC-INTEGRITY.md § "Pricing formula v1"), `support.diagnostics_enabled`

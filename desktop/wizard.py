@@ -412,9 +412,9 @@ class SetupWizard(ctk.CTkToplevel):
                 "30,000-track library takes hours, not days.",
         "standard": "Analysis, search and the models all run locally; a large "
                     "library analyses overnight.",
-        "lite": "Too small for local audio analysis — it arrives from the "
-                "network instead. Library, player, search and streaming are "
-                "unaffected.",
+        "lite": "Audio analysis runs locally at its lighter setting; the "
+                "instruments come from the network unless you switch them on. "
+                "Library, player, search and streaming are unaffected.",
     }
     _NO_ML_DETAIL = ("PyTorch has no build for this Mac, so audio analysis and "
                      "sound search stay off. Library, player, streaming and "
@@ -422,8 +422,9 @@ class SetupWizard(ctk.CTkToplevel):
 
     # Fresh-install footprint, from the reference node's own caches and the
     # pinned wheel set: BGE-M3 4.3 + CLAP 1.2 + MiniLM 0.6 on every tier, plus
-    # AST 0.35 + PaSST 0.35 + MADLAD-ct2 2.8 where analysis and translation
-    # run; the torch trio is ~4.5 GB as a CUDA build and ~1.5 GB otherwise;
+    # AST 0.35 + PaSST 0.35 + MADLAD-ct2 2.8 where instruments are recognised
+    # by default and translation runs (lite fetches the tagger only once its
+    # owner switches the instruments on); the torch trio is ~4.5 GB as a CUDA build and ~1.5 GB otherwise;
     # portable PostgreSQL and the media tools add ~0.3 GB.
     def _install_gb(self) -> int:
         if not self._hw.ml_available:
