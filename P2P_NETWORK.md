@@ -536,7 +536,9 @@ the newest a record may carry is the methodology this release computes
 (`record_sig.FEATURES_ANALYSIS_VERSION`, `INSTRUMENTS_ANALYSIS_VERSION`), and
 the gate refuses a newer one — a seal over a version no release makes would
 replace every imported record of its kind and keep the honest ones out. A
-newer release's records reach a node when the node updates.
+newer release's records reach a node when the node updates; until then a
+node of that release still offers and pushes them to this one through carry,
+which refuses them at the gate as a pull's would be.
 The Docker peer surface serves the inventory and every pull category from
 the same shared handlers as the launcher's sync server.
 
@@ -1435,7 +1437,9 @@ nobody reported is exactly this, and `signin_failed` carries the CLI's
 last line), `chat.error`, `sync.failed`, `sync.import_failed`
 (one category that never lands — the run's totals read "0 items" and hide
 it), `update.failed`, `mb_slice.failed` / `lb_slice.failed` (a slice cycle
-that raised; since 2026-09-24 / 2026-09-20). The master accepts any
+that raised; since 2026-09-24 / 2026-09-20), `migration.waiting` (the
+analysis records' cutover failed closed for want of the node's key, and
+whether the identity re-normalization waits with it; since 2026-11-11). The master accepts any
 well-formed `family.name`, so
 a node one release ahead is never refused a whole report over a new kind.
 Before a database exists (wizard, a PostgreSQL that did not start) events

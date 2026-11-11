@@ -224,7 +224,10 @@ implementation details live in the code, DB and git history.
   kind and kept the honest ones out for good (the first review of the
   cutover). A record's seal binds the declaration of the row it links to,
   so the guards shed it on a new link too, and read a value in the form its
-  hash does (a float bit for bit, the instruments map as its text).
+  hash does (a float bit for bit, the instruments map as its text); and
+  sign() writes a record's seal only onto the row version it read (xmin) —
+  a save landing between its read and its write is a change no guard can
+  shed a later seal from, and leaves the record for the next pass.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be
