@@ -871,7 +871,10 @@ network's safety anchor.
 **The "don't send what they already have" filter** is the offer/answer round:
 16 bytes per recording to ask against ~46 KB to send blind. **Budget** is
 `sync.carry_limit` (2000 tracks ≈ 92 MB by default), counted honestly — only
-tracks with imported analysis and no file. It is now the second belt; the first
+tracks with imported analysis, of any kind, and no file, leaving out a track
+that holds analysis of this node's own (what joins a phantom it streamed
+itself spends no room, and is taken whatever the room; since 2026-11-11). It
+is now the second belt; the first
 is the phantom intersection itself. **Provenance is never erased**:
 `_drop_protected` keeps segments off tracks that already hold a grid — a
 first-hand source, a sealed grid, or an unlinked one on an owned track
@@ -1437,7 +1440,11 @@ nobody reported is exactly this, and `signin_failed` carries the CLI's
 last line), `chat.error`, `sync.failed`, `sync.import_failed`
 (one category that never lands — the run's totals read "0 items" and hide
 it), `update.failed`, `mb_slice.failed` / `lb_slice.failed` (a slice cycle
-that raised; since 2026-09-24 / 2026-09-20), `migration.waiting` (the
+that raised; since 2026-09-24 / 2026-09-20), `mb_slice.refused` /
+`lb_slice.refused` (a source refused this node's slice request over a
+falsification it holds against this node) and `slice.penalized` (a key this
+node penalized on the slice lanes),
+`migration.waiting` (the
 analysis records' cutover failed closed for want of the node's key, and
 whether the identity re-normalization waits with it; since 2026-11-11). The master accepts any
 well-formed `family.name`, so

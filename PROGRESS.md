@@ -225,9 +225,12 @@ implementation details live in the code, DB and git history.
   cutover). A record's seal binds the declaration of the row it links to,
   so the guards shed it on a new link too, and read a value in the form its
   hash does (a float bit for bit, the instruments map as its text); and
-  sign() writes a record's seal only onto the row version it read (xmin) —
-  a save landing between its read and its write is a change no guard can
-  shed a later seal from, and leaves the record for the next pass.
+  sign() writes every seal — a record's, an album's, a tracklist row's, a
+  recording binding's — only onto the row version it read (xmin): a save
+  landing between its read and its write is a change no guard can shed a
+  later seal from, and leaves the row for the next pass. sign() reports what
+  it wrote and what it tried, and the notary drains a capped backlog by the
+  second.
 - **Track-by-track incremental enrichment**. Each step checks if data exists,
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be
