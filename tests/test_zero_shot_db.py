@@ -498,7 +498,7 @@ def test_the_import_gate_refuses_a_bundle_off_the_unit_sphere_or_under_a_model_i
     for norm, inside in ((edge[0] + 1e-4, True), (edge[1] - 1e-4, True),
                          (edge[0] - 1e-4, False), (edge[1] + 1e-4, False)):
         vector = [norm * x for x in LABEL["vocal"]]
-        assert sync_client._unit(vector) is inside
+        assert sync_client.is_unit(vector) is inside
         _, embedding = _bundle(cur, [vector])
         assert bool(_scores(cur, embedding)) is inside, norm
 
@@ -623,8 +623,9 @@ def test_the_analysis_pass_writes_a_bundle_in_one_statement_and_it_is_scored(cur
         model = db.get(embeddings.EmbeddingModel, uuid.UUID(MODEL))
         for segments in (first, again):                     # an analysis, then a re-analysis
             vectors = np.array(segments, dtype=np.float32)
+            mean = vectors.mean(axis=0)
             assert generator._persist_analysis(db, track, model, list(range(len(segments))),
-                                               vectors, vectors.mean(axis=0), None)
+                                               vectors, mean / np.linalg.norm(mean), None)
             db.commit()
     engine.dispose()
     assert len(inserts) == 2

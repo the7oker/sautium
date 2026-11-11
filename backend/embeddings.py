@@ -30,6 +30,7 @@ import provenance
 from audio_analysis import TrackTooLong, load_full_track_48k
 from config import settings
 from database import get_db_context
+from desktop.sync_client import UNIT_NORM, is_unit
 from models import Embedding, EmbeddingModel, Track, MediaFile
 from uuid_utils import embedding_model_uuid
 
@@ -188,6 +189,12 @@ def sonic_work_since(db: Session, file_id: int, track_ids: Optional[list] = None
         {"since": file_id, "min_seconds": provenance.MIN_MATERIAL_SECONDS,
          "reanalyze": _reanalyze_imported(), "track_ids": track_ids,
          "longest": longest}).scalar())
+
+
+class NotUnitVectors(ValueError):
+    """An analysis this node made whose segments or portrait are not unit
+    vectors — what the import gate of every peer refuses, and the derived
+    scores assume. Nothing of it is saved."""
 
 
 class AudioEmbeddingGenerator:
@@ -372,7 +379,25 @@ class AudioEmbeddingGenerator:
         Returns False when the existing row outranks the incoming analysis.
         A portrait without its segments (the legacy mean) outranks nothing,
         as it holds nothing (provenance.held_in_group): whatever copy made
-        it, the pass that makes segments replaces it."""
+        it, the pass that makes segments replaces it.
+
+        This is where every vector this node computed is written, the sonic
+        pass's and a stream's alike, so here they are held to the band the
+        import gate holds a peer's to (sync_client.is_unit — the gate's own
+        function, so the two cannot differ): NotUnitVectors before anything
+        is written when a segment or the portrait is outside it. The encoder
+        normalizes, so that is a fault of this node's model or code — and
+        without the check its bundles would be sealed, served, and refused
+        by every peer."""
+        segments = [v.tolist() for v in vecs]
+        mean = portrait.tolist()
+        if not (is_unit(mean) and all(is_unit(s) for s in segments)):
+            norms = [float(np.linalg.norm(np.asarray(s, dtype=np.float64))) for s in segments]
+            raise NotUnitVectors(
+                f"the analysis of track {track_id} is not unit vectors: segment norms "
+                f"{min(norms):.6g}..{max(norms):.6g}, portrait "
+                f"{float(np.linalg.norm(np.asarray(mean, dtype=np.float64))):.6g} "
+                f"(a unit vector is {UNIT_NORM[0]}..{UNIT_NORM[1]}); model {model.name}")
         existing = db.execute(sa_text("""
             SELECT e.analysis_source_id,
                    EXISTS (SELECT 1 FROM embedding_segments g WHERE g.embedding_id = e.id) AS whole
@@ -393,7 +418,7 @@ class AudioEmbeddingGenerator:
                    analysis_version = EXCLUDED.analysis_version
             RETURNING id
         """), {"tid": str(track_id), "mid": str(model.id),
-               "vec": str(portrait.tolist()), "sid": analysis_source_id,
+               "vec": str(mean), "sid": analysis_source_id,
                "ver": EMBEDDING_ANALYSIS_VERSION}).scalar()
         db.execute(sa_text(
             "DELETE FROM embedding_segments WHERE embedding_id = :eid"),
@@ -405,7 +430,7 @@ class AudioEmbeddingGenerator:
             SELECT :eid, s.idx, CAST(s.vec AS vector)
               FROM unnest(CAST(:idxs AS smallint[]), CAST(:vecs AS text[])) AS s(idx, vec)
         """), {"eid": eid, "idxs": [int(i) for i in idxs],
-               "vecs": [str(v.tolist()) for v in vecs]})
+               "vecs": [str(s) for s in segments]})
         return True
 
     def sonic_pass(self, limit: Optional[int] = None, order_by_date: bool = False,
@@ -440,7 +465,9 @@ class AudioEmbeddingGenerator:
         Returns:
             processed, success (a record saved), failed, skipped (nothing to
             make: the group holds it, or a better copy's records stand),
-            embeddings and features (the records saved).
+            embeddings and features (the records saved), and not_unit — the
+            failed tracks whose computed vectors were not unit vectors
+            (NotUnitVectors: nothing of such a track is saved).
         """
         import time
         import notary
@@ -449,7 +476,7 @@ class AudioEmbeddingGenerator:
 
         provenance.require_fingerprinter()
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0,
-                 "embeddings": 0, "features": 0, "too_long": 0}
+                 "embeddings": 0, "features": 0, "too_long": 0, "not_unit": 0}
         start_time = time.time()
         if not force:
             # A failed look costs only the work it would have saved: the
@@ -657,6 +684,9 @@ class AudioEmbeddingGenerator:
                     for item, audio, features in loaded:
                         outcome, made = self._sonic_track(db, item, audio, features,
                                                           embedding_model, save_features)
+                        if outcome == "not_unit":
+                            stats["not_unit"] += 1
+                            outcome = "failed"
                         stats[outcome] += 1
                         stats["embeddings"] += made.count("embeddings")
                         stats["features"] += made.count("features")
@@ -688,6 +718,11 @@ class AudioEmbeddingGenerator:
                 f"Sonic pass complete: {stats['success']} success, {stats['failed']} failed, "
                 f"{stats['embeddings']} embeddings, {stats['features']} features"
             )
+            if stats["not_unit"]:
+                logger.error(
+                    f"Sonic pass: {stats['not_unit']} of the failed track(s) were not saved because "
+                    "this node's own analysis made vectors that are not unit vectors — a fault of "
+                    "its model or code, not of the files (each is named above)")
 
         return stats
 
@@ -721,7 +756,9 @@ class AudioEmbeddingGenerator:
     def _sonic_track(self, db: Session, item, audio, features, model, save_features):
         """One decoded track of the sonic pass, its records made and saved
         under a savepoint of its own. Returns the outcome (success, failed,
-        skipped: a better copy's records stand) and the kinds saved."""
+        skipped: a better copy's records stand; not_unit: its vectors were
+        not unit vectors, and nothing of the track is saved — its features
+        neither) and the kinds saved."""
         row, src_id, embed, describe = item
         made, failed = [], False
         try:
@@ -738,6 +775,9 @@ class AudioEmbeddingGenerator:
                         failed = True
                     elif save_features(db, row.track_id, features, src_id):
                         made.append("features")
+        except NotUnitVectors as e:
+            logger.error(f"Sonic pass: nothing saved — {e}")
+            return "not_unit", []
         except Exception as e:
             logger.error(f"Sonic pass failed for {row.track_id}: {e}")
             return "failed", []

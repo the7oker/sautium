@@ -130,4 +130,4 @@ def test_a_unit_vector_is_one_within_the_band_the_derivation_scores():
     axis = [1.0] + [0.0] * 511
     for norm, unit in ((1.0, True), (low, True), (high, True), (0.98, False), (1.02, False),
                        (0.0, False), (40.0, False), (-1.0, True)):
-        assert sync_client._unit([norm * x for x in axis]) is unit, norm
+        assert sync_client.is_unit([norm * x for x in axis]) is unit, norm

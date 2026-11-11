@@ -267,8 +267,10 @@ See:
   `backend/zero_shot.py`). They never travel and are never signed. Presence
   is a read-time threshold in `zero_shot.py`; gates read `zero_shot_scores`,
   display reads the `track_zero_shot` view. A bundle holding a segment
-  that is not a unit vector (norm outside 0.99..1.01) derives none, and the
-  import gate refuses one. Discovery, search, Now Playing, the assistant and
+  that is not a unit vector (norm outside 0.99..1.01) derives none, the
+  import gate refuses one, and since 2026-11-11 the node's own passes save
+  none (`embeddings._persist_analysis`, by the gate's own `is_unit`: such a
+  track fails alone, with an error in the log and in the pass's count). Discovery, search, Now Playing, the assistant and
   the CLI read these; no analysis writes them and no record carries them
   (since 2026-11-10, the records' cutover below). The thresholds were set
   2026-11-11 from a measurement on a real library of ~41 000 tracks: one

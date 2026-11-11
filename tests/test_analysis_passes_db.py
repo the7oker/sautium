@@ -19,6 +19,7 @@ The models are fakes (CLAP one unit vector, librosa a fixed map, the tagger
 fixed scores), as fpcalc and ffprobe are where a registration would decode."""
 
 import asyncio
+import logging
 import math
 import sys
 import time
@@ -761,6 +762,111 @@ def test_a_stream_held_for_its_sonic_records_but_not_its_instruments_is_tagged(
     stream.run(track)
     assert models.tagger.calls == 1
     assert _records(cur, track)["embeddings"] == owned
+
+
+# -- What this node saves is unit vectors ----------------------------------------
+
+def _off_unit(what: str):
+    """What CLAP answers when it went wrong in one way: a segment or the
+    portrait off the unit sphere, or not a number at all."""
+    bad = {"a long segment": (np.stack([UNIT, 3 * UNIT]), UNIT),
+           "a short segment": (np.stack([0.5 * UNIT]), UNIT),
+           "the portrait": (np.stack([UNIT]), 1.5 * UNIT),
+           "not a number": (np.stack([np.full(512, np.nan, dtype=np.float32)]), UNIT)}[what]
+    return list(range(len(bad[0]))), bad[0], bad[1]
+
+
+def _clap_answers(monkeypatch, models, answers: dict) -> None:
+    """The n-th CLAP call (1-based) answers `answers[n]`; any other, the unit vector."""
+    def clap(self, audio):
+        models.calls.append(("CLAP", None))
+        n = len([c for c in models.calls if c[0] == "CLAP"])
+        return answers.get(n, ([0], np.stack([UNIT]), UNIT))
+    monkeypatch.setattr(embeddings.AudioEmbeddingGenerator, "_compute_segments", clap)
+
+
+@pytest.mark.parametrize("what", ["a long segment", "a short segment", "the portrait", "not a number"])
+def test_the_sonic_pass_saves_no_record_of_a_track_whose_vectors_are_not_unit(
+        cur, prints, models, monkeypatch, caplog, what):
+    """The band the import gate holds a peer's bundle to, held to this node's
+    own: the track fails alone — its features unsaved too — the rest of the
+    batch saves, and the pass counts it and says so."""
+    tracks = _three(cur, prints, fixed=True)
+    _clap_answers(monkeypatch, models, {2: _off_unit(what)})
+    with caplog.at_level(logging.ERROR, logger="embeddings"):
+        stats = models.sonic()
+    assert {k: stats[k] for k in ("processed", "success", "failed", "not_unit", "embeddings",
+                                  "features")} == {"processed": 3, "success": 2, "failed": 1,
+                                                   "not_unit": 1, "embeddings": 2, "features": 2}
+    # whichever of the batch's three the second forward was (its decodes race)
+    held = {n: set(_records(cur, track)) for n, track in tracks.items()}
+    refused = [n for n in held if not held[n]]
+    assert len(refused) == 1 and all(held[n] == {"embeddings", "features"}
+                                     for n in held if n not in refused), held
+    bad = tracks[refused[0]]
+    cur.execute("""SELECT t.title, count(s.id) FROM tracks t
+                   LEFT JOIN embeddings e ON e.track_id = t.id
+                   LEFT JOIN embedding_segments s ON s.embedding_id = e.id
+                   GROUP BY t.title ORDER BY t.title""")
+    assert cur.fetchall() == [(n, 0 if n in refused else 1) for n in "abc"]
+    said = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    named = [m for m in said if "not unit vectors:" in m]
+    assert len(named) == 1 and bad in named[0] and "model clap" in named[0] \
+        and "segment norms" in named[0] and "portrait" in named[0], said
+    assert any("1 of the failed track(s) were not saved" in m for m in said)
+    assert models.wakes == ["sonic pass"]                   # for the two that were saved
+    assert _queued(bad)["embeddings"] and _queued(bad)["features"]
+
+    # still in the queue: once the node analyses rightly again, it is saved
+    _clap_answers(monkeypatch, models, {})
+    again = models.sonic()
+    assert (again["success"], again["failed"], again["not_unit"]) == (1, 0, 0)
+    assert set(_records(cur, bad)) == {"embeddings", "features"}
+
+
+def test_what_the_pass_refuses_to_save_is_what_the_import_gate_refuses(cur, models):
+    """One function decides both (desktop/sync_client.is_unit): a vector at
+    either edge of the band is saved here and taken there, one past it is
+    neither."""
+    from desktop import sync_client
+    assert embeddings.is_unit is sync_client.is_unit
+    low, high = sync_client.UNIT_NORM
+    axis = np.zeros(512, dtype=np.float32)
+    axis[0] = 1.0
+    generator = embeddings.AudioEmbeddingGenerator(model_name="clap", device="cpu")
+    for norm, unit in ((low + 1e-4, True), (high - 1e-4, True), (low - 1e-4, False), (high + 1e-4, False)):
+        track = _track(cur)
+        vector = (norm * axis).astype(np.float32)
+        assert sync_client.is_unit(vector.tolist()) is unit
+        with database.get_db_context() as db:
+            model = db.get(embeddings.EmbeddingModel, uuid.UUID(MODEL))
+            if unit:
+                assert generator._persist_analysis(db, track, model, [0], np.stack([vector]), UNIT, None)
+            else:
+                with pytest.raises(embeddings.NotUnitVectors, match=f"track {track}.*model clap"):
+                    generator._persist_analysis(db, track, model, [0], np.stack([vector]), UNIT, None)
+        assert bool(_records(cur, track)) is unit
+
+
+@pytest.mark.parametrize("what", ["a long segment", "the portrait"])
+def test_a_stream_whose_vectors_are_not_unit_saves_nothing_and_the_next_one_saves(
+        cur, models, stream, monkeypatch, caplog, what):
+    """The stream path saves through the same check: no embedding, and no
+    features or instruments of the same run either; nothing to seal, so the
+    notary is not woken. Another stream beside it is saved whole."""
+    bad, good = _track(cur, "bad"), _track(cur, "good")
+    _clap_answers(monkeypatch, models, {1: _off_unit(what)})
+    from streaming import enrichment
+    with caplog.at_level(logging.ERROR, logger=enrichment.__name__):
+        stream.run(bad)
+    assert _records(cur, bad) == {}
+    assert models.wakes == []
+    said = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(said) == 1 and bad in said[0] and "model clap" in said[0] \
+        and "nothing saved" in said[0], said
+    stream.run(good)
+    assert set(_records(cur, good)) == {"embeddings", "features", "instruments"}
+    assert models.wakes == ["preview analysis"]
 
 
 # -- The per-track pipeline ------------------------------------------------------

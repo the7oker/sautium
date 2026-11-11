@@ -214,6 +214,9 @@ def sonic_pass(limit, batch_size, newest_first, max_duration,
         click.echo(f"   • Success: {stats['success']} tracks "
                    f"({stats['embeddings']} embeddings, {stats['features']} features)")
         click.echo(f"   • Failed: {stats['failed']} tracks")
+        if stats.get("not_unit"):
+            click.echo(f"   • Of them not saved, their vectors not unit vectors (this node's "
+                       f"model or code, see the log): {stats['not_unit']} tracks")
         if stats.get("too_long"):
             click.echo(f"   • Too long for this machine now: {stats['too_long']} tracks")
 
@@ -934,6 +937,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
         instruments = gpu.get("instruments")
         if not skip_sonic:
             click.echo(f"   • Sonic pass: {sonic.get('success', 0)} success, {sonic.get('failed', 0)} failed"
+                       + (f" ({sonic['not_unit']} of them not unit vectors: this node's model or code, "
+                          "see the log)" if sonic.get("not_unit") else "")
                        + (f", {sonic['too_long']} too long for this machine now" if sonic.get("too_long") else ""))
         if instruments is not None:
             click.echo(f"   • Instruments: {instruments.get('success', 0)} success, {instruments.get('failed', 0)} failed"

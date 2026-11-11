@@ -291,6 +291,7 @@ class PreviewEnricher:
             computed = embedder._compute_segments(audio) if "embeddings" in make else None
 
         from audio_analysis import save_features, save_instruments
+        from embeddings import NotUnitVectors
         with SessionLocal() as db:
             # Each save decides the overwrite by material rank BEFORE writing
             # (provenance.outranked), so a preview never touches a real-file
@@ -298,8 +299,15 @@ class PreviewEnricher:
             saved = []
             if computed is not None:
                 model = embedder._get_or_create_embedding_model(db)
-                if embedder._persist_analysis(db, track_id, model, *computed, src_id):
-                    saved.append("embedding")
+                try:
+                    if embedder._persist_analysis(db, track_id, model, *computed, src_id):
+                        saved.append("embedding")
+                except NotUnitVectors as e:
+                    # This node's own analysis went wrong: none of it is
+                    # saved, the features and instruments of the same run
+                    # neither (the session ends uncommitted)
+                    logger.error("preview enrich: nothing saved — %s", e)
+                    return
             if feats and save_features(db, track_id, feats, src_id):
                 saved.append("features")
             if instruments is not None and save_instruments(db, track_id, instruments, src_id):

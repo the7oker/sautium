@@ -109,11 +109,13 @@ def _on_the_grid(segments, duration) -> bool:
 # outside it derives none there). Every analyser normalizes in float32,
 # within 1.5e-7 of 1 as measured on CUDA bf16, x86 and ARM; one normalizing
 # in bf16 would stay within 0.8 %. A seal says who made a vector, not that
-# it is one a node can use.
+# it is one a node can use. The node's own passes hold what they save to
+# the same band (backend/embeddings.py _persist_analysis), so a node whose
+# analysis went wrong fails there and never seals what every peer refuses.
 UNIT_NORM = (0.99, 1.01)
 
 
-def _unit(values: list) -> bool:
+def is_unit(values: list) -> bool:
     return UNIT_NORM[0] <= math.sqrt(math.fsum(x * x for x in values)) <= UNIT_NORM[1]
 
 
@@ -1060,7 +1062,7 @@ class SyncClient:
                 if len(floats) != VECTOR_DIM:
                     bad = f"segment {s.get('i')} of {len(floats)} dimensions"
                     break
-                if not _unit(floats):
+                if not is_unit(floats):
                     bad = f"segment {s.get('i')} not a unit vector"
                     break
                 if not s.get("signature"):
