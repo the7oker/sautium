@@ -275,6 +275,11 @@ _TABLE_ENTITY = {"embedding_segments": None,       # via embeddings.track_id, se
                  "audio_features": "track_id", "track_instruments": "track_id",
                  "album_tracks": "track_id", "track_mbids": "track_id",
                  "albums": "id"}
+# The per-track records whose UPDATE also asserts the row version read
+# (xmin): a save between the SELECT and the UPDATE — another link, another
+# value — is just as invisible to the guards, and the record stays unsigned
+# for the next pass (2026-11-11).
+_SEALED_AS_READ = frozenset({"audio_features", "track_instruments"})
 
 
 def _materialize_owned_tracklists(cur) -> int:
@@ -434,7 +439,8 @@ def sign(conn, full=False, limit=None, dry_run=False,
     if track_ids:
         logger.info("tracks with unsigned analysis: %d", len(track_ids))
 
-    # pending: (table, pk, signature, entity uuid) across every table
+    # pending: (table, pk, signature, entity uuid[, the row version read])
+    # across every table
     pending, capped = [], False
     for tid in track_ids:
         if max_records and len(pending) >= max_records:
@@ -461,8 +467,8 @@ def sign(conn, full=False, limit=None, dry_run=False,
             pending.append(("embedding_segments", seg["id"], rs.sign(payload, key), tid))
 
         cur.execute(f"""
-            SELECT a.id, a.analysis_version, {', '.join(FEATURE_ORDER)},
-                   src.chromaprint, src.duration_seconds
+            SELECT a.id, a.xmin::text AS read_as, a.analysis_version,
+                   {', '.join(FEATURE_ORDER)}, src.chromaprint, src.duration_seconds
             FROM audio_features a
             JOIN analysis_sources src ON src.id = a.analysis_source_id
             WHERE a.track_id = %(tid)s AND a.signature IS NULL
@@ -473,10 +479,11 @@ def sign(conn, full=False, limit=None, dry_run=False,
             payload = rs.features_payload(author, tid, feat["chromaprint"],
                                           feat["duration_seconds"],
                                           feat["analysis_version"], fh)
-            pending.append(("audio_features", feat["id"], rs.sign(payload, key), tid))
+            pending.append(("audio_features", feat["id"], rs.sign(payload, key), tid,
+                            feat["read_as"]))
 
         cur.execute(f"""
-            SELECT i.id, i.analysis_version, i.instruments,
+            SELECT i.id, i.xmin::text AS read_as, i.analysis_version, i.instruments,
                    src.chromaprint, src.duration_seconds
             FROM track_instruments i
             JOIN analysis_sources src ON src.id = i.analysis_source_id
@@ -488,7 +495,8 @@ def sign(conn, full=False, limit=None, dry_run=False,
             payload = rs.instruments_payload(author, tid, inst["chromaprint"],
                                              inst["duration_seconds"],
                                              inst["analysis_version"], ih)
-            pending.append(("track_instruments", inst["id"], rs.sign(payload, key), tid))
+            pending.append(("track_instruments", inst["id"], rs.sign(payload, key), tid,
+                            inst["read_as"]))
 
     budget = max(0, max_records - len(pending)) if max_records else None
     scope = None if full else sorted(set(track_ids) | set(minted))
@@ -511,19 +519,32 @@ def sign(conn, full=False, limit=None, dry_run=False,
     # Grouped and batched: a statement per record was fine at audio scale and
     # is not at enrichment scale — the first unified pass signed 300k+ rows.
     by_table: dict = {}
-    for table, pk, sig, entity in pending:
-        by_table.setdefault(table, []).append((pk, author, sig, entity))
+    for table, pk, sig, entity, *read_as in pending:
+        by_table.setdefault(table, []).append((pk, author, sig, entity, *read_as))
     for table, rows in by_table.items():
         pk_col, pk_cast = _TABLE_PK.get(table, ("id", "int"))
         entity_col = _TABLE_ENTITY[table]
+        # A record is sealed only as it was read: the version of its row
+        # (xmin) is the one its values and its link's declaration were
+        # signed from. A save that lands in between — a new link, a new
+        # value — makes another version the guard cannot shed a seal from,
+        # since the seal arrives after it; that row stays unsigned for the
+        # next pass, which reads it as it is. Optimistic: nothing is locked
+        # across the signing. Segments need no check: a save replaces them.
+        as_read = table in _SEALED_AS_READ
+        columns = "v(pk, author, sig, entity, read_as)" if as_read else "v(pk, author, sig, entity)"
         if entity_col is None:
-            entity_sql = ("FROM (VALUES %s) AS v(pk, author, sig, entity), "
+            entity_sql = (f"FROM (VALUES %s) AS {columns}, "
                           "embeddings e "
                           "WHERE t.id = v.pk AND e.id = t.embedding_id "
                           "AND e.track_id = v.entity")
         else:
-            entity_sql = (f"FROM (VALUES %s) AS v(pk, author, sig, entity) "
+            entity_sql = (f"FROM (VALUES %s) AS {columns} "
                           f"WHERE t.{pk_col} = v.pk AND t.{entity_col} = v.entity")
+        if as_read:
+            entity_sql += " AND t.xmin = v.read_as"
+        template = (f"(%s::{pk_cast}, %s, %s, %s::uuid, %s::xid)" if as_read
+                    else f"(%s::{pk_cast}, %s, %s, %s::uuid)")
         signed = 0
         for i in range(0, len(rows), 500):
             page = rows[i:i + 500]
@@ -533,13 +554,13 @@ def sign(conn, full=False, limit=None, dry_run=False,
                        SET author_pubkey = v.author, signature = v.sig
                     {entity_sql} AND t.signature IS NULL""",
                 page,
-                template=f"(%s::{pk_cast}, %s, %s, %s::uuid)",
+                template=template,
                 page_size=500,
             )
             signed += cur.rowcount
         if signed < len(rows):
-            logger.warning("%d of %d %s rows moved to another uuid while the pass "
-                           "was open — left unsigned for the next pass",
+            logger.warning("%d of %d %s rows changed or moved to another uuid while the "
+                           "pass was open — left unsigned for the next pass",
                            len(rows) - signed, len(rows), table)
         logger.info("signed %d rows in %s", signed, table)
     conn.commit()

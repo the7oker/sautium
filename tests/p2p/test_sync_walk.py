@@ -169,3 +169,31 @@ def test_the_master_hint_is_asked_when_no_node_answered_and_only_then(monkeypatc
     w = _Walked(monkeypatch, dht_nodes=[("198.51.100.20", 21000)], volunteers=[], answering=set(),
                 empty_handed={"198.51.100.20:21000"})
     assert w.hint_asked == 0 and w.probed == []
+
+
+def test_each_run_reads_this_nodes_holdings_afresh(monkeypatch):
+    """What a run reads once of this node's holdings for all its peers (the
+    run cache the peers' clients share) is read again by the next run."""
+    walk = _walk()
+    walk.manual_peers = ["https://198.51.100.5:21000"]
+    seen = []
+
+    async def db(fn, *args):
+        return {"incomplete_artist_uuids": ["a1"],
+                "core_and_bulk": (["t1"], [])}.get(fn.__name__, [])
+
+    async def pull(addr, gaps, progress, progress_cb, peer_api=None, is_lan=False):
+        seen.append(dict(walk._run_cache))
+        walk._run_cache["lacking_only_instruments"] = {"t1"}
+        return {}
+
+    async def measure(reply_size, sample, directory_total):
+        return False
+
+    walk.db, walk._sync_from_peer, walk._measure_network = db, pull, measure
+    monkeypatch.setattr(sync_walk.node_hints, "fetch", lambda cap: [])
+    monkeypatch.setattr(sync_walk.node_hints, "total", lambda cap: None)
+    monkeypatch.setattr(sync_walk.master_hint, "fetch", lambda: None)
+    for _ in range(2):
+        asyncio.run(walk.run())
+    assert seen == [{}, {}]

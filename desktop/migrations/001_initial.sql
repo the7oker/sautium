@@ -1181,18 +1181,21 @@ CREATE INDEX IF NOT EXISTS idx_audio_features_unstamped
 -- invariant, not a convenience — writers (ORM, raw scripts, sync imports)
 -- need no seal awareness and cannot silently break a sealed record.
 -- sign_audio.py's UPDATE sets a new signature explicitly, so the guard leaves
--- it alone. A segment's link (embedding_id) is not payload: a segment is
--- replaced, never re-linked, and its bundle's material is its embedding's
--- source. A record's link is (since 2026-11-10): the features and the
--- instruments seals are over the declaration of the source row the record
--- links to, so a save from another copy, or the SET NULL of a deleted
--- source, sheds them — nothing moves a sealed record to another row while
--- its seal must hold (the identity merge sheds what it moves; the records'
--- cutover moves embeddings, never a record). A record's value counts in the
--- form its hash reads it: a float bit for bit (float8send — its shortest
--- repr tells -0.0 from 0.0, which float8's equality does not), the
--- instruments map as its text (JSONB's equality takes 1 and 1.0 for one
--- number).
+-- it alone, and writes a record's seal only onto the row version it read
+-- (xmin): a save between its read and its write leaves the record unsigned
+-- for the next pass. A segment's link (embedding_id) is not payload: a
+-- segment is replaced, never re-linked, and its bundle's material is its
+-- embedding's source. A record's link is (since 2026-11-10): the features
+-- and the instruments seals are over the declaration of the source row the
+-- record links to, so a save from another copy, or the SET NULL of a
+-- deleted source, sheds them — nothing moves a sealed record to another row
+-- while its seal must hold: the identity merge sheds what it moves, and the
+-- records' cutover moves a grid (sealed segments with their embedding) only
+-- onto a row of the same declaration, every seal verified there. A record's
+-- value counts in the form its hash reads it: a float bit for bit
+-- (float8send — its shortest repr tells -0.0 from 0.0, which float8's
+-- equality does not), the instruments map as its text (JSONB's equality
+-- takes 1 and 1.0 for one number).
 CREATE OR REPLACE FUNCTION seal_guard_embedding_segments() RETURNS trigger AS $$
 BEGIN
     IF (NEW.vector IS DISTINCT FROM OLD.vector

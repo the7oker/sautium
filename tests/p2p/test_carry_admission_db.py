@@ -118,20 +118,33 @@ def test_a_carried_tracks_features_and_binding_follow_its_segments_whatever_the_
     assert _wanted(conn, budget=budget, category="track_mbids") == {OWNED, PHANTOM}
 
 
-def test_every_carried_kind_spends_the_room(conn):
-    """A phantom whose grid is this node's own holds nothing another author
-    made until a push brings its features or instruments alone: from then
-    it is carried, it spends the room, and what follows for it is taken
-    whatever the room — not the imported grids alone."""
-    assert sync_queries.count_carried_tracks(conn) == 0
+def _imported(conn, track, table):
+    """Another author's sealed record of `table` for `track`, under an
+    imported source."""
     with conn.cursor() as cur:
         cur.execute("INSERT INTO analysis_sources (track_id, chromaprint, imported) "
-                    "VALUES (%s, 'AQAA', true) RETURNING id", (ANALYSED,))
-        cur.execute("""INSERT INTO track_instruments (track_id, instruments, analysis_source_id,
-                                                      analysis_version)
-                       VALUES (%s, '{}', %s, 2)""", (ANALYSED, cur.fetchone()[0]))
+                    "VALUES (%s, 'AQAA', true) RETURNING id", (track,))
+        source = cur.fetchone()[0]
+        record = ("instruments", "'{}'") if table == "track_instruments" else ("bpm", "99")
+        cur.execute(f"""INSERT INTO {table} (track_id, {record[0]}, analysis_source_id,
+                                            analysis_version, author_pubkey, signature)
+                        VALUES (%s, {record[1]}, %s, 2, %s, %s)""",
+                    (track, source, "ab" * 32, "5e" * 64))
+
+
+def test_every_carried_kind_is_carrying_and_spends_the_room_without_analysis_of_its_own(conn):
+    """A phantom another author's analysis of any kind is here for is carried
+    — what follows for it is taken whatever the room — and spends the room
+    unless this node holds analysis of its own of it: a phantom it streamed
+    itself takes others' features or instruments without spending a unit
+    budgeted for a whole grid, as many as the owner streamed."""
+    assert sync_queries.count_carried_tracks(conn) == 0
+    _imported(conn, PHANTOM, "audio_features")              # its features alone
     assert sync_queries.count_carried_tracks(conn) == 1
-    assert _wanted(conn, budget=1) == {OWNED}                               # the room is spent
+    assert _wanted(conn, budget=1) == {OWNED, PHANTOM}       # carried: its segments follow
+    assert _wanted(conn, budget=1, category="audio_features") == {OWNED}    # the room is spent
+    _imported(conn, ANALYSED, "track_instruments")          # beside a grid of its own
+    assert sync_queries.count_carried_tracks(conn) == 1
     assert _wanted(conn, budget=1, category="audio_features") == {OWNED, ANALYSED}
     wanted = sync_queries.wanted_tracks(conn, [_recording(conn, t) for t in (PHANTOM, ANALYSED)], 1)
     assert set(wanted["audio_features"]) == {ANALYSED}

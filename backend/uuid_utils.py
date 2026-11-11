@@ -16,8 +16,10 @@ NAMESPACE = uuid.UUID('adc1ec0b-2c81-5e26-9938-a369c6f7a5e1')
 # Version of the identity rule (normalize / normalize_key below). Bump it with
 # every change to either: backend/db_migrate.py re-normalizes a node's
 # existing rows at startup when its recorded rule is older (marker row
-# identity_rule_v{N} in _schema_migrations), so no node ever mints on one
-# rule beside rows minted on another.
+# identity_rule_v{N} in _schema_migrations), so a node mints on one rule
+# beside rows minted on another only while that re-normalization waits for
+# the analysis records' cutover, which reads the seals it sheds (the
+# `migration.waiting` support event); its later run merges the two.
 IDENTITY_RULE = 2
 
 # Apostrophe-like marks are DROPPED, not spaced: "don’t" / "don't" / "dont"

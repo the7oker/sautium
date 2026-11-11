@@ -752,28 +752,41 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
 # The tables of per-track analysis records, each row linked to its source.
 _ANALYSIS_TABLES = ("embeddings", "audio_features", "track_instruments")
 
+def _analysis_of(imported: bool) -> str:
+    """A track holds analysis of any kind under an imported source, or
+    under one of this node's own; the track's uuid expression as {t}."""
+    return "(" + " OR ".join(
+        f"""EXISTS (SELECT 1 FROM {table} c_x
+                      JOIN analysis_sources c_s ON c_s.id = c_x.analysis_source_id
+                     WHERE c_x.track_id = {{t}} AND {"" if imported else "NOT "}c_s.imported)"""
+        for table in _ANALYSIS_TABLES) + ")"
+
+
 # A track this node CARRIES: it holds another author's analysis of it, of any
 # kind — a phantom it streamed itself and was pushed the features or the
-# instruments of included. Formatted with the track's uuid expression as {t}.
-_CARRIED = "(" + " OR ".join(
-    f"""EXISTS (SELECT 1 FROM {table} c_x
-                  JOIN analysis_sources c_s ON c_s.id = c_x.analysis_source_id
-                 WHERE c_x.track_id = {{t}} AND c_s.imported)"""
-    for table in _ANALYSIS_TABLES) + ")"
+# instruments of included. What follows for it adds nothing to carry.
+_CARRIED = _analysis_of(imported=True)
+# Of those, the ones that spend the carry room: no analysis of this node's
+# own. A phantom it streamed itself takes others' features or instruments
+# without spending it (an instruments map is a kilobyte of a unit budgeted at
+# ~46 KB) — as many as the owner streamed.
+_OWN_ANALYSIS = _analysis_of(imported=False)
 
 
 def count_carried_tracks(conn) -> int:
-    """How many tracks this node holds imported analysis for, of any kind,
-    while owning no file — the honest meter for "disk spent on someone
-    else's behalf". Analysis of tracks we DO own is not carrying, it is our
-    own library, however it arrived."""
+    """How many tracks this node holds another author's analysis for, of any
+    kind, while owning no file and holding no analysis of its own — the
+    honest meter for "disk spent on someone else's behalf". Analysis of
+    tracks we DO own is not carrying, it is our own library, however it
+    arrived; nor is what joins a phantom's own analysis."""
     rows = db_query(
         conn,
         "SELECT count(DISTINCT x.track_id) AS n FROM ("
         + " UNION ALL ".join(f"""SELECT r.track_id FROM {table} r
                                    JOIN analysis_sources s ON s.id = r.analysis_source_id
                                   WHERE s.imported""" for table in _ANALYSIS_TABLES)
-        + """) x WHERE NOT EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = x.track_id)""",
+        + f""") x WHERE NOT EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = x.track_id)
+                 AND NOT {_OWN_ANALYSIS.format(t="x.track_id")}""",
     )
     return int(rows[0]["n"]) if rows else 0
 
@@ -816,19 +829,25 @@ def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
     carried here already (_CARRIED: another author's analysis of it, of any
     kind, is here — what follows adds nothing to carry), or one more within
     the room the carry limit leaves (an owned track's gap-fill is never
-    carrying; every carried kind spends the room, count_carried_tracks). One
-    item per track (per track and recording for a binding). No offer state is kept: the
+    carrying, nor what joins a phantom's own analysis: count_carried_tracks).
+    One item per track (per track and recording for a binding), but for a
+    record category, whose every item of a track taken goes to the importer
+    to choose from. No offer state is kept: the
     push is judged by the same rules as the offer. The room is read per
     push, and pushes in flight at once may each spend it: the limit is
     exceeded by at most what they carry together, a part each (900 KiB) —
     a soft ceiling, where serialising them would hold every thread that
     serves peers behind one import."""
     binding = category == "track_mbids"
+    # A record category keeps every item of a track it takes: which one lands
+    # is the importer's choice — its newest methodology among those whose
+    # seal verifies, as for a pull of the same payload.
+    records = category in ("audio_features", "instruments")
     keyed: dict = {}
     for it in items:
         key = (it.get("track_uuid"), it.get("recording_mbid") if binding else None)
         if _is_uuid(key[0]) and (not binding or _is_uuid(key[1])):
-            keyed.setdefault(key, it)
+            keyed.setdefault(key, []).append(it)
     if not keyed or budget <= 0:
         return []
     room = budget - count_carried_tracks(conn)
@@ -849,7 +868,8 @@ def wanted_for_push(conn, category: str, items: list, budget: int) -> list:
           ORDER BY id LIMIT %(room)s)""",
         {"ids": [k[0] for k in keyed], "recs": [k[1] for k in keyed],
          "phantoms": phantom_layer_on(conn), "room": max(room, 0)})
-    return [keyed[(r["track_uuid"], r["rec"])] for r in rows]
+    return [it for r in rows
+            for it in keyed[(r["track_uuid"], r["rec"])][:None if records else 1]]
 
 
 def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:

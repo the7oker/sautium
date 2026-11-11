@@ -42,7 +42,8 @@ REPORT_KEEP_DAYS = 180
 BUNDLE_KEEP_DAYS = 30
 PROBLEM_KINDS = ("service.start_failed", "p2p.start_failed", "backend.crashed",
                  "backend.gave_up", "agent.signin_failed", "agent.signin_timeout",
-                 "chat.error", "sync.failed", "sync.import_failed", "update.failed")
+                 "chat.error", "sync.failed", "sync.import_failed", "update.failed",
+                 "migration.waiting")
 
 
 def _require_master() -> None:

@@ -1857,3 +1857,91 @@ def test_a_streams_analysis_saves_both_records_under_the_streams_row(conn, monke
         cur.execute("SELECT bpm, analysis_source_id FROM audio_features WHERE track_id = %s",
                     (track,))
         assert cur.fetchone() == (101.0, stream)
+
+
+# -- sign() seals a record only as it read it ---------------------------------
+
+def _record_row(cur, kind, track, source, values) -> None:
+    if kind == "instruments":
+        cur.execute("""INSERT INTO track_instruments (track_id, instruments, analysis_source_id,
+                                                      analysis_version)
+                       VALUES (%s, %s, %s, 2)""", (track, psycopg2.extras.Json(values), source))
+    else:
+        cur.execute(f"""INSERT INTO audio_features (track_id, {", ".join(rs.FEATURE_ORDER)},
+                                                    analysis_source_id, analysis_version)
+                        VALUES (%s, {", ".join(["%s"] * len(rs.FEATURE_ORDER))}, %s, 2)""",
+                    (track, *(values[k] for k in rs.FEATURE_ORDER), source))
+
+
+def _save(scratch_dsn, sql, params) -> None:
+    """A save committed by another session — a pass of the node's own."""
+    other = psycopg2.connect(scratch_dsn)
+    other.autocommit = True
+    try:
+        with other.cursor() as cur:
+            cur.execute(sql, params)
+    finally:
+        other.close()
+
+
+@pytest.mark.parametrize("kind", ["instruments", "features"])
+@pytest.mark.parametrize("change", ["link", "value"])
+@pytest.mark.parametrize("order", ["between", "after"])
+def test_a_save_racing_sign_leaves_no_seal_over_what_the_record_no_longer_is(
+        conn, scratch_dsn, monkeypatch, kind, change, order):
+    """Probes P1 and P2 of the second review: sign() read a record and
+    signed it, and a save that re-linked it (equal values) or changed a value
+    landed before the signature was written — the seal bound the row as it
+    had been, no guard could shed a seal that arrived after the change, and
+    sign() never took the record again. The write asserts the row version it
+    read: such a record stays unsigned and the next pass seals it as it is.
+    A save after the write is the guards' (round 1): the seal is shed."""
+    monkeypatch.setattr(p2p_identity, "_signing_key_cache", NODE)
+    table = "track_instruments" if kind == "instruments" else "audio_features"
+    values = {"piano": 0.62} if kind == "instruments" else _FEATURES
+    with conn.cursor() as cur:
+        track = _track(cur)
+        first, second = _source(cur, track, FP, duration=240), _source(cur, track, FP, duration=241)
+        _record_row(cur, kind, track, first, values)
+    duration, now = 240, values
+    if change == "link":
+        sql, params, duration = (f"UPDATE {table} SET analysis_source_id = %s WHERE track_id = %s",
+                                 (second, track), 241)
+    elif kind == "instruments":
+        now = {"piano": 0.5}
+        sql, params = ("UPDATE track_instruments SET instruments = %s WHERE track_id = %s",
+                       (psycopg2.extras.Json(now), track))
+    else:
+        now = {**_FEATURES, "energy": 0.5}
+        sql, params = "UPDATE audio_features SET energy = 0.5 WHERE track_id = %s", (track,)
+
+    def sealed():
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT author_pubkey, signature FROM {table} WHERE track_id = %s",
+                        (track,))
+            return cur.fetchone()
+
+    if order == "between":
+        real, done = sign_audio._collect_enrichment, []
+
+        def between(*a, **kw):
+            if not done:
+                _save(scratch_dsn, sql, params)
+                done.append(True)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(sign_audio, "_collect_enrichment", between)
+        _sign(scratch_dsn)
+        monkeypatch.setattr(sign_audio, "_collect_enrichment", real)
+        assert done
+    else:
+        _sign(scratch_dsn)
+        author, signed = sealed()
+        assert rs.verify(_record_payload(kind, track, 240, values), signed, author)
+        _save(scratch_dsn, sql, params)
+    assert sealed() == (None, None)
+    dict_cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    assert track in sign_audio._pending_tracks(dict_cur)
+    assert _sign(scratch_dsn) == 1
+    author, signed = sealed()
+    assert rs.verify(_record_payload(kind, track, duration, now), signed, author)

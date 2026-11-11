@@ -368,6 +368,31 @@ def test_a_methodology_no_release_computes_is_refused_and_pins_nothing(
         assert _row(cur, table, gap) is None
 
 
+def test_a_push_naming_a_track_twice_lands_what_a_pull_of_it_lands(conn, scratch_dsn):
+    """Probe P3 of the second review: the carry's admission kept a track's
+    first item, where the importer keeps its newest methodology — a push of
+    [v1, v2] landed v1, a pull v2. The admission takes the track, and the
+    importer the item, on both paths."""
+    album = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'LP')", (album,))
+        pushed, pulled = _track(cur), _track(cur)
+        for n, t in enumerate((pushed, pulled), 1):
+            cur.execute("""INSERT INTO album_tracks (album_id, track_id, position, recording_mbid)
+                           VALUES (%s, %s, %s, %s)""", (album, t, n, str(uuid.uuid4())))
+
+    def twice(track):
+        payloads = [_v4_features(AUTHOR, track, version=v) for v in (1, 2)]
+        return {"items": [i for p in payloads for i in p["items"]], "authors": {},
+                "batches": {r: b for p in payloads for r, b in p["batches"].items()}}
+
+    assert sync_client.import_pushed(scratch_dsn, "audio_features", twice(pushed), 100) == 1
+    assert _import(scratch_dsn, "audio_features", twice(pulled)) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id::text, analysis_version FROM audio_features")
+        assert dict(cur.fetchall()) == {pushed: 2, pulled: 2}
+
+
 def test_the_planner_asks_only_for_what_the_importer_would_take(conn, scratch_dsn):
     newest = rs.INSTRUMENTS_ANALYSIS_VERSION
     with conn.cursor() as cur:
@@ -547,6 +572,34 @@ def _apply_seed(name, conn, bundle, monkeypatch) -> dict:
     pg = conftest.PG
     dsn = f"postgresql://{pg['user']}:{pg['password']}@{pg['host']}:{pg['port']}/{name}"
     return seed_import.apply_seed(conn, dsn, {"version": bundle["version"]})
+
+
+def test_a_pick_without_sealed_instruments_ships_with_a_warning(conn, monkeypatch):
+    """The instruments are no pick's requirement: a pick whose tracks hold
+    sealed segments and features and no instruments is exported, said."""
+    import seed_export
+    picks = []
+    with conn.cursor() as cur:
+        for rank, scores in ((1, SCORES), (2, None)):
+            track, album = _track(cur), str(uuid.uuid4())
+            root = seal_track(cur, AUTHOR, track, MODEL, recording=str(uuid.uuid4()),
+                              instruments=scores)
+            cur.execute("""INSERT INTO albums (id, title, signature, batch_root)
+                           VALUES (%s, %s, %s, %s)""", (album, f"Pick {rank}", "5e" * 64, root))
+            cur.execute("""INSERT INTO album_tracks (album_id, track_id, position, length_ms,
+                                                     signature, batch_root)
+                           VALUES (%s, %s, 1, 95000, %s, %s)""", (album, track, "5e" * 64, root))
+            cur.execute("INSERT INTO album_descriptions (album_id, source, summary) "
+                        "VALUES (%s, 'test', 'A pick')", (album,))
+            picks.append({"rank": rank, "tier": 1, "artist": "a", "title": f"Pick {rank}",
+                          "analysis_waiver": False, "album_id": album, "owned_on_master": False,
+                          "_found": True, "_row": {"mbid": str(uuid.uuid4()), "cover_url": None}})
+    monkeypatch.setattr(seed_export, "_manifest_cache", {"picks": [
+        {"rank": rank, "owned_on_master": False} for rank in (1, 2)]})
+    fatal, warns, report = seed_export._coverage(conn, picks)
+    assert fatal == [] and [r["status"] for r in report] == ["ok", "ok"]
+    assert [w for w in warns if "instruments" in w] == [
+        "# 2 a — Pick 2: 1/1 tracks without sealed instruments (informational)"]
 
 
 def test_seed_v4_carries_the_instruments_and_lands_whole(conn, fresh_node, monkeypatch):

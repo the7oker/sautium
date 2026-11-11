@@ -14,8 +14,12 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      every uuid5 entity through `canon.migrations.renormalize_identities`
      when the recorded rule is older than the code's. Idempotent, so a fresh
      node just records the marker; a node with old-rule data is rewritten
-     here, before it can mint on the new rule beside old rows. That rewrite
-     sheds every seal — the node's own sign_audio cadence re-seals. The
+     here, before it can mint on the new rule beside old rows — unless the
+     records step below fails closed: the rewrite sheds every seal, which
+     that step reads, so it waits too (the `migration.waiting` event), the
+     node mints on the new rule beside old rows meanwhile, and the rewrite's
+     later run merges them. The rewrite's shed of every seal is re-sealed by
+     the node's own sign_audio cadence. The
      play-stats step (`play_stats_derived_v1`) re-derives `local_play_stats`
      from `listening_history` once, the day the table became a function of
      it (backend/play_stats.py) instead of counters kept in place. The
@@ -576,6 +580,15 @@ def apply_pending() -> dict:
             logger.info("analysis records v4: %s", out["analysis_records_v4"])
             if out["analysis_records_v4"]["done"]:
                 _mark(conn, "analysis_records_v4")
+            else:
+                # Failed closed: it waits for a start that finds the node's
+                # key, with the identity re-normalization and the seed — a
+                # state that can last, so support sees it, not only the log.
+                from desktop.p2p import diag_events
+                diag_events.record(conn, "migration.waiting", {
+                    "step": "analysis_records_v4", "why": "no_key",
+                    "holds_identity_rule": not _marked(
+                        conn, _IDENTITY_MARK.format(IDENTITY_RULE))})
 
         mark = _IDENTITY_MARK.format(IDENTITY_RULE)
         if not _marked(conn, mark) and not _marked(conn, "analysis_records_v4"):

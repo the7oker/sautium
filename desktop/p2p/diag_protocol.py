@@ -67,6 +67,7 @@ EVENT_KINDS = frozenset({
     "sync.failed",
     "sync.import_failed",
     "update.failed",
+    "migration.waiting",
 })
 # What a report may call an event: `family.name`. EVENT_KINDS is the
 # vocabulary nodes emit today; the master accepts any well-formed kind so a

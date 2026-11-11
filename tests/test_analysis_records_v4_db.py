@@ -22,6 +22,7 @@ its five fields, delta 056), the data step analysis_records_v4
 Skipped without a cluster."""
 
 import json
+import logging
 import sys
 import uuid
 from pathlib import Path
@@ -802,7 +803,7 @@ def test_a_failure_inside_the_step_rolls_it_back_whole(monkeypatch):
 
 # -- the start --------------------------------------------------------------------
 
-def test_the_records_step_reads_the_seals_before_an_identity_pass_sheds_them(monkeypatch):
+def test_the_records_step_reads_the_seals_before_an_identity_pass_sheds_them(monkeypatch, caplog):
     """A node that re-normalizes its identities at the same start (one from
     before 2026-08-25, or its backup) sheds every seal there
     (canon.migrations._shed_all_seals): the records step runs first, so
@@ -850,8 +851,15 @@ def test_the_records_step_reads_the_seals_before_an_identity_pass_sheds_them(mon
                                 WHERE e.id = %s GROUP BY s.imported""", (grid,))
                 return cur.fetchone()
 
+        caplog.set_level(logging.WARNING, logger="db_migrate")
         db_migrate.apply_pending()                       # no key: the step fails closed
         assert order == ["records"] and grid_source() == (False, 2)
+        assert any("the re-normalization waits for the analysis records' cutover"
+                   in r.getMessage() for r in caplog.records)
+        with c.cursor() as cur:                          # and support is told, content-free
+            cur.execute("SELECT detail FROM diag_events WHERE kind = 'migration.waiting'")
+            assert cur.fetchall() == [({"step": "analysis_records_v4", "why": "no_key",
+                                        "holds_identity_rule": True},)]
         on.keys((OWN,))
         order.clear()
         db_migrate.apply_pending()
