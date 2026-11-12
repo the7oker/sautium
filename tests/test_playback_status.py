@@ -227,3 +227,24 @@ def test_the_status_a_connection_opens_with_carries_the_floor_of_its_events(monk
             pass
 
     asyncio.run(run())
+
+
+def test_no_playback_class_defines_a_method_twice():
+    """Two slices that each add a method of one name to a class rebase onto
+    each other without a conflict, and the later definition shadows the
+    earlier in silence: a takeover's spot was left by another slice's method
+    of the same name, with other arguments (ROON-COEX-4 on atlas-release,
+    2026-11-12; before it `_heard`, `_rest_at`). No class of the playback
+    package defines a method twice."""
+    import ast
+    import collections
+    twice = {}
+    for path in sorted((BACKEND / "playback").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ClassDef):
+                names = collections.Counter(f.name for f in node.body
+                                            if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                            and not any(isinstance(d, ast.Attribute) and d.attr in ("setter", "getter")
+                                                        for d in f.decorator_list))
+                twice.update({f"{path.name}:{node.name}.{name}": n for name, n in names.items() if n > 1})
+    assert twice == {}

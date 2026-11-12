@@ -1253,7 +1253,7 @@ class HqpBackend(PlayerBackend):
         # again, or the item leaves the queue (_listen_held). The poller's alone
         self._cut: Optional[QueueItem] = None
         # A takeover's verdict left the spot — its cut listen's, or the slot
-        # after a track that had played out (_leave_spot) — and HQPlayer has
+        # after a track that had played out (_takeover_spot) — and HQPlayer has
         # played or paused no entry of ours since: a playlist it rests on
         # meanwhile is that controller's, whatever the spot names
         # (_rests_on_another, _step). And the id of the event of a takeover
@@ -3256,7 +3256,7 @@ class HqpBackend(PlayerBackend):
         (`_cut`): the play tracker holds that listen, as a pause holds it,
         until HQPlayer plays or pauses an entry of ours again (_listen_held);
         and every verdict that leaves a spot stands until then (`_takeover`:
-        _leave_spot). `playlist`: HQPlayer's as this tick read and judged it
+        _takeover_spot). `playlist`: HQPlayer's as this tick read and judged it
         (None: not read, or its verdict did not stand). Whether this tick
         judged a takeover that left a spot. Called on the poller."""
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
@@ -3325,7 +3325,7 @@ class HqpBackend(PlayerBackend):
             return False
         if not out:
             self._cut = listen.item
-            self._leave_spot(listen.item, int(listen.second), status, edited)
+            self._takeover_spot(listen.item, int(listen.second), status, edited)
             logger.info("another controller took HQPlayer at slot %d, %d s — Play takes it back there",
                         slot, int(listen.second))
             return True
@@ -3333,12 +3333,12 @@ class HqpBackend(PlayerBackend):
         if after is None:
             logger.info("another controller took HQPlayer once slot %d, the queue's last, had played out", slot)
             return False
-        self._leave_spot(after, 0, status, edited)
+        self._takeover_spot(after, 0, status, edited)
         logger.info("another controller took HQPlayer once slot %d had played out — Play goes on at slot %d",
                     slot, slot + 1)
         return True
 
-    def _leave_spot(self, item: QueueItem, second: int, status, edited: bool, *,
+    def _takeover_spot(self, item: QueueItem, second: int, status, edited: bool, *,
                     unless_set: bool = False) -> bool:
         """A takeover's verdict leaves the spot at `item` and `second`
         (_note_listen: the listen it cut; the slot after a track that had
@@ -3431,7 +3431,7 @@ class HqpBackend(PlayerBackend):
                 return False
         item = att.target[0] if att.target is not None else None
         if (item is not None and att.under_way() and self._queue.index_of(item) is not None
-                and self._leave_spot(item, 0, status, not busy, unless_set=True)):
+                and self._takeover_spot(item, 0, status, not busy, unless_set=True)):
             logger.info("another controller took HQPlayer while it moved on to slot %d — Play starts it there",
                         self._queue.index_of(item))
         return True
