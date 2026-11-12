@@ -42,6 +42,7 @@ def origin(tmp_path, monkeypatch):
     git(tmp_path, "clone", "-q", str(bare), str(seed))
     (seed / "desktop").mkdir()
     (seed / "desktop" / "requirements.txt").write_text("released\n")
+    (seed / "desktop" / "build_common.py").write_text('VERSION = "0.2.0"\n')
     git(seed, "add", ".")
     git(seed, "commit", "-qm", "release")
     git(seed, "push", "-q", "origin", "HEAD:main")
@@ -65,8 +66,14 @@ def payload(tmp_path, key) -> Path:
     for name in ("__init__.py", "updater.py", "release_verify.py", "requirements.txt"):
         shutil.copy2(DESKTOP / name, root / "desktop" / name)
     (root / "desktop" / "release_signers").write_text(key.line() + "\n")
-    (root / ".sautium_build").write_text("0.2.0+bundle\n")
+    installer(root, "0.2.0")
     return root
+
+
+def installer(root: Path, version: str) -> None:
+    """Make the payload another installer's: its stated version and its build id."""
+    (root / "desktop" / "build_common.py").write_text(f'VERSION = "{version}"\n')
+    (root / ".sautium_build").write_text(f"{version}+bundle\n")
 
 
 def load(path: Path, name: str, monkeypatch):
@@ -120,7 +127,8 @@ def test_the_first_checkout_is_the_newest_verified_release(bootstrap, origin):
     assert (bootstrap.APP_DIR / "desktop" / "requirements.txt").read_text() == "released\n"
 
 
-def test_the_payloads_code_runs_without_writing_into_the_payload(bootstrap, origin):
+def test_the_payloads_code_runs_without_writing_into_the_payload(bootstrap, origin, monkeypatch):
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     publish(origin, "v0.2.0")
     assert bootstrap.clone_tree(lambda _: None) is True
     assert list(bootstrap.PAYLOAD.rglob("__pycache__")) == []
@@ -137,6 +145,7 @@ def _new_release(origin, name, orphan=False):
     if orphan:
         git(origin.seed, "checkout", "-q", "--orphan", "rewritten")
     (origin.seed / "desktop" / "requirements.txt").write_text(f"{name}\n")
+    (origin.seed / "desktop" / "build_common.py").write_text(f'VERSION = "{name[1:]}"\n')
     git(origin.seed, "add", ".")
     git(origin.seed, "commit", "-qm", name)
     origin.tip = git(origin.seed, "rev-parse", "HEAD")
@@ -146,10 +155,51 @@ def _new_release(origin, name, orphan=False):
 def test_a_reinstall_over_a_clone_moves_it_past_a_rewritten_history(bootstrap, origin):
     _clone_at(bootstrap, origin, "v0.2.0")
     _new_release(origin, "v0.3.0", orphan=True)
-    (bootstrap.PAYLOAD / ".sautium_build").write_text("0.3.0+new\n")      # the next installer
+    installer(bootstrap.PAYLOAD, "0.3.0")                      # the next installer
     bootstrap.sync_payload(lambda _: None)
     assert git(bootstrap.APP_DIR, "rev-parse", "HEAD") == origin.tip
-    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.3.0+new"
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.3.0+bundle"
+
+
+def test_the_bundle_that_reconciled_a_clone_never_runs_over_it_again(bootstrap, origin, monkeypatch):
+    """Round 2's A: the worker also runs over a clone for a stale package
+    marker or a relaunch after an update — the same bundle must not move it."""
+    _clone_at(bootstrap, origin, "v0.2.0")
+    _new_release(origin, "v0.3.0", orphan=True)
+    ran = []
+    monkeypatch.setattr(bootstrap, "install_release", lambda report: ran.append(1))
+    bootstrap.sync_payload(lambda _: None)
+    assert ran == []
+
+
+def test_an_older_installer_never_moves_a_clone(bootstrap, origin):
+    _clone_at(bootstrap, origin, "v0.2.0")
+    _new_release(origin, "v0.3.0")
+    git(bootstrap.APP_DIR, "fetch", "-q", "origin", "refs/tags/v0.3.0")
+    git(bootstrap.APP_DIR, "checkout", "-q", "--force", "-B", "main", "FETCH_HEAD")   # its updater took v0.3.0
+    held = git(bootstrap.APP_DIR, "rev-parse", "HEAD")
+    _new_release(origin, "v0.4.0", orphan=True)                               # a rewrite above it
+    installer(bootstrap.PAYLOAD, "0.2.5")                                      # an older installer run again
+    bootstrap.sync_payload(lambda _: None)
+    assert git(bootstrap.APP_DIR, "rev-parse", "HEAD") == held
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.2.5+bundle"
+
+
+def test_a_failed_reinstall_is_tried_again(bootstrap, origin, monkeypatch):
+    _clone_at(bootstrap, origin, "v0.2.0")
+    installer(bootstrap.PAYLOAD, "0.3.0")
+    def failing(report):
+        raise RuntimeError("python failed (exit 1)")
+    monkeypatch.setattr(bootstrap, "install_release", failing)
+    bootstrap.sync_payload(lambda _: None)
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.2.0+bundle"
+
+
+def test_a_fresh_clone_records_its_bundle(bootstrap, origin):
+    publish(origin, "v0.2.0")
+    bootstrap.sync_payload(lambda _: None)
+    assert bootstrap.tree_is_clone()
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.2.0+bundle"
 
 
 def _set_up(bootstrap, monkeypatch) -> bool:
@@ -165,7 +215,7 @@ def _set_up(bootstrap, monkeypatch) -> bool:
 def test_a_clone_is_set_up_for_the_bundle_that_reconciled_it(bootstrap, origin, monkeypatch):
     _clone_at(bootstrap, origin, "v0.2.0")
     assert _set_up(bootstrap, monkeypatch)
-    (bootstrap.PAYLOAD / ".sautium_build").write_text("0.3.0+new\n")
+    installer(bootstrap.PAYLOAD, "0.3.0")
     assert not _set_up(bootstrap, monkeypatch)
 
 
@@ -173,12 +223,12 @@ def test_a_reinstall_that_finds_nothing_newer_keeps_the_clone(bootstrap, origin)
     _clone_at(bootstrap, origin, "v0.2.0")
     held = git(bootstrap.APP_DIR, "rev-parse", "HEAD")
     (bootstrap.APP_DIR / "pgsql").mkdir()
-    (bootstrap.PAYLOAD / ".sautium_build").write_text("0.2.0+repair\n")
+    installer(bootstrap.PAYLOAD, "0.3.0")
     git(origin.seed, "push", "-q", "origin", ":refs/tags/v0.2.0")
     bootstrap.sync_payload(lambda _: None)
     assert git(bootstrap.APP_DIR, "rev-parse", "HEAD") == held
     assert (bootstrap.APP_DIR / "pgsql").is_dir()
-    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.2.0+repair"
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.3.0+bundle"
 
 
 def test_an_interrupted_first_checkout_is_no_clone(bootstrap):

@@ -47,8 +47,10 @@ _ARMOR_BEGIN = b"-----BEGIN SSH SIGNATURE-----"
 _ARMOR_END = b"-----END SSH SIGNATURE-----"
 _HASHES = {"sha256": hashlib.sha256, "sha512": hashlib.sha512}
 
-# A release's name: `v<major>.<minor>.<patch>`, no leading zeros, nothing after.
-_VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+# A release's name: `v<major>.<minor>.<patch>`, no leading zeros, nothing
+# after, six digits a part at most — a name every filesystem stores (a pushed
+# `v1.0.<300 digits>` could not be, and failed the fetch it was in).
+_VERSION = re.compile(r"v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})")
 _HEX_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 

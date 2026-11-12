@@ -155,8 +155,10 @@ def is_installed() -> bool:
     return DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == requirements_hash()
 
 
-def run_streamed(cmd: list, report: Callable[[str], None], cwd: Optional[Path] = None) -> None:
-    """Run a subprocess, mirroring its output into the log and the UI."""
+def run_streamed(cmd: list, report: Callable[[str], None], cwd: Optional[Path] = None,
+                 ok: tuple = (0,)) -> int:
+    """Run a subprocess, mirroring its output into the log and the UI; its
+    exit code, which must be one of `ok`."""
     cmd = [str(part) for part in cmd]
     log(f"$ {' '.join(cmd)}")
     env = dict(os.environ)
@@ -170,23 +172,17 @@ def run_streamed(cmd: list, report: Callable[[str], None], cwd: Optional[Path] =
         if line:
             log(line)
             report(line)
-    if proc.wait() != 0:
+    if proc.wait() not in ok:
         raise RuntimeError(f"{Path(cmd[0]).name} failed (exit {proc.returncode}) — see {LOG_PATH}")
+    return proc.returncode
 
 
 def sync_payload(report: Callable[[str], None]) -> None:
     """Put the tree in place — as a clone when GitHub is reachable, from the
     bundle when it is not. After the first clone updates are the launcher's
-    job, not the disk image's; a new DMG over an existing clone is a
-    reinstall, which moves it to the newest release this payload's keys
-    verify if that is newer than what it holds — the way to a release that
-    rewrote history, or to one signed by keys only a new DMG carries."""
+    job; a new DMG over an existing clone is a reinstall (reconcile_clone)."""
     if tree_is_clone():
-        try:
-            install_release(report)
-        except Exception as exc:
-            log(f"reinstall found no newer release ({exc}) — the clone stays as it is")
-        PAYLOAD_SEEN.write_text(bundle_build_id())
+        reconcile_clone(report)
         return
 
     report("Installing application files…")
@@ -226,23 +222,43 @@ def clone_tree(report: Callable[[str], None]) -> bool:
     try:
         run_streamed(["git", "init", "--quiet", APP_DIR], report)
         run_streamed(["git", "-C", APP_DIR, "config", "remote.origin.url", REPO_URL], report)
-        install_release(report)
+        checked_out = install_release(report)
     except Exception as exc:
         log(f"no release checked out ({exc}) — falling back to the bundled copy")
+        checked_out = False
+    if not checked_out:
         shutil.rmtree(APP_DIR, ignore_errors=True)
         return False
     log(f"cloned {REPO_URL} at its newest signed release")
     return True
 
 
-def install_release(report: Callable[[str], None]) -> None:
+def install_release(report: Callable[[str], None]) -> bool:
     """The payload's own updater, run on the installed runtime (whose packages
     the payload's requirements already put there): it chooses and verifies
     the release and checks it out in APP_DIR — this file is stdlib only, and
     the signature check needs `cryptography`. `-B`: nothing may be written
-    into the signed bundle."""
-    run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
-                  APP_DIR, PAYLOAD_SIGNERS], report, cwd=PAYLOAD)
+    into the signed bundle. Whether a release was checked out (exit 3: none
+    to take); any other failure raises."""
+    return run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
+                         APP_DIR, PAYLOAD_SIGNERS], report, cwd=PAYLOAD, ok=(0, 3)) == 0
+
+
+def reconcile_clone(report: Callable[[str], None]) -> None:
+    """A bundle meets an existing clone once: a reinstall. The payload's
+    updater moves the clone only if this DMG is newer than the release the
+    clone holds (desktop/updater.py install_release) — the worker also runs
+    over a clone for a stale package marker or a relaunch after an update,
+    and an older DMG's list must never undo what the clone's own updater
+    took. A failure is tried again at the next start."""
+    if PAYLOAD_SEEN.exists() and PAYLOAD_SEEN.read_text().strip() == bundle_build_id():
+        return
+    try:
+        install_release(report)
+    except Exception as exc:
+        log(f"reinstall over the clone failed ({exc}) — tried again at the next start")
+        return
+    PAYLOAD_SEEN.write_text(bundle_build_id())
 
 
 def install_runtime(report: Callable[[str], None]) -> None:

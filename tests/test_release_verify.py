@@ -217,11 +217,17 @@ def test_a_name_mismatch_is_refused(key):
         rv.verify_tag(raw, "v9.9.9", signers(key.line()))
 
 
-@pytest.mark.parametrize("name", ["v1.2", "1.2.3", "v01.2.3", "v1.2.3-rc1", "v1.2.3.4", "release"])
+@pytest.mark.parametrize("name", ["v1.2", "1.2.3", "v01.2.3", "v1.2.3-rc1", "v1.2.3.4", "release",
+                                  "v1.0.1234567", "v1.0." + "9" * 300])
 def test_a_name_that_is_not_a_release_is_refused(key, name):
     raw = signed_tag_object(key, COMMIT, name)
     with pytest.raises(rv.VerifyError, match="not a release name"):
         rv.verify_tag(raw, name, signers(key.line()))
+
+
+def test_a_version_part_has_six_digits_at_most():
+    assert rv.parse_version("v999999.0.123456") == (999999, 0, 123456)
+    assert rv.parse_version("v1000000.0.0") is None
 
 
 def test_a_tag_of_anything_but_a_commit_is_refused(key):

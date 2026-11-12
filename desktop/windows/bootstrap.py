@@ -192,8 +192,9 @@ def remove_tree(path: Path) -> None:
 
 
 def run_streamed(cmd: list, report: Callable[[str], None], env: dict,
-                 cwd: Optional[Path] = None) -> None:
-    """Run a subprocess, mirroring its output into the log and the UI."""
+                 cwd: Optional[Path] = None, ok: tuple = (0,)) -> int:
+    """Run a subprocess, mirroring its output into the log and the UI; its
+    exit code, which must be one of `ok`."""
     cmd = [str(part) for part in cmd]
     log(f"$ {' '.join(cmd)}")
     proc = subprocess.Popen(
@@ -206,23 +207,17 @@ def run_streamed(cmd: list, report: Callable[[str], None], env: dict,
         if line:
             log(line)
             report(line)
-    if proc.wait() != 0:
+    if proc.wait() not in ok:
         raise RuntimeError(f"{Path(cmd[0]).name} failed (exit {proc.returncode}) — see {LOG_PATH}")
+    return proc.returncode
 
 
 def sync_payload(report: Callable[[str], None]) -> None:
     """Put the tree in place — as a clone when GitHub is reachable, from the
-    bundle when it is not. An existing clone is a reinstall: it moves to the
-    newest release this payload's keys verify, if that is newer than what it
-    holds — the way to a release that rewrote history, or to one signed by
-    keys only a new installer carries — and is otherwise left to the
-    launcher's updater."""
+    bundle when it is not. After the first clone updates are the launcher's
+    job; a new installer over an existing clone is a reinstall (reconcile_clone)."""
     if tree_is_clone():
-        try:
-            install_release(report)
-        except Exception as exc:
-            log(f"reinstall found no newer release ({exc}) — the clone stays as it is")
-        PAYLOAD_SEEN.write_text(bundle_build_id(), encoding="utf-8")
+        reconcile_clone(report)
         return
     if not clone_tree(report):
         copy_payload(report)
@@ -230,14 +225,15 @@ def sync_payload(report: Callable[[str], None]) -> None:
     PAYLOAD_SEEN.write_text(bundle_build_id(), encoding="utf-8")
 
 
-def install_release(report: Callable[[str], None]) -> None:
+def install_release(report: Callable[[str], None]) -> bool:
     """The payload's own updater, run on the runtime (whose packages the
     payload's requirements already put there): it chooses and verifies the
     release and checks it out in APP_DIR — this file is stdlib only, and the
     signature check needs `cryptography`. `-B`: no bytecode written into the
-    installed folder."""
-    run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
-                  APP_DIR, PAYLOAD_SIGNERS], report, launcher_env(), cwd=PAYLOAD)
+    installed folder. Whether a release was checked out (exit 3: none to
+    take); any other failure raises."""
+    return run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
+                         APP_DIR, PAYLOAD_SIGNERS], report, launcher_env(), cwd=PAYLOAD, ok=(0, 3)) == 0
 
 
 def clone_tree(report: Callable[[str], None]) -> bool:
@@ -258,9 +254,11 @@ def clone_tree(report: Callable[[str], None]) -> bool:
         # interrupted attempt left behind.
         run_streamed([GIT, "-C", APP_DIR, "init", "--quiet"], report, env)
         run_streamed([GIT, "-C", APP_DIR, "config", "remote.origin.url", REPO_URL], report, env)
-        install_release(report)
+        checked_out = install_release(report)
     except Exception as exc:
         log(f"no release checked out ({exc}) — falling back to the bundled copy")
+        checked_out = False
+    if not checked_out:
         remove_tree(APP_DIR / ".git")
         return False
     # The copy's stamp would tell the launcher it is a packaged tree that
@@ -268,6 +266,23 @@ def clone_tree(report: Callable[[str], None]) -> bool:
     (APP_DIR / ".sautium_build").unlink(missing_ok=True)
     log(f"cloned {REPO_URL} at its newest signed release")
     return True
+
+
+def reconcile_clone(report: Callable[[str], None]) -> None:
+    """A bundle meets an existing clone once: a reinstall. The payload's
+    updater moves the clone only if this installer is newer than the release
+    the clone holds (desktop/updater.py install_release) — the worker also
+    runs over a clone for a stale package marker or a relaunch after an
+    update, and an older installer's list must never undo what the clone's
+    own updater took. A failure is tried again at the next start."""
+    if PAYLOAD_SEEN.exists() and PAYLOAD_SEEN.read_text(encoding="utf-8").strip() == bundle_build_id():
+        return
+    try:
+        install_release(report)
+    except Exception as exc:
+        log(f"reinstall over the clone failed ({exc}) — tried again at the next start")
+        return
+    PAYLOAD_SEEN.write_text(bundle_build_id(), encoding="utf-8")
 
 
 def copy_payload(report: Callable[[str], None]) -> None:

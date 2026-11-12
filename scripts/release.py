@@ -40,13 +40,16 @@ launcher's verifier against the keys of the checkout's desktop/release_signers
 with --commit, that it names that commit (scripts/release-publish.sh runs it
 before it creates the GitHub release).
 
-The chain: its root is the first key list `main` ever carried (the first
-commit on origin/main's first-parent line whose desktop/release_signers holds
-a key) — a list that history does not let a later push replace. The lowest
-release that root's keys signed is the floor; each later release is signed
-by a key on the list of the release before it and descends from it. A tag
-off that chain — unsigned, signed by another key, off its history — is no
-release of this script's, whatever else origin holds.
+The chain: each release is signed by a key on the list of the release
+before it and descends from it. Its root is the floor — the first signed
+release. `tag` records the floor it makes in this checkout's git
+configuration (`sautium.releaseFloor`, the tag object's id), and from then on
+the chain starts there and nowhere else: what origin's history says can be
+reshaped by a push (a merge whose first parent is a history of the pusher's
+own), what this checkout recorded cannot. A checkout without the record (an
+auditor's clone) derives the root from the first key list on origin/main's
+first-parent line and says so. A tag off the chain — unsigned, signed by
+another key, off its history — is no release of this script's.
 """
 
 import argparse
@@ -62,9 +65,7 @@ REPO = ROOT
 
 from desktop import release_verify, updater  # noqa: E402
 
-# The maintainer's checkout takes every `v*` tag as origin has it, forced and
-# pruned, into the same namespace launchers use; refs/tags is left alone.
-RELEASE_FETCH = f"+refs/tags/v*:{updater.RELEASE_REFS}v*"
+FLOOR_CONFIG = "sautium.releaseFloor"
 
 
 class Refused(SystemExit):
@@ -122,7 +123,10 @@ def root_list() -> Tuple[Optional[str], List[release_verify.Signer]]:
 def trusted_chain() -> List[Tuple[updater.Release, List[release_verify.Signer]]]:
     """The signed releases, oldest first, each with the list its tree carries
     (which signs the next one)."""
-    _, held = root_list()
+    floor = git("config", "--get", FLOOR_CONFIG, check=False)
+    if not floor:
+        _, held = root_list()
+        print("  (no floor recorded in this checkout: the chain's root is derived from origin/main)")
     listing = git("for-each-ref", "--format=%(refname) %(objecttype)", updater.RELEASE_REFS)
     tags = []
     for line in listing.splitlines():
@@ -133,6 +137,13 @@ def trusted_chain() -> List[Tuple[updater.Release, List[release_verify.Signer]]]
             tags.append((version, name, ref))
     chain = []
     for version, name, ref in sorted(tags):
+        if floor and not chain:
+            # The floor this checkout made and verified: taken as recorded.
+            if git("rev-parse", ref) == floor:
+                commit = git("rev-parse", f"{ref}^{{commit}}")
+                held = signers_at(commit)[0]
+                chain.append((updater.Release(name, version, commit), held))
+            continue
         try:
             signed = release_verify.verify_tag(git_bytes("cat-file", "tag", ref), name, held)
         except release_verify.VerifyError as exc:
@@ -143,12 +154,26 @@ def trusted_chain() -> List[Tuple[updater.Release, List[release_verify.Signer]]]
             continue
         held = signers_at(signed.commit)[0]
         chain.append((updater.Release(name, version, signed.commit), held))
+    if floor and not chain:
+        raise Refused(f"the floor this checkout recorded ({FLOOR_CONFIG} = {floor[:12]}) is not on origin")
     return chain
 
 
 def fetch() -> None:
-    git("fetch", "--quiet", "--no-tags", "--prune", "origin",
-        "+refs/heads/main:refs/remotes/origin/main", RELEASE_FETCH)
+    """origin/main and every tag of the release form, forced, into the
+    namespace launchers use (refs/tags left alone); names of another form
+    never reach the fetch, where one this filesystem cannot store would fail
+    it whole."""
+    names = [name for _, name, _ in updater._remote_releases(str(REPO))]
+    refspecs = "".join(f"+refs/tags/{n}:{updater.RELEASE_REFS}{n}\n" for n in names)
+    result = subprocess.run(["git", "-C", str(REPO), "fetch", "--quiet", "--no-tags", "--stdin", "origin",
+                             "+refs/heads/main:refs/remotes/origin/main"],
+                            input=refspecs, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Refused(f"git fetch failed: {result.stderr.strip()}")
+    for ref in git("for-each-ref", "--format=%(refname)", updater.RELEASE_REFS).split():
+        if ref[len(updater.RELEASE_REFS):] not in names:
+            git("update-ref", "-d", ref)
 
 
 def release_name(version: str) -> Tuple[str, Tuple[int, int, int]]:
@@ -173,7 +198,8 @@ def tag(version: str, rev: Optional[str], list_change: bool) -> None:
     commit = git("rev-parse", "--verify", f"{rev or 'HEAD'}^{{commit}}")
     if not is_ancestor(commit, "origin/main"):
         raise Refused(f"{commit[:12]} is not on origin/main — push it first")
-    if git("ls-remote", "--refs", "origin", f"refs/tags/{name}"):
+    if f"refs/tags/{name}" in [line.split("\t")[-1] for line in
+                                git("ls-remote", "--refs", "origin", f"refs/tags/{name}").splitlines()]:
         raise Refused(f"origin already has a tag {name}")
 
     chain = trusted_chain()
@@ -242,6 +268,9 @@ def tag(version: str, rev: Optional[str], list_change: bool) -> None:
         git("tag", "-d", name)
         raise Refused(f"{name} deleted again: {problem}")
 
+    if not chain:
+        git("config", FLOOR_CONFIG, git("rev-parse", f"refs/tags/{name}"))
+        print(f"\nThe floor is recorded in this checkout ({FLOOR_CONFIG}): the chain starts at {name}.")
     print(f"\n{name} is signed by {', '.join(made.signer.principals)} and verifies as launchers verify it.")
     print("Push it:\n")
     print(f"    git -C {REPO} push origin refs/tags/{name}\n")

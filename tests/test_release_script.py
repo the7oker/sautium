@@ -299,3 +299,53 @@ def test_the_selftest_refuses_a_key_the_list_does_not_hold(stand):
     stand.use_key("stranger")
     result = stand.run("selftest")
     assert result.returncode != 0 and "not listed" in result.stderr
+
+
+def test_the_floor_is_recorded_and_roots_the_chain(stand, tmp_path):
+    """Round 2's F: a merge whose first parent is a history of the pusher's
+    own, listing the pusher's key, cannot re-root the chain once the floor
+    is recorded."""
+    stand.commit("0.2.0")
+    stand.release("0.2.0")
+    floor = git(stand.repo, "config", "--get", "sautium.releaseFloor")
+    assert floor == git(stand.repo, "rev-parse", "refs/tags/v0.2.0")
+    main = git(stand.repo, "rev-parse", "HEAD")
+    git(stand.repo, "checkout", "-q", "--orphan", "theirs")
+    stand.commit("0.1.5", signers=["pusher"], push=False)
+    _push_tag_object(stand, "v0.1.5", "HEAD", key="pusher")
+    theirs = git(stand.repo, "rev-parse", "HEAD")
+    tree = git(stand.repo, "rev-parse", f"{main}^{{tree}}")
+    merge = git(stand.repo, "commit-tree", tree, "-p", theirs, "-p", main, "-m", "merge")
+    git(stand.repo, "push", "-q", "-f", "origin", f"{merge}:refs/heads/main")
+    git(stand.repo, "checkout", "-q", "-B", "main", merge)
+    assert stand.run("verify", "0.2.0").returncode == 0
+    impostor = stand.run("verify", "0.1.5")
+    assert impostor.returncode != 0 and "not in the release chain" in impostor.stderr
+
+
+def test_a_recorded_floor_gone_from_origin_never_makes_a_new_floor(stand):
+    stand.commit("0.2.0")
+    stand.release("0.2.0")
+    git(stand.repo, "push", "-q", "origin", ":refs/tags/v0.2.0")
+    stand.commit("0.3.0")
+    result = stand.run("tag", "0.3.0")
+    assert result.returncode != 0 and "is not on origin" in result.stderr
+
+
+def test_a_branch_named_like_the_tag_is_no_tag(stand):
+    stand.commit("0.2.0")
+    git(stand.repo, "push", "-q", "origin", "HEAD:refs/heads/refs/tags/v0.2.0")
+    assert stand.run("tag", "0.2.0").returncode == 0
+
+
+def test_the_derived_root_skips_an_empty_list_and_follows_the_first_parent(stand):
+    """Without a recorded floor (an auditor's clone) the root is the first key
+    list on origin/main's first-parent line; an empty file before it is none."""
+    git(stand.repo, "checkout", "-q", "--orphan", "fresh")
+    stand.commit("0.1.1", raw_signers="")
+    stand.commit("0.2.0", signers=["daily"])
+    stand.release("0.2.0", "--list-change")
+    git(stand.repo, "config", "--unset", "sautium.releaseFloor")
+    result = stand.run("verify", "0.2.0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no floor recorded" in result.stdout

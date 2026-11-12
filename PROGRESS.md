@@ -2215,7 +2215,14 @@ The short version of the hard-learned lessons:
     works in the tree.
 
   A moved tag is judged as it now stands, and a pushed tag over a huge
-  history costs a launcher a few hundred bytes.
+  history costs a launcher a few hundred bytes. What a tag object names
+  directly (a blob, a commit's own message) is still sent whole: once, kept
+  in the probe. The 30-minute timeout lets a slow line finish it rather than
+  fail every check. Every probe command names the probe by `--git-dir`, and
+  a probe that is not a repository is made again (round 2: a folder holding
+  only `HEAD` sent the probe's partial-clone settings and its shallow
+  boundary into the launcher's own repository). Version parts have six
+  digits at most, so every release name is one a filesystem stores.
 - **Judged newest version first:**
   - the walk stops at the first signed release HEAD contains (the installed
     one), so a version is never taken backwards and nothing below it is
@@ -2224,12 +2231,18 @@ The short version of the hard-learned lessons:
     refused and said;
   - the move goes to the verified commit by its id, re-surveyed at "Update
     Now", never to a ref name.
-- **A reinstall moves.** A new installer over an existing clone runs the same
-  `install-release` there, so a rewritten history or keys only a new
-  installer lists are reachable. It moves to the newest release the
-  payload's list verifies, never to a lower version than the clone holds.
-  The bundle a clone was last reconciled with is kept in
-  `<data root>/.payload_build`.
+- **A reinstall moves, and only a newer installer does.** The bootstrap's
+  worker also runs over a clone for a stale package marker, or for the
+  relaunch after an update that changed `desktop/`. In round 2, running
+  `install-release` there with the payload's list re-trusted a rotated-out
+  key and took a signed rewrite without any reinstall.
+  - Now a bundle reconciles a clone once (`<data root>/.payload_build`).
+  - The payload's updater moves the clone only if the installer's stated
+    version is above the clone's, and then only to a release above both.
+  - The version is the one each tree states: no key is needed to read it, and
+    at a release whose own list drops its signer nothing HEAD holds verifies.
+  - The release a clone's own list no longer verifies is `held` ("up to
+    date"), never a refusal.
 - **What went with the mirror:** `refs/sautium/mirrored`, the
   non-fast-forward move and the reflog expiry with its prune. Every rewrite
   is refused now, signed or not, and nothing is purged.

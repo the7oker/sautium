@@ -19,8 +19,8 @@ from desktop.utils import get_project_root
 from tests.release_signing import Key, push_signed_tag
 
 
-def git(cwd, *args):
-    return subprocess.run(["git", *args], cwd=cwd, check=True,
+def git(cwd, *args, check=True):
+    return subprocess.run(["git", *args], cwd=cwd, check=check,
                           capture_output=True, text=True).stdout.strip()
 
 
@@ -38,9 +38,13 @@ class World:
         for tree in (self.managed, self.working):
             git(tmp_path, "clone", "-q", "-b", "main", str(self.origin), str(tree))
 
-    def commit(self, app: str, signers=None) -> str:
+    def commit(self, app: str, signers=None, version: str = None) -> str:
         (self.seed / "app.txt").write_text(app)
         paths = ["app.txt"]
+        if version:
+            (self.seed / "desktop").mkdir(exist_ok=True)
+            (self.seed / "desktop" / "build_common.py").write_text(f'VERSION = "{version}"\n')
+            paths.append("desktop/build_common.py")
         if signers is not None:
             (self.seed / "desktop").mkdir(exist_ok=True)
             (self.seed / "desktop" / "release_signers").write_text(
@@ -335,6 +339,51 @@ def test_a_tag_that_does_not_verify_costs_no_more_than_its_tag_object(world):
     assert sum(f.stat().st_size for f in (probe / "objects").rglob("*") if f.is_file()) < 50_000
 
 
+def test_a_tag_over_a_long_history_costs_only_its_tip(world):
+    lines = []
+    for i in range(1, 2001):
+        lines += ["commit refs/heads/long", f"committer t <t@t> {1700000000 + i} +0000",
+                  f"data {len(str(i))}", str(i), ""]        # each continues the branch it is on
+    subprocess.run(["git", "fast-import", "--quiet"], cwd=world.seed, check=True,
+                   input="\n".join(lines).encode())
+    world.tag("v9.0.0", git(world.seed, "rev-parse", "refs/heads/long"), key=Key())
+    assert world.check().refused[0][0] == "v9.0.0"
+    probe = Path(git(world.managed, "rev-parse", "--absolute-git-dir")) / updater.PROBE_DIR
+    assert sum(f.stat().st_size for f in (probe / "objects").rglob("*") if f.is_file()) < 20_000
+
+
+def test_a_probe_that_is_no_repository_is_made_again_never_falls_through(world):
+    git_dir = Path(git(world.managed, "rev-parse", "--absolute-git-dir"))
+    probe = git_dir / updater.PROBE_DIR
+    probe.mkdir()
+    (probe / "HEAD").write_text("ref: refs/heads/main\n")        # an init that died after HEAD
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    assert world.check().offered.name == "v0.2.0"
+    assert not (git_dir / "shallow").exists()
+    assert git(world.managed, "config", "--get", "extensions.partialClone", check=False) == ""
+
+
+def test_a_git_that_hangs_is_no_survey(world, monkeypatch):
+    real = subprocess.run
+    def hanging(cmd, **kw):
+        if "ls-remote" in cmd:
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        return real(cmd, **kw)
+    monkeypatch.setattr(updater.subprocess, "run", hanging)
+    assert world.check() is None
+
+
+def test_an_origin_at_a_former_address_is_moved_before_the_check(world, monkeypatch, tmp_path):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    former = tmp_path / "former-address.git"
+    git(world.managed, "remote", "set-url", "origin", str(former))
+    monkeypatch.setattr(updater, "ORIGIN_MOVES", {"former-address": str(world.origin)})
+    assert world.check().offered.name == "v0.2.0"
+    assert git(world.managed, "remote", "get-url", "origin") == str(world.origin)
+
+
 def test_a_release_that_verifies_is_fetched_with_its_history(world):
     tip = world.commit("v2\n")
     world.tag("v0.2.0", tip)
@@ -348,6 +397,7 @@ def test_a_deleted_tag_leaves_with_its_release(world):
     assert world.check().offered
     git(world.seed, "push", "-q", "origin", ":refs/tags/v0.2.0")
     assert world.check().offered is None
+    assert git(world.managed, "for-each-ref", updater.RELEASE_REFS) == ""
 
 
 def test_a_tag_moved_upstream_never_fails_the_fetch(world):
@@ -438,38 +488,65 @@ def test_a_first_install_with_no_signed_release_takes_none(world):
     assert not (app / "app.txt").exists()
 
 
-def test_a_reinstall_moves_a_clone_to_a_release_that_rewrote_history(world):
-    tip = world.commit("v2\n")
+def _payload_list(world, *keys):
+    signers = world.tmp / "payload-signers"
+    signers.write_text("".join(k.line() + "\n" for k in keys))
+    return str(signers)
+
+
+def test_a_newer_installer_moves_a_clone_past_a_rewritten_history(world, monkeypatch):
+    tip = world.commit("v2\n", version="0.2.0")
     world.tag("v0.2.0", tip)
     world.update()
     git(world.seed, "checkout", "-q", "--orphan", "rewritten")
-    world.commit("v3, rewritten\n", signers=[world.key])
-    rewritten = git(world.seed, "rev-parse", "HEAD")
+    rewritten = world.commit("v3, rewritten\n", signers=[world.key], version="0.3.0")
     world.tag("v0.3.0", rewritten)
     assert world.check().rewrite.name == "v0.3.0"
-    signers = world.tmp / "payload-signers"
-    signers.write_text(world.key.line() + "\n")
-    assert updater.install_release(str(world.managed), str(signers)).name == "v0.3.0"
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 0))
+    assert updater.install_release(str(world.managed), _payload_list(world, world.key)).name == "v0.3.0"
     assert world.head() == rewritten
 
 
-def test_a_reinstall_never_moves_a_clone_to_a_lower_version(world):
-    old = world.commit("v2\n")
-    world.tag("v0.2.0", old)
-    new = world.commit("v3\n")
-    world.tag("v0.3.0", new, key=Key())                 # only the clone's own list... not the payload's
+def test_an_installer_no_newer_than_the_clone_never_moves_it(world, monkeypatch):
+    """Round 2's A: an old installer's list must not undo a rotation the clone
+    took, nor take it past a rewrite without a reinstall."""
+    stolen, new = world.key, Key()
+    rotating = world.commit("v2\n", signers=[new], version="0.3.0")
+    world.tag("v0.3.0", rotating)                        # signed by the old key, rotates it out
     world.update()
-    signers = world.tmp / "payload-signers"
-    signers.write_text(world.key.line() + "\n")
-    tip = world.commit("v4\n")
-    world.tag("v0.4.0", tip)
-    world.update()                                       # the clone holds v0.4.0
-    assert world.head() == tip
-    other = Key()
-    signers.write_text(other.line() + "\n")             # an old installer, whose list signed only v0.3.0
-    world.tag("v0.3.1", old, key=other)
-    assert updater.install_release(str(world.managed), str(signers)).name == "v0.4.0"
-    assert world.head() == tip
+    git(world.seed, "checkout", "-q", "--orphan", "thief")
+    thief = world.commit("v9\n", signers=[stolen], version="0.9.0")
+    world.tag("v0.9.0", thief, key=stolen)
+    assert world.check().offered is None                 # the clone's own list refuses it
+    for installer in ((0, 2, 0), (0, 3, 0)):             # an older installer, the same one
+        monkeypatch.setattr(updater, "installer_version", lambda installer=installer: installer)
+        assert updater.install_release(str(world.managed), _payload_list(world, stolen)) is None
+        assert world.head() == rotating
+
+
+def test_a_newer_installer_never_moves_a_clone_to_a_lower_version(world, monkeypatch):
+    """Round 2's B: at a release whose own list drops its signer nothing HEAD
+    holds verifies, and the version the tree states still holds the line."""
+    k0, k1, k2 = world.key, Key(), Key()
+    v3 = world.commit("v3\n", signers=[k1], version="0.3.0")
+    world.tag("v0.3.0", v3, key=k0)
+    world.update()
+    v4 = world.commit("v4\n", signers=[k2], version="0.4.0")
+    world.tag("v0.4.0", v4, key=k1)
+    world.update()
+    assert world.head() == v4
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 5, 0))
+    assert updater.install_release(str(world.managed), _payload_list(world, k0)) is None
+    assert world.head() == v4
+
+
+def test_the_release_a_clones_own_list_no_longer_verifies_is_up_to_date(world):
+    k0, k1 = world.key, Key()
+    v3 = world.commit("v3\n", signers=[k1], version="0.3.0")
+    world.tag("v0.3.0", v3, key=k0)
+    world.update()
+    survey = world.check()
+    assert (survey.held, survey.refused, survey.offered) == ("v0.3.0", [], None)
 
 
 def test_a_first_install_runs_as_the_bootstraps_run_it(world):

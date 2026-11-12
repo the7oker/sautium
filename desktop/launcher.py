@@ -1506,7 +1506,8 @@ class LauncherApp(ctk.CTk):
                     if survey.offered or survey.rewrite or survey.refused:
                         self.ui_call(lambda: self._show_update_dialog(survey))
                     else:
-                        verdict = "You're up to date!" if survey.installed else NOTHING_SIGNED_YET
+                        verdict = ("You're up to date!" if survey.installed or survey.held
+                                   else NOTHING_SIGNED_YET)
                         self.ui_call(self._update_flow_idle)
                         self.ui_call(lambda: self._progress_text.configure(text=verdict))
                         self.ui_call(lambda: self.after(

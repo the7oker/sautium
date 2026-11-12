@@ -206,10 +206,14 @@ the Linux side can reach (on WSL that needs `usbipd`):
    unsigned tag of that name, and the name is then taken for good.
 
 `python scripts/release.py verify <version>` says at any time whether origin's
-tag is in the release chain. The chain starts at the first key list `main`
-ever carried: the floor is the lowest release that list's keys signed, and
-each later release is signed by a key on the list of the one before it and
-descends from it.
+tag is in the release chain. Each release in the chain is signed by a key on
+the list of the release before it and descends from it. The chain starts at
+the floor, the first signed release. `tag` records the floor it makes in the
+checkout's git configuration (`sautium.releaseFloor`). From then on that
+record is the root, and no push can reshape it (a merge whose first parent is
+a history of the pusher's own, for example). A checkout without the record,
+such as an auditor's clone, derives the root from the first key list on
+`origin/main`'s first-parent line, and says so.
 
 ## Rotation and recovery
 
@@ -226,11 +230,22 @@ descends from it.
   theft is what limits that window.
 - **Both keys are lost:** installed launchers stop taking updates. A reinstall
   from a new installer moves them on, because its payload carries the new
-  list. A new installer over an existing install moves the install to the
-  newest release its own list verifies, if that is newer than the one
-  installed. The same move takes an install past a rewritten history.
+  list.
+- **How a reinstall moves an install.** An installer run over an existing
+  install moves it only if the installer is **newer** than the release the
+  install holds, and then only to a newer release still, the newest that the
+  installer's own list verifies. Both versions are read from what each tree
+  states. An installer as old as the install, or older, changes nothing: its
+  list must never undo a rotation the install has already taken. The same
+  move takes an install past a rewritten history, as long as the installer is
+  built from a release on the new history.
 
 ## On GitHub
+
+A tag that is not a release costs a launcher little. Names of any other form
+are never fetched, and a tag that does not verify brings its tag object and
+commit, but neither history nor trees. What a tag object names directly is
+still sent whole: a pushed tag on a large blob costs that blob once.
 
 A ruleset on tags matching `v*` should forbid deleting and updating them. A
 launcher judges a moved tag as it now stands, so a moved tag never installs
