@@ -294,3 +294,26 @@ def test_ssh_keygen_verifies_what_the_test_signer_makes(tmp_path):
     result = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(tmp_path / "signers"), "-I", "release",
                              "-n", "git", "-s", str(tmp_path / "sig")], input=message, capture_output=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_the_shipped_list_holds_the_owners_two_keys_for_git(caplog):
+    """desktop/release_signers as it ships: every line parses, both keys are
+    allowed for `git`, and they are the keys the owner named (2026-11-11) —
+    the security key's and the recovery key's fingerprints."""
+    import hashlib
+    text = (Path(__file__).parent.parent / "desktop" / "release_signers").read_text()
+    listed = rv.parse_allowed_signers(text, "shipped")
+    assert "refused" not in caplog.text
+    fingerprints = {s.principals: base64.b64encode(hashlib.sha256(s.key_blob).digest()).decode().rstrip("=")
+                    for s in listed}
+    assert fingerprints == {("release",): "VfUGpBDGFCxAw2J4n8WNeFJj/LcrTac5Zgp73egmpqU",
+                            ("recovery",): "a6UW2+JUmY9Ak8b0u62XJchKL3yrPj7D/mHb/PAUCrY"}
+    assert all(s.namespaces == ("git",) for s in listed)
+    assert [s.key_type for s in listed] == [rv.SK_ED25519, rv.ED25519]
+
+
+def test_the_shipped_security_key_is_the_one_that_made_the_fixture():
+    shipped = next(s for s in rv.parse_allowed_signers(
+        (Path(__file__).parent.parent / "desktop" / "release_signers").read_text()) if s.key_type == rv.SK_ED25519)
+    listed, message, sig = hardware()
+    assert shipped.key_blob == listed[0].key_blob
