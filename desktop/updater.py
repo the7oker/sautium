@@ -1,12 +1,18 @@
 """
-Git-based auto-updater for Sautium.
+Git-based auto-updater for Sautium: a launcher takes RELEASES — signed
+annotated tags `v<major>.<minor>.<patch>` — never the tip of a branch.
 
-The application is a git clone that MIRRORS origin/main. A node never
-authors commits, so an update makes the checkout equal to the remote tip
-(fetch + reset --hard) instead of merging the remote into a local branch:
-`git pull` dies the moment upstream history is rewritten ("Need to specify
-how to reconcile divergent branches") and would have stranded every node on
-the first force-push; a mirror does not care how the tip got where it is.
+A push to `main` reaches no installed launcher without the release key's
+signature. The updater fetches origin's `v*` tags, verifies each with the
+launcher's own Python (desktop/release_verify.py — the Windows installer's
+MinGit has no `ssh-keygen`) against the allowed signers of the INSTALLED tree
+(`HEAD:desktop/release_signers`, never a fetched one; a release may change the
+list, which then governs the next update), and offers the highest version
+whose commit descends from HEAD. A signed release that does not descend — a
+rewritten history — is refused, and only a reinstall moves to it; nothing is
+purged. The bootstraps' first clone takes the newest release that verifies
+against the installer's own list (`install-release`, below).
+
 After update: run pending DB migrations, restart backend+tracker. Dependency
 installs are not done here — see perform_update.
 """
@@ -15,12 +21,13 @@ import logging
 import re
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, Tuple, List
 
-logger = logging.getLogger(__name__)
+from desktop import release_verify
 
-REMOTE_BRANCH = "origin/main"
+logger = logging.getLogger(__name__)
 
 # The repository moved on 2026-09-12 (history rewritten before going public).
 # A checkout still pointing at the old address is switched to the new one
@@ -31,56 +38,233 @@ ORIGIN_MOVES = {
     "github.com/the7oker/ai.djai": "https://github.com/the7oker/sautium.git",
 }
 
-# The tip this checkout last received from origin. A checkout whose HEAD is
-# that tip carries nothing of its own and may be moved wherever origin goes,
-# a rewritten history included; any other HEAD is somebody's work — the
-# developer's tree runs this launcher too — and is never overwritten.
-MIRRORED_REF = "refs/sautium/mirrored"
+# Origin's `v*` tags land in a namespace of our own, forced and pruned: a tag
+# moved or deleted upstream is mirrored as it is now and judged again, and a
+# moved tag can never fail the fetch ("would clobber existing tag") and take
+# every other release with it. refs/tags stays whoever works in the tree's.
+RELEASE_REFS = "refs/sautium/releases/"
+RELEASE_FETCH = f"+refs/tags/v*:{RELEASE_REFS}v*"
+SIGNERS_PATH = "desktop/release_signers"
+
+# v0.1.0 and v0.1.1 were published as lightweight, unsigned tags before
+# releases were signed. Nothing at or below this version is a release.
+FLOOR = (0, 1, 1)
+
+
+@dataclass(frozen=True)
+class Release:
+    name: str                       # the signed tag's own name, `v0.2.0`
+    version: Tuple[int, int, int]
+    commit: str
+
+    @property
+    def label(self) -> str:
+        return "Sautium " + self.name[1:]
+
+
+@dataclass
+class Survey:
+    """What origin's releases are to this checkout.
+
+    `installed`: the highest signed release HEAD already contains (None
+    before the first one). `offered`: the highest signed release above it
+    whose commit descends from HEAD — what an update moves to. `rewrite`: a
+    signed release above both that does not descend (a rewritten history,
+    which only a reinstall reaches). `refused`: `v*` tags above all of them
+    this checkout does not trust — unsigned, signed by a key the installed
+    list lacks, renamed, broken — as (tag, why)."""
+    installed: Optional[Release] = None
+    offered: Optional[Release] = None
+    rewrite: Optional[Release] = None
+    refused: List[Tuple[str, str]] = field(default_factory=list)
+
+
+# The update dialog's words (desktop/launcher.py shows them) — drafts for
+# the owner's words review (SIGN-1).
+def survey_words(survey: Survey) -> Tuple[str, List[str]]:
+    """(heading, paragraphs) for a survey that has something to say."""
+    paragraphs = []
+    if survey.offered:
+        heading = f"{survey.offered.label} is available"
+        paragraphs.append("Services will be briefly restarted during the update.")
+    elif survey.rewrite:
+        heading = f"{survey.rewrite.label} needs a reinstall"
+    else:
+        heading = "No update was installed"
+    if survey.rewrite:
+        paragraphs.append(
+            f"{survey.rewrite.label} rewrites the history this copy was installed from, so it "
+            "cannot be installed as an update. Reinstalling Sautium moves to it.")
+    if survey.refused:
+        paragraphs.append(
+            f"A release tagged {survey.refused[0][0]} does not carry a signature this copy "
+            "trusts, so it was not installed.")
+    return heading, paragraphs
+
+
+def survey_button(survey: Survey) -> Optional[str]:
+    """The update button's label while a survey waits on the person."""
+    if survey.offered:
+        return f"Update to {survey.offered.name}"
+    if survey.rewrite:
+        return "Reinstall Needed"
+    return None
+
+
+NOTHING_SIGNED_YET = "No signed release has been published yet."
 
 
 def _git_cmd(args: list, cwd: Optional[str] = None, timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run a git command."""
-    from desktop.utils import get_project_root
-    cmd = ["git"] + args
+    """Run a git command in `cwd`, by default our own tree."""
+    if cwd is None:
+        from desktop.utils import get_project_root
+        cwd = str(get_project_root())
     kwargs = {
         "capture_output": True,
         "text": True,
         "timeout": timeout,
-        "cwd": cwd or str(get_project_root()),
+        "cwd": cwd,
     }
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return subprocess.run(cmd, **kwargs)
+    return subprocess.run(["git"] + args, **kwargs)
 
 
-def _rev(ref: str) -> Optional[str]:
-    result = _git_cmd(["rev-parse", "--verify", "--quiet", ref])
+def _git_bytes(args: list, cwd: Optional[str] = None, stdin: bytes = b"") -> subprocess.CompletedProcess:
+    """A git command whose output stays the bytes git wrote: a signature
+    covers a tag object byte for byte, and a text decode may alter it."""
+    if cwd is None:
+        from desktop.utils import get_project_root
+        cwd = str(get_project_root())
+    kwargs = {"capture_output": True, "timeout": 60, "cwd": cwd, "input": stdin}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.run(["git"] + args, **kwargs)
+
+
+def _rev(ref: str, cwd: Optional[str] = None) -> Optional[str]:
+    result = _git_cmd(["rev-parse", "--verify", "--quiet", ref], cwd)
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _is_ancestor(commit: str, of: str) -> bool:
-    return _git_cmd(["merge-base", "--is-ancestor", commit, of]).returncode == 0
+def _ancestry(commit: str, of: str, cwd: Optional[str] = None) -> Optional[bool]:
+    """Whether `commit` is `of` or an ancestor of it; None when git cannot
+    tell (an object that is not a commit, or is not here)."""
+    code = _git_cmd(["merge-base", "--is-ancestor", commit, of], cwd).returncode
+    return {0: True, 1: False}.get(code)
 
 
-def _record_mirrored(tip: str) -> None:
-    _git_cmd(["update-ref", MIRRORED_REF, tip])
-
-
-def _migrate_origin() -> None:
+def _migrate_origin(cwd: Optional[str] = None) -> None:
     """Point origin at the repository's current address if it still names a
     former one. Runs before every fetch; a no-op for every other origin."""
-    result = _git_cmd(["remote", "get-url", "origin"])
+    result = _git_cmd(["remote", "get-url", "origin"], cwd)
     if result.returncode != 0:
         return
     url = result.stdout.strip()
     for old, new in ORIGIN_MOVES.items():
         if old in url and url != new:
-            moved = _git_cmd(["remote", "set-url", "origin", new])
+            moved = _git_cmd(["remote", "set-url", "origin", new], cwd)
             if moved.returncode == 0:
                 logger.info(f"origin moved: {url} -> {new}")
             else:
                 logger.warning(f"origin move failed: {moved.stderr.strip()}")
             return
+
+
+def fetch_releases(cwd: Optional[str] = None) -> Optional[str]:
+    """Mirror origin's `v*` tags into RELEASE_REFS; the error, or None."""
+    _migrate_origin(cwd)
+    result = _git_cmd(["fetch", "--no-tags", "--prune", "origin", RELEASE_FETCH], cwd, timeout=120)
+    if result.returncode != 0:
+        return f"git fetch failed: {result.stderr.strip()}"
+    return None
+
+
+def installed_signers(cwd: Optional[str] = None) -> List[release_verify.Signer]:
+    """The allowed signers HEAD was committed with — not the working copy's
+    file, not a fetched tree's: the keys that may move this checkout are the
+    ones it already trusts."""
+    result = _git_bytes(["show", f"HEAD:{SIGNERS_PATH}"], cwd)
+    if result.returncode != 0:
+        logger.warning(f"HEAD has no {SIGNERS_PATH} — no release can verify")
+        return []
+    return release_verify.parse_allowed_signers(
+        result.stdout.decode("utf-8", "replace"), f"HEAD:{SIGNERS_PATH}")
+
+
+def _objects(refs: List[str], cwd: Optional[str]) -> dict:
+    """{ref: (object type, raw bytes)}, read in one `cat-file --batch`."""
+    result = _git_bytes(["cat-file", "--batch"], cwd, "".join(f"{ref}\n" for ref in refs).encode())
+    if result.returncode != 0:
+        raise RuntimeError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
+    out, at, objects = result.stdout, 0, {}
+    for ref in refs:
+        end = out.index(b"\n", at)
+        header = out[at:end].split()
+        at = end + 1
+        if len(header) != 3:            # "<ref> missing"
+            objects[ref] = ("missing", b"")
+            continue
+        size = int(header[2])
+        objects[ref] = (header[1].decode(), out[at:at + size])
+        at += size + 1
+    return objects
+
+
+def survey(signers: List[release_verify.Signer], head: Optional[str],
+           cwd: Optional[str] = None) -> Survey:
+    """Judge the fetched releases against `signers`, the newest version first.
+
+    With a `head`, the walk ends at the first signed release HEAD contains:
+    nothing at or below the installed one can be an update, so a version is
+    never taken backwards. Without one — a first install — the newest signed
+    release is the one offered."""
+    listing = _git_cmd(["for-each-ref", "--format=%(refname)", RELEASE_REFS], cwd)
+    if listing.returncode != 0:
+        raise RuntimeError(f"git for-each-ref failed: {listing.stderr.strip()}")
+    candidates = []
+    for ref in listing.stdout.split():
+        name = ref[len(RELEASE_REFS):]
+        version = release_verify.parse_version(name)
+        if version is None:
+            logger.debug(f"tag {name} is not a release name — ignored")
+        elif version > FLOOR:
+            candidates.append((version, name, ref))
+    candidates.sort(reverse=True)
+
+    found = Survey()
+    objects = _objects([ref for _, _, ref in candidates], cwd) if candidates else {}
+    for version, name, ref in candidates:
+        kind, raw = objects[ref]
+        why = None
+        if kind != "tag":
+            why = "a lightweight tag, not a signed release"
+        else:
+            try:
+                tag = release_verify.verify_tag(raw, name, signers)
+            except release_verify.VerifyError as exc:
+                why = str(exc)
+        if why is None:
+            release = Release(name, version, tag.commit)
+            if head is None:
+                found.offered = release
+                break
+            contained = _ancestry(tag.commit, head, cwd)
+            if contained:
+                found.installed = release
+                break
+            descends = _ancestry(head, tag.commit, cwd) if contained is False else None
+            if descends:
+                found.offered = found.offered or release
+            elif descends is False:
+                if not (found.offered or found.rewrite):
+                    found.rewrite = release
+            else:
+                why = "its commit cannot be read"
+        if why is not None and not (found.offered or found.rewrite):
+            logger.warning(f"tag {name} refused: {why}")
+            found.refused.append((name, why))
+    return found
 
 
 def get_project_root() -> Path:
@@ -187,52 +371,22 @@ def is_git_repo() -> bool:
     return Path(result.stdout.strip()).resolve() == get_project_root().resolve()
 
 
-def check_for_updates() -> Tuple[bool, int, str]:
-    """
-    Check if updates are available.
-
-    Returns:
-        (has_updates, commit_count, current_hash)
-    """
+def check_for_updates() -> Optional[Survey]:
+    """Fetch the releases and judge them against this checkout; None when
+    there is nothing to judge (not a checkout of ours, or the fetch failed —
+    logged)."""
     if not is_git_repo():
-        return False, 0, ""
-
-    current_hash = _rev("HEAD") or ""
-
-    # Learned BEFORE the fetch moves origin/main: a HEAD level with the tip
-    # last fetched (or pushed) is a mirror; afterwards the two differ on
-    # every node that is merely behind. Checkouts made by clone and the
-    # former `git pull` get their marker this way.
-    if current_hash and current_hash == _rev(REMOTE_BRANCH):
-        _record_mirrored(current_hash)
-
-    # The first fetch after a history rewrite transfers the whole repository
-    # again, not a delta.
-    _migrate_origin()
-    result = _git_cmd(["fetch", "origin", "main"], timeout=120)
-    if result.returncode != 0:
-        logger.warning(f"git fetch failed: {result.stderr}")
-        return False, 0, ""
-
-    # Commits origin has that we don't: zero for a checkout level with or
-    # ahead of origin (the developer's unpushed work), the whole new history
-    # for one whose upstream was rewritten.
-    result = _git_cmd(["rev-list", "HEAD..origin/main", "--count"])
-    if result.returncode != 0:
-        return False, 0, current_hash
-
-    count = int(result.stdout.strip())
-    return count > 0, count, current_hash
+        return None
+    error = fetch_releases()
+    if error:
+        logger.warning(error)
+        return None
+    return survey(installed_signers(), _rev("HEAD"))
 
 
 def get_update_changelog(old_hash: str) -> List[str]:
-    """Commit messages between old hash and current HEAD. A rewritten history
-    has no such range — every commit is new to this checkout — so a note and
-    the newest commits stand in for it."""
-    if not _is_ancestor(old_hash, "HEAD"):
-        result = _git_cmd(["log", "--oneline", "-n", "15"])
-        latest = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-        return ["Upstream history was rewritten; the checkout now mirrors it. Latest commits:"] + latest
+    """Commit messages between old hash and current HEAD — a release always
+    descends from what it replaced."""
     result = _git_cmd(["log", "--oneline", f"{old_hash}..HEAD"])
     if result.returncode != 0:
         return []
@@ -265,19 +419,19 @@ def has_launcher_changes(old_hash: str) -> bool:
     return any(f.startswith("desktop/") for f in changed)
 
 
-def reset_to_origin() -> Tuple[str, Optional[str], Optional[Path]]:
+def reset_to_release() -> Tuple[str, Optional[Release], Optional[str], Optional[Path]]:
     """
-    Make the checkout equal to origin/main.
+    Move the checkout to the release a fresh survey offers.
 
     Returns:
-        (old_hash before the move, error or None, the patch the tree's own
-        edits were set aside in or None)
+        (old_hash before the move, the release moved to or None, error or
+        None, the patch the tree's own edits were set aside in or None)
     """
     old_hash = _rev("HEAD") or ""
 
     status = _git_cmd(["status", "--porcelain", "--untracked-files=no"])
     if status.returncode != 0:
-        return old_hash, f"git status failed: {status.stderr.strip()}", None
+        return old_hash, None, f"git status failed: {status.stderr.strip()}", None
     # An edited tracked file in a working tree is somebody's work and stops
     # the update, as `git pull` did. In the tree a carrier installed it is
     # nobody's — a hot-patch left from a test, a tool that rewrote a file —
@@ -285,24 +439,22 @@ def reset_to_origin() -> Tuple[str, Optional[str], Optional[Path]]:
     # ran git by hand (2026-09-25); it is set aside below instead.
     edited = bool(status.stdout.strip())
     if edited and not is_managed_install():
-        return old_hash, "the checkout has local modifications", None
+        return old_hash, None, "the checkout has local modifications", None
 
-    _migrate_origin()
-    result = _git_cmd(["fetch", "origin", "main"], timeout=120)
-    if result.returncode != 0:
-        return old_hash, f"git fetch failed: {result.stderr.strip()}", None
-
-    # A fast-forward loses nothing and is always taken; any other move is
-    # taken only from a tip origin itself handed us (MIRRORED_REF).
-    fast_forward = _is_ancestor("HEAD", REMOTE_BRANCH)
-    if not fast_forward and old_hash != _rev(MIRRORED_REF):
-        return old_hash, "the checkout carries commits of its own and upstream history has moved", None
+    error = fetch_releases()
+    if error:
+        return old_hash, None, error, None
+    # Judged again here, not taken from the check the dialog showed: the move
+    # goes to the commit this survey verified, by its id — never to a ref
+    # something could repoint in between.
+    release = survey(installed_signers(), old_hash).offered if old_hash else None
+    if release is None:
+        return old_hash, None, "no signed release descends from this checkout", None
 
     set_aside = None
     if edited:
         # Kept, never discarded: `git apply` on the old commit brings the
-        # edits back. A file in the data dir, not a stash — the reflog expiry
-        # after a rewritten history would drop a stash.
+        # edits back. A file in the data dir, not a stash.
         from datetime import datetime
         from desktop.config_manager import get_data_dir
         folder = get_data_dir() / "local-edits"
@@ -310,30 +462,37 @@ def reset_to_origin() -> Tuple[str, Optional[str], Optional[Path]]:
         set_aside = folder / f"{datetime.now():%Y%m%d-%H%M%S}-{old_hash[:12]}.patch"
         saved = _git_cmd(["diff", "--binary", f"--output={set_aside}", "HEAD"])
         if saved.returncode != 0:
-            return old_hash, f"could not set local edits aside: {saved.stderr.strip()}", None
+            return old_hash, None, f"could not set local edits aside: {saved.stderr.strip()}", None
         logger.warning(f"local edits set aside in {set_aside}")
 
-    result = _git_cmd(["reset", "--hard", REMOTE_BRANCH], timeout=120)
+    result = _git_cmd(["reset", "--hard", release.commit], timeout=120)
     if result.returncode != 0:
-        return old_hash, f"git reset failed: {result.stderr.strip()}", set_aside
-    new_hash = _rev("HEAD")
-    _record_mirrored(new_hash)
-    logger.info(f"checkout moved {old_hash[:12]} -> {new_hash[:12]}")
-    return old_hash, None, set_aside
+        return old_hash, None, f"git reset failed: {result.stderr.strip()}", set_aside
+    logger.info(f"checkout moved {old_hash[:12]} -> {release.commit[:12]} ({release.name})")
+    return old_hash, release, None, set_aside
 
 
-def forget_old_history(progress_cb: Optional[Callable] = None) -> None:
-    """After a move that was not a fast-forward the old commits are
-    unreachable, but the reflog keeps them — and their blobs — for 90 days.
-    Upstream rewrote its history to purge something, and the purge has to
-    reach every node's disk. Runs LAST in an update: the tree diffs against
-    the old commit (requirements, migrations, launcher code) read it first."""
-    if progress_cb:
-        progress_cb("Compacting repository...")
-    _git_cmd(["reflog", "expire", "--expire=now", "--all"], timeout=120)
-    gc = _git_cmd(["gc", "--prune=now", "--quiet"], timeout=600)
-    if gc.returncode != 0:
-        logger.warning(f"git gc after a history rewrite failed: {gc.stderr.strip()}")
+def install_release(app_dir: str, signers_file: str) -> Optional[Release]:
+    """A first install's checkout: the newest release that verifies against
+    the installer's own list, checked out in `app_dir` (a repository with its
+    origin set; files of an earlier attempt or the bundled copy may lie in
+    it). None when origin cannot be reached or holds no such release — the
+    bootstrap then installs its bundled copy, as with no network."""
+    error = fetch_releases(app_dir)
+    if error:
+        logger.warning(error)
+        return None
+    signers = release_verify.parse_allowed_signers(
+        Path(signers_file).read_text(encoding="utf-8"), signers_file)
+    release = survey(signers, None, app_dir).offered
+    if release is None:
+        logger.warning("origin holds no release that verifies against the installer's signers")
+        return None
+    result = _git_cmd(["checkout", "--force", "-B", "main", release.commit], app_dir, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"git checkout failed: {result.stderr.strip()}")
+    logger.info(f"installed {release.name} ({release.commit[:12]})")
+    return release
 
 
 def perform_update(
@@ -345,8 +504,9 @@ def perform_update(
     Full update sequence, with P2P already stopped by the caller (it owns the
     manager, and the slot it empties is what the restart's "up" refills):
     1. Stop backend + tracker (keep PostgreSQL)
-    2. Make the checkout equal to origin/main (fetch + reset --hard; a
-       managed tree's own edits are set aside as a patch first)
+    2. Move the checkout to the offered release (fetch, verify, reset --hard
+       to its commit; a managed tree's own edits are set aside as a patch
+       first)
     3. Run migrations if new ones exist
     4. Restart backend + tracker — UNLESS the launcher itself has to come
        back as a new process, which starts them on its own
@@ -372,7 +532,7 @@ def perform_update(
     if progress_cb:
         progress_cb("Downloading updates...")
 
-    old_hash, error, set_aside = reset_to_origin()
+    old_hash, release, error, set_aside = reset_to_release()
     if error:
         logger.error(f"update failed: {error}")
         _update_failed(config, "checkout", error)
@@ -381,7 +541,7 @@ def perform_update(
                        and service_manager.start_tracker(progress_cb))
         return False, [], False, services_up
 
-    changelog = get_update_changelog(old_hash)
+    changelog = [release.label] + get_update_changelog(old_hash)
     if set_aside:
         changelog.insert(0, f"Local edits to the app were set aside in {set_aside}")
 
@@ -402,9 +562,6 @@ def perform_update(
     # hot-patched desktop/ module — and only a new process drops it.
     relaunch = has_launcher_changes(old_hash) or set_aside is not None
 
-    if not _is_ancestor(old_hash, "HEAD"):
-        forget_old_history(progress_cb)
-
     if relaunch:
         # The launcher is about to be replaced by a successor process that
         # starts the services itself — bringing them up here would only be
@@ -423,3 +580,14 @@ def perform_update(
         progress_cb("Update complete!")
 
     return True, changelog, False, services_up
+
+
+if __name__ == "__main__":
+    # The bootstraps' first clone (desktop/windows/bootstrap.py,
+    # desktop/macos/bootstrap.py), run from the installer's payload:
+    #   python -B -m desktop.updater install-release <app dir> <signers file>
+    # Exit 0 with the release checked out, 3 with none to take.
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    if len(sys.argv) != 4 or sys.argv[1] != "install-release":
+        sys.exit("usage: python -m desktop.updater install-release <app dir> <signers file>")
+    sys.exit(0 if install_release(sys.argv[2], sys.argv[3]) else 3)

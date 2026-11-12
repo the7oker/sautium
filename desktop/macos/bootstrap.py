@@ -33,12 +33,15 @@ BUNDLED_RUNTIME = RESOURCES / "runtime"
 PAYLOAD = RESOURCES / "payload"
 
 # The tree is a git checkout, not a copy: the launcher already knows how to
-# update one — pull, reinstall changed requirements, run new migrations,
-# restart the backend — and that path is exercised daily on the maintainer's
-# own machine. The bundled payload seeds an install that cannot reach GitHub;
-# once a clone exists, git owns the directory and the DMG stops touching it.
+# update one — fetch the signed releases, reset to the newest that verifies,
+# reinstall changed requirements, run new migrations, restart the backend.
+# The first checkout is a release too, verified by the payload's own code
+# against the payload's own list of release keys (desktop/updater.py
+# install-release); the bundled payload seeds an install that cannot reach
+# GitHub or finds no release there. Once a clone exists, git owns the
+# directory and the DMG stops touching it.
 REPO_URL = "https://github.com/the7oker/sautium.git"
-REPO_BRANCH = "main"
+PAYLOAD_SIGNERS = PAYLOAD / "desktop" / "release_signers"
 
 BREW_INSTALL_CMD = (
     '/bin/bash -c "$(curl -fsSL '
@@ -113,8 +116,8 @@ def installed_build_id() -> str:
     return marker.read_text(encoding="utf-8").strip()
 
 
-def requirements_hash() -> str:
-    req = APP_DIR / "desktop" / "requirements.txt"
+def requirements_hash(tree: Path = APP_DIR) -> str:
+    req = tree / "desktop" / "requirements.txt"
     return hashlib.sha256(req.read_bytes()).hexdigest()
 
 
@@ -143,14 +146,15 @@ def is_installed() -> bool:
     return DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == requirements_hash()
 
 
-def run_streamed(cmd: list, report: Callable[[str], None]) -> None:
+def run_streamed(cmd: list, report: Callable[[str], None], cwd: Optional[Path] = None) -> None:
     """Run a subprocess, mirroring its output into the log and the UI."""
+    cmd = [str(part) for part in cmd]
     log(f"$ {' '.join(cmd)}")
     env = dict(os.environ)
     env["PYTHONNOUSERSITE"] = "1"
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, env=env,
+        text=True, bufsize=1, env=env, cwd=cwd,
     )
     for line in proc.stdout:
         line = line.rstrip()
@@ -189,25 +193,33 @@ def sync_payload(report: Callable[[str], None]) -> None:
 
 
 def clone_tree(report: Callable[[str], None]) -> bool:
-    """Clone the repository, or say why not. Not fatal: an install with no
-    network still runs from the bundled copy, and the next launch that can
-    reach GitHub replaces it with a clone."""
+    """Check out the newest signed release into APP_DIR, or say why not.
+
+    The release is chosen and verified by the payload's own updater, run on
+    the installed runtime (whose packages the payload's requirements already
+    put there) — this file is stdlib only, and the signature check needs
+    `cryptography`. `-B`: nothing may be written into the signed bundle.
+
+    Not fatal: an install with no network, or none signed, still runs from
+    the bundled copy."""
     if not shutil.which("git"):
         log("git not found — falling back to the bundled copy")
         return False
-    report("Downloading the latest version…")
+    report("Downloading the latest release…")
     # No terminal to answer a credential prompt: without this a repository that
     # stopped being public would hang the setup window forever instead of
     # falling back to the copy we already have.
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
     try:
-        run_streamed(["git", "clone", "--branch", REPO_BRANCH, REPO_URL, str(APP_DIR)],
-                     report)
+        run_streamed(["git", "init", "--quiet", APP_DIR], report)
+        run_streamed(["git", "-C", APP_DIR, "config", "remote.origin.url", REPO_URL], report)
+        run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
+                      APP_DIR, PAYLOAD_SIGNERS], report, cwd=PAYLOAD)
     except Exception as exc:
-        log(f"clone failed ({exc}) — falling back to the bundled copy")
+        log(f"no release checked out ({exc}) — falling back to the bundled copy")
         shutil.rmtree(APP_DIR, ignore_errors=True)
         return False
-    log(f"cloned {REPO_URL} ({REPO_BRANCH})")
+    log(f"cloned {REPO_URL} at its newest signed release")
     return True
 
 
@@ -223,16 +235,20 @@ def install_runtime(report: Callable[[str], None]) -> None:
     log(f"runtime installed: {(RUNTIME_DIR / RUNTIME_STAMP).read_text().strip()}")
 
 
-def install_deps(report: Callable[[str], None]) -> None:
-    if DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == requirements_hash():
+def install_deps(report: Callable[[str], None], tree: Path = APP_DIR) -> None:
+    """The launcher's packages, from `tree`'s requirements — the payload's
+    before the first checkout (its updater verifies the release), the
+    tree's own after it; the marker makes the second a no-op when the two
+    files agree."""
+    if DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == requirements_hash(tree):
         return
     report("Installing launcher dependencies…")
     run_streamed(
         [str(RUNTIME_PYTHON), "-m", "pip", "install", "--disable-pip-version-check",
-         "-r", str(APP_DIR / "desktop" / "requirements.txt")],
+         "-r", str(tree / "desktop" / "requirements.txt")],
         report,
     )
-    DEPS_MARKER.write_text(requirements_hash())
+    DEPS_MARKER.write_text(requirements_hash(tree))
 
 
 def launch() -> None:
@@ -473,8 +489,12 @@ def start_worker(window: BootstrapWindow) -> None:
             if not find_brew():
                 window.post("needs_brew", None)
                 return
-            sync_payload(lambda text: window.post("status", text))
+            # The runtime and the payload's packages first: the first checkout
+            # is verified by the payload's code on that runtime.
             install_runtime(lambda text: window.post("status", text))
+            if not tree_is_clone():
+                install_deps(lambda line: window.post("detail", line), PAYLOAD)
+            sync_payload(lambda text: window.post("status", text))
             install_deps(lambda line: window.post("detail", line))
             window.post("status", "Starting Sautium…")
             window.post("done", None)

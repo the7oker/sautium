@@ -1476,11 +1476,13 @@ class LauncherApp(ctk.CTk):
             state="normal", text=label or self._update_idle_label,
             fg_color="#3b82f6" if highlight else "transparent")
 
-    def _note_update_available(self, count: int) -> None:
+    def _note_update_available(self, survey) -> None:
         """The startup check's verdict — only worth painting while nothing
         else owns the button; a flow in progress paints its own."""
-        if not self._update_in_progress:
-            self._update_flow_idle(f"Update Available ({count} commits)", highlight=True)
+        from desktop.updater import survey_button
+        label = survey_button(survey)
+        if label and not self._update_in_progress:
+            self._update_flow_idle(label, highlight=True)
 
     def _check_updates(self):
         """Manual update check — the button and the tray menu."""
@@ -1489,7 +1491,7 @@ class LauncherApp(ctk.CTk):
         self._update_flow_busy("Checking...")
 
         def _check():
-            from desktop.updater import check_for_updates, installed_build
+            from desktop.updater import NOTHING_SIGNED_YET, check_for_updates, installed_build
 
             try:
                 if installed_build():
@@ -1498,12 +1500,15 @@ class LauncherApp(ctk.CTk):
                     # whole of what this button does on a packaged install.
                     self.ui_call(self._update_flow_idle)
                 else:
-                    has_updates, count, _ = check_for_updates()
-                    if has_updates:
-                        self.ui_call(lambda: self._show_update_dialog(count))
+                    survey = check_for_updates()
+                    if survey is None:
+                        raise RuntimeError("the releases could not be fetched")
+                    if survey.offered or survey.rewrite or survey.refused:
+                        self.ui_call(lambda: self._show_update_dialog(survey))
                     else:
+                        verdict = "You're up to date!" if survey.installed else NOTHING_SIGNED_YET
                         self.ui_call(self._update_flow_idle)
-                        self.ui_call(lambda: self._progress_text.configure(text="You're up to date!"))
+                        self.ui_call(lambda: self._progress_text.configure(text=verdict))
                         self.ui_call(lambda: self.after(
                             3000, lambda: self._progress_text.configure(text="")))
             except Exception as e:
@@ -1553,38 +1558,41 @@ class LauncherApp(ctk.CTk):
                     # without the command line tools, running it pops the
                     # Xcode installer at a moment nobody asked for one.
                     return
-                has_updates, count, _ = check_for_updates()
-                if has_updates:
-                    self.ui_call(lambda: self._note_update_available(count))
+                survey = check_for_updates()
+                if survey:
+                    self.ui_call(lambda: self._note_update_available(survey))
             except Exception as e:
                 logger.debug(f"Background update check failed: {e}")
 
         self._update_thread = threading.Thread(target=_check, daemon=True)
         self._update_thread.start()
 
-    def _show_update_dialog(self, count: int):
-        """Show update confirmation dialog. The button stays taken until the
-        dialog resolves — "Later" and the window's close button hand it back,
-        "Update Now" hands it to the update."""
-        self._update_flow_busy("Update available")
+    def _show_update_dialog(self, survey):
+        """What the check found: a release to install (Update Now / Later),
+        or only what was refused (OK). The button stays taken until the
+        dialog resolves — "Later", "OK" and the window's close button hand it
+        back, "Update Now" hands it to the update."""
+        from desktop.updater import survey_button, survey_words
+        heading, paragraphs = survey_words(survey)
+        self._update_flow_busy("Update available" if survey.offered else "Checked")
 
         dialog = ctk.CTkToplevel(self)
-        dialog.title("Update Available")
-        dialog.geometry("400x200")
+        dialog.title("Update Available" if survey.offered else "Updates")
+        dialog.geometry(f"440x{150 + 55 * len(paragraphs)}")
         dialog.transient(self)
         dialog.grab_set()
 
         ctk.CTkLabel(
             dialog,
-            text=f"Update available: {count} new commit(s)",
+            text=heading,
             font=ctk.CTkFont(size=16, weight="bold"),
         ).pack(pady=(20, 10))
 
-        ctk.CTkLabel(
-            dialog,
-            text="Services will be briefly restarted during the update.",
-            text_color="gray",
-        ).pack(pady=5)
+        for paragraph in paragraphs:
+            ctk.CTkLabel(
+                dialog, text=paragraph, text_color="gray",
+                wraplength=400, justify="left",
+            ).pack(padx=20, pady=5)
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=20)
@@ -1595,17 +1603,19 @@ class LauncherApp(ctk.CTk):
 
         def _later():
             dialog.destroy()
-            self._update_flow_idle(f"Update Available ({count} commits)", highlight=True)
+            label = survey_button(survey)
+            self._update_flow_idle(label, highlight=bool(label))
 
         dialog.protocol("WM_DELETE_WINDOW", _later)
 
-        ctk.CTkButton(
-            btn_frame, text="Update Now", width=120,
-            command=_do_update,
-        ).pack(side="left", padx=10)
+        if survey.offered:
+            ctk.CTkButton(
+                btn_frame, text="Update Now", width=120,
+                command=_do_update,
+            ).pack(side="left", padx=10)
 
         ctk.CTkButton(
-            btn_frame, text="Later", width=120,
+            btn_frame, text="Later" if survey.offered else "OK", width=120,
             command=_later,
             fg_color="transparent", border_width=1,
         ).pack(side="left", padx=10)

@@ -32,7 +32,7 @@ import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 HERE = Path(__file__).resolve().parent
 RUNTIME_DIR = HERE / "runtime"
@@ -49,12 +49,14 @@ PAYLOAD = HERE / "payload"
 ICON = HERE / "Sautium.ico"
 
 # The tree is a git checkout, not a copy: the launcher already knows how to
-# update one — fetch, reset to the tip, run new migrations, restart the
-# backend — and that path is exercised daily on the maintainer's own machine.
-# The bundled payload seeds an install that cannot reach GitHub; once a clone
-# exists, git owns the directory and Setup stops touching it.
+# update one — fetch the signed releases, reset to the newest that verifies,
+# run new migrations, restart the backend. The first checkout is a release
+# too, verified by the payload's own code against the payload's own list of
+# release keys (desktop/updater.py install-release); the bundled payload
+# seeds an install that cannot reach GitHub or finds no release there. Once a
+# clone exists, git owns the directory and Setup stops touching it.
 REPO_URL = "https://github.com/the7oker/sautium.git"
-REPO_BRANCH = "main"
+PAYLOAD_SIGNERS = PAYLOAD / "desktop" / "release_signers"
 
 # Shared with the launcher (desktop/utils.py) and the installer
 # (desktop/installer/sautium.iss): the shortcut's AppUserModelID groups its
@@ -157,15 +159,15 @@ def tree_current() -> bool:
     return tree_is_clone() or installed_build_id() == bundle_build_id()
 
 
-def deps_key() -> str:
+def deps_key(tree: Path = APP_DIR) -> str:
     """What the marker must say: this runtime, these requirements."""
-    requirements = APP_DIR / "desktop" / "requirements.txt"
+    requirements = tree / "desktop" / "requirements.txt"
     return (f"{RUNTIME_STAMP.read_text(encoding='utf-8').strip()} "
             f"{hashlib.sha256(requirements.read_bytes()).hexdigest()}")
 
 
-def deps_current() -> bool:
-    return DEPS_MARKER.exists() and DEPS_MARKER.read_text(encoding="utf-8").strip() == deps_key()
+def deps_current(tree: Path = APP_DIR) -> bool:
+    return DEPS_MARKER.exists() and DEPS_MARKER.read_text(encoding="utf-8").strip() == deps_key(tree)
 
 
 def is_installed() -> bool:
@@ -183,13 +185,14 @@ def remove_tree(path: Path) -> None:
         shutil.rmtree(path, onexc=unlock)
 
 
-def run_streamed(cmd: list, report: Callable[[str], None], env: dict) -> None:
+def run_streamed(cmd: list, report: Callable[[str], None], env: dict,
+                 cwd: Optional[Path] = None) -> None:
     """Run a subprocess, mirroring its output into the log and the UI."""
     cmd = [str(part) for part in cmd]
     log(f"$ {' '.join(cmd)}")
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
+        text=True, encoding="utf-8", errors="replace", bufsize=1, env=env, cwd=cwd,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
     for line in proc.stdout:
@@ -213,38 +216,38 @@ def sync_payload(report: Callable[[str], None]) -> None:
 
 
 def clone_tree(report: Callable[[str], None]) -> bool:
-    """Turn APP_DIR into a checkout of main, in place. Not `git clone`: the
-    folder is rarely empty — an earlier start that could not reach GitHub
-    left the bundled copy here, and the launcher then filled it with the
-    PostgreSQL, Python and audio tools it downloads beside the tree, which a
-    fresh clone into an empty folder would throw away. init + fetch +
-    checkout overwrites the tracked files and touches nothing else.
+    """Turn APP_DIR into a checkout of the newest signed release, in place.
+    Not `git clone`: the folder is rarely empty — an earlier start that could
+    not reach GitHub left the bundled copy here, and the launcher then filled
+    it with the PostgreSQL, Python and audio tools it downloads beside the
+    tree, which a fresh clone into an empty folder would throw away. init +
+    fetch + checkout overwrites the tracked files and touches nothing else.
 
-    Not fatal: an install with no network runs from the bundled copy, and the
-    next start that can reach GitHub replaces it with a clone."""
-    report("Downloading the latest version…")
+    The release is chosen and verified by the payload's own updater, run on
+    the runtime (whose packages the payload's requirements already put
+    there) — this file is stdlib only, and the signature check needs
+    `cryptography`. `-B`: no bytecode written into the installed folder.
+
+    Not fatal: an install with no network, or none signed, runs from the
+    bundled copy."""
+    report("Downloading the latest release…")
     APP_DIR.mkdir(parents=True, exist_ok=True)
     env = git_env()
     try:
         # config rather than `remote add`: re-runnable over a repository an
-        # interrupted attempt left behind. The refspec is what makes the
-        # fetch update origin/main, which the checkout and the launcher's
-        # updater both read.
+        # interrupted attempt left behind.
         run_streamed([GIT, "-C", APP_DIR, "init", "--quiet"], report, env)
         run_streamed([GIT, "-C", APP_DIR, "config", "remote.origin.url", REPO_URL], report, env)
-        run_streamed([GIT, "-C", APP_DIR, "config", "remote.origin.fetch",
-                      "+refs/heads/*:refs/remotes/origin/*"], report, env)
-        run_streamed([GIT, "-C", APP_DIR, "fetch", "--progress", "origin", REPO_BRANCH], report, env)
-        run_streamed([GIT, "-C", APP_DIR, "checkout", "--force", "-B", REPO_BRANCH,
-                      f"origin/{REPO_BRANCH}"], report, env)
+        run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
+                      APP_DIR, PAYLOAD_SIGNERS], report, launcher_env(), cwd=PAYLOAD)
     except Exception as exc:
-        log(f"clone failed ({exc}) — falling back to the bundled copy")
+        log(f"no release checked out ({exc}) — falling back to the bundled copy")
         remove_tree(APP_DIR / ".git")
         return False
     # The copy's stamp would tell the launcher it is a packaged tree that
     # cannot pull.
     (APP_DIR / ".sautium_build").unlink(missing_ok=True)
-    log(f"cloned {REPO_URL} ({REPO_BRANCH})")
+    log(f"cloned {REPO_URL} at its newest signed release")
     return True
 
 
@@ -273,16 +276,20 @@ def copy_payload(report: Callable[[str], None]) -> None:
     log(f"payload copied from the bundle: {bundle_build_id()}")
 
 
-def install_deps(report: Callable[[str], None]) -> None:
-    if deps_current():
+def install_deps(report: Callable[[str], None], tree: Path = APP_DIR) -> None:
+    """The launcher's packages, from `tree`'s requirements — the payload's
+    before the first checkout (its updater verifies the release), the
+    tree's own after it; the marker makes the second a no-op when the two
+    files agree."""
+    if deps_current(tree):
         return
     report("Installing launcher dependencies…")
     run_streamed(
         [RUNTIME_PYTHON, "-m", "pip", "install", "--disable-pip-version-check",
-         "--only-binary=:all:", "-r", APP_DIR / "desktop" / "requirements.txt"],
+         "--only-binary=:all:", "-r", tree / "desktop" / "requirements.txt"],
         report, launcher_env(),
     )
-    DEPS_MARKER.write_text(deps_key(), encoding="utf-8")
+    DEPS_MARKER.write_text(deps_key(tree), encoding="utf-8")
 
 
 def launch() -> None:
@@ -464,6 +471,8 @@ class ProgressBar(tk.Canvas):
 def start_worker(window: BootstrapWindow) -> None:
     def work():
         try:
+            if not tree_is_clone():
+                install_deps(lambda line: window.post("detail", line), PAYLOAD)
             sync_payload(lambda text: window.post("status", text))
             install_deps(lambda line: window.post("detail", line))
             window.post("status", "Starting Sautium…")

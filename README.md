@@ -88,7 +88,7 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   `P2P_NETWORK.md`.
 - **Desktop launcher** — CustomTkinter app that manages the backend, P2P
   layer and account; ships as a Windows installer and a macOS bundle, both
-  carriers for a git clone that updates itself.
+  carriers for a git clone that updates itself from signed releases.
 - **Gear advisor** — the audio chain as data: researched specs and community
   sentiment per component, a deterministic pair engine (impedance, SPL
   headroom, damping, gain staging) and an upgrade advisor that diagnoses
@@ -271,8 +271,13 @@ The backend is also reachable from phones/tablets on the same Wi-Fi at
 > DMGs — Apple Silicon and Intel — are signed with a Developer ID and
 > notarised; the Windows build is unsigned, so SmartScreen warns on first
 > launch. Downloads: https://sautium.net/download and
-> [GitHub Releases](https://github.com/the7oker/sautium/releases). An
-> installed app updates itself from `main`.
+> [GitHub Releases](https://github.com/the7oker/sautium/releases).
+>
+> An installed app updates itself from **signed releases**. An update comes
+> when a release is published, not with every change to `main`. Before taking
+> a release, the app checks its signature against the keys it already trusts.
+> A release that rewrites history is never installed as an update: the app
+> says so, and reinstalling Sautium moves to it.
 
 The launcher runs the whole stack without Docker — PostgreSQL, backend, P2P and
 the account system. From a checkout it is `python -m desktop`; for other people
@@ -291,12 +296,18 @@ Neither package is a frozen launcher. Each carries a private CPython 3.12
 — the Windows one a MinGit as well — and a bootstrap installs the tree into the
 data root on first run (`~/.local/share/Sautium/app`,
 `%LOCALAPPDATA%\Sautium\app`), after which the launcher runs exactly as it does
-from a checkout, because it is one: the tree is cloned from `main`, so
-**Check for Updates** in the launcher pulls, runs new migrations and restarts
+from a checkout, because it is one. The first launch checks out the newest
+signed release (a tag `v<version>` that verifies against the payload's own
+`desktop/release_signers`). From then on, **Check for Updates** in the
+launcher moves to the next signed release, runs new migrations and restarts
 the backend, the same path a checkout uses. The bundled snapshot is the
-fallback for an install that cannot reach GitHub. Two consequences: what lands
-on `main` reaches every installed app, and a schema change only travels as a
-NEW numbered migration — editing `001_initial.sql` in place never re-runs.
+fallback for an install that cannot reach GitHub or finds no signed release
+there. Two consequences:
+
+- what a signed release carries reaches every installed app, while a push to
+  `main` alone reaches none of them (`docs/RELEASING.md`);
+- a schema change only travels as a NEW numbered migration — editing
+  `001_initial.sql` in place never re-runs.
 Freezing was rejected: the launcher provisions and then RUNS a Python
 (pip-installing torch, spawning uvicorn and the MCP server), and inside a
 frozen bundle `sys.executable` is the bundle. A new package is therefore only
@@ -315,7 +326,9 @@ python desktop/build_macos.py --sign "Developer ID Application: ..." \
                               --notarize <keychain-profile> [--arch x86_64]
 ```
 
-Since 2026-09-21 a build is published by `scripts/release-publish.sh`: it
+Since 2026-09-21 a build is published by `scripts/release-publish.sh`. Since
+2026-11-12 the signed tag comes first (`scripts/release.py tag`, pushed by
+the maintainer, `docs/RELEASING.md`), and the script stops without it. It
 creates the GitHub release `v<version>` (marked latest), uploads the
 installers with `SHA256SUMS.txt` and a `downloads.json` describing them
 (version, commit, per-asset URL, sha256 and size — what the website's
@@ -328,8 +341,9 @@ re-downloads every asset over the public URL and verifies it.
    unknown — there is no code-signing certificate — so choose **More info →
    Run anyway**. The install is per-user, without an administrator prompt,
    into `%LOCALAPPDATA%\Programs\Sautium`.
-2. The first launch clones the current `main` into `%LOCALAPPDATA%\Sautium\app`
-   (the bundled copy is the offline fallback), installs the launcher's packages
+2. The first launch checks out the newest signed release into
+   `%LOCALAPPDATA%\Sautium\app` (the bundled copy is the offline fallback),
+   installs the launcher's packages
    into the bundled Python and starts the launcher, which then downloads
    PostgreSQL 18, a Python for the backend, ffmpeg, flac, fpcalc and deno
    beside the tree. Windows asks for administrator permission once per

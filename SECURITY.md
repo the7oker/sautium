@@ -74,7 +74,12 @@ browser pins the node's identity on its first sign-in and asks before
 accepting another); DNS rebinding; peer impersonation (TLS pinned to the
 node key); data poisoning over the peer network (author signatures,
 content-addressed analysis, recomputation as the detector —
-`docs/design/P2P-SYNC-INTEGRITY.md`).
+`docs/design/P2P-SYNC-INTEGRITY.md`); a push to the repository that the
+maintainer did not intend — a leaked token, a phished login, a misled agent
+holding the push credential. An installed launcher takes only a release tag
+signed by a key on its own installed list, and only one that descends from
+what it runs; a security-key signature also needs the key's PIN
+(`docs/RELEASING.md`).
 
 Accepted, out of scope: a targeted attacker on the LAN who holds the account
 password, or who is answering in the node's place on a browser's very first

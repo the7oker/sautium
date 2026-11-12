@@ -2177,7 +2177,60 @@ The short version of the hard-learned lessons:
   with the CLI's client id ourselves is neither. The CLI-driven login is the
   supported surface and needs none of it.
 
-### The updater mirrors origin/main (2026-09-12)
+### Updates are signed releases (2026-11-12)
+
+- **A launcher takes a release, never a branch tip.** A release is a signed
+  annotated tag `v<major>.<minor>.<patch>` on a commit of `main`
+  (`docs/RELEASING.md`). Threat (1) of the security design: a push the
+  maintainer did not intend — a leaked token, a phished login, a misled agent
+  holding the push credential — used to reach every installed launcher at
+  once. It now reaches none without the release key's signature.
+- **Verified in the launcher's own Python** (`desktop/release_verify.py`,
+  SSHSIG over the tag object with `cryptography`), not by `git verify-tag`:
+  MinGit, the git the Windows installer carries, has no `ssh-keygen`.
+  - Two key types: `ssh-ed25519`, and `sk-ssh-ed25519@openssh.com` (FIDO2).
+  - For the FIDO2 type, PROTOCOL.u2f's signed data is checked: the
+    application's hash, the flags, the counter, the message's hash. Both the
+    user-presence and the user-verification flags are required, so a touch
+    alone is refused. A real signature from the owner's security key is a
+    fixture.
+- **The installed tree's list decides** (`git show
+  HEAD:desktop/release_signers`), never the fetched tree's. A release may
+  rotate the list for the next one. A first install verifies against the
+  installer's payload: the bootstraps install the payload's packages first,
+  then run the payload's own updater on the runtime with `-B`
+  (`python -m desktop.updater install-release`). The bootstraps stay
+  stdlib-only, and nothing is written into a signed bundle.
+- **Fetched into a namespace of our own:** `+refs/tags/v*:refs/sautium/
+  releases/v*`, forced and pruned. A tag moved upstream is judged as it now
+  stands and never fails the fetch with "would clobber existing tag".
+  `refs/tags` is left to whoever works in the tree.
+- **Judged newest version first:**
+  - the walk stops at the first signed release HEAD contains (the installed
+    one), so a version is never taken backwards and older tags are never
+    read;
+  - a newer signed release that does not descend from HEAD is a rewrite,
+    refused and said;
+  - the move goes to the verified commit by its id, re-surveyed at "Update
+    Now", never to a ref name.
+- **What went with the mirror:** `refs/sautium/mirrored`, the
+  non-fast-forward move and the reflog expiry with its prune. Every rewrite
+  is refused now, signed or not, and nothing is purged.
+- **Unsigned history is the floor.** `v0.1.0` and `v0.1.1` were lightweight
+  tags that `scripts/release-publish.sh` made GitHub create:
+  - a GitHub release for a tag origin lacks creates that tag, lightweight, on
+    `target_commitish`;
+  - so the script now stops unless origin's tag is a signed release on the
+    built commit;
+  - nothing at or below 0.1.1 is ever a release (`updater.FLOOR`).
+- **The transition.** Launchers on the previous code follow `origin/main`
+  and reach this code that way. From then on they take signed tags only, and
+  until the first signed tag exists they are offered nothing. The first
+  signed release follows the push that ships this code on the same day.
+
+### The updater mirrored origin/main (2026-09-12 – 2026-11-12)
+
+Superseded by signed releases (above). Kept for the rewrite lessons.
 
 - **A node's checkout is a mirror, not a branch.** It never authors a
   commit, so "update" means "make my tree equal to origin/main": `git fetch`

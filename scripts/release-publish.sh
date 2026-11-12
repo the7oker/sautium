@@ -9,6 +9,13 @@
 # assets, then fetches every asset back over the public URL and checks it
 # against SHA256SUMS.txt.
 #
+# The signed tag comes first: scripts/release.py tag makes it, the maintainer
+# pushes it, and this script stops unless origin's v<version> is a signed
+# release launchers take naming the very commit the installers were built
+# from. Creating a GitHub release for a tag origin does not have makes GitHub
+# create it — lightweight, unsigned, on target_commitish — and that name is
+# then taken for good (v0.1.0 and v0.1.1 were born this way).
+#
 #   scripts/release-publish.sh [--tree DIR] [--version V] [--notes FILE] [--dry-run] <artefact>...
 #
 # --tree is the checkout the installers were built from — by default this
@@ -18,7 +25,9 @@
 # --version defaults to desktop/build_common.py VERSION; --notes replaces the
 # default release body; --dry-run writes SHA256SUMS.txt and downloads.json
 # into dist/ ($DIST_DIR) and stops before the first API call. Token as in
-# seed-publish.sh: $GITHUB_TOKEN, else `git credential fill`.
+# seed-publish.sh: $GITHUB_TOKEN, else `git credential fill`. $PYTHON is the
+# interpreter scripts/release.py runs on (it needs `cryptography`; default
+# python3).
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 
@@ -60,13 +69,17 @@ done
 # compares against the tagged tree, so the tree that built them must be
 # clean, its commit must be on origin/main, and the tag goes on THAT commit —
 # never on whatever main points at by the time this runs (another push may
-# have landed while the DMGs were being notarised).
+# have landed while the DMGs were being notarised). The signed tag on that
+# commit must already be on origin.
 git -C "$root" fetch -q origin main
 full=$(git -C "$root" rev-parse HEAD)
 dirty=$(git -C "$root" status --porcelain --untracked-files=no)
 problem=""
 [ -z "$dirty" ] || problem="uncommitted changes in $root"
 git -C "$root" merge-base --is-ancestor "$full" origin/main || problem="${problem:+$problem; }$full is not on origin/main"
+tag="v$version"
+"${PYTHON:-python3}" "$root/scripts/release.py" verify "$version" --commit "$full" --repo "$root" \
+    || problem="${problem:+$problem; }origin has no signed release $tag on $full (scripts/release.py tag, then push it)"
 if [ -n "$problem" ]; then
     if [ $dry_run -eq 1 ]; then
         echo "dry run: $problem — a real run stops here"
@@ -75,7 +88,6 @@ if [ -n "$problem" ]; then
     fi
 fi
 commit=$(git -C "$root" rev-parse --short=12 HEAD)
-tag="v$version"
 download="https://github.com/$repo/releases/download/$tag"
 
 mkdir -p "$out"
@@ -175,7 +187,7 @@ EOF
     esac
     cat <<EOF
 
-Check a download against \`SHA256SUMS.txt\` (\`sha256sum -c SHA256SUMS.txt --ignore-missing\` beside the file). The installer is a carrier: the first launch clones \`main\` and the app updates itself from there. How to verify what the tree does, and that this payload was built from it: [docs/AUDIT.md](https://github.com/$repo/blob/$tag/docs/AUDIT.md).
+Check a download against \`SHA256SUMS.txt\` (\`sha256sum -c SHA256SUMS.txt --ignore-missing\` beside the file). The installer is a carrier: the first launch checks out the newest signed release, and the app takes each later one as an update. How to verify what the tree does, and that this payload was built from it: [docs/AUDIT.md](https://github.com/$repo/blob/$tag/docs/AUDIT.md).
 
 Downloads and guides: https://sautium.net/download · Built from \`$commit\`.
 EOF

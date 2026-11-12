@@ -1,0 +1,433 @@
+"""The updater takes signed releases only (desktop/updater.py): origin's `v*`
+tags, verified against the INSTALLED tree's desktop/release_signers, the
+highest version whose commit descends from HEAD; a rewrite is refused, a
+version is never taken backwards, a push to main alone reaches nobody. And the
+move itself when the tree carries edits: the tree a carrier installed —
+`<data dir>/app` — sets them aside as a patch, any other checkout refuses.
+Real git repositories in a temp dir, `origin` a bare one, throwaway keys."""
+
+import subprocess
+import sys
+
+import pytest
+
+from desktop import updater
+from desktop.config_manager import get_data_dir
+from desktop.utils import get_project_root
+from tests.release_signing import Key, push_signed_tag
+
+
+def git(cwd, *args):
+    return subprocess.run(["git", *args], cwd=cwd, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+class World:
+    def __init__(self, tmp_path, monkeypatch, key):
+        self.tmp, self.monkeypatch, self.key = tmp_path, monkeypatch, key
+        self.origin = tmp_path / "origin.git"
+        git(tmp_path, "init", "-q", "--bare", "-b", "main", str(self.origin))
+        self.seed = tmp_path / "seed"
+        git(tmp_path, "clone", "-q", str(self.origin), str(self.seed))
+        self.base = self.commit("v1\n", signers=[key])
+        self.managed = get_data_dir() / "app"
+        self.working = tmp_path / "work" / "djai"
+        for tree in (self.managed, self.working):
+            git(tmp_path, "clone", "-q", "-b", "main", str(self.origin), str(tree))
+
+    def commit(self, app: str, signers=None) -> str:
+        (self.seed / "app.txt").write_text(app)
+        paths = ["app.txt"]
+        if signers is not None:
+            (self.seed / "desktop").mkdir(exist_ok=True)
+            (self.seed / "desktop" / "release_signers").write_text(
+                "".join(k.line(f"key{i}") + "\n" for i, k in enumerate(signers)))
+            paths.append("desktop/release_signers")
+        git(self.seed, "add", *paths)
+        git(self.seed, "commit", "-qm", app.strip())
+        git(self.seed, "push", "-q", "-f", "origin", "HEAD:main")
+        return git(self.seed, "rev-parse", "HEAD")
+
+    def tag(self, name: str, commit: str, key: Key = None, **kw) -> None:
+        push_signed_tag(self.seed, key or self.key, commit, name, **kw)
+        git(self.seed, "push", "-q", "-f", "origin", f"refs/tags/{name}")
+
+    def lightweight(self, name: str, commit: str) -> None:
+        git(self.seed, "tag", "-f", name, commit)
+        git(self.seed, "push", "-q", "-f", "origin", f"refs/tags/{name}")
+
+    def use(self, tree):
+        self.monkeypatch.setattr("desktop.utils.get_project_root", lambda: tree)
+
+    def check(self, tree=None) -> updater.Survey:
+        self.use(tree or self.managed)
+        return updater.check_for_updates()
+
+    def update(self, tree=None):
+        self.use(tree or self.managed)
+        return updater.reset_to_release()
+
+    def head(self, tree=None) -> str:
+        return git(tree or self.managed, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    for key, value in {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                       "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "data"))
+    return World(tmp_path, monkeypatch, Key(sk=True))
+
+
+# ── what is offered ───────────────────────────────────────────────────────
+
+def test_a_push_to_main_alone_reaches_nobody(world):
+    world.commit("v2\n")
+    survey = world.check()
+    assert (survey.installed, survey.offered, survey.rewrite, survey.refused) == (None, None, None, [])
+    old, release, error, _ = world.update()
+    assert (release, error) == (None, "no signed release descends from this checkout")
+    assert world.head() == world.base
+
+
+def test_a_normal_release_is_offered_and_taken(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    survey = world.check()
+    assert survey.offered == updater.Release("v0.2.0", (0, 2, 0), tip)
+    assert survey.offered.label == "Sautium 0.2.0"
+    old, release, error, set_aside = world.update()
+    assert (old, release.name, error, set_aside) == (world.base, "v0.2.0", None, None)
+    assert world.head() == tip
+    assert (world.managed / "app.txt").read_text() == "v2\n"
+    after = world.check()
+    assert (after.installed.name, after.offered) == ("v0.2.0", None)
+
+
+def test_the_move_goes_to_the_verified_commit_not_to_main(world):
+    tagged = world.commit("v2\n")
+    world.tag("v0.2.0", tagged)
+    world.commit("v3, unreleased\n")
+    world.update()
+    assert world.head() == tagged
+
+
+def test_two_releases_at_once_offer_the_highest(world):
+    first = world.commit("v2\n")
+    world.tag("v0.2.0", first)
+    second = world.commit("v3\n")
+    world.tag("v0.3.0", second)
+    assert world.check().offered.name == "v0.3.0"
+    world.update()
+    assert world.head() == second
+
+
+def test_versions_compare_as_numbers(world):
+    nine = world.commit("v2\n")
+    world.tag("v0.9.0", nine)
+    ten = world.commit("v3\n")
+    world.tag("v0.10.0", ten)
+    assert world.check().offered.name == "v0.10.0"
+
+
+def test_a_version_is_never_taken_backwards(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.3.0", tip)
+    world.update()
+    later = world.commit("v3\n")
+    world.tag("v0.2.5", later)            # descends from HEAD, a lower version
+    survey = world.check()
+    assert (survey.installed.name, survey.offered) == ("v0.3.0", None)
+
+
+def test_a_checkout_ahead_of_the_newest_release_has_it_installed(world):
+    tagged = world.commit("v2\n")
+    world.tag("v0.2.0", tagged)
+    world.commit("v3\n")
+    tree = world.working
+    git(tree, "pull", "-q", "--ff-only", "origin", "main")
+    survey = world.check(tree)
+    assert (survey.installed.name, survey.offered, survey.rewrite) == ("v0.2.0", None, None)
+
+
+def test_the_unsigned_tags_before_the_floor_are_never_releases(world):
+    world.lightweight("v0.1.0", world.base)
+    world.lightweight("v0.1.1", world.base)
+    survey = world.check()
+    assert (survey.installed, survey.offered, survey.refused) == (None, None, [])
+
+
+# ── rotation ──────────────────────────────────────────────────────────────
+
+def test_a_release_that_rotates_the_list_governs_the_next(world):
+    new_key = Key()
+    rotating = world.commit("v2\n", signers=[new_key])
+    world.tag("v0.2.0", rotating)                       # signed by the old key
+    nxt = world.commit("v3\n")
+    world.tag("v0.3.0", nxt, key=new_key)               # by the new key only
+
+    survey = world.check()
+    assert survey.offered.name == "v0.2.0"              # v0.3.0 is not yet trusted here
+    assert survey.refused[0][0] == "v0.3.0" and "not listed" in survey.refused[0][1]
+
+    world.update()
+    assert world.check().offered.name == "v0.3.0"
+    world.update()
+    assert world.head() == nxt
+
+
+def test_a_rotated_out_keys_later_tag_is_refused(world):
+    new_key = Key()
+    rotating = world.commit("v2\n", signers=[new_key])
+    world.tag("v0.2.0", rotating)
+    world.update()
+    later = world.commit("v3\n")
+    world.tag("v0.3.0", later)                           # the old key, no longer listed
+    survey = world.check()
+    assert survey.offered is None
+    assert survey.refused[0][0] == "v0.3.0" and "not listed" in survey.refused[0][1]
+
+
+def test_the_list_is_read_from_head_not_the_working_copy(world):
+    stranger = Key()
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip, key=stranger)
+    (world.managed / "desktop" / "release_signers").write_text(stranger.line() + "\n")
+    survey = world.check()
+    assert survey.offered is None and survey.refused[0][0] == "v0.2.0"
+
+
+def test_the_list_is_read_from_head_not_the_fetched_tree(world):
+    stranger = Key()
+    tip = world.commit("v2\n", signers=[stranger])       # the release adds its own key
+    world.tag("v0.2.0", tip, key=stranger)
+    assert world.check().offered is None
+
+
+def test_an_empty_installed_list_takes_nothing(world):
+    tip = world.commit("v2\n", signers=[])
+    world.tag("v0.2.0", tip)
+    world.update()                                       # signed by the old list
+    later = world.commit("v3\n")
+    world.tag("v0.3.0", later)
+    assert world.check().offered is None
+
+
+# ── what is refused ───────────────────────────────────────────────────────
+
+def test_a_signed_release_that_rewrites_history_is_refused(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    world.update()
+    git(world.seed, "reset", "-q", "--hard", world.base)
+    rewritten = world.commit("v2, rewritten\n")
+    world.tag("v0.3.0", rewritten)
+    survey = world.check()
+    assert (survey.installed.name, survey.offered, survey.rewrite.name) == ("v0.2.0", None, "v0.3.0")
+    old, release, error, _ = world.update()
+    assert release is None and error
+    assert world.head() == tip
+
+
+def orphan(world):
+    """A history that shares nothing with HEAD's, as a rewrite leaves it."""
+    git(world.seed, "checkout", "-q", "--orphan", "other")
+    (world.seed / "app.txt").write_text("elsewhere\n")
+    git(world.seed, "commit", "-qam", "elsewhere")
+
+
+def test_a_rewrite_below_a_release_that_descends_is_not_reported(world):
+    orphan(world)
+    world.tag("v0.2.0", git(world.seed, "rev-parse", "HEAD"))
+    git(world.seed, "checkout", "-q", "main")
+    good = world.commit("v2\n")
+    world.tag("v0.3.0", good)
+    survey = world.check()
+    assert (survey.offered.name, survey.rewrite) == ("v0.3.0", None)
+
+
+def test_a_rewrite_above_a_release_that_descends_is_said_beside_it(world):
+    good = world.commit("v2\n")
+    world.tag("v0.2.0", good)
+    orphan(world)
+    world.tag("v0.3.0", git(world.seed, "rev-parse", "HEAD"))
+    git(world.seed, "checkout", "-q", "main")
+    survey = world.check()
+    assert (survey.offered.name, survey.rewrite.name) == ("v0.2.0", "v0.3.0")
+
+
+def test_a_lightweight_tag_is_refused(world):
+    tip = world.commit("v2\n")
+    world.lightweight("v0.2.0", tip)
+    survey = world.check()
+    assert survey.offered is None
+    assert survey.refused == [("v0.2.0", "a lightweight tag, not a signed release")]
+
+
+def test_a_renamed_tag_is_refused(world):
+    tip = world.commit("v2\n")
+    world.tag("v9.9.9", tip, header_name="v0.2.0")       # the signed v0.2.0 pushed as v9.9.9
+    survey = world.check()
+    assert survey.offered is None
+    assert survey.refused[0][0] == "v9.9.9" and "named 'v0.2.0'" in survey.refused[0][1]
+
+
+def test_a_moved_tag_is_judged_as_it_is_now(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    assert world.check().offered.commit == tip
+    elsewhere = world.commit("v3\n")
+    world.tag("v0.2.0", elsewhere, key=Key())            # moved, re-signed by a stranger
+    survey = world.check()
+    assert survey.offered is None and survey.refused[0][0] == "v0.2.0"
+    world.lightweight("v0.2.0", elsewhere)               # moved again, unsigned
+    assert world.check().refused == [("v0.2.0", "a lightweight tag, not a signed release")]
+
+
+def test_a_deleted_tag_leaves_with_its_release(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    assert world.check().offered
+    git(world.seed, "push", "-q", "origin", ":refs/tags/v0.2.0")
+    assert world.check().offered is None
+
+
+def test_a_tag_moved_upstream_never_fails_the_fetch(world):
+    tip = world.commit("v2\n")
+    world.lightweight("v0.2.0", tip)
+    git(world.managed, "fetch", "-q", "--tags", "origin")   # refs/tags/v0.2.0 here, as a person's fetch leaves it
+    world.tag("v0.2.0", tip)                                # replaced upstream by the signed one
+    assert world.check().offered.name == "v0.2.0"
+
+
+def test_refused_tags_below_the_installed_release_are_not_judged(world):
+    world.lightweight("v0.1.5", world.base)
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    world.update()
+    assert world.check().refused == []
+
+
+def test_no_signed_tag_at_all_offers_nothing(world):
+    tip = world.commit("v2\n")
+    world.lightweight("v0.2.0", tip)
+    world.lightweight("latest", tip)
+    survey = world.check()
+    assert (survey.installed, survey.offered, survey.rewrite) == (None, None, None)
+
+
+def test_an_unreachable_origin_is_no_survey(world, tmp_path):
+    git(world.managed, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    assert world.check() is None
+
+
+# ── the first install (the bootstraps) ────────────────────────────────────
+
+def _fresh(world, name):
+    app = world.tmp / name
+    git(world.tmp, "init", "-q", str(app))
+    git(app, "config", "remote.origin.url", str(world.origin))
+    signers = world.tmp / f"{name}-signers"
+    signers.write_text(world.key.line() + "\n")
+    return app, signers
+
+
+def test_a_first_install_checks_out_the_newest_verified_release(world):
+    first = world.commit("v2\n")
+    world.tag("v0.2.0", first)
+    second = world.commit("v3\n")
+    world.tag("v0.3.0", second)
+    world.tag("v0.4.0", world.commit("v4\n"), key=Key())     # not on the installer's list
+    world.commit("v5, unreleased\n")
+    app, signers = _fresh(world, "app")
+    release = updater.install_release(str(app), str(signers))
+    assert release.name == "v0.3.0"
+    assert git(app, "rev-parse", "HEAD") == second
+    assert git(app, "symbolic-ref", "--short", "HEAD") == "main"
+    assert (app / "app.txt").read_text() == "v3\n"
+
+
+def test_a_first_install_with_no_signed_release_takes_none(world):
+    world.lightweight("v0.2.0", world.commit("v2\n"))
+    app, signers = _fresh(world, "app")
+    assert updater.install_release(str(app), str(signers)) is None
+    assert not (app / "app.txt").exists()
+
+
+def test_a_first_install_runs_as_the_bootstraps_run_it(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    app, signers = _fresh(world, "app")
+    command = [sys.executable, "-B", "-m", "desktop.updater", "install-release", str(app), str(signers)]
+    result = subprocess.run(command, cwd=str(get_project_root()), capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert git(app, "rev-parse", "HEAD") == tip
+    git(world.seed, "push", "-q", "origin", ":refs/tags/v0.2.0")
+    again = subprocess.run(command, cwd=str(get_project_root()), capture_output=True, text=True)
+    assert again.returncode == 3, again.stdout + again.stderr
+
+
+# ── a tree with edits of its own ──────────────────────────────────────────
+
+@pytest.fixture
+def released(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    return world, tip
+
+
+def test_managed_tree_sets_its_edits_aside_and_moves(released, tmp_path):
+    world, tip = released
+    tree = world.managed
+    (tree / "app.txt").write_text("v1 hot-patched\n")
+
+    old_hash, release, error, set_aside = world.update(tree)
+
+    assert error is None
+    assert old_hash == world.base
+    assert world.head(tree) == tip
+    assert (tree / "app.txt").read_text() == "v2\n"
+    assert set_aside.parent == get_data_dir() / "local-edits"
+    # The patch is the edit itself: applied on the commit it was made on, it
+    # gives the hot-patched file back.
+    restore = tmp_path / "restore"
+    git(tree, "worktree", "add", "-q", "--detach", str(restore), world.base)
+    git(restore, "apply", str(set_aside))
+    assert (restore / "app.txt").read_text() == "v1 hot-patched\n"
+
+
+def test_working_tree_keeps_its_edits_and_refuses(released):
+    world, _ = released
+    tree = world.working
+    (tree / "app.txt").write_text("v1 work in progress\n")
+
+    old_hash, release, error, set_aside = world.update(tree)
+
+    assert error == "the checkout has local modifications"
+    assert (release, set_aside) == (None, None)
+    assert world.head(tree) == world.base
+    assert (tree / "app.txt").read_text() == "v1 work in progress\n"
+    assert not (get_data_dir() / "local-edits").exists()
+
+
+def test_working_tree_with_commits_of_its_own_is_never_moved(released):
+    world, _ = released
+    tree = world.working
+    (tree / "app.txt").write_text("my own\n")
+    git(tree, "commit", "-qam", "mine")
+    mine = world.head(tree)
+    survey = world.check(tree)
+    assert survey.offered is None and survey.rewrite.name == "v0.2.0"
+    world.update(tree)
+    assert world.head(tree) == mine
+
+
+def test_clean_managed_tree_sets_nothing_aside(released):
+    world, tip = released
+    old_hash, release, error, set_aside = world.update()
+    assert (error, set_aside) == (None, None)
+    assert world.head() == tip
+    assert not (get_data_dir() / "local-edits").exists()

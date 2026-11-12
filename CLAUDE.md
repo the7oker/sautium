@@ -663,6 +663,13 @@ Revisit this section then.
 6. **Private material** (deployment specifics, defense status, marketing,
    secrets) lives in `docs/private/` or `docs/marketing/` — both junctions
    into the private repo and gitignored — never in the public tree.
+7. **A release is a signed tag** (since 2026-11-12, `docs/RELEASING.md`).
+   Installed launchers take only `v<semver>` tags signed by a key in their
+   own installed `desktop/release_signers`; a push to `main` reaches none of
+   them. The release keys are the owner's alone. No agent generates, reads
+   or uses one, signs or pushes a tag, or types a key's PIN or passphrase;
+   tests make throwaway keys. A change to `desktop/release_signers` is the
+   owner's, in a commit review sees.
 
 ---
 
@@ -719,6 +726,7 @@ toast takes no pointer events and never blocks the user (see
 | `backend/hqp_library.py` + `backend/playback/substitute.py` | An HQPlayer's own library as album variants (`<LibraryGet/>` → `scanner.import_metadata` with an HQPlayer `FileSink`; `hqp_endpoints` as the library's identity and the registry of chosen HQPlayers; a sync never removes rows) and what the ACTIVE output opens for each queue slot (`QueueItem.play`, re-read on an output switch: a rip here, that HQPlayer's copy, else a stream fetched lazily a lead window ahead of the playhead) |
 | `backend/zero_shot.py` + `backend/zero_shot_labels/labels.json` | The zero-shot values as readers see them: the release's label embeddings (made once by `scripts/make_zero_shot_labels.py`, loaded only under the pinned digest), the read-time thresholds (`MOOD_MIN`, `DANCEABLE_MIN`) and the SQL fragments the gates share. The derivation itself is SQL — `zero_shot_derive` and the two triggers on `embedding_segments` in `001_initial.sql`; `db_migrate`'s `zero_shot_labels_v1` loads the labels and scores what a node already held |
 | `backend/streaming/demo.py` | The demo policy: the `demo_plays` ledger (one full demo-channel listen per track), the resolve's per-track provider order, the proxy's fetch-time gate (`link_admissible`), the status observer that spends the listen past 90 % and drops the spent buffer |
+| `desktop/release_verify.py` + `desktop/updater.py` + `scripts/release.py` | Updates are signed releases: SSHSIG over git tag objects verified in Python (`ssh-ed25519`, `sk-ssh-ed25519@openssh.com` with a touch AND the PIN), the installed tree's `desktop/release_signers`, the highest release that descends from HEAD (a rewrite refused), the bootstraps' first checkout (`install-release`), and the maintainer's tag/verify/selftest steps |
 | `backend/streaming/deezer_catalog.py` + `deezer_preview.py` | Deezer public API in core: the catalog resolve (barcode → album tracklist → track gate, one pacer + memo per process) shared as `DeezerCatalogProvider` by the BYO lossless module and the core 30 s excerpt provider (`deezer_preview`, `manifest.excerpt`, always last in `providers_preferred()`) |
 
 ---

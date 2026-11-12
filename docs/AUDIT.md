@@ -85,8 +85,9 @@ A. Outbound destinations. List every host the software can connect to, with
        Worker's handlers too and state what each one stores; only the
        source is auditable, not the deployment),
      backend/seed_export.py RELEASE_URL and backend/seed_import.py (the
-       cold-start seed bundle), desktop/updater.py (self-update from
-       origin/main),
+       cold-start seed bundle), desktop/updater.py and
+       desktop/release_verify.py (self-update from signed release tags:
+       what is fetched, whose keys verify it, what is refused),
      desktop/p2p/dht_service.py (DHT bootstrap routers), desktop/p2p/ and
        backend/p2p_app.py (connections to other nodes: sync, relay, chat),
      backend/routers/peer_diag.py, desktop/p2p/diag_events.py,
@@ -184,6 +185,10 @@ F. Support diagnostics. The claim: the node sends content-free event
    every difference.
 
 G. Payload provenance of a published installer (skip if you have none).
+   0. The release tag: `python3 scripts/release.py verify <tag>` (needs the
+      `cryptography` package) says whether the tag is a release installed
+      launchers take, verified as desktop/updater.py verifies it — each
+      release against the key list of the one before it.
    1. Integrity: download the installer and SHA256SUMS.txt from
       https://github.com/the7oker/sautium/releases/tag/<tag> and run
       `sha256sum -c SHA256SUMS.txt --ignore-missing` beside them.
@@ -278,9 +283,11 @@ and by design; the report should list them as matches, not discrepancies:
   the project accepts knowingly, because the tool breaks weekly otherwise.
 - A **third public pin** ships beside the master's: the birth authority's
   key (`backend/birth_authority.py`, `desktop/p2p/birth_cert.py`).
-- The updater follows `origin/main`; an installed app pulls whatever lands
-  there. That is the shipping model (`README.md` § Desktop launcher), and
-  the reason the audit is per commit.
+- The updater takes signed release tags only (`docs/RELEASING.md`): an
+  installed app moves to a `v<version>` tag that a key in its own installed
+  `desktop/release_signers` signed, and whose commit descends from what it
+  runs. A push to `main` alone reaches no installed app. The audit is per
+  commit, and a release is the commit its signed tag names.
 
 Accepted and out of scope, from `SECURITY.md`: an attacker on the LAN who
 holds the account password, or who answers in the node's place on a
