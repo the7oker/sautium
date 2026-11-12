@@ -91,6 +91,10 @@ def data_root() -> Path:
 ROOT = data_root()
 APP_DIR = ROOT / "app"
 LOG_PATH = ROOT / "bootstrap.log"
+# The bundle a clone was last reconciled with: a Setup that brings another
+# one is a reinstall, and a reinstall moves the clone to the newest release
+# the new payload's keys verify (see sync_payload).
+PAYLOAD_SEEN = ROOT / ".payload_build"
 
 _mutex = None
 
@@ -153,10 +157,12 @@ def tree_is_clone() -> bool:
 
 
 def tree_current() -> bool:
-    """A clone is never "out of date" as far as Setup is concerned — the
-    launcher's own update path owns it from then on, and a newer Setup must
-    not silently roll it back to the snapshot it happens to carry."""
-    return tree_is_clone() or installed_build_id() == bundle_build_id()
+    """A clone is current once this bundle has looked at it: from then on the
+    launcher's own update path owns it, and a newer Setup never rolls it back
+    to the snapshot it happens to carry."""
+    if tree_is_clone():
+        return PAYLOAD_SEEN.exists() and PAYLOAD_SEEN.read_text(encoding="utf-8").strip() == bundle_build_id()
+    return installed_build_id() == bundle_build_id()
 
 
 def deps_key(tree: Path = APP_DIR) -> str:
@@ -206,13 +212,32 @@ def run_streamed(cmd: list, report: Callable[[str], None], env: dict,
 
 def sync_payload(report: Callable[[str], None]) -> None:
     """Put the tree in place — as a clone when GitHub is reachable, from the
-    bundle when it is not. A clone is left alone: after the first one, updates
-    are the launcher's job, not Setup's."""
+    bundle when it is not. An existing clone is a reinstall: it moves to the
+    newest release this payload's keys verify, if that is newer than what it
+    holds — the way to a release that rewrote history, or to one signed by
+    keys only a new installer carries — and is otherwise left to the
+    launcher's updater."""
     if tree_is_clone():
-        log("tree is a clone — left to the launcher's updater")
+        try:
+            install_release(report)
+        except Exception as exc:
+            log(f"reinstall found no newer release ({exc}) — the clone stays as it is")
+        PAYLOAD_SEEN.write_text(bundle_build_id(), encoding="utf-8")
         return
     if not clone_tree(report):
         copy_payload(report)
+        return
+    PAYLOAD_SEEN.write_text(bundle_build_id(), encoding="utf-8")
+
+
+def install_release(report: Callable[[str], None]) -> None:
+    """The payload's own updater, run on the runtime (whose packages the
+    payload's requirements already put there): it chooses and verifies the
+    release and checks it out in APP_DIR — this file is stdlib only, and the
+    signature check needs `cryptography`. `-B`: no bytecode written into the
+    installed folder."""
+    run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
+                  APP_DIR, PAYLOAD_SIGNERS], report, launcher_env(), cwd=PAYLOAD)
 
 
 def clone_tree(report: Callable[[str], None]) -> bool:
@@ -222,11 +247,6 @@ def clone_tree(report: Callable[[str], None]) -> bool:
     it with the PostgreSQL, Python and audio tools it downloads beside the
     tree, which a fresh clone into an empty folder would throw away. init +
     fetch + checkout overwrites the tracked files and touches nothing else.
-
-    The release is chosen and verified by the payload's own updater, run on
-    the runtime (whose packages the payload's requirements already put
-    there) — this file is stdlib only, and the signature check needs
-    `cryptography`. `-B`: no bytecode written into the installed folder.
 
     Not fatal: an install with no network, or none signed, runs from the
     bundled copy."""
@@ -238,8 +258,7 @@ def clone_tree(report: Callable[[str], None]) -> bool:
         # interrupted attempt left behind.
         run_streamed([GIT, "-C", APP_DIR, "init", "--quiet"], report, env)
         run_streamed([GIT, "-C", APP_DIR, "config", "remote.origin.url", REPO_URL], report, env)
-        run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
-                      APP_DIR, PAYLOAD_SIGNERS], report, launcher_env(), cwd=PAYLOAD)
+        install_release(report)
     except Exception as exc:
         log(f"no release checked out ({exc}) — falling back to the bundled copy")
         remove_tree(APP_DIR / ".git")
@@ -471,8 +490,8 @@ class ProgressBar(tk.Canvas):
 def start_worker(window: BootstrapWindow) -> None:
     def work():
         try:
-            if not tree_is_clone():
-                install_deps(lambda line: window.post("detail", line), PAYLOAD)
+            # The payload's packages first: its updater verifies the release.
+            install_deps(lambda line: window.post("detail", line), PAYLOAD)
             sync_payload(lambda text: window.post("status", text))
             install_deps(lambda line: window.post("detail", line))
             window.post("status", "Starting Sautium…")

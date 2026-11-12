@@ -2201,18 +2201,35 @@ The short version of the hard-learned lessons:
   then run the payload's own updater on the runtime with `-B`
   (`python -m desktop.updater install-release`). The bootstraps stay
   stdlib-only, and nothing is written into a signed bundle.
-- **Fetched into a namespace of our own:** `+refs/tags/v*:refs/sautium/
-  releases/v*`, forced and pruned. A tag moved upstream is judged as it now
-  stands and never fails the fetch with "would clobber existing tag".
-  `refs/tags` is left to whoever works in the tree.
+- **A release is fetched only after its tag verifies** (review round 1 found
+  that the first cut fetched every `v*` tag's whole history at once, and that
+  one name the filesystem cannot store, or one that is not UTF-8, failed the
+  fetch for every release beside it):
+  - `ls-remote` lists origin's tags, and only names of the release form,
+    matched as bytes, go further;
+  - their tag objects are fetched into a probe repository inside the git dir
+    (a partial clone, `--depth=1 --filter=tree:0`: the tag and its commit)
+    and verified there;
+  - only a verified release is fetched into the repository, with its history,
+    forced, under `refs/sautium/releases/`. `refs/tags` is left to whoever
+    works in the tree.
+
+  A moved tag is judged as it now stands, and a pushed tag over a huge
+  history costs a launcher a few hundred bytes.
 - **Judged newest version first:**
   - the walk stops at the first signed release HEAD contains (the installed
-    one), so a version is never taken backwards and older tags are never
-    read;
+    one), so a version is never taken backwards and nothing below it is
+    judged;
   - a newer signed release that does not descend from HEAD is a rewrite,
     refused and said;
   - the move goes to the verified commit by its id, re-surveyed at "Update
     Now", never to a ref name.
+- **A reinstall moves.** A new installer over an existing clone runs the same
+  `install-release` there, so a rewritten history or keys only a new
+  installer lists are reachable. It moves to the newest release the
+  payload's list verifies, never to a lower version than the clone holds.
+  The bundle a clone was last reconciled with is kept in
+  `<data root>/.payload_build`.
 - **What went with the mirror:** `refs/sautium/mirrored`, the
   non-fast-forward move and the reflog expiry with its prune. Every rewrite
   is refused now, signed or not, and nothing is purged.

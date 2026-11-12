@@ -6,8 +6,10 @@ move itself when the tree carries edits: the tree a carrier installed —
 `<data dir>/app` — sets them aside as a patch, any other checkout refuses.
 Real git repositories in a temp dir, `origin` a bare one, throwaway keys."""
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +29,7 @@ class World:
         self.tmp, self.monkeypatch, self.key = tmp_path, monkeypatch, key
         self.origin = tmp_path / "origin.git"
         git(tmp_path, "init", "-q", "--bare", "-b", "main", str(self.origin))
+        git(self.origin, "config", "uploadpack.allowFilter", "true")    # as GitHub does
         self.seed = tmp_path / "seed"
         git(tmp_path, "clone", "-q", str(self.origin), str(self.seed))
         self.base = self.commit("v1\n", signers=[key])
@@ -287,6 +290,58 @@ def test_a_moved_tag_is_judged_as_it_is_now(world):
     assert world.check().refused == [("v0.2.0", "a lightweight tag, not a signed release")]
 
 
+def test_a_tag_moved_backwards_is_judged_as_it_is_now(world):
+    first = world.commit("v2\n")
+    later = world.commit("v3\n")
+    world.tag("v0.3.0", later)
+    assert world.check().offered.commit == later
+    world.tag("v0.3.0", first)                           # re-signed, on an older commit: no fast-forward
+    assert world.check().offered.commit == first
+
+
+def test_names_that_are_no_release_never_reach_a_fetch(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    for junk in ("vИ", "v1.2", "v01.2.3", "v1.2.3-rc1"):
+        world.lightweight(junk, tip)
+    raw = subprocess.run(["git", "tag", b"v\xff".decode("latin-1")], cwd=world.seed)    # not UTF-8 on the wire
+    assert raw.returncode == 0
+    subprocess.run(["git", "push", "-q", "origin", "--tags"], cwd=world.seed, check=True)
+    survey = world.check()
+    assert (survey.offered.name, survey.refused) == ("v0.2.0", [])
+    assert git(world.managed, "for-each-ref", "--format=%(refname)", updater.RELEASE_REFS) == \
+        f"{updater.RELEASE_REFS}v0.2.0"
+
+
+def _has(repo, oid) -> bool:
+    return subprocess.run(["git", "cat-file", "-e", oid], cwd=repo).returncode == 0
+
+
+def test_a_tag_that_does_not_verify_costs_no_more_than_its_tag_object(world):
+    git(world.seed, "checkout", "-q", "--orphan", "junk")
+    (world.seed / "big.bin").write_bytes(os.urandom(2_000_000))
+    git(world.seed, "add", "big.bin")
+    git(world.seed, "commit", "-qm", "junk")
+    junk = git(world.seed, "rev-parse", "HEAD")
+    blob = git(world.seed, "rev-parse", "HEAD:big.bin")
+    world.tag("v9.0.0", junk, key=Key())                 # a stranger's signature over a big history
+    git(world.seed, "checkout", "-q", "main")
+    survey = world.check()
+    assert survey.refused[0][0] == "v9.0.0"
+    assert not _has(world.managed, blob) and not _has(world.managed, junk)
+    # The probe is a partial clone: asking it for the blob would fetch it, so
+    # its size answers instead.
+    probe = Path(git(world.managed, "rev-parse", "--absolute-git-dir")) / updater.PROBE_DIR
+    assert sum(f.stat().st_size for f in (probe / "objects").rglob("*") if f.is_file()) < 50_000
+
+
+def test_a_release_that_verifies_is_fetched_with_its_history(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    world.check()
+    assert _has(world.managed, f"{tip}^{{tree}}")
+
+
 def test_a_deleted_tag_leaves_with_its_release(world):
     tip = world.commit("v2\n")
     world.tag("v0.2.0", tip)
@@ -322,6 +377,32 @@ def test_no_signed_tag_at_all_offers_nothing(world):
 def test_an_unreachable_origin_is_no_survey(world, tmp_path):
     git(world.managed, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
     assert world.check() is None
+    old, release, error, _ = world.update()
+    assert release is None and "ls-remote" in error
+
+
+def test_an_update_that_breaks_after_the_stop_brings_the_services_back(world, monkeypatch):
+    calls = []
+
+    class Services:
+        def stop_tracker(self): calls.append("stop_tracker")
+        def stop_backend(self): calls.append("stop_backend")
+        def start_backend(self, cb=None): calls.append("start_backend"); return True
+        def start_tracker(self, cb=None): calls.append("start_tracker"); return True
+
+    def broken():
+        raise UnicodeDecodeError("cp1252", b"\x81", 0, 1, "undefined")
+    monkeypatch.setattr(updater, "reset_to_release", broken)
+    monkeypatch.setattr(updater, "_update_failed", lambda config, step, error: calls.append(("failed", step)))
+    assert updater.perform_update(Services(), {}) == (False, [], False, True)
+    assert calls == ["stop_tracker", "stop_backend", ("failed", "checkout"), "start_backend", "start_tracker"]
+
+
+def test_git_output_is_read_as_utf8_whatever_the_locale(world, monkeypatch):
+    world.commit("v2 — ünïcode\n")
+    monkeypatch.setattr("locale.getpreferredencoding", lambda do_setlocale=True: "cp1252")
+    world.use(world.seed)
+    assert "ünïcode" in updater._git_cmd(["log", "-1", "--format=%s"]).stdout
 
 
 # ── the first install (the bootstraps) ────────────────────────────────────
@@ -355,6 +436,40 @@ def test_a_first_install_with_no_signed_release_takes_none(world):
     app, signers = _fresh(world, "app")
     assert updater.install_release(str(app), str(signers)) is None
     assert not (app / "app.txt").exists()
+
+
+def test_a_reinstall_moves_a_clone_to_a_release_that_rewrote_history(world):
+    tip = world.commit("v2\n")
+    world.tag("v0.2.0", tip)
+    world.update()
+    git(world.seed, "checkout", "-q", "--orphan", "rewritten")
+    world.commit("v3, rewritten\n", signers=[world.key])
+    rewritten = git(world.seed, "rev-parse", "HEAD")
+    world.tag("v0.3.0", rewritten)
+    assert world.check().rewrite.name == "v0.3.0"
+    signers = world.tmp / "payload-signers"
+    signers.write_text(world.key.line() + "\n")
+    assert updater.install_release(str(world.managed), str(signers)).name == "v0.3.0"
+    assert world.head() == rewritten
+
+
+def test_a_reinstall_never_moves_a_clone_to_a_lower_version(world):
+    old = world.commit("v2\n")
+    world.tag("v0.2.0", old)
+    new = world.commit("v3\n")
+    world.tag("v0.3.0", new, key=Key())                 # only the clone's own list... not the payload's
+    world.update()
+    signers = world.tmp / "payload-signers"
+    signers.write_text(world.key.line() + "\n")
+    tip = world.commit("v4\n")
+    world.tag("v0.4.0", tip)
+    world.update()                                       # the clone holds v0.4.0
+    assert world.head() == tip
+    other = Key()
+    signers.write_text(other.line() + "\n")             # an old installer, whose list signed only v0.3.0
+    world.tag("v0.3.1", old, key=other)
+    assert updater.install_release(str(world.managed), str(signers)).name == "v0.4.0"
+    assert world.head() == tip
 
 
 def test_a_first_install_runs_as_the_bootstraps_run_it(world):
@@ -431,3 +546,12 @@ def test_clean_managed_tree_sets_nothing_aside(released):
     assert (error, set_aside) == (None, None)
     assert world.head() == tip
     assert not (get_data_dir() / "local-edits").exists()
+
+
+def test_a_refusal_is_said_in_the_dialog_only_when_nothing_is_offered():
+    offered = updater.Release("v0.2.0", (0, 2, 0), "0" * 40)
+    refused = [("v0.3.0", "the ssh-ed25519 key that signed is not listed for 'git'")]
+    heading, lines = updater.survey_words(updater.Survey(offered=offered, refused=refused))
+    assert heading == "Sautium 0.2.0 is available" and not any("v0.3.0" in line for line in lines)
+    heading, lines = updater.survey_words(updater.Survey(refused=refused))
+    assert heading == "No update was installed" and "v0.3.0" in lines[-1]

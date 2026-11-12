@@ -3,7 +3,7 @@
 The release steps a maintainer runs in their own terminal (docs/RELEASING.md).
 
     python scripts/release.py selftest [--repo <checkout>]
-    python scripts/release.py tag <version> [--commit <rev>] [--repo <checkout>]
+    python scripts/release.py tag <version> [--commit <rev>] [--list-change] [--repo <checkout>]
     python scripts/release.py verify <version> [--commit <rev>] [--repo <checkout>]
 
 The checkout is the one this script is in unless --repo names another.
@@ -16,31 +16,37 @@ launcher's verifier against the keys of the checkout's desktop/release_signers
 
 `tag` makes the signed release tag `v<version>` and never pushes it:
   1. fetches origin's main and tags;
-  2. the commit (origin/main's tip unless --commit) must be on origin/main —
-     pushed;
-  3. the version must be new and above every `v*` tag origin has, and the
+  2. the commit is this checkout's HEAD unless --commit names another, and
+     must be on origin/main — pushed. Never origin's tip by default: that is
+     exactly what a push nobody intended controls;
+  3. prints what the release carries since the last one — the commits, and
+     the key list if it changed, which then needs --list-change: the list a
+     release carries decides who signs the next one;
+  4. the version must be new and above the last signed release, and the
      commit's desktop/build_common.py VERSION must say it;
-  4. the commit's desktop/release_signers must parse whole, one key or more —
-     it is the list the NEXT release is verified against;
-  5. the commit must descend from the last trusted release — launchers refuse
+  5. the commit's desktop/release_signers must parse whole, with a key
+     allowed for `git` — it is the list the NEXT release is verified against;
+  6. the commit must descend from the last signed release — launchers refuse
      anything else as a rewritten history;
-  6. `git tag -s` with this checkout's own git configuration (gpg.format=ssh,
+  7. `git tag -s` with this checkout's own git configuration (gpg.format=ssh,
      user.signingkey, gpg.ssh.program — whichever ssh-keygen drives the key;
      the key's touch, PIN or passphrase are asked by that program, here);
-  7. verifies the result with the launcher's own verifier against the list
-     installed launchers hold (and with `git verify-tag` when
+  8. verifies the result with the launcher's own verifier against the list of
+     the last signed release (and with `git verify-tag` when
      gpg.ssh.allowedSignersFile is set), deleting the tag if either refuses;
-  8. prints the push command.
+  9. prints the push command.
 
-`verify` says whether `v<version>` on origin is a release launchers take —
-signed by a key on the list of the release before it — and, with --commit,
-that it names that commit (scripts/release-publish.sh runs it before it
-creates the GitHub release).
+`verify` says whether `v<version>` on origin is in the release chain and,
+with --commit, that it names that commit (scripts/release-publish.sh runs it
+before it creates the GitHub release).
 
-"The list launchers hold" is followed from the first signed release: each
-release's tree governs the next one, as desktop/updater.py applies it on every
-node. The first signed release (the floor) is verified against its own tree's
-list — the list the launchers that took this code from main carry.
+The chain: its root is the first key list `main` ever carried (the first
+commit on origin/main's first-parent line whose desktop/release_signers holds
+a key) — a list that history does not let a later push replace. The lowest
+release that root's keys signed is the floor; each later release is signed
+by a key on the list of the release before it and descends from it. A tag
+off that chain — unsigned, signed by another key, off its history — is no
+release of this script's, whatever else origin holds.
 """
 
 import argparse
@@ -56,6 +62,10 @@ REPO = ROOT
 
 from desktop import release_verify, updater  # noqa: E402
 
+# The maintainer's checkout takes every `v*` tag as origin has it, forced and
+# pruned, into the same namespace launchers use; refs/tags is left alone.
+RELEASE_FETCH = f"+refs/tags/v*:{updater.RELEASE_REFS}v*"
+
 
 class Refused(SystemExit):
     def __init__(self, message: str):
@@ -63,7 +73,8 @@ class Refused(SystemExit):
 
 
 def git(*args, check: bool = True) -> str:
-    result = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True)
+    result = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
     if check and result.returncode != 0:
         raise Refused(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout.strip()
@@ -76,32 +87,42 @@ def git_bytes(*args) -> bytes:
     return result.stdout
 
 
+def is_ancestor(commit: str, of: str) -> bool:
+    return subprocess.run(["git", "-C", str(REPO), "merge-base", "--is-ancestor", commit, of]).returncode == 0
+
+
+def list_text(commit: str) -> Optional[bytes]:
+    result = subprocess.run(["git", "-C", str(REPO), "show", f"{commit}:{updater.SIGNERS_PATH}"],
+                            capture_output=True)
+    return result.stdout if result.returncode == 0 else None
+
+
 def signers_at(commit: str) -> Tuple[List[release_verify.Signer], int]:
     """The list in `commit`'s tree, and how many key lines it has: a line
     that did not parse is in the count and not in the list."""
-    result = subprocess.run(["git", "-C", str(REPO), "show", f"{commit}:{updater.SIGNERS_PATH}"],
-                            capture_output=True)
-    if result.returncode != 0:
+    raw = list_text(commit)
+    if raw is None:
         return [], 0
-    text = result.stdout.decode("utf-8", "replace")
+    text = raw.decode("utf-8", "replace")
     lines = [line for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
     return release_verify.parse_allowed_signers(text, f"{commit[:12]}:{updater.SIGNERS_PATH}"), len(lines)
 
 
-def remote_versions() -> List[str]:
-    """Every `v<semver>` tag origin has, signed or not."""
-    names = []
-    for line in git("ls-remote", "--tags", "--refs", "origin").splitlines():
-        name = line.split("refs/tags/", 1)[-1]
-        if release_verify.parse_version(name):
-            names.append(name)
-    return names
+def root_list() -> Tuple[Optional[str], List[release_verify.Signer]]:
+    """(the commit, its keys): the first key list main's first-parent line
+    carried."""
+    for commit in git("log", "--reverse", "--first-parent", "--format=%H", "origin/main", "--",
+                      updater.SIGNERS_PATH).split():
+        listed, _ = signers_at(commit)
+        if listed:
+            return commit, listed
+    return None, []
 
 
 def trusted_chain() -> List[Tuple[updater.Release, List[release_verify.Signer]]]:
-    """The releases launchers take, oldest first, each with the list its tree
-    carries (which governs the next): the fetched tags walked from the oldest
-    up, as nodes take them one by one."""
+    """The signed releases, oldest first, each with the list its tree carries
+    (which signs the next one)."""
+    _, held = root_list()
     listing = git("for-each-ref", "--format=%(refname) %(objecttype)", updater.RELEASE_REFS)
     tags = []
     for line in listing.splitlines():
@@ -112,32 +133,22 @@ def trusted_chain() -> List[Tuple[updater.Release, List[release_verify.Signer]]]
             tags.append((version, name, ref))
     chain = []
     for version, name, ref in sorted(tags):
-        raw = git_bytes("cat-file", "tag", ref)
-        if chain:
-            held = chain[-1][1]
-        else:
-            held, _ = signers_at(release_verify.tag_headers(release_verify.split_tag(raw)[0])["object"])
         try:
-            signed = release_verify.verify_tag(raw, name, held)
+            signed = release_verify.verify_tag(git_bytes("cat-file", "tag", ref), name, held)
         except release_verify.VerifyError as exc:
-            print(f"  {name}: not a release launchers take ({exc})")
+            print(f"  {name}: not in the release chain ({exc})")
             continue
         if chain and not is_ancestor(chain[-1][0].commit, signed.commit):
-            print(f"  {name}: does not descend from {chain[-1][0].name} — launchers refuse it")
+            print(f"  {name}: does not descend from {chain[-1][0].name} — not in the release chain")
             continue
-        chain.append((updater.Release(name, version, signed.commit), signers_at(signed.commit)[0]))
+        held = signers_at(signed.commit)[0]
+        chain.append((updater.Release(name, version, signed.commit), held))
     return chain
 
 
-def is_ancestor(commit: str, of: str) -> bool:
-    return subprocess.run(["git", "-C", str(REPO), "merge-base", "--is-ancestor", commit, of]).returncode == 0
-
-
 def fetch() -> None:
-    git("fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
-    error = updater.fetch_releases(str(REPO))
-    if error:
-        raise Refused(error)
+    git("fetch", "--quiet", "--no-tags", "--prune", "origin",
+        "+refs/heads/main:refs/remotes/origin/main", RELEASE_FETCH)
 
 
 def release_name(version: str) -> Tuple[str, Tuple[int, int, int]]:
@@ -148,42 +159,71 @@ def release_name(version: str) -> Tuple[str, Tuple[int, int, int]]:
     return name, parsed
 
 
-def tag(version: str, rev: Optional[str]) -> None:
+def describe(signers: List[release_verify.Signer]) -> List[str]:
+    import base64
+    import hashlib
+    return [f"    {','.join(s.principals)}  {s.key_type}  SHA256:"
+            f"{base64.b64encode(hashlib.sha256(s.key_blob).digest()).decode().rstrip('=')}"
+            f"  namespaces={','.join(s.namespaces) if s.namespaces else '(any)'}" for s in signers]
+
+
+def tag(version: str, rev: Optional[str], list_change: bool) -> None:
     name, parsed = release_name(version)
     fetch()
-    commit = git("rev-parse", "--verify", f"{rev or 'origin/main'}^{{commit}}")
+    commit = git("rev-parse", "--verify", f"{rev or 'HEAD'}^{{commit}}")
     if not is_ancestor(commit, "origin/main"):
         raise Refused(f"{commit[:12]} is not on origin/main — push it first")
-
-    existing = remote_versions()
-    if name in existing:
+    if git("ls-remote", "--refs", "origin", f"refs/tags/{name}"):
         raise Refused(f"origin already has a tag {name}")
-    newest = max([release_verify.parse_version(t) for t in existing] + [updater.FLOOR])
-    if parsed <= newest:
-        raise Refused(f"{name} is not above v{'.'.join(map(str, newest))}, origin's newest tag")
+
+    chain = trusted_chain()
+    root_commit, root = root_list()
+    if chain:
+        previous, held = chain[-1]
+        if parsed <= previous.version:
+            raise Refused(f"{name} is not above {previous.name}, the last signed release")
+        if not is_ancestor(previous.commit, commit):
+            raise Refused(f"{commit[:12]} does not descend from {previous.name} — every launcher would refuse it")
+        since, before = previous.commit, list_text(previous.commit)
+        print(f"Last signed release: {previous.name} ({previous.commit[:12]}).")
+    else:
+        if parsed <= updater.FLOOR:
+            raise Refused(f"{name} is not above v0.1.1, the unsigned floor")
+        if root_commit is None:
+            raise Refused(f"origin/main has never carried a key in {updater.SIGNERS_PATH}")
+        held, since, before = root, None, list_text(root_commit)
+        print(f"No signed release yet: {name} is the floor, signed for the key list main first carried "
+              f"({root_commit[:12]}).")
+
     stated = re.search(r'^VERSION = "([^"]*)"$', git("show", f"{commit}:desktop/build_common.py"), re.M)
     if not stated or stated.group(1) != name[1:]:
         raise Refused(f"desktop/build_common.py at {commit[:12]} says VERSION = "
                       f"{stated.group(1) if stated else '?'!r}, not {name[1:]!r} — commit the bump first")
-
     own, lines = signers_at(commit)
-    if not own or len(own) != lines:
-        raise Refused(f"{updater.SIGNERS_PATH} at {commit[:12]} has {lines} key line(s), "
-                      f"{len(own)} of them valid — the next release could not be verified")
+    if not own or len(own) != lines or not any(s.allows(release_verify.GIT_NAMESPACE) for s in own):
+        raise Refused(f"{updater.SIGNERS_PATH} at {commit[:12]} has {lines} key line(s), {len(own)} of them "
+                      f"valid, {sum(s.allows(release_verify.GIT_NAMESPACE) for s in own)} for `git` — "
+                      "the next release could not be verified")
 
-    chain = trusted_chain()
-    if not chain:
-        held = own
-        print(f"No signed release yet: {name} is the floor, verified against {commit[:12]}'s own list.")
-    else:
-        previous, held = chain[-1]
-        print(f"Last release launchers take: {previous.name} ({previous.commit[:12]}).")
-        if not is_ancestor(previous.commit, commit):
-            raise Refused(f"{commit[:12]} does not descend from {previous.name} — every launcher would refuse it")
+    log = git("log", "--oneline", "--no-decorate", f"{since}..{commit}" if since else commit)
+    entries = log.splitlines()
+    print(f"\n{name} on {commit[:12]} carries {len(entries)} commit(s){' since ' + chain[-1][0].name if chain else ''}:")
+    for line in entries[:30]:
+        print(f"    {line}")
+    if len(entries) > 30:
+        print(f"    … and {len(entries) - 30} more")
+    if list_text(commit) != before:
+        print(f"\nThe key list changes in this release — these keys sign the NEXT one:")
+        print("\n".join(describe(own)))
+        if not list_change:
+            raise Refused("the release changes desktop/release_signers: check the keys above, "
+                          "then run again with --list-change")
+    print(f"\nThe keys that may sign {name}:")
+    print("\n".join(describe(held)))
 
     if git("config", "--get", "gpg.format", check=False) != "ssh":
         raise Refused("gpg.format is not ssh in this checkout — see docs/RELEASING.md, one-time setup")
-    print(f"Signing {name} on {commit[:12]} — the key may ask for a touch and its PIN.")
+    print(f"\nSigning {name} on {commit[:12]} — the key may ask for a touch and its PIN.", flush=True)
     signed = subprocess.run(["git", "-C", str(REPO), "tag", "-s", "-m", f"Sautium {name[1:]}", name, commit])
     if signed.returncode != 0:
         raise Refused("git tag -s failed")
@@ -220,7 +260,7 @@ def selftest() -> None:
     with tempfile.TemporaryDirectory() as scratch:
         message = Path(scratch) / "selftest"
         message.write_bytes(b"sautium release selftest\n")
-        print(f"Signing a scratch file with {program} — the key may ask for a touch and its PIN.")
+        print(f"Signing a scratch file with {program} — the key may ask for a touch and its PIN.", flush=True)
         if subprocess.run([program, "-Y", "sign", "-n", "sautium-test", "-f", key, str(message)]).returncode != 0:
             raise Refused(f"{program} -Y sign failed")
         armored = Path(f"{message}.sig").read_bytes()
@@ -236,10 +276,10 @@ def verify(version: str, rev: Optional[str]) -> None:
     fetch()
     found = next((release for release, _ in trusted_chain() if release.name == name), None)
     if found is None:
-        raise Refused(f"{name} is not a release launchers take")
+        raise Refused(f"{name} is not in the release chain")
     if rev and git("rev-parse", "--verify", f"{rev}^{{commit}}") != found.commit:
         raise Refused(f"{name} names {found.commit[:12]}, not {rev}")
-    print(f"{name} is a signed release launchers take: {found.commit}")
+    print(f"{name} is a signed release in the chain: {found.commit}")
 
 
 def main() -> None:
@@ -251,13 +291,18 @@ def main() -> None:
         p.add_argument("version")
         p.add_argument("--commit")
         p.add_argument("--repo", type=Path, default=ROOT)
+        if command == "tag":
+            p.add_argument("--list-change", action="store_true",
+                           help="the release changes desktop/release_signers, and that is intended")
     args = parser.parse_args()
     global REPO
     REPO = args.repo.resolve()
     if args.command == "selftest":
         selftest()
+    elif args.command == "tag":
+        tag(args.version, args.commit, args.list_change)
     else:
-        (tag if args.command == "tag" else verify)(args.version, args.commit)
+        verify(args.version, args.commit)
 
 
 if __name__ == "__main__":

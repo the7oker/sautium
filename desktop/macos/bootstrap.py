@@ -88,6 +88,10 @@ RUNTIME_STAMP = "runtime.version"
 LEGACY_VENV = ROOT / "venv"
 DEPS_MARKER = ROOT / ".launcher_deps_hash"
 LOG_PATH = ROOT / "bootstrap.log"
+# The bundle a clone was last reconciled with: a DMG that brings another one
+# is a reinstall, and a reinstall moves the clone to the newest release the
+# new payload's keys verify (see sync_payload).
+PAYLOAD_SEEN = ROOT / ".payload_build"
 
 
 def log(line: str) -> None:
@@ -129,19 +133,24 @@ def runtime_current() -> bool:
 
 
 def tree_is_clone() -> bool:
-    return (APP_DIR / ".git").is_dir()
+    """A repository that got its files. `.git` alone is a first checkout that
+    was interrupted — re-done, not trusted."""
+    return (APP_DIR / ".git").is_dir() and (APP_DIR / "desktop" / "requirements.txt").exists()
 
 
 def is_installed() -> bool:
     """True when the tree and its deps are in place for this runtime.
 
-    A clone is never "out of date" as far as the bundle is concerned — the
-    launcher's own update path owns it from then on, and a newer DMG must not
-    silently roll it back to the snapshot it happens to carry.
+    A clone is current once this bundle has looked at it: from then on the
+    launcher's own update path owns it, and a newer DMG never rolls it back
+    to the snapshot it happens to carry.
     """
     if not runtime_current():
         return False
-    if not tree_is_clone() and installed_build_id() != bundle_build_id():
+    if tree_is_clone():
+        if not PAYLOAD_SEEN.exists() or PAYLOAD_SEEN.read_text().strip() != bundle_build_id():
+            return False
+    elif installed_build_id() != bundle_build_id():
         return False
     return DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == requirements_hash()
 
@@ -167,10 +176,17 @@ def run_streamed(cmd: list, report: Callable[[str], None], cwd: Optional[Path] =
 
 def sync_payload(report: Callable[[str], None]) -> None:
     """Put the tree in place — as a clone when GitHub is reachable, from the
-    bundle when it is not. A clone is left alone: after the first one, updates
-    are the launcher's job, not the disk image's."""
+    bundle when it is not. After the first clone updates are the launcher's
+    job, not the disk image's; a new DMG over an existing clone is a
+    reinstall, which moves it to the newest release this payload's keys
+    verify if that is newer than what it holds — the way to a release that
+    rewrote history, or to one signed by keys only a new DMG carries."""
     if tree_is_clone():
-        log("tree is a clone — left to the launcher's updater")
+        try:
+            install_release(report)
+        except Exception as exc:
+            log(f"reinstall found no newer release ({exc}) — the clone stays as it is")
+        PAYLOAD_SEEN.write_text(bundle_build_id())
         return
 
     report("Installing application files…")
@@ -183,7 +199,9 @@ def sync_payload(report: Callable[[str], None]) -> None:
         shutil.move(str(keep), str(stash))
     shutil.rmtree(APP_DIR, ignore_errors=True)
 
-    if not clone_tree(report):
+    if clone_tree(report):
+        PAYLOAD_SEEN.write_text(bundle_build_id())
+    else:
         shutil.copytree(PAYLOAD, APP_DIR, symlinks=True)
         log(f"payload copied from the bundle: {bundle_build_id()}")
 
@@ -194,11 +212,6 @@ def sync_payload(report: Callable[[str], None]) -> None:
 
 def clone_tree(report: Callable[[str], None]) -> bool:
     """Check out the newest signed release into APP_DIR, or say why not.
-
-    The release is chosen and verified by the payload's own updater, run on
-    the installed runtime (whose packages the payload's requirements already
-    put there) — this file is stdlib only, and the signature check needs
-    `cryptography`. `-B`: nothing may be written into the signed bundle.
 
     Not fatal: an install with no network, or none signed, still runs from
     the bundled copy."""
@@ -213,14 +226,23 @@ def clone_tree(report: Callable[[str], None]) -> bool:
     try:
         run_streamed(["git", "init", "--quiet", APP_DIR], report)
         run_streamed(["git", "-C", APP_DIR, "config", "remote.origin.url", REPO_URL], report)
-        run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
-                      APP_DIR, PAYLOAD_SIGNERS], report, cwd=PAYLOAD)
+        install_release(report)
     except Exception as exc:
         log(f"no release checked out ({exc}) — falling back to the bundled copy")
         shutil.rmtree(APP_DIR, ignore_errors=True)
         return False
     log(f"cloned {REPO_URL} at its newest signed release")
     return True
+
+
+def install_release(report: Callable[[str], None]) -> None:
+    """The payload's own updater, run on the installed runtime (whose packages
+    the payload's requirements already put there): it chooses and verifies
+    the release and checks it out in APP_DIR — this file is stdlib only, and
+    the signature check needs `cryptography`. `-B`: nothing may be written
+    into the signed bundle."""
+    run_streamed([RUNTIME_PYTHON, "-B", "-m", "desktop.updater", "install-release",
+                  APP_DIR, PAYLOAD_SIGNERS], report, cwd=PAYLOAD)
 
 
 def install_runtime(report: Callable[[str], None]) -> None:
@@ -492,8 +514,7 @@ def start_worker(window: BootstrapWindow) -> None:
             # The runtime and the payload's packages first: the first checkout
             # is verified by the payload's code on that runtime.
             install_runtime(lambda text: window.post("status", text))
-            if not tree_is_clone():
-                install_deps(lambda line: window.post("detail", line), PAYLOAD)
+            install_deps(lambda line: window.post("detail", line), PAYLOAD)
             sync_payload(lambda text: window.post("status", text))
             install_deps(lambda line: window.post("detail", line))
             window.post("status", "Starting Sautium…")

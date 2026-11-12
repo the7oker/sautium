@@ -28,12 +28,16 @@ def git(cwd, *args):
 
 @pytest.fixture
 def origin(tmp_path, monkeypatch):
+    # Not from the repository's root, whose own desktop/ would hide a
+    # bootstrap that forgot to run the payload's code from the payload.
+    monkeypatch.chdir(tmp_path)
     for key, value in {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
                        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}.items():
         monkeypatch.setenv(key, value)
     bare = tmp_path / "origin.git"
     git(tmp_path, "init", "-q", "--bare", "-b", "main", str(bare))
+    git(bare, "config", "uploadpack.allowFilter", "true")
     seed = tmp_path / "seed"
     git(tmp_path, "clone", "-q", str(bare), str(seed))
     (seed / "desktop").mkdir()
@@ -61,6 +65,7 @@ def payload(tmp_path, key) -> Path:
     for name in ("__init__.py", "updater.py", "release_verify.py", "requirements.txt"):
         shutil.copy2(DESKTOP / name, root / "desktop" / name)
     (root / "desktop" / "release_signers").write_text(key.line() + "\n")
+    (root / ".sautium_build").write_text("0.2.0+bundle\n")
     return root
 
 
@@ -115,6 +120,72 @@ def test_the_first_checkout_is_the_newest_verified_release(bootstrap, origin):
     assert (bootstrap.APP_DIR / "desktop" / "requirements.txt").read_text() == "released\n"
 
 
+def test_the_payloads_code_runs_without_writing_into_the_payload(bootstrap, origin):
+    publish(origin, "v0.2.0")
+    assert bootstrap.clone_tree(lambda _: None) is True
+    assert list(bootstrap.PAYLOAD.rglob("__pycache__")) == []
+
+
+def _clone_at(bootstrap, origin, name):
+    publish(origin, name)
+    bootstrap.APP_DIR.parent.mkdir(parents=True, exist_ok=True)
+    assert bootstrap.clone_tree(lambda _: None) is True
+    bootstrap.PAYLOAD_SEEN.write_text(bootstrap.bundle_build_id())
+
+
+def _new_release(origin, name, orphan=False):
+    if orphan:
+        git(origin.seed, "checkout", "-q", "--orphan", "rewritten")
+    (origin.seed / "desktop" / "requirements.txt").write_text(f"{name}\n")
+    git(origin.seed, "add", ".")
+    git(origin.seed, "commit", "-qm", name)
+    origin.tip = git(origin.seed, "rev-parse", "HEAD")
+    publish(origin, name)
+
+
+def test_a_reinstall_over_a_clone_moves_it_past_a_rewritten_history(bootstrap, origin):
+    _clone_at(bootstrap, origin, "v0.2.0")
+    _new_release(origin, "v0.3.0", orphan=True)
+    (bootstrap.PAYLOAD / ".sautium_build").write_text("0.3.0+new\n")      # the next installer
+    bootstrap.sync_payload(lambda _: None)
+    assert git(bootstrap.APP_DIR, "rev-parse", "HEAD") == origin.tip
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.3.0+new"
+
+
+def _set_up(bootstrap, monkeypatch) -> bool:
+    """Whether the bootstrap would launch at once, its runtime and packages
+    taken as in place."""
+    if hasattr(bootstrap, "runtime_current"):
+        monkeypatch.setattr(bootstrap, "runtime_current", lambda: True)
+        bootstrap.DEPS_MARKER.write_text(bootstrap.requirements_hash())
+        return bootstrap.is_installed()
+    return bootstrap.tree_current()
+
+
+def test_a_clone_is_set_up_for_the_bundle_that_reconciled_it(bootstrap, origin, monkeypatch):
+    _clone_at(bootstrap, origin, "v0.2.0")
+    assert _set_up(bootstrap, monkeypatch)
+    (bootstrap.PAYLOAD / ".sautium_build").write_text("0.3.0+new\n")
+    assert not _set_up(bootstrap, monkeypatch)
+
+
+def test_a_reinstall_that_finds_nothing_newer_keeps_the_clone(bootstrap, origin):
+    _clone_at(bootstrap, origin, "v0.2.0")
+    held = git(bootstrap.APP_DIR, "rev-parse", "HEAD")
+    (bootstrap.APP_DIR / "pgsql").mkdir()
+    (bootstrap.PAYLOAD / ".sautium_build").write_text("0.2.0+repair\n")
+    git(origin.seed, "push", "-q", "origin", ":refs/tags/v0.2.0")
+    bootstrap.sync_payload(lambda _: None)
+    assert git(bootstrap.APP_DIR, "rev-parse", "HEAD") == held
+    assert (bootstrap.APP_DIR / "pgsql").is_dir()
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.2.0+repair"
+
+
+def test_an_interrupted_first_checkout_is_no_clone(bootstrap):
+    (bootstrap.APP_DIR / ".git").mkdir(parents=True)
+    assert not bootstrap.tree_is_clone()
+
+
 def test_no_signed_release_falls_back_to_the_bundled_copy(bootstrap, origin):
     publish(origin, "v0.2.0", lightweight=True)
     assert bootstrap.clone_tree(lambda _: None) is False
@@ -161,13 +232,14 @@ def test_the_payloads_packages_go_in_before_the_first_checkout(bootstrap, monkey
     assert window.posts[-1] == "done"
 
 
-def test_a_clone_installs_only_its_own_packages(bootstrap, monkeypatch):
+def test_a_reinstall_over_a_clone_has_the_payloads_packages_first_too(bootstrap, monkeypatch):
     (bootstrap.APP_DIR / ".git").mkdir(parents=True)
     (bootstrap.APP_DIR / "desktop").mkdir()
     (bootstrap.APP_DIR / "desktop" / "requirements.txt").write_text("x\n")
     calls = []
     _run_worker(bootstrap, monkeypatch, calls)
-    assert [step for step in calls if step[0] == "deps"] == [("deps", bootstrap.APP_DIR)]
+    assert [step for step in calls if step[0] != "runtime"] == \
+        [("deps", bootstrap.PAYLOAD), ("sync", None), ("deps", bootstrap.APP_DIR)]
 
 
 def test_the_macos_runtime_is_in_place_before_the_payloads_packages(macos, monkeypatch):

@@ -176,14 +176,20 @@ the Linux side can reach (on WSL that needs `usbipd`):
        python scripts/release.py tag <version>          # e.g. 0.2.0
 
    The script checks that:
-   - the commit (`origin/main`'s tip unless `--commit`) is on `origin/main`;
-   - the version is new and above every `v*` tag origin has;
-   - the tree's `desktop/release_signers` parses whole, since it is the list
-     the next release is verified against;
-   - the commit descends from the last release launchers take.
+   - the commit is your checkout's HEAD (unless `--commit` names another) and
+     is on `origin/main`. It is never origin's tip by default, because the tip
+     is exactly what a push nobody intended controls;
+   - the version is new and above the last signed release;
+   - the tree's `desktop/release_signers` parses whole and holds a key for
+     `git`, since it is the list the next release is verified against;
+   - the commit descends from the last signed release.
 
-   It then runs `git tag -s` (touch and PIN), verifies the tag with the
-   launcher's own verifier against the list installed launchers hold, and runs
+   It prints the commits the release carries since the last one. If the key
+   list changes in this release, it prints the new keys with their
+   fingerprints and stops until you run it again with `--list-change`.
+
+   It then runs `git tag -s` (touch and PIN) and verifies the tag with the
+   launcher's own verifier against the last signed release's list. It runs
    `git verify-tag` too. If either check refuses, the tag is deleted again.
    **It never pushes.**
 3. Push the tag with the command it prints:
@@ -200,7 +206,10 @@ the Linux side can reach (on WSL that needs `usbipd`):
    unsigned tag of that name, and the name is then taken for good.
 
 `python scripts/release.py verify <version>` says at any time whether origin's
-tag is a release launchers take.
+tag is in the release chain. The chain starts at the first key list `main`
+ever carried: the floor is the lowest release that list's keys signed, and
+each later release is signed by a key on the list of the one before it and
+descends from it.
 
 ## Rotation and recovery
 
@@ -211,10 +220,15 @@ tag is a release launchers take.
   a new daily key.
 - **The daily key is stolen:** the same rotation, plus a public notice. The
   thief still needs a push to GitHub to reach anyone, so the account's
-  hardening is the other half of the defence.
+  hardening is the other half of the defence. A launcher judges each release
+  against its own installed list, so one that has not yet taken the release
+  that rotates the key out still trusts the old key. Rotating soon after a
+  theft is what limits that window.
 - **Both keys are lost:** installed launchers stop taking updates. A reinstall
   from a new installer moves them on, because its payload carries the new
-  list.
+  list. A new installer over an existing install moves the install to the
+  newest release its own list verifies, if that is newer than the one
+  installed. The same move takes an install past a rewritten history.
 
 ## On GitHub
 

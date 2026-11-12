@@ -186,9 +186,10 @@ F. Support diagnostics. The claim: the node sends content-free event
 
 G. Payload provenance of a published installer (skip if you have none).
    0. The release tag: `python3 scripts/release.py verify <tag>` (needs the
-      `cryptography` package) says whether the tag is a release installed
-      launchers take, verified as desktop/updater.py verifies it — each
-      release against the key list of the one before it.
+      `cryptography` package) says whether the tag is in the release chain:
+      signed, with the launcher's own verifier, by a key on the list of the
+      release before it, the chain rooted at the first key list `main`
+      carried (docs/RELEASING.md).
    1. Integrity: download the installer and SHA256SUMS.txt from
       https://github.com/the7oker/sautium/releases/tag/<tag> and run
       `sha256sum -c SHA256SUMS.txt --ignore-missing` beside them.

@@ -38,17 +38,29 @@ ORIGIN_MOVES = {
     "github.com/the7oker/ai.djai": "https://github.com/the7oker/sautium.git",
 }
 
-# Origin's `v*` tags land in a namespace of our own, forced and pruned: a tag
-# moved or deleted upstream is mirrored as it is now and judged again, and a
-# moved tag can never fail the fetch ("would clobber existing tag") and take
-# every other release with it. refs/tags stays whoever works in the tree's.
+# A release is fetched only once its tag has verified. Origin's tag names are
+# listed first (`ls-remote`), and only names of the release form go any
+# further: whatever else a pusher invents — a name this filesystem cannot
+# store, one that is not UTF-8 — never reaches a fetch, where one bad name
+# fails it for every release beside it. The tag objects are then fetched into
+# a PROBE repository inside our git dir, shallow and without trees
+# (`--depth=1 --filter=tree:0`: the tag and its commit, a few hundred bytes)
+# and judged there; only a release that verifies is fetched into our own
+# repository, history and all, under a namespace of our own (refs/tags stays
+# whoever works in the tree's). A pushed tag over a huge history costs a
+# launcher those few hundred bytes.
 RELEASE_REFS = "refs/sautium/releases/"
-RELEASE_FETCH = f"+refs/tags/v*:{RELEASE_REFS}v*"
+PROBE_DIR = "sautium-release-probe"
 SIGNERS_PATH = "desktop/release_signers"
+_RELEASE_NAME = re.compile(rb"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 # v0.1.0 and v0.1.1 were published as lightweight, unsigned tags before
 # releases were signed. Nothing at or below this version is a release.
 FLOOR = (0, 1, 1)
+
+
+class UpdateError(RuntimeError):
+    """git failed on the way to origin's releases (no network, no origin)."""
 
 
 @dataclass(frozen=True)
@@ -95,7 +107,9 @@ def survey_words(survey: Survey) -> Tuple[str, List[str]]:
         paragraphs.append(
             f"{survey.rewrite.label} rewrites the history this copy was installed from, so it "
             "cannot be installed as an update. Reinstalling Sautium moves to it.")
-    if survey.refused:
+    # A refusal above an offer is said in the log only: in a rotation the next
+    # release, signed by the key this one adds, sits there until this one is in.
+    if survey.refused and not survey.offered:
         paragraphs.append(
             f"A release tagged {survey.refused[0][0]} does not carry a signature this copy "
             "trusts, so it was not installed.")
@@ -119,27 +133,38 @@ def _git_cmd(args: list, cwd: Optional[str] = None, timeout: int = 30) -> subpro
     if cwd is None:
         from desktop.utils import get_project_root
         cwd = str(get_project_root())
+    # UTF-8 whatever the locale (git writes commit subjects in it): Windows'
+    # ANSI code page cannot decode every byte git may print.
     kwargs = {
         "capture_output": True,
         "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
         "timeout": timeout,
         "cwd": cwd,
     }
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return subprocess.run(["git"] + args, **kwargs)
+    try:
+        return subprocess.run(["git"] + args, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise UpdateError(f"git {args[0]} gave no answer in {timeout} s") from exc
 
 
-def _git_bytes(args: list, cwd: Optional[str] = None, stdin: bytes = b"") -> subprocess.CompletedProcess:
+def _git_bytes(args: list, cwd: Optional[str] = None, stdin: bytes = b"",
+               timeout: int = 60) -> subprocess.CompletedProcess:
     """A git command whose output stays the bytes git wrote: a signature
     covers a tag object byte for byte, and a text decode may alter it."""
     if cwd is None:
         from desktop.utils import get_project_root
         cwd = str(get_project_root())
-    kwargs = {"capture_output": True, "timeout": 60, "cwd": cwd, "input": stdin}
+    kwargs = {"capture_output": True, "timeout": timeout, "cwd": cwd, "input": stdin}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return subprocess.run(["git"] + args, **kwargs)
+    try:
+        return subprocess.run(["git"] + args, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise UpdateError(f"git {args[0]} gave no answer in {timeout} s") from exc
 
 
 def _rev(ref: str, cwd: Optional[str] = None) -> Optional[str]:
@@ -171,15 +196,6 @@ def _migrate_origin(cwd: Optional[str] = None) -> None:
             return
 
 
-def fetch_releases(cwd: Optional[str] = None) -> Optional[str]:
-    """Mirror origin's `v*` tags into RELEASE_REFS; the error, or None."""
-    _migrate_origin(cwd)
-    result = _git_cmd(["fetch", "--no-tags", "--prune", "origin", RELEASE_FETCH], cwd, timeout=120)
-    if result.returncode != 0:
-        return f"git fetch failed: {result.stderr.strip()}"
-    return None
-
-
 def installed_signers(cwd: Optional[str] = None) -> List[release_verify.Signer]:
     """The allowed signers HEAD was committed with — not the working copy's
     file, not a fetched tree's: the keys that may move this checkout are the
@@ -193,49 +209,100 @@ def installed_signers(cwd: Optional[str] = None) -> List[release_verify.Signer]:
 
 
 def _objects(refs: List[str], cwd: Optional[str]) -> dict:
-    """{ref: (object type, raw bytes)}, read in one `cat-file --batch`."""
+    """{ref: (object id, object type, raw bytes)}, read in one `cat-file --batch`."""
     result = _git_bytes(["cat-file", "--batch"], cwd, "".join(f"{ref}\n" for ref in refs).encode())
     if result.returncode != 0:
-        raise RuntimeError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
+        raise UpdateError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
     out, at, objects = result.stdout, 0, {}
     for ref in refs:
         end = out.index(b"\n", at)
         header = out[at:end].split()
         at = end + 1
         if len(header) != 3:            # "<ref> missing"
-            objects[ref] = ("missing", b"")
+            objects[ref] = ("", "missing", b"")
             continue
         size = int(header[2])
-        objects[ref] = (header[1].decode(), out[at:at + size])
+        objects[ref] = (header[0].decode(), header[1].decode(), out[at:at + size])
         at += size + 1
     return objects
 
 
+def _remote_releases(cwd: Optional[str]) -> List[Tuple[Tuple[int, int, int], str]]:
+    """Origin's tags of the release form above the floor, newest first. Names
+    are matched as bytes: nothing else a pusher names is ever decoded."""
+    result = _git_bytes(["ls-remote", "--refs", "origin", "refs/tags/v*"], cwd, timeout=120)
+    if result.returncode != 0:
+        raise UpdateError(f"git ls-remote failed: {result.stderr.decode(errors='replace').strip()}")
+    found = []
+    for line in result.stdout.splitlines():
+        _oid, _, ref = line.partition(b"\t")
+        name = ref[len(b"refs/tags/"):] if ref.startswith(b"refs/tags/") else b""
+        if _RELEASE_NAME.fullmatch(name):
+            version = release_verify.parse_version(name.decode())
+            if version > FLOOR:
+                found.append((version, name.decode()))
+    found.sort(reverse=True)
+    return found
+
+
+def _probe(names: List[str], cwd: Optional[str]) -> dict:
+    """{name: (object id, type, raw bytes)} of origin's tags, fetched into the
+    probe repository: the tag objects and their commits, no trees, no
+    history."""
+    git_dir = _git_cmd(["rev-parse", "--absolute-git-dir"], cwd)
+    url = _git_cmd(["remote", "get-url", "origin"], cwd)
+    if git_dir.returncode != 0 or url.returncode != 0:
+        raise UpdateError(f"not a repository with an origin: {git_dir.stderr.strip() or url.stderr.strip()}")
+    probe = str(Path(git_dir.stdout.strip()) / PROBE_DIR)
+    if not Path(probe, "HEAD").exists():
+        _git_cmd(["init", "--quiet", "--bare", probe], cwd)
+    # A partial-clone remote, so the server may leave the trees out.
+    for key, value in (("core.repositoryformatversion", "1"), ("extensions.partialClone", "origin"),
+                       ("remote.origin.url", url.stdout.strip()), ("remote.origin.promisor", "true"),
+                       ("remote.origin.partialclonefilter", "tree:0")):
+        _git_cmd(["config", key, value], probe)
+    refspecs = "".join(f"+refs/tags/{name}:refs/tags/{name}\n" for name in names).encode()
+    fetched = _git_bytes(["fetch", "--quiet", "--no-tags", "--depth=1", "--filter=tree:0", "--stdin", "origin"],
+                         probe, refspecs, timeout=120)
+    if fetched.returncode != 0:
+        raise UpdateError(f"git fetch of the release tags failed: {fetched.stderr.decode(errors='replace').strip()}")
+    objects = _objects([f"refs/tags/{name}" for name in names], probe)
+    return {name: objects[f"refs/tags/{name}"] for name in names}
+
+
+def _fetch_release(name: str, oid: str, cwd: Optional[str]) -> bool:
+    """Fetch a release that verified in the probe, history and all; False
+    when origin's tag is no longer the object that verified."""
+    result = _git_cmd(["fetch", "--quiet", "--no-tags", "origin", f"+refs/tags/{name}:{RELEASE_REFS}{name}"],
+                      cwd, timeout=1800)
+    if result.returncode != 0:
+        raise UpdateError(f"git fetch of {name} failed: {result.stderr.strip()}")
+    return _rev(f"{RELEASE_REFS}{name}", cwd) == oid
+
+
+def _forget_releases_but(kept: set, cwd: Optional[str]) -> None:
+    """Drop our refs of releases this survey did not fetch (gone from origin,
+    no longer verifying, below the installed one): HEAD keeps what it needs."""
+    listing = _git_cmd(["for-each-ref", "--format=%(refname)", RELEASE_REFS], cwd)
+    stale = [ref for ref in listing.stdout.split() if ref[len(RELEASE_REFS):] not in kept]
+    if stale:
+        _git_bytes(["update-ref", "--stdin"], cwd, "".join(f"delete {ref}\n" for ref in stale).encode())
+
+
 def survey(signers: List[release_verify.Signer], head: Optional[str],
            cwd: Optional[str] = None) -> Survey:
-    """Judge the fetched releases against `signers`, the newest version first.
+    """Judge origin's releases against `signers`, the newest version first;
+    UpdateError when origin cannot be read.
 
     With a `head`, the walk ends at the first signed release HEAD contains:
     nothing at or below the installed one can be an update, so a version is
     never taken backwards. Without one — a first install — the newest signed
     release is the one offered."""
-    listing = _git_cmd(["for-each-ref", "--format=%(refname)", RELEASE_REFS], cwd)
-    if listing.returncode != 0:
-        raise RuntimeError(f"git for-each-ref failed: {listing.stderr.strip()}")
-    candidates = []
-    for ref in listing.stdout.split():
-        name = ref[len(RELEASE_REFS):]
-        version = release_verify.parse_version(name)
-        if version is None:
-            logger.debug(f"tag {name} is not a release name — ignored")
-        elif version > FLOOR:
-            candidates.append((version, name, ref))
-    candidates.sort(reverse=True)
-
-    found = Survey()
-    objects = _objects([ref for _, _, ref in candidates], cwd) if candidates else {}
-    for version, name, ref in candidates:
-        kind, raw = objects[ref]
+    remote = _remote_releases(cwd)
+    objects = _probe([name for _, name in remote], cwd) if remote else {}
+    found, kept = Survey(), set()
+    for version, name in remote:
+        oid, kind, raw = objects[name]
         why = None
         if kind != "tag":
             why = "a lightweight tag, not a signed release"
@@ -244,7 +311,10 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
                 tag = release_verify.verify_tag(raw, name, signers)
             except release_verify.VerifyError as exc:
                 why = str(exc)
+        if why is None and not _fetch_release(name, oid, cwd):
+            why = "it moved on origin during the check"
         if why is None:
+            kept.add(name)
             release = Release(name, version, tag.commit)
             if head is None:
                 found.offered = release
@@ -262,8 +332,12 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
             else:
                 why = "its commit cannot be read"
         if why is not None and not (found.offered or found.rewrite):
-            logger.warning(f"tag {name} refused: {why}")
+            logger.debug(f"tag {name} refused: {why}")
             found.refused.append((name, why))
+    _forget_releases_but(kept, cwd)
+    if found.refused:
+        name, why = found.refused[0]
+        logger.warning(f"{len(found.refused)} release tag(s) refused; the newest, {name}: {why}")
     return found
 
 
@@ -286,8 +360,8 @@ def installed_build() -> Optional[str]:
     """The build id of a packaged install (a bootstrap that could not clone
     writes it beside the copy it unpacks — desktop/macos/bootstrap.py,
     desktop/windows/bootstrap.py), or None for a git checkout. A packaged
-    tree has no remote to compare against — the next start that reaches
-    GitHub replaces it with a clone, and the next package with a newer copy."""
+    tree has no remote to compare against; it stays as it is until another
+    installer runs, whose bootstrap tries the clone again."""
     stamp = get_project_root() / ".sautium_build"
     if not stamp.exists():
         return None
@@ -377,11 +451,12 @@ def check_for_updates() -> Optional[Survey]:
     logged)."""
     if not is_git_repo():
         return None
-    error = fetch_releases()
-    if error:
-        logger.warning(error)
+    _migrate_origin()
+    try:
+        return survey(installed_signers(), _rev("HEAD"))
+    except UpdateError as exc:
+        logger.warning(str(exc))
         return None
-    return survey(installed_signers(), _rev("HEAD"))
 
 
 def get_update_changelog(old_hash: str) -> List[str]:
@@ -441,13 +516,14 @@ def reset_to_release() -> Tuple[str, Optional[Release], Optional[str], Optional[
     if edited and not is_managed_install():
         return old_hash, None, "the checkout has local modifications", None
 
-    error = fetch_releases()
-    if error:
-        return old_hash, None, error, None
+    _migrate_origin()
     # Judged again here, not taken from the check the dialog showed: the move
     # goes to the commit this survey verified, by its id — never to a ref
     # something could repoint in between.
-    release = survey(installed_signers(), old_hash).offered if old_hash else None
+    try:
+        release = survey(installed_signers(), old_hash).offered if old_hash else None
+    except UpdateError as exc:
+        return old_hash, None, str(exc), None
     if release is None:
         return old_hash, None, "no signed release descends from this checkout", None
 
@@ -473,24 +549,35 @@ def reset_to_release() -> Tuple[str, Optional[Release], Optional[str], Optional[
 
 
 def install_release(app_dir: str, signers_file: str) -> Optional[Release]:
-    """A first install's checkout: the newest release that verifies against
-    the installer's own list, checked out in `app_dir` (a repository with its
-    origin set; files of an earlier attempt or the bundled copy may lie in
-    it). None when origin cannot be reached or holds no such release — the
-    bootstrap then installs its bundled copy, as with no network."""
-    error = fetch_releases(app_dir)
-    if error:
-        logger.warning(error)
-        return None
+    """What an installer's bootstrap checks out (desktop/windows/bootstrap.py,
+    desktop/macos/bootstrap.py): the newest release that verifies against the
+    installer's own list, in `app_dir` — a repository with its origin set.
+
+    A first install has no HEAD there (files of an earlier attempt or the
+    bundled copy may lie in it). A reinstall over a clone does, and this is
+    how a reinstall reaches a release that rewrote history, or one signed by
+    keys only the new installer lists — never a lower version than the one
+    the clone holds. The release the tree is on, or None when origin cannot
+    be reached or holds no release the list verifies (the bootstrap then
+    installs, or keeps, what it has)."""
     signers = release_verify.parse_allowed_signers(
         Path(signers_file).read_text(encoding="utf-8"), signers_file)
-    release = survey(signers, None, app_dir).offered
+    head = _rev("HEAD", app_dir)
+    try:
+        current = survey(installed_signers(app_dir), head, app_dir).installed if head else None
+        release = survey(signers, None, app_dir).offered
+    except UpdateError as exc:
+        logger.warning(str(exc))
+        return None
     if release is None:
         logger.warning("origin holds no release that verifies against the installer's signers")
         return None
+    if current and current.version >= release.version:
+        logger.info(f"the tree already holds {current.name}")
+        return current
     result = _git_cmd(["checkout", "--force", "-B", "main", release.commit], app_dir, timeout=300)
     if result.returncode != 0:
-        raise RuntimeError(f"git checkout failed: {result.stderr.strip()}")
+        raise UpdateError(f"git checkout failed: {result.stderr.strip()}")
     logger.info(f"installed {release.name} ({release.commit[:12]})")
     return release
 
@@ -532,7 +619,13 @@ def perform_update(
     if progress_cb:
         progress_cb("Downloading updates...")
 
-    old_hash, release, error, set_aside = reset_to_release()
+    try:
+        old_hash, release, error, set_aside = reset_to_release()
+    except Exception as exc:
+        # The services are down by now: whatever broke here, they come back
+        # up below and the failure is reported, never left as a stopped node.
+        logger.exception("update failed")
+        old_hash, release, error, set_aside = "", None, f"{type(exc).__name__}: {exc}", None
     if error:
         logger.error(f"update failed: {error}")
         _update_failed(config, "checkout", error)
