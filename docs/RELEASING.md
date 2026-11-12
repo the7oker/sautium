@@ -220,6 +220,10 @@ such as an auditor's clone, derives the root from the first key list on
 - **A new key** reaches launchers in a release that a key already on the list
   signed, and whose tree lists the new key. The release after that may be
   signed by the new key alone.
+- **Sign a rotation with a key the new list keeps**, such as the recovery key,
+  which stays listed. A release whose own list drops the key that signed it
+  leaves the installers built from it with nothing to verify, and a first
+  install from one of them falls back to its bundled copy.
 - **The daily key is lost:** the recovery key signs a release whose list names
   a new daily key.
 - **The daily key is stolen:** the same rotation, plus a public notice. The

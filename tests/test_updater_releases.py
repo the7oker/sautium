@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from desktop import updater
+from desktop import release_verify, updater
 from desktop.config_manager import get_data_dir
 from desktop.utils import get_project_root
 from tests.release_signing import Key, push_signed_tag
@@ -632,3 +632,58 @@ def test_a_refusal_is_said_in_the_dialog_only_when_nothing_is_offered():
     assert heading == "Sautium 0.2.0 is available" and not any("v0.3.0" in line for line in lines)
     heading, lines = updater.survey_words(updater.Survey(refused=refused))
     assert heading == "No update was installed" and "v0.3.0" in lines[-1]
+
+
+def test_a_tag_held_must_be_one_head_contains(world):
+    """A tag that does not verify on a commit HEAD does NOT contain is a
+    refusal, not held."""
+    later = world.commit("v2\n")
+    world.tag("v0.2.0", later, key=Key())
+    survey = world.check()
+    assert (survey.held, survey.refused[0][0]) == (None, "v0.2.0")
+
+
+def test_held_tags_cost_one_git_process_however_many(world, monkeypatch):
+    for i in range(30):
+        world.tag(f"v9.0.{i}", world.base, key=Key())
+    calls = []
+    real = updater._git_cmd
+    def counting(args, cwd=None, timeout=30):
+        calls.append(args[0])
+        return real(args, cwd, timeout)
+    monkeypatch.setattr(updater, "_git_cmd", counting)
+    survey = world.check()
+    assert survey.held == "v9.0.29" and survey.refused == []
+    assert calls.count("rev-list") == 1 and calls.count("merge-base") == 0
+
+
+def test_the_updaters_name_filter_agrees_with_the_verifier():
+    for name in (b"v999999.0.0", b"v1000000.0.0", b"v1.0.1234567", b"v0.2.0"):
+        assert bool(updater._RELEASE_NAME.fullmatch(name)) == \
+            (release_verify.parse_version(name.decode()) is not None)
+
+
+def test_a_tree_that_states_no_version_reads_as_the_lowest():
+    assert updater._stated_version("") == (0, 0, 0)
+    assert updater._stated_version('VERSION = "0.3.1"\n') == (0, 3, 1)
+
+
+def test_a_newer_installer_never_moves_a_clone_to_its_own_version(world, monkeypatch):
+    tip = world.commit("v2\n", version="0.3.0")
+    world.tag("v0.3.0", tip)
+    world.update()
+    git(world.seed, "checkout", "-q", "--orphan", "same")
+    same = world.commit("v3 same version\n", signers=[world.key], version="0.3.0")
+    world.tag("v0.3.0", same)                               # moved; the same version on another history
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 4, 0))
+    assert updater.install_release(str(world.managed), _payload_list(world, world.key)) is None
+    assert world.head() == tip
+
+
+def test_an_unreachable_origin_fails_a_reinstall_loudly(world, monkeypatch, tmp_path):
+    world.commit("v2\n", version="0.2.0")
+    git(world.managed, "pull", "-q", "--ff-only", "origin", "main")
+    git(world.managed, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 0))
+    with pytest.raises(updater.UpdateError):
+        updater.install_release(str(world.managed), _payload_list(world, world.key))

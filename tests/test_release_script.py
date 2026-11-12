@@ -349,3 +349,22 @@ def test_the_derived_root_skips_an_empty_list_and_follows_the_first_parent(stand
     result = stand.run("verify", "0.2.0")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "no floor recorded" in result.stdout
+
+
+def test_verify_forgets_a_tag_deleted_from_origin(stand):
+    stand.commit("0.2.0")
+    stand.release("0.2.0")
+    stand.commit("0.3.0")
+    stand.release("0.3.0")
+    assert stand.run("verify", "0.3.0").returncode == 0
+    git(stand.repo, "push", "-q", "origin", ":refs/tags/v0.3.0")
+    gone = stand.run("verify", "0.3.0")
+    assert gone.returncode != 0 and "not in the release chain" in gone.stderr
+
+
+def test_a_floor_never_pushed_says_how_to_make_it_again(stand):
+    stand.commit("0.2.0")
+    assert stand.run("tag", "0.2.0").returncode == 0     # made, not pushed
+    git(stand.repo, "tag", "-d", "v0.2.0")
+    result = stand.run("tag", "0.2.0")
+    assert result.returncode != 0 and "git config --unset sautium.releaseFloor" in result.stderr

@@ -2242,7 +2242,14 @@ The short version of the hard-learned lessons:
   - The version is the one each tree states: no key is needed to read it, and
     at a release whose own list drops its signer nothing HEAD holds verifies.
   - The release a clone's own list no longer verifies is `held` ("up to
-    date"), never a refusal.
+    date"), never a refusal, and is judged against one `rev-list` of HEAD
+    (round 3: a `merge-base` per tag let a pusher's thousand tags cost a
+    thousand git processes).
+  - A reinstall that could not read origin exits 1 and is tried again at the
+    next start; only "nothing newer" (exit 3) records the bundle (round 3:
+    an offline reinstall was recorded as having found nothing, for good). A
+    reinstall whose payload packages cannot be installed waits for the next
+    start, and the clone launches meanwhile.
 - **What went with the mirror:** `refs/sautium/mirrored`, the
   non-fast-forward move and the reflog expiry with its prune. Every rewrite
   is refused now, signed or not, and nothing is purged.

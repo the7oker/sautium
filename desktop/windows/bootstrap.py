@@ -161,7 +161,7 @@ def tree_current() -> bool:
     launcher's own update path owns it, and a newer Setup never rolls it back
     to the snapshot it happens to carry."""
     if tree_is_clone():
-        return PAYLOAD_SEEN.exists() and PAYLOAD_SEEN.read_text(encoding="utf-8").strip() == bundle_build_id()
+        return clone_reconciled()
     return installed_build_id() == bundle_build_id()
 
 
@@ -268,6 +268,10 @@ def clone_tree(report: Callable[[str], None]) -> bool:
     return True
 
 
+def clone_reconciled() -> bool:
+    return PAYLOAD_SEEN.exists() and PAYLOAD_SEEN.read_text(encoding="utf-8").strip() == bundle_build_id()
+
+
 def reconcile_clone(report: Callable[[str], None]) -> None:
     """A bundle meets an existing clone once: a reinstall. The payload's
     updater moves the clone only if this installer is newer than the release
@@ -275,7 +279,7 @@ def reconcile_clone(report: Callable[[str], None]) -> None:
     runs over a clone for a stale package marker or a relaunch after an
     update, and an older installer's list must never undo what the clone's
     own updater took. A failure is tried again at the next start."""
-    if PAYLOAD_SEEN.exists() and PAYLOAD_SEEN.read_text(encoding="utf-8").strip() == bundle_build_id():
+    if clone_reconciled():
         return
     try:
         install_release(report)
@@ -505,10 +509,23 @@ class ProgressBar(tk.Canvas):
 def start_worker(window: BootstrapWindow) -> None:
     def work():
         try:
-            # The payload's packages first: its updater verifies the release.
-            install_deps(lambda line: window.post("detail", line), PAYLOAD)
-            sync_payload(lambda text: window.post("status", text))
-            install_deps(lambda line: window.post("detail", line))
+            detail = lambda line: window.post("detail", line)
+            status = lambda text: window.post("status", text)
+            # The payload's packages before its updater runs: it verifies the
+            # release. Over a clone that is a reinstall's own step, and a
+            # reinstall that cannot run (offline, say) waits for the next
+            # start rather than keep a working clone from launching.
+            if tree_is_clone():
+                if not clone_reconciled():
+                    try:
+                        install_deps(detail, PAYLOAD)
+                        reconcile_clone(status)
+                    except Exception as exc:
+                        log(f"the reinstall waits for the next start ({exc})")
+            else:
+                install_deps(detail, PAYLOAD)
+                sync_payload(status)
+            install_deps(detail)
             window.post("status", "Starting Sautium…")
             window.post("done", None)
         except Exception as exc:

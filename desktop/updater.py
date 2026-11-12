@@ -287,7 +287,11 @@ def _probe_repository(cwd: Optional[str]) -> List[str]:
     if _git_cmd(git + ["rev-parse", "--is-bare-repository"], cwd).stdout.strip() != "true":
         if probe.exists():
             # It holds nothing but tag objects, fetched again below.
-            shutil.rmtree(probe, onerror=lambda func, path, _: (os.chmod(path, stat.S_IWRITE), func(path)))
+            # git writes its objects read-only, which Windows will not delete.
+            for item in probe.rglob("*"):
+                if item.is_file():
+                    os.chmod(item, stat.S_IREAD | stat.S_IWRITE)
+            shutil.rmtree(probe)
         made = _git_cmd(["init", "--quiet", "--bare", str(probe)], cwd)
         if made.returncode != 0:
             raise UpdateError(f"git init of the release probe failed: {made.stderr.strip()}")
@@ -334,6 +338,15 @@ def _forget_releases_but(kept: set, cwd: Optional[str]) -> None:
         _git_bytes(["update-ref", "--stdin"], cwd, "".join(f"delete {ref}\n" for ref in stale).encode())
 
 
+def _history(head: str, cwd: Optional[str]) -> set:
+    """Every commit HEAD contains, in one `rev-list`: a pusher's thousand tags
+    on old commits cost one git process, not a thousand."""
+    result = _git_cmd(["rev-list", head], cwd, timeout=120)
+    if result.returncode != 0:
+        raise UpdateError(f"git rev-list failed: {result.stderr.strip()}")
+    return set(result.stdout.split())
+
+
 def _tagged_commit(raw: bytes) -> Optional[str]:
     """The commit a tag object names, read without trusting it."""
     try:
@@ -355,7 +368,7 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
     remote = _remote_releases(cwd)
     annotated = [name for _, name, signed in remote if signed]
     objects = _probe(annotated, cwd) if annotated else {}
-    found, kept = Survey(), set()
+    found, kept, history = Survey(), set(), None
     for version, name, signed in remote:
         why, tag = None, None
         if not signed:
@@ -372,9 +385,14 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
                 except release_verify.VerifyError as exc:
                     why = str(exc)
                     commit = _tagged_commit(raw)
-                    if head and commit and _ancestry(commit, head, cwd):
-                        found.held = found.held or name
-                        continue
+                    if head and commit:
+                        if history is None:
+                            history = _history(head, cwd)
+                        if commit in history:
+                            logger.debug(f"tag {name} held: HEAD contains it, its signature does not "
+                                         f"verify here ({why})")
+                            found.held = found.held or name
+                            continue
         if why is None and not _fetch_release(name, oid, cwd):
             why = "it moved on origin during the check"
         if why is None:
@@ -641,8 +659,10 @@ def install_release(app_dir: str, signers_file: str) -> Optional[Release]:
     or older, knows nothing the clone's own list does not, and its list must
     never undo a rotation the clone took. This is how a reinstall reaches a
     release that rewrote history, or one signed by keys only a new installer
-    lists. The release moved to, or None when there is none to take (no
-    origin, nothing verifies, nothing newer)."""
+    lists. The release moved to, or None when there is none to take
+    (nothing verifies, nothing newer); UpdateError when origin cannot be read
+    — a reinstall that could not look is tried again, never recorded as
+    having found nothing."""
     signers = release_verify.parse_allowed_signers(
         Path(signers_file).read_text(encoding="utf-8"), signers_file)
     head = _rev("HEAD", app_dir)
@@ -653,11 +673,7 @@ def install_release(app_dir: str, signers_file: str) -> Optional[Release]:
             logger.info(f"this installer ({'.'.join(map(str, mine))}) is not newer than the tree "
                         f"({'.'.join(map(str, held))}) — the tree is left to its own updater")
             return None
-    try:
-        release = survey(signers, None, app_dir).offered
-    except UpdateError as exc:
-        logger.warning(str(exc))
-        return None
+    release = survey(signers, None, app_dir).offered
     if release is None:
         logger.warning("origin holds no release that verifies against the installer's signers")
         return None
@@ -769,8 +785,13 @@ if __name__ == "__main__":
     # The bootstraps' first clone (desktop/windows/bootstrap.py,
     # desktop/macos/bootstrap.py), run from the installer's payload:
     #   python -B -m desktop.updater install-release <app dir> <signers file>
-    # Exit 0 with the release checked out, 3 with none to take.
+    # Exit 0 with the release checked out, 3 with none to take, 1 when origin
+    # could not be read or the checkout failed.
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     if len(sys.argv) != 4 or sys.argv[1] != "install-release":
         sys.exit("usage: python -m desktop.updater install-release <app dir> <signers file>")
-    sys.exit(0 if install_release(sys.argv[2], sys.argv[3]) else 3)
+    try:
+        sys.exit(0 if install_release(sys.argv[2], sys.argv[3]) else 3)
+    except UpdateError as exc:
+        logger.error(str(exc))
+        sys.exit(1)

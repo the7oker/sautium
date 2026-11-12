@@ -155,7 +155,9 @@ def trusted_chain() -> List[Tuple[updater.Release, List[release_verify.Signer]]]
         held = signers_at(signed.commit)[0]
         chain.append((updater.Release(name, version, signed.commit), held))
     if floor and not chain:
-        raise Refused(f"the floor this checkout recorded ({FLOOR_CONFIG} = {floor[:12]}) is not on origin")
+        raise Refused(f"the floor this checkout recorded ({FLOOR_CONFIG} = {floor[:12]}) is not on origin — "
+                      f"push it, or if it was never pushed and is to be made again, "
+                      f"`git config --unset {FLOOR_CONFIG}` first")
     return chain
 
 

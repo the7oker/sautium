@@ -185,6 +185,22 @@ def test_an_older_installer_never_moves_a_clone(bootstrap, origin):
     assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.2.5+bundle"
 
 
+def test_a_reinstall_that_cannot_reach_origin_is_tried_again(bootstrap, origin, tmp_path):
+    """Round 3's M1: origin unreachable is no "nothing newer" — the same
+    installer looks again at the next start, and then moves the clone."""
+    _clone_at(bootstrap, origin, "v0.2.0")
+    _new_release(origin, "v0.3.0", orphan=True)
+    installer(bootstrap.PAYLOAD, "0.3.0")
+    url = git(bootstrap.APP_DIR, "remote", "get-url", "origin")
+    git(bootstrap.APP_DIR, "remote", "set-url", "origin", str(tmp_path / "unreachable.git"))
+    bootstrap.sync_payload(lambda _: None)
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.2.0+bundle"
+    git(bootstrap.APP_DIR, "remote", "set-url", "origin", url)
+    bootstrap.sync_payload(lambda _: None)
+    assert git(bootstrap.APP_DIR, "rev-parse", "HEAD") == origin.tip
+    assert bootstrap.PAYLOAD_SEEN.read_text().strip() == "0.3.0+bundle"
+
+
 def test_a_failed_reinstall_is_tried_again(bootstrap, origin, monkeypatch):
     _clone_at(bootstrap, origin, "v0.2.0")
     installer(bootstrap.PAYLOAD, "0.3.0")
@@ -260,9 +276,11 @@ class _Window:
         self.posts.append(kind)
 
 
-def _run_worker(boot, monkeypatch, calls):
-    monkeypatch.setattr(boot, "install_deps", lambda report, tree=boot.APP_DIR: calls.append(("deps", tree)))
+def _run_worker(boot, monkeypatch, calls, keep_deps=False):
+    if not keep_deps:
+        monkeypatch.setattr(boot, "install_deps", lambda report, tree=boot.APP_DIR: calls.append(("deps", tree)))
     monkeypatch.setattr(boot, "sync_payload", lambda report: calls.append(("sync", None)))
+    monkeypatch.setattr(boot, "reconcile_clone", lambda report: calls.append(("reconcile", None)))
     monkeypatch.setattr(boot, "install_runtime", lambda report: calls.append(("runtime", None)), raising=False)
     monkeypatch.setattr(boot, "find_brew", lambda: "/opt/homebrew/bin/brew", raising=False)
     threads = []
@@ -282,14 +300,41 @@ def test_the_payloads_packages_go_in_before_the_first_checkout(bootstrap, monkey
     assert window.posts[-1] == "done"
 
 
-def test_a_reinstall_over_a_clone_has_the_payloads_packages_first_too(bootstrap, monkeypatch):
+def _a_clone(bootstrap):
     (bootstrap.APP_DIR / ".git").mkdir(parents=True)
     (bootstrap.APP_DIR / "desktop").mkdir()
     (bootstrap.APP_DIR / "desktop" / "requirements.txt").write_text("x\n")
+
+
+def test_a_reinstall_over_a_clone_has_the_payloads_packages_first_too(bootstrap, monkeypatch):
+    _a_clone(bootstrap)
     calls = []
     _run_worker(bootstrap, monkeypatch, calls)
     assert [step for step in calls if step[0] != "runtime"] == \
-        [("deps", bootstrap.PAYLOAD), ("sync", None), ("deps", bootstrap.APP_DIR)]
+        [("deps", bootstrap.PAYLOAD), ("reconcile", None), ("deps", bootstrap.APP_DIR)]
+
+
+def test_a_reconciled_clone_never_gets_the_payloads_packages(bootstrap, monkeypatch):
+    _a_clone(bootstrap)
+    bootstrap.PAYLOAD_SEEN.write_text(bootstrap.bundle_build_id())
+    calls = []
+    _run_worker(bootstrap, monkeypatch, calls)
+    assert [step for step in calls if step[0] != "runtime"] == [("deps", bootstrap.APP_DIR)]
+
+
+def test_a_reinstall_that_cannot_run_lets_the_clone_launch(bootstrap, monkeypatch):
+    """Offline: the payload's packages cannot be installed. The clone still
+    launches, and the reinstall waits for the next start."""
+    _a_clone(bootstrap)
+    calls = []
+    def deps(report, tree=bootstrap.APP_DIR):
+        if tree == bootstrap.PAYLOAD:
+            raise RuntimeError("python failed (exit 1)")
+        calls.append(("deps", tree))
+    monkeypatch.setattr(bootstrap, "install_deps", deps)
+    window = _run_worker(bootstrap, monkeypatch, calls, keep_deps=True)
+    assert window.posts[-1] == "done"
+    assert not bootstrap.PAYLOAD_SEEN.exists()
 
 
 def test_the_macos_runtime_is_in_place_before_the_payloads_packages(macos, monkeypatch):
