@@ -294,6 +294,31 @@ def test_a_stolen_keys_tag_on_a_commit_that_once_stated_a_higher_version_hides_n
     assert world.head() == r0
 
 
+def test_a_stolen_keys_tag_just_above_the_installed_version_hides_no_rotation(world):
+    a, r, b = world.key, Key(), Key()
+    planted = world.commit("a merged bump\n", signers=[a, r], version="0.2.1")
+    r0 = world.commit("r0\n", version="0.2.0")
+    world.tag("v0.2.0", r0)
+    world.update()
+    world.tag("v0.3.0", world.commit("r1\n", signers=[b, r], version="0.3.0"), key=r)
+    world.tag("v0.2.1", planted, key=a)
+    world.tag("v0.2.2", off_main(world, r0, "thief\n"), key=a)
+    survey = world.check()
+    assert (survey.installed.name, survey.held, survey.offered) == ("v0.2.0", "v0.2.1", None)
+
+
+def test_a_working_tree_stating_no_version_still_never_goes_backwards(world):
+    """Review round 3: a HEAD whose VERSION line is its own edit sets no
+    ceiling, so the release it holds still ends the read."""
+    tagged = world.commit("v2\n", version="0.2.0")
+    world.tag("v0.2.0", tagged)
+    world.commit("dev\n", version="0.3.0.dev0")
+    git(world.working, "pull", "-q", "--ff-only", "origin", "main")
+    world.tag("v0.1.9", world.commit("later\n"))
+    survey = world.check(world.working)
+    assert (survey.installed.name, survey.offered, survey.rewrite) == ("v0.2.0", None, None)
+
+
 def test_a_lower_name_on_a_commit_stating_a_higher_version_is_no_installed_release(world):
     tip = world.commit("v2\n", version="0.3.0")
     world.tag("v0.2.0", tip)

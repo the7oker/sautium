@@ -514,8 +514,11 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
     found, refused, candidates = Survey(), [], []
     history = _history(head, cwd) if head else set()
     # No release HEAD holds is above the version HEAD's own tree states (on a
-    # managed install, exactly the installed one's).
+    # managed install, exactly the installed one's). A HEAD that states none
+    # (a working tree's own edit) sets no ceiling: with one of (0, 0, 0) every
+    # release it holds would be held, and a lower version offered.
     ceiling = _stated_version(self_stated(head, cwd)) if head else (0, 0, 0)
+    ceiling = None if ceiling == (0, 0, 0) else ceiling
     for version, name, signed in remote:            # the newest first
         if not signed:
             refused.append((version, name, "a lightweight tag, not a signed release"))
@@ -536,7 +539,8 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
             # among them.
             try:
                 tag = release_verify.verify_tag(raw, name, signers)
-                why = None if _stated_version(self_stated(tag.commit, cwd)) == version <= ceiling else \
+                stated = _stated_version(self_stated(tag.commit, cwd))
+                why = None if stated == version and (ceiling is None or version <= ceiling) else \
                     "its tree states another version, or one above HEAD's"
             except release_verify.VerifyError as exc:
                 why = str(exc)

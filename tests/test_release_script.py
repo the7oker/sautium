@@ -376,11 +376,13 @@ def test_a_new_root_keeps_no_key_of_the_old_list(stand):
     stand.use_key("recovery")
     result = stand.run("tag", "0.3.0", "--new-root", typed="new root v0.3.0\n")
     assert result.returncode != 0 and "not a new root" in result.stderr and "still on v0.2.0's list" in result.stderr
+    assert "--list-change" in result.stderr
     git(stand.repo, "checkout", "-q", "--orphan", "rewritten")
     stand.commit("0.3.1", signers=["daily", "recovery"])
     stand.use_key("daily")
     rewrite = stand.run("tag", "0.3.1", "--new-root", typed="new root v0.3.1\n").stderr
     assert "not a new root" in rewrite and "a rewrite with the same keys" in rewrite
+    assert "--list-change" not in rewrite
 
 
 def test_a_new_root_is_judged_against_the_old_chains_last_list(stand):
