@@ -1227,7 +1227,8 @@ pass them on; no key's signature is trusted for what it says.
   and queues no check. **No re-serve by origin** (2026-11-14): a blob
   fetched for the owner's imported history (a name its waiting room holds,
   an artist a placed scrobble or an imported listen engages, a spelling no
-  artist here bears — the history's own, once placed under MusicBrainz's) or
+  artist here bears whose slice covers only artists the history alone placed
+  — the history's own, once placed under MusicBrainz's —, or none bound here) or
   for his own lookup (Discovery's mint, the assistant's resolve, an opened
   artist page's ListenBrainz statistics) is kept for this node alone
   (`local_only`, read at the fetch by `LOCAL_ONLY_SQL` in each family's

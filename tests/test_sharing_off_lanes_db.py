@@ -209,12 +209,19 @@ def test_a_page_s_request_made_while_no_one_listened_is_asked_once_the_listen_is
     from desktop.p2p.sync_walk import DeadAddresses
     cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=_refuse, dead=DeadAddresses(),
                                         sharing_enabled=lambda: True)
-    asyncio.run(cycle.pages_waiting())
-    assert cycle._reasons == set()
-    artist = str(uuid.uuid4())
+    artist, mbid = str(uuid.uuid4()), str(uuid.uuid4())
     with node.cursor() as cur:
         cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'Opened Unheard')", (artist,))
+        cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES (%s, %s, 'name_exact')",
+                    (mbid, artist))
         cur.execute("INSERT INTO lb_slice_requests (artist_id) VALUES (%s)", (artist,))
+    asyncio.run(cycle.pages_waiting())
+    assert cycle._reasons == set()          # before the timer's first run, which reads every page
+    cycle._timed = True
+    cycle._paged = {mbid}
+    asyncio.run(cycle.pages_waiting())
+    assert cycle._reasons == set()          # asked at once already: it rides the paced requests
+    cycle._paged = set()
     asyncio.run(cycle.pages_waiting())
     assert cycle._reasons == {"request"}
 

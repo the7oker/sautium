@@ -9,7 +9,9 @@ with a peer's word about this node and with a name a signed zero-match closed:
   author's source first; the author whose zero-match closed it is asked last,
   and its zero-match is no answer before then from whichever source;
 - one source whose answer raises is skipped for the rest of the run, and
-  what it was asked goes to the next source — in both cycles.
+  what it was asked goes to the next source — in both cycles;
+- the backend's recorder of a failed run, refused by the database the run
+  mostly failed on, ends no run loop.
 
 A real HTTP server on loopback plays the refusing peer and the client is a
 peer client, so the refusal takes the bounded path; no database: the cycles'
@@ -298,3 +300,25 @@ def test_an_lb_source_whose_answer_raises_is_skipped_and_its_artists_asked_of_th
     assert asked_lb == [(broken, [ARTIST]), (good, [ARTIST])]
     assert dropped == [broken]
     assert published[-1]["unserved"] == 0
+
+
+def test_the_backend_s_record_of_a_failed_run_refused_by_the_database_ends_no_run_loop(monkeypatch):
+    """Every run of the slice cycles is its dispatcher's: a record that raised
+    out of a failed run's except ended the dispatcher, and the cycle with it,
+    until the backend restarted."""
+    import sys
+    from pathlib import Path
+    backend = Path(__file__).resolve().parents[2] / "backend"
+    if str(backend) not in sys.path:
+        sys.path.insert(0, str(backend))
+    pytest.importorskip("fastapi")
+    monkeypatch.chdir(backend)            # main mounts its static folder by a relative path
+    import psycopg2
+    import db_pool
+    import main
+
+    def refused():
+        raise psycopg2.OperationalError("the server closed the connection unexpectedly")
+
+    monkeypatch.setattr(db_pool, "get_conn", refused)
+    assert main._diag_record("lb_slice.failed", {"trigger": "auto", "error": "down"}) is None

@@ -440,3 +440,15 @@ def test_a_page_in_flight_while_remove_runs_is_never_written(walk, monkeypatch):
                     "(SELECT count(*) FROM pending_scrobble_artists), "
                     "(SELECT count(*) FROM lastfm_import)")
         assert cur.fetchone() == (0, 0, 0)
+
+
+def test_remove_after_a_budget_pause_leaves_no_walk_to_resume(walk, monkeypatch):
+    """A walk the waiting room's budget paused resumes after a canon pass
+    (resume_below_budget): removed meanwhile, it would read back the whole
+    history the owner just removed."""
+    started = []
+    monkeypatch.setitem(lastfm_history._state, "budget", True)
+    monkeypatch.setattr(lastfm_history, "start", lambda reason: started.append(reason) or True)
+    lastfm_history.remove_imported()
+    lastfm_history.resume_below_budget()
+    assert started == []

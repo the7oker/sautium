@@ -433,8 +433,8 @@ def _lb_stream(monkeypatch, rows, newest=None, sources=None, sharing=None):
     monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, version: list(rows))
     cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_refuse, dead=DeadAddresses(),
                                         sharing_enabled=lambda: sharing is None or sharing[0])
-    sources = sources or [(SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0),
-                           "ef" * 32, None)]
+    sources = sources or [(SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0,
+                                           last_health=None), "ef" * 32, None)]
     published = []
 
     async def find_sources(listed):
@@ -524,8 +524,9 @@ def test_a_page_asked_at_once_is_paced_when_asked_again(monkeypatch):
     assert len(asked) == 2 and asked[1] - asked[0] >= 0.29
 
 
-def _source(n):
-    return SimpleNamespace(base_url=f"https://198.51.100.{n}:21000", session_deadline=0)
+def _source(n, dump=False):
+    return SimpleNamespace(base_url=f"https://198.51.100.{n}:21000", session_deadline=0,
+                           last_health={"lb_dump": "20261101-000000"} if dump else {})
 
 
 REPLICA, DUMP = "aa" * 32, "bb" * 32
@@ -539,7 +540,7 @@ def _replica_ahead(asked):
         if node == REPLICA:
             return {"imported": 0, "recordings": 0, "missing": list(batch), "dropped": 0}
         return {"imported": len(batch), "recordings": 0, "missing": [], "dropped": 0}
-    return [(_source(6), REPLICA, None), (_source(5), DUMP, None)], exchange
+    return [(_source(6), REPLICA, None), (_source(5, dump=True), DUMP, None)], exchange
 
 
 def test_a_page_is_asked_of_the_dump_nodes_first_and_at_once(monkeypatch):
@@ -650,3 +651,44 @@ def test_after_a_rate_limit_s_wait_the_lb_stream_asks_again_only_while_sharing_i
     assert len(asked) == 1
     assert published[-1]["reason"] == "sharing_off"
 
+
+def test_a_page_a_dump_node_had_no_budget_for_is_asked_of_it_again_at_the_pace(monkeypatch):
+    """A dump node's `missing` is its budget's of the moment (pages opened one
+    after another spend this node's share of it): the page is asked of it
+    again by the paced requests of the same run, not left for a later one."""
+    monkeypatch.setattr(lb_slice_cycle, "PACKET_GAP", 0.2)
+    page = _mbids("a", 1)
+    rows = [(m, None, True) for m in page] + [(m, None, False) for m in _mbids("c", 30)]
+    asked = []
+
+    async def exchange(api, node, source_addr, batch, min_version):
+        asked.append(list(batch))
+        if len(asked) == 1:               # the budget spent: the page and its fill come back missing
+            return {"imported": 0, "recordings": 0, "missing": list(batch), "dropped": 0}
+        return {"imported": len(batch), "recordings": 0, "missing": [], "dropped": 0}
+
+    cycle, published = _lb_stream(monkeypatch, rows, sources=[(_source(5, dump=True), DUMP, None)])
+    cycle._exchange = exchange
+    asyncio.run(cycle.run())
+    assert len(asked) == 2 and page[0] in asked[1]
+    assert published[-1]["unserved"] == 0
+
+
+def test_the_page_goes_to_the_dump_nodes_in_the_order_they_were_found(monkeypatch):
+    """The source finder's fallback names the master last among the dump nodes:
+    the page keeps that order — the dump nodes before the replicas, never the
+    whole list reversed."""
+    page = _mbids("a", 1)
+    first, master = "c1" * 32, "c2" * 32
+    sources = [(_source(6), REPLICA, None), (_source(7, dump=True), first, None),
+               (_source(8, dump=True), master, None)]
+    asked = []
+
+    async def exchange(api, node, source_addr, batch, min_version):
+        asked.append(node)
+        return {"imported": len(batch), "recordings": 0, "missing": [], "dropped": 0}
+
+    cycle, _ = _lb_stream(monkeypatch, [(m, None, True) for m in page], sources=sources)
+    cycle._exchange = exchange
+    asyncio.run(cycle.run())
+    assert asked == [first]

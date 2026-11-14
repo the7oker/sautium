@@ -355,5 +355,7 @@ def remove_imported() -> Dict[str, int]:
         cur.execute("DELETE FROM lastfm_import")
     logger.info("Last.fm history removed: %d listens over %d tracks, %d cards, %d waiting",
                 len(deleted), len(tracks), sessions, waiting)
-    _set(phase="idle", progress="", pct=None, error=None, paused=None)
+    # No budget pause outlives the history: the next canon pass would resume
+    # it (resume_below_budget) and read back what was just removed.
+    _set(phase="idle", progress="", pct=None, error=None, paused=None, budget=False)
     return {"listens": len(deleted), "sessions": sessions, "waiting": waiting}

@@ -834,43 +834,53 @@ def pending_slice_names(conn, limit: int = 200) -> list:
 
 RESERVE_BLOB_MAX_GZ = 2 * 1024 * 1024
 
+# An artist {a} (an SQL expression) the imported history placed: a waiting
+# name resolved to it, or a listen imported from Last.fm.
+_HISTORY_ARTIST_SQL = """(EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n WHERE lo_n.artist_id = {a})
+       OR EXISTS (SELECT 1 FROM track_artists lo_ta
+                    JOIN listening_history lo_lh ON lo_lh.track_id = lo_ta.track_id
+                   WHERE lo_ta.artist_id = {a} AND lo_lh.source = 'lastfm'))"""
+# What another node may already know of an artist {a}: a file owned here or at
+# the HQPlayer, or a completed listen on this node.
+_KNOWN_ARTIST_SQL = """(EXISTS (SELECT 1 FROM track_artists lo_ta
+                    JOIN owned_files lo_f ON lo_f.track_id = lo_ta.track_id
+                   WHERE lo_ta.artist_id = {a})
+       OR EXISTS (SELECT 1 FROM track_artists lo_ta
+                    JOIN listening_history lo_lh ON lo_lh.track_id = lo_ta.track_id
+                   WHERE lo_ta.artist_id = {a} AND lo_lh.source = 'sautium'
+                     AND lo_lh.completed AND NOT lo_lh.skipped))"""
+
 # Whether a blob this node fetched for the name keyed {nk} (an SQL expression)
 # serves this node only — the origin it had when fetched (2026-11-14): a
 # re-served blob answers "did you fetch X?" to anyone who asks, so what the
 # owner's imported history and his own lookups brought stays here. Local: the
 # name waits in the waiting room (pending_scrobble_artists), or it names an
-# artist the history placed (a waiting name resolved to it, or a listen
-# imported from Last.fm), or no artist here bears it at all — a spelling of
-# the history's own once its scrobbles were placed under MusicBrainz's and its
-# waiting row went with the last of them, or a lookup that minted nothing:
-# every name the stream draws for another reason is an artist's here — unless
-# a reason another node may already know names it too: a file owned here or at
-# the HQPlayer, or a completed listen on this node (the caveat concedes both).
-# A fetch for the person (Discovery's mint, the assistant's resolve) is local
-# whatever the name (MBSliceClient's `for_person`); a pick's binding says
-# nothing here, since the seed brings the master's own picks under the same
-# confidence. The similar-artist stubs, the seed's picks and carried phantoms
-# re-serve as before. Read at the import and by the one-time marking of the
-# blobs kept before (db_migrate `slice_origins_v1`).
-LOCAL_ONLY_SQL = """(
-    (EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n WHERE lo_n.name_key = {nk})
-     OR NOT EXISTS (SELECT 1 FROM artists lo_x WHERE lower(btrim(lo_x.name)) = {nk})
+# artist the history placed — unless the name names an artist another node may
+# already know of (the caveat concedes it). A name no artist here bears — a
+# spelling of the history's own, once its scrobbles were placed under
+# MusicBrainz's and its waiting row went with the last of them; an owned
+# artist's or a stub's spelling the canon renamed since; a lookup that minted
+# nothing — is told by the artists its slice covers (slice_index, written at
+# the import before this is read): local when every one bound here is the
+# history's alone, or none is bound at all. A fetch for the person
+# (Discovery's mint, the assistant's resolve) is local whatever the name
+# (MBSliceClient's `for_person`); a pick's binding says nothing here, since the
+# seed brings the master's own picks under the same confidence. The
+# similar-artist stubs, the seed's picks and carried phantoms re-serve as
+# before. Read at the import and by the one-time marking of the blobs kept
+# before (db_migrate `slice_origins_v1`).
+LOCAL_ONLY_SQL = f"""(
+    (EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n WHERE lo_n.name_key = {{nk}})
      OR EXISTS (SELECT 1 FROM artists lo_a
-                 WHERE lower(btrim(lo_a.name)) = {nk}
-                   AND (EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n
-                                 WHERE lo_n.artist_id = lo_a.id)
-                        OR EXISTS (SELECT 1 FROM track_artists lo_ta
-                                     JOIN listening_history lo_lh ON lo_lh.track_id = lo_ta.track_id
-                                    WHERE lo_ta.artist_id = lo_a.id AND lo_lh.source = 'lastfm'))))
+                 WHERE lower(btrim(lo_a.name)) = {{nk}} AND {_HISTORY_ARTIST_SQL.format(a="lo_a.id")})
+     OR (NOT EXISTS (SELECT 1 FROM artists lo_x WHERE lower(btrim(lo_x.name)) = {{nk}})
+         AND NOT EXISTS (SELECT 1 FROM slice_index lo_i
+                           JOIN artist_mbids lo_m ON lo_m.mbid = ANY(lo_i.subject_artists)
+                          WHERE lo_i.family = 'mb' AND lo_i.key = {{nk}}
+                            AND NOT ({_HISTORY_ARTIST_SQL.format(a="lo_m.artist_id")}
+                                     AND NOT {_KNOWN_ARTIST_SQL.format(a="lo_m.artist_id")}))))
     AND NOT EXISTS (SELECT 1 FROM artists lo_a
-                     WHERE lower(btrim(lo_a.name)) = {nk}
-                       AND (EXISTS (SELECT 1 FROM track_artists lo_ta
-                                      JOIN owned_files lo_f ON lo_f.track_id = lo_ta.track_id
-                                     WHERE lo_ta.artist_id = lo_a.id)
-                            OR EXISTS (SELECT 1 FROM track_artists lo_ta
-                                         JOIN listening_history lo_lh ON lo_lh.track_id = lo_ta.track_id
-                                        WHERE lo_ta.artist_id = lo_a.id AND lo_lh.source = 'sautium'
-                                          AND lo_lh.completed AND NOT lo_lh.skipped))))"""
+                     WHERE lower(btrim(lo_a.name)) = {{nk}} AND {_KNOWN_ARTIST_SQL.format(a="lo_a.id")}))"""
 
 
 def local_only(conn, nk: str) -> bool:

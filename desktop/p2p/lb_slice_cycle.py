@@ -209,12 +209,16 @@ def _requests(remaining: dict, opened: set, newest: Optional[str]) -> list:
     return out
 
 
-def page_requests_waiting(dsn: str) -> bool:
+def page_requests_waiting(dsn: str) -> set:
+    """The MBIDs of the artist pages that asked and wait, none fetched yet."""
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT EXISTS (SELECT 1 FROM lb_slice_requests)")
-            return bool(cur.fetchone()[0])
+            cur.execute("""SELECT DISTINCT am.mbid::text FROM lb_slice_requests r
+                             JOIN artist_mbids am ON am.artist_id = r.artist_id
+                            WHERE NOT EXISTS (SELECT 1 FROM lb_slice_fetches f
+                                               WHERE f.artist_mbid = am.mbid)""")
+            return {r[0] for r in cur.fetchall()}
     finally:
         conn.close()
 
@@ -308,9 +312,9 @@ def publish_status(dsn: str, key: str, state: dict) -> None:
     every few seconds while a Last.fm history import grew the MBID set
     (2026-10-07). An unchanged row is not rewritten and wakes nobody — the
     NOTIFY says a condition moved, not that a run happened. The cycle is the
-    row's only writer, under its run lock: a dump loader just wakes the
-    notices channel, since a node holding a family's dump shows no deferral
-    for it (routers/settings._notices_state)."""
+    row's only writer, one run at a time (its dispatcher's): a dump loader
+    just wakes the notices channel, since a node holding a family's dump shows
+    no deferral for it (routers/settings._notices_state)."""
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
@@ -396,6 +400,7 @@ class LbSliceCycle:
         self._asked_at: dict[str, float] = {}   # source -> when this node last asked it
         self._page = asyncio.Event()            # an artist page asked since the run began
         self._paged: set[str] = set()           # page MBIDs already asked at once
+        self._timed = False                     # the timer's first run was asked for
 
     # ------------------------------------------------------------ lifecycle
 
@@ -437,11 +442,16 @@ class LbSliceCycle:
             self._notify.set()
 
     async def pages_waiting(self) -> None:
-        """Whenever the notifications are listened for (the first time and
-        after a reconnect): an artist page that asked while no one listened is
-        asked now — a page wakes the cycle once, for its new request alone."""
+        """Whenever the notifications are listened for again: an artist page
+        that asked while no one listened, and was not asked at once yet, is
+        asked now — a page wakes the cycle once, for its new request alone.
+        Not before the timer's first run, which reads every waiting page
+        itself once a source can be found (a run at the first LISTEN would
+        find none but the fallback's)."""
+        if not self._timed:
+            return
         loop = asyncio.get_event_loop()
-        if await loop.run_in_executor(None, page_requests_waiting, self.db_dsn):
+        if await loop.run_in_executor(None, page_requests_waiting, self.db_dsn) - self._paged:
             self.request("request")
 
     async def request_async(self, reason: str) -> None:
@@ -487,6 +497,7 @@ class LbSliceCycle:
                 # Through the dispatcher like every other trigger: one run at a
                 # time, and a trigger during a run — an opened page's — is never
                 # dropped for it.
+                self._timed = True
                 self.request("auto")
                 sleep_for = interval_min * 60
             else:
@@ -696,19 +707,28 @@ class LbSliceCycle:
     async def _ask_page(self, sources: list, remaining: dict, page: set,
                         total: dict) -> tuple[bool, dict]:
         """An opened page's MBIDs, asked at once, of the dump nodes before the
-        replicas — the stream's order reversed: a replica rarely holds the
-        artist a person just opened —, each source once until every one is
-        answered, mixed with fresh MBIDs into PAGE_MBIDS where the backlog has
-        them. What a source lacks goes on to the next; what none answered, and
-        what a failure left (the paced requests judge the source), leads the
-        paced requests. Returns whether anything was imported, and what each
-        source said it lacks (the paced requests do not ask it again)."""
+        replicas — a replica rarely holds the artist a person just opened —,
+        each source once until every one is answered, mixed with fresh MBIDs
+        into PAGE_MBIDS where the backlog has them. What a source lacks goes on
+        to the next; what none answered, and what a failure left (the paced
+        requests judge the source), leads the paced requests. Returns whether
+        anything was imported, and what each replica said it lacks (the paced
+        requests do not ask it again; a dump node is)."""
         size = lb_slice_queries.MAX_MBIDS_PER_REQUEST
         unserved = [m for m in remaining["fresh"] if m in page][:size]
         filled: set = set()
         imported = False
         lacked: dict = {}
-        for api, node, _ in reversed(sources):
+        if not unserved:
+            return imported, lacked
+
+        def is_dump(api) -> bool:
+            return bool((api.last_health or {}).get("lb_dump"))
+
+        # The dump nodes first, each tier in the order it was found (the
+        # fallback's master hint last among them).
+        for api, node, _ in ([s for s in sources if is_dump(s[0])]
+                             + [s for s in sources if not is_dump(s[0])]):
             if not unserved or not self._sharing_enabled():
                 break
             fill = [m for m in remaining["fresh"]
@@ -721,8 +741,12 @@ class LbSliceCycle:
             result = await self._isolated(api, node, lb_slice_queries.addr_uuid(api.base_url), batch, None)
             if result is None or "error" in result:
                 continue
-            lacked[node] = set(result["missing"])
-            answered = set(batch) - lacked[node]
+            missing = set(result["missing"])
+            if not is_dump(api):
+                # A replica lacks what it never kept; a dump node's `missing` is
+                # its budget's of the moment, and the paced requests ask again.
+                lacked[node] = missing
+            answered = set(batch) - missing
             remaining["fresh"] = [m for m in remaining["fresh"] if m not in answered]
             unserved = [m for m in unserved if m not in answered]
             imported = imported or bool(result["imported"])

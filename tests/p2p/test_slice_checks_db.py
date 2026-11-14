@@ -1144,21 +1144,51 @@ def test_the_blobs_kept_before_their_origin_are_marked_once_by_the_same_rules(or
     assert _kept_local(conn, "lb") == {history: True, owned: False}
 
 
+def _indexed(conn, key, *artists):
+    """The subject index's row of the kept blob of `key`: the MB artists its
+    slice covers (written at every import before the origin is read)."""
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO slice_index (family, key, author, relay, payload_sha256, dump_version,
+                                                subject_artists)
+                       VALUES ('mb', %s, %s, %s, %s, %s, %s::uuid[])""",
+                    (key, "ab" * 32, "ab" * 32, "00" * 32, dump_version(3), list(artists)))
+
+
 def test_a_history_spelling_whose_scrobbles_were_placed_stays_with_this_node(origins):
     """The waiting room asked for the scrobbles' own spelling; the canon placed
     them under MusicBrainz's, and the name's waiting row went with the last
-    of them: no artist here bears the spelling, and nothing the stream draws
-    for another reason is a name no artist bears. A spelling of a history
-    alone names its owner."""
+    of them: no artist here bears the spelling, and the artist its slice
+    covers is the history's alone. A spelling of a history names its owner."""
     conn = origins
     import db_migrate
-    _local_artist(conn, "Sigur Rós", imported=True, mbid=str(uuid.uuid4()))
+    gid = str(uuid.uuid4())
+    _local_artist(conn, "Sigur Rós", imported=True, mbid=gid)
     _kept_before(conn, "mb", "sigur ros", "ab" * 32)
+    _indexed(conn, "sigur ros", gid)
+    _kept_before(conn, "mb", "minted nothing", "ab" * 32)      # covers no artist bound here
     db_migrate._mark_local_slices(conn)
-    assert _kept_local(conn) == {"sigur ros": True}
+    assert _kept_local(conn) == {"sigur ros": True, "minted nothing": True}
     assert mb_slice_queries.local_only(conn, "sigur ros")
     _local_artist(conn, "Sigur Ros", similar_of=_local_artist(conn, "Owned Seed", owned=True))
     assert not mb_slice_queries.local_only(conn, "sigur ros")       # now a stub's name too
+
+
+def test_a_spelling_the_canon_renamed_since_its_fetch_stays_shared(origins):
+    """Owned files tagged "Bjork" were asked as "bjork", a stub's Last.fm
+    spelling as "sigur ros"; the canon gave both MusicBrainz's name since. The
+    artists their slices cover are an owned one and a stub: nobody's history —
+    and those spellings are what other nodes' streams ask."""
+    conn = origins
+    import db_migrate
+    bjork, sigur, both = (str(uuid.uuid4()) for _ in range(3))
+    _local_artist(conn, "Björk", owned=True, mbid=bjork)
+    _local_artist(conn, "Sigur Rós", similar_of=_local_artist(conn, "Owned Seed", owned=True), mbid=sigur)
+    _local_artist(conn, "Heard And Owned", owned=True, imported=True, mbid=both)
+    for key, gid in (("bjork", bjork), ("sigur ros", sigur), ("heard and owned!", both)):
+        _kept_before(conn, "mb", key, "ab" * 32)
+        _indexed(conn, key, gid)
+    db_migrate._mark_local_slices(conn)
+    assert _kept_local(conn) == {"bjork": False, "sigur ros": False, "heard and owned!": False}
 
 
 def test_a_dump_node_s_kept_blobs_are_its_own_builds_and_stay_shared(origins, monkeypatch):

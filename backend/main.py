@@ -91,11 +91,18 @@ _mb_cycle_tasks: list[asyncio.Task] = []
 
 
 def _diag_record(kind: str, detail: dict) -> None:
-    """A failed walk or slice run as a local incident (support diagnostics)."""
+    """A failed walk or slice run as a local incident (support diagnostics).
+    The run loop that reports it goes on whatever the database says: a run
+    fails mostly while it is gone, and the incident then has the log line the
+    run wrote, as the launcher's recorder spools it (diag_events.
+    record_or_spool) — a Docker node has no reader for a spool."""
     from db_pool import get_conn
     from desktop.p2p import diag_events
-    with get_conn() as conn:
-        diag_events.record(conn, kind, detail)
+    try:
+        with get_conn() as conn:
+            diag_events.record(conn, kind, detail)
+    except psycopg2.Error as e:
+        logger.warning("diag: the incident %s was not recorded — the database refused it (%s)", kind, e)
 
 
 async def _after_walk() -> None:
