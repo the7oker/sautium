@@ -2436,10 +2436,16 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
         _write("sync.p2p_enabled", bool(req.p2p_enabled))
         # The launcher's LAN beacon and its serving follow the switch now
         # (desktop/p2p/p2p_manager._sharing_changed), not at a cache's expiry,
-        # and so does this process's peer surface.
+        # and so does this process's peer surface — and every requester of
+        # both runtimes, which reads the same switch: the Discovery chip
+        # follows it live, and a node turned back on asks the network now,
+        # not at the walk's next interval (its run wakes both slice cycles).
         db_execute("NOTIFY sautium_sharing")
         from routers import sync as sync_router
         sync_router.sharing_changed()
+        db_execute("NOTIFY sautium_mb_sources")
+        if req.p2p_enabled:
+            db_execute("NOTIFY sautium_sync_request")
     if req.auto_interval_min is not None:
         # None gets coerced to null serverside via _write — explicit
         # 0 here means "every 0 min" (disabled in the UI). We store

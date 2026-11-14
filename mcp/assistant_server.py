@@ -617,6 +617,11 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
                            warming up and offer to retry; do NOT offer the
                            dump download and do NOT claim the artist is
                            missing.
+      status "network_off" -> the owner turned P2P sharing off, so the node
+                           asks no other node about artists. Say so; the
+                           owner can turn sharing on in Settings or load
+                           the MusicBrainz database. Do NOT claim the
+                           artist is missing.
       status "no_dump"  -> no local dump AND peer discovery found nothing;
                            payload carries download_gb/required_gb/free_gb/
                            can_fit for quoting the user before any download.
@@ -650,6 +655,14 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
             # round hasn't completed — a retry-later, not "no catalog".
             mb_state = (_backend_get("/api/discovery/mb-status", {})
                         or {}).get("state")
+            if mb_state == "off":
+                return json.dumps({
+                    "status": "network_off",
+                    "note": ("P2P sharing is off on this node, so it asks no "
+                             "other node about artists; the owner can turn it "
+                             "on in More → Sync & P2P, or load the MusicBrainz "
+                             "database in More → Offline databases"),
+                })
             if mb_state == "searching":
                 return json.dumps({
                     "status": "peer_search_in_progress",

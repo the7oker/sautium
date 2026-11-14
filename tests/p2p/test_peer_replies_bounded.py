@@ -298,7 +298,7 @@ def test_read_json_takes_an_object_within_its_cap_and_refuses_the_rest():
 
 def _walk():
     return SyncWalk("postgresql://unused", identity=lambda: None,
-                    sharing_enabled=lambda: False)
+                    sharing_enabled=lambda: True)
 
 
 def test_a_run_past_its_deadline_asks_no_further_peer(monkeypatch):
@@ -328,7 +328,7 @@ def test_each_peer_session_ends_by_its_deadline_and_by_the_runs(monkeypatch):
 
     monkeypatch.setattr(sync_walk, "SyncClient", _Sync)
     walk = _walk()
-    api = SimpleNamespace(session_deadline=None, peer_pubkey=None)
+    api = SimpleNamespace(session_deadline=None, peer_pubkey=None, last_health={"sharing": True})
 
     walk._run_deadline = time.monotonic() + 5            # the run ends first
     asyncio.run(walk._sync_from_peer("x", ([], []), lambda m: None, None, peer_api=api))
@@ -372,6 +372,7 @@ def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
     asked, dropped, published = [], [], []
     cycle = cycle_mod.MbSliceCycle.__new__(cycle_mod.MbSliceCycle)
     cycle.db_dsn, cycle.config, cycle._status_cleared = "postgresql://unused", {}, False
+    cycle._sharing_enabled = lambda: True
     cycle._sources = SimpleNamespace(drop=dropped.append)
 
     async def publish(**state):

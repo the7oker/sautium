@@ -305,6 +305,7 @@ class LbSliceCycle:
         *,
         connect: Callable[[str], Awaitable[Optional[BackendAPIClient]]],
         dead: DeadAddresses,
+        sharing_enabled: Callable[[], bool],
         config: Optional[dict] = None,
         dht=None,
         lan=None,
@@ -317,6 +318,8 @@ class LbSliceCycle:
         connect: async (addr) -> BackendAPIClient | None — the walk's
             connect_peer: health, the TLS-pinned key, the own-address guard.
         dead: the walk's record of dead discovered addresses (`walk.dead`).
+        sharing_enabled: the "P2P sharing" switch — off, the cycle asks no
+            peer and probes no source, as the walk does.
         config: the `lb_slice` block (fetch / auto_interval_min).
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
@@ -327,9 +330,13 @@ class LbSliceCycle:
         """
         self.db_dsn = db_dsn
         self.config = dict(config or {})
+        self._sharing_enabled = sharing_enabled
         self._sources = SourceFinder(
             "LB slice", capability="lbdump", directory=("lbslices", "lbdump"),
-            usable=lambda h: bool(h.get("lb_dump") or h.get("lb_slices")),
+            # A node whose owner turned sharing off answers no slice request:
+            # it is never told the MBIDs.
+            usable=lambda h: bool(h.get("lb_dump") or h.get("lb_slices"))
+                             and h.get("sharing") is not False,
             connect=connect, dead=dead, dht=dht, lan=lan,
             manual_peers=list(manual_peers or []),
             load_bans=load_bans_fn or (lambda: load_bans(self.db_dsn)),
@@ -492,6 +499,15 @@ class LbSliceCycle:
                 await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
                 self._status_cleared = True
             return {}
+        if not self._sharing_enabled():
+            # A node that does not give does not take: no source is probed
+            # and no MBID leaves; the status says how many wait, and why.
+            pending = await loop.run_in_executor(
+                None, pending_slice_mbids, self.db_dsn, PENDING_PER_CYCLE, None)
+            await self._publish(pending=len(pending), served=0, unserved=len(pending),
+                                reason="sharing_off" if pending else "idle", sources=0,
+                                newest=None)
+            return {}
 
         listing = await loop.run_in_executor(None, published_newest, self.db_dsn, "lb")
         self._published = listing[0] if listing else None
@@ -522,7 +538,7 @@ class LbSliceCycle:
         reasons: set[str] = set()
         imported_any = False
         for api, node, _ in sources:
-            if not (remaining["stale"] or remaining["fresh"]):
+            if not (remaining["stale"] or remaining["fresh"]) or "sharing_off" in reasons:
                 break
             source_addr = lb_slice_queries.addr_uuid(api.base_url)
             api.session_deadline = time.monotonic() + PEER_SESSION_S
@@ -532,9 +548,13 @@ class LbSliceCycle:
                 group = remaining[lane]
                 for i in range(0, len(group), batch_size):
                     batch = group[i:i + batch_size]
+                    if not self._sharing_enabled():
+                        # Turned off while the run went on: nothing more leaves.
+                        reasons.add("sharing_off")
                     # A session that is over has not failed: what is left
                     # stays pending for the next source or cycle.
-                    if limited or failed or time.monotonic() >= api.session_deadline:
+                    if (limited or failed or "sharing_off" in reasons
+                            or time.monotonic() >= api.session_deadline):
                         leftovers[lane].extend(batch)
                         continue
                     result = await self._isolated(api, node, source_addr, batch, min_version)
@@ -587,7 +607,8 @@ class LbSliceCycle:
             await loop.run_in_executor(None, analyze_tables, self.db_dsn)
         await self._publish(
             pending=len(pending), served=len(pending) - unserved, unserved=unserved,
-            reason=("rate_limited" if "rate_limited" in reasons
+            reason=("sharing_off" if "sharing_off" in reasons
+                    else "rate_limited" if "rate_limited" in reasons
                     else "error" if "error" in reasons
                     else "missing" if unserved else "ok"),
             sources=len(sources), newest=newest)

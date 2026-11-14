@@ -130,12 +130,12 @@ def _build_sync_walk():
     list: the walk recognises its own address by the key /health returns."""
     from desktop.p2p.sync_walk import SyncWalk
     from p2p_identity import peer_identity
-    from routers.settings import _read
+    from routers.sync import sharing_enabled
 
     return SyncWalk(
         settings.database_url,
         identity=lambda: peer_identity(settings),
-        sharing_enabled=lambda: bool(_read("sync.p2p_enabled")),
+        sharing_enabled=sharing_enabled,
         diag_record=_diag_record,
         after_run=_after_walk,
     )
@@ -147,11 +147,13 @@ def _build_mb_cycle(walk):
     launcher's defaults as constants, and the in-process canon trigger for
     what it imports. A full-dump node runs it too — it asks nothing."""
     from desktop.p2p.mb_slice_cycle import MbSliceCycle
+    from routers.sync import sharing_enabled
     return MbSliceCycle(
         settings.database_url,
         connect=walk.connect_peer,
         dead=walk.dead,
         after_import=_start_canon_trigger,
+        sharing_enabled=sharing_enabled,
         config={"fetch": True, "auto_interval_min": 360},
         diag_record=_diag_record,
         first_source=lambda: walk.first_source,
@@ -163,10 +165,12 @@ def _build_lb_cycle(walk):
     connect (health + pinned key + own-address guard), no LAN tier, no
     config.json — the launcher's defaults as constants."""
     from desktop.p2p.lb_slice_cycle import LbSliceCycle
+    from routers.sync import sharing_enabled
     return LbSliceCycle(
         settings.database_url,
         connect=walk.connect_peer,
         dead=walk.dead,
+        sharing_enabled=sharing_enabled,
         config={"fetch": True, "auto_interval_min": 360},
         diag_record=_diag_record,
         first_source=lambda: walk.first_source,
@@ -733,7 +737,9 @@ async def lifespan(app: FastAPI):
     if settings.p2p_enabled and HAS_LIBTORRENT and settings.p2p_sync_port:
         try:
             from desktop.p2p.dht_state import DhtStateStore
+            from routers.sync import sharing_enabled
             _dht_service = DHTService(
+                sharing_enabled=sharing_enabled,
                 listen_port=settings.p2p_dht_port,
                 http_port=announce_port,
                 state_store=DhtStateStore(settings.database_url),

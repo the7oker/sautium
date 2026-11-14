@@ -47,7 +47,7 @@ import hashlib
 import logging
 import time
 from collections import deque
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -234,16 +234,20 @@ class _TraversalLane:
 class DHTService:
     """libtorrent-based DHT service for per-artist peer discovery."""
 
-    def __init__(self, listen_port: int = 19001, http_port: int = 19000,
-                 state_store=None):
+    def __init__(self, *, sharing_enabled: Callable[[], bool], listen_port: int = 19001,
+                 http_port: int = 19000, state_store=None):
         """
         Args:
+            sharing_enabled: the "P2P sharing" switch — off, the rare-artist
+                tail is held: it would advertise analysis the node refuses
+                to serve, and name the artists it holds analysis for.
             listen_port: UDP port for libtorrent DHT operations
             http_port: TCP port of the HTTP sync server (announced to peers)
             state_store: desktop/p2p/dht_state.DhtStateStore — the routing
                 table snapshot loaded at start and saved every re-announce
                 cycle and on stop. None = cold bootstrap every run.
         """
+        self._sharing_enabled = sharing_enabled
         self.listen_port = listen_port
         self.http_port = http_port
         self._announce_port = http_port  # may differ if UPnP maps to another port
@@ -726,11 +730,12 @@ class DHTService:
 
         The tail is re-read each pass, so a set that grew or shrank between
         passes re-spaces itself without any bookkeeping. Held entirely while
-        the network-size verdict says the node key still lists everyone."""
+        the network-size verdict says the node key still lists everyone, and
+        while P2P sharing is off."""
         while self._running:
             uuids = sorted(self._announced)
-            if (not uuids or not self._session
-                    or not self._announces_enabled or not self._tail_enabled):
+            if (not uuids or not self._session or not self._announces_enabled
+                    or not self._tail_enabled or not self._sharing_enabled()):
                 await asyncio.sleep(TAIL_IDLE_RECHECK)
                 continue
 
@@ -742,7 +747,8 @@ class DHTService:
             for uuid in uuids:
                 if not self._running or not self._session:
                     return
-                if not self._announces_enabled or not self._tail_enabled:
+                if (not self._announces_enabled or not self._tail_enabled
+                        or not self._sharing_enabled()):
                     break
                 await self._lane.slot("tail")
                 if not self._running or not self._session:

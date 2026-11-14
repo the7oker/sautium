@@ -31,7 +31,7 @@ class _Client:
 
 def _walk():
     return SyncWalk("postgresql://unused", identity=lambda: _Identity(),
-                    sharing_enabled=lambda: False)
+                    sharing_enabled=lambda: True)
 
 
 def test_own_address_is_never_a_peer(monkeypatch):

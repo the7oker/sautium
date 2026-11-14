@@ -418,8 +418,9 @@ class SyncWalk:
             CLIENT; also how the walk recognises its own address (a DHT
             lookup returns us too, and the Docker surface has no observed
             external IP to subtract).
-        sharing_enabled: the "P2P sharing" switch — gates the carry push,
-            exactly as it gates serving.
+        sharing_enabled: the "P2P sharing" switch — a node that does not
+            give does not take: off, the walk asks no peer and no DHT key
+            and carries nothing, exactly as serving stops.
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
         skip_addrs: () -> addresses the DHT may list that are not peers
@@ -576,6 +577,13 @@ class SyncWalk:
 
         self._run_deadline = time.monotonic() + RUN_MAX_S
         self._run_cache = {}
+
+        if not self._sharing_enabled():
+            # Before the gap set and the DHT: off, nothing of the catalogue
+            # leaves this node — no inventory, no node-key or artist lookup,
+            # no carry; the network-size verdict keeps its last value.
+            _progress("P2P sharing is off — this node asks no peer")
+            return {"status": "sharing_off"}
 
         # Step 1: the gap set — artists missing data in ANY category.
         # Inventory + _compute_needed inside the peer sync handle the
@@ -757,7 +765,7 @@ class SyncWalk:
         # never is). Only once the network is too big for tier A to have
         # listed every holder: below that a per-artist key can only name a
         # node the inventory round already asked.
-        if remaining and dht_nodes_task is not None:
+        if remaining and dht_nodes_task is not None and self._sharing_enabled():
             residual = await self.db(rare_search_uuids) if rare_mode else []
             if residual:
                 probe = await self._residual_slice(residual)
@@ -971,6 +979,11 @@ class SyncWalk:
         if time.monotonic() >= self._run_deadline:
             _progress(f"  the run is past its deadline — {peer_addr} waits for the next one")
             return {"error": "run_deadline"}
+        if not self._sharing_enabled():
+            # The owner turned sharing off while the run went on: no further
+            # peer is asked, and none is carried to.
+            _progress(f"  P2P sharing is off — {peer_addr} is not asked")
+            return {"error": "sharing_off"}
         if peer_api is None:
             _progress(f"Connecting to {peer_addr}...")
             peer_api = await self.connect_peer(peer_addr, is_lan=is_lan)
@@ -986,6 +999,11 @@ class SyncWalk:
         if peer_api.peer_pubkey and await self.db(peer_refused, peer_api.peer_pubkey):
             _progress(f"  {peer_addr} is a node banned here, skipping")
             return {"error": "refused"}
+        if (peer_api.last_health or {}).get("sharing") is False:
+            # Its owner turned sharing off: it answers no inventory, so it is
+            # told none of this node's tracks.
+            _progress(f"  {peer_addr} does not share, skipping")
+            return {"error": "not_sharing"}
 
         peer_api.session_deadline = min(time.monotonic() + PEER_SESSION_S,
                                         self._run_deadline)
@@ -1015,8 +1033,9 @@ class SyncWalk:
         # which is exactly what makes it a candidate carrier. Offer it our
         # own first-hand canon material: nobody can pull from a node behind
         # CGNAT, so pushing is the only way its analysis ever reaches the
-        # network. Never fatal to the sync that just succeeded.
-        if "carry" in sync_client.peer_capabilities and self._sharing_enabled():
+        # network. Never fatal to the sync that just succeeded. The switch
+        # was read for this peer above, as for its pull.
+        if "carry" in sync_client.peer_capabilities:
             try:
                 await asyncio.get_event_loop().run_in_executor(
                     None, partial(self._push_to_carrier, peer_api, _progress))

@@ -33,6 +33,7 @@ const fmtRelative = () => 'now', fmtNum = n => String(n);
 const _bgEnrichStatusLine = () => '', _syncCadenceLine = () => '';
 const identityLabel = () => '', identityDetail = () => '';
 const loadLabel = () => '', loadDetail = () => '', gateLabel = () => '', gateDetail = () => '';
+const SHARING_ON_LINE = '', SHARING_OFF_LINE = '';
 const supportLabel = s => 'support-row:' + (s && s.enabled ? 'on' : 'off'), supportDetail = () => '';
 %(render)s
 const out = {};
@@ -64,6 +65,7 @@ const fmtRelative = () => 'now', fmtNum = n => String(n);
 const _bgEnrichStatusLine = () => '', _syncCadenceLine = () => '';
 const identityLabel = () => '', identityDetail = () => '';
 const loadLabel = () => '', loadDetail = () => '', gateLabel = () => '', gateDetail = () => '';
+const SHARING_ON_LINE = '', SHARING_OFF_LINE = '';
 %(label)s
 %(detail)s
 %(render)s

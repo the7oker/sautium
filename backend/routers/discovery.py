@@ -324,6 +324,8 @@ def mb_search(q: str = Query(..., min_length=2, max_length=255),
     if mb_discovery.available():
         return {"available": True, **mb_discovery.search(q.strip(), limit=limit)}
     res = mb_discovery.remote_search(q.strip(), limit=limit)
+    if res["status"] == "sharing_off":
+        return {"available": False, "sharing_off": True, "artists": [], "albums": []}
     if res["status"] == "ok":
         return {"available": True, "remote": True,
                 "artists": res["artists"], "albums": []}
@@ -331,6 +333,11 @@ def mb_search(q: str = Query(..., min_length=2, max_length=255),
         return {"available": True, "remote": True, "cooldown": res["retry_in"],
                 "artists": [], "albums": []}
     return {"available": False, "artists": [], "albums": []}
+
+
+# Draft words, for the owner's words review.
+_SHARING_OFF = ("P2P sharing is off, so this node asks no other node about artists. "
+                "Turn it on in More → Sync & P2P to add artists from the network.")
 
 
 @router.post("/mb-mint")
@@ -343,6 +350,8 @@ def mb_mint(body: dict = Body(...)):
     slice key), then run the same pipeline."""
     import mb_discovery
     if not (mb_discovery.available() or mb_discovery.remote_available()):
+        if mb_discovery.state()["state"] == "off":
+            raise HTTPException(status_code=409, detail=_SHARING_OFF)
         raise HTTPException(status_code=503, detail="MusicBrainz dump not loaded")
     artist_gid = str(body.get("artist_gid") or "")
     if not artist_gid:
@@ -350,6 +359,8 @@ def mb_mint(body: dict = Body(...)):
     out = mb_discovery.mint(artist_gid, body.get("rg_gid"),
                             artist_name=str(body.get("artist_name") or "") or None,
                             asked_name=str(body.get("asked_name") or "") or None)
+    if out["status"] == "sharing_off":
+        raise HTTPException(status_code=409, detail=_SHARING_OFF)
     if out["status"] == "unknown_artist":
         raise HTTPException(status_code=404, detail="artist not in the dump")
     if out["status"] == "rate_limited":

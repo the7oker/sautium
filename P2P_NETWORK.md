@@ -204,8 +204,10 @@ differences are injected: the DHT
 service, LAN discovery (none in a container — it cannot hear the beacon),
 manual peers, the address skip list (the launcher subtracts itself by its
 UPnP external IP; every runtime also recognises its own address by the key
-`/health` returns), the sharing switch on the carry push, the diag sink, the
-post-run hook (both runtimes request the MB and LB slice cycles; before
+`/health` returns), the sharing switch (off, since 2026-11-14, the walk asks
+no peer and no DHT key and carries nothing; so do both slice cycles, and the
+DHT holds the rare-artist tail — a node that does not give does not take), the
+diag sink, the post-run hook (both runtimes request the MB and LB slice cycles; before
 2026-09-24 only the launcher fetched MB slices). Triggers are the same on both:
 `NOTIFY sautium_sync_request`, the `sync.auto_interval_min` timer, the first
 source after start. The master's first run (2026-09-08, 297k artists with a

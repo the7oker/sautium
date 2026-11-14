@@ -91,18 +91,28 @@ def remote_sources(kind: Optional[str] = None) -> list:
     return sources
 
 
+def _sharing() -> bool:
+    """The "P2P sharing" switch: a node that does not give does not take —
+    off, no search, mint or resolve asks another node anything."""
+    from routers.sync import sharing_enabled
+    return sharing_enabled()
+
+
 def remote_available() -> bool:
-    return bool(remote_sources("dump"))
+    return _sharing() and bool(remote_sources("dump"))
 
 
 def state() -> dict:
     """Live MB-scope capability for the UI chip: 'local' (full dump),
     'remote' (dump peers known), 'searching' (P2P is up but no source
-    probe round has completed yet — the key is absent), 'none' (probed
-    and found nothing, or P2P is off). Rides /api/events as {"t": "mb"}
-    so the chip updates without a page reload."""
+    probe round has completed yet — the key is absent), 'off' (P2P sharing
+    is off: the network is not asked), 'none' (probed and found nothing).
+    Rides /api/events as {"t": "mb"} so the chip updates without a page
+    reload."""
     if available():
         return {"available": True, "remote": False, "state": "local"}
+    if not _sharing():
+        return {"available": False, "remote": False, "state": "off"}
     row = db_query_one(
         "SELECT value FROM user_settings WHERE key = %(k)s",
         {"k": SOURCES_KEY})
@@ -112,10 +122,6 @@ def state() -> dict:
         if dumps:
             return {"available": True, "remote": True, "state": "remote"}
         return {"available": False, "remote": False, "state": "none"}
-    p2p = db_query_one(
-        "SELECT value FROM user_settings WHERE key = 'sync.p2p_enabled'")
-    if p2p is not None and not p2p.get("value"):
-        return {"available": False, "remote": False, "state": "none"}
     return {"available": False, "remote": False, "state": "searching"}
 
 
@@ -123,12 +129,15 @@ def remote_search(q: str, limit: int = 10) -> dict:
     """Search artist candidates on remote dump nodes, rotating across them.
 
     Returns {"status": "ok", "artists": [...], "node": url} |
-    {"status": "no_peers"} | {"status": "cooldown", "retry_in": seconds}.
-    Rotation + failover: start at the round-robin cursor, skip nodes whose
-    burst is exhausted, take the first that answers; 429 or transport
-    errors move to the next node. Failed attempts count as spend — a dead
-    node must not be free to hammer."""
+    {"status": "no_peers"} | {"status": "cooldown", "retry_in": seconds} |
+    {"status": "sharing_off"}. Rotation + failover: start at the
+    round-robin cursor, skip nodes whose burst is exhausted, take the
+    first that answers; 429 or transport errors move to the next node.
+    Failed attempts count as spend — a dead node must not be free to
+    hammer."""
     global _remote_rr
+    if not _sharing():
+        return {"status": "sharing_off"}
     dumps = [s.get("url") for s in remote_sources("dump") if s.get("url")]
     if not dumps:
         return {"status": "no_peers"}
@@ -303,7 +312,10 @@ def _fetch_remote_slice(artist_name: str) -> dict:
     Returns {"ok": True} on import, else {"ok": False, "retry_after": s}
     where `retry_after` is set when every source that answered was
     rate-limited — the UI then says "busy, try in N s" instead of "not in
-    the dump", which is a lie about the catalog."""
+    the dump", which is a lie about the catalog — or {"ok": False,
+    "sharing_off": True}: P2P sharing is off, and no node is asked."""
+    if not _sharing():
+        return {"ok": False, "sharing_off": True}
     try:
         from desktop.api_client import BackendAPIClient
         from desktop.mb_slice_client import MBSliceClient
@@ -396,6 +408,8 @@ def mint(artist_gid: str, rg_gid: Optional[str] = None,
             row = db_query_one(
                 "SELECT name FROM mb_artist WHERE gid = %(g)s::uuid",
                 {"g": artist_gid})
+        elif fetched.get("sharing_off"):
+            return {"status": "sharing_off"}
         elif fetched.get("retry_after"):
             return {"status": "rate_limited", "retry_after": fetched["retry_after"]}
     if not row:

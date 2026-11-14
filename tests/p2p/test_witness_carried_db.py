@@ -419,6 +419,7 @@ class _WalkPeer:
     def __init__(self, key: str):
         self.peer_pubkey = key
         self.base_url = "https://198.51.100.30:21000"
+        self.last_health = {"sharing": True}
 
 
 @pytest.mark.parametrize("ban", ["row", "failed"])

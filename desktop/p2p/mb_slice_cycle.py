@@ -124,6 +124,7 @@ class MbSliceCycle:
         connect: Callable[[str], Awaitable[Optional[BackendAPIClient]]],
         dead: DeadAddresses,
         after_import: Callable[[], None],
+        sharing_enabled: Callable[[], bool],
         config: Optional[dict] = None,
         dht=None,
         lan=None,
@@ -139,6 +140,8 @@ class MbSliceCycle:
         after_import: () -> None, executor-safe — hand the freshly imported
             facts to the canon (the launcher's POST /canonicalize, the
             backend's in-process trigger).
+        sharing_enabled: the "P2P sharing" switch — off, the cycle asks no
+            peer and probes no source, as the walk does.
         config: the `mb_slice` block (fetch / auto_interval_min).
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
@@ -149,9 +152,13 @@ class MbSliceCycle:
         """
         self.db_dsn = db_dsn
         self.config = dict(config or {})
+        self._sharing_enabled = sharing_enabled
         self._sources = SourceFinder(
             "MB slice", capability="mbdump", directory=("mbslices", "mbdump"),
-            usable=lambda h: bool(h.get("mb_dump") or h.get("mb_slices")),
+            # A node whose owner turned sharing off answers no slice request:
+            # it is never told the names.
+            usable=lambda h: bool(h.get("mb_dump") or h.get("mb_slices"))
+                             and h.get("sharing") is not False,
             connect=connect, dead=dead, dht=dht, lan=lan,
             manual_peers=list(manual_peers or []),
             load_bans=load_bans_fn or (lambda: load_bans(self.db_dsn)),
@@ -277,7 +284,7 @@ class MbSliceCycle:
         """On-demand source re-probe (the backend NOTIFYs when a remote search
         exhausted every known source — the 'dump node disappeared' moment);
         a full-dump node has nothing to probe."""
-        if self._probe_lock.locked():
+        if self._probe_lock.locked() or not self._sharing_enabled():
             return
         async with self._probe_lock:
             loop = asyncio.get_event_loop()
@@ -322,6 +329,13 @@ class MbSliceCycle:
                 await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
                 self._status_cleared = True
             return {}
+        if not self._sharing_enabled():
+            # A node that does not give does not take: no source is probed
+            # and no name leaves; the status says how many wait, and why.
+            pending = await loop.run_in_executor(None, pending_names, self.db_dsn, PENDING_PER_CYCLE)
+            await self._publish(pending=len(pending), served=0, unserved=len(pending),
+                                reason="sharing_off" if pending else "idle", sources=0)
+            return {}
         # Source discovery runs BEFORE the pending-names early return: it also
         # persists mb.search_sources for the backend's remote MB search, which
         # a dump-less node needs even when canon has no work (2026-08-10).
@@ -347,7 +361,7 @@ class MbSliceCycle:
         remaining = list(names)
         reasons: set[str] = set()
         for n, (api, node) in enumerate(peers):
-            if not remaining:
+            if not remaining or "sharing_off" in reasons:
                 break
             # A re-opened name goes to another author's source while one is
             # left to ask, and the author that closed it is asked last: its
@@ -364,6 +378,11 @@ class MbSliceCycle:
             waited = False
             for i in range(0, len(asked), batch_size):
                 batch = asked[i:i + batch_size]
+                if not self._sharing_enabled():
+                    # Turned off while the run went on: nothing more leaves.
+                    reasons.add("sharing_off")
+                    leftovers.extend(asked[i:])
+                    break
                 if time.monotonic() >= api.session_deadline:
                     # The source's session is over, not failed: the rest
                     # stays pending for the next source or cycle.
@@ -434,7 +453,8 @@ class MbSliceCycle:
         served = len(names) - len(remaining)
         await self._publish(
             pending=len(names), served=served, unserved=len(remaining),
-            reason=("rate_limited" if "rate_limited" in reasons
+            reason=("sharing_off" if "sharing_off" in reasons
+                    else "rate_limited" if "rate_limited" in reasons
                     else "error" if "error" in reasons
                     else "missing" if remaining else "ok"),
             sources=len(peers))

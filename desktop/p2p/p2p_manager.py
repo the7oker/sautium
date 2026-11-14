@@ -252,6 +252,7 @@ class P2PManager:
             mb_dump_version=self._mb_dump_version,
         )
         self._dht_service = DHTService(
+            sharing_enabled=self._sharing_on,
             state_store=DhtStateStore(self.db_dsn),
             listen_port=dht_port,
             http_port=http_port,
@@ -277,8 +278,7 @@ class P2PManager:
         self._walk = SyncWalk(
             self.db_dsn,
             identity=self._peer_identity,
-            sharing_enabled=lambda: bool(
-                self._sync_server and self._sync_server._sharing_enabled()),
+            sharing_enabled=self._sharing_on,
             dht=self._dht_service,
             lan=self._lan_discovery,
             manual_peers=p2p_cfg.get("manual_peers", []),
@@ -293,6 +293,7 @@ class P2PManager:
             self.db_dsn,
             connect=self._walk.connect_peer,
             dead=self._walk.dead,
+            sharing_enabled=self._sharing_on,
             config=self.config.get("lb_slice", {}),
             dht=self._dht_service,
             lan=self._lan_discovery,
@@ -309,6 +310,7 @@ class P2PManager:
             connect=self._walk.connect_peer,
             dead=self._walk.dead,
             after_import=self._canonicalize_locally,
+            sharing_enabled=self._sharing_on,
             config=self.config.get("mb_slice", {}),
             dht=self._dht_service,
             lan=self._lan_discovery,
@@ -3085,6 +3087,13 @@ class P2PManager:
             # A move while no LISTEN was up (before it, or while it reconnects)
             # would be lost: the switch is read again whenever it is up.
             on_listening=lambda: asyncio.create_task(self._sharing_changed()))
+
+    def _sharing_on(self) -> bool:
+        """The "P2P sharing" switch as this process reads it — the sync
+        server's cached read, which the owner's move of the switch (NOTIFY
+        sautium_sharing) refreshes at once: serving and every requester here
+        (the walk, both slice cycles, the DHT tail) follow the one value."""
+        return self._sync_server._sharing_enabled()
 
     async def _sharing_changed(self) -> None:
         """P2P sharing as it is now — at start, whenever the owner moves it,

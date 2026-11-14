@@ -159,17 +159,21 @@ def get_artist(
     # MBIDs the ledger does not vouch for yet, opened on a node without the
     # statistics dump, is asked of the network now — the durable row is the
     # request (the cycle serves it first), the NOTIFY only the wake. Version
-    # upgrades are the cycle's job, not this page's.
-    db_execute("""
-        INSERT INTO lb_slice_requests (artist_id)
-        SELECT %(id)s::uuid
-         WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = %(id)s::uuid)
-           AND NOT EXISTS (SELECT 1 FROM user_settings WHERE key = 'listenbrainz.db_version')
-           AND NOT EXISTS (SELECT 1 FROM lb_slice_fetches f
-                           JOIN artist_mbids am ON am.mbid = f.artist_mbid
-                           WHERE am.artist_id = %(id)s::uuid)
-        ON CONFLICT (artist_id) DO NOTHING
-    """, {"id": artist_id})
+    # upgrades are the cycle's job, not this page's. With P2P sharing off no
+    # request is made: a row kept for later would ask, the day sharing comes
+    # back, about every page opened meanwhile.
+    from routers.sync import sharing_enabled
+    if sharing_enabled():
+        db_execute("""
+            INSERT INTO lb_slice_requests (artist_id)
+            SELECT %(id)s::uuid
+             WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = %(id)s::uuid)
+               AND NOT EXISTS (SELECT 1 FROM user_settings WHERE key = 'listenbrainz.db_version')
+               AND NOT EXISTS (SELECT 1 FROM lb_slice_fetches f
+                               JOIN artist_mbids am ON am.mbid = f.artist_mbid
+                               WHERE am.artist_id = %(id)s::uuid)
+            ON CONFLICT (artist_id) DO NOTHING
+        """, {"id": artist_id})
     artist["lb_pending"] = db_query_one(
         "SELECT 1 AS x FROM lb_slice_requests WHERE artist_id = %(id)s::uuid",
         {"id": artist_id}) is not None

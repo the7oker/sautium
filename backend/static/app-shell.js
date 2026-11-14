@@ -4010,10 +4010,15 @@
             // Only the MB scope chip disables (no dump) — tapping it must
             // say why instead of dying silently.
             if (chip.id === 'discoveryMbChip') {
-              const searching = chip.dataset.mbState === 'searching';
+              const mbState = chip.dataset.mbState;
+              // Draft words for the owner's words review: 'off'.
               window.notifyDialog({
                 title: 'MusicBrainz search', kind: 'info',
-                message: searching
+                message: mbState === 'off'
+                  ? 'P2P sharing is off, so this node asks no other node about '
+                    + 'artists. Turn it on in <b>More → Sync &amp; P2P</b>, or download the '
+                    + 'catalog yourself in <b>More → Offline databases</b>.'
+                  : mbState === 'searching'
                   ? 'Looking for MusicBrainz catalog nodes on the network — '
                     + 'give it a minute. Or download the catalog yourself in '
                     + '<b>More → Offline databases</b>.'
@@ -12014,6 +12019,10 @@
       // nothing about when it arrives.
       const sched = n.until ? `, and on schedule ${fmtUntil(n.until)}` : '';
       switch (d.reason) {
+        // Draft words for the owner's words review.
+        case 'sharing_off':
+          return { title: 'P2P sharing is off',
+                   text: `${who} wait for their albums: with sharing off this node asks no other node for catalog data. Turn sharing on in More → Sync &amp; P2P to recognise them.` };
         case 'rate_limited':
           return { title: 'Catalog data delayed',
                    text: `The catalog node asked to slow down — ${who} still wait for their albums. Asked again with the next network pass${sched}.` };
@@ -12034,6 +12043,10 @@
       const who = `<span class="num">${fmtNum(d.unserved || 0)}${capped ? '+' : ''}</span> artist${d.unserved === 1 ? '' : 's'}`;
       const sched = n.until ? `, and on schedule ${fmtUntil(n.until)}` : '';
       switch (d.reason) {
+        // Draft words for the owner's words review.
+        case 'sharing_off':
+          return { title: 'P2P sharing is off',
+                   text: `${who} wait for their listening statistics: with sharing off this node asks no other node for them. Turn sharing on in More → Sync &amp; P2P to fetch them.` };
         case 'rate_limited':
           return { title: 'Listening statistics delayed',
                    text: `The statistics node asked to slow down — ${who} still wait for their listening statistics. Asked again with the next network pass${sched}.` };
@@ -14495,6 +14508,17 @@
     return _renderNoticeRows() + _renderSyncSettings(sync);
   }
 
+  // What the switch does, both ways — draft words for the owner's words
+  // review: a node that does not give does not take.
+  const SHARING_ON_LINE = 'This node shares the analysis and the catalog facts it holds, and asks other '
+    + 'nodes for what it lacks. Its questions name artists and tracks of your catalog, mixed, '
+    + 'in random order — never when or how often you played.';
+  const SHARING_OFF_LINE = 'Off, this node neither serves nor asks for music data: it takes no analysis '
+    + 'from other nodes, recognises no new artist without the MusicBrainz database, and Discovery\'s '
+    + 'MusicBrainz search and the assistant\'s lookup are off. It still announces its address in the '
+    + 'network\'s lookup table, keeps its chats, friends and support contact, relays while Relay for '
+    + 'others is on, and has the analysis it signed stamped.';
+
   function _renderSyncSettings(sync) {
     const on = !!sync.p2p_enabled;
     const interval = sync.auto_interval_min;
@@ -14551,7 +14575,7 @@
               <span class="row-stack-label" style="color:var(--color-text-dim);">Auto-sync · Rare-artist keys · Carry for others</span>
               <span></span>
             </div>
-            <div class="row-stack-sub">Turn P2P sharing on to configure sync, node-announce and carry limits.</div>
+            <div class="row-stack-sub">${escapeProfileHtml(SHARING_OFF_LINE)}</div>
           </div>
           <div class="form-row">
             <span class="form-label">Background enrichment</span>
@@ -14571,6 +14595,7 @@
           <span class="form-label">P2P sharing</span>
           <button class="toggle on" data-action="toggle-p2p"><span class="knob"></span></button>
         </div>
+        <div class="form-row stacked"><div class="row-stack-sub">${escapeProfileHtml(SHARING_ON_LINE)}</div></div>
         <div class="form-row">
           <span class="form-label">Auto-sync interval</span>
           <button class="select-trigger" data-action="pick-interval">
