@@ -1178,15 +1178,17 @@ class PlaybackManager:
                 if backend:
                     backend.queue_changed("remove")
                 else:
-                    self._emit_idle_status()
+                    self._emit_idle_status(slots_moved=True)
                 self._schedule_persist()
             return ok
 
-    def _emit_idle_status(self) -> None:
+    def _emit_idle_status(self, *, slots_moved: bool = False) -> None:
         """Nothing playing but the canonical queue exists — emit a stopped
         status anchored on the track Play would start (the last slot, or 1
         for a never-played queue) so the mini-player shows with a Play button
-        (pressing it runs ensure_active → attach/probe/play)."""
+        (pressing it runs ensure_active → attach/probe/play). `slots_moved`:
+        the edit moved the queue's slots (a removal with no output attached):
+        the spot the last status named by its index is not carried on."""
         slot = self._last_slot if self._last_slot >= 1 else 1
         first = self.queue.item_at(slot) or self.queue.item_at(1)
         if first is None:
@@ -1215,16 +1217,20 @@ class PlaybackManager:
         # A queue edit while stopped keeps the explanation of the last play
         # on offer, and a start under way (HQPlayer's own advance, a play
         # press); the backend's next tick decides whether they still hold.
-        # While an output is attached, its other words stand on too — what
-        # another app did to it, where Play resumes, a build or a silence
+        # Where Play resumes stands on too, unless the edit moved the slots
+        # (an append moves none; with no output attached nothing follows to
+        # correct a spot a removal moved — a failed attach's spot would name
+        # another track at its second). While an output is attached, so do
+        # its other words — what another app did to it, a build or a silence
         # HQPlayer is in, a queue it takes again: a page ends each one's
         # toast with the status that says it no more (an append under a
         # takeover's spot ended it, and a silent HQPlayer's next status
-        # raised its toast again for the person who had closed it). With no
-        # output attached nothing follows to correct them — a removal moves
-        # the slot a spot names — so they go, as before.
-        carried = ("diagnosis",) + (("output_event", "resume", "building", "not_answering", "rebuilding")
-                                    if self._active is not None else ())
+        # raised its toast again for the person who had closed it).
+        carried = ["diagnosis"]
+        if not slots_moved:
+            carried.append("resume")
+        if self._active is not None:
+            carried += ["output_event", "building", "not_answering", "rebuilding"]
         for key in carried:
             if self._latest_status.get(key):
                 idle[key] = self._latest_status[key]

@@ -521,8 +521,8 @@ and stop for the design session.
   it told that stands again where a later one stood (a takeover, once
   the refusal over it ended) is redrawn into the toast still up
   (`stand`). The backend must say the condition on every status while it
-  lasts: the manager's own stopped status after a queue edit carries the
-  output's words on for that (`_emit_idle_status`).
+  lasts: the manager's own stopped status after a queue edit carries an
+  attached output's words on for that (`_emit_idle_status`).
 - **`notices.strip(key, html | null)`** — a long-lived condition
   (the link is down). Fixed to the top of the viewport so it stays in
   view at any scroll position (a phone waking mid-page must still see

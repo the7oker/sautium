@@ -6394,7 +6394,7 @@
 
   const outputEventsMet = new Set();
   let outputEventFloor = 0;
-  const outputEventsTold = new Set();  // the events this page told while they ride the status
+  const outputEventsTold = new Map();  // the events this page told while they ride the status: id → kind
   const outputEventToast = statusToast('player.other_app');
   function onOutputEvent(data) {
     if (!data) return;
@@ -6408,7 +6408,7 @@
     // News once: an id above the connection's floor this page has not met.
     const news = ev.id > outputEventFloor && !outputEventsMet.has(ev.id);
     outputEventsMet.add(ev.id);
-    if (news) outputEventsTold.add(ev.id);
+    if (news) outputEventsTold.set(ev.id, ev.kind);
     // An event this page told keeps its words true to the status (the
     // spot's second after a Seek there) and stands again in the toast when
     // a later one over it ends (the takeover, once the refusal of the other
@@ -6416,12 +6416,16 @@
     // before the connection stands without a word.
     const c = outputEventsTold.has(ev.id) ? outputEventCopy(ev, data) : null;
     if (!c) {
-      // A later event the page has no word for (the stream reconnected
-      // while the refusal stood), over the one in its toast: that app holds
-      // the output still, the toast's words hold, and its event may stand
-      // again. An earlier one means the toast's own event is over.
+      // A refusal the page has no word for (the stream reconnected while
+      // it stood), over the takeover in its toast: that app holds the
+      // output still, the toast's words hold, and the takeover stands again
+      // once the refusal is over. Only a refusal stands over a takeover —
+      // any other event the page has no word for (a second takeover, the
+      // other app's stop, a renderer's pause) took its place for good, and
+      // an earlier one means the toast's own event is over: the toast goes.
       const up = outputEventToast.tag;
-      if (!(outputEventsTold.has(up) && ev.id > up)) outputEventToast.know(ev.id);
+      const over = ev.kind === 'refused' && outputEventsTold.get(up) === 'took' && ev.id > up;
+      if (!over) outputEventToast.know(ev.id);
       return;
     }
     // Its attempt's failure is said here: the play route's answer for the

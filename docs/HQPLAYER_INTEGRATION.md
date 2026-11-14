@@ -2010,9 +2010,9 @@ has an id of its own beside its attempt's, which is as old as the press.
 Another app playing through an output the node was not playing on left no
 spot and is no event: nothing of the person's was taken, and Now Playing
 offers Play (it takes the output back). The manager's own stopped status
-after a queue edit carries the output's words on — the event, a diagnosis,
-`resume`, `building`, `not_answering`, `rebuilding`: a page ends a toast
-with the status that says its condition no more. A verdict made
+after a queue edit carries an attached output's words on — the event, a
+diagnosis, `resume`, `building`, `not_answering`, `rebuilding`: a page ends a
+toast with the status that says its condition no more. A verdict made
 after its pass said the status — an attempt's close — wakes the poller, so
 its diagnosis and the `stopped` event ride a status at once, not a poll's
 interval later (since 2026-11-14).

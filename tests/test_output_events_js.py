@@ -162,6 +162,8 @@ REFUSED = {"id": 12, "kind": "refused", "attempt": 12, "reason": "no output rate
 STOPPED = {"id": 13, "kind": "stopped", "attempt": 13}
 PAUSED = {"id": 14, "kind": "paused"}
 PLAYING = {"state": "playing", "output": OUT}
+OWN = {"id": 40, "code": "not_played", "title": "HQPlayer could not play it", "next": "", "track_id": "t",
+       "failing": False}
 
 
 def test_an_event_is_one_toast_that_stays_until_play():
@@ -253,6 +255,20 @@ def test_a_takeover_stands_in_the_toast_again_once_the_refusal_over_it_ended():
                 "closed_before": [start, _st(TOOK), {"press": ["player.other_app", CLOSE]}, {"pass": 500},
                                   _st(REFUSED), _st(TOOK), {"pass": 500}, _st(TOOK)],
                 "reconnected": [start, _st(TOOK), _st(REFUSED, event_floor=50), _st(REFUSED), _st(TOOK), PLAYING],
+                # ...but only a refusal stands over a takeover: any other event the page slept through
+                # took the told one's place for good (round 3) — a second takeover (its spot is another),
+                # the other app's stop of a take-back, a takeover of the renderer that had paused
+                "second_takeover": [start, _st(TOOK), _st({"id": 21, "kind": "took"}, event_floor=50,
+                                                         resume={"index": 5, "position": 9})],
+                "stopped_meanwhile": [start, _st(TOOK), _st(STOPPED, event_floor=50)],
+                "refused_after_a_stop": [start, _st(STOPPED), _st({**REFUSED, "id": 21, "attempt": 21},
+                                                                  event_floor=50)],
+                "paused_then_taken": [start, _st(PAUSED, state="paused"), _st({"id": 21, "kind": "took"},
+                                                                             event_floor=50)],
+                # the refusal's toast stepped aside for a failed play's lasting toast: the takeover that
+                # stands again is redrawn where it waits — it does not push the failed play's off screen
+                "parked": [start, _st(TOOK), _st(REFUSED), _st(REFUSED, diagnosis=OWN), _st(TOOK, diagnosis=OWN),
+                           _st(TOOK), {"pass": 500}],
                 "waiting": [start, _st(TOOK), _st(REFUSED),
                             {"toast": {"kind": "info", "key": "a", "title": "First"}}, _st(TOOK), {"pass": 5_000}],
                 # the takeover's toast waited behind news when the refusal came: waiting is not closed
@@ -261,7 +277,7 @@ def test_a_takeover_stands_in_the_toast_again_once_the_refusal_over_it_ended():
     assert [[t["title"] for t in step["shown"]] for step in out["stands"]] == [
         [], ["Another app took HQPlayer Desktop · study-pc"], ["HQPlayer refused the other app's track"],
         ["Another app took HQPlayer Desktop · study-pc"], ["Another app took HQPlayer Desktop · study-pc"], []]
-    assert out["stands"][3]["shown"][0]["buttons"] == ["Why?", "×"]
+    assert out["stands"][3]["shown"][0]["buttons"] == ["Why?", "×"] and out["stands"][3]["shown"][0]["lasting"]
     assert out["stands"][4]["shown"][0]["text"].endswith('<span class="num">3:20</span>.')
     assert _keys(out["closed"]) == [[], ["player.other_app"], ["player.other_app"], [], [], [], []]
     # the refusal is news of its own after a closed takeover, and goes when it is over
@@ -269,6 +285,12 @@ def test_a_takeover_stands_in_the_toast_again_once_the_refusal_over_it_ended():
         ["HQPlayer refused the other app's track"], [], [], []]
     assert [[t["title"] for t in step["shown"]] for step in out["reconnected"]] == [
         []] + [["Another app took HQPlayer Desktop · study-pc"]] * 4 + [[]]
+    for gone in ("second_takeover", "stopped_meanwhile", "refused_after_a_stop", "paused_then_taken"):
+        assert _keys(out[gone]) == [[], ["player.other_app"], []], gone
+    assert _keys(out["parked"])[3:5] == [["hqplayer.diagnosis"], ["hqplayer.diagnosis"]]
+    assert [step["waiting"] for step in out["parked"]][3:5] == [["player.other_app"], ["player.other_app"]]
+    assert [(t["title"], t["lasting"]) for t in out["parked"][6]["shown"]] == [
+        ("Another app took HQPlayer Desktop · study-pc", True)]
     # behind news: redrawn as the takeover where it waits, and back in its turn
     assert _keys(out["waiting"])[3:] == [["a"], ["a"], ["player.other_app"]]
     assert out["waiting"][4]["waiting"] == ["player.other_app"]
@@ -575,7 +597,13 @@ def test_a_connections_floor_reaches_the_page_when_its_first_status_is_supersede
 # The keys of the status a notice rides on: a toast's to read ("The output's words"), never these
 # objects' — in any spelling (a dot, a bracket, a destructuring)
 NOTICE_KEYS = ("diagnosis", "output_event", "event_floor", "building", "not_answering", "rebuilding", "resume",
-               "paused_on_device", "dsp_change", "seek_missed", "other_refused", "hold")
+               "paused_on_device", "dsp_change", "seek_missed", "other_refused", "hold", "connecting", "taken",
+               "starting", "failing")
+# How often the two objects, whole, reach for the status outside their handlers' argument, raise a
+# notice, or listen for one: the sheet's radio button says its failure in a toast, and its Similar
+# rows mark the track that plays; nothing else
+NOW_PLAYING_REACHES = {"sheet": {"currentStatus": 2, "notices": 1, "np-update": 0},
+                       "mp": {"currentStatus": 0, "notices": 0, "np-update": 0}}
 NOW_PLAYING_ELEMENTS = [
     "div#miniPlayer.mini-player", "div#mpCover.mp-cover", "div.mp-info", "div#mpTitle.mp-title",
     "div#mpArtist.mp-artist", "button#mpPlayPause.mp-action", "svg", "button#mpNext.mp-action", "svg",
@@ -594,14 +622,11 @@ NOW_PLAYING_ELEMENTS = [
     "div#npSimilar.np-similar", "div.np-similar-head", "h3.np-similar-title", "span.np-similar-sub", "svg",
     "span#npSimilarCount", "div#npSimilarList.np-similar-list", "div.np-spacer",
 ]
-# What the script outside the two objects says of them: these members (the other `sheet`s are local
-# sheets of other screens), and one selector of the Similar rows' add button
-NOW_PLAYING_OUTSIDE = {
-    "sheet": {"addEventListener", "className", "hide", "html", "init", "innerHTML", "isOpen", "onStatus",
-              "querySelector", "querySelectorAll", "refreshPreviewDetail", "remove"},
-    "mp": {"init", "setCover", "update"},
-    "selectors": {".track-add, .np-sim-add"},
-}
+# What the script outside the two objects may say of them: one selector, of the Similar rows' add
+# button — and never an element the objects hold (the fields their init fills by id: `sheet.year`,
+# `mp.title`…; other screens' local sheets are named `sheet` too, and have no such field), nor the
+# objects themselves handed to anyone or kept under another name
+NOW_PLAYING_OUTSIDE = {"selectors": {".track-add, .np-sim-add"}}
 # The two status handlers, statement by statement
 NOW_PLAYING_HANDLERS = {
     "sheet": {
@@ -617,6 +642,7 @@ NOW_PLAYING_HANDLERS = {
                   "this._paintProgress", "this.coverFallback.style.setProperty", "this.playPauseIcon.closest",
                   "this.playPauseIcon.setAttribute", "this.radioBtn.setAttribute", "this.tryFetchDetail",
                   "transportBusy"},
+        "source": "        const playing = data.state === 'playing' && data.source !== 'external';",
         "attributes": {"d", "data-state"}, "classes": {"is-loading"},
         "assigned": {"_identity", "_npAlbumId", "_npMfId", "_npPreviewTid", "_npProvider", "_trackLength", "hidden",
                      "lastTrackKey", "textContent"},
@@ -629,6 +655,7 @@ NOW_PLAYING_HANDLERS = {
         "calls": {"btn.classList.toggle", "coverPlaceholderColors", "document.body.classList.add",
                   "document.body.classList.remove", "gradient", "this.playPauseIcon.closest",
                   "this.playPauseIcon.setAttribute", "this.setCover", "transportBusy", "update"},
+        "source": "          playing && data.source !== 'external'",
         "attributes": {"d"}, "classes": {"has-miniplayer", "is-loading"},
         "assigned": {"backgroundImage", "hidden", "lastSongKey", "textContent"},
     },
@@ -637,7 +664,10 @@ _VOID = {"img", "input", "br", "hr", "line", "rect", "circle", "path", "meta", "
 
 
 def _uncommented(js: str) -> str:
-    return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", js, flags=re.S))
+    """The script without its comments — those that open a line or follow a
+    space, as every one of the page's does: a `/*` inside a string
+    (`accept="image/*"`) or the `//` of an address opens none."""
+    return re.sub(r"(?m)(^|\s)//[^\n]*", r"\1", re.sub(r"(?ms)(^|\s)/\*.*?\*/", r"\1", js))
 
 
 def _now_playing_elements(html: str) -> list:
@@ -687,6 +717,18 @@ def _now_playing_objects(shell: str) -> dict:
     return {"sheet": shell[s0:s1], "mp": shell[m0:m1], "outside": shell[:s0] + shell[s1:m0] + shell[m1:]}
 
 
+def _method(body: str, name: str) -> str:
+    """One method of an object literal's source, by its name: from its
+    `name(…) {` at the methods' indent to the `},` that closes it."""
+    start = body.index(f"\n    {name}(")
+    return body[start:body.index("\n    },", start) + 7]
+
+
+def _now_playing_handlers(parts: dict) -> dict:
+    """The two status handlers: the sheet's `onStatus`, the mini-player's `update`."""
+    return {"sheet": _method(parts["sheet"], "onStatus"), "mp": _method(parts["mp"], "update")}
+
+
 def now_playing_says_a_notice(html: str, css: str, shell: str) -> list:
     """Why Now Playing — the sheet or the mini-player — could render a
     notice, as the page's three files stand: each reason a sentence, none
@@ -702,23 +744,30 @@ def now_playing_says_a_notice(html: str, css: str, shell: str) -> list:
 
     parts = _now_playing_objects(shell)
     outside = _uncommented(parts["outside"])
-    if re.search(r"getElementById\(\s*['\"`](?:np|mp)[A-Z]|getElementById\(\s*['\"`]miniPlayer", outside):
+    if re.search(r"getElementById\(\s*['\"`](?:np|mp)[A-Z]|getElementById\(\s*['\"`]miniPlayer"
+                 r"|\[id[*^$~|]?=\s*['\"]?(?:np|mp)[A-Z]|\[id[*^$~|]?=\s*['\"]?miniPlayer", outside):
         why.append("an element of the two is taken by its id outside their objects")
     selectors = set(re.findall(r"['\"`]([^'\"`\n]*(?:\.np-|#np[A-Z]|\.mp-|#mp[A-Z]|mini-player|#miniPlayer)[^'\"`\n]*)['\"`]",
                                outside))
     if selectors - NOW_PLAYING_OUTSIDE["selectors"]:
         why.append(f"the script outside their objects selects into them: {sorted(selectors - NOW_PLAYING_OUTSIDE['selectors'])}")
     for name in ("sheet", "mp"):
-        members = set(re.findall(r"(?<![\w.$])" + name + r"\.(\w+)", outside))
-        if members - NOW_PLAYING_OUTSIDE[name]:
-            why.append(f"the script outside reaches into `{name}`: {sorted(members - NOW_PLAYING_OUTSIDE[name])}")
-        named = [key for key in NOTICE_KEYS if re.search(r"\b" + key + r"\b", _uncommented(parts[name]))]
+        body = _uncommented(parts[name])
+        fields = set(re.findall(r"this\.(\w+) = document\.getElementById", body))
+        reached = set(re.findall(r"(?<![\w.$])" + name + r"\.(\w+)", outside)) & fields
+        if reached:
+            why.append(f"the script outside reaches for `{name}`'s elements: {sorted(reached)}")
+        # (a local sheet of another screen is appended to the page, alone in its call: not this)
+        if re.search(r"\(\s*" + name + r"\s*,|,\s*" + name + r"\s*[,)]|=\s*" + name + r"\s*[;,]", outside):
+            why.append(f"`{name}` is handed on or kept under another name outside")
+        named = [key for key in NOTICE_KEYS if re.search(r"\b" + key + r"\b", body)]
         if named:
             why.append(f"`{name}` names {named}, which a notice rides on")
+        reaches = {word: len(re.findall(re.escape(word), body)) for word in NOW_PLAYING_REACHES[name]}
+        if reaches != NOW_PLAYING_REACHES[name]:
+            why.append(f"`{name}` reaches for the status or the notices another number of times: {reaches}")
 
-    handlers = {"sheet": shell[shell.index("    onStatus(data) {"):shell.index("    // One similar path for owned AND preview")],
-                "mp": shell[shell.index("    update(data) {"):shell.index("\n    setCover(detail) {")]}
-    for name, source in handlers.items():
+    for name, source in _now_playing_handlers(parts).items():
         handler, pinned = _uncommented(source), NOW_PLAYING_HANDLERS[name]
         reads = set(re.findall(r"\bdata\.(\w+)", handler))
         if reads - pinned["reads"]:
@@ -726,7 +775,7 @@ def now_playing_says_a_notice(html: str, css: str, shell: str) -> list:
         if re.search(r"\bdata\s*\[|\bdata\?\.|\}\s*=\s*data\b|=\s*data\s*[;,)]|\.\.\.data\b|currentStatus", handler):
             why.append(f"`{name}`'s handler reads the status by another road than `data.<key>`")
         # `source` tells one thing here: whose playback it is, for the transport's icon
-        if re.findall(r"data\.source\b(?! !== 'external')", handler):
+        if re.findall(r"[^\n]*data\.source\b[^\n]*", handler) != [pinned["source"]]:
             why.append(f"`{name}`'s handler reads `source` for more than the transport's icon")
         writes = [f"{target}.{prop} {op} {' '.join(value.split())}" for target, prop, op, value in re.findall(
             r"([\w.]+)\.(textContent|innerHTML|innerText|outerHTML|hidden|title|value|className)\s*([-+*]?=)(?!=)\s*([^;]+);",
@@ -824,6 +873,27 @@ def test_now_playing_renders_no_notice():
             "      this.title.setAttribute('title', data.state === 'stopped' ? 'Stopped by another app' : '');\n"))),
         "a key read with a question mark": (html, css, after(shell, sheet_at, (
             "      this.year.hidden = !!data?.building;\n"))),
+        # round 3's: the objects' other methods, the mini-player's line through its own words, the
+        # object handed to a helper, a second listener past a string that looks like a comment
+        "a listener of its own in the sheet's init": (html, css, swap(
+            shell, "      this.close.addEventListener('click', () => this.hide());",
+            "      this.close.addEventListener('click', () => this.hide());\n"
+            "      document.addEventListener('np-update', e => { this.year.textContent = e.detail.error || ''; });")),
+        "the status read from the window in the mini-player": (html, css, swap(shell, mini_at, mini_at + (
+            "      this.setCover(window.currentStatus);\n"))),
+        "the notices painted from the sheet": (html, css, swap(
+            shell, "      this.close.addEventListener('click', () => this.hide());",
+            "      this.close.addEventListener('click', () => this.hide());\n"
+            "      this.year.textContent = notices.list().map(n => n.key).join(' ');")),
+        "the mini-player's line through its own words": (html, css, swap(
+            shell, "      const artist = data.artist || '';\n      const album = data.album || '';",
+            "      const artist = stopped && data.source === 'external' ? 'Another app is playing' : data.artist || '';\n"
+            "      const album = data.album || '';")),
+        "the sheet handed to a helper outside": (html, css, after(shell, tail, listener % "paintNote(sheet, e.detail);")),
+        "a listener after the string that looks like a comment": (html, css, swap(
+            shell, "\n  /* ---------- Notices: toasts, the strip, the rows ----------",
+            "\n" + listener % "document.getElementById('npYearText').textContent = 'Another app has it';"
+            + "\n  /* ---------- Notices: toasts, the strip, the rows ----------")),
         "a notice key kept for later in the object": (html, css, swap(
             shell, "    onStatus(data) {\n      if (!data) return;\n",
             "    onStatus(data) {\n      if (!data) return;\n      this._last = data;\n"

@@ -252,13 +252,19 @@ def test_a_queue_edit_while_stopped_keeps_the_outputs_words_on_the_status(monkey
     monkeypatch.setattr(mgr, "_latest_status", {"state": "stopped"})
     mgr._emit_idle_status()
     assert not set(said) & set(mgr.latest_status)
-    # With no output attached nothing follows to correct them: a removal there moves the slot a spot
-    # names, and the next Play would start another track at that second. Only the explanation stays.
+    # With no output attached the output's other words go — there is none to say them again — but
+    # the spot a failed attach held stays through an append, which moves no slot (the next Play
+    # starts there); a removal moves the slot it names, and nothing follows to correct it: it goes.
     mgr._active = None
     monkeypatch.setattr(PlaybackManager, "output_info", property(lambda self: {"type": None, "label": None}))
     monkeypatch.setattr(mgr, "_latest_status", {"state": "disconnected", **said})
     mgr._emit_idle_status()
+    assert {k for k in said if k in mgr.latest_status} == {"diagnosis", "resume"}
+    monkeypatch.setattr(mgr, "_latest_status", {"state": "disconnected", **said})
+    mgr._emit_idle_status(slots_moved=True)             # as a removal with no output attached says it
     assert {k for k in said if k in mgr.latest_status} == {"diagnosis"}
+    import inspect
+    assert "self._emit_idle_status(slots_moved=True)" in inspect.getsource(PlaybackManager.remove)
 
 
 def test_no_playback_class_defines_a_method_twice():
