@@ -266,8 +266,10 @@ def test_a_failure_said_is_not_said_again_when_its_diagnosis_comes_back(traced, 
     run = _ui_run([{"np": {"state": "stopped", "output": out}}, {"cmd": "play"}, diagnosed,
                    {"np": {"state": "stopped", "output": out}}, diagnosed],
                   {"/api/player/play": {"status": 200, "body": answer}})
-    # the answer, then the diagnosis taking it over: two asked, none after
-    assert run["calls"] == 2 and run["toasts"][0]["action"] == "Why?", run
+    # the answer, then the diagnosis taking it over: two asked, none after — and the diagnosis's toast,
+    # a lasting one, went with the status that offered it no more
+    assert run["calls"] == 2 and run["toasts"] == [], run
+    assert [(t["action"], t["lasting"]) for t in run["gone"]] == [("Why?", True)], run
 
 
 def test_a_tab_opened_after_a_failure_never_says_it(traced, fake, monkeypatch):
@@ -314,7 +316,9 @@ def test_a_failure_met_in_a_failing_run_is_not_said_when_the_run_ends(traced, fa
     run = _ui_run([bare] + [{"np": {"state": "stopped", "output": out, "diagnosis": d}} for d in seen]
                   + [{"np": {"state": "playing", "output": out}},
                      {"np": {"state": "stopped", "output": out, "diagnosis": ended}}], {})
-    assert run["calls"] == 2 and [t["action"] for t in run["toasts"]] == ["Why?"], run
+    # the second's toast took the first's place, and went when the status offered the third's instead
+    assert run["calls"] == 2 and run["toasts"] == [], run
+    assert [t["action"] for t in run["gone"]] == ["Why?"], run
 
 
 def test_a_refused_play_whose_diagnosis_came_first_in_a_failing_run_is_said(traced, fake, monkeypatch):

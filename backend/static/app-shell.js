@@ -6307,7 +6307,9 @@
     return {
       say(tag, spec) {
         if (tag === said) { notices.amend(key, tag, spec); return; }
-        leave(tag);
+        // A toast for an earlier instance still up is redrawn in place as
+        // this one (the key's): never one leaving while the next comes in
+        said = tag;
         notices.toast({ ...spec, key, tag, lasting: true });
       },
       know(tag) { leave(tag); },
