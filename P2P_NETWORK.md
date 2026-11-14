@@ -1199,7 +1199,17 @@ pass them on; no key's signature is trusted for what it says.
   completed full dump) re-serves another author's blob, and only after its own check
   against MusicBrainz in the last 30 days found no suspected fabrication;
   every other node — a dump node included — passes on its own builds only
-  and queues no check.
+  and queues no check. **No re-serve by origin** (2026-11-14): a blob
+  fetched for the owner's imported history (a name its waiting room holds,
+  an artist a placed scrobble or an imported listen engages) or for his own
+  lookup (Discovery's mint, the assistant's resolve, a person's pick, an
+  opened artist page's ListenBrainz statistics) is kept for this node alone
+  (`local_only`, read at the fetch by `LOCAL_ONLY_SQL` in each family's
+  queries) — unless something another node may already know names it too: a
+  file owned here or at the HQPlayer, a listen played to the end here. It is
+  never served, advertised nor checked, so nobody learns by asking that this
+  node fetched it. The blobs kept before were marked once by the same rules
+  (`db_migrate` `slice_origins_v1`).
 - **Proven falsifications** — a dump version later than MetaBrainz has
   published, rows outside the slice's own subtree — convict the author and
   quarantine the node that passed the slice on (for a version, only one

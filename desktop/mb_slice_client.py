@@ -40,7 +40,7 @@ from desktop.api_client import BackendAPIClient
 from desktop.p2p import mb_asks, slice_trust, wire
 from desktop.p2p.mb_slice_queries import (MB_LOAD_LOCK_KEY, PROTOCOL_VERSION,
                                           SLICE_TABLES, TABLE_ROW_LIMITS, addr_uuid,
-                                          bandcamp_page, name_key as lower_key,
+                                          bandcamp_page, local_only, name_key as lower_key,
                                           store_slice_blob,
                                           verify_slice_entry)
 
@@ -273,10 +273,15 @@ class MBSliceClient:
         source_node: str = "",
         backend_api: Optional[BackendAPIClient] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
+        for_person: bool = False,
     ):
+        """`for_person`: the names are the person's own lookup (Discovery's
+        mint, the assistant's resolve) — what they bring serves this node
+        alone, whatever else names them."""
         self.peer_api = peer_api
         self.db_dsn = db_dsn
         self.source_node = source_node
+        self.for_person = for_person
         self.source_addr = addr_uuid(getattr(peer_api, "base_url", ""))
         self.backend_api = backend_api
         self.progress_cb = progress_cb
@@ -524,12 +529,15 @@ class MBSliceClient:
         slice_trust.index(conn, "mb", nk, author, relay or author, self.source_addr,
                           payload, core.get("dump_version") or "", artists, groups)
         # Replica inventory: keep the verified blob verbatim so this node can
-        # re-serve it with the author's signature once it has checked it. A
-        # blob too large to keep removes the name's older one — dump nodes
-        # serve those from their own cache.
+        # re-serve it with the author's signature once it has checked it —
+        # unless it came for the imported history or the person's own lookup
+        # (the origin it has now, at its fetch). A blob too large to keep
+        # removes the name's older one — dump nodes serve those from their
+        # own cache.
         kept = store_slice_blob(conn, nk, core.get("dump_version") or "", author,
                                 entry["sig"], blob_gz, cap=True, relay=relay or author,
-                                contested=bool(clashed), mbids=carried(full))
+                                contested=bool(clashed), mbids=carried(full),
+                                local=self.for_person or local_only(conn, nk))
         if clashed:
             stats["contested"] += 1
             logger.warning("MB slice for %r: %d row(s) clash with rows held here — none "

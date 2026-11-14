@@ -834,32 +834,74 @@ def pending_slice_names(conn, limit: int = 200) -> list:
 
 RESERVE_BLOB_MAX_GZ = 2 * 1024 * 1024
 
+# Whether a blob this node fetched for the name keyed {nk} (an SQL expression)
+# serves this node only — the origin it had when fetched (2026-11-14): a
+# re-served blob answers "did you fetch X?" to anyone who asks, so what the
+# owner's imported history and his own lookups brought stays here. Local: the
+# name waits in the waiting room (pending_scrobble_artists), or it names an
+# artist the history placed (a waiting name resolved to it, or a listen
+# imported from Last.fm) or the person picked (Discovery's mint, the
+# assistant's resolve: confidence 'user') — unless a reason another node may
+# already know names it too: a file owned here or at the HQPlayer, or a
+# completed listen on this node (the caveat concedes both). The similar-artist
+# stubs, the seed's picks and carried phantoms re-serve as before. A fetch for
+# the person (Discovery's mint, the assistant's resolve) is local whatever the
+# name (MBSliceClient's `for_person`). Read at the import and by the one-time
+# marking of the blobs kept before (db_migrate `slice_origins_v1`).
+LOCAL_ONLY_SQL = """(
+    (EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n WHERE lo_n.name_key = {nk})
+     OR EXISTS (SELECT 1 FROM artists lo_a
+                 WHERE lower(btrim(lo_a.name)) = {nk}
+                   AND (EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n
+                                 WHERE lo_n.artist_id = lo_a.id)
+                        OR EXISTS (SELECT 1 FROM track_artists lo_ta
+                                     JOIN listening_history lo_lh ON lo_lh.track_id = lo_ta.track_id
+                                    WHERE lo_ta.artist_id = lo_a.id AND lo_lh.source = 'lastfm')
+                        OR EXISTS (SELECT 1 FROM artist_mbids lo_am
+                                    WHERE lo_am.artist_id = lo_a.id AND lo_am.confidence = 'user'))))
+    AND NOT EXISTS (SELECT 1 FROM artists lo_a
+                     WHERE lower(btrim(lo_a.name)) = {nk}
+                       AND (EXISTS (SELECT 1 FROM track_artists lo_ta
+                                      JOIN owned_files lo_f ON lo_f.track_id = lo_ta.track_id
+                                     WHERE lo_ta.artist_id = lo_a.id)
+                            OR EXISTS (SELECT 1 FROM track_artists lo_ta
+                                         JOIN listening_history lo_lh ON lo_lh.track_id = lo_ta.track_id
+                                        WHERE lo_ta.artist_id = lo_a.id AND lo_lh.source = 'sautium'
+                                          AND lo_lh.completed AND NOT lo_lh.skipped))))"""
+
+
+def local_only(conn, nk: str) -> bool:
+    """LOCAL_ONLY_SQL for the name `nk`, as things stand now."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT " + LOCAL_ONLY_SQL.format(nk="%(nk)s"), {"nk": nk})
+        return bool(cur.fetchone()[0])
+
 
 def cached_slice(conn, nk: str):
     with conn.cursor() as cur:
-        cur.execute("SELECT dump_version, author_pubkey, sig, blob_gz"
+        cur.execute("SELECT dump_version, author_pubkey, sig, blob_gz, local_only"
                     "  FROM mb_slice_blobs WHERE name_key = %s", (nk,))
         row = cur.fetchone()
     if not row:
         return None
     return {"dump_version": row[0], "author_pubkey": row[1].strip(),
-            "sig": row[2].strip(), "blob_gz": bytes(row[3])}
+            "sig": row[2].strip(), "blob_gz": bytes(row[3]), "local_only": row[4]}
 
 
 def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
                      sig: str, blob_gz: bytes, cap: bool = True,
                      match: Optional[str] = None, relay: Optional[str] = None,
-                     contested: bool = False, mbids=()) -> bool:
+                     contested: bool = False, mbids=(), local: bool = False) -> bool:
     """Upsert one verified blob, with its payload's hash and the MBIDs of its
     artist, group, release and recording rows (`mbids`, which a settled clash
     finds its carriers by). `cap=True` is the replica posture: a blob too
     large to keep is not stored, and the name's older blob goes with it — the
-    kept blobs always say what the ledger says. A dump node stores its own
-    regardless — that is the cache, each blob under the `match` key of what
-    it covers, `relay` None. Another blob in its place is checked anew before
-    it passes on, and what waited on the one it replaces — its clashes, its
-    check's draw — goes with it; the same bytes again keep their verdict and
-    their arrival."""
+    kept blobs always say what the ledger says; `local` keeps it for this
+    node alone (LOCAL_ONLY_SQL). A dump node stores its own regardless — that
+    is the cache, each blob under the `match` key of what it covers, `relay`
+    None. Another blob in its place is checked anew before it passes on, and
+    what waited on the one it replaces — its clashes, its check's draw — goes
+    with it; the same bytes again keep their verdict and their arrival."""
     payload = hashlib.sha256(blob_gz).hexdigest()
     with conn.cursor() as cur:
         cur.execute("""DELETE FROM slice_check_plans p
@@ -876,8 +918,8 @@ def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
         cur.execute("""
             INSERT INTO mb_slice_blobs
                    (name_key, dump_version, author_pubkey, sig, blob_gz, match_key, relay,
-                    contested, payload_sha256, mbids)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid[])
+                    contested, payload_sha256, mbids, local_only)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid[], %s)
             ON CONFLICT (name_key) DO UPDATE SET
                 dump_version = EXCLUDED.dump_version,
                 author_pubkey = EXCLUDED.author_pubkey,
@@ -887,6 +929,7 @@ def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
                 relay = EXCLUDED.relay,
                 contested = EXCLUDED.contested,
                 mbids = EXCLUDED.mbids,
+                local_only = EXCLUDED.local_only,
                 checked_at = CASE WHEN mb_slice_blobs.payload_sha256 = EXCLUDED.payload_sha256
                                   THEN mb_slice_blobs.checked_at END,
                 suspect = coalesce(mb_slice_blobs.payload_sha256 = EXCLUDED.payload_sha256, FALSE)
@@ -895,7 +938,7 @@ def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
                                   THEN mb_slice_blobs.created_at ELSE now() END,
                 payload_sha256 = EXCLUDED.payload_sha256""",
             (nk, dump_version, author_pubkey, sig, blob_gz, match, relay, contested, payload,
-             list(mbids)))
+             list(mbids), local))
     return True
 
 
@@ -996,6 +1039,10 @@ def serve_slices(conn, names: list, sign_fn=None,
             continue
         answered.add(nk)
         entry = cached_slice(conn, nk)
+        if entry is not None and entry["local_only"]:
+            # Fetched for this node's imported history or its owner's own
+            # lookup: no other node is told it holds it.
+            entry = None
         if version is not None and (entry is None or entry["dump_version"] != version
                                     or entry["author_pubkey"].lower() != own):
             # A miss, a blob cut from an earlier dump or another author's: built

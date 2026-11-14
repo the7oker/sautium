@@ -111,7 +111,8 @@ def _blob(conn, family: str, key: str) -> Optional[dict]:
     with conn.cursor() as cur:
         cur.execute(f"""SELECT dump_version, btrim(author_pubkey), blob_gz, btrim(relay),
                                checked_at, suspect, {contested}, created_at,
-                               checked_at > now() - make_interval(days => %s), {payload}
+                               checked_at > now() - make_interval(days => %s), {payload},
+                               local_only
                           FROM {table} WHERE {col} = %s""", (CHECK_DAYS, key))
         row = cur.fetchone()
     if row is None:
@@ -120,7 +121,8 @@ def _blob(conn, family: str, key: str) -> Optional[dict]:
     return {"dump_version": row[0], "author": row[1], "blob_gz": blob_gz, "relay": row[3],
             "checked_at": row[4], "suspect": row[5], "contested": row[6], "created_at": row[7],
             "fresh_check": bool(row[8]),
-            "payload": (row[9] or "").strip() or hashlib.sha256(blob_gz).hexdigest()}
+            "payload": (row[9] or "").strip() or hashlib.sha256(blob_gz).hexdigest(),
+            "local_only": row[10]}
 
 
 def _author_ok(conn, author: str, relay: Optional[str]) -> bool:
@@ -166,7 +168,9 @@ def servable(conn, family: str, key: str, own_pubkey: Optional[str]) -> Optional
     is suspect or contested). None: checkable, not checked lately — the caller
     asks for the check and answers `missing` this time."""
     b = _blob(conn, family, key)
-    if b is None:
+    if b is None or b["local_only"]:
+        # One fetched for this node's own history or its owner's lookup is
+        # passed on to no one, and so never checked for it.
         return False
     if own_pubkey and b["author"].lower() == own_pubkey.lower() and b["relay"] is None:
         return True
@@ -186,8 +190,8 @@ def servable(conn, family: str, key: str, own_pubkey: Optional[str]) -> Optional
 def checkable_count(conn, family: str, own_pubkey: Optional[str]) -> int:
     """The blobs that can be passed on, checked or not yet: this node's own
     builds, and — on a node that checks — those of verified authors with no
-    penalty, from sources with none, not suspect nor contested: what
-    `/health` advertises."""
+    penalty, from sources with none, not suspect nor contested, and not kept
+    for this node alone: what `/health` advertises."""
     from desktop.p2p.birth_cert import CERT_VERSION
     table, _ = _TABLE[family]
     contested = "AND NOT b.contested" if family == "mb" else ""
@@ -196,7 +200,7 @@ def checkable_count(conn, family: str, own_pubkey: Optional[str]) -> int:
         cur.execute(f"""
             SELECT count(*) FROM {table} b
              WHERE (b.relay IS NULL AND btrim(b.author_pubkey) = %(own)s)
-                OR (%(checks)s AND NOT b.suspect {contested}
+                OR (%(checks)s AND NOT b.suspect {contested} AND NOT b.local_only
                     AND b.dump_version ~ '^[0-9]{{8}}-[0-9]{{6}}$' AND b.dump_version <= %(bound)s
                     AND EXISTS (SELECT 1 FROM p2p_identities i
                                  WHERE i.pubkey = btrim(b.author_pubkey) AND i.status = 'verified'

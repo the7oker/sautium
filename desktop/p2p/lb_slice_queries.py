@@ -205,25 +205,44 @@ def get_slice_one(conn, artist_mbid: str, version: str) -> dict:
 # Blob cache + replication (one table, three roles — see mb_slice_blobs)
 # ---------------------------------------------------------------------------
 
+# Whether a blob this node fetched for the artist MBID {mbid} (an SQL
+# expression) serves this node only — the origin it had when fetched
+# (2026-11-14). LB is asked for an opened page, an owned artist and an
+# engaged one: it re-serves only what another node may already know of this
+# node — an artist owned here or at the HQPlayer, or listened to to the end on
+# this node; an opened page's artist, and one engaged only by imported
+# Last.fm listens, stay here. Read at the import and by the one-time marking
+# of the blobs kept before (db_migrate `slice_origins_v1`).
+LOCAL_ONLY_SQL = """NOT EXISTS (
+    SELECT 1 FROM artist_mbids lo_am
+      JOIN track_artists lo_ta ON lo_ta.artist_id = lo_am.artist_id
+     WHERE lo_am.mbid = {mbid}
+       AND (EXISTS (SELECT 1 FROM owned_files lo_f WHERE lo_f.track_id = lo_ta.track_id)
+            OR EXISTS (SELECT 1 FROM listening_history lo_lh
+                        WHERE lo_lh.track_id = lo_ta.track_id AND lo_lh.source = 'sautium'
+                          AND lo_lh.completed AND NOT lo_lh.skipped)))"""
+
+
 def cached_slice(conn, mbid: str) -> Optional[dict]:
     with conn.cursor() as cur:
-        cur.execute("SELECT dump_version, author_pubkey, sig, blob_gz"
+        cur.execute("SELECT dump_version, author_pubkey, sig, blob_gz, local_only"
                     "  FROM lb_slice_blobs WHERE artist_mbid = %s", (mbid,))
         row = cur.fetchone()
     if not row:
         return None
     return {"dump_version": row[0], "author_pubkey": row[1].strip(),
-            "sig": row[2].strip(), "blob_gz": bytes(row[3])}
+            "sig": row[2].strip(), "blob_gz": bytes(row[3]), "local_only": row[4]}
 
 
 def store_slice_blob(conn, mbid: str, dump_version: str, author_pubkey: str,
                      sig: str, blob_gz: bytes, cap: bool = True,
-                     relay: Optional[str] = None) -> bool:
+                     relay: Optional[str] = None, local: bool = False) -> bool:
     """Upsert one verified blob, forward only by dump version. `cap=True` is
-    the replica posture (skip oversized); a dump node stores its own
-    regardless — that is the cache, `relay` None. Another blob in its place
-    is checked anew before it passes on, its pending check's draw gone; the
-    same bytes again keep their verdict."""
+    the replica posture (skip oversized); `local` keeps it for this node
+    alone (LOCAL_ONLY_SQL); a dump node stores its own regardless — that is
+    the cache, `relay` None. Another blob in its place is checked anew before
+    it passes on, its pending check's draw gone; the same bytes again keep
+    their verdict."""
     if cap and len(blob_gz) > RESERVE_BLOB_MAX_GZ:
         return False
     with conn.cursor() as cur:
@@ -234,21 +253,22 @@ def store_slice_blob(conn, mbid: str, dump_version: str, author_pubkey: str,
                     (mbid, mbid, blob_gz))
         cur.execute("""
             INSERT INTO lb_slice_blobs
-                   (artist_mbid, dump_version, author_pubkey, sig, blob_gz, relay)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                   (artist_mbid, dump_version, author_pubkey, sig, blob_gz, relay, local_only)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (artist_mbid) DO UPDATE SET
                 dump_version = EXCLUDED.dump_version,
                 author_pubkey = EXCLUDED.author_pubkey,
                 sig = EXCLUDED.sig,
                 blob_gz = EXCLUDED.blob_gz,
                 relay = EXCLUDED.relay,
+                local_only = EXCLUDED.local_only,
                 checked_at = CASE WHEN lb_slice_blobs.blob_gz = EXCLUDED.blob_gz
                                   THEN lb_slice_blobs.checked_at END,
                 suspect = lb_slice_blobs.blob_gz = EXCLUDED.blob_gz AND lb_slice_blobs.suspect,
                 created_at = CASE WHEN lb_slice_blobs.blob_gz = EXCLUDED.blob_gz
                                   THEN lb_slice_blobs.created_at ELSE now() END
             WHERE EXCLUDED.dump_version >= lb_slice_blobs.dump_version""",
-            (mbid, dump_version, author_pubkey, sig, blob_gz, relay))
+            (mbid, dump_version, author_pubkey, sig, blob_gz, relay, local))
     return True
 
 
@@ -301,8 +321,11 @@ def serve_slices(conn, artist_mbids: list, min_version: Optional[str] = None,
     slices, missing = {}, []
     for asked, key in zip(artist_mbids, keys):
         entry = cached_slice(conn, key)
-        if entry is not None and ((min_version is not None and entry["dump_version"] < min_version)
+        if entry is not None and (entry["local_only"]
+                                  or (min_version is not None and entry["dump_version"] < min_version)
                                   or (local is not None and entry["dump_version"] < local)):
+            # A blob fetched for this node's own (an opened page, an artist of
+            # the imported history alone) is no other node's to learn of.
             entry = None
         cert = None
         if entry is not None and entry["author_pubkey"].lower() == own:
@@ -498,6 +521,10 @@ def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict
         author = (entry.get("author_pubkey") or "").lower()
         relay = (relay or author).lower()
         payload = hashlib.sha256(blob_gz).hexdigest()
+        # Its origin as it is now, at the fetch, before the on-demand request
+        # it answers goes.
+        cur.execute("SELECT " + LOCAL_ONLY_SQL.format(mbid="%s::uuid"), (mbid,))
+        local = bool(cur.fetchone()[0])
         cur.execute("""
             INSERT INTO lb_slice_fetches
                    (artist_mbid, dump_version, recordings, source_node, source_pubkey,
@@ -522,5 +549,5 @@ def import_slice(conn, artist_mbid: str, core: dict, blob_gz: bytes, entry: dict
              WHERE am.artist_id = r.artist_id AND am.mbid = %s::uuid""", (mbid,))
     slice_trust.index(conn, "lb", mbid, author, relay, source_addr, payload, version, [mbid], [])
     store_slice_blob(conn, mbid, version, author, entry.get("sig") or "", blob_gz, cap=True,
-                     relay=relay)
+                     relay=relay, local=local)
     return len(recordings)

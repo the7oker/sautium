@@ -212,23 +212,24 @@ def _recording_known(c, recording, *artists):
 
 
 def test_serve_replica_matrix_against_min_version(conn):
-    # This node holds no dump: it keeps M_OWNED at V2 and M_PHANTOM at V1, and
-    # passes neither on before its own check — asked, it queues the check.
+    # This node holds no dump: it keeps M_OWNED at V2 and passes it on only
+    # after its own check — asked, it queues the check. M_PHANTOM's blob, at
+    # V1, came for an opened page (LB never asks a phantom in bulk): kept for
+    # this node alone, and never checked for another.
     out = q.serve_slices(conn, [M_OWNED, M_PHANTOM, M_ENGAGED], None, None, "")
     assert out["slices"] == {} and out["missing"] == [M_OWNED, M_PHANTOM, M_ENGAGED]
     with conn.cursor() as cur:
         cur.execute("""SELECT subject::text, subject_key FROM mbws_waiters
                         WHERE kind = 'recording' AND mbid = %s ORDER BY 2""", (REC_1,))
-        assert cur.fetchall() == [("slice_check", f"lb:{M_OWNED}"), ("slice_check", f"lb:{M_PHANTOM}")]
+        assert cur.fetchall() == [("slice_check", f"lb:{M_OWNED}")]
     _recording_known(conn, REC_1, M_OWNED, M_PHANTOM)
-    with conn.cursor() as cur:                    # the artists, as MusicBrainz answers them
-        for artist in (M_OWNED, M_PHANTOM):
-            cur.execute("""INSERT INTO mbws_answers (kind, mbid, status, target)
-                           VALUES ('artist', %s, 'found', %s)""", (artist, artist))
+    with conn.cursor() as cur:                    # the artist, as MusicBrainz answers it
+        cur.execute("""INSERT INTO mbws_answers (kind, mbid, status, target)
+                       VALUES ('artist', %s, 'found', %s)""", (M_OWNED, M_OWNED))
     assert slice_checks.evaluate(conn, "lb", M_OWNED) is True
-    assert slice_checks.evaluate(conn, "lb", M_PHANTOM) is True
     out = q.serve_slices(conn, [M_OWNED, M_PHANTOM, M_ENGAGED], None, None, "")
-    assert set(out["slices"]) == {M_OWNED, M_PHANTOM, M_ENGAGED}       # a zero-match checks out at once
+    assert set(out["slices"]) == {M_OWNED, M_ENGAGED}       # a zero-match checks out at once
+    assert out["missing"] == [M_PHANTOM]
     out = q.serve_slices(conn, [M_OWNED, M_PHANTOM], V2, None, "")
     assert set(out["slices"]) == {M_OWNED} and out["missing"] == [M_PHANTOM]
     # Passed on under the certificate this node recorded for its author.

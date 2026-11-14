@@ -45,7 +45,11 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      any dump holder came to author slices — the nodes that ran it keep the
      marker. The master step (`master_stub_bound_v1`) binds the support
      contact still waiting unbound to the master's own key, the day a contact
-     came to carry its key's fingerprint (2026-11-07). The rebuild step
+     came to carry its key's fingerprint (2026-11-07). The origins step
+     (`slice_origins_v1`) marks the slice blobs kept before a blob came to
+     carry its origin by the rules a fetch reads now: those that name the
+     imported history or the owner's own picks serve the node alone from
+     then on (2026-11-14). The rebuild step
      (`slice_rebuild_v1`) rebuilds a node's catalogue rows once from the
      slices it keeps, under the import's rules of that day — a slice's own
      subtree only, its rows of their columns' kinds, an artist or a group one
@@ -250,6 +254,29 @@ def _rebuild_slices(conn) -> dict:
     slice_rebuild.request(conn, "upgrade")
     conn.commit()
     return {"requested": True}
+
+
+def _mark_local_slices(conn) -> dict:
+    """The slice blobs this node kept before a blob came to carry its origin
+    (2026-11-14) marked once by the rules a fetch reads now
+    (mb_slice_queries / lb_slice_queries LOCAL_ONLY_SQL): those that name
+    the imported history or the owner's own picks serve this node alone
+    from here on. A dump node's own builds (no relay) are nobody's history."""
+    from desktop.p2p import lb_slice_queries, mb_slice_queries
+    with conn.cursor() as cur:
+        cur.execute("UPDATE mb_slice_blobs b SET local_only = "
+                    + mb_slice_queries.LOCAL_ONLY_SQL.format(nk="b.name_key")
+                    + " WHERE b.relay IS NOT NULL")
+        mb = cur.rowcount
+        cur.execute("UPDATE lb_slice_blobs b SET local_only = "
+                    + lb_slice_queries.LOCAL_ONLY_SQL.format(mbid="b.artist_mbid")
+                    + " WHERE b.relay IS NOT NULL")
+        lb = cur.rowcount
+        cur.execute("SELECT (SELECT count(*) FROM mb_slice_blobs WHERE local_only), "
+                    "       (SELECT count(*) FROM lb_slice_blobs WHERE local_only)")
+        mb_local, lb_local = cur.fetchone()
+    conn.commit()
+    return {"mb_marked": mb, "mb_local": mb_local, "lb_marked": lb, "lb_local": lb_local}
 
 
 def _bind_master_stub(conn) -> int:
@@ -624,6 +651,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "master_stub_bound_v1"):
             out["master_stub_bound"] = _bind_master_stub(conn)
             _mark(conn, "master_stub_bound_v1")
+
+        if not _marked(conn, "slice_origins_v1"):
+            out["slice_origins"] = _mark_local_slices(conn)
+            _mark(conn, "slice_origins_v1")
 
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):

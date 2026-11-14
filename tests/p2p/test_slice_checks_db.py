@@ -109,12 +109,43 @@ def _offer(dsn, key, subtree, relay=None):
         client.close()
 
 
-def _offer_lb(dsn, key, entries, relay):
-    """`key`'s LB slices ({artist MBID: slice}) taken through the LB cycle's exchange."""
+def _offer_lb(dsn, key, entries, relay, owned=True):
+    """`key`'s LB slices ({artist MBID: slice}) taken through the LB cycle's
+    exchange — for artists owned here, as the LB lanes ask for them; with
+    `owned` False, for whatever the test bound the MBIDs to (an opened page,
+    an artist the imported history alone engages: kept for this node)."""
+    if owned:
+        conn = psycopg2.connect(dsn)
+        conn.autocommit = True
+        try:
+            for mbid in entries:
+                _owned_mbid(conn, mbid)
+        finally:
+            conn.close()
     peer = Peer({m: lb_entry(key, m, one) for m, one in entries.items()}, pub(relay))
     cycle = lb_slice_cycle.LbSliceCycle(dsn, connect=None, dead=DeadAddresses(),
                                         sharing_enabled=lambda: True)
     return asyncio.run(cycle._exchange(peer, pub(relay), None, list(entries), None))
+
+
+def _owned_mbid(conn, mbid):
+    """An artist owned here — a file of its own — bound to `mbid`, unless the
+    MBID is bound already."""
+    aid, track, album = (str(uuid.uuid4()) for _ in range(3))
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM artist_mbids WHERE mbid = %s", (mbid,))
+        if cur.fetchone():
+            return
+        cur.execute("INSERT INTO artists (id, name) VALUES (%s, %s)", (aid, f"Owned {aid[:8]}"))
+        cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES (%s, %s, 'name_exact')",
+                    (mbid, aid))
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'owned')", (track,))
+        cur.execute("INSERT INTO track_artists (track_id, artist_id) VALUES (%s, %s)", (track, aid))
+        cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'Owned')", (album,))
+        cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
+                    (album, f"/owned/{aid}"))
+        cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, file_format) "
+                    "VALUES (%s, %s, %s, 'FLAC')", (track, cur.fetchone()[0], f"/owned/{aid}/1.flac"))
 
 
 def _rows(conn, sql, *params):
@@ -932,3 +963,141 @@ def test_a_name_is_keyed_one_way_in_the_ledger_and_the_blob(conn, scratch_dsn):
         cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
                     "SELECT %s, id, 'user' FROM artists WHERE name = %s", (s.gid, name))
     assert mb_slice_queries.name_key(name) not in mb_slice_queries.pending_slice_names(conn)
+
+
+# -- what this node keeps for itself alone ------------------------------------------------
+
+@pytest.fixture
+def origins(conn):
+    """`conn`, and what the origin tests leave that the module's own reset
+    does not take: the waiting room, the listens, the on-demand requests."""
+    yield conn
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE pending_scrobbles, pending_scrobble_artists, lb_slice_requests, "
+                    "listening_history, tracks, albums CASCADE")
+
+def _heard(conn, name_key):
+    """`name_key` waits in the waiting room of an imported Last.fm history."""
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO pending_scrobble_artists (name_key) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (name_key,))
+        cur.execute("""INSERT INTO pending_scrobbles (played_at, artist, title, name_key)
+                       VALUES (now(), %s, 'a song', %s)""", (name_key, name_key))
+
+
+def _local_artist(conn, name, *, owned=False, imported=False, native=False, picked=False,
+                  similar_of=None, mbid=None):
+    """A local artist named `name`: a file owned here, a listen imported from
+    Last.fm or played to the end here, a person's pick, a similar stub."""
+    aid = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO artists (id, name) VALUES (%s, %s)", (aid, name))
+        if mbid or picked:
+            cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES (%s, %s, %s)",
+                        (mbid or str(uuid.uuid4()), aid, "user" if picked else "name_exact"))
+        if owned or imported or native:
+            track = str(uuid.uuid4())
+            cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'a song')", (track,))
+            cur.execute("INSERT INTO track_artists (track_id, artist_id) VALUES (%s, %s)", (track, aid))
+            if owned:
+                album = str(uuid.uuid4())
+                cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'A')", (album,))
+                cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) "
+                            "RETURNING id", (album, f"/music/{aid}"))
+                cur.execute("""INSERT INTO media_files (track_id, album_variant_id, file_path, file_format)
+                               VALUES (%s, %s, %s, 'FLAC')""",
+                            (track, cur.fetchone()[0], f"/music/{aid}/1.flac"))
+            for source in (["lastfm"] if imported else []) + (["sautium"] if native else []):
+                cur.execute("""INSERT INTO listening_history (track_id, started_at, completed, skipped,
+                                                              source)
+                               VALUES (%s, now() - interval '1 day', TRUE, FALSE, %s)""", (track, source))
+        if similar_of:
+            cur.execute("INSERT INTO similar_artists (artist_id, similar_artist_id, match_score, source) "
+                        "VALUES (%s, %s, 0.5, 'lastfm')", (similar_of, aid))
+    return aid
+
+
+def _kept_local(conn, family="mb"):
+    table, col = ("mb_slice_blobs", "name_key") if family == "mb" else ("lb_slice_blobs", "artist_mbid::text")
+    return dict(_rows(conn, f"SELECT {col}, local_only FROM {table}"))
+
+
+def test_a_slice_fetched_for_the_imported_history_or_a_pick_is_passed_on_to_no_one(origins, scratch_dsn):
+    conn = origins
+    author, relay = _key(), _key()
+    _slice_fed(conn)
+    heard, placed, picked = Subtree("Heard Only"), Subtree("Placed From History"), Subtree("Picked Act")
+    stub, owned_too = Subtree("Similar Stub"), Subtree("Heard And Owned")
+    _heard(conn, "heard only")
+    _local_artist(conn, "Placed From History", imported=True, mbid=placed.gid)
+    _local_artist(conn, "Picked Act", picked=True)
+    _local_artist(conn, "Similar Stub", similar_of=_local_artist(conn, "Owned Seed", owned=True))
+    _heard(conn, "heard and owned")
+    _local_artist(conn, "Heard And Owned", owned=True, imported=True)
+    for subtree in (heard, placed, picked, stub, owned_too):
+        subtree.group()
+        _offer(scratch_dsn, author, subtree, relay=relay)
+    assert _kept_local(conn) == {"heard only": True, "placed from history": True, "picked act": True,
+                                 "similar stub": False, "heard and owned": False}
+    asked = [heard.name, placed.name, picked.name, stub.name, owned_too.name]
+    out = mb_slice_queries.serve_slices(conn, asked, own_pubkey=OWN)
+    assert out["missing"] == asked and not out["slices"]              # none checked yet
+    # Only the two another node may know of wait for their check: the rest is
+    # never passed on, so never checked for it.
+    assert {k for (k,) in _rows(conn, "SELECT key FROM slice_check_plans")} == {"similar stub",
+                                                                                "heard and owned"}
+    assert slice_checks.checkable_count(conn, "mb", OWN) == 2
+
+
+def test_the_person_s_own_lookup_is_kept_for_this_node_alone(origins, scratch_dsn):
+    conn = origins
+    author = _key()
+    s = Subtree("Looked Up")
+    s.group()
+    _local_artist(conn, "Looked Up", similar_of=_local_artist(conn, "Owned Seed", owned=True))
+    peer = Peer({s.name: mb_entry(author, s.name, s.one())}, pub(author))
+    client = MBSliceClient(peer, db_dsn=scratch_dsn, for_person=True)
+    try:
+        client.run([s.name])
+    finally:
+        client.close()
+    assert _kept_local(conn) == {"looked up": True}
+
+
+def test_an_lb_slice_for_an_opened_page_or_the_history_alone_is_passed_on_to_no_one(origins, scratch_dsn):
+    conn = origins
+    author, relay = _key(), _key()
+    opened, history, owned, native = (str(uuid.uuid4()) for _ in range(4))
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO lb_slice_requests (artist_id) VALUES (%s)",
+                    (_local_artist(conn, "Opened Page", mbid=opened),))
+    _local_artist(conn, "History Alone", imported=True, mbid=history)
+    _local_artist(conn, "Owned Here", owned=True, mbid=owned)
+    _local_artist(conn, "Played Here", native=True, mbid=native)
+    version = dump_version(3)
+    entries = {m: {"dump_version": version, "artist": [10, 3], "recordings": [], "truncated": False}
+               for m in (opened, history, owned, native)}
+    assert _offer_lb(scratch_dsn, author, entries, relay, owned=False)["imported"] == 4
+    assert _kept_local(conn, "lb") == {opened: True, history: True, owned: False, native: False}
+    _slice_fed(conn)
+    out = lb_slice_queries.serve_slices(conn, [opened, history], own_pubkey=OWN)
+    assert out["missing"] == [opened, history]
+    assert _count(conn, "slice_check_plans") == 0
+
+
+def test_the_blobs_kept_before_their_origin_are_marked_once_by_the_same_rules(origins):
+    conn = origins
+    import db_migrate
+    _heard(conn, "waited")
+    _local_artist(conn, "Owned Long Ago", owned=True)
+    with conn.cursor() as cur:
+        for key, relay in (("waited", "ab" * 32), ("owned long ago", "ab" * 32), ("built here", None)):
+            cur.execute("""INSERT INTO mb_slice_blobs (name_key, dump_version, author_pubkey, sig,
+                                                       blob_gz, relay)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                        (key, dump_version(3), OWN, "00" * 64, psycopg2.Binary(b"\x00"), relay))
+    _heard(conn, "built here")
+    out = db_migrate._mark_local_slices(conn)
+    assert out["mb_marked"] == 2 and out["mb_local"] == 1
+    assert _kept_local(conn) == {"waited": True, "owned long ago": False, "built here": False}
+

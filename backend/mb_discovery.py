@@ -332,7 +332,9 @@ def _fetch_remote_slice(artist_name: str) -> dict:
     retry_after = None
     for url in ordered:
         api = BackendAPIClient(url, peer=identity)
-        client = MBSliceClient(api, db_dsn=app_settings.database_url, source_node=url)
+        # The person's own lookup: what it brings serves this node alone.
+        client = MBSliceClient(api, db_dsn=app_settings.database_url, source_node=url,
+                               for_person=True)
         try:
             # The channel's key, which /health learns and pins, is who passed
             # the slice on (the import records it beside the author's).

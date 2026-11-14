@@ -3752,7 +3752,11 @@ CREATE TABLE IF NOT EXISTS mb_slice_blobs (
     -- The blob's hash, and the MBIDs of its artist, group, release and
     -- recording rows: which kept blob carries a row a clash proved false.
     payload_sha256 CHAR(64),
-    mbids         UUID[] NOT NULL DEFAULT '{}'
+    mbids         UUID[] NOT NULL DEFAULT '{}',
+    -- Fetched for this node's imported history or its owner's own lookup
+    -- (mb_slice_queries.LOCAL_ONLY_SQL, read at the fetch): passed on to no
+    -- other node, so none learns by asking that this node fetched it.
+    local_only    BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX IF NOT EXISTS idx_mb_slice_blobs_match
     ON mb_slice_blobs (match_key, dump_version) WHERE match_key IS NOT NULL;
@@ -3813,7 +3817,8 @@ CREATE TABLE IF NOT EXISTS lb_slice_blobs (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     relay         CHAR(64),                 -- as mb_slice_blobs
     checked_at    TIMESTAMPTZ,
-    suspect       BOOLEAN NOT NULL DEFAULT FALSE
+    suspect       BOOLEAN NOT NULL DEFAULT FALSE,
+    local_only    BOOLEAN NOT NULL DEFAULT FALSE   -- as mb_slice_blobs (lb_slice_queries.LOCAL_ONLY_SQL)
 );
 
 -- The on-demand lane: an artist page opened on a slice node. The row is the
