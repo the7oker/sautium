@@ -250,6 +250,15 @@ class ProviderUnavailable(ProviderError):
     nothing about the track, so the host must not remember it as a miss."""
 
 
+# The host's ears for a provider's aside_changed(): registered where the
+# host's module is imported, so they stand before any provider is built.
+_aside_listeners: list = []
+
+
+def on_aside_change(listener) -> None:
+    _aside_listeners.append(listener)
+
+
 @dataclass(frozen=True)
 class SteppedAside:
     """A provider's own word that it is not to be asked for now: what it is
@@ -261,7 +270,7 @@ class SteppedAside:
     The words are the module's: it knows its service's name and what the
     person lost, and the host shows them as text beside its own role-named
     copy. `detail` is the service's own answer, with no credential in it."""
-    code: str               # the module's stable name for the cause — a new one is a new notice
+    code: str               # the module's stable name for the cause
     since: str              # ISO 8601, UTC: when the provider first read this cause
     title: str
     text: str
@@ -292,14 +301,19 @@ class StreamProvider(ABC):
         notice. Blocking (the provider asks its service); what
         stepped_aside() returns afterwards is the answer."""
 
-    # The host's ear, set when the provider is registered.
-    _aside_listener = None
-
     def aside_changed(self) -> None:
         """Called by the provider after what stepped_aside() returns changed,
-        either way: the host wakes whoever shows it."""
-        if self._aside_listener is not None:
-            self._aside_listener(self)
+        either way: the host wakes whoever shows it (on_aside_change). The
+        state is the provider's and is read where it lives, so a wake that
+        fails — the database away — loses a push and nothing else: it is
+        logged here and never fails the fetch or the check that found the
+        change."""
+        for listener in _aside_listeners:
+            try:
+                listener(self)
+            except Exception:
+                logger.exception("stream provider %s: the wake after its state changed failed",
+                                 self.manifest.id)
 
     # Split resolve/download so the host can run a fast availability pass (which
     # tracks exist on this provider) BEFORE the slow downloads — to mark missing
@@ -368,9 +382,8 @@ class ProviderRegistry:
     tag is the seam for future module kinds, which live in their own
     subsystems rather than being forced through this contract."""
 
-    def __init__(self, on_aside_change=None) -> None:
+    def __init__(self) -> None:
         self._by_id: dict[str, StreamProvider] = {}
-        self._on_aside_change = on_aside_change
 
     def register(self, provider: StreamProvider) -> None:
         m = provider.manifest
@@ -385,7 +398,6 @@ class ProviderRegistry:
         if m.id in self._by_id:
             raise ValueError(f"stream provider id {m.id!r} is already registered")
         self._by_id[m.id] = provider
-        provider._aside_listener = self._on_aside_change
         logger.info("registered stream provider: %s (%s, lossless=%s, excerpt=%s, "
                     "demo_limited=%s)", m.id, m.kind, m.lossless, m.excerpt, m.demo_limited)
 

@@ -14,7 +14,7 @@ import time
 from typing import Optional
 
 import api_cooldown
-from .base import ProviderRegistry, StreamProvider
+from .base import ProviderRegistry, StreamProvider, on_aside_change
 from .proxy import MediaProxy
 from .youtube import YouTubeProvider
 
@@ -34,7 +34,7 @@ def init(settings) -> bool:
         logger.info("streaming preview disabled (streaming_preview_enabled=false)")
         return False
 
-    _registry = ProviderRegistry(on_aside_change=_aside_changed)
+    _registry = ProviderRegistry()
     # The provider runs the yt-dlp build the refresh loop puts in place (its
     # first pass is at start); until one lands it answers "unavailable", and
     # the excerpt provider below stands in.
@@ -307,10 +307,11 @@ def note_provider_health(silent: dict, answered: set) -> bool:
 
 def _aside_changed(provider: StreamProvider) -> None:
     """A provider stepped aside, or came back (its own word,
-    StreamProvider.aside_changed): the notices channel derives the set anew.
-    The ranking and the resolved chains need no wake — both read the
-    provider's state when they run, and a chain is cached under the order it
-    was resolved in."""
+    StreamProvider.aside_changed): the notices channel derives the set anew,
+    and an open album page re-reads what can stream and from where. The
+    ranking and the resolved chains need no wake — both read the provider's
+    state when they run, and a chain is cached under the order it was
+    resolved in."""
     aside = provider.stepped_aside()
     if aside is None:
         logger.info("stream provider %s is offered again", provider.manifest.id)
@@ -318,7 +319,12 @@ def _aside_changed(provider: StreamProvider) -> None:
         logger.warning("stream provider %s stepped aside (%s): %s%s", provider.manifest.id,
                        aside.code, aside.title, f" — {aside.detail}" if aside.detail else "")
     from db_pool import db_execute
+    from .events import preview_events
+    preview_events.ping()
     db_execute("NOTIFY sautium_notices")
+
+
+on_aside_change(_aside_changed)
 
 
 def providers_aside() -> list:

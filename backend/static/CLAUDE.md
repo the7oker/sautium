@@ -569,7 +569,9 @@ rule for WHEN a condition exists lives there, the words and the clock
 (local time, mono) live in `NOTICE_COPY` here — but for the rate check's
 notice (`hqplayer.rate_check`), whose words are the rate check's own
 (`backend/hqp_rate_check.py`, one place for every word it says), carried in
-its `data` as phrases its `NOTICE_COPY` entry draws. A copy may name an
+its `data` as phrases its `NOTICE_COPY` entry draws, and for a provider that
+stepped aside (`streaming.aside.<id>`), whose title and text are its module's,
+carried in `data` as plain text `asideNoticeCopy` escapes. A copy may name an
 `action` (`{ label, run }`): the notice's toast carries it, and so does its
 row on Sync & P2P (since 2026-10-21), as a `.btn-link` beside the title —
 the toast's label, doing what the toast's button does (the rate check's Why?

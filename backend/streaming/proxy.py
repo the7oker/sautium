@@ -785,6 +785,15 @@ class MediaProxy:
                     logger.info("preview link refused [%d] via %s: demo listen spent",
                                 e.index, prov.manifest.id)
                     continue
+                # A chain resolved while the provider was offered still names
+                # it: one that has stepped aside since is not asked
+                aside = prov.stepped_aside()
+                if aside is not None:
+                    last_err = last_err or ProviderError(
+                        f"{prov.manifest.id}: stepped aside ({aside.code})")
+                    logger.info("preview link skipped [%d] via %s: stepped aside (%s)",
+                                e.index, prov.manifest.id, aside.code)
+                    continue
                 started = time.monotonic()
                 try:
                     e.audio = prov.download(sid) if sid else prov.fetch(e.query)

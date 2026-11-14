@@ -1460,13 +1460,12 @@ def _stream_quality(provider_id: Optional[str]) -> str:
     """'lossless' / 'lossy' for the serving provider — the preview analog of the
     owned file-quality badge (a stream has no file bit-depth)."""
     if provider_id:
-        try:
-            from streaming import service as streaming_service
-            for p in streaming_service.providers_preferred():
-                if p.manifest.id == provider_id:
-                    return "lossless" if p.manifest.lossless else "lossy"
-        except Exception:
-            pass
+        # The registry, not the ranking: a buffer fetched from a provider
+        # that has stepped aside since is still that provider's audio
+        from streaming import service as streaming_service
+        prov = streaming_service.get_provider(provider_id)
+        if prov is not None:
+            return "lossless" if prov.manifest.lossless else "lossy"
         if provider_id == "deezer":   # registry not ready — known-provider fallback
             return "lossless"
     return "lossy"

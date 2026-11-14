@@ -10,9 +10,9 @@ import logging
 
 import pytest
 
-from streaming import service
-from streaming.base import (CONTRACT_VERSION, ProviderManifest, ProviderRegistry,
-                            SteppedAside, StreamProvider)
+from streaming import base, service
+from streaming.base import (CONTRACT_VERSION, FetchedAudio, ProviderError, ProviderManifest,
+                            ProviderRegistry, SteppedAside, StreamProvider, TrackQuery)
 
 ASIDE = SteppedAside(code="no_tier", since="2026-11-14T09:00:00+00:00",
                      title="Lossless-X: this account no longer has the tier",
@@ -46,7 +46,8 @@ class _Stateful(_Plain):
 @pytest.fixture
 def registry(monkeypatch):
     woke = []
-    reg = ProviderRegistry(on_aside_change=woke.append)
+    monkeypatch.setattr(base, "_aside_listeners", [woke.append])
+    reg = ProviderRegistry()
     for prov in (_Plain("demo", demo_limited=True), _Plain("clip", excerpt=True),
                  _Stateful("lossless-x", lossless=True), _Plain("lossless-a", lossless=True)):
         reg.register(prov)
@@ -73,6 +74,10 @@ def test_a_provider_that_stepped_aside_is_registered_and_not_offered(registry):
     prov.aside = ASIDE
     assert _order() == ["lossless-a", "demo", "clip"]
     assert service.providers_aside() == [(prov, ASIDE)]
+    other = reg.get("lossless-a")
+    other.stepped_aside = lambda: ASIDE
+    assert service.providers_aside() == [(other, ASIDE), (prov, ASIDE)]     # by id
+    del other.stepped_aside
     assert service.get_provider("lossless-x") is prov          # provenance, names, Check again
     assert prov in reg.enabled()
     prov.aside = None
@@ -88,28 +93,104 @@ def test_the_only_lossless_provider_aside_leaves_the_next_one_first(registry):
     assert service.get_provider().manifest.id == "demo"
 
 
-def test_a_providers_word_of_a_change_reaches_the_hosts_listener(registry):
+def test_a_providers_word_of_a_change_reaches_the_hosts_listeners(registry):
     reg, woke = registry
     prov = reg.get("lossless-x")
     prov.aside = ASIDE
     prov.aside_changed()
     assert woke == [prov]
-    unregistered = _Stateful("elsewhere")
-    unregistered.aside_changed()                               # no host listens: nothing to do
+
+
+def test_the_service_listens_from_its_import(registry):
+    """Before any provider is built: a read a provider starts in its factory
+    can land at any moment after."""
+    import importlib
+    fresh = []
+    base._aside_listeners[:] = fresh
+    importlib.reload(service)
+    try:
+        assert base._aside_listeners == [service._aside_changed]
+    finally:
+        base._aside_listeners[:] = []
+
+
+def test_a_wake_that_fails_is_logged_and_the_other_listeners_still_hear(registry, monkeypatch, caplog):
+    """The state is read where it lives: a failed wake loses a push, and
+    must not fail the fetch or the check that found the change."""
+    reg, woke = registry
+
+    def down(prov):
+        raise RuntimeError("the database is away")
+
+    monkeypatch.setattr(base, "_aside_listeners", [down, woke.append])
+    prov = reg.get("lossless-x")
+    with caplog.at_level(logging.ERROR, logger="streaming.base"):
+        prov.aside_changed()
     assert woke == [prov]
+    assert [r.getMessage() for r in caplog.records] == [
+        "stream provider lossless-x: the wake after its state changed failed"]
+    assert caplog.records[0].exc_info[0] is RuntimeError
 
 
-def test_the_wake_is_the_notices_channel(registry, monkeypatch):
+def test_the_wake_is_the_notices_channel_and_the_album_pages(registry, monkeypatch):
     reg, _ = registry
     import db_pool
-    sent = []
+    from streaming.events import preview_events
+    sent, pings = [], []
     monkeypatch.setattr(db_pool, "db_execute", lambda sql, *a: sent.append(sql))
+    monkeypatch.setattr(preview_events, "ping", lambda: pings.append(1))
     prov = reg.get("lossless-x")
     prov.aside = ASIDE
     service._aside_changed(prov)
     prov.aside = None
     service._aside_changed(prov)
-    assert sent == ["NOTIFY sautium_notices"] * 2
+    assert sent == ["NOTIFY sautium_notices"] * 2 and len(pings) == 2
+
+
+def test_a_chain_resolved_earlier_does_not_ask_a_provider_that_stepped_aside(registry):
+    """The proxy's fetch walks the chain as it was resolved: the link of a
+    provider aside is skipped, unasked, and the next one serves."""
+    from streaming.proxy import MediaProxy
+    reg, _ = registry
+    asked = []
+
+    class _Serving(_Stateful):
+        def download(self, source_id):
+            asked.append((self.manifest.id, source_id))
+            return FetchedAudio(data=b"audio", mime="audio/flac", lossless=self.manifest.lossless)
+
+        def fetch(self, query):
+            asked.append((self.manifest.id, None))
+            return FetchedAudio(data=b"audio", mime="audio/mpeg")
+
+    first, second = _Serving("first", lossless=True), _Serving("second")
+    proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"test-key")
+    tracks = iter(range(100))
+
+    def served(chain):
+        asked.clear()
+        n = next(tracks)                # a track of its own: a held buffer is never fetched again
+        query = TrackQuery(artist="A", title=f"T{n}", track_id=f"t{n}")
+        token = proxy.start_session([(query, chain)])[0]
+        entry = proxy.wait_ready(token, 10)
+        return (entry.provider.manifest.id if entry.audio is not None else None,
+                entry.error, list(asked))
+
+    assert served([(first, "s1"), (second, None)]) == ("first", None, [("first", "s1")])
+    first.aside = ASIDE
+    assert served([(first, "s1"), (second, None)]) == ("second", None, [("second", None)])
+    assert served([(first, None)]) == (None, "first: stepped aside (no_tier)", [])
+    first.aside = None
+    assert served([(first, None), (second, None)])[0] == "first"
+
+
+def test_a_buffers_quality_badge_is_its_providers_whether_offered_or_not(registry):
+    from routers import player
+    reg, _ = registry
+    assert player._stream_quality("lossless-x") == "lossless"
+    reg.get("lossless-x").aside = ASIDE
+    assert player._stream_quality("lossless-x") == "lossless"
+    assert player._stream_quality("demo") == "lossy" and player._stream_quality(None) == "lossy"
 
 
 def test_a_shared_upstream_answering_does_not_clear_a_providers_own_state(registry, monkeypatch):

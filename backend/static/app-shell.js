@@ -12249,7 +12249,19 @@
   // The tap hears the answer either way: a provider that is back says so
   // once (its notice leaves with the channel's next snapshot), one that is
   // still aside says its own words again, under its notice's key.
-  async function checkProviderAgain(id) {
+  // One check per provider at a time — the provider asks its service, which
+  // can take a while: a second tap joins the one in flight, and every toast
+  // of a check shares the notice's key, so each replaces the one before.
+  const _providerChecks = new Map();
+  function checkProviderAgain(id) {
+    if (!_providerChecks.has(id)) {
+      _providerChecks.set(id, _checkProvider(id).finally(() => _providerChecks.delete(id)));
+    }
+    return _providerChecks.get(id);
+  }
+  async function _checkProvider(id) {
+    const key = `streaming.aside.${id}`;
+    notices.toast({ kind: 'info', title: 'Checking the provider…', text: '', key });
     let res;
     try {
       const r = await fetch(`/api/settings/streaming/providers/${encodeURIComponent(id)}/check`,
@@ -12258,17 +12270,16 @@
       res = await r.json();
     } catch (e) {
       notices.toast({ kind: 'error', title: 'The provider could not be checked',
-                      text: escapeHtml(e.message || '') });
+                      text: escapeHtml(e.message || ''), key });
       return;
     }
     if (!res.aside) {
       notices.toast({ kind: 'success', title: `${escapeHtml(res.name)} is back`,
-                      text: 'Streamed tracks come from it again.' });
+                      text: 'Streamed tracks come from it again.', key });
       return;
     }
     const c = asideNoticeCopy({ data: { ...res.aside, provider: id, name: res.name } });
-    notices.toast({ kind: 'warning', title: c.title, text: c.text, action: c.action,
-                    key: `streaming.aside.${id}` });
+    notices.toast({ kind: 'warning', title: c.title, text: c.text, action: c.action, key });
   }
   function noticeCopy(n) {
     const fn = NOTICE_COPY[n.key];
