@@ -275,6 +275,51 @@ def test_a_stolen_keys_tag_on_the_installed_commit_hides_no_rotation(rotated):
     assert world.head() == r0
 
 
+def test_a_stolen_keys_tag_on_a_commit_that_once_stated_a_higher_version_hides_no_rotation(world):
+    """Review round 2: a merged commit below r0 said VERSION = "9.0.0"; the
+    thief's v9.0.0 there states its own version, but no release HEAD holds
+    is above what HEAD itself states."""
+    a, r, b = world.key, Key(), Key()
+    planted = world.commit("a merged bump\n", signers=[a, r], version="9.0.0")
+    r0 = world.commit("r0\n", version="0.2.0")
+    world.tag("v0.2.0", r0)
+    world.update()
+    world.tag("v0.3.0", world.commit("r1\n", signers=[b, r], version="0.3.0"), key=r)
+    world.tag("v9.0.0", planted, key=a)
+    world.tag("v9.0.1", off_main(world, r0, "thief\n"), key=a)
+    survey = world.check()
+    assert (survey.installed.name, survey.held, survey.offered) == ("v0.2.0", "v9.0.0", None)
+    assert survey.fork == ("v9.0.1", "v0.3.0")
+    world.update()
+    assert world.head() == r0
+
+
+def test_a_lower_name_on_a_commit_stating_a_higher_version_is_no_installed_release(world):
+    tip = world.commit("v2\n", version="0.3.0")
+    world.tag("v0.2.0", tip)
+    world.update()
+    survey = world.check()
+    assert (survey.installed, survey.held) == (None, "v0.2.0")
+
+
+def test_a_working_tree_ahead_with_its_version_bumped_keeps_its_installed_release(world):
+    tagged = world.commit("v2\n", version="0.2.0")
+    world.tag("v0.2.0", tagged)
+    world.commit("bump\n", version="0.3.0")                # not released yet
+    git(world.working, "pull", "-q", "--ff-only", "origin", "main")
+    assert world.check(world.working).installed.name == "v0.2.0"
+
+
+def test_a_fork_below_a_rewrite_is_not_said(rotated):
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.4.0", off_main(world, r0, "thief\n"), key=a)
+    git(world.seed, "checkout", "-q", "--orphan", "rewritten")
+    world.tag("v0.5.0", world.commit("rewritten\n", signers=[a, r], version="0.5.0"), key=r)
+    survey = world.check()
+    assert (survey.offered, survey.rewrite.name, survey.fork) == (None, "v0.5.0", None)
+    assert not any(name == "v0.4.0" for name, _ in survey.refused)
+
+
 def test_nested_forks_cut_at_the_lower_link(rotated):
     """The thief's v0.2.5 on r0 (A; its tree lists A and T), v0.2.6 on it (T),
     v0.2.7 beside v0.2.6 (A): forks at v0.2.5 and, with the owner's v0.3.0, at

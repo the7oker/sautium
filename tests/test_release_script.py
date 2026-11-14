@@ -379,7 +379,26 @@ def test_a_new_root_keeps_no_key_of_the_old_list(stand):
     git(stand.repo, "checkout", "-q", "--orphan", "rewritten")
     stand.commit("0.3.1", signers=["daily", "recovery"])
     stand.use_key("daily")
-    assert "not a new root" in stand.run("tag", "0.3.1", "--new-root", typed="new root v0.3.1\n").stderr
+    rewrite = stand.run("tag", "0.3.1", "--new-root", typed="new root v0.3.1\n").stderr
+    assert "not a new root" in rewrite and "a rewrite with the same keys" in rewrite
+
+
+def test_a_new_root_is_judged_against_the_old_chains_last_list(stand):
+    """A key the old chain dropped may sign the new root; one its last list
+    still holds may not, under whatever principal."""
+    stand.commit("0.2.0", signers=["daily", "recovery"])
+    stand.release("0.2.0", "--list-change")
+    stand.commit("0.3.0", signers=["recovery", "daily2"])     # drops the daily key
+    stand.use_key("recovery")
+    stand.release("0.3.0", "--list-change")
+    kept = stand.line("daily2").replace("daily2 ", "renamed ", 1)
+    stand.commit("0.4.0", raw_signers=stand.line("daily") + "\n" + kept + "\n")
+    stand.use_key("daily")
+    refused = stand.run("tag", "0.4.0", "--new-root", typed="new root v0.4.0\n")
+    assert refused.returncode != 0 and "still on v0.3.0's list" in refused.stderr
+    stand.commit("0.4.0", raw_signers=stand.line("daily") + "\n" + stand.line("fresh") + "\n")
+    made = stand.run("tag", "0.4.0", "--new-root", typed="new root v0.4.0\n")
+    assert made.returncode == 0, made.stdout + made.stderr
 
 
 def test_the_fork_refusal_names_the_pair_at_the_cut(stand):

@@ -326,10 +326,15 @@ def tag(version: str, rev: Optional[str], list_change: bool, new_root: bool = Fa
         # makes launchers take it as an ordinary update, and the notice would
         # tell people the opposite.
         kept = [s for s in own if any(s.key_blob == old.key_blob for old in last.signers)]
-        if kept:
+        if kept and is_ancestor(previous.commit, commit):
             raise Refused(f"not a new root: {', '.join(fingerprint(s.key_blob) for s in kept)} is still on "
                           f"{previous.name}'s list, so launchers would take {name} as an update — sign a rotation "
                           "with `tag --list-change` instead")
+        if kept:
+            raise Refused(f"not a new root: {', '.join(fingerprint(s.key_blob) for s in kept)} is still on "
+                          f"{previous.name}'s list, and {commit[:12]} does not descend from it — a rewrite with "
+                          "the same keys, which launchers show as needing a reinstall; this script makes no such "
+                          "release (a new root is for keys that are lost)")
         held, before = own, None
         if is_ancestor(previous.commit, commit):
             since = previous.commit

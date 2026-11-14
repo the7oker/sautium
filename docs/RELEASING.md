@@ -46,8 +46,9 @@ it relies on is `desktop/release_verify.py` and `desktop/updater.py`.
   before it, the first from HEAD. The offer shows as "Sautium \<version\>". A
   version below the installed one is never taken. The installed release is the
   highest release HEAD contains whose tree states its version
-  (`desktop/build_common.py`): a signed tag on an older commit of HEAD's, under
-  a higher name, is no installed release and hides nothing from the walk.
+  (`desktop/build_common.py`), never above the version HEAD's own tree states:
+  a signed tag on an older commit of HEAD's, under a higher name, is no
+  installed release and hides nothing from the walk.
 - **A fork.** Two signed releases that continue the same release, neither
   descending from the other, are a fork. The launcher cannot tell which one is
   yours, because a thief may give theirs any version, a lower one too. So it

@@ -2230,10 +2230,12 @@ The short version of the hard-learned lessons:
     release below it, the rotation included, and the thief's `v0.9.1` beside
     it was offered. Now a tag HEAD contains is the installed release only when
     its commit's `desktop/build_common.py` states its version (what
-    `release.py` already required); any other is held.
+    `release.py` already required) and that version is not above the one
+    HEAD's own tree states (round 2: a merged commit that once said 9.0.0
+    let a stolen key's `v9.0.0` on it end the read); any other is held.
   - Launchers and `release.py` admit tag objects through one gate
-    (`updater.admitted`: annotated, a tag of a commit, at most 64 KiB) before
-    the walk; a 70 KB signed tag was in the script's chain and refused by
+    (`updater.admitted`: a tag object, at most 64 KiB; that it tags a commit
+    is the verifier's) before the walk; a 70 KB signed tag was in the script's chain and refused by
     every launcher.
   - `release.py tag` refuses, before the signature, a key the last release's
     list or the release's own list does not hold (a rotation signed by the key

@@ -98,18 +98,19 @@ class Survey:
     release tag HEAD contains that is no installed release — signed by a key
     HEAD's own list does not name (a release made before scripts/release.py
     refused one whose list drops its signer, a stranger's tag on an old
-    commit), or on a commit that states another version (a listed key's tag
-    under a higher name on an older commit) — said as "up to date", never a
+    commit), or on a commit that states another version or one above HEAD's
+    (a listed key's tag under a higher name on an older commit) — said as
+    "up to date", never a
     refusal, never a floor for the walk. `offered`: the highest release the
     chain reaches above it that the installed list verifies too — what an
     update moves to. `rewrite`: a signed release above it that does not
     descend from HEAD (a rewritten history, which only a reinstall reaches).
     `refused`: `v*` tags above all of them this checkout does not take —
     unsigned, signed by a key their place in the chain does not list,
-    renamed, broken, a fork — as (tag, why), the newest first. `fork`: when
-    the newest refusal is a fork, (that tag, the release it competes with):
-    two signed continuations of the same release, of which the launcher
-    cannot tell the owner's."""
+    renamed, broken, a fork — as (tag, why), the newest first. `fork`: the
+    newest fork above any offer or rewrite, (that tag, the release it
+    competes with): two signed continuations of the same release, of which
+    the launcher cannot tell the owner's."""
     installed: Optional[Release] = None
     offered: Optional[Release] = None
     rewrite: Optional[Release] = None
@@ -512,6 +513,9 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
     objects = _probe(annotated, cwd) if annotated else {}
     found, refused, candidates = Survey(), [], []
     history = _history(head, cwd) if head else set()
+    # No release HEAD holds is above the version HEAD's own tree states (on a
+    # managed install, exactly the installed one's).
+    ceiling = _stated_version(self_stated(head, cwd)) if head else (0, 0, 0)
     for version, name, signed in remote:            # the newest first
         if not signed:
             refused.append((version, name, "a lightweight tag, not a signed release"))
@@ -524,14 +528,16 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
         if _tagged_commit(raw) in history:
             # The installed release ends the read, so it must be one: a
             # release's tree states its own version (scripts/release.py
-            # refuses any other). A key's tag on an older commit of HEAD's —
-            # a stolen key's v9.0.0 on the installed commit itself — is no
-            # installed release, and would otherwise hide every release below
-            # it from the walk, the rotation that drops that key among them.
+            # refuses any other), and none is above what HEAD states. A key's
+            # tag on an older commit of HEAD's — a stolen key's v9.0.0 on the
+            # installed commit itself, or on a merged commit that once said
+            # 9.0.0 — is no installed release, and would otherwise hide every
+            # release below it from the walk, the rotation that drops that key
+            # among them.
             try:
                 tag = release_verify.verify_tag(raw, name, signers)
-                why = None if _stated_version(self_stated(tag.commit, cwd)) == version else \
-                    "its tree states another version"
+                why = None if _stated_version(self_stated(tag.commit, cwd)) == version <= ceiling else \
+                    "its tree states another version, or one above HEAD's"
             except release_verify.VerifyError as exc:
                 why = str(exc)
             if why:
