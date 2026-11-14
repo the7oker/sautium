@@ -281,7 +281,7 @@ def test_a_run_that_filled_its_cap_streams_on_whatever_waits(monkeypatch):
 
 
 def test_one_source_is_asked_at_the_stream_s_pace_across_runs(monkeypatch):
-    published, asked_at = [], []
+    published, asked_at, sizes = [], [], []
     names = [f"name {i}" for i in range(120)]
     cycle = _mb_cycle([True], published, monkeypatch, pending=names)
     monkeypatch.setattr(mb_slice_cycle, "PACKET_GAP", 0.25)
@@ -292,6 +292,7 @@ def test_one_source_is_asked_at_the_stream_s_pace_across_runs(monkeypatch):
 
     async def isolated(client, node, batch, avoid):
         asked_at.append(time.monotonic())
+        sizes.append(list(batch))
         return {"names": len(batch), "missing": []}
 
     cycle.find_sources, cycle._isolated = find_sources, isolated
@@ -300,10 +301,11 @@ def test_one_source_is_asked_at_the_stream_s_pace_across_runs(monkeypatch):
                                                                          finalize=lambda: None))
 
     async def go():
-        await cycle.run()                 # three requests of 50, 50 and 20 names
+        await cycle.run()                 # five requests of PACKET_NAMES (25) names
         await cycle.run()                 # the next run's first waits its turn too
     asyncio.run(go())
-    assert len(asked_at) == 6
+    assert len(asked_at) == 10
     gaps = [b - a for a, b in zip(asked_at, asked_at[1:])]
     assert min(gaps) >= 0.24
+    assert all(len(b) <= mb_slice_cycle.PACKET_NAMES for b in sizes)
 

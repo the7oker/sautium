@@ -27,10 +27,10 @@ What a run does (`MbSliceCycle.run`):
    one form (mb_slice_queries.pending_slice_names) — the owner's files, the
    imported scrobbles, the stubs and the re-asks are one stream, mixed in
    every request, so a request does not tell why this node asks;
-4. source by source, batches through MBSliceClient (verified against the
-   original author's key), one request to a source every PACKET_GAP at
-   most; a replica's `missing` and outright failures carry to the next
-   source; a rate-limited source is waited out once;
+4. source by source, batches of PACKET_NAMES through MBSliceClient
+   (verified against the original author's key), one request to a source
+   every PACKET_GAP at most; a replica's `missing` and outright failures
+   carry to the next source; a rate-limited source is waited out once;
 5. after an importing run: ANALYZE, then `after_import` (the canon trigger);
    `mb_slice.status` published on every run, an all-clear included;
 6. a run that filled its cap and was served asks for the next one at once:
@@ -68,12 +68,14 @@ STATUS_KEY = "mb_slice.status"
 SOURCES_KEY = "mb.search_sources"
 FIRST_SOURCE_MAX_DELAY = 60          # like the walk: wait for a source, not a clock
 FIRST_RUN_DELAY = 120                # let the first sync walk spend the peers' windows first
-# The stream's one pace: a request of MAX_NAMES_PER_REQUEST names to a source
-# every PACKET_GAP at most — 25 names a minute, under the quarter of a dump
-# node's build budget one requester has (mb_slice_queries.BuildBudget: 30
-# builds a minute), with room left for a person's click. A request sent
-# faster finds the budget spent and comes back `missing`.
-PACKET_GAP = 120.0
+# The stream's one pace: a request of PACKET_NAMES names to a source every
+# PACKET_GAP at most — 25 names a minute, under the quarter of a dump node's
+# build budget one requester has (mb_slice_queries.BuildBudget: 30 builds in
+# any minute), with room left for a person's click. A larger request, or one
+# sent sooner, finds the budget spent and its rest comes back `missing`
+# (measured 2026-11-14: 50 names every 120 s had 30 of each built).
+PACKET_NAMES = 25
+PACKET_GAP = 60.0
 
 
 def _connect(dsn: str):
@@ -363,7 +365,7 @@ class MbSliceCycle:
 
         names = list(pending)
         reopened = await loop.run_in_executor(None, reopened_authors, self.db_dsn, names)
-        batch_size = mb_slice_queries.MAX_NAMES_PER_REQUEST
+        batch_size = PACKET_NAMES
         logger.info(f"MB slice: {len(names)} pending names, {len(peers)} source(s) (replicas first)")
         total = {"names": 0, "matched": 0, "rows_inserted": 0}
         imported_any = False

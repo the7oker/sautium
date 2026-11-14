@@ -1142,9 +1142,9 @@ newest scrobbles alone, and the import wakes no network lane of its own (nor
 does the scrobble canon after it: the walk and both slice cycles take what it
 brought at their own pace). A run that fills its cap and is served asks for
 the next at once, whatever waits, and a source is asked at most once every
-`PACKET_GAP` (120 s, 50 names — under the quarter of a dump node's build
-budget one requester has): an import or a scan makes the stream longer, never
-faster. The LB cycle draws its owned and engaged artists the same way, an
+`PACKET_GAP` (60 s, `PACKET_NAMES` 25 names — under the quarter of a dump
+node's build budget one requester has, 30 builds in any minute): an import or
+a scan makes the stream longer, never faster. The LB cycle draws its owned and engaged artists the same way, an
 opened page's MBIDs always in the draw, and shuffles each request; the walk
 sends its core and bulk tracks as one shuffled list. The cost, in time only:
 the owner's files wait behind the stubs in a large pool, the stubs resolve
