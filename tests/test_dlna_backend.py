@@ -1579,18 +1579,21 @@ def test_a_session_across_hqplayer_a_renderer_and_back_keeps_one_listen_a_track(
     ahead into a stream whose bytes the RAM budget dropped waits for them in
     the node, loading, and plays once they land. One listen a track, each
     announced once, none written at a switch."""
-    import types
-    from streaming.base import FetchedAudio, ProviderManifest, TrackQuery
+    from streaming.base import FetchedAudio, ProviderManifest, StreamProvider, TrackQuery
     listened, lastfm = heard
     renderer = renderers(name="Kitchen")
     fake.length, fake.takes_seek = 8, True
     _moving_transport(fake, monkeypatch, transit=2)
     gate = threading.Event()
     gate.set()
-    provider = types.SimpleNamespace(
-        manifest=ProviderManifest(id="test", name="Test", kind="direct_url", lossless=True),
-        fetch=lambda query: gate.wait(20) and FetchedAudio(data=b"fLaC" + b"\x00" * 4092,
-                                                           mime="audio/flac", lossless=True))
+    class _Stream(StreamProvider):
+        manifest = ProviderManifest(id="test", name="Test", kind="direct_url", lossless=True)
+
+        def fetch(self, query):
+            return gate.wait(20) and FetchedAudio(data=b"fLaC" + b"\x00" * 4092,
+                                                  mime="audio/flac", lossless=True)
+
+    provider = _Stream()
     late = proxy.start_session([(TrackQuery(artist="Artist", title="Stream 5", album="Album",
                                             duration=8.0, track_id=_STREAM_5), [(provider, None)])])[0]
     assert proxy.wait_ready(late, timeout=5).audio is not None
