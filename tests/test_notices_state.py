@@ -452,11 +452,11 @@ def test_the_aside_notice_draws_the_modules_words_and_check_again_answers_the_ta
            for name in ("escapeHtml", "asideNoticeCopy", "checkProviderAgain", "_checkProvider", "noticeCopy")]
     out = subprocess.run([shutil.which("node"), "-e",
                           "'use strict';const NOTICE_COPY = {};const _providerChecks = new Map();"
-                          "const PROVIDER_CHECK_TOAST_MS = 60000;" + "".join(fns) + _ASIDE_COPY],
+                          + "".join(fns) + _ASIDE_COPY],
                          capture_output=True, text=True, check=True).stdout
     url, key = "/api/settings/streaming/providers/cat%2Fx/check", "streaming.aside.cat/x"
-    checking = {"kind": "info", "title": "Checking the provider…", "text": "", "action": None, "key": key,
-                "ttl": 60000}
+    # no lifetime of its own: it must not hold the phone's one toast lane for the flight
+    checking = {"kind": "info", "title": "Checking the provider…", "text": "", "action": None, "key": key}
     assert json.loads(out) == {
         "title": "Lossless-X: no &lt;tier&gt;", "text": "Tracks &amp; more. (answer &quot;0&quot;)",
         "label": "Check again", "same": True, "bare": "x",

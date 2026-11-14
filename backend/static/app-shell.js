@@ -12253,13 +12253,13 @@
   // can take most of a minute: a second tap joins the one in flight, and
   // every toast of a check shares the notice's key, so each replaces the one
   // before. "Checking…" is said at every tap (a tap on the row closes the
-  // toast under that key first, notices.act) and stays for the flight: the
-  // answer replaces it.
+  // toast under that key first, notices.act) and lives as any passive toast
+  // does: the phone shows one toast at a time, and a progress toast held for
+  // the flight would keep every other one waiting behind it.
   const _providerChecks = new Map();
-  const PROVIDER_CHECK_TOAST_MS = 60000;
   function checkProviderAgain(id) {
     notices.toast({ kind: 'info', title: 'Checking the provider…', text: '',
-                    key: `streaming.aside.${id}`, ttl: PROVIDER_CHECK_TOAST_MS });
+                    key: `streaming.aside.${id}` });
     if (!_providerChecks.has(id)) {
       _providerChecks.set(id, _checkProvider(id).finally(() => _providerChecks.delete(id)));
     }

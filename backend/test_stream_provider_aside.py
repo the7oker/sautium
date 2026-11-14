@@ -107,11 +107,12 @@ def test_the_service_listens_from_its_import():
     process's list is the fixtures' to patch."""
     import subprocess
     import sys
+    from pathlib import Path
     out = subprocess.run(
         [sys.executable, "-c",
          "from streaming import base, service; "
          "print(base._aside_listeners == [service._aside_changed])"],
-        capture_output=True, text=True, check=True).stdout
+        capture_output=True, text=True, check=True, cwd=Path(__file__).resolve().parent).stdout
     assert out.strip() == "True"
 
 
