@@ -1047,8 +1047,6 @@
       this.year = document.getElementById('npYearText');
       this.qBadge = document.getElementById('npQBadge');
       this.excerptBadge = document.getElementById('npExcerptBadge');
-      this.whyBtn = document.getElementById('npWhy');
-      this.hqpTag = document.getElementById('npHqpTag');
       this.keyPill = document.getElementById('npKeyPill');
       this.bpm = document.getElementById('npBpm');
       this.bpmNum = document.getElementById('npBpmNum');
@@ -1073,11 +1071,6 @@
 
       this.close.addEventListener('click', () => this.hide());
       this.el.addEventListener('click', e => { if (e.target === this.el) this.hide(); });
-      this.whyBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        if (e.detail > 1) return;
-        onceInFlight(this.whyBtn, () => openHqpDiagnosis(this.whyBtn.dataset.attempt));
-      });
       this.playPause.addEventListener('click', e => {
         e.stopPropagation();
         if (this.playPause.classList.contains('is-loading')) return;    // a start in flight
@@ -1338,21 +1331,10 @@
       // a replay into an excerpt), and the quality badge beside it stays the
       // provider's tier from the detail.
       if (this.excerptBadge) this.excerptBadge.hidden = !data.excerpt;
-      // The HQPlayer output judged the last play of this track failed
-      // (playback/hqp_diagnostics.py) — offered beside the track it is about,
-      // never beside the queue head a stopped status falls back to
-      const diag = data.diagnosis;
-      const why = !!diag && (!diag.track_id || diag.track_id === data.track_id);
-      // ...and another app's track HQPlayer refused is none of this track's
-      // plays: its button asks only "Why?" (its toast said what, and is gone
-      // in ten seconds; a page opened later never had one)
-      const asks = why && diag.code === 'other_refused' ? 'Why?' : "Why didn't it play?";
-      this.whyBtn.hidden = !why;
-      if (this.whyBtn.textContent !== asks) this.whyBtn.textContent = asks;
-      this.whyBtn.dataset.attempt = why ? diag.id : '';
-      const tag = outputLine(data, why ? diag : null);
-      this.hqpTag.hidden = !tag;
-      this.hqpTag.textContent = tag;
+      // Nothing else of the status is said here: this screen shows the
+      // player alone — the track, its badges, the bar, the controls. What
+      // happened to the output, a failed play's Why?, a build it waits for
+      // are toasts (the block "The output's words"; § Notices in CLAUDE.md)
 
       // Track length for the scrub → seek-target math (seconds).
       this._trackLength = data.length || 0;
@@ -6273,58 +6255,75 @@
     return () => _freshSeq.get(key) === n;
   }
 
-  /* ---- Output events: what another app did to the output -----------------
-     Another app that also controls the output (Roon on the same HQPlayer,
-     on the same renderer) took it, stopped it just after Sautium took it
-     back, had its own track refused by HQPlayer, or paused the renderer —
-     wherever the person is in the UI they learn it from a toast in the form
-     of the output-unavailable one, and Now Playing keeps the state in one
-     line (ROON-COEX, the owner's decision of 2026-11-11).
+  /* ---- The output's words: what happened is a toast ----------------------
+     Now Playing shows the player alone — the track, its badges, the bar, the
+     controls (the owner's rule, 2026-11-11 and 2026-11-14; § Notices in
+     backend/static/CLAUDE.md). Whatever else the output has to say is a
+     toast in the output-unavailable form, wherever the person is in the UI:
+
+     - what another app that also controls the output did (Roon on the same
+       HQPlayer, on the same renderer): it took the output, stopped it just
+       after Sautium took it back, had its own track refused by HQPlayer, or
+       paused the renderer (`output_event`);
+     - a play HQPlayer did not carry out (`diagnosis`, further down);
+     - a condition the output is in for a while — a build HQPlayer answers
+       nothing in, a renderer being attached again, a queue HQPlayer takes
+       afresh (onOutputCondition).
+
+     Each is a lasting toast (statusToast): raised once as its condition
+     begins, on screen until its close or until the status says the
+     condition no more — a Play that takes the output back, a build's end —
+     so nothing is lost to a ten-second timer, and nothing is painted on
+     Now Playing. A page opened later shows the state — the track at its
+     spot, the bar at the spot's second — and no message.
 
      One toast per event and page. The backend mints an event once and says
-     it on the status as `output_event` ({id, kind, attempt?, reason?}) for
-     as long as the state it led to stands, so no page misses it to a
-     coalesced status; a page tells an id it has not met, once — a poll, a
-     second read of the state, the next status are the same id. And only an
-     event minted during its connection: the status a connection opens with
-     carries its floor (`event_floor`, an id of the kind the events' are —
-     later is larger), and an event at or under it happened before — on
-     that status or on any later one, an event that left the status under a
-     newer one or an outage and came back. So a page opened after the
-     event, a reload and a stream that reconnects (a phone tab back from the
-     background) see the line on Now Playing, never a stale toast. The words
-     are drafts for the owner's words review. */
+     it on the status as `output_event` ({id, kind, attempt?, reason?,
+     cause?}) for as long as the state it led to stands, so no page misses
+     it to a coalesced status; a page tells an id it has not met, once — a
+     poll, a second read of the state, the next status are the same id. And
+     only an event minted during its connection: the status a connection
+     opens with carries its floor (`event_floor`, an id of the kind the
+     events' are — later is larger), and an event at or under it happened
+     before — on that status or on any later one, an event that left the
+     status under a newer one or an outage and came back. So a page opened
+     after the event, a reload and a stream that reconnects (a phone tab
+     back from the background) get no stale toast. The words are drafts for
+     the owner's words review. */
 
-  // What the output says beside the track on Now Playing, the action first
-  // — the part a narrow screen must not lose: the build it is in (its
-  // transport waits meanwhile), a silence no build of ours explains, or,
-  // for a stopped HQPlayer, the second the play press resumes at (a paused
-  // one whose playlist was taken afresh is left stopped: never "paused").
-  // Another app on the output (`source` external): what Play does there,
-  // then whose it is. A renderer that paused our track by no word of the
-  // node's (its own remote, a controller past UPnP): its pause, not
-  // Sautium's. A renderer being attached again where it answers now
-  // (`connecting`, its name): said while it lasts, so a press waiting on it
-  // is seen. A take-back the app it took the output from stopped (its own
-  // Stop after its Pause, ROON-COEX P6; `diag`, the diagnosis offered
-  // beside this track): that app's stop, at the same spot — its start too
-  // (a tap, Next, a new queue: 0:00).
-  function outputLine(data, diag) {
-    const b = data.building, r = data.resume;
-    const out = (data.output && data.output.label) || 'this output';
-    const stoppedBy = !!diag && diag.code === 'other_stopped';
-    return data.connecting ? `Connecting to ${data.connecting}…`
-      : b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
-      : data.not_answering ? 'HQPlayer is not answering'
-      : data.rebuilding ? 'HQPlayer is taking the queue again'
-      : data.source === 'external'
-        ? (r ? `Play resumes at ${fmtDuration(r.position)} · another app has ${out}`
-          : `Play takes it back · another app has ${out}`)
-      : data.paused_on_device && data.state === 'paused' ? `Paused on ${out}`
-      : r && stoppedBy && data.state === 'stopped'
-        ? `Play resumes at ${fmtDuration(r.position)} · another app stopped ${out}`
-      : r && r.position > 0 && data.state === 'stopped'
-        ? `Play resumes at ${fmtDuration(r.position)}` : '';
+  // A condition the status says while it lasts, as one lasting toast under
+  // `key`. `say(tag, spec)`: the status says it — `tag` names the instance,
+  // and only a new one raises the toast (the same tag on a later status
+  // redraws changed words in place, and a toast the person closed stays
+  // closed). `know(tag)`: it stands but is no news to this page (minted
+  // before its connection): nothing is raised, and a toast for an earlier
+  // instance goes. `end()`: the status says it no more.
+  function statusToast(key) {
+    let said = null;
+    const leave = (tag) => {
+      if (said !== null && said !== tag) notices.resolve(key, said);
+      said = tag;
+    };
+    return {
+      say(tag, spec) {
+        if (tag === said) { notices.amend(key, tag, spec); return; }
+        leave(tag);
+        notices.toast({ ...spec, key, tag, lasting: true });
+      },
+      know(tag) { leave(tag); },
+      end() { leave(null); },
+    };
+  }
+
+  // The one action of a toast about a setting HQPlayer refused at a source
+  // rate (BACKLOG B-89): Sautium's HQPlayer screen with the picker that
+  // needs changing open — the filter's where the filter does not fit the
+  // rate (`line`: HQPlayer's own line says so), the modulator's, the output
+  // rate's where the output family has no rate for the source.
+  const HQP_PICKER_FOR = { filter: 'filter', line: 'filter', modulator: 'modulator', rate: 'rate' };
+  function hqpSettingsAction(cause) {
+    const picker = HQP_PICKER_FOR[cause];
+    return picker ? { label: 'HQPlayer settings', run: () => openHqpSettingsAt(picker) } : null;
   }
 
   // An event's words: the toast's title and text (HTML — the output's name
@@ -6337,7 +6336,7 @@
     if (ev.kind === 'took') {
       return { kind: 'info', title: `Another app took ${out}`,
                text: at ? `Play takes it back and resumes at ${at}.` : 'Play takes it back.',
-               why: `Another app that also controls ${out} started playing through it. Sautium sends ${out} nothing while that app plays, and keeps your place in the queue.`,
+               sheet: `Another app that also controls ${out} started playing through it. Sautium sends ${out} nothing while that app plays, and keeps your place in the queue.`,
                next: `Press Play to take ${out} back: playback resumes${at ? ` at ${at}` : ''} and the other app's playback stops.` };
     }
     if (ev.kind === 'stopped') {
@@ -6348,12 +6347,13 @@
       const reason = String(ev.reason || '');
       const said = reason ? `${escapeProfileHtml(reason[0].toUpperCase() + reason.slice(1))}. ` : '';
       return { kind: 'info', title: "HQPlayer refused the other app's track",
-               text: `${said}Play takes ${out} back${at ? ` at ${at}` : ''}.` };
+               text: `${said}Play takes ${out} back${at ? ` at ${at}` : ''}.`,
+               action: hqpSettingsAction(ev.cause) };
     }
     if (ev.kind === 'paused') {
       return { kind: 'info', title: `Paused on ${out}`,
                text: 'Not by Sautium: the device itself, or another app that plays to it. Play resumes.',
-               why: `${out} paused this track by itself: its own remote, or another app that plays to it (Roon shows its playback this way on some devices). Sautium did not send this pause.`,
+               sheet: `${out} paused this track by itself: its own remote, or another app that plays to it (Roon shows its playback this way on some devices). Sautium did not send this pause.`,
                next: 'Press Play to resume here.' };
     }
     return null;
@@ -6365,7 +6365,7 @@
     const { el, close } = openModal(`
       <div class="confirm-sheet hqp-diag">
         <h2 class="confirm-title">${c.title}</h2>
-        <p class="confirm-message">${c.why}</p>
+        <p class="confirm-message">${c.sheet}</p>
         <p class="hqp-diag-next">${c.next}</p>
         <div class="confirm-actions single">
           <button class="profile-btn primary" type="button" data-close>Close</button>
@@ -6377,25 +6377,84 @@
 
   const outputEventsMet = new Set();
   let outputEventFloor = 0;
+  let outputEventTold = null;         // the event this page toasted: its words follow the status
+  const outputEventToast = statusToast('player.other_app');
   function onOutputEvent(data) {
     if (!data) return;
     // Each connection's floor is its own: a backend that came back counting
     // lower (its clock set back) is not held to the one before it
     if (data.event_floor != null) outputEventFloor = data.event_floor;
     const ev = data.output_event;
-    if (!ev || ev.id <= outputEventFloor || outputEventsMet.has(ev.id)) return;
+    // Gone from the status: its toast goes, and should it come back (an
+    // outage between) it is no news — the floor's rule, for a page that told it
+    if (!ev) { outputEventToast.end(); outputEventTold = null; return; }
+    // News once: an id above the connection's floor this page has not met.
+    // The one it told keeps its words true to the status (the spot's second
+    // after a Seek there); any other stands without a word
+    if (ev.id > outputEventFloor && !outputEventsMet.has(ev.id)) outputEventTold = ev.id;
     outputEventsMet.add(ev.id);
-    const c = outputEventCopy(ev, data);
-    if (!c) return;
+    const c = outputEventTold === ev.id ? outputEventCopy(ev, data) : null;
+    if (!c) { outputEventToast.know(ev.id); return; }
     // Its attempt's failure is said here: the play route's answer for the
     // same attempt, should one follow, says nothing more (answerSays)
     if (ev.attempt != null) saidAttempts.add(ev.attempt);
-    notices.toast({ kind: c.kind, key: 'player.other_app', title: c.title, text: c.text,
-                    action: { label: 'Why?', run: () => (ev.attempt != null
-                      ? openHqpDiagnosis(ev.attempt) : openOutputEventSheet(c)) } });
+    outputEventToast.say(ev.id, {
+      kind: c.kind, title: c.title, text: c.text, action: c.action || null,
+      why: () => (ev.attempt != null ? openHqpDiagnosis(ev.attempt) : openOutputEventSheet(c)),
+    });
   }
   document.addEventListener('np-update', (e) => onOutputEvent(e.detail));
-  /* ---- Output events: end ---- */
+
+  // A condition the output is in for a while, each a lasting toast of its
+  // own while the status says it. One that ends by itself takes no taps and
+  // has no close (`passive`): HQPlayer's build (its transport waits
+  // meanwhile; an Embedded box answers all through its builds, so nothing
+  // waits there), the queue it takes again at a play press, a renderer
+  // being attached again where it answers now. One that may not end has a
+  // close: a build HQPlayer did not finish, a silence no build of ours
+  // explains.
+  const outputConditions = {
+    connecting: statusToast('player.connecting'),
+    building: statusToast('hqplayer.building'),
+    silent: statusToast('hqplayer.silent'),
+    rebuilding: statusToast('hqplayer.rebuilding'),
+  };
+  function outputConditionCopy(data) {
+    const b = data.building;
+    return {
+      connecting: data.connecting && {
+        tag: data.connecting, passive: true,
+        title: `Connecting to ${escapeProfileHtml(data.connecting)}…`,
+      },
+      building: b && (b.unfinished ? {
+        tag: `unfinished:${b.since}`, kind: 'error',
+        title: 'HQPlayer did not finish building the filter', text: 'Restart HQPlayer.',
+      } : {
+        tag: `building:${b.since}`, passive: true,
+        title: 'HQPlayer is building the filter',
+        text: b.silent ? 'It takes commands again once it is done.' : '',
+      }),
+      silent: data.not_answering && {
+        tag: 'silent', title: 'HQPlayer is not answering',
+        text: 'Sautium keeps asking; commands wait for its answer.',
+      },
+      rebuilding: data.rebuilding && {
+        tag: 'rebuilding', passive: true, title: 'HQPlayer is taking the queue again',
+      },
+    };
+  }
+  function onOutputCondition(data) {
+    if (!data) return;
+    const copy = outputConditionCopy(data);
+    for (const [name, toast] of Object.entries(outputConditions)) {
+      const c = copy[name];
+      if (!c) { toast.end(); continue; }
+      const { tag, ...spec } = c;
+      toast.say(tag, spec);
+    }
+  }
+  document.addEventListener('np-update', (e) => onOutputCondition(e.detail));
+  /* ---- The output's words: end (the diagnosis toast follows) ---- */
 
   // Playback 503 = the configured output can't take the command (a dozing
   // renderer, a closed HQPlayer, no output at all). Nothing to decide, so
@@ -6447,33 +6506,39 @@
 
   // A play the HQPlayer output judged failed (playback/hqp_diagnostics.py):
   // one toast per attempt, with the way to its explanation — the toast its
-  // route's answer opened, taken over in place (answerSays). An attempt's
-  // diagnosis is news only the first time this tab meets it: a status that
-  // loses it and gets it back says nothing, whatever the first meeting said.
-  // Not when the same failure repeats on a dead output — the
+  // route's answer opened, taken over in place (answerSays). A lasting one:
+  // it stays until its close or until the status offers the diagnosis no
+  // more (a new start, the slot playing after all) — Now Playing has no
+  // button for it. Where HQPlayer refused the rate combination, its one
+  // action opens the picker that needs changing (hqpSettingsAction). An
+  // attempt's diagnosis is news only the first time this tab meets it: a
+  // status that loses it and gets it back says nothing, whatever the first
+  // meeting said. Not when the same failure repeats on a dead output — the
   // `hqplayer.failing` notice speaks then (`failing`, decided by the server,
   // a flag of the run: when the run ends the same attempt comes back
   // without it) — and not for an HQPlayer that did not answer: the play
   // route's 503 already said so — nor for what another app did (its stop of
   // a take-back, its own track HQPlayer refused): that event's toast says it
-  // (onOutputEvent). The status a tab connects with paints the tag only,
-  // never a stale toast.
-  let lastDiagnosisSeen;
+  // (onOutputEvent). The status a tab connects with says nothing: a page
+  // opened later finds the attempt under More → HQPlayer → Diagnostics.
+  let diagnosisSeen = false;
   const metDiagnoses = new Set();
+  const diagnosisToast = statusToast('hqplayer.diagnosis');
   document.addEventListener('np-update', (e) => {
     const d = e.detail && e.detail.diagnosis;
-    const id = d ? d.id : null;
-    const first = lastDiagnosisSeen === undefined;
-    if (id === lastDiagnosisSeen) return;
-    lastDiagnosisSeen = id;
-    if (!d || metDiagnoses.has(d.id)) return;
+    const first = !diagnosisSeen;
+    diagnosisSeen = true;
+    if (!d) { diagnosisToast.end(); return; }
+    const news = !first && !metDiagnoses.has(d.id) && !d.failing && d.code !== 'unreachable'
+      && d.code !== 'other_stopped' && d.code !== 'other_refused';
     metDiagnoses.add(d.id);
-    if (first || d.failing || d.code === 'unreachable'
-        || d.code === 'other_stopped' || d.code === 'other_refused') return;
+    if (!news) { diagnosisToast.know(d.id); return; }
     saidAttempts.add(d.id);
-    notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: escapeHtml(d.title),
-                    text: escapeHtml(d.next || ''),
-                    action: { label: 'Why?', run: () => openHqpDiagnosis(d.id) } });
+    diagnosisToast.say(d.id, {
+      kind: 'error', title: escapeHtml(d.title), text: escapeHtml(d.next || ''),
+      why: () => openHqpDiagnosis(d.id),
+      action: d.code === 'rate_refused' ? hqpSettingsAction(d.cause) : null,
+    });
   });
 
   // A DSP change that went through a build answered its caller before it was
@@ -9140,18 +9205,22 @@
         <details class="hqp-advanced hqp-diag-more"><summary>Details</summary>${hqpTraceHtml(a)}</details>
         <details class="hqp-advanced hqp-diag-more" data-log><summary>HQPlayer log</summary>
           <div data-log-body>${a.hqp_log ? hqpLogHtml(a.hqp_log) : ''}</div></details>
+        <div class="copy-line" data-copy-skip>${copyButtonHtml('data-copy-from=".hqp-diag"', 'Copy details')}</div>
         <div class="confirm-actions single">
           <button class="profile-btn primary" type="button" data-close>Close</button>
         </div>
       </div>`, () => {}, null);
     el.querySelector('[data-close]').addEventListener('click', () => close());
     el.querySelector('[data-close]').focus();
+    // Read at its first opening that lasts: a copy opens it for a moment
+    // (readAsShown), and its event comes after it is closed again
     const logBox = el.querySelector('[data-log]');
-    if (!a.hqp_log) {
-      logBox.addEventListener('toggle', () => {
-        if (logBox.open) loadHqpLog(logBox.querySelector('[data-log-body]'));
-      }, { once: true });
-    }
+    let logAsked = !!a.hqp_log;
+    logBox.addEventListener('toggle', () => {
+      if (!logBox.open || logAsked) return;
+      logAsked = true;
+      loadHqpLog(logBox.querySelector('[data-log-body]'));
+    });
   }
 
   function openHqpLog() {
@@ -9159,6 +9228,7 @@
       <div class="confirm-sheet hqp-diag">
         <h2 class="confirm-title">HQPlayer log</h2>
         <div data-log-body></div>
+        <div class="copy-line" data-copy-skip>${copyButtonHtml('data-copy-from=".hqp-diag"', 'Copy')}</div>
         <div class="confirm-actions single">
           <button class="profile-btn primary" type="button" data-close>Close</button>
         </div>
@@ -9595,6 +9665,23 @@
     }
   }
 
+  // A toast's "HQPlayer settings" (hqpSettingsAction): the HQPlayer screen
+  // with one picker open — the screen's next draw opens it, once (the
+  // mounted screen is drawn again; elsewhere the route leads to it).
+  let hqpPickerWanted = null;
+  let hqpScreenMounted = null;        // { screen, load } while the screen is in the document
+  function openHqpSettingsAt(picker) {
+    hqpPickerWanted = picker;
+    const at = hqpScreenMounted;
+    if (at && document.contains(at.screen) && parseHash().startsWith('more/hqplayer')) at.load();
+    else navigate('more/hqplayer');
+  }
+  const HQP_PICKER_OPENERS = {
+    filter: '[data-action="open-filter"]',
+    modulator: 'button[data-knob="shaper"]',
+    rate: 'button[data-knob="rate"]',
+  };
+
   async function renderHqplayerSettings(root) {
     const screen = document.createElement('div');
     screen.className = 'screen hqp-screen';
@@ -9646,6 +9733,7 @@
     const detachDiag = () => {
       document.removeEventListener('np-update', onDiagnosis);
       window.removeEventListener('sautium:route', onRoute);
+      if (hqpScreenMounted && hqpScreenMounted.screen === screen) hqpScreenMounted = null;
     };
     const onDiagnosis = (e) => {
       if (!document.contains(screen)) return detachDiag();
@@ -9698,6 +9786,7 @@
       });
     }
 
+    hqpScreenMounted = { screen, load };
     async function load() {
       const fresh = claimFresh('hqp.load');
       const body = screen.querySelector('#hqpBody');
@@ -9725,6 +9814,7 @@
         s = await r.json();
       } catch (err) {
         if (!fresh()) return;
+        hqpPickerWanted = null;        // no picker to open on a screen that could not be drawn
         body.innerHTML = `<div class="hqp-error">Could not reach HQPlayer.</div>`;
         return;
       }
@@ -9739,6 +9829,9 @@
     }
 
     function renderBody(body, s) {
+      // The picker a toast asked for: this draw's alone, whatever it draws
+      const pickerWanted = hqpPickerWanted;
+      hqpPickerWanted = null;
       const st = s.state || {};
       const modeName = modeNameFromState(st, s.modes);
       const rateName = rateNameFromState(st, s.rates);
@@ -10160,6 +10253,11 @@
           }));
         });
       });
+
+      // ...opened as the person's own tap on its row opens it; a control
+      // that waits (a build, a list HQPlayer did not give) opens nothing
+      const opener = pickerWanted && body.querySelector(HQP_PICKER_OPENERS[pickerWanted]);
+      if (opener && !opener.disabled) opener.click();
     }
 
     load();
@@ -10167,10 +10265,12 @@
 
   // Modal sheet: HQPlayer's full filter or modulator list, a search box,
   // sections — the favourite filters first, then by family. Sized to fill
-  // most of the viewport so the user can scan 77 entries comfortably. A row:
-  // the current-row dot, the name and this host's headroom mark (a filter's
-  // star beside it), then the facts the state carries and ⓘ for its card —
-  // buttons beside the row's pick button, which cannot hold a button. The
+  // most of the viewport so the user can scan 77 entries comfortably. A row
+  // is two lines: the current-row dot, the name and this host's headroom
+  // mark, with ⓘ for its card and a filter's star at the line's end; then the
+  // facts the state carries, the row's whole width (BACKLOG B-88: ⓘ had a
+  // third line of its own on a phone). The two are buttons over the end of
+  // the pick button's first line — it cannot hold a button. The
   // atlas's head lines, when the node holds one, open the list; members of
   // an identical group of three or more are joined by a rule under the
   // group's head, drawn once above each run of them the search leaves
@@ -10211,21 +10311,23 @@
     const rowHtml = (r, bracketed) => {
       const current = r.index === currentIdx;
       const f = r.facts;
+      const info = !!(f && f.card);
       return `
-        <div class="hqp-sheet-row${current ? ' is-current' : ''}${bracketed ? ' is-bracketed' : ''}" data-idx="${r.index}">
+        <div class="hqp-sheet-row${current ? ' is-current' : ''}${bracketed ? ' is-bracketed' : ''}" data-idx="${r.index}"
+             data-side="${(info ? 1 : 0) + (filter ? 1 : 0)}">
           <button class="hqp-sheet-row-name" type="button" data-pick="${r.index}">
             <span class="hqp-sheet-row-head">
               ${current ? '<span class="hqp-sheet-dot"></span>' : ''}
-              ${escapeHtml(r.name)}
+              <span class="hqp-sheet-row-title">${escapeHtml(r.name)}</span>
               ${hqpHeadroomMark(measured[r.name])}
             </span>
             ${hqpFactsHtml(f)}
           </button>
-          <div class="hqp-sheet-side${filter ? '' : ' is-starless'}">
+          <div class="hqp-sheet-side">
+            ${info ? `<button class="hqp-sheet-info" type="button" data-info="${escapeHtml(r.name)}"
+                              aria-label="Details: ${escapeHtml(r.name)}">${SVG_INFO}</button>` : ''}
             ${filter ? `<button class="hqp-sheet-star${favs.has(r.name) ? ' is-on' : ''}" type="button"
                                 data-fav="${escapeHtml(r.name)}" aria-label="Toggle favourite">★</button>` : ''}
-            ${f && f.card ? `<button class="hqp-sheet-info" type="button" data-info="${escapeHtml(r.name)}"
-                                     aria-label="Details: ${escapeHtml(r.name)}">${SVG_INFO}</button>` : ''}
           </div>
         </div>`;
     };
@@ -11761,7 +11863,10 @@
     area.setAttribute('readonly', '');
     area.style.position = 'fixed';
     area.style.opacity = '0';
-    document.body.appendChild(area);
+    // Inside the open dialog where one is up: everything outside a modal
+    // dialog is inert, and an inert field selects nothing to copy
+    const host = [...document.querySelectorAll('dialog[open]')].pop() || document.body;
+    host.appendChild(area);
     area.select();
     let ok = false;
     try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
@@ -11769,6 +11874,38 @@
     return ok;
   }
   window.copyText = copyText;
+
+  /* The page's one copy handler. What a person may need to copy — a code,
+     an error's details for support — carries a button, never a selection to
+     make by hand (on a touch screen the app's chrome selects nothing:
+     style.css "A tap is a tap"). `data-copy` holds the text itself;
+     `data-copy-from` names the element whose text as read is copied (the
+     nearest one up the tree: its blocks but the buttons' own, a closed
+     <details> opened for the reading). Said by a toast either way. */
+  function copyButtonHtml(attr, label) {
+    return `<button class="btn-link" type="button" ${attr}>${escapeHtml(label)}</button>`;
+  }
+  function readAsShown(el) {
+    const closed = [...el.querySelectorAll('details:not([open])')];
+    closed.forEach(d => { d.open = true; });
+    const text = [...el.children]
+      .filter(c => !c.matches('[data-copy-skip], .confirm-actions'))
+      .map(c => c.innerText.trim()).filter(Boolean).join('\n\n');
+    closed.forEach(d => { d.open = false; });
+    return text.replace(/\n{3,}/g, '\n\n');
+  }
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-copy], [data-copy-from]');
+    if (!btn) return;
+    onceInFlight(btn, async () => {
+      const from = btn.dataset.copyFrom && btn.closest(btn.dataset.copyFrom);
+      const text = from ? readAsShown(from) : (btn.dataset.copy || '');
+      const ok = !!text && await copyText(text);
+      notices.toast(ok ? { kind: 'info', key: 'copy', title: 'Copied' }
+                       : { kind: 'error', key: 'copy', title: 'Could not copy',
+                           text: 'This browser did not allow it.' });
+    });
+  });
 
   /* ---------- Notices: toasts, the strip, the rows ----------
      A toast is a signal that a condition began (or that something the
@@ -11991,7 +12128,7 @@
   NOTICE_COPY['hqplayer.rate_check'] = n => {
     const d = n.data || {};
     return { title: hqpPhrase(d.title), text: (d.text || []).map(hqpPhrase).join(' '),
-             action: { label: 'Why?', run: () => navigate('more/hqplayer') } };
+             why: () => navigate('more/hqplayer') };
   };
   NOTICE_COPY['tools.missing'] = n => ({
     title: 'Media tools missing',
@@ -12092,7 +12229,8 @@
         // this connection, become known without a toast
         if (!this._news(key, n.since) || snapshot.initial) return;
         const c = noticeCopy(n);
-        this.toast({ kind: n.kind, title: c.title, text: c.text, action: c.action || null, key });
+        this.toast({ kind: n.kind, title: c.title, text: c.text, why: c.why || null,
+                     action: c.action || null, key });
       });
       this.items = next;
       window.dispatchEvent(new CustomEvent('sautium:notices-changed'));
@@ -12128,63 +12266,121 @@
       } catch (_) { /* the next wake repaints the trail */ }
     },
 
-    /* kind: info | warning | error | success. `action` = { label, run }
-       makes it the tappable shape (with a close); `key` coalesces — a
-       repeat updates the live toast in place instead of stacking. */
-    toast({ kind = 'info', title = '', text = '', action = null, key = null, ttl = null } = {}) {
+    /* kind: info | warning | error | success. At most two buttons, in one
+       order everywhere: `why` (a function — the Why? button, the
+       explanation) and `action` = { label, run } (the one thing to do
+       about it); either makes it the tappable shape (with a close). `key`
+       coalesces — a repeat updates the live toast in place instead of
+       stacking. `lasting`: a condition that lasts — the toast stays until
+       its close, or until the party that raised it says the condition
+       ended (resolve), and steps aside for news meanwhile (_pump); `tag`
+       names what it was raised for, so that party ends its own toast and
+       no newer one under the key. A lasting toast has a close unless
+       `passive`: a condition that ends by itself (a build, a reconnect)
+       takes no taps and goes with it. */
+    toast({ kind = 'info', title = '', text = '', action = null, why = null, key = null, ttl = null,
+            lasting = false, passive = false, tag = null } = {}) {
+      const say = { kind, title, text, action, why, lasting, passive, tag };
       const live = key && this._shown.find(t => t.key === key);
-      if (live) { this._fill(live, { kind, title, text, action }); this._arm(live); return; }
+      if (live) { this._fill(live, say); this._arm(live); return; }
       const queued = key && this._queue.find(t => t.key === key);
-      if (queued) { Object.assign(queued, { kind, title, text, action }); return; }
-      this._queue.push({ kind, title, text, action, key, ttl, el: null, timer: null });
+      if (queued) { Object.assign(queued, say); return; }
+      // News goes before the lasting toasts that stepped aside for news
+      const parked = this._queue.findIndex(t => t.parked);
+      this._queue.splice(parked < 0 ? this._queue.length : parked, 0,
+                         { ...say, key, ttl, el: null, timer: null, parked: false });
       this._pump();
     },
 
-    /* A notice's action taken from its row: what its toast's button does —
-       the toast, shown or still queued, goes, and the copy's action runs. */
-    act(key) {
+    /* The condition a lasting toast said has ended: the toast goes, shown
+       or waiting — the one raised for `tag` alone where one is named. */
+    resolve(key, tag = null) {
+      const its = t => t.key === key && (tag === null || t.tag === tag);
+      this._queue = this._queue.filter(t => !its(t));
+      const live = this._shown.find(its);
+      if (live) this._dismiss(live);
+    },
+
+    /* A lasting toast's words changed while its condition stands (the
+       second Play resumes at): redrawn in place if it is shown or waiting,
+       never raised again — one the person closed stays closed. */
+    amend(key, tag, { kind = 'info', title = '', text = '', action = null, why = null, passive = false }) {
+      const t = [...this._shown, ...this._queue].find(x => x.key === key && x.tag === tag);
+      if (!t || (t.title === title && t.text === text && t.kind === kind)) return;
+      const say = { kind, title, text, action, why, lasting: true, passive, tag };
+      if (t.el) this._fill(t, say); else Object.assign(t, say);
+    },
+
+    /* A notice's button pressed on its row: what its toast's button does —
+       the toast, shown or still queued, goes, and the copy's Why? (`which`
+       'why') or its action runs. */
+    act(key, which = 'action') {
       this._queue = this._queue.filter(t => t.key !== key);
       const live = this._shown.find(t => t.key === key);
       if (live) this._dismiss(live);
-      noticeCopy(this.get(key)).action.run();
+      const c = noticeCopy(this.get(key));
+      if (which === 'why') c.why(); else c.action.run();
     },
 
     flush() { this._pump(); },
 
     _cap() { return layoutMode() === 'tablet' ? 3 : 1; },
 
+    /* Shows what waits while there is a place. News never waits behind a
+       condition: with every place taken, a lasting toast on screen steps
+       aside for it — back into the queue behind the news, and on screen
+       again when a place frees unless its condition ended meanwhile. One
+       that stepped aside displaces nothing itself. */
     _pump() {
       if (modalIsOpen()) return;          // never compete with a decision
-      while (this._queue.length && this._shown.length < this._cap()) {
+      while (this._queue.length) {
+        if (this._shown.length >= this._cap()) {
+          const held = this._queue[0].parked ? null : this._shown.find(t => t.lasting);
+          if (!held) return;
+          clearTimeout(held.timer);
+          this._shown.splice(this._shown.indexOf(held), 1);
+          held.el.remove();               // no leave transition: the news moves in where it stood
+          Object.assign(held, { el: null, parked: true });
+          this._queue.push(held);
+        }
         this._show(this._queue.shift());
       }
     },
 
-    _fill(t, { kind, title, text, action }) {
-      Object.assign(t, { kind, title, text, action });
+    _fill(t, { kind, title, text, action, why, lasting, passive, tag }) {
+      Object.assign(t, { kind, title, text, action, why, lasting, passive, tag });
       const el = t.el;
+      const tappable = !!(action || why) || (lasting && !passive);
       const wasIn = el.classList.contains('is-in');
-      el.className = `toast kind-${kind}${action ? ' is-actionable' : ''}${wasIn ? ' is-in' : ''}`;
-      el.setAttribute('role', action && kind === 'error' ? 'alert' : 'status');
+      el.className = `toast kind-${kind}${tappable ? ' is-actionable' : ''}${wasIn ? ' is-in' : ''}`;
+      el.setAttribute('role', tappable && kind === 'error' ? 'alert' : 'status');
       el.innerHTML = `
         <div class="toast-body">
           ${title ? `<div class="toast-title">${title}</div>` : ''}
           ${text ? `<div class="toast-text">${text}</div>` : ''}
         </div>
-        ${action ? `<div class="toast-side">
-          <button class="toast-action" type="button">${escapeHtml(action.label)}</button>
+        ${tappable ? `<div class="toast-side">
+          ${why ? '<button class="toast-action" type="button" data-toast="why">Why?</button>' : ''}
+          ${action ? `<button class="toast-action" type="button" data-toast="action">${escapeHtml(action.label)}</button>` : ''}
           <button class="toast-close" type="button" aria-label="Dismiss">×</button>
         </div>` : ''}`;
-      if (action) {
-        el.querySelector('.toast-action').addEventListener('click', () => { this._dismiss(t); action.run(); });
-        el.querySelector('.toast-close').addEventListener('click', () => this._dismiss(t));
-        el.addEventListener('pointerenter', () => clearTimeout(t.timer));
-        el.addEventListener('pointerleave', () => this._arm(t));
-      }
+      if (!tappable) return;
+      const on = (sel, run) => {
+        const b = el.querySelector(sel);
+        if (b) b.addEventListener('click', () => { this._dismiss(t); run(); });
+      };
+      on('[data-toast="why"]', () => why());
+      on('[data-toast="action"]', () => action.run());
+      on('.toast-close', () => {});
     },
 
     _show(t) {
       t.el = document.createElement('div');
+      t.parked = false;
+      // A pointer resting on a toast that takes taps holds it on screen
+      const el = t.el;
+      el.addEventListener('pointerenter', () => clearTimeout(t.timer));
+      el.addEventListener('pointerleave', () => { if (t.el === el) this._arm(t); });
       this._fill(t, t);
       document.getElementById('toastStack').appendChild(t.el);
       this._shown.push(t);
@@ -12195,8 +12391,9 @@
 
     _arm(t) {
       clearTimeout(t.timer);
+      if (t.lasting) return;              // its condition ends it, or its close
       const chars = `${t.title} ${t.text}`.replace(/<[^>]+>/g, '').length;
-      const ttl = t.ttl || (t.action ? 10000 : Math.min(8000, 4000 + 50 * chars));
+      const ttl = t.ttl || (t.action || t.why ? 10000 : Math.min(8000, 4000 + 50 * chars));
       t.timer = setTimeout(() => this._dismiss(t), ttl);
     },
 
@@ -12205,9 +12402,11 @@
       const i = this._shown.indexOf(t);
       if (i < 0) return;
       this._shown.splice(i, 1);
-      t.el.classList.remove('is-in');
+      // Its own element: a lasting toast may be on screen again by then
+      const el = t.el;
+      el.classList.remove('is-in');
       // The leave transition is --dur-base; reduced-motion has none.
-      setTimeout(() => { t.el.remove(); this._pump(); }, 220);
+      setTimeout(() => { el.remove(); this._pump(); }, 220);
     },
 
     /* A long-lived condition: fixed to the top of the viewport, the page
@@ -12223,9 +12422,10 @@
   };
   window.notices = notices;
 
-  /* Rows for Sync & P2P — the place the facts live. A copy's action is the
-     row's button too, the toast's label beside the title; renderSync runs it,
-     from one listener on the block the rows are redrawn in. */
+  /* Rows for Sync & P2P — the place the facts live. A copy's buttons are the
+     row's too, beside the title in the toast's order (Why?, then its
+     action); renderSync runs them, from one listener on the block the rows
+     are redrawn in. */
   function _renderNoticeRows() {
     const items = notices.list();
     if (!items.length) return '';
@@ -12237,8 +12437,10 @@
           <div class="form-row stacked notice-row kind-${escapeHtml(n.kind)}">
             <div class="row-stack">
               <span class="row-stack-label">${c.title}</span>
-              ${c.action ? `<button class="btn-link" type="button" data-notice-action="${escapeHtml(n.key)}">${
-                escapeHtml(c.action.label)}</button>` : '<span></span>'}
+              ${c.why || c.action ? `<span class="notice-row-buttons">${
+                c.why ? `<button class="btn-link" type="button" data-notice-action="${escapeHtml(n.key)}" data-which="why">Why?</button>` : ''}${
+                c.action ? `<button class="btn-link" type="button" data-notice-action="${escapeHtml(n.key)}" data-which="action">${
+                  escapeHtml(c.action.label)}</button>` : ''}</span>` : '<span></span>'}
             </div>
             <div class="row-stack-sub">${c.text}</div>
           </div>`;
@@ -13761,6 +13963,74 @@
     `;
   }
 
+  /* The AI canonization log (BACKLOG B-86): what became what, one row a
+     decision, newest first. A row is up to three lines, none cut: the names
+     — the library's → MusicBrainz's, or the one name where the link changed
+     no spelling — wrapping where they are long; what happened, where the
+     names do not say it (a link under the same name with MusicBrainz's
+     disambiguation, which tells the namesake picked — the decision this tier
+     exists for, so such rows are told one by one, never folded into a
+     count; a pick the name guard refused, with the guard's reason); and the
+     model's own reason, smaller. A row opens its details (openCanonDetails).
+     The words are drafts for the owner's words review. */
+  let _aiCanonShown = [];
+  function canonWhat(it) {
+    if (it.verdict === 'guard-rejected') {
+      return 'Not applied: the name guard found no spelling, transliteration or word the two names share.';
+    }
+    const same = it.from === it.to;
+    const which = it.comment ? `${same ? ' · ' : 'MusicBrainz: '}${it.comment}` : '';
+    return same ? `Linked to its MusicBrainz artist${which}` : which;
+  }
+  function canonRowHtml(it, i) {
+    const rej = it.verdict === 'guard-rejected';
+    const same = !rej && it.from === it.to;
+    const what = canonWhat(it);
+    return `<button class="canon-log-row${rej ? ' rejected' : ''}" type="button" data-canon="${i}">
+        <span class="canon-names">${same ? '' : `<span class="from">${escapeProfileHtml(it.from || '')}</span>
+          <span class="arrow">→</span>`}<span class="to">${escapeProfileHtml(it.to || '')}</span></span>
+        ${what ? `<span class="canon-what">${escapeProfileHtml(what)}</span>` : ''}
+        ${it.why ? `<span class="canon-why">${escapeProfileHtml(it.why)}</span>` : ''}
+      </button>`;
+  }
+  // A row's details: what happened in a sentence, the model's reason, what
+  // it was shown (the owned albums, genres, one album's folder), the
+  // MusicBrainz artists it weighed with the one it named marked, and the
+  // artist's page on MusicBrainz.
+  function openCanonDetails(it) {
+    const rej = it.verdict === 'guard-rejected';
+    const same = it.from === it.to;
+    const from = `“${escapeProfileHtml(it.from || '')}”`, to = `“${escapeProfileHtml(it.to || '')}”`;
+    const happened = rej
+      ? `The AI named ${to} for the library's ${from}. Nothing was changed: the name guard applies a pick only when the two names share a spelling, a transliteration or a word — a pick that follows a folder's or an album's name instead is refused.`
+      : same ? `${from} is now linked to its MusicBrainz artist; the name did not change.`
+      : `The library's ${from} is now MusicBrainz's ${to}.`;
+    const ev = it.evidence || {};
+    const shown = [['Albums', ev.albums], ['Genres', ev.genres], ['Folder', ev.folder]].filter(([, v]) => v);
+    const cands = it.candidates || [];
+    const mbUrl = it.gid ? `https://musicbrainz.org/artist/${encodeURIComponent(it.gid)}` : '';
+    const { el, close } = openModal(`
+      <div class="confirm-sheet hqp-diag canon-details">
+        <h2 class="confirm-title${rej ? ' error' : ''}">${same ? '' : `${escapeProfileHtml(it.from || '')} → `}${escapeProfileHtml(it.to || '')}</h2>
+        <p class="confirm-message">${happened}</p>
+        ${it.comment ? `<p class="hqp-diag-next">MusicBrainz describes ${rej ? 'that artist' : 'it'} as: ${escapeProfileHtml(it.comment)}.</p>` : ''}
+        ${it.why ? `<div class="hqp-diag-label">The AI's reason${it.conf ? ` (confidence: ${escapeProfileHtml(it.conf)})` : ''}</div>
+          <p class="hqp-diag-note">${escapeProfileHtml(it.why)}</p>` : ''}
+        ${shown.length ? `<div class="hqp-diag-label">What it was shown</div>
+          <dl class="hqp-diag-facts">${shown.map(([k, v]) => `<dt>${k}</dt><dd>${escapeProfileHtml(v)}</dd>`).join('')}</dl>` : ''}
+        <div class="hqp-diag-label">${it.proposed ? 'It proposed the name itself; the MusicBrainz artists of the library\'s spelling were' : 'The MusicBrainz artists it weighed'}</div>
+        <ul class="hqp-diag-list">${cands.map(c => `<li${c.gid === it.gid ? ' class="is-picked"' : ''}>${
+          escapeProfileHtml(c.name)}${c.comment ? ` — ${escapeProfileHtml(c.comment)}` : ''}${
+          c.gid === it.gid ? ' · its pick' : ''}</li>`).join('') || '<li>None under this spelling.</li>'}</ul>
+        ${mbUrl ? `<p class="hqp-diag-note"><a class="btn-link" href="${mbUrl}" target="_blank" rel="noopener">Open the artist on MusicBrainz</a></p>` : ''}
+        <div class="confirm-actions single">
+          <button class="profile-btn primary" type="button" data-close>Close</button>
+        </div>
+      </div>`, () => {}, null);
+    el.querySelector('[data-close]').addEventListener('click', () => close());
+    el.querySelector('[data-close]').focus();
+  }
+
   // AI canonization tier — toggle + "Run now" + live progress/reasoning log.
   function _renderAiCanon(ai) {
     const c = ai.canonization;
@@ -13771,15 +14041,8 @@
     const pct = job.total ? Math.round((job.processed / job.total) * 100) : 0;
     const noDump = c.mb_dump === false;
     const tally = `canonized ${job.canonized||0} · skipped ${job.skipped||0} · guard ${job.guard_rejected||0}${job.errors ? ' · errors '+job.errors : ''}`;
-    const log = (job.items || []).slice(0, 30).map(it => {
-      const rej = it.verdict === 'guard-rejected';
-      return `<div class="canon-log-row${rej ? ' rejected' : ''}">
-        <span class="from">${escapeProfileHtml(it.from)}</span>
-        <span class="arrow">→</span>
-        <span class="to">${escapeProfileHtml(it.to)}</span>
-        <span class="why">${escapeProfileHtml(it.why || (rej ? 'guard' : ''))}</span>
-      </div>`;
-    }).join('');
+    _aiCanonShown = (job.items || []).slice(0, 30);
+    const log = _aiCanonShown.map(canonRowHtml).join('');
     return `
       <div class="profile-group-label">AI canonization</div>
       <div class="form-group">
@@ -13972,7 +14235,10 @@
       // polls for the result — nothing comes back through this host.
       body = `
           <div class="row-stack-value" style="${_cliSigninProse}">${link}, sign in to ChatGPT and enter this one-time code:</div>
-          <div class="signin-device-code">${sg.code ? escapeProfileHtml(sg.code) : '…'}</div>
+          <div class="copy-inline">
+            <div class="signin-device-code">${sg.code ? escapeProfileHtml(sg.code) : '…'}</div>
+            ${sg.code ? copyButtonHtml(`data-copy="${escapeProfileHtml(sg.code)}"`, 'Copy') : ''}
+          </div>
           <div class="row-stack-sub">The code expires in 15 minutes. Sautium finishes on its own once you enter it.</div>`;
     } else {
       body = `
@@ -16292,6 +16558,11 @@
       } catch (_) {}
       renderAI(root, { look: false });   // picks up running state + stream
     });
+    onAction('[data-canon]', (e) => {
+      if (e.detail > 1) return;          // the second click of a double-click
+      const it = _aiCanonShown[Number(e.currentTarget.dataset.canon)];
+      if (it) openCanonDetails(it);
+    });
 
     if (ai.provider === 'claude_code' || researchNeedsClaude) _subscribeClaudeStream();
     if (ai.provider === 'codex') _subscribeCodexStream();
@@ -16329,7 +16600,7 @@
     // snapshot and every refresh, so the block holds the one listener
     root.querySelector('[data-sync-content]').addEventListener('click', e => {
       const btn = e.target.closest('[data-notice-action]');
-      if (btn) notices.act(btn.dataset.noticeAction);
+      if (btn) notices.act(btn.dataset.noticeAction, btn.dataset.which);
     });
     _subscribeSyncStream(root);
     notices.markSeen();

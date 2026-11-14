@@ -1403,36 +1403,6 @@ body.sautium-base {
   background: rgba(237, 226, 212, 0.02);
   text-transform: none;
 }
-/* What the output says beside the track (app-shell.js outputLine): a
-   sentence, not a tag's two words — it wraps inside its badge at a phone's
-   width, never runs past the screen's edge (the owner's phone, 2026-11-11:
-   "Another app took HQPlayer Desktop · study-pc — Play t…"). */
-.np-q-badge.np-output-line {
-  flex-shrink: 1;
-  min-width: 0;
-  max-width: 100%;
-  line-height: 1.4;
-  letter-spacing: 0.02em;
-  overflow-wrap: anywhere;
-}
-/* "Why didn't it play?" — the HQPlayer output judged the last play of this
-   track failed (playback/hqp_diagnostics.py). A tappable status tag: the
-   lossy badge's error tint, set in the prose face (mono is for numbers). */
-.np-why {
-  display: inline-flex;
-  align-items: center;
-  padding: calc(4 * var(--px)) calc(9 * var(--px));
-  border-radius: calc(3 * var(--px));
-  border: 1px solid rgba(193, 86, 78, 0.35);
-  background: rgba(193, 86, 78, 0.06);
-  color: var(--color-negative);
-  font-family: var(--font-sans);
-  font-size: var(--text-caption);
-  font-weight: 600;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
 .np-key-pill {
   padding: calc(4 * var(--px)) calc(8 * var(--px));
   background: var(--color-surface-lo);
@@ -4747,15 +4717,25 @@ a.am-kind { text-decoration: none; }
   text-transform: uppercase;
   color: var(--color-text-muted);
 }
+/* A row is two lines (BACKLOG B-88): the name with ⓘ and a filter's star
+   at its end, then the facts across the whole row. The pick button is the
+   row; the side's buttons lie over the end of its first line, which the
+   name's line keeps clear by their width (--side: 44 design-px a button),
+   so a long name wraps before them and is never cut. */
 .hqp-sheet-row {
+  --side: 0px;
   display: grid;
-  grid-template-columns: 1fr calc(40 * var(--px));
+  grid-template-columns: 1fr auto;
   align-items: start;
   border-bottom: 1px solid var(--color-divider);
 }
+.hqp-sheet-row[data-side="1"] { --side: calc(44 * var(--px)); }
+.hqp-sheet-row[data-side="2"] { --side: calc(88 * var(--px)); }
 .hqp-sheet-row:last-child { border-bottom: 0; }
 .hqp-sheet-row.is-current { background: var(--color-amber-weak); }
 .hqp-sheet-row-name {
+  grid-column: 1 / -1;
+  grid-row: 1;
   display: flex; flex-direction: column; align-items: flex-start;
   gap: calc(3 * var(--px));
   width: 100%;
@@ -4770,7 +4750,15 @@ a.am-kind { text-decoration: none; }
 }
 .hqp-sheet-row-head {
   display: flex; align-items: center; gap: calc(8 * var(--px));
+  box-sizing: border-box;
+  width: 100%;
+  min-height: calc(20 * var(--px));
+  /* the side's buttons end 4 design-px from the row's edge, the name's
+     padding 16: the line stops 4 short of the first button */
+  padding-right: max(0px, calc(var(--side) - 8 * var(--px)));
 }
+.hqp-sheet-row-title { min-width: 0; overflow-wrap: anywhere; }
+.hqp-sheet-dot { flex-shrink: 0; }
 .hqp-sheet-row.is-current .hqp-sheet-row-name { color: var(--color-amber); }
 .hqp-sheet-dot {
   display: inline-block;
@@ -4780,7 +4768,7 @@ a.am-kind { text-decoration: none; }
   background: var(--color-amber);
 }
 .hqp-sheet-star {
-  width: calc(40 * var(--px));
+  width: calc(44 * var(--px));
   height: calc(44 * var(--px));
   background: transparent;
   border: 0;
@@ -4789,17 +4777,19 @@ a.am-kind { text-decoration: none; }
   cursor: pointer;
 }
 .hqp-sheet-star.is-on { color: var(--color-amber); }
-/* The row's right column: a filter's star beside line 1 and ⓘ under it; on
-   a modulator's row ⓘ alone, beside its chips. */
+/* The end of the row's first line: ⓘ, then a filter's star — each a
+   44 design-px target, over the pick button. */
 .hqp-sheet-side {
+  grid-column: 2;
+  grid-row: 1;
+  z-index: 1;
   display: flex;
-  flex-direction: column;
   align-items: center;
+  padding-right: calc(4 * var(--px));
 }
-.hqp-sheet-side.is-starless { padding-top: calc(30 * var(--px)); }
 .hqp-sheet-info {
-  width: calc(40 * var(--px));
-  height: calc(36 * var(--px));
+  width: calc(44 * var(--px));
+  height: calc(44 * var(--px));
   display: grid; place-items: center;
   background: transparent;
   border: 0;
@@ -6390,14 +6380,40 @@ select.add-gear-input {
 }
 
 /* A tap is a tap: no double-tap-to-zoom anywhere in the app (pinch still
-   zooms), and a desktop double-click on a row or tile selects no words.
-   touch-action composes down the tree, so one declaration covers every
-   control; the drag handles keep their own stricter values. */
+   zooms), and a press selects no words. touch-action composes down the
+   tree, so one declaration covers every control; the drag handles keep
+   their own stricter values.
+
+   Selection (BACKLOG B-90: on a phone a press on an Output row selected its
+   text, raised the copy menu and the browser's tap-to-search bar, and the
+   next taps went to the selection):
+   - Everything that takes a tap is unselectable everywhere — the rule of
+     the press feedback below, one list for both: a control that joins it
+     dips and selects nothing.
+   - On a touch screen the whole app is chrome: a press selects nothing
+     and calls up no menu — but what is there to be read: the prose a
+     person may want to quote (a Why? sheet and every dialog, the
+     assistant's answers, a chat's messages, a bio, HQPlayer's log), and
+     what is typed. A mouse selects by intent, so a desktop keeps its
+     titles and lines selectable.
+   - What a person needs to copy carries a copy button ([data-copy], the
+     page's one copy handler), never a selection to make by hand. */
 html, body { touch-action: manipulation; }
-.track-row, .friend-row, .more-row, .nav-tab, .artist-tile, .album-tile,
-.q-row, .album-actions, .ai-chat-row {
-  user-select: none;
-  -webkit-user-select: none;
+/* The gaps of a row of buttons: a double-click between two selects nothing */
+.album-actions { user-select: none; -webkit-user-select: none; }
+@media (pointer: coarse) {
+  body {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  :where(input, textarea, [contenteditable],
+         .confirm-sheet, .ai-msg-prose, .ai-msg-user, .bubble, .bio, .bio-text, .identity-bio,
+         .research-prose, .helper-prose, .hqp-card-body, .hqp-log, .is-selectable) {
+    user-select: text;
+    -webkit-user-select: text;
+    -webkit-touch-callout: default;
+  }
 }
 
 /* Press feedback — one answer to a tap, everywhere: the pressed control
@@ -6418,16 +6434,21 @@ html, body { touch-action: manipulation; }
    - Buttons, links, selects and summaries are covered by tag; an element
      of another tag that takes taps is named here.
    - A control that declares its own `transition` lists the filter in it,
-     or its dip loses the fade. */
+     or its dip loses the fade.
+   - The same list is what a press never selects (see "A tap is a tap"). */
 html { -webkit-tap-highlight-color: transparent; }
 @property --own-filter { syntax: '*'; inherits: false; }
 :where(button, a[href], select, summary, [role="button"],
        [data-gear-nav], [data-brand-name],
        .q-row, .q-drag, .ai-chat-row, .np-artist, .np-album, .np-sim-row,
        .track-row, .track-add, .see-more, .f-chip, .friend-row, .token-row,
+       .artist-tile, .album-tile,
        .form-row.is-clickable, .add-gear-result) {
   filter: var(--own-filter, none);
   transition: filter var(--dur-base) var(--ease-standard);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 
   &:active:not(:disabled):not(:has(&:active)) {
     filter: var(--own-filter,) opacity(0.55);
@@ -6542,6 +6563,20 @@ html { -webkit-tap-highlight-color: transparent; }
   cursor: pointer;
 }
 .toast-close:hover { color: var(--color-text); background: var(--color-surface); }
+/* A notice's buttons on its row: Why?, then its action, as on its toast */
+.notice-row-buttons { display: inline-flex; gap: calc(12 * var(--px)); }
+/* What a person may need to copy carries its copy button (the "A tap is a
+   tap" rule): a line of its own under a sheet's details, or beside a code. */
+.copy-line {
+  display: flex;
+  justify-content: flex-end;
+  margin: calc(-8 * var(--px)) 0 calc(12 * var(--px));
+}
+.copy-inline {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--px));
+}
 @media (prefers-reduced-motion: reduce) {
   .toast { transition: none; transform: none; }
 }
@@ -6893,47 +6928,67 @@ html { -webkit-tap-highlight-color: transparent; }
   cursor: pointer;
 }
 
-/* AI-canonization reasoning log (More → AI assistant) — one row per name
-   the tier judged, newest first; guard-rejected renames stay visible with
-   the target struck through, since a rejection is the interesting event. */
+/* AI-canonization log (More → AI assistant; BACKLOG B-86) — one row per
+   name the tier judged, newest first, each opening its details. Up to three
+   lines, none cut: the names (the library's → MusicBrainz's) wrap where they
+   are long; what happened, where the names do not say it; the model's own
+   reason, smaller. A pick the name guard refused stays visible with the
+   target struck through, since a rejection is the interesting event. */
 .form-group.canon-log { margin-top: calc(10 * var(--px)); }
 .canon-log-row {
   display: flex;
-  align-items: baseline;
-  gap: calc(6 * var(--px));
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(3 * var(--px));
+  width: 100%;
+  min-height: calc(44 * var(--px));
   padding: calc(10 * var(--px)) calc(14 * var(--px));
+  background: transparent;
+  border: 0;
   border-bottom: 1px solid var(--color-divider);
+  font-family: inherit;
+  text-align: left;
+  color: var(--color-text);
+  cursor: pointer;
 }
 .canon-log-row:last-child { border-bottom: none; }
+.canon-names {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: calc(2 * var(--px)) calc(6 * var(--px));
+  max-width: 100%;
+}
 .canon-log-row .from,
 .canon-log-row .to {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .canon-log-row .from {
   font-size: calc(12.5 * var(--px));
   color: var(--color-text-muted);
-  max-width: 40%;
 }
 .canon-log-row .arrow { color: var(--color-blue); }
-.canon-log-row .to {
-  font-size: calc(13 * var(--px));
-  color: var(--color-text);
+.canon-log-row .to { font-size: calc(13 * var(--px)); }
+.canon-what,
+.canon-why {
+  font-size: calc(11.5 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
 }
-.canon-log-row .why {
-  margin-left: auto;
-  padding-left: calc(6 * var(--px));
+.canon-why {
   font-size: calc(11 * var(--px));
   color: var(--color-text-dim);
   font-style: italic;
-  white-space: nowrap;
 }
 .canon-log-row.rejected .arrow { color: var(--color-negative); }
 .canon-log-row.rejected .to {
   text-decoration: line-through;
   color: var(--color-text-muted);
 }
+.canon-log-row.rejected .canon-what { color: var(--color-negative); }
+.canon-details .is-picked { color: var(--color-text); }
 
 /* Inline transient feedback ("Force sync now" → "Synced · 5 new items"). */
 .toast-inline {

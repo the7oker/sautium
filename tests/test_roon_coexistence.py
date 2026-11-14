@@ -163,6 +163,13 @@ def _statuses(fake, since: int) -> int:
     return sum(1 for c, _ in fake.commands[since:] if c == "Status")
 
 
+def _refused_said(status) -> str | None:
+    """The other app's refused track as the status says it: its event's
+    reason, the node's sentence for the cause (§6.1 P7, §12.6)."""
+    event = (status or {}).get("output_event") or {}
+    return event.get("reason") if event.get("kind") == "refused" else None
+
+
 def _node_commands(fake, since: tuple, roon: FakeRoon) -> list:
     """What the node sent HQPlayer since `since` (_mark), its questions
     aside: every command that is not one of Roon's since then."""
@@ -730,6 +737,45 @@ def test_a_tap_waiting_for_its_stream_ends_when_roon_takes_hqplayer(fake, monkey
         roon.close()
 
 
+def test_b82_an_append_after_a_waiting_start_was_taken_over_stays_out_of_roons_playlist(fake, monkeypatch):
+    """BACKLOG B-82 (ROON-COEX-4 §12.6, open item 5): a tap that waited for
+    its stream on an HQPlayer at rest (the node's own Stop before it: no
+    listen for a verdict to cut), taken over by Roon, leaves the takeover's
+    marker as a cut listen's verdict does — so once Roon stops and HQPlayer
+    rests on Roon's playlist, the spot standing, an append is the queue's
+    alone: nothing goes into the other controller's playlist (what the
+    toast's sheet promises: "Sautium sends ‹output› nothing while that app
+    plays")."""
+    fake.raw_streams = "uri"
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=3)
+    roon = FakeRoon(fake.port)
+    try:
+        assert b.stop()
+        assert _wait(lambda: fake.state == int(PlaybackState.STOPPED) and mgr._latest_status.get("state") == "stopped")
+        prov.go.clear()
+        assert b.select(3, "stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading")
+        uri = roon.play_track()
+        assert _wait(lambda: mgr._latest_status.get("source") == "external", 10)
+        roon.stop()
+        k = len(fake.commands)
+        _wait(lambda: fake.state == int(PlaybackState.STOPPED) and _statuses(fake, k) >= 3)
+        st = mgr._latest_status
+        assert (st.get("source"), st.get("resume")) == (None, {"index": 3, "position": 0}), st
+        n = _mark(fake, roon)
+        assert mgr.append([_item("E:/Music/B/09.flac", 9)]) == 1
+        k = len(fake.commands)
+        _wait(lambda: _statuses(fake, k) >= 3)
+        sent = _node_commands(fake, n, roon)
+        _observed("B-82", node_commands=sent, playlist=[u[-22:] for u in fake.playlist], mirror=b._mirror)
+        assert sent == [] and fake.playlist == [uri], (sent, fake.playlist)
+        assert mgr.queue.item_at(5).track_id == "track-9"
+    finally:
+        prov.go.set()
+        b.shutdown()
+        roon.close()
+
+
 def proxy_audio(token) -> bool:
     from streaming import service as streaming_service
     e = streaming_service.get_proxy()._peek(token)
@@ -1272,6 +1318,10 @@ def test_the_other_apps_stop_is_an_event_of_its_own_verdict_alone(fake):
     q, b = _three(fake)
     b._stopped_event = (40, 99)
     assert b._output_event({"id": 40, "code": "other_stopped"}, None) == {"id": 99, "kind": "stopped", "attempt": 40}
+    # ...and HQPlayer's refusal of the other app's track names the setting its toast opens (B-89)
+    assert b._output_event({"id": 41, "code": "other_refused"}, ("its filter is not possible at 96 kHz", "filter")) == {
+        "id": 41, "kind": "refused", "attempt": 41, "reason": "its filter is not possible at 96 kHz",
+        "cause": "filter"}
     assert b._output_event({"id": 41, "code": "other_stopped"}, None) is None
     assert b._output_event({"id": 40, "code": "not_played"}, None) is None
 
@@ -2374,12 +2424,12 @@ def test_p7_the_refusal_of_roons_track_is_said_beside_the_spot_in_the_nodes_word
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10)
+        _wait(lambda: _refused_said(mgr._latest_status), timeout=10)
         st = mgr._latest_status
         _observed("P7", status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume",
-                                                          "other_refused", "diagnosis")},
+                                                          "output_event", "diagnosis")},
                   node_commands=_node_commands(fake, n, roon))
-        assert st["other_refused"] == "no output rate for 96 kHz in its output family"
+        assert _refused_said(st) == "no output rate for 96 kHz in its output family"
         assert (st["state"], st["resume"]["index"], st.get("source")) == ("stopped", 2, None)
         assert st["diagnosis"]["track_id"] is None         # Now Playing offers it over any track
         att = diag.find(st["diagnosis"]["id"])
@@ -3843,7 +3893,7 @@ def test_p7_no_refusal_said_once_roons_next_track_played_and_stopped(fake, liste
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+        assert _wait(lambda: _refused_said(mgr._latest_status), timeout=10), "no refusal said at F7"
         roon.play_track()                          # its next pick, at a rate HQPlayer takes
         assert _wait(lambda: fake.state == PLAYING and fake.position >= 2, timeout=10)
         roon.stop()
@@ -3851,10 +3901,10 @@ def test_p7_no_refusal_said_once_roons_next_track_played_and_stopped(fake, liste
         _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
         st = mgr._latest_status
         _observed("P7-stale", status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume",
-                                                                    "other_refused")},
+                                                                    "output_event")},
                   hqplayer=(fake.state, fake.track, fake.playlist[-1][-30:] if fake.playlist else None))
         assert st.get("state") == "stopped"
-        assert st.get("other_refused") is None, "a refusal said of a track HQPlayer played"
+        assert _refused_said(st) is None, "a refusal said of a track HQPlayer played"
     finally:
         b.shutdown()
         roon.close()
@@ -3876,8 +3926,8 @@ def test_p7_roons_next_refused_track_is_not_said_with_the_first_ones_reason(fake
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
-        first = mgr._latest_status.get("other_refused")
+        assert _wait(lambda: _refused_said(mgr._latest_status), timeout=10), "no refusal said at F7"
+        first = _refused_said(mgr._latest_status)
         with open(tmp_path / "HQPlayer6Desktop.log", "a") as log:
             log.write("& 2026/11/02 18:00:30 No suitable output rate for 192000, stop\n")
         roon.play_track()                          # Static Bloom: refused too
@@ -3887,9 +3937,9 @@ def test_p7_roons_next_refused_track_is_not_said_with_the_first_ones_reason(fake
         k = len(fake.commands)
         _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
         st = mgr._latest_status
-        _observed("P7-second", first=first, now=st.get("other_refused"), state=st.get("state"),
+        _observed("P7-second", first=first, now=_refused_said(st), state=st.get("state"),
                   hqplayer=(fake.state, fake.playlist[-1][-30:] if fake.playlist else None))
-        assert "96 kHz" not in (st.get("other_refused") or ""), "the 192 kHz track said refused for 96 kHz"
+        assert "96 kHz" not in (_refused_said(st) or ""), "the 192 kHz track said refused for 96 kHz"
     finally:
         b.shutdown()
         roon.close()
@@ -3913,8 +3963,8 @@ def test_p13_each_refused_track_of_roons_gets_a_row_of_its_own(fake, listens, mo
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
-        first = mgr._latest_status.get("other_refused")
+        assert _wait(lambda: _refused_said(mgr._latest_status), timeout=10), "no refusal said at F7"
+        first = _refused_said(mgr._latest_status)
         with open(tmp_path / "HQPlayer6Desktop.log", "a") as log:
             log.write("& 2026/11/02 18:00:30 No suitable output rate for 192000, stop\n")
         n = _mark(fake, roon)
@@ -3922,10 +3972,10 @@ def test_p13_each_refused_track_of_roons_gets_a_row_of_its_own(fake, listens, mo
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        said = _wait(lambda: "192 kHz" in (_refused_said(mgr._latest_status) or ""), timeout=15)
         rows = [a for a in diag.attempts() if a.intent == "other"]       # the newest first
         st = mgr._latest_status
-        _observed("P13-second", first=first, now=st.get("other_refused"), rows=[a.verdict["sentence"] for a in rows],
+        _observed("P13-second", first=first, now=_refused_said(st), rows=[a.verdict["sentence"] for a in rows],
                   node_commands=_node_commands(fake, n, roon))
         assert said, "the 192 kHz refusal got no row"
         assert "96 kHz" in first and len(rows) == 2 and rows[0].id != rows[1].id
@@ -4066,8 +4116,8 @@ def _a8s_first_refusal(fake, mgr, roon):
     for _ in range(6):
         roon.play_again()
         time.sleep(0.15)
-    assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
-    return mgr._latest_status.get("other_refused")
+    assert _wait(lambda: _refused_said(mgr._latest_status), timeout=10), "no refusal said at F7"
+    return _refused_said(mgr._latest_status)
 
 
 def _write(log, *lines):
@@ -4105,14 +4155,14 @@ def test_p13_a_read_between_roons_add_and_its_play_leaves_the_next_refusal_its_r
         k = len(fake.commands)
         assert _wait(lambda: any(c == "PlaylistGet" for c, _ in fake.commands[k:]), timeout=10), \
             "no tick read the playlist between Roon's add and its Play"
-        early = mgr._latest_status.get("other_refused")
+        early = _refused_said(mgr._latest_status)
         _write(log, "& 2026/11/02 18:00:30 No suitable output rate for 192000, stop")     # at Roon's Play
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        said = _wait(lambda: "192 kHz" in (_refused_said(mgr._latest_status) or ""), timeout=15)
         rows = [a.verdict["sentence"] for a in diag.attempts() if a.intent == "other"]
-        _observed("P13-add-play", first=first, early=early, now=mgr._latest_status.get("other_refused"), rows=rows)
+        _observed("P13-add-play", first=first, early=early, now=_refused_said(mgr._latest_status), rows=rows)
         assert said, "Static Bloom's refusal got no row of its own"
         assert len(rows) == 2 and "96 kHz" in rows[1], "a row for Static Bloom said with another track's reason"
     finally:
@@ -4143,8 +4193,8 @@ def test_p13_a_dsp_change_in_f7s_state_leaves_the_next_refused_track_its_row(fak
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=15)
-        _observed("P13-dsp", first=first, change=out, now=mgr._latest_status.get("other_refused"),
+        said = _wait(lambda: "192 kHz" in (_refused_said(mgr._latest_status) or ""), timeout=15)
+        _observed("P13-dsp", first=first, change=out, now=_refused_said(mgr._latest_status),
                   node_commands=_node_commands(fake, n, roon))
         assert said, "Static Bloom's refusal got no row after the person's DSP change"
         assert _node_commands(fake, n, roon) == []
@@ -4203,7 +4253,7 @@ def test_p13_one_read_of_hqplayers_log_at_a_time_makes_one_row_per_refused_track
             time.sleep(0.4)
         gate.set()
         said = f"{rate[:-3]} kHz"
-        assert _wait(lambda: said in (mgr._latest_status.get("other_refused") or ""), timeout=15)
+        assert _wait(lambda: said in (_refused_said(mgr._latest_status) or ""), timeout=15)
         for i in range(4):                         # Roon's Play sent again on the playlist a row named
             _write(log, f"& 2026/11/02 18:00:{50 + i:02d} No suitable output rate for {rate}, stop")
             roon.play_again()
@@ -4271,7 +4321,7 @@ def test_p12_the_row_stays_while_roon_sends_its_play_again(fake, listens, monkey
         for _ in range(16):                        # 4 s more of Roon's Play sent again
             roon.play_again()
             time.sleep(0.25)
-            said.append(bool(mgr._latest_status.get("other_refused")))
+            said.append(bool(_refused_said(mgr._latest_status)))
         _observed("P12-row-stays", said=said)
         assert all(said), said
     finally:
@@ -4349,9 +4399,9 @@ def test_p13_a_seek_in_f7s_state_leaves_the_next_refused_track_its_row(fake, lis
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=10)
+        said = _wait(lambda: "192 kHz" in (_refused_said(mgr._latest_status) or ""), timeout=10)
         st = mgr._latest_status
-        _observed("P13-seek", first=first, now=st.get("other_refused"), resume=st.get("resume"),
+        _observed("P13-seek", first=first, now=_refused_said(st), resume=st.get("resume"),
                   node_commands=_node_commands(fake, n, roon))
         assert said, "the next refused track got no row after the person's Seek"
         assert st["resume"]["position"] == 30 and _node_commands(fake, n, roon) == []
@@ -4384,9 +4434,9 @@ def test_p13_roons_refused_track_after_a_takeover_it_played_gets_its_row(fake, l
         for _ in range(8):
             roon.play_again()
             time.sleep(0.2)
-        said = _wait(lambda: "192 kHz" in (mgr._latest_status.get("other_refused") or ""), timeout=10)
+        said = _wait(lambda: "192 kHz" in (_refused_said(mgr._latest_status) or ""), timeout=10)
         st = mgr._latest_status
-        _observed("P13-after-D3", state=st.get("state"), resume=st.get("resume"), now=st.get("other_refused"),
+        _observed("P13-after-D3", state=st.get("state"), resume=st.get("resume"), now=_refused_said(st),
                   node_commands=_node_commands(fake, n, roon))
         assert said, "Roon's refused track got no row after a takeover it played"
         assert st["resume"]["index"] == 2 and _node_commands(fake, n, roon) == []
@@ -4588,10 +4638,10 @@ def test_p7_a_read_under_way_across_the_persons_seek_says_no_row_beside_the_move
         k = len(fake.commands)
         _wait(lambda: _statuses(fake, k) >= 3, timeout=10)
         st = mgr._latest_status
-        _observed("P7-seek-in-flight", now=st.get("other_refused"), resume=st.get("resume"),
+        _observed("P7-seek-in-flight", now=_refused_said(st), resume=st.get("resume"),
                   node_commands=_node_commands(fake, n, roon))
         assert _node_commands(fake, n, roon) == []
-        assert not st.get("other_refused"), st.get("other_refused")
+        assert not _refused_said(st), _refused_said(st)
         assert b._refusal_read is not None and b._refusal_read.final is not None, b._refusal_read
     finally:
         gate.set()
@@ -4695,13 +4745,13 @@ def test_p7_a_queue_edit_in_f7s_state_keeps_the_row(fake, listens, monkeypatch, 
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+        assert _wait(lambda: _refused_said(mgr._latest_status), timeout=10), "no refusal said at F7"
         k = len(pushed)
         from test_hqp_backend import _item
         mgr.append([_item("E:/Music/A/09.flac", 9)])
         time.sleep(2.5)
         seen = [(p.get("state"), p.get("track_index"), (p.get("diagnosis") or {}).get("code"),
-                 p.get("other_refused")) for p in pushed[k:]]
+                 _refused_said(p)) for p in pushed[k:]]
         _observed("P7-idle", seen=seen)
         assert all(code != "other_refused" or other for _s, _i, code, other in seen), (
             "a status offering the other app's sheet without its row")
@@ -4739,9 +4789,9 @@ def test_p7_a_cause_the_log_named_before_the_takeover_is_not_the_other_apps(fake
         k = len(fake.commands)
         _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
         st = mgr._latest_status
-        _observed("P7-old-line", other_refused=st.get("other_refused"), state=st.get("state"),
+        _observed("P7-old-line", other_refused=_refused_said(st), state=st.get("state"),
                   resume=st.get("resume"))
-        assert st.get("other_refused") is None, "an older line's refusal said as the other app's"
+        assert _refused_said(st) is None, "an older line's refusal said as the other app's"
     finally:
         b.shutdown()
         roon.close()
@@ -4809,10 +4859,10 @@ def test_p7_the_row_goes_with_the_spot_it_was_read_under(fake, listens, monkeypa
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10)
+        _wait(lambda: _refused_said(mgr._latest_status), timeout=10)
         assert b.seek(30)
         assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("position") == 30
-                     and not mgr._latest_status.get("other_refused"), 6), mgr._latest_status
+                     and not _refused_said(mgr._latest_status), 6), mgr._latest_status
     finally:
         b.shutdown()
         roon.close()
@@ -4990,9 +5040,9 @@ def test_b2_the_nodes_own_judged_refusal_is_not_the_other_apps(fake, listens, mo
         k = len(fake.commands)
         _wait(lambda: _statuses(fake, k) >= 4, timeout=15)
         st = mgr._latest_status
-        _observed("B2", other_refused=st.get("other_refused"), state=st.get("state"), resume=st.get("resume"))
-        assert "48 kHz" not in (st.get("other_refused") or ""), (
-            f"the node's own judged refusal said as the other app's: {st.get('other_refused')!r}")
+        _observed("B2", other_refused=_refused_said(st), state=st.get("state"), resume=st.get("resume"))
+        assert "48 kHz" not in (_refused_said(st) or ""), (
+            f"the node's own judged refusal said as the other app's: {_refused_said(st)!r}")
     finally:
         b.shutdown()
         roon.close()
@@ -5012,17 +5062,17 @@ def test_f_the_row_goes_with_the_spot_its_track_took_out_of_the_queue(fake, list
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+        assert _wait(lambda: _refused_said(mgr._latest_status), timeout=10), "no refusal said at F7"
         n = _mark(fake, roon)
         assert mgr.remove(2)
         k = len(fake.commands)
         _wait(lambda: _statuses(fake, k) >= 4, timeout=15)
         st = mgr._latest_status
         _observed("F", status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume",
-                                                             "other_refused")},
+                                                             "output_event")},
                   spot=b._spot_at(), node_commands=_node_commands(fake, n, roon))
         assert st.get("resume") is None, "the spot stands with its track out of the queue"
-        assert st.get("other_refused") is None, f"the row stands with no spot: {st.get('other_refused')!r}"
+        assert _refused_said(st) is None, f"the row stands with no spot: {_refused_said(st)!r}"
     finally:
         b.shutdown()
         roon.close()
@@ -5074,7 +5124,7 @@ def test_g_roons_refused_track_played_after_all_leaves_no_row(fake, listens, mon
         for _ in range(6):
             roon.play_again()
             time.sleep(0.15)
-        assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+        assert _wait(lambda: _refused_said(mgr._latest_status), timeout=10), "no refusal said at F7"
         fake.refuse_play.clear()                   # the rate set right in HQPlayer
         roon.play_again()
         assert _wait(lambda: fake.state == PLAYING and fake.position >= 2, timeout=10)
@@ -5085,9 +5135,9 @@ def test_g_roons_refused_track_played_after_all_leaves_no_row(fake, listens, mon
         _wait(lambda: _statuses(fake, k) >= 3, timeout=15)
         st = mgr._latest_status
         _observed("G", status={k_: st.get(k_) for k_ in ("state", "track_index", "source", "resume",
-                                                             "other_refused")},
+                                                             "output_event")},
                   hqplayer=(fake.state, fake.playlist[-1][-30:] if fake.playlist else None))
-        assert st.get("other_refused") is None, "a refusal said of the track HQPlayer played after all"
+        assert _refused_said(st) is None, "a refusal said of the track HQPlayer played after all"
     finally:
         b.shutdown()
         roon.close()
@@ -5174,7 +5224,7 @@ def _f7(fake, monkeypatch, tmp_path, *, rests_nowhere=False):
     for _ in range(6):
         roon.play_again()
         time.sleep(0.15)
-    assert _wait(lambda: mgr._latest_status.get("other_refused"), timeout=10), "no refusal said at F7"
+    assert _wait(lambda: _refused_said(mgr._latest_status), timeout=10), "no refusal said at F7"
     return roon, mgr, b, uri
 
 
@@ -5215,15 +5265,15 @@ def test_a_the_persons_queue_words_in_f7s_state_send_roons_playlist_nothing(fake
                       and fake.playlist[fake.track - 1].startswith("file:///"))
         _observed("A", word=word, nowhere=nowhere, node_commands=sent, playlist=[u[-22:] for u in held],
                   after=[u[-22:] for u in fake.playlist], hqplayer=(fake.state, fake.track),
-                  ours_plays=ours_plays, row=st.get("other_refused"),
+                  ours_plays=ours_plays, row=_refused_said(st),
                   status=(st.get("state"), st.get("track_index"), (st.get("resume") or {}).get("index")),
                   mirror=b._mirror)
         # A new queue takes the spot with its item (F7: what erases it), and the row
         # with it (P12: only in F7's state); an append and the radio's clear keep both
-        row = word == "replace" or st.get("other_refused")
+        row = word == "replace" or _refused_said(st)
         assert sent == [] and held and held[0] == uri and not ours_plays and row, (
             f"{word} in F7's state: node sent {sent}, playlist {[u[-22:] for u in held]}, ours plays under "
-            f"Roon's Play: {ours_plays}, row: {st.get('other_refused')!r}")
+            f"Roon's Play: {ours_plays}, row: {_refused_said(st)!r}")
     finally:
         b.shutdown()
         roon.close()
@@ -5238,7 +5288,7 @@ def test_b_the_sheet_names_roons_uri_where_desktop6_rests_on_no_entry(fake, list
     try:
         st = mgr._latest_status
         att = diag.find(st["diagnosis"]["id"])
-        _observed("B", row=st.get("other_refused"), uri=(att.facts or {}).get("uri"),
+        _observed("B", row=_refused_said(st), uri=(att.facts or {}).get("uri"),
                   expected=(att.facts or {}).get("expected_uri"))
         assert (att.facts or {}).get("uri") == uri, f"the sheet names URI {(att.facts or {}).get('uri')!r}"
     finally:
@@ -5358,7 +5408,7 @@ def test_f_the_row_stands_through_roons_play_sent_again(fake, listens, monkeypat
         for _ in range(12):
             roon.play_again()
             time.sleep(0.25)
-            seen.append(mgr._latest_status.get("other_refused"))
+            seen.append(_refused_said(mgr._latest_status))
         _observed("F", seen=[bool(s) for s in seen], playlist=[u[-22:] for u in fake.playlist])
         assert all(seen), f"the row stood down in F7's state: {[bool(s) for s in seen]}"
     finally:
@@ -5803,7 +5853,7 @@ def test_what_another_controller_did_to_hqplayer_is_one_event_each(fake, listens
         refused = mgr._latest_status["output_event"]
         assert refused == {"id": mgr._latest_status["diagnosis"]["id"], "kind": "refused",
                            "attempt": mgr._latest_status["diagnosis"]["id"],
-                           "reason": "no output rate for 96 kHz in its output family"}
+                           "reason": "no output rate for 96 kHz in its output family", "cause": "rate"}
         assert refused["id"] != took["id"]
         fake.refuse_play.clear()
         roon.play_track()                   # its next track plays: that refusal is over

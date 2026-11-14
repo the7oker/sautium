@@ -948,10 +948,6 @@ class PlaybackManager:
         # `error` is a string the UI toasts as it stands.
         if s.extra.get("diagnosis"):
             new_data["diagnosis"] = s.extra["diagnosis"]
-        # Another app's track HQPlayer refused under the takeover's spot
-        # (ROON-COEX §6.1 P7): the node's sentence for the cause
-        if s.extra.get("other_refused"):
-            new_data["other_refused"] = s.extra["other_refused"]
         # How often HQPlayer's limiter acted on its output (<Status clips>):
         # the meter's peak is read before upsampling, this is the after.
         if s.extra.get("limited") is not None:
@@ -1217,12 +1213,14 @@ class PlaybackManager:
             "ui_build": ui_build(),
         }
         # A queue edit while stopped keeps the explanation of the last play
-        # on screen, and a start under way (HQPlayer's own advance, a play
-        # press); the backend's next tick decides whether they still hold.
-        if self._latest_status.get("diagnosis"):
-            idle["diagnosis"] = self._latest_status["diagnosis"]
-        if self._latest_status.get("other_refused"):
-            idle["other_refused"] = self._latest_status["other_refused"]
+        # on offer, what another app did to the output (a page ends that
+        # event's toast with the status that says it no more: an append
+        # under a takeover's spot ended it), and a start under way
+        # (HQPlayer's own advance, a play press); the backend's next tick
+        # decides whether they still hold.
+        for key in ("diagnosis", "output_event"):
+            if self._latest_status.get(key):
+                idle[key] = self._latest_status[key]
         if self._latest_status.get("starting"):
             idle["starting"] = True
         self._push_status(idle)

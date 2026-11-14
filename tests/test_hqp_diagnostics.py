@@ -190,6 +190,23 @@ def test_only_a_claim_without_a_hedge_closes_an_attempt_at_its_first_stop():
     assert not diag.names_cause({**rate, "inputs": {**rate["inputs"], "adaptive": None}})
 
 
+def test_a_file_beside_our_entry_makes_no_other_controller_of_our_own_refused_track():
+    """BACKLOG B-83 (ROON-COEX-4 §12.6, open item 3): HQPlayer's refusal of
+    our own next track at an advance, its playlist holding a file the node
+    never gave beside our entries (one added in HQPlayer's own window), is
+    HQPlayer's refusal — never "another controller is driving HQPlayer".
+    The playlist of another controller, where nothing tells our entry stands
+    at the slot, still is."""
+    for name in ("rate_refused_advance", "rate_refused_filter"):
+        facts = _trace(name)
+        assert facts["playlist"]["at_slot_ours"] and diag.verdict(facts)["code"] == "rate_refused"
+        beside = {**facts, "playlist": {**facts["playlist"], "foreign": 1}}
+        assert diag.verdict(beside)["code"] == "rate_refused", diag.verdict(beside)
+        theirs = {**facts, "playlist": {**facts["playlist"], "foreign": 1, "at_slot": None,
+                                        "at_slot_ours": False, "at_slot_expected": False}}
+        assert diag.verdict(theirs)["code"] == "external", diag.verdict(theirs)
+
+
 def test_hqplayers_line_is_quoted_and_alone_names_nothing():
     line_only = _case("rate_refused_line_only")
     # without the log the rule names nothing: no cause, as before

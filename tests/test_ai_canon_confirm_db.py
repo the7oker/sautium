@@ -84,6 +84,37 @@ def test_the_model_sees_musicbrainz_answers_and_the_artist_takes_musicbrainz_nam
         assert _bound(cur) == [("Jon Anderson", JON, "ai")]
 
 
+def test_the_log_says_what_each_decision_was_and_what_it_weighed(node):
+    """BACKLOG B-86: a row of the More → AI list can say what happened and
+    open its details — the artist MusicBrainz knows it as (MBID,
+    disambiguation), the candidates the model weighed, what it was shown —
+    and a pick the name guard refused says that it was the guard."""
+    conn, fake, ai_canon, monkeypatch = node
+    _model(monkeypatch, ai_canon, JON)
+
+    batches = [ev for ev in ai_canon.ai_canonize_stream(dry_run=True) if ev["event"] == "batch"]
+
+    [item] = batches[-1]["items"]
+    assert (item["from"], item["to"], item["verdict"], item["why"]) == ("Jon", "Jon Anderson", "canonized",
+                                                                        "the folder")
+    assert (item["gid"], item["comment"], item["proposed"], item["guard"]) == (JON, "Yes singer", False, None)
+    assert item["candidates"] == [{"gid": JON, "name": "Jon Anderson", "comment": "Yes singer"}]
+    assert item["evidence"]["albums"] == "The Friends of Mr. Cairo" and set(item["evidence"]) == {
+        "albums", "genres", "folder"}
+
+    # A pick whose name does not correspond to the library's: refused by the guard, and said so
+    fake.artist(JON, "Kitaro", aliases=["Jon"], disambiguation="Japanese composer")
+    import mb_answers
+    from db_pool import db_execute
+    db_execute("DELETE FROM mbws_answers WHERE mbid = %s::uuid", (JON,))
+    assert mb_answers.answer("artist", JON) is None
+    batches = [ev for ev in ai_canon.ai_canonize_stream(dry_run=True) if ev["event"] == "batch"]
+    [refused] = batches[-1]["items"]
+    assert (refused["verdict"], refused["guard"], refused["to"], refused["comment"]) == (
+        "guard-rejected", "name", "Kitaro", "Japanese composer")
+    assert batches[-1]["guard_rejected"] == 1 and batches[-1]["canonized"] == 0
+
+
 def test_a_gid_musicbrainz_did_not_answer_for_is_refused(node):
     conn, fake, ai_canon, monkeypatch = node
     _model(monkeypatch, ai_canon, OTHER_JON)

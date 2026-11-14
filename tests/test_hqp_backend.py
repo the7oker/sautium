@@ -1791,6 +1791,25 @@ def test_a_failure_the_slot_then_played_is_not_offered_when_it_stops(traced, fak
     assert traced._diagnosis(stopped) is None
 
 
+def test_a_verdict_the_status_says_is_said_by_a_tick_of_its_own(traced, fake, monkeypatch):
+    """ROON-COEX §12.7, the toasts' delay: the pass that judges an attempt
+    said its status before the verdict, so the diagnosis — and the event of
+    another app's stop — rode the next pass, a poll's interval later. The
+    verdict wakes the poller: a tick of its own says it."""
+    said = []
+    monkeypatch.setattr(traced, "_emit", said.append)
+    fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
+    monkeypatch.setattr(hb, "_poll_interval", lambda failures: 60.0)
+    time.sleep(1.5)                                 # the poller now waits for a poke
+    assert traced.play() is False
+    if not _wait(lambda: diag.attempts(), 3.0):
+        traced.poke()                               # the pass that judges it
+    a = _closed(timeout=5.0)
+    assert a.verdict["code"] == "rejected"
+    assert _wait(lambda: any((st.extra.get("diagnosis") or {}).get("id") == a.id for st in said), 5.0), (
+        "the verdict waits for the next poll to be said")
+
+
 def test_a_refused_play_is_judged_at_once_in_hqplayers_words(traced, fake):
     fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
     assert traced.play() is False

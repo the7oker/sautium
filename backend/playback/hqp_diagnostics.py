@@ -748,6 +748,15 @@ def other_reason(log: Optional[dict]) -> Optional[str]:
     return None
 
 
+def other_cause(log: Optional[dict]) -> Optional[str]:
+    """Which setting a refusal of another controller's track names
+    (other_reason), as a rate_refused verdict's `cause` names it for the
+    node's own: the "filter" its rate does not fit, or the output "rate" its
+    family has none for — the picker a toast's "HQPlayer settings" opens
+    (BACKLOG B-89). None where the log names neither."""
+    return {"rate_filter": "filter", "no_output_rate": "rate"}.get(((log or {}).get("cause") or {}).get("code"))
+
+
 def record_other_refused(uri: Optional[str], log: dict, reason: str) -> Attempt:
     """A track of another controller's that HQPlayer refused while that
     controller held it — the takeover the node judged on a playlist not its
@@ -1131,7 +1140,11 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
         return _v("rejected", f, quote=refusal["message"] or None, command=refusal["command"])
     if pl.get("read") and f.get("expected_uri") and pl.get("expected_present") is False:
         return _v("rejected", f, not_kept=True)
-    if pl.get("foreign"):
+    # ...or holds entries not ours with nothing telling the attempt's own
+    # stands where it plays. A file beside our entry — one added in HQPlayer's
+    # own window — is no other controller driving it: a refusal of our own
+    # next track there is HQPlayer's, said below
+    if pl.get("foreign") and not pl.get("at_slot_ours"):
         return _v("external", f)
     if owner:
         return _v("interrupted", f)

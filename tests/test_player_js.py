@@ -129,12 +129,18 @@ const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
 const npHandlers = [], toasts = [];
 let calls = 0;
 // notices.toast as it shows them: one with the key of a toast still up
-// takes it over in place (`calls` counts every one asked for)
+// takes it over in place (`calls` counts every one asked for); a lasting
+// toast whose condition ended goes (resolve: the one raised for its tag)
 const toast = t => {
   calls += 1;
   const i = t.key ? toasts.findIndex(x => x.key === t.key) : -1;
   if (i >= 0) toasts[i] = t; else toasts.push(t);
 };
+const resolve = (key, tag) => {
+  const i = toasts.findIndex(x => x.key === key && (tag == null || x.tag === tag));
+  if (i >= 0) { gone.push(toasts[i]); toasts.splice(i, 1); }
+};
+const gone = [];
 const ctx = {
   window: { addEventListener() {}, dispatchEvent() {} },
   document: { readyState: 'loading', visibilityState: 'visible',
@@ -145,14 +151,15 @@ const ctx = {
   },
   crypto: require('node:crypto').webcrypto, CustomEvent: class {},
   console: { warn() {}, log() {}, error() {}, debug() {} }, setTimeout, clearTimeout,
-  notices: { toast }, __tracks: spec.tracks || [],
-  openHqpDiagnosis() {}, navigate() {},
+  notices: { toast, resolve, amend() {} }, __tracks: spec.tracks || [],
+  openHqpDiagnosis() {}, navigate() {}, openHqpSettingsAt() {},
 };
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(playerPath, 'utf8'), ctx);
 vm.runInContext([
   cut('  function escapeHtml(s) {', '\n  /* ---------- Now-playing track highlight'),
   cut('  function escapeProfileHtml(s) {', '\n  function statusBadgeHTML'),
+  cut('  function statusToast(key) {', "\n  // An event's words:"),
   cut('  // Playback 503 = the configured output', '\n  // Backend-async playback failures ride'),
   cut('  // Backend-async playback failures ride', '\n  // A DSP change that went through a build'),
   cut('  // Surface a queue/play failure as a toast', '\n  // Grey out + disable the phantom track rows'),
@@ -167,8 +174,10 @@ vm.runInContext([
     else if (ev.seek != null) await ctx.window.playerSeek(ev.seek);
     else if (ev.jump != null) await ctx.__sheet.jumpTo(ev.jump);
   }
-  process.stdout.write(JSON.stringify({ calls, toasts: toasts.map(t => ({
-    key: t.key, kind: t.kind, title: t.title, text: t.text, action: t.action ? t.action.label : null })) }));
+  const shown = t => ({ key: t.key, kind: t.kind, title: t.title, text: t.text, lasting: !!t.lasting,
+                        action: t.why ? 'Why?' : t.action ? t.action.label : null,
+                        second: t.why && t.action ? t.action.label : null });
+  process.stdout.write(JSON.stringify({ calls, toasts: toasts.map(shown), gone: gone.map(shown) }));
 })().catch(e => { process.stderr.write(String(e && e.stack)); process.exit(1); });
 """
 
@@ -486,7 +495,7 @@ const button = () => {
 };
 const el = () => ({ hidden: false, textContent: '', dataset: {}, setAttribute() {} });
 const npBtn = button(), mpBtn = button();
-const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), timeCurrent: el(), timeTotal: el(),
+const np = { excerptBadge: el(), timeCurrent: el(), timeTotal: el(),
              radioBtn: el(),
              playPauseIcon: { setAttribute() {}, closest: () => npBtn },
              _paintProgress() {}, tryFetchDetail() {}, lastTrackKey: 'Song|Artist' };
@@ -498,8 +507,6 @@ const ctx = { document: { body: { classList: { add() {}, remove() {} } } },
 vm.createContext(ctx);
 vm.runInContext([
   cut('  function transportBusy(data) {', '\n  const sheet = {'),
-  cut('  function fmtDuration(seconds) {', '\n  function fmtDurationLong(seconds) {'),
-  cut('  function outputLine(data, diag) {', "\n  // An event's words:"),
   'this.__np = { ' + cut('    onStatus(data) {', '\n    // One similar path for owned AND preview') + ' };',
   'this.__mp = { ' + cut('    update(data) {', '\n    setCover(detail) {') + ' };',
   'this.__npWire = function () { ' + cut("      this.playPause.addEventListener('click', e => {",
@@ -592,16 +599,16 @@ const drawn = { np: null, mp: null };
 const icon = key => ({ setAttribute(k, v) { if (k === 'd') drawn[key] = v; },
                        closest: () => ({ classList: { toggle() {} } }) });
 const el = () => ({ hidden: false, textContent: '', dataset: {}, setAttribute() {} });
-const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), timeCurrent: el(), timeTotal: el(),
+const painted = [];
+const np = { excerptBadge: el(), timeCurrent: el(), timeTotal: el(),
              radioBtn: el(),
-             playPauseIcon: icon('np'), _paintProgress() {}, tryFetchDetail() {}, lastTrackKey: 'Song|Artist' };
+             playPauseIcon: icon('np'), _paintProgress(pct) { painted.push(pct); }, tryFetchDetail() {},
+             lastTrackKey: 'Song|Artist' };
 const mp = { el: el(), title: el(), artist: el(), playPauseIcon: icon('mp'), lastSongKey: 'Song|Album' };
 const ctx = { document: { body: { classList: { add() {}, remove() {} } } }, window: {} };
 vm.createContext(ctx);
 vm.runInContext([
   cut('  function transportBusy(data) {', '\n  const sheet = {'),
-  cut('  function fmtDuration(seconds) {', '\n  function fmtDurationLong(seconds) {'),
-  cut('  function outputLine(data, diag) {', "\n  // An event's words:"),
   'this.__np = { ' + cut('    onStatus(data) {', '\n    // One similar path for owned AND preview') + ' };',
   'this.__mp = { ' + cut('    update(data) {', '\n    setCover(detail) {') + ' };',
 ].join('\n'), ctx);
@@ -609,8 +616,8 @@ const out = [];
 for (const status of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   ctx.__np.onStatus.call(np, status);
   ctx.__mp.update.call(mp, status);
-  out.push([drawn.np.startsWith('M9 5v20'), drawn.mp.startsWith('M8 5v14'), np.hqpTag.textContent,
-            np.whyBtn.hidden, np.whyBtn.dataset.attempt, np.whyBtn.hidden ? null : np.whyBtn.textContent]);
+  out.push([drawn.np.startsWith('M9 5v20'), drawn.mp.startsWith('M8 5v14'),
+            np.timeCurrent.textContent, np.timeTotal.textContent, painted[painted.length - 1]]);
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -619,13 +626,19 @@ process.stdout.write(JSON.stringify(out));
 def test_the_transport_offers_play_while_another_app_holds_the_output():
     """Another app plays through the output — with the spot its takeover
     left (stopped) or without one (its own state, playing): the toggle sends
-    play, never pause, and both buttons draw Play; the tag says what Play
-    does. The node's own playback keeps Pause."""
+    play, never pause, and both buttons draw Play. Now Playing shows the
+    player alone: paused at the spot, the bar at the spot's second with the
+    track's length — no word of the other app (its toast said it; ROON-COEX
+    §12.7). The node's own playback keeps Pause."""
     base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
             "position_formatted": "0:00", "length_formatted": "5:00",
             "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
     statuses = [{**base, "state": "playing", "source": "external"},
-                {**base, "state": "stopped", "source": "external", "resume": {"index": 2, "position": 83}},
+                {**base, "state": "stopped", "source": "external", "resume": {"index": 2, "position": 83},
+                 "position_formatted": "1:23", "progress_percent": 27.7,
+                 "output_event": {"id": 5, "kind": "took"},
+                 "diagnosis": {"id": 7, "code": "other_refused", "title": "HQPlayer refused the other app's track",
+                               "next": "", "track_id": None, "failing": False}},
                 {**base, "state": "playing"}]
     proc = subprocess.run([NODE, "-e", _TOGGLE, "--", str(REPO_ROOT / "backend" / "static" / "player.js")],
                           input=json.dumps(statuses).encode(), capture_output=True)
@@ -634,90 +647,17 @@ def test_the_transport_offers_play_while_another_app_holds_the_output():
     proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
                           input=json.dumps(statuses).encode(), capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
-    assert json.loads(proc.stdout) == [
-        [True, True, "Play takes it back · another app has HQPlayer Desktop", True, "", None],
-        [True, True, "Play resumes at 1:23 · another app has HQPlayer Desktop", True, "", None],
-        [False, False, "", True, "", None]]
+    assert json.loads(proc.stdout) == [[True, True, "0:00", "5:00", 0], [True, True, "1:23", "5:00", 27.7],
+                                       [False, False, "0:00", "5:00", 0]]
 
 
-def test_another_apps_refused_track_is_a_toasts_word_and_now_playing_keeps_its_why():
-    """ROON-COEX §12.6 (the owner's decision of 2026-11-11, in place of P12
-    (a)'s row): beside the spot the takeover left, HQPlayer stopped on
-    another app's track it refused — its toast says so; Now Playing keeps
-    the state alone, the action first, and the way to that attempt's sheet:
-    its button asks only "Why?" there, never "Why didn't it play?" beside
-    our track, which did not fail. A failed play of the node's own asks
-    that."""
-    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
-            "position_formatted": "0:00", "length_formatted": "5:00",
-            "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
-    other = {"id": 7, "code": "other_refused", "title": "HQPlayer refused the other app's track", "next": "",
-             "track_id": None, "failing": False}
-    own = {"id": 8, "code": "not_played", "title": "HQPlayer could not play it", "next": "", "track_id": "t",
-           "failing": False}
-    statuses = [{**base, "state": "stopped", "resume": {"index": 2, "position": 17}, "diagnosis": other,
-                 "other_refused": "no output rate for 96 kHz in its output family"},
-                {**base, "state": "stopped", "diagnosis": own}]
-    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
-                          input=json.dumps(statuses).encode(), capture_output=True)
-    assert proc.returncode == 0, proc.stderr.decode()
-    rows = json.loads(proc.stdout)
-    assert rows[0][2:4] == ["Play resumes at 0:17", False] and str(rows[0][4]) == "7" and rows[0][5] == "Why?"
-    assert rows[1][2:4] == ["", False] and str(rows[1][4]) == "8"    # a DOM dataset holds the attempt as text
-    assert rows[1][5] == "Why didn't it play?"
-
-
-def test_a_take_back_the_other_app_stopped_says_so_at_its_spot():
-    """ROON-COEX §6.2 P6: Roon's own Stop, 5 s after its Pause, lands on the
-    node's take-back. Now Playing says that Play resumes at the spot and
-    that another app stopped the output, the Why button beside it for the
-    sheet — never the plain "Play resumes at …" of a stop of the node's
-    own; a verdict about another track says nothing of the kind."""
-    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
-            "position_formatted": "0:00", "length_formatted": "5:00",
-            "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
-    stopped = {"id": 9, "code": "other_stopped", "title": "Another app stopped HQPlayer",
-               "next": "Press Play to resume where it was.", "track_id": "t", "failing": False}
-    spot = {"index": 2, "position": 46}
-    statuses = [{**base, "state": "stopped", "resume": spot, "diagnosis": stopped},
-                {**base, "state": "stopped", "resume": spot},
-                {**base, "state": "stopped", "resume": spot, "diagnosis": {**stopped, "track_id": "u"}}]
-    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
-                          input=json.dumps(statuses).encode(), capture_output=True)
-    assert proc.returncode == 0, proc.stderr.decode()
-    rows = json.loads(proc.stdout)
-    assert rows[0][2:4] == ["Play resumes at 0:46 · another app stopped HQPlayer Desktop", False]
-    assert rows[1][2] == rows[2][2] == "Play resumes at 0:46"
-
-
-def test_a_take_back_the_other_app_stopped_at_its_start_says_so_too():
-    """Review round 1's L2: a take-back by a tap, Next or Previous under
-    another controller's hold starts its slot from 0 (L11), as a new queue
-    does; Roon's Stop on it leaves the spot at 0:00. Now Playing says that
-    another app stopped the output there too — a plain stop at 0:00 still
-    says nothing."""
-    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
-            "position_formatted": "0:00", "length_formatted": "5:00",
-            "output": {"type": "hqplayer", "label": "HQPlayer Desktop", "attached": True}}
-    stopped = {"id": 9, "code": "other_stopped", "title": "Another app stopped HQPlayer",
-               "next": "Press Play to resume where it was.", "track_id": "t", "failing": False}
-    spot = {"index": 3, "position": 0}
-    statuses = [{**base, "state": "stopped", "resume": spot, "diagnosis": stopped},
-                {**base, "state": "stopped", "resume": spot}]
-    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
-                          input=json.dumps(statuses).encode(), capture_output=True)
-    assert proc.returncode == 0, proc.stderr.decode()
-    rows = json.loads(proc.stdout)
-    assert rows[0][2] == "Play resumes at 0:00 · another app stopped HQPlayer Desktop"
-    assert rows[1][2] == ""
-
-
-def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():
+def test_a_renderer_attached_again_spins_its_transport():
     """N-20: while the play gate — or a scan that found the renderer
-    elsewhere — attaches the renderer again where it answers now, Now
-    Playing says so beside the track, and both transport buttons spin and
-    take no tap: a press waiting on it is seen as one in flight. The phone
-    stood silent for 9 s, and the person picked it again (2026-11-01)."""
+    elsewhere — attaches the renderer again where it answers now, both
+    transport buttons spin and take no tap: a press waiting on it is seen as
+    one in flight. The phone stood silent for 9 s, and the person picked it
+    again (2026-11-01). That it connects is said by a toast while it lasts
+    (tests/test_output_events_js.py), never beside the track."""
     base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
             "position_formatted": "6:45", "length_formatted": "7:22",
             "output": {"type": "dlna", "label": "Sautium Player", "attached": True}}
@@ -729,13 +669,6 @@ def test_a_renderer_attached_again_says_it_connects_and_its_transport_spins():
     assert proc.returncode == 0, proc.stderr.decode()
     assert json.loads(proc.stdout) == [[True, True, False, False, True], [True, True, False, False, True],
                                        [False, False, True, True, True]]
-    # The spot the lost renderer left is said once it is attached; not before
-    statuses[0]["resume"] = {"index": 1, "position": 405}
-    proc = subprocess.run([NODE, "-e", _ICONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
-                          input=json.dumps(statuses).encode(), capture_output=True)
-    assert proc.returncode == 0, proc.stderr.decode()
-    assert [tag for _np, _mp, tag, *_ in json.loads(proc.stdout)] == [
-        "Connecting to Sautium Player…", "Connecting to Sautium Player…", ""]
 
 
 _SHEET = r"""

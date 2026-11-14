@@ -417,8 +417,18 @@ second activation impossible while the first is in flight — never
   closing the bar first brought the play target back under the second
   tap. Where a confirm replaces the trigger in place (the chat row's
   trash → Delete/Cancel), the harmless button sits where the trigger was.
-- `html, body { touch-action: manipulation }` and `user-select: none` on
-  tap rows: no double-tap zoom, no selected words.
+- `html, body { touch-action: manipulation }`: no double-tap zoom. And a
+  press selects no words (`style.css` § "A tap is a tap", since
+  2026-11-14): everything that takes a tap — the press feedback's own
+  selector list, so a tappable that joins it dips and selects nothing —
+  is `user-select: none` with `-webkit-touch-callout: none` everywhere;
+  on a touch screen (`pointer: coarse`) the whole app is, but what is
+  there to be read or typed (a Why? sheet and every dialog, the
+  assistant's answers, a chat's messages, a bio, HQPlayer's log, every
+  field — add a prose class to that one list). Text a person needs to
+  copy (a code, an error's details for support) carries a copy button —
+  `[data-copy]` / `[data-copy-from]`, the page's one copy handler —
+  never a selection to make by hand.
 
 Server side, a create that a double-tap could duplicate is made
 idempotent instead (an empty chat is reused, a radio start is
@@ -453,19 +463,59 @@ control has a press look of its own: no tint, colour or scale on
 A dialog is for a decision, or for an instruction that must not be
 missed. Everything else goes through `window.notices` in
 `app-shell.js`, which lives next to the dialogs and shares their
-visual language:
+visual language.
 
-- **`notices.toast({ kind, title, text, action?, key? })`** — the
-  passive toast (no `action`) takes **no pointer events**: a tap goes
-  to whatever is beneath it, so it never blocks a control and the
-  second tap of a double-tap cannot land on it. It is narrower than
-  the screen header (272 design-px, centred) so the corner buttons
-  stay uncovered. One at a time on the phone, three on the tablet;
-  the rest queue. A toast never competes with a decision: while a
-  `<dialog>` is open the queue waits and drains on its close. `key`
-  coalesces — a repeat updates the live toast instead of stacking.
-  Only a toast **with** an action (`{ label, run }`) opts back into
-  pointer events and gets a close button and a hover pause.
+**Now Playing shows state only; what happened is a toast** (the owner's
+rule, 2026-11-11, made true everywhere 2026-11-14). Now Playing — the
+sheet and the mini-player — shows the player alone: the track, its
+format badges, the progress, the controls. Nothing that happened is
+written there: no line, banner, tag or explanatory button under the
+badges, whatever the feature (the box that held "Building the filter…",
+"Play resumes at …", "Why didn't it play?" was removed that day, with
+its mechanism). Another app took the output, a play failed, HQPlayer
+builds a filter, a renderer is being attached again: each is a toast in
+the form of the "audio output unavailable" one, raised wherever the
+person is in the UI. `tests/test_output_events_js.py::
+test_now_playing_renders_no_notice` fails when Now Playing's meta row
+gains an element or its status handler reads a key a notice rides on.
+If a design page or a prompt asks for a message on Now Playing, say so
+and stop for the design session.
+
+- **`notices.toast({ kind, title, text, why?, action?, key?, lasting?,
+  passive?, tag? })`** — the passive toast (no button) takes **no
+  pointer events**: a tap goes to whatever is beneath it, so it never
+  blocks a control and the second tap of a double-tap cannot land on
+  it. It is narrower than the screen header (272 design-px, centred) so
+  the corner buttons stay uncovered. One at a time on the phone, three
+  on the tablet; the rest queue. A toast never competes with a
+  decision: while a `<dialog>` is open the queue waits and drains on
+  its close. `key` coalesces — a repeat updates the live toast instead
+  of stacking.
+- **A toast has at most two buttons, in one order everywhere: Why?,
+  then one action** (since 2026-11-14), and a close after them. `why`
+  is a function — the explanation (a sheet, the screen that holds the
+  reason); `action` is `{ label, run }` — the one thing to do about it
+  ("Audio output" for an output that does not answer, "HQPlayer
+  settings" for a filter or a rate HQPlayer refused: it opens the
+  HQPlayer screen with the picker that needs changing,
+  `openHqpSettingsAt`). Never an action labelled "Why?", never a third
+  button: a toast that seems to need one needs a sheet behind its Why?.
+  A press on either button takes the toast with it. Either one opts the
+  toast back into pointer events, with the close and a hover pause.
+- **A condition that lasts is a `lasting` toast** (since 2026-11-14):
+  no timer — it stays until its close or until the party that raised it
+  says the condition ended (`notices.resolve(key, tag)`), so nothing is
+  lost to ten seconds and nothing needs a place on a screen to live in.
+  `tag` names what it was raised for: that party ends its own toast and
+  no newer one under the key. News never waits behind it — with every
+  place taken, a lasting toast on screen steps aside for a new toast
+  and returns when the place frees, unless its condition ended
+  meanwhile. One that ends by itself (a build, a reconnect) is
+  `passive`: no close, no taps. `statusToast(key)` is the pattern for a
+  condition the player status says while it lasts — raised once as the
+  status first says it, its words redrawn in place while they change
+  (`notices.amend`), gone with the status that says it no more, and
+  never raised a second time for the person who closed it.
 - **`notices.strip(key, html | null)`** — a long-lived condition
   (the link is down). Fixed to the top of the viewport so it stays in
   view at any scroll position (a phone waking mid-page must still see
@@ -549,15 +599,20 @@ with `NOTIFY sautium_notices` after changing a source.
 What another app did to the audio output — took it, stopped it, had its
 own track refused by HQPlayer, paused the renderer — is no notice (no row,
 no trail) but an **event on the status** (`output_event`, since 2026-11-11):
-`onOutputEvent` in `app-shell.js` toasts an id the page has not met, once,
-under one key (`player.other_app`), in the output-unavailable toast's form
-with a Why? that opens its sheet. The status a connection opens with carries
-`event_floor`, and an event with an id at or under it is state to paint,
-never news — the connect-time notices snapshot's rule, kept for an event that
-leaves the status and comes back; Now Playing's line (`outputLine`) keeps the state, the action
-first, and wraps rather than clips. The rule for when an event exists and how
-long the status carries it lives in the backends
-(`docs/HQPLAYER_INTEGRATION.md` § "Output events").
+`onOutputEvent` in `app-shell.js` tells an id the page has not met, once,
+under one key (`player.other_app`), as a lasting toast with a Why? that
+opens its sheet — on screen until its close or until the status says the
+event no more (the node's own Play, since 2026-11-14; before it the toast
+left after ten seconds and Now Playing kept a line). The status a connection
+opens with carries `event_floor`, and an event with an id at or under it is
+no news — the connect-time notices snapshot's rule, kept for an event that
+leaves the status and comes back: a page opened later shows the player at
+its spot and no message. The rule for when an event exists and how long the
+status carries it lives in the backends (`docs/HQPLAYER_INTEGRATION.md`
+§ "Output events"). The same block ("The output's words") says a failed
+play's diagnosis and the output's passing conditions — HQPlayer's build, a
+silence, a queue it takes again, a renderer being attached again — as
+lasting toasts while the status says them.
 
 `title` and `text` are HTML — escape anything user-controlled, exactly
 as for the dialogs. Transport commands (next, previous, volume) get no

@@ -293,6 +293,39 @@ def _confirmed_proposals(decisions: list) -> dict:
     return out
 
 
+def _disambiguation(gid: str, cands: list, checked: bool) -> str:
+    """MusicBrainz's disambiguation of the artist a decision resolved to: the
+    offered candidate's, or — a PROPOSE name's — the row behind it (MusicBrainz's
+    own answer on a node without the dump)."""
+    for c in cands:
+        if c["gid"] == gid:
+            return c["comment"] or ""
+    if checked:
+        return (mb_answers.artist(gid) or {}).get("disambiguation") or ""
+    rows = db_query("SELECT COALESCE(comment, '') AS comment FROM mb_artist WHERE gid = %(g)s::uuid", {"g": gid})
+    return rows[0]["comment"] if rows else ""
+
+
+def _log_item(it: dict, d: dict, gid: str, mb_name: str, verdict: str, checked: bool) -> dict:
+    """One decision as the More → AI screen's list shows it and its row's
+    details open it: the library's name and MusicBrainz's, the artist it is
+    (MBID, disambiguation — a link under the same name changes nothing else a
+    person can see), the model's reason, whether it picked an offered
+    candidate or proposed the name, what it was shown (the candidates weighed,
+    the owned albums, genres and folder), and for a pick the name guard
+    refused, that guard (`guard`: "name" — _name_corresponds). Local, like
+    the folder in it: the list is the owner's own screen."""
+    ctx = it["ctx"]
+    return {"from": it["name"], "to": mb_name, "verdict": verdict, "conf": d.get("conf"), "why": d.get("why"),
+            "gid": gid, "comment": _disambiguation(gid, it["cands"], checked),
+            "proposed": bool(_proposed(d.get("pick"))),
+            "guard": "name" if verdict == "guard-rejected" else None,
+            "candidates": [{"gid": c["gid"], "name": c["name"], "comment": c["comment"] or ""}
+                           for c in it["cands"]],
+            "evidence": {"albums": ctx["albums"] or "", "genres": ctx["genres"] or "",
+                         "folder": ctx["path"] or ""}}
+
+
 def _apply(artist_id, mb_name, gid):
     db = SessionLocal()
     try:
@@ -315,7 +348,7 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
     UI can show live counts + the AI's reasoning without polling). `since` scopes
     to new-file artists (post-scan trigger). Events: {event:'start', provider,
     model, total}, then {event:'batch', processed, canonized, skipped,
-    guard_rejected, errors, items:[{from,to,verdict,conf,why}]}, then
+    guard_rejected, errors, items:[_log_item, …]}, then
     {event:'done', ...totals}."""
     provider = _provider()
     if not provider:
@@ -402,8 +435,7 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                     continue
                 if not _name_corresponds(it["name"], mb_name):   # the path-confusion guard
                     st["guard_rejected"] += 1
-                    items.append({"from": it["name"], "to": mb_name, "verdict": "guard-rejected",
-                                  "conf": d.get("conf"), "why": d.get("why")})
+                    items.append(_log_item(it, d, gid, mb_name, "guard-rejected", checked))
                     continue
                 if not dry_run and mb_answers.waiting("owned_artist", it["id"]):
                     # The algorithmic canon queued a decision of the artist
@@ -419,8 +451,7 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                         logger.error("ai_canon apply failed for %r: %s", it["name"], e)
                         continue
                 st["canonized"] += 1
-                items.append({"from": it["name"], "to": mb_name, "verdict": "canonized",
-                              "conf": d.get("conf"), "why": d.get("why")})
+                items.append(_log_item(it, d, gid, mb_name, "canonized", checked))
         st["processed"] += len(batch)
         yield {"event": "batch", **st, "items": items}
 

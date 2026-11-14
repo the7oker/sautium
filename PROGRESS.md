@@ -2512,6 +2512,30 @@ for a Last.fm cooldown (30 min doubling to 24 h) that reads as "Idle".
   `streaming.silent`), and the slice loop on dump-less Docker nodes
   (2026-09-24, `desktop/p2p/mb_slice_cycle.py`).
 
+### Now Playing shows state only; a condition that lasts is a lasting toast (2026-11-14)
+
+A box under the format badges on Now Playing had become the place a new
+feature put its word: HQPlayer's build, a queue taken again, a renderer
+being attached, the second Play resumes at, what another app did to the
+output, a "Why didn't it play?" button. Each landed there for a good local
+reason — it is beside the track it is about — and together they made a
+pattern the next feature copied; the owner saw the messages only when that
+sheet happened to be open, cut at a phone's edge. His rule (2026-11-11,
+restated 2026-11-14): Now Playing shows the player alone — the track, its
+badges, the bar, the controls — and what happened is a toast, wherever the
+person is. The box went with its mechanism, and a test fails when Now
+Playing's meta row gains an element or its status handler reads a key a
+notice rides on.
+
+What made the box attractive was that a line there *lasts*, where a toast
+left after ten seconds. So the toast learned to last: `lasting` has no timer
+and stays until its close or until the party that raised it says the
+condition ended (`notices.resolve`); a phone shows one toast, so a lasting
+one steps aside for news and returns. A toast that needs more than a
+sentence has Why?; one that has a thing to do about it has one action after
+it — two buttons at most, in that order. Lesson: when a rule keeps being
+broken for a good reason, the reason names the missing primitive.
+
 ### A double-tap is one tap (2026-09-13)
 
 The same audit listed twenty-odd handlers a double-tap could double:
@@ -3769,7 +3793,7 @@ third, which read as the queue gaining a track. The queue itself never
 changed (no output path adds a slot); reproduced on a fake renderer in
 `tests/test_dlna_backend.py`. Now losing a renderer freezes its spot — the
 slot, and the second by the clock when it played — and its status says
-"stopped" with `resume` (Now Playing's "Play resumes at …", worded "Stopped at … — Play resumes here" until 2026-11-11);
+"stopped" with `resume` (Now Playing's bar at that second; a line "Play resumes at …" beside the track until 2026-11-14, worded "Stopped at … — Play resumes here" until 2026-11-11);
 nothing it still says moves it. The play gate reads that spot
 (`PlaybackManager.spot`) before it detaches the lost instance and hands it to
 the attach (`activate(spot=)`, `resume_at(slot, position)`): an Opus stream
@@ -3815,7 +3839,7 @@ holds it paused with nothing loaded and starts there at Play (Opus by
 `?ss=`, any other by a Seek once it plays); the browser primes the tab
 that claims the output there; the built-in engine is seeded in its own
 command order and opens nothing until Play; HQPlayer, found stopped at the
-attach, keeps it as its resume spot ("Play resumes at …") —
+attach, keeps it as its resume spot (the bar at its second) —
 one found playing keeps its own place, as the attach always had it. When the
 old output played, the route then presses Play as the person would, through
 the play gate and once its locks are let go — never inside `activate`,
@@ -3931,8 +3955,9 @@ press — and a lost instance's UNSUBSCRIBE is not waited for. An attach
 that fails keeps the spot it was to resume at, said with the output
 disconnected, for the next Play. While the output attaches again every status says so (`connecting`,
 the renderer's name) and never "disconnected", which hid the mini player:
-Now Playing says "Connecting to ‹renderer›…" beside the track, and both
-transport buttons spin as for a start in flight. Lesson: never wait on one
+a toast says "Connecting to ‹renderer›…" while it lasts (beside the track on
+Now Playing until 2026-11-14), and both transport buttons spin as for a start
+in flight. Lesson: never wait on one
 address while another can answer, and say what is being waited for.
 
 ### A renderer that seeks an Opus stream itself is asked to (2026-11-02)

@@ -1347,7 +1347,8 @@ class HqpBackend(PlayerBackend):
         self._serial_before_return: Optional[int] = None
         # Another controller's track HQPlayer refused at F7's verdict, as its
         # log named it (ROON-COEX §6.1 P7): (its attempt's id, the node's
-        # sentence, the spot's generation it was read under) — said beside
+        # sentence, the spot's generation it was read under, the playlist it
+        # was read on, the setting it names: diag.other_cause) — said beside
         # the takeover's spot while that spot stands (_status)
         self._other_refused: Optional[tuple] = None
         self._verdict_playlist: list = []
@@ -3493,7 +3494,7 @@ class HqpBackend(PlayerBackend):
                                                        reading=None, unnamed=None if over else list(playlist))
                 if kept and found:
                     att = diag.record_other_refused(*found)
-                    self._other_refused = (att.id, found[2], gen, playlist)
+                    self._other_refused = (att.id, found[2], gen, playlist, diag.other_cause(found[1]))
         if kept and found:
             logger.info("HQPlayer refused the other app's track: %s", found[2])
             self.poke()
@@ -3580,9 +3581,11 @@ class HqpBackend(PlayerBackend):
         takes HQPlayer — a tick that reads its entry, playing or paused: that
         controller's word is the newer one. The wait ends, and its track and
         second are the spot, as a Stop leaves them (stop): Play takes
-        HQPlayer back there. One asked while another controller already held
-        HQPlayer is the newer word itself, and goes once its bytes land.
-        Called on the poller."""
+        HQPlayer back there — a takeover's spot as a cut listen's is
+        (`_takeover`: what the queue takes meanwhile stays out of the playlist
+        HQPlayer rests on, the other controller's: _rests_on_another). One
+        asked while another controller already held HQPlayer is the newer
+        word itself, and goes once its bytes land. Called on the poller."""
         if not playing[2]:
             return
         with self._spot_lock:
@@ -3593,7 +3596,7 @@ class HqpBackend(PlayerBackend):
             slot = self._queue.index_of(park.item)
             if slot is not None:
                 self._spot, self._spot_gen = (park.item, park.second), self._spot_gen + 1
-                self._took_event = new_id()
+                self._takeover, self._took_event = True, new_id()
         logger.info("another controller took HQPlayer while slot %s waited for its stream — "
                     "Play starts it there", slot)
 
@@ -3841,17 +3844,20 @@ class HqpBackend(PlayerBackend):
                 "modulator": status.active_shaper, "rate": hqp_atlas.rate_name(status.active_rate)}
         diagnosis = self._diagnosis(status)
         other = self._other_refused
+        refused = None
         if (other is not None and other[2] == self._spot_gen and status.state == PlaybackState.STOPPED
                 and self._spot_at() is not None):
             # The other app's refused track (§6.1 P7), beside the spot its
-            # takeover left: the node's sentence, and its attempt for the sheet
-            extra["other_refused"] = other[1]
+            # takeover left: its attempt for the sheet, and the node's
+            # sentence for the cause with the setting it names — the event's
+            # `reason` and `cause`
+            refused = (other[1], other[4])
             extra["diagnosis"] = {"id": other[0], "code": "other_refused",
                                   "title": "HQPlayer refused the other app's track", "next": "",
                                   "track_id": None, "failing": False}
         elif diagnosis is not None:
             extra["diagnosis"] = diagnosis
-        event = self._output_event(extra.get("diagnosis"), extra.get("other_refused"))
+        event = self._output_event(extra.get("diagnosis"), refused)
         if event is not None:
             extra["output_event"] = event
         watch = self._link.build
@@ -3876,8 +3882,8 @@ class HqpBackend(PlayerBackend):
             # A start waiting for its stream (_park): the slot it waits on,
             # loading, at its second — what HQPlayer plays meanwhile is none of
             # this status's words
-            for key in ("artist", "album", "song", "source", "resume", "diagnosis", "other_refused",
-                        "output_event", "starting"):
+            for key in ("artist", "album", "song", "source", "resume", "diagnosis", "output_event",
+                        "starting"):
                 extra.pop(key, None)
             return PlaybackStatus(state="loading", position=float(parked.second),
                                   length=parked.item.duration_seconds or 0.0, queue_index=slot,
@@ -3901,25 +3907,27 @@ class HqpBackend(PlayerBackend):
             length=status.length if length is None else length,
             queue_index=idx, volume=status.volume, extra=extra, item=item, out_after=out_after)
 
-    def _output_event(self, diagnosis: Optional[dict], refused: Optional[str]) -> Optional[dict]:
+    def _output_event(self, diagnosis: Optional[dict], refused: Optional[tuple]) -> Optional[dict]:
         """What another controller did to the output, as the status says it
         while the state it led to stands — one event, the newest in kind:
         every page tells an event once, by its id, and none minted before
         its connection (the stream's `event_floor`; ROON-COEX §12.6), so one
         that leaves the status — under a newer one, a start that waits for
         its stream, an outage — and comes back is no news to anyone.
-        HQPlayer refused the other app's track (`refused`, the node's
-        sentence, while its refusal is said: the attempt
+        HQPlayer refused the other app's track (`refused`: the node's
+        sentence and the setting it names — the picker the toast's "HQPlayer
+        settings" opens — while its refusal is said: the attempt
         record_other_refused kept, made at that verdict); the other app
-        stopped a take-back (the `other_stopped` diagnosis, while Now Playing
-        offers it: its event's id minted at the verdict, _finalize — the
+        stopped a take-back (the `other_stopped` diagnosis, while the status
+        says it: its event's id minted at the verdict, _finalize — the
         attempt's own is as old as the press); it took HQPlayer and left a
         spot (_took_event, while a spot stands). Another controller playing
         through an HQPlayer it took idle left no spot and is no event:
         nothing of the person's was taken."""
         code = (diagnosis or {}).get("code")
         if refused and code == "other_refused":
-            return {"id": diagnosis["id"], "kind": "refused", "attempt": diagnosis["id"], "reason": refused}
+            return {"id": diagnosis["id"], "kind": "refused", "attempt": diagnosis["id"],
+                    "reason": refused[0], "cause": refused[1]}
         stopped = self._stopped_event
         if code == "other_stopped" and stopped is not None and stopped[0] == diagnosis["id"]:
             return {"id": stopped[1], "kind": "stopped", "attempt": diagnosis["id"]}
@@ -3929,7 +3937,8 @@ class HqpBackend(PlayerBackend):
         return None
 
     def _diagnosis(self, status) -> Optional[dict]:
-        """The failed attempt Now Playing offers to explain: this backend's
+        """The failed attempt the status offers to explain (its toast's Why?
+        opens it): this backend's
         latest, while no newer one runs, the queue is the one it was made
         for, HQPlayer is not playing something meanwhile, and it has not
         played that slot since (diag.note_playing). An attempt that never
@@ -3942,9 +3951,11 @@ class HqpBackend(PlayerBackend):
         if (v.get("code") in (None, "played", "interrupted", "unreachable")
                 or f.get("generation") != self._queue.generation):
             return None
+        # `cause`: the setting a refused rate combination names (the filter,
+        # the modulator, HQPlayer's line alone) — the picker its toast opens
         return {"id": last.id, "code": v["code"], "title": v["title"], "next": v["next"],
                 "track_id": (f.get("item") or {}).get("track_id"),
-                "failing": diag.failing_run() is not None}
+                "failing": diag.failing_run() is not None, "cause": v.get("cause")}
 
     # -- the playback trace (playback.hqp_diagnostics) ------------------------------
 
@@ -4524,6 +4535,12 @@ class HqpBackend(PlayerBackend):
             self._stopped_event = (att.id, new_id())
         if v["code"] in ("not_played", "rate_refused", "other_stopped"):
             self._rests_on_its_start(att)
+        if v["code"] not in ("played", "interrupted", "unreachable"):
+            # A verdict the status says (_diagnosis, the other app's stop as
+            # its event): said now, by a tick of its own — the pass that
+            # judged it had said its status before, and the next waits out
+            # the poll's interval (a toast a second late, ROON-COEX §12.7)
+            self.poke()
         if v["code"] in ("not_played", "unknown", "rate_refused", "other_stopped") or (
                 v["code"] == "rejected" and not v.get("quote")):
             # HQPlayer's log names what the protocol did not — read once, now;
@@ -4564,7 +4581,6 @@ class HqpBackend(PlayerBackend):
             self._rest_gen, self._rest_left = self._spot_gen, time.time()
         logger.info("HQPlayer stopped on the start of slot %d by itself — Play starts it again",
                     self._queue.index_of(item))
-        self.poke()
 
     def _attach_log(self, att: diag.Attempt, uri: Optional[str]) -> None:
         source = diag.log_source(self._link.host, self._info)
