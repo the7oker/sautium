@@ -12250,10 +12250,16 @@
   // once (its notice leaves with the channel's next snapshot), one that is
   // still aside says its own words again, under its notice's key.
   // One check per provider at a time — the provider asks its service, which
-  // can take a while: a second tap joins the one in flight, and every toast
-  // of a check shares the notice's key, so each replaces the one before.
+  // can take most of a minute: a second tap joins the one in flight, and
+  // every toast of a check shares the notice's key, so each replaces the one
+  // before. "Checking…" is said at every tap (a tap on the row closes the
+  // toast under that key first, notices.act) and stays for the flight: the
+  // answer replaces it.
   const _providerChecks = new Map();
+  const PROVIDER_CHECK_TOAST_MS = 60000;
   function checkProviderAgain(id) {
+    notices.toast({ kind: 'info', title: 'Checking the provider…', text: '',
+                    key: `streaming.aside.${id}`, ttl: PROVIDER_CHECK_TOAST_MS });
     if (!_providerChecks.has(id)) {
       _providerChecks.set(id, _checkProvider(id).finally(() => _providerChecks.delete(id)));
     }
@@ -12261,7 +12267,6 @@
   }
   async function _checkProvider(id) {
     const key = `streaming.aside.${id}`;
-    notices.toast({ kind: 'info', title: 'Checking the provider…', text: '', key });
     let res;
     try {
       const r = await fetch(`/api/settings/streaming/providers/${encodeURIComponent(id)}/check`,

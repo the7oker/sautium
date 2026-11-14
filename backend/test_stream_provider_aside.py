@@ -101,17 +101,27 @@ def test_a_providers_word_of_a_change_reaches_the_hosts_listeners(registry):
     assert woke == [prov]
 
 
-def test_the_service_listens_from_its_import(registry):
+def test_the_service_listens_from_its_import():
     """Before any provider is built: a read a provider starts in its factory
-    can land at any moment after."""
-    import importlib
-    fresh = []
-    base._aside_listeners[:] = fresh
-    importlib.reload(service)
-    try:
-        assert base._aside_listeners == [service._aside_changed]
-    finally:
-        base._aside_listeners[:] = []
+    can land at any moment after. Asked of a fresh interpreter — this
+    process's list is the fixtures' to patch."""
+    import subprocess
+    import sys
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from streaming import base, service; "
+         "print(base._aside_listeners == [service._aside_changed])"],
+        capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "True"
+
+
+def test_listeners_are_added_never_replaced(registry, monkeypatch):
+    reg, woke = registry
+    also = []
+    base.on_aside_change(also.append)
+    prov = reg.get("lossless-x")
+    prov.aside_changed()
+    assert woke == [prov] and also == [prov]
 
 
 def test_a_wake_that_fails_is_logged_and_the_other_listeners_still_hear(registry, monkeypatch, caplog):

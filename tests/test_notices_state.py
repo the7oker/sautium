@@ -412,21 +412,28 @@ async function fetch(url, init) {
   await copy.action.run();
   answer = 'thrown';
   await copy.action.run();
-  // three taps while one check is in flight: one request, and another provider's is its own
+  const sequence = toasts.splice(0);
+  // three taps while one check is in flight: one request, "Checking…" said at each tap;
+  // another provider's check is its own
   const before = asked.length;
   answer = 'held';
   const taps = [copy.action.run(), copy.action.run(), copy.action.run()];
   await Promise.resolve();
   const inFlight = asked.length - before;
+  const releaseFirst = release;
+  const other = checkProviderAgain('other');
+  await Promise.resolve();
+  const withOther = asked.slice(before).map(a => a[0]);
+  const releaseOther = release;
   answer = { provider: 'cat/x', name: 'Lossless-X', aside: null };
-  release();
-  await Promise.all(taps);
+  releaseFirst(); releaseOther();
+  await Promise.all([...taps, other]);
+  const flight = toasts.splice(0).map(t => [t.title, t.key]);
   await copy.action.run();                      // the flight is over: a tap asks again
   process.stdout.write(JSON.stringify({ title: copy.title, text: copy.text, label: copy.action.label,
     same: viaNotice.title === copy.title && viaNotice.text === copy.text && viaNotice.action.label === 'Check again',
     bare: asideNoticeCopy({ key: 'streaming.aside.q', data: { provider: 'q', title: 'T', text: 'x' } }).text,
-    asked: asked.slice(0, before), inFlight, after: asked.length - before, toasts: toasts.slice(0, 8),
-    keys: [...new Set(toasts.map(t => t.key))] }));
+    asked: asked.slice(0, before), inFlight, withOther, flight, after: asked.length - before, sequence }));
 })();
 """
 
@@ -437,22 +444,28 @@ def test_the_aside_notice_draws_the_modules_words_and_check_again_answers_the_ta
     brackets; Check again posts to the provider's check and the tap hears
     the answer: still aside (the module's words), back, or that the check
     itself failed — every toast of a check under the notice's key, each
-    replacing the one before. Taps while a check is in flight join it.
+    replacing the one before. Taps while a check is in flight join it, each
+    saying "Checking…" again; another provider's check is its own.
     app-shell.js's own functions."""
     src = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
     fns = [re.search(rf"\n  (?:async )?function {name}\(.*?\) \{{\n.*?\n  \}}\n", src, re.S).group(0)
            for name in ("escapeHtml", "asideNoticeCopy", "checkProviderAgain", "_checkProvider", "noticeCopy")]
     out = subprocess.run([shutil.which("node"), "-e",
                           "'use strict';const NOTICE_COPY = {};const _providerChecks = new Map();"
-                          + "".join(fns) + _ASIDE_COPY],
+                          "const PROVIDER_CHECK_TOAST_MS = 60000;" + "".join(fns) + _ASIDE_COPY],
                          capture_output=True, text=True, check=True).stdout
     url, key = "/api/settings/streaming/providers/cat%2Fx/check", "streaming.aside.cat/x"
-    checking = {"kind": "info", "title": "Checking the provider…", "text": "", "action": None, "key": key}
+    checking = {"kind": "info", "title": "Checking the provider…", "text": "", "action": None, "key": key,
+                "ttl": 60000}
     assert json.loads(out) == {
         "title": "Lossless-X: no &lt;tier&gt;", "text": "Tracks &amp; more. (answer &quot;0&quot;)",
         "label": "Check again", "same": True, "bare": "x",
-        "asked": [[url, "POST"]] * 4, "inFlight": 1, "after": 2, "keys": [key],
-        "toasts": [
+        "asked": [[url, "POST"]] * 4, "inFlight": 1, "after": 3,
+        "withOther": [url, "/api/settings/streaming/providers/other/check"],
+        "flight": [["Checking the provider…", key]] * 3 + [
+            ["Checking the provider…", "streaming.aside.other"],
+            ["Lossless-X is back", key], ["Lossless-X is back", "streaming.aside.other"]],
+        "sequence": [
             checking,
             {"kind": "warning", "title": "Lossless-X: no &lt;tier&gt;", "text": "Still.",
              "action": "Check again", "key": key},
