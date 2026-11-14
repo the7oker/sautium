@@ -180,13 +180,13 @@ def test_an_instruments_record_travels_sealed_and_lands_as_its_authors(conn, scr
     assert again["authors"].keys() <= {pub(AUTHOR)}
 
 
-@pytest.mark.parametrize("category", ["tracks", "track-mbids", "track_mbids", "segments",
+@pytest.mark.parametrize("category", ["track-mbids", "track_mbids", "segments",
                                       "audio-features", "audio_features", "instruments"])
 def test_the_docker_router_answers_every_pull_category_as_the_shared_handler(
         conn, scratch_dsn, monkeypatch, category):
     """The Docker node's /pull/{category} serves the launcher's handlers
-    (sync_queries.PULL_HANDLERS) — the track rows and the recording bindings
-    too, which the router's own copies served before."""
+    (sync_queries.PULL_HANDLERS) — the recording bindings too, which the
+    router's own copies served before."""
     import asyncio
     import contextlib
     import json
@@ -205,7 +205,7 @@ def test_the_docker_router_answers_every_pull_category_as_the_shared_handler(
     answer = asyncio.run(router.pull(category, router.PullRequest(uuids=[track]),
                                      Request({"type": "http", "headers": []})))
     handler = sync_queries.PULL_HANDLERS[category]
-    direct = handler(conn, [track]) if category == "tracks" else handler(conn, [track], own=None)
+    direct = handler(conn, [track], own=None)
     served = json.loads(answer.body)
     assert served == json.loads(json.dumps(direct))
     assert [it["track_uuid"] for it in served["items"]] == [track]
@@ -413,6 +413,29 @@ def test_the_planner_asks_only_for_what_the_importer_would_take(conn, scratch_ds
 
 
 # -- the holdings filters, the gap sets ----------------------------------------------
+
+def test_the_inventory_names_only_what_a_pull_serves(conn):
+    """A probe learns from an inventory only what a pull would hand it: a
+    track that exists here as a row and no more — a phantom the history or a
+    click minted, an owned file not analysed yet — is not named, nor a grid
+    with no sealed segment; the track rows themselves are no pull category."""
+    with conn.cursor() as cur:
+        bare, sealed, unsealed_grid, only_tagged = (_track(cur) for _ in range(4))
+        seal_track(cur, AUTHOR, sealed, MODEL, recording=str(uuid.uuid4()), instruments=SCORES)
+        seal_track(cur, AUTHOR, only_tagged, MODEL, recording=str(uuid.uuid4()), instruments=SCORES)
+        for table in ("embeddings", "audio_features"):       # its instruments alone stay
+            cur.execute(f"DELETE FROM {table} WHERE track_id = %s", (only_tagged,))
+        seal_track(cur, AUTHOR, unsealed_grid, MODEL, recording=str(uuid.uuid4()))
+        cur.execute("""UPDATE embedding_segments SET signature = NULL, batch_root = NULL
+                        WHERE embedding_id IN (SELECT id FROM embeddings WHERE track_id = %s)""",
+                    (unsealed_grid,))
+        cur.execute("DELETE FROM audio_features WHERE track_id = %s", (unsealed_grid,))
+    inventory = sync_queries.get_inventory(conn, [bare, sealed, unsealed_grid, only_tagged])
+    assert inventory["tracks"] == sorted([sealed, only_tagged])
+    assert [row[0] for row in inventory["embeddings"]] == [sealed]
+    assert {row[0] for row in inventory["instruments"]} == {sealed, only_tagged}
+    assert "tracks" not in sync_queries.PULL_HANDLERS
+
 
 def test_the_holdings_name_the_tracks_with_instruments_in_a_filter_of_their_own(conn, monkeypatch):
     from desktop.p2p.bloom import BloomFilter

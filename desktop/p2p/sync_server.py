@@ -846,10 +846,9 @@ class SyncServer:
                 request, {"error": f"uuids must be a list of at most {limit} items"},
                 status=400,
             )
-        if category != "tracks":
-            # A sealed category: its `authors` map carries this node's own
-            # certificate for the records it authored.
-            handler = partial(handler, own=self._own_slice_cert())
+        # Its `authors` map carries this node's own certificate for the
+        # records it authored.
+        handler = partial(handler, own=self._own_slice_cert())
 
         try:
             return await self._answer(request, handler, uuids)

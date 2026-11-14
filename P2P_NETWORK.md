@@ -572,10 +572,18 @@ left behind — counts as a gap that sealed segments replace.
 ### Exchange
 ```
 GET  /api/sync/holdings          Bloom filters: the tracks a peer holds segments or sealed features for, and sealed instruments for
-POST /api/sync/inventory         track uuids → what the peer holds for them
-POST /api/sync/pull/{category}   segments | audio-features | instruments | tracks | track-mbids
+POST /api/sync/inventory         track uuids → the sealed analysis the peer serves for them
+POST /api/sync/pull/{category}   segments | audio-features | instruments | track-mbids
 POST /api/sync/offer, /push/{…}  carry: segments, audio_features, instruments, track_mbids
 ```
+
+The serve side answers only what an asker uses (2026-11-14): an inventory
+names a track only for the sealed analysis a pull would hand over — a row
+here without it (a phantom the history or a click minted, an owned file not
+analysed yet) is not named, nor a grid without a sealed segment — and the
+track-metadata pull (`/pull/tracks`), which no asker ever called, is gone.
+`/offer` still answers by existence: its taste filter is the carrier's own
+catalogue, so closing it is a carry-design change.
 
 ---
 

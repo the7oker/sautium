@@ -160,15 +160,20 @@ HOLDS_INSTRUMENTS = f"""EXISTS (SELECT 1 FROM track_instruments a
 
 def get_inventory(conn, track_uuids: list[str]) -> dict:
     """
-    Check what analysis this node can serve for the given track UUIDs.
+    What analysis this node serves for the given track UUIDs, and nothing
+    else: the asker uses an inventory to plan its pulls, so it learns only
+    what a pull would hand it — never which of its tracks exist here as rows
+    without analysis (a probe could otherwise map this node's catalogue, the
+    phantom tracks its history and its browsing minted among them).
 
-    Returns category -> list. `tracks` is plain uuids; the versioned
-    categories return [uuid, analysis_version, segment_count] triples
-    (embeddings) and [uuid, analysis_version] pairs (audio_features,
-    instruments), so peers can re-pull rows produced by an older analysis
-    methodology — existence alone never delivers upgrades. segment_count
-    lets a peer see how dense this node's grid is (densification / "deepen
-    analysis" planning).
+    Returns category -> list, every list drawn from sealed records: the
+    versioned categories as [uuid, analysis_version, sealed segment count]
+    triples (embeddings, only those with a sealed segment) and [uuid,
+    analysis_version] pairs (audio_features, instruments), so peers can
+    re-pull rows produced by an older analysis methodology — existence alone
+    never delivers upgrades; `tracks` is the asked uuids any of them names.
+    The segment count lets a peer see how dense this node's grid is
+    (densification / "deepen analysis" planning).
 
     Lyrics are deliberately NOT part of the protocol (2026-07-11): the one
     category that is verbatim copyrighted text — every node fetches its own
@@ -181,15 +186,12 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
         return dict(EMPTY_INVENTORY)
     q = lambda sql: db_query(conn, sql, [track_uuids])
 
-    tracks = _uuid_list(
-        q("SELECT id FROM tracks WHERE id = ANY(%s::uuid[])"), "id"
-    )
     embeddings = [
         [r["track_id"], r["v"], r["segs"]] for r in
         q("""SELECT e.track_id::text AS track_id,
                     MAX(e.analysis_version) AS v, COUNT(es.id) AS segs
              FROM embeddings e
-             LEFT JOIN embedding_segments es ON es.embedding_id = e.id
+             JOIN embedding_segments es ON es.embedding_id = e.id
                    AND es.signature IS NOT NULL AND es.batch_root IS NOT NULL
              WHERE e.track_id = ANY(%s::uuid[])
              GROUP BY e.track_id""")
@@ -203,7 +205,8 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
                   FROM {table} WHERE track_id = ANY(%s::uuid[])
                     AND {_SIGNED}""")
         ]
-    return {"tracks": tracks, "embeddings": embeddings, **records}
+    served = {row[0] for rows in (embeddings, *records.values()) for row in rows}
+    return {"tracks": sorted(served), "embeddings": embeddings, **records}
 
 
 # ---------------------------------------------------------------------------
@@ -390,47 +393,6 @@ def _pull_simple(conn, category: str, sql: str, uuids: list[str],
 _SEALED_ONLY = " AND {t}.signature IS NOT NULL AND {t}.batch_root IS NOT NULL"
 
 
-def pull_tracks(conn, uuids: list[str]) -> dict:
-    """Pull track metadata with associated artists."""
-    if not uuids:
-        return {"category": "tracks", "items": []}
-
-    tracks = db_query(
-        conn,
-        "SELECT id::text AS track_uuid, title FROM tracks WHERE id = ANY(%s::uuid[])",
-        [uuids],
-    )
-    artists = db_query(
-        conn,
-        """SELECT ta.track_id::text, ta.role,
-                  a.id::text AS artist_uuid, a.name AS artist_name
-           FROM track_artists ta
-           INNER JOIN artists a ON a.id = ta.artist_id
-           WHERE ta.track_id = ANY(%s::uuid[])
-           ORDER BY ta.track_id, ta.role""",
-        [uuids],
-    )
-    artists_by_track: dict[str, list] = {}
-    for a in artists:
-        tid = str(a["track_id"])
-        artists_by_track.setdefault(tid, []).append({
-            "artist_uuid": a["artist_uuid"],
-            "name": a["artist_name"],
-            "role": a["role"],
-        })
-
-    items = []
-    for t in tracks:
-        uuid = t["track_uuid"]
-        items.append({
-            "track_uuid": uuid,
-            "title": t["title"],
-            "artists": artists_by_track.get(uuid, []),
-        })
-
-    return {"category": "tracks", "items": items}
-
-
 def _provenance_item(r: dict):
     """Nested provenance payload from p_-prefixed LEFT JOIN columns; None for
     rows not linked to an analysis_sources row (unlinked legacy rows).
@@ -613,7 +575,6 @@ def pull_track_mbids(conn, track_uuids: list[str], own=None) -> dict:
 
 # Map category name -> pull function
 PULL_HANDLERS = {
-    "tracks": pull_tracks,
     "segments": pull_segments,
     "audio-features": pull_audio_features,
     "audio_features": pull_audio_features,

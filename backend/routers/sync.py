@@ -23,7 +23,6 @@ serves too — one copy of what the two surfaces answer.
 
 import logging
 import os
-from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -592,11 +591,10 @@ async def get_holdings(request: Request, have: Optional[str] = None) -> Response
 @router.post("/pull/{category}")
 async def pull(category: str, req: PullRequest, request: Request) -> Response:
     """A pull category's records — desktop/p2p/sync_queries.PULL_HANDLERS,
-    as the launcher's sync server serves them: track metadata, and the
-    sealed analysis (segment bundles, features, instruments, recording
-    bindings) with the `batches` map of their Worker timestamps and the
-    `authors` map of their authors' certificates, this node's own for the
-    records it authored."""
+    as the launcher's sync server serves them: the sealed analysis (segment
+    bundles, features, instruments, recording bindings) with the `batches`
+    map of their Worker timestamps and the `authors` map of their authors'
+    certificates, this node's own for the records it authored."""
     _require_sharing()
     if carry_queries is None:
         raise HTTPException(status_code=404, detail="sync unavailable")
@@ -609,11 +607,10 @@ async def pull(category: str, req: PullRequest, request: Request) -> Response:
             detail=f"segments pull is capped at {carry_queries.SEGMENTS_MAX_UUIDS} tracks per request")
 
     def _run():
-        # A sealed category: its `authors` map carries this node's own
-        # certificate for the records it authored.
-        serve = handler if category == "tracks" else partial(handler, own=_own_slice_cert())
+        # Its `authors` map carries this node's own certificate for the
+        # records it authored.
         with get_conn() as conn:
-            return serve(conn, req.uuids)
+            return handler(conn, req.uuids, own=_own_slice_cert())
 
     try:
         return await _answer(request, _run)
