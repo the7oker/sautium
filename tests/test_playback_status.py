@@ -252,6 +252,13 @@ def test_a_queue_edit_while_stopped_keeps_the_outputs_words_on_the_status(monkey
     monkeypatch.setattr(mgr, "_latest_status", {"state": "stopped"})
     mgr._emit_idle_status()
     assert not set(said) & set(mgr.latest_status)
+    # With no output attached nothing follows to correct them: a removal there moves the slot a spot
+    # names, and the next Play would start another track at that second. Only the explanation stays.
+    mgr._active = None
+    monkeypatch.setattr(PlaybackManager, "output_info", property(lambda self: {"type": None, "label": None}))
+    monkeypatch.setattr(mgr, "_latest_status", {"state": "disconnected", **said})
+    mgr._emit_idle_status()
+    assert {k for k in said if k in mgr.latest_status} == {"diagnosis"}
 
 
 def test_no_playback_class_defines_a_method_twice():

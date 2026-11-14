@@ -131,6 +131,25 @@ def test_a_proposed_names_row_carries_musicbrainz_own_disambiguation(node):
     assert ANDERSON not in {c["gid"] for c in item["candidates"]}
 
 
+def test_a_row_that_cannot_be_read_is_that_artists_error_and_nothing_is_written(node):
+    """The row of a decision is read before the decision is applied (its
+    disambiguation: a read of MusicBrainz's rows): a read that fails counts
+    as that artist's error — nothing was renamed or bound that the list
+    could not show, and the run goes on."""
+    conn, fake, ai_canon, monkeypatch = node
+    _model(monkeypatch, ai_canon, JON)
+
+    def unread(gid, cands, checked):
+        raise RuntimeError("the row could not be read")
+    monkeypatch.setattr(ai_canon, "_disambiguation", unread)
+
+    stats = ai_canon.ai_canonize()
+
+    assert (stats["canonized"], stats["errors"]) == (0, 1)
+    with conn.cursor() as cur:
+        assert _bound(cur) == []
+
+
 def test_a_gid_musicbrainz_did_not_answer_for_is_refused(node):
     conn, fake, ai_canon, monkeypatch = node
     _model(monkeypatch, ai_canon, OTHER_JON)

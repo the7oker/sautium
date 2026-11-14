@@ -70,7 +70,8 @@ def test_on_a_touch_screen_only_prose_and_fields_select():
     # every link a control) names the same prose
     links = re.search(r":where\(([^)]*)\) a\[href\]\s*\{([^}]*)\}", css, re.S)
     assert {s.strip() for s in links.group(1).split(",")} == selects - {"input", "textarea", "[contenteditable]"}
-    assert "user-select: text;" in links.group(2) and "-webkit-user-select: text;" in links.group(2)
+    assert {k.strip(): v.strip() for k, v in (d.split(":", 1) for d in links.group(2).split(";") if ":" in d)} == {
+        "user-select": "text", "-webkit-user-select": "text"}
     assert css.index(links.group(0)) > css.index(":where(button, a[href], select, summary,")
     # outside that block the body is left alone: a desktop selects what it could before
     assert "user-select" not in _rule(css.replace(block, ""), "body")

@@ -1212,16 +1212,20 @@ class PlaybackManager:
             "output": self.output_info,
             "ui_build": ui_build(),
         }
-        # A queue edit while stopped keeps the output's own words: the
-        # explanation of the last play, what another app did to the output,
-        # where Play resumes, a build or a silence HQPlayer is in, a queue it
-        # takes again (a page ends each one's toast with the status that says
-        # it no more: an append under a takeover's spot ended it, and a
-        # silent HQPlayer's next status raised its toast again for the person
-        # who had closed it), and a start under way (HQPlayer's own advance,
-        # a play press); the backend's next tick decides whether they still
-        # hold.
-        for key in ("diagnosis", "output_event", "resume", "building", "not_answering", "rebuilding"):
+        # A queue edit while stopped keeps the explanation of the last play
+        # on offer, and a start under way (HQPlayer's own advance, a play
+        # press); the backend's next tick decides whether they still hold.
+        # While an output is attached, its other words stand on too — what
+        # another app did to it, where Play resumes, a build or a silence
+        # HQPlayer is in, a queue it takes again: a page ends each one's
+        # toast with the status that says it no more (an append under a
+        # takeover's spot ended it, and a silent HQPlayer's next status
+        # raised its toast again for the person who had closed it). With no
+        # output attached nothing follows to correct them — a removal moves
+        # the slot a spot names — so they go, as before.
+        carried = ("diagnosis",) + (("output_event", "resume", "building", "not_answering", "rebuilding")
+                                    if self._active is not None else ())
+        for key in carried:
             if self._latest_status.get(key):
                 idle[key] = self._latest_status[key]
         if self._latest_status.get("starting"):

@@ -433,9 +433,19 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                 if not gid:
                     st["skipped"] += 1
                     continue
-                if not _name_corresponds(it["name"], mb_name):   # the path-confusion guard
+                guarded = not _name_corresponds(it["name"], mb_name)   # the path-confusion guard
+                # Its row is read before anything is written, and a read that
+                # fails is this artist's error alone: no change goes
+                # unreported, and the decisions before it keep their rows
+                try:
+                    item = _log_item(it, d, gid, mb_name, "guard-rejected" if guarded else "canonized", checked)
+                except Exception as e:
+                    st["errors"] += 1
+                    logger.error("ai_canon: the row of %r was not read: %s", it["name"], e)
+                    continue
+                if guarded:
                     st["guard_rejected"] += 1
-                    items.append(_log_item(it, d, gid, mb_name, "guard-rejected", checked))
+                    items.append(item)
                     continue
                 if not dry_run and mb_answers.waiting("owned_artist", it["id"]):
                     # The algorithmic canon queued a decision of the artist
@@ -443,9 +453,6 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                     # nothing after a rename.
                     st["skipped"] += 1
                     continue
-                # Its row is read before anything is written: what it reads
-                # (the disambiguation) failing leaves no change unreported
-                item = _log_item(it, d, gid, mb_name, "canonized", checked)
                 if not dry_run:
                     try:
                         _apply(it["id"], mb_name, gid)

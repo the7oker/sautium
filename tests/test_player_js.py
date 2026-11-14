@@ -151,7 +151,9 @@ const ctx = {
   },
   crypto: require('node:crypto').webcrypto, CustomEvent: class {},
   console: { warn() {}, log() {}, error() {}, debug() {} }, setTimeout, clearTimeout,
-  notices: { toast, resolve, amend() {} }, __tracks: spec.tracks || [],
+  notices: { toast, resolve, amend() {}, restate() {},
+             has: (key, tag) => toasts.some(x => x.key === key && x.tag === tag) },
+  __tracks: spec.tracks || [],
   openHqpDiagnosis() {}, navigate() {}, openHqpSettingsAt() {},
 };
 vm.createContext(ctx);

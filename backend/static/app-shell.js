@@ -6297,20 +6297,25 @@
   // redraws changed words in place, and a toast the person closed stays
   // closed). `stand(tag, spec)`: an instance this page told before stands
   // again where a later one stood (a takeover, once the refusal over it
-  // ended): the toast still up is redrawn as it, in place — one the person
-  // closed is not raised for it. `know(tag)`: it stands but is no news to
+  // ended): the later one's toast, still up, is redrawn as it where it is
+  // — on screen or waiting its turn, never moved ahead as news. Not for an
+  // instance whose own toast the person closed: the later one's toast goes
+  // then, and nothing is raised. `know(tag)`: it stands but is no news to
   // this page (minted before its connection): nothing is raised, and a
   // toast for an earlier instance goes. `end()`: the status says it no
-  // more.
+  // more. `tag`: the instance it holds.
   function statusToast(key) {
     let said = null;
+    const closed = new Set();         // the instances whose toast the person closed
     const leave = (tag) => {
       if (said !== null && said !== tag) notices.resolve(key, said);
       said = tag;
     };
     return {
+      get tag() { return said; },
       say(tag, spec) {
         if (tag === said) { notices.amend(key, tag, spec); return; }
+        if (said !== null && !notices.has(key, said)) closed.add(said);
         // A toast for an earlier instance still up is redrawn in place as
         // this one (the key's): never one leaving while the next comes in
         said = tag;
@@ -6318,12 +6323,12 @@
       },
       stand(tag, spec) {
         if (tag === said) { notices.amend(key, tag, spec); return; }
-        const up = said !== null && notices.has(key, said);
+        if (closed.has(tag)) { leave(tag); return; }
+        if (said !== null) notices.restate(key, said, { ...spec, tag });
         said = tag;
-        if (up) notices.toast({ ...spec, key, tag, lasting: true });
       },
       know(tag) { leave(tag); },
-      end() { leave(null); },
+      end() { leave(null); closed.clear(); },
     };
   }
 
@@ -6410,7 +6415,15 @@
     // app's track is over: that app holds the output still). One from
     // before the connection stands without a word.
     const c = outputEventsTold.has(ev.id) ? outputEventCopy(ev, data) : null;
-    if (!c) { outputEventToast.know(ev.id); return; }
+    if (!c) {
+      // A later event the page has no word for (the stream reconnected
+      // while the refusal stood), over the one in its toast: that app holds
+      // the output still, the toast's words hold, and its event may stand
+      // again. An earlier one means the toast's own event is over.
+      const up = outputEventToast.tag;
+      if (!(outputEventsTold.has(up) && ev.id > up)) outputEventToast.know(ev.id);
+      return;
+    }
     // Its attempt's failure is said here: the play route's answer for the
     // same attempt, should one follow, says nothing more (answerSays)
     if (ev.attempt != null) saidAttempts.add(ev.attempt);
@@ -12328,6 +12341,17 @@
        waiting its turn: not once the person closed it. */
     has(key, tag) {
       return [...this._shown, ...this._queue].some(t => t.key === key && t.tag === tag);
+    },
+
+    /* The lasting toast raised under `key` for `tag` says another instance
+       now (`say.tag`): redrawn where it is — on screen, or waiting its turn
+       in its place — never raised if it is up no more. */
+    restate(key, tag, { kind = 'info', title = '', text = '', action = null, why = null, passive = false,
+                        tag: next = tag }) {
+      const t = [...this._shown, ...this._queue].find(x => x.key === key && x.tag === tag);
+      if (!t) return;
+      const say = { kind, title, text, action, why, lasting: true, passive, tag: next };
+      if (t.el) this._fill(t, say); else Object.assign(t, say);
     },
 
     /* The condition a lasting toast said has ended: the toast goes, shown
