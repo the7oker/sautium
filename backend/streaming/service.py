@@ -316,8 +316,9 @@ def _aside_changed(provider: StreamProvider) -> None:
     if aside is None:
         logger.info("stream provider %s is offered again", provider.manifest.id)
     else:
-        logger.warning("stream provider %s stepped aside (%s): %s%s", provider.manifest.id,
-                       aside.code, aside.title, f" — {aside.detail}" if aside.detail else "")
+        # The cause's code only: its words are the module's, said in the
+        # module's own log line and on the notice
+        logger.warning("stream provider %s stepped aside (%s)", provider.manifest.id, aside.code)
     from db_pool import db_execute
     from .events import preview_events
     preview_events.ping()

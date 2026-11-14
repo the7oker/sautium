@@ -38,6 +38,7 @@ from playback.base import PlaybackStatus  # noqa: E402
 from playback import queue as queue_mod  # noqa: E402
 from playback import tracker  # noqa: E402
 from playback.hqp_backend import HqpBackend  # noqa: E402
+from streaming.base import StreamProvider  # noqa: E402
 from playback.manager import PlaybackManager  # noqa: E402
 from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
 from streaming import service as streaming_service  # noqa: E402
@@ -5800,7 +5801,7 @@ def test_next_and_previous_move_the_spot_a_refused_start_left(fake, output, monk
     assert sent == [] and fake.state == int(PlaybackState.STOPPED)
 
 
-class _GatedStream:
+class _GatedStream(StreamProvider):
     """A stream provider whose every fetch waits for `go` — the refetch of
     bytes the RAM budget dropped, held until the test lets it land — and
     answers `data` (the shape a refetch lands in)."""
