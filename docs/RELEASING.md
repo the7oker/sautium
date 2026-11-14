@@ -44,12 +44,22 @@ it relies on is `desktop/release_verify.py` and `desktop/updater.py`.
   pushed as `v9.9.9` is refused.
 - **The history.** Each release on the walk must descend from the release
   before it, the first from HEAD. The offer shows as "Sautium \<version\>". A
-  version below the installed one is never taken.
+  version below the installed one is never taken. The installed release is the
+  highest release HEAD contains whose tree states its version
+  (`desktop/build_common.py`): a signed tag on an older commit of HEAD's, under
+  a higher name, is no installed release and hides nothing from the walk.
 - **A fork.** Two signed releases that continue the same release, neither
   descending from the other, are a fork. The launcher cannot tell which one is
   yours, because a thief may give theirs any version, a lower one too. So it
   takes nothing above the release they both continue, and the dialog names
-  the two. Deleting the tag that is not yours from origin ends it.
+  the two. Deleting the tag that is not yours from origin ends it. With the tag
+  ruleset below, a deletion is refused to everyone: switch the ruleset to
+  Disabled, delete the tag, switch it back to Active. Changing a ruleset needs
+  the repository's admin, which a leaked push token does not carry.
+  A first install meets the same rule from the installer's own release: an
+  installer older than a rewritten history, or one that meets a fork, installs
+  none and starts from its bundled copy, which never updates until a newer
+  installer runs. Build new installers after a rewrite.
 - **A rewrite.** A newer signed release that does not descend from HEAD (a
   rewritten history) is refused. The dialog says that reinstalling moves to
   it, and nothing is purged.
@@ -212,7 +222,9 @@ the Linux side can reach (on WSL that needs `usbipd`):
 
    It prints the commits the release carries since the last one. If the key
    list changes in this release, it prints the new keys with their
-   fingerprints and stops until you run it again with `--list-change`.
+   fingerprints and stops until you run it again with `--list-change`. The
+   floor counts as a change when the list differs from the first one `main`
+   carried.
 
    It then runs `git tag -s` (touch and PIN) and verifies the tag with the
    launcher's own verifier against the last signed release's list and against
@@ -268,6 +280,14 @@ such as an auditor's clone, derives the root from the first key list on
   launchers below the rotation take nothing until you delete that tag from
   origin, and launchers that took the rotation are not affected.
 - **Both keys are lost:** a new root, below.
+- **How a reinstall moves an install.** An installer run over an existing
+  install moves it only if the installer is **newer** than the release the
+  install holds, and then only to a newer release still, the newest that the
+  installer's own list verifies. Both versions are read from what each tree
+  states. An installer as old as the install, or older, changes nothing: its
+  list must never undo a rotation the install has already taken. The same
+  move takes an install past a rewritten history, as long as the installer is
+  built from a release on the new history.
 
 ### Both keys lost: a new root
 
@@ -296,15 +316,6 @@ release: its payload carries the new list.
    `git config sautium.releaseFloor <the tag object id in the notice>`.
 
 From then on `tag` works as before, on the new chain.
-- **How a reinstall moves an install.** An installer run over an existing
-  install moves it only if the installer is **newer** than the release the
-  install holds, and then only to a newer release still, the newest that the
-  installer's own list verifies. Both versions are read from what each tree
-  states. An installer as old as the install, or older, changes nothing: its
-  list must never undo a rotation the install has already taken. The same
-  move takes an install past a rewritten history, as long as the installer is
-  built from a release on the new history.
-
 ## The installers' checksums
 
 `scripts/release-publish.sh` writes `SHA256SUMS.txt` and signs it:

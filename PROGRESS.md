@@ -2222,7 +2222,19 @@ The short version of the hard-learned lessons:
     which a push credential gives anyway, never a thief's release installed.
   - A release no list on the walk verifies is never fetched; one some list
     verifies is fetched before its history is read (a rotated-out key's tag
-    costs its history once).
+    costs a fetch at every check, its history downloaded again once git has
+    pruned it).
+  - **The installed release states its version** (review round 1's high): the
+    first tag HEAD contains that the installed list verifies ended the read,
+    so a stolen key's `v0.9.0` on the installed commit itself hid every
+    release below it, the rotation included, and the thief's `v0.9.1` beside
+    it was offered. Now a tag HEAD contains is the installed release only when
+    its commit's `desktop/build_common.py` states its version (what
+    `release.py` already required); any other is held.
+  - Launchers and `release.py` admit tag objects through one gate
+    (`updater.admitted`: annotated, a tag of a commit, at most 64 KiB) before
+    the walk; a 70 KB signed tag was in the script's chain and refused by
+    every launcher.
   - `release.py tag` refuses, before the signature, a key the last release's
     list or the release's own list does not hold (a rotation signed by the key
     it drops left every installer built from it unable to verify anything),

@@ -320,7 +320,7 @@ def test_new_keys_without_new_root_are_refused(stand):
 def test_a_new_root_needs_its_confirmation_typed(stand):
     _new_root(stand)
     floor = git(stand.repo, "config", "--get", "sautium.releaseFloor")
-    for typed in (None, "yes\n", "new root v0.3\n"):
+    for typed in (None, "yes\n", "new root v0.3\n", "not new root v0.3.0\n"):
         result = stand.run("tag", "0.3.0", "--new-root", typed=typed)
         assert result.returncode != 0 and "not confirmed — nothing was signed" in result.stderr
         assert "stays on the release it has" in result.stdout and "daily2" in result.stdout
@@ -364,6 +364,41 @@ def test_release_publish_accepts_a_new_roots_installers(stand, tmp_path):
                                                                   "DIST_DIR": str(tmp_path / "dist")})
     assert result.returncode == 0, result.stdout + result.stderr
     assert "a real run stops here" not in result.stdout
+
+
+def test_a_new_root_keeps_no_key_of_the_old_list(stand):
+    """Review round 1: a "new root" signed by a key the old list still holds
+    is an ordinary update for launchers, whatever the notice says; a rewrite
+    with the same keys likewise."""
+    stand.commit("0.2.0", signers=["daily", "recovery"])
+    stand.release("0.2.0", "--list-change")
+    stand.commit("0.3.0", signers=["recovery", "daily2"])
+    stand.use_key("recovery")
+    result = stand.run("tag", "0.3.0", "--new-root", typed="new root v0.3.0\n")
+    assert result.returncode != 0 and "not a new root" in result.stderr and "still on v0.2.0's list" in result.stderr
+    git(stand.repo, "checkout", "-q", "--orphan", "rewritten")
+    stand.commit("0.3.1", signers=["daily", "recovery"])
+    stand.use_key("daily")
+    assert "not a new root" in stand.run("tag", "0.3.1", "--new-root", typed="new root v0.3.1\n").stderr
+
+
+def test_the_fork_refusal_names_the_pair_at_the_cut(stand):
+    floor = stand.commit("0.2.0", signers=["daily", "recovery"])
+    stand.release("0.2.0", "--list-change")
+    c3 = stand.commit("0.3.0")
+    stand.release("0.3.0")
+    stand.commit("0.4.0")
+    stand.release("0.4.0")
+    git(stand.repo, "checkout", "-q", "--detach", c3)
+    stand.commit("0.4.5", push=False)
+    _push_tag_object(stand, "v0.4.5", "HEAD", key="daily")           # beside v0.4.0, on v0.3.0
+    git(stand.repo, "checkout", "-q", "--detach", floor)
+    stand.commit("0.5.0", push=False)
+    _push_tag_object(stand, "v0.5.0", "HEAD", key="daily")           # beside v0.3.0, on v0.2.0
+    git(stand.repo, "checkout", "-q", "main")
+    stand.commit("0.6.0")
+    result = stand.run("tag", "0.6.0")
+    assert result.returncode != 0 and "forks at v0.2.0: v0.5.0 and v0.3.0" in result.stderr
 
 
 def test_a_new_root_is_above_the_old_chain(stand):

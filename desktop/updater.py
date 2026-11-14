@@ -93,11 +93,13 @@ class Release:
 class Survey:
     """What origin's releases are to this checkout.
 
-    `installed`: the highest signed release HEAD already contains (None
-    before the first one). `held`: the highest release tag HEAD contains
-    whose signer HEAD's own list does not name (a release made before
-    scripts/release.py refused one whose list drops its signer, or a
-    stranger's tag on an old commit) — said as "up to date", never a
+    `installed`: the highest signed release HEAD already contains whose tree
+    states its version (None before the first one). `held`: the highest
+    release tag HEAD contains that is no installed release — signed by a key
+    HEAD's own list does not name (a release made before scripts/release.py
+    refused one whose list drops its signer, a stranger's tag on an old
+    commit), or on a commit that states another version (a listed key's tag
+    under a higher name on an older commit) — said as "up to date", never a
     refusal, never a floor for the walk. `offered`: the highest release the
     chain reaches above it that the installed list verifies too — what an
     update moves to. `rewrite`: a signed release above it that does not
@@ -375,6 +377,22 @@ def _history(head: str, cwd: Optional[str]) -> set:
     return set(result.stdout.split())
 
 
+def admitted(kind: str, raw: Optional[bytes]) -> Optional[str]:
+    """Why an annotated tag's object is no candidate at all, or None — the one
+    gate launchers and scripts/release.py both apply before a signature is
+    read."""
+    if raw is None:
+        return f"a {kind} too large to be a release tag"
+    if kind != "tag":
+        return f"a tag of a {kind}, not a signed release"
+    return None
+
+
+def self_stated(commit: str, cwd: Optional[str] = None) -> str:
+    """The text of `commit`'s desktop/build_common.py ("" when it has none)."""
+    return _git_cmd(["show", f"{commit}:desktop/build_common.py"], cwd).stdout
+
+
 def _tagged_commit(raw: bytes) -> Optional[str]:
     """The commit a tag object names, read without trusting it."""
     try:
@@ -404,13 +422,14 @@ class Link:
 @dataclass
 class Chain:
     """What `walk_chain` reached. `links[0]` is the start; `cut` is the last
-    link an offer may come from when a fork stands at it; each refusal and
-    fork is (version, tag, why); `rewrites` are releases a link's list
+    link an offer may come from when a fork stands at it; each refusal is
+    (version, tag, why), each fork (version, tag, the link it continues, the
+    release beside it, why); `rewrites` are releases a link's list
     verifies that descend from no link — off the start's history."""
     links: List[Link]
     cut: Optional[int] = None
     refused: List[Tuple[Tuple[int, int, int], str, str]] = field(default_factory=list)
-    forks: List[Tuple[Tuple[int, int, int], str, str, str]] = field(default_factory=list)
+    forks: List[Tuple[Tuple[int, int, int], str, int, str, str]] = field(default_factory=list)
     rewrites: List[Release] = field(default_factory=list)
 
     def reach(self) -> List[Link]:
@@ -472,7 +491,7 @@ def walk_chain(start: Link, candidates: List[Tuple[Tuple[int, int, int], str, st
             links.append(Link(release, commit, tuple(signers_at(commit, cwd)), 0 in tags))
         else:
             other = links[on + 1].release.name
-            chain.forks.append((version, name, other,
+            chain.forks.append((version, name, on, other,
                                 f"it does not descend from {other}, which continues {links[on].label} too"))
             chain.cut = on if chain.cut is None else min(chain.cut, on)
     return chain
@@ -498,17 +517,25 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
             refused.append((version, name, "a lightweight tag, not a signed release"))
             continue
         oid, kind, raw = objects[name]
-        if raw is None:
-            refused.append((version, name, f"a {kind} too large to be a release tag"))
-            continue
-        if kind != "tag":
-            refused.append((version, name, f"a tag of a {kind}, not a signed release"))
+        why = admitted(kind, raw)
+        if why:
+            refused.append((version, name, why))
             continue
         if _tagged_commit(raw) in history:
+            # The installed release ends the read, so it must be one: a
+            # release's tree states its own version (scripts/release.py
+            # refuses any other). A key's tag on an older commit of HEAD's —
+            # a stolen key's v9.0.0 on the installed commit itself — is no
+            # installed release, and would otherwise hide every release below
+            # it from the walk, the rotation that drops that key among them.
             try:
                 tag = release_verify.verify_tag(raw, name, signers)
+                why = None if _stated_version(self_stated(tag.commit, cwd)) == version else \
+                    "its tree states another version"
             except release_verify.VerifyError as exc:
-                logger.debug(f"tag {name} held: HEAD contains it, its signature does not verify here ({exc})")
+                why = str(exc)
+            if why:
+                logger.debug(f"tag {name} held: HEAD contains it, and it is no release here ({why})")
                 found.held = found.held or name
                 continue
             found.installed = Release(name, version, tag.commit)
@@ -524,14 +551,14 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
     found.rewrite = max(rewrites, key=lambda release: release.version) if rewrites else None
     if found.rewrite:
         above = found.rewrite.version
-    forks = {name: other for _, name, other, _ in chain.forks}
-    refused += chain.refused + [(version, name, why) for version, name, _, why in chain.forks]
+    refused += chain.refused + [(version, name, why) for version, name, _, _, why in chain.forks]
     found.refused = [(name, why) for version, name, why in sorted(refused, reverse=True) if version > above]
-    if found.refused and found.refused[0][0] in forks:
-        found.fork = (found.refused[0][0], forks[found.refused[0][0]])
+    forks = sorted((version, name, other) for version, name, _, other, _ in chain.forks if version > above)
+    if forks:
+        found.fork = forks[-1][1:]
     _forget_releases_but({link.release.name for link in chain.links[1:]} |
                          {release.name for release in chain.rewrites}, cwd)
-    for _, name, other, _ in chain.forks:
+    for _, name, _, other, _ in chain.forks:
         logger.warning(f"release tags {name} and {other} fork: nothing above what both continue is taken "
                        "until one of them is gone from origin")
     if found.refused:

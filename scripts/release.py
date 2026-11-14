@@ -170,13 +170,21 @@ def trusted_chain() -> updater.Chain:
     else:
         print("  (no floor recorded in this checkout: the chain's root is derived from origin/main)")
         start = updater.Link(None, None, tuple(root_list()[1]))
-    chain = updater.walk_chain(start, [(version, name, oid, git_bytes("cat-file", "tag", ref))
-                                       for version, name, ref, oid in tags], str(REPO))
+    objects = updater._objects([ref for _, _, ref, _ in tags], [], str(REPO)) if tags else {}
+    candidates = []
+    for version, name, ref, oid in tags:
+        _, kind, raw = objects[ref]
+        why = updater.admitted(kind, raw)
+        if why:
+            print(f"  {name}: not in the release chain ({why})")
+        else:
+            candidates.append((version, name, oid, raw))
+    chain = updater.walk_chain(start, candidates, str(REPO))
     for _, name, why in chain.refused:
         print(f"  {name}: not in the release chain ({why})")
     for release in chain.rewrites:
         print(f"  {release.name}: does not descend from {chain.links[0].label} — not in the release chain")
-    for _, name, _, why in chain.forks:
+    for _, name, _, _, why in chain.forks:
         print(f"  {name}: a fork — {why}; not in the release chain")
     return chain
 
@@ -310,15 +318,24 @@ def tag(version: str, rev: Optional[str], list_change: bool, new_root: bool = Fa
         made = [link.release for link in chain.links if link.release]
         if not made:
             raise Refused("there is no release chain yet — its first release is made with `tag` alone")
-        previous = max(made, key=lambda release: release.version)
+        last = max((link for link in chain.links if link.release), key=lambda link: link.release.version)
+        previous = last.release
         if parsed <= previous.version:
             raise Refused(f"{name} is not above {previous.name}, the old chain's last release")
+        # A new root is for keys that are lost: one the old list still holds
+        # makes launchers take it as an ordinary update, and the notice would
+        # tell people the opposite.
+        kept = [s for s in own if any(s.key_blob == old.key_blob for old in last.signers)]
+        if kept:
+            raise Refused(f"not a new root: {', '.join(fingerprint(s.key_blob) for s in kept)} is still on "
+                          f"{previous.name}'s list, so launchers would take {name} as an update — sign a rotation "
+                          "with `tag --list-change` instead")
         held, before = own, None
         if is_ancestor(previous.commit, commit):
             since = previous.commit
         print(f"A new root: {name} is signed for its own key list, not for {previous.name}'s.")
     elif chain.cut is not None:
-        _, fork, other, _ = chain.forks[0]
+        _, fork, _, other, _ = next(entry for entry in chain.forks if entry[2] == chain.cut)
         raise Refused(f"the release chain forks at {chain.links[chain.cut].label}: {fork} and {other} both "
                       "continue it, and launchers below take nothing above it — delete the tag that is not "
                       f"yours from origin (`git push origin :refs/tags/<it>`), then run again")

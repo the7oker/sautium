@@ -101,7 +101,7 @@ def test_a_push_to_main_alone_reaches_nobody(world):
 
 
 def test_a_normal_release_is_offered_and_taken(world):
-    tip = world.commit("v2\n")
+    tip = world.commit("v2\n", version="0.2.0")
     world.tag("v0.2.0", tip)
     survey = world.check()
     assert survey.offered == updater.Release("v0.2.0", (0, 2, 0), tip)
@@ -141,7 +141,7 @@ def test_versions_compare_as_numbers(world):
 
 
 def test_a_version_is_never_taken_backwards(world):
-    tip = world.commit("v2\n")
+    tip = world.commit("v2\n", version="0.3.0")
     world.tag("v0.3.0", tip)
     world.update()
     later = world.commit("v3\n")
@@ -151,7 +151,7 @@ def test_a_version_is_never_taken_backwards(world):
 
 
 def test_a_checkout_ahead_of_the_newest_release_has_it_installed(world):
-    tagged = world.commit("v2\n")
+    tagged = world.commit("v2\n", version="0.2.0")
     world.tag("v0.2.0", tagged)
     world.commit("v3\n")
     tree = world.working
@@ -225,16 +225,21 @@ def test_an_empty_installed_list_takes_nothing(world):
 
 # ── the chain: a rotation revokes for every launcher ──────────────────────
 
-def off_main(world, parent: str, app: str) -> str:
-    """A commit on `parent` that main never carries — pushed as a tag only."""
+def off_main(world, parent: str, app: str, signers=None) -> str:
+    """A commit on `parent` that main never carries — pushed as a tag only;
+    `signers` replaces the list its tree carries."""
     tree = git(world.seed, "rev-parse", f"{parent}^{{tree}}")
-    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=world.seed, input=app, check=True,
-                          capture_output=True, text=True).stdout.strip()
     index = world.tmp / "side-index"
     env = {**os.environ, "GIT_INDEX_FILE": str(index)}
     subprocess.run(["git", "read-tree", tree], cwd=world.seed, env=env, check=True)
-    subprocess.run(["git", "update-index", "--cacheinfo", f"100644,{blob},app.txt"], cwd=world.seed, env=env,
-                   check=True)
+    files = {"app.txt": app}
+    if signers is not None:
+        files["desktop/release_signers"] = "".join(k.line(f"key{i}") + "\n" for i, k in enumerate(signers))
+    for path, text in files.items():
+        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=world.seed, input=text, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}"], cwd=world.seed,
+                       env=env, check=True)
     side = subprocess.run(["git", "write-tree"], cwd=world.seed, env=env, check=True, capture_output=True,
                           text=True).stdout.strip()
     index.unlink()
@@ -246,12 +251,111 @@ def rotated(world):
     """r0 = v0.2.0 lists {A, R} and is installed; r1 = v0.3.0 rotates the
     list to {B, R}, signed by R: A is the stolen key."""
     a, r, b = world.key, Key(), Key()
-    r0 = world.commit("r0\n", signers=[a, r])
+    r0 = world.commit("r0\n", signers=[a, r], version="0.2.0")
     world.tag("v0.2.0", r0)
     world.update()
-    r1 = world.commit("r1\n", signers=[b, r])
+    r1 = world.commit("r1\n", signers=[b, r], version="0.3.0")
     world.tag("v0.3.0", r1, key=r)
     return world, a, r, b, r0, r1
+
+
+def test_a_stolen_keys_tag_on_the_installed_commit_hides_no_rotation(rotated):
+    """Review round 1's H1: the thief signs v0.9.0 with A on r0 itself. HEAD
+    contains it and the installed list verifies it, but r0's tree states
+    0.2.0, so it is no installed release: the walk still sees the rotation."""
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.9.0", r0, key=a)
+    survey = world.check()
+    assert (survey.installed.name, survey.held, survey.offered.name) == ("v0.2.0", "v0.9.0", "v0.3.0")
+    evil = off_main(world, r0, "thief\n")
+    world.tag("v0.9.1", evil, key=a)
+    survey = world.check()
+    assert survey.offered is None and survey.fork == ("v0.9.1", "v0.3.0")
+    world.update()
+    assert world.head() == r0
+
+
+def test_nested_forks_cut_at_the_lower_link(rotated):
+    """The thief's v0.2.5 on r0 (A; its tree lists A and T), v0.2.6 on it (T),
+    v0.2.7 beside v0.2.6 (A): forks at v0.2.5 and, with the owner's v0.3.0, at
+    r0 — the walk stops at r0, never offering v0.2.5."""
+    world, a, r, b, r0, r1 = rotated
+    t = Key()
+    base = off_main(world, r0, "thief base\n", signers=[a, t])
+    world.tag("v0.2.5", base, key=a)
+    world.tag("v0.2.6", off_main(world, base, "thief 6\n"), key=t)
+    world.tag("v0.2.7", off_main(world, base, "thief 7\n"), key=a)
+    survey = world.check()
+    assert survey.offered is None and survey.fork == ("v0.3.0", "v0.2.5")
+
+
+def test_a_lightweight_tag_above_a_fork_hides_no_fork_sentence(rotated):
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.4.0", off_main(world, r0, "thief\n"), key=a)
+    world.lightweight("v9.9.9", r1)
+    survey = world.check()
+    assert survey.refused[0][0] == "v9.9.9" and survey.fork == ("v0.4.0", "v0.3.0")
+    assert "Releases v0.4.0 and v0.3.0" in updater.survey_words(survey)[1][-1]
+
+
+def test_the_fork_sentence_is_never_beside_an_offer():
+    offered = updater.Release("v0.2.0", (0, 2, 0), "0" * 40)
+    heading, lines = updater.survey_words(updater.Survey(offered=offered, refused=[("v0.4.0", "x")],
+                                                         fork=("v0.4.0", "v0.3.0")))
+    assert not any("v0.4.0" in line for line in lines)
+
+
+# ── launchers and scripts/release.py judge one origin alike ──────────────
+
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "release.py"
+
+
+def _maintainer(world, floor: str):
+    """The owner's checkout of the same origin, its floor recorded as `tag`
+    records it."""
+    repo = world.tmp / "maint"
+    if not repo.exists():
+        git(world.tmp, "clone", "-q", str(world.origin), str(repo))
+    git(repo, "fetch", "-q", "origin", f"refs/tags/{floor}:refs/tags/{floor}")
+    git(repo, "config", "sautium.releaseFloor", git(repo, "rev-parse", f"refs/tags/{floor}"))
+    return lambda *args: subprocess.run([sys.executable, str(SCRIPT), *args, "--repo", str(repo)],
+                                        capture_output=True, text=True)
+
+
+def test_release_py_refuses_what_the_launcher_refuses_on_the_installed_commit(rotated):
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.9.0", r0, key=a)
+    world.tag("v0.9.1", off_main(world, r0, "thief\n"), key=a)
+    script = _maintainer(world, "v0.2.0")
+    assert world.check().offered is None
+    assert script("verify", "0.9.1").returncode != 0 and script("verify", "0.9.0").returncode != 0
+
+
+def test_release_py_refuses_a_link_below_a_fork(rotated):
+    """Below the cut a thief's lower version is a link of the walk, never a
+    release of the chain."""
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.2.5", off_main(world, r0, "thief\n"), key=a)
+    script = _maintainer(world, "v0.2.0")
+    assert script("verify", "0.2.5").returncode != 0
+    assert script("verify", "0.3.0").returncode != 0
+    assert world.check().offered is None
+
+
+def test_a_tag_object_too_large_is_refused_by_both(world):
+    """Review round 1's M1: the launcher never reads a tag object over 64 KiB;
+    release.py must not take it into the chain either."""
+    world.tag("v0.2.0", world.commit("r1\n", version="0.2.0"))
+    r2 = world.commit("r2\n", version="0.3.0")
+    payload = (f"object {r2}\ntype commit\ntag v0.3.0\ntagger T <t@t> 1794470000 +0000\n\n"
+               + "x" * 70000 + "\n").encode()
+    oid = subprocess.run(["git", "hash-object", "-t", "tag", "-w", "--stdin"], cwd=world.seed,
+                         input=payload + world.key.sign(payload), capture_output=True, check=True).stdout.decode().strip()
+    git(world.seed, "update-ref", "refs/tags/v0.3.0", oid)
+    git(world.seed, "push", "-q", "-f", "origin", "refs/tags/v0.3.0")
+    assert world.check().refused[0] == ("v0.3.0", "a tag too large to be a release tag")
+    verdict = _maintainer(world, "v0.2.0")("verify", "0.3.0")
+    assert verdict.returncode != 0 and "too large" in verdict.stdout
 
 
 def test_a_stolen_keys_tag_on_top_of_a_rotation_is_refused_below_it(rotated):
@@ -381,7 +485,7 @@ def test_a_new_root_is_no_update_for_the_old_chain_and_its_installer_moves_on(wo
 # ── what is refused ───────────────────────────────────────────────────────
 
 def test_a_signed_release_that_rewrites_history_is_refused(world):
-    tip = world.commit("v2\n")
+    tip = world.commit("v2\n", version="0.2.0")
     world.tag("v0.2.0", tip)
     world.update()
     git(world.seed, "reset", "-q", "--hard", world.base)
@@ -565,7 +669,7 @@ def test_a_tag_moved_upstream_never_fails_the_fetch(world):
 
 def test_refused_tags_below_the_installed_release_are_not_judged(world):
     world.lightweight("v0.1.5", world.base)
-    tip = world.commit("v2\n")
+    tip = world.commit("v2\n", version="0.2.0")
     world.tag("v0.2.0", tip)
     world.update()
     assert world.check().refused == []
