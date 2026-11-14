@@ -1790,6 +1790,10 @@ CREATE INDEX IF NOT EXISTS idx_genre_desc_emb_vector ON genre_desc_embeddings
 
 -- Core table indexes
 CREATE INDEX IF NOT EXISTS idx_artists_name_trgm ON artists USING gin (name gin_trgm_ops);
+-- An artist by the slice key of its name (lower(btrim(name)), mb_slice_queries.name_key's SQL
+-- form): what a fetched slice is for, read at the fetch (LOCAL_ONLY_SQL) and by the one-time
+-- marking of the kept blobs.
+CREATE INDEX IF NOT EXISTS idx_artists_name_key ON artists (lower(btrim(name)));
 CREATE INDEX IF NOT EXISTS idx_artists_verification_status ON artists(verification_status);
 CREATE INDEX IF NOT EXISTS idx_artists_artist_type ON artists(artist_type);
 CREATE INDEX IF NOT EXISTS idx_artists_gender ON artists(gender);

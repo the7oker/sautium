@@ -1101,3 +1101,18 @@ def test_the_blobs_kept_before_their_origin_are_marked_once_by_the_same_rules(or
     assert out["mb_marked"] == 2 and out["mb_local"] == 1
     assert _kept_local(conn) == {"waited": True, "owned long ago": False, "built here": False}
 
+
+
+def test_the_origin_of_a_name_is_read_through_an_index(origins):
+    """Read at every fetch and for every kept blob once: the artist a name is
+    found by its key's index, never by scanning the artists."""
+    conn = origins
+    with conn.cursor() as cur:
+        cur.execute("SET enable_seqscan = off")
+        try:
+            cur.execute("EXPLAIN SELECT " + mb_slice_queries.LOCAL_ONLY_SQL.format(nk="'some name'"))
+            plan = "\n".join(r[0] for r in cur.fetchall())
+        finally:
+            cur.execute("RESET enable_seqscan")
+    assert "idx_artists_name_key" in plan
+    assert "Seq Scan on artists" not in plan
