@@ -127,6 +127,31 @@ def test_the_first_checkout_is_the_newest_verified_release(bootstrap, origin):
     assert (bootstrap.APP_DIR / "desktop" / "requirements.txt").read_text() == "released\n"
 
 
+def test_the_first_checkout_walks_the_chain_past_a_stolen_key(bootstrap, origin):
+    """The daily key A is stolen and rotated out by v0.3.0, which the
+    recovery key R signs: a thief's higher tag signed by A is never the first
+    checkout of an installer whose list still holds A."""
+    a, r, b = origin.key, Key(), Key()
+    bootstrap.PAYLOAD_SIGNERS.write_text(a.line("release") + "\n" + r.line("recovery") + "\n")
+
+    def release(name, signers, key):
+        (origin.seed / "desktop" / "release_signers").write_text(
+            "".join(k.line(f"k{i}") + "\n" for i, k in enumerate(signers)))
+        (origin.seed / "desktop" / "build_common.py").write_text(f'VERSION = "{name[1:]}"\n')
+        git(origin.seed, "add", ".")
+        git(origin.seed, "commit", "-qm", name)
+        origin.tip = git(origin.seed, "rev-parse", "HEAD")
+        publish(origin, name, key=key)
+        return origin.tip
+
+    release("v0.2.0", [a, r], a)                               # the installer's own release
+    rotation = release("v0.3.0", [b, r], r)
+    release("v0.4.0", [b, r], a)                               # the thief's, on top
+    bootstrap.APP_DIR.parent.mkdir(parents=True, exist_ok=True)
+    assert bootstrap.clone_tree(lambda _: None) is True
+    assert git(bootstrap.APP_DIR, "rev-parse", "HEAD") == rotation
+
+
 def test_the_payloads_code_runs_without_writing_into_the_payload(bootstrap, origin, monkeypatch):
     monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     publish(origin, "v0.2.0")

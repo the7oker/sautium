@@ -77,9 +77,13 @@ content-addressed analysis, recomputation as the detector —
 `docs/design/P2P-SYNC-INTEGRITY.md`); a push to the repository that the
 maintainer did not intend — a leaked token, a phished login, a misled agent
 holding the push credential. An installed launcher takes only a release tag
-signed by a key on its own installed list, and only one that descends from
-what it runs; a security-key signature also needs the key's PIN
-(`docs/RELEASING.md`).
+signed along the release chain — each release by a key on the list of the
+release before it, the first by its own installed list — and only one that
+descends from what it runs; a security-key signature also needs the key's PIN
+(`docs/RELEASING.md`). A rotation therefore revokes a stolen key for every
+launcher, also one still below the rotating release; a tag the stolen key signs
+beside it is a fork, which stops those launchers until the tag is deleted. The
+installers' `SHA256SUMS.txt` is signed by the same key.
 
 Accepted, out of scope: a targeted attacker on the LAN who holds the account
 password, or who is answering in the node's place on a browser's very first

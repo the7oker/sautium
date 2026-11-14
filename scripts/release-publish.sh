@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Publish a launcher release: the installers desktop/build_windows.py and
 # desktop/build_macos.py wrote (the DMG copied over from the Mac that built
-# it), plus SHA256SUMS.txt and downloads.json — the file the website's
-# download page reads from releases/latest/download/downloads.json. Creates
+# it), plus SHA256SUMS.txt, its signature SHA256SUMS.txt.sig (the release key
+# under the `sautium-file` namespace — scripts/release.py sign-file, the same
+# key setup as the tag, so the key asks for its touch and PIN here) and
+# downloads.json — the file the website's download page reads from
+# releases/latest/download/downloads.json. Creates
 # the GitHub release v<version> when it does not exist — marked latest and
 # NOT a prerelease, because a prerelease drops out of /releases/latest and
 # the site would read whatever release is left there — replaces same-named
@@ -12,7 +15,8 @@
 # The signed tag comes first: scripts/release.py tag makes it, the maintainer
 # pushes it, and this script stops unless origin's v<version> is a signed
 # release launchers take naming the very commit the installers were built
-# from. Creating a GitHub release for a tag origin does not have makes GitHub
+# from — a new root's too, once scripts/release.py recorded it as this
+# checkout's floor. Creating a GitHub release for a tag origin does not have makes GitHub
 # create it — lightweight, unsigned, on target_commitish — and that name is
 # then taken for good (v0.1.0 and v0.1.1 were born this way).
 #
@@ -24,7 +28,7 @@
 # the payload, so it must be clean, and so must this check).
 # --version defaults to desktop/build_common.py VERSION; --notes replaces the
 # default release body; --dry-run writes SHA256SUMS.txt and downloads.json
-# into dist/ ($DIST_DIR) and stops before the first API call. Token as in
+# into dist/ ($DIST_DIR), signs nothing and stops before the first API call. Token as in
 # seed-publish.sh: $GITHUB_TOKEN, else `git credential fill`. $PYTHON is the
 # interpreter scripts/release.py runs on (it needs `cryptography`; default
 # python3).
@@ -152,8 +156,11 @@ EOF
 echo "wrote $sums and $out/downloads.json"
 if [ $dry_run -eq 1 ]; then
     cat "$out/downloads.json"
+    echo "dry run: SHA256SUMS.txt is not signed — a real run signs it here"
     exit 0
 fi
+rm -f "$sums.sig"
+"${PYTHON:-python3}" "$root/scripts/release.py" sign-file "$sums" --repo "$root"
 
 token=${GITHUB_TOKEN:-$(printf 'protocol=https\nhost=github.com\n\n' \
     | git credential fill | sed -n 's/^password=//p')}
@@ -187,7 +194,7 @@ EOF
     esac
     cat <<EOF
 
-Check a download against \`SHA256SUMS.txt\` (\`sha256sum -c SHA256SUMS.txt --ignore-missing\` beside the file). The installer is a carrier: the first launch checks out the newest signed release, and the app takes each later one as an update. How to verify what the tree does, and that this payload was built from it: [docs/AUDIT.md](https://github.com/$repo/blob/$tag/docs/AUDIT.md).
+Check a download against \`SHA256SUMS.txt\` (\`sha256sum -c SHA256SUMS.txt --ignore-missing\` beside the file), and the list itself against its signature by the release key: with [\`desktop/release_signers\`](https://github.com/$repo/blob/$tag/desktop/release_signers) beside it — its \`release\` line is the one in the [README](https://github.com/$repo/blob/$tag/README.md#desktop-launcher-optional) and on https://sautium.net/download — run \`ssh-keygen -Y verify -f release_signers -I release -n sautium-file -s SHA256SUMS.txt.sig < SHA256SUMS.txt\` (on Windows in \`cmd\`; from PowerShell wrap it in \`cmd /c "…"\`), which answers \`Good "sautium-file" signature for release\`. The installer is a carrier: the first launch checks out the newest signed release, and the app takes each later one as an update. How to verify what the tree does, and that this payload was built from it: [docs/AUDIT.md](https://github.com/$repo/blob/$tag/docs/AUDIT.md).
 
 Downloads and guides: https://sautium.net/download · Built from \`$commit\`.
 EOF
@@ -225,16 +232,18 @@ for file in "${artefacts[@]}"; do
     esac
 done
 upload "$sums" text/plain
+upload "$sums.sig" text/plain
 upload "$out/downloads.json" application/json
 
 check=$(mktemp -d)
 trap 'rm -rf "$check"' EXIT
-for file in "${artefacts[@]}" "$sums" "$out/downloads.json"; do
+for file in "${artefacts[@]}" "$sums" "$sums.sig" "$out/downloads.json"; do
     name=$(basename "$file")
     # A fresh asset can answer 404 for a moment after the upload.
     curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors -o "$check/$name" "$download/$name"
 done
 (cd "$check" && sha256sum -c --quiet SHA256SUMS.txt)
-cmp -s "$sums" "$check/SHA256SUMS.txt" && cmp -s "$out/downloads.json" "$check/downloads.json" \
-    || { echo "the published SHA256SUMS.txt / downloads.json differ from the local files" >&2; exit 1; }
+cmp -s "$sums" "$check/SHA256SUMS.txt" && cmp -s "$sums.sig" "$check/SHA256SUMS.txt.sig" \
+    && cmp -s "$out/downloads.json" "$check/downloads.json" \
+    || { echo "the published SHA256SUMS.txt / .sig / downloads.json differ from the local files" >&2; exit 1; }
 echo "published $tag ($(wc -l < "$sums") installers, commit $commit): $download/downloads.json"

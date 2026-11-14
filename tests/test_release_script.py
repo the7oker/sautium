@@ -5,6 +5,7 @@ the result with the launcher's own verifier against the list installed
 launchers hold, deletes a tag that fails, and never pushes. Real `git tag -s`
 through real ssh-keygen with throwaway keys, a bare origin."""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -42,9 +43,9 @@ class Stand:
             self.keys[name] = path
         return self.keys[name]
 
-    def line(self, name) -> str:
+    def line(self, name, namespaces="git") -> str:
         kind, b64 = Path(f"{self.key(name)}.pub").read_text().split()[:2]
-        return f'{name} namespaces="git" {kind} {b64}'
+        return f'{name} namespaces="{namespaces}" {kind} {b64}'
 
     def use_key(self, name):
         git(self.repo, "config", "user.signingkey", str(self.key(name)))
@@ -62,9 +63,9 @@ class Stand:
             git(self.repo, "push", "-q", "-f", "origin", "HEAD:main")
         return git(self.repo, "rev-parse", "HEAD")
 
-    def run(self, *args):
+    def run(self, *args, typed=None):
         return subprocess.run([sys.executable, str(SCRIPT), *args, "--repo", str(self.repo)],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, input=typed)
 
     def release(self, version, *flags):
         """Tag and push, as the maintainer does."""
@@ -226,26 +227,185 @@ def test_an_empty_key_list_is_refused(stand):
     assert result.returncode != 0 and "0 key line(s)" in result.stderr
 
 
-def test_a_tag_by_a_key_launchers_do_not_hold_is_deleted_again(stand):
+def test_a_key_launchers_do_not_hold_is_refused_before_it_signs(stand):
     stand.commit("0.2.0")
     stand.use_key("stranger")
     result = stand.run("tag", "0.2.0")
-    assert result.returncode != 0 and "deleted again" in result.stderr and "not listed" in result.stderr
-    assert git(stand.repo, "tag") == ""
+    assert result.returncode != 0 and "not one of the keys above" in result.stderr
+    assert "Signing" not in result.stdout and git(stand.repo, "tag") == ""
 
 
 def test_the_next_release_is_verified_against_the_list_the_last_one_carries(stand):
-    stand.commit("0.2.0")
-    stand.release("0.2.0")
-    stand.commit("0.3.0", signers=["recovery"])           # rotates the list, signed by the daily key
+    stand.commit("0.2.0", signers=["daily", "recovery"])
+    stand.release("0.2.0", "--list-change")
+    stand.commit("0.3.0", signers=["recovery", "new"])     # rotates the daily key out
+    stand.use_key("recovery")
     result = stand.release("0.3.0", "--list-change")
     assert "Last signed release: v0.2.0" in result.stdout
 
     stand.commit("0.4.0")
+    stand.use_key("daily")
     refused = stand.run("tag", "0.4.0")                    # the daily key is rotated out
-    assert refused.returncode != 0 and "deleted again" in refused.stderr
-    stand.use_key("recovery")
+    assert refused.returncode != 0 and "not one of the keys above" in refused.stderr
+    stand.use_key("new")
     assert stand.run("tag", "0.4.0").returncode == 0
+
+
+def test_a_release_whose_own_list_drops_its_signer_is_refused_before_it_signs(stand):
+    """A rotation signed by the key it drops leaves every installer built
+    from it unable to verify anything."""
+    stand.commit("0.2.0", signers=["daily", "recovery"])
+    stand.release("0.2.0", "--list-change")
+    stand.commit("0.3.0", signers=["recovery", "new"])     # drops the daily key, which would sign it
+    result = stand.run("tag", "0.3.0", "--list-change")
+    assert result.returncode != 0
+    assert "does not hold for `git`" in result.stderr and "Sign a rotation with a key the new list keeps" \
+        in result.stderr
+    assert "SHA256:" in result.stderr and "Signing" not in result.stdout
+    assert git(stand.repo, "tag", "-l", "v0.3.0") == ""
+
+
+def test_the_signing_key_is_read_from_a_private_key_without_its_pub(stand):
+    stand.commit("0.2.0")
+    Path(f"{stand.key('daily')}.pub").unlink()                # ssh-keygen -y derives it
+    assert stand.run("tag", "0.2.0").returncode == 0
+
+
+# ── the chain is the launchers' ───────────────────────────────────────────
+
+def test_a_stolen_keys_tag_above_a_rotation_is_not_in_the_chain(stand):
+    stand.commit("0.2.0", signers=["daily", "recovery"])
+    stand.release("0.2.0", "--list-change")
+    stand.commit("0.3.0", signers=["recovery", "new"])
+    stand.use_key("recovery")
+    stand.release("0.3.0", "--list-change")
+    stand.commit("0.4.0", push=True)
+    _push_tag_object(stand, "v0.4.0", "HEAD", key="daily")
+    result = stand.run("verify", "0.4.0")
+    assert result.returncode != 0 and "v0.4.0: not in the release chain" in result.stdout
+
+
+def test_a_fork_blocks_the_next_release_until_its_tag_is_gone(stand):
+    floor = stand.commit("0.2.0", signers=["daily", "recovery"])
+    stand.release("0.2.0", "--list-change")
+    stand.commit("0.3.0")
+    stand.release("0.3.0")
+    git(stand.repo, "checkout", "-q", "--detach", floor)
+    stand.commit("0.2.5", push=False)
+    _push_tag_object(stand, "v0.2.5", "HEAD", key="daily")     # a second signed continuation of v0.2.0
+    git(stand.repo, "checkout", "-q", "main")
+    stand.commit("0.4.0")
+    result = stand.run("tag", "0.4.0")
+    assert result.returncode != 0 and "the release chain forks at v0.2.0" in result.stderr
+    assert stand.run("verify", "0.3.0").returncode != 0            # launchers at v0.2.0 take neither
+    git(stand.repo, "push", "-q", "origin", ":refs/tags/v0.2.5")
+    assert stand.run("tag", "0.4.0").returncode == 0
+
+
+# ── a new root: every key lost ────────────────────────────────────────────
+
+def _new_root(stand):
+    stand.commit("0.2.0", signers=["daily", "recovery"])
+    stand.release("0.2.0", "--list-change")
+    stand.commit("0.3.0", signers=["daily2", "recovery2"])
+    stand.use_key("daily2")
+
+
+def test_new_keys_without_new_root_are_refused(stand):
+    _new_root(stand)
+    result = stand.run("tag", "0.3.0", "--list-change")
+    assert result.returncode != 0 and "not one of the keys above" in result.stderr
+
+
+def test_a_new_root_needs_its_confirmation_typed(stand):
+    _new_root(stand)
+    floor = git(stand.repo, "config", "--get", "sautium.releaseFloor")
+    for typed in (None, "yes\n", "new root v0.3\n"):
+        result = stand.run("tag", "0.3.0", "--new-root", typed=typed)
+        assert result.returncode != 0 and "not confirmed — nothing was signed" in result.stderr
+        assert "stays on the release it has" in result.stdout and "daily2" in result.stdout
+    assert git(stand.repo, "tag") == "v0.2.0"
+    assert git(stand.repo, "config", "--get", "sautium.releaseFloor") == floor
+
+
+def test_a_new_root_becomes_the_floor_and_prints_the_notice(stand):
+    _new_root(stand)
+    root = stand.commit("0.3.0", signers=["daily2", "recovery2"])
+    result = stand.run("tag", "0.3.0", "--new-root", typed="new root v0.3.0\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+    oid = git(stand.repo, "rev-parse", "refs/tags/v0.3.0")
+    assert git(stand.repo, "config", "--get", "sautium.releaseFloor") == oid
+    assert "starts a new chain of signed releases" in result.stdout and oid in result.stdout
+    git(stand.repo, "push", "-q", "origin", "refs/tags/v0.3.0")
+    assert stand.run("verify", "0.3.0", "--commit", root).returncode == 0
+    old = stand.run("verify", "0.2.0")
+    assert old.returncode != 0 and "not in the release chain" in old.stderr
+    stand.commit("0.4.0")
+    assert stand.run("tag", "0.4.0").returncode == 0                # the new chain goes on
+    stand.use_key("daily")
+    assert stand.run("tag", "0.4.0").returncode != 0
+
+
+def test_release_publish_accepts_a_new_roots_installers(stand, tmp_path):
+    _new_root(stand)
+    stand.run("tag", "0.3.0", "--new-root", typed="new root v0.3.0\n")
+    git(stand.repo, "push", "-q", "origin", "refs/tags/v0.3.0")
+    installer = tmp_path / "Sautium-0.3.0-x64.exe"
+    installer.write_bytes(b"an installer")
+    # The tree the installers were built from carries the script and the
+    # launcher's verifier; here they stand beside the stand's tracked files.
+    (stand.repo / "scripts").mkdir()
+    shutil.copy2(SCRIPT, stand.repo / "scripts" / "release.py")
+    for name in ("__init__.py", "updater.py", "release_verify.py"):
+        shutil.copy2(SCRIPT.parent.parent / "desktop" / name, stand.repo / "desktop" / name)
+    publish = SCRIPT.parent / "release-publish.sh"
+    result = subprocess.run(["bash", str(publish), "--tree", str(stand.repo), "--dry-run", str(installer)],
+                            capture_output=True, text=True, env={**os.environ, "PYTHON": sys.executable,
+                                                                  "DIST_DIR": str(tmp_path / "dist")})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "a real run stops here" not in result.stdout
+
+
+def test_a_new_root_is_above_the_old_chain(stand):
+    _new_root(stand)
+    stand.commit("0.2.0", signers=["daily2", "recovery2"])
+    result = stand.run("tag", "0.2.0", "--new-root", typed="new root v0.2.0\n")
+    assert result.returncode != 0 and "origin already has a tag v0.2.0" in result.stderr
+    stand.commit("0.1.9", signers=["daily2", "recovery2"])
+    result = stand.run("tag", "0.1.9", "--new-root", typed="new root v0.1.9\n")
+    assert result.returncode != 0 and "not above v0.2.0, the old chain's last release" in result.stderr
+
+
+# ── the installers' SHA256SUMS ────────────────────────────────────────────
+
+def _sums(stand, tmp_path, signers_text):
+    stand.commit("0.2.0", raw_signers=signers_text)
+    sums = tmp_path / "SHA256SUMS.txt"
+    sums.write_text("ab12  Sautium-0.2.0-x64.exe\n")
+    return sums
+
+
+def test_the_sums_are_signed_for_the_files_namespace_and_verify_with_ssh_keygen(stand, tmp_path):
+    lines = stand.line("daily", "git,sautium-file") + "\n" + stand.line("recovery") + "\n"
+    sums = _sums(stand, tmp_path, lines)
+    result = stand.run("sign-file", str(sums))
+    assert result.returncode == 0, result.stdout + result.stderr
+    signers = stand.repo / "desktop" / "release_signers"
+    verify = ["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", "daily", "-n", "sautium-file",
+              "-s", f"{sums}.sig"]
+    good = subprocess.run(verify, stdin=sums.open("rb"), capture_output=True, text=True)
+    assert good.returncode == 0 and 'Good "sautium-file" signature for daily' in good.stdout, good.stderr
+    as_git = subprocess.run(verify[:7] + ["git"] + verify[8:], stdin=sums.open("rb"), capture_output=True)
+    assert as_git.returncode != 0                               # never a release's signature
+
+
+def test_the_recovery_key_signs_no_sums(stand, tmp_path):
+    lines = stand.line("daily", "git,sautium-file") + "\n" + stand.line("recovery") + "\n"
+    sums = _sums(stand, tmp_path, lines)
+    stand.use_key("recovery")
+    result = stand.run("sign-file", str(sums))
+    assert result.returncode != 0 and "does not hold for `sautium-file`" in result.stderr
+    assert not Path(f"{sums}.sig").exists()
 
 
 def test_a_release_off_the_last_ones_history_is_refused(stand):

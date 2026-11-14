@@ -278,6 +278,21 @@ The backend is also reachable from phones/tablets on the same Wi-Fi at
 > a release, the app checks its signature against the keys it already trusts.
 > A release that rewrites history is never installed as an update: the app
 > says so, and reinstalling Sautium moves to it.
+>
+> **Checking a download.** Each release publishes `SHA256SUMS.txt` and its
+> signature by the release key, `SHA256SUMS.txt.sig`. Save this line as
+> `release_signers` (it is also `desktop/release_signers` in the repository,
+> and on the site's download page):
+>
+>     release namespaces="git,sautium-file" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAINFPSGUPTG3nUxaoM63ZGdZq/mwg4XMbkS8AEaXhD1wiAAAAE3NzaDpzYXV0aXVtLXJlbGVhc2U=
+>
+> Then, beside the downloaded files (on Windows in `cmd`):
+>
+>     ssh-keygen -Y verify -f release_signers -I release -n sautium-file -s SHA256SUMS.txt.sig < SHA256SUMS.txt
+>
+> It answers `Good "sautium-file" signature for release`, and
+> `sha256sum -c SHA256SUMS.txt --ignore-missing` then checks the installer
+> itself (`docs/RELEASING.md` § The installers' checksums).
 
 The launcher runs the whole stack without Docker — PostgreSQL, backend, P2P and
 the account system. From a checkout it is `python -m desktop`; for other people
@@ -330,7 +345,8 @@ Since 2026-09-21 a build is published by `scripts/release-publish.sh`. Since
 2026-11-12 the signed tag comes first (`scripts/release.py tag`, pushed by
 the maintainer, `docs/RELEASING.md`), and the script stops without it. It
 creates the GitHub release `v<version>` (marked latest), uploads the
-installers with `SHA256SUMS.txt` and a `downloads.json` describing them
+installers with `SHA256SUMS.txt`, its signature by the release key
+(`SHA256SUMS.txt.sig`) and a `downloads.json` describing them
 (version, commit, per-asset URL, sha256 and size — what the website's
 download page reads from `releases/latest/download/downloads.json`), then
 re-downloads every asset over the public URL and verifies it.

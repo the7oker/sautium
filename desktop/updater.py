@@ -3,15 +3,24 @@ Git-based auto-updater for Sautium: a launcher takes RELEASES — signed
 annotated tags `v<major>.<minor>.<patch>` — never the tip of a branch.
 
 A push to `main` reaches no installed launcher without the release key's
-signature. The updater fetches origin's `v*` tags, verifies each with the
+signature. The updater fetches origin's `v*` tags and verifies them with the
 launcher's own Python (desktop/release_verify.py — the Windows installer's
-MinGit has no `ssh-keygen`) against the allowed signers of the INSTALLED tree
-(`HEAD:desktop/release_signers`, never a fetched one; a release may change the
-list, which then governs the next update), and offers the highest version
-whose commit descends from HEAD. A signed release that does not descend — a
-rewritten history — is refused, and only a reinstall moves to it; nothing is
-purged. The bootstraps' first clone takes the newest release that verifies
-against the installer's own list (`install-release`, below).
+MinGit has no `ssh-keygen`) along the release CHAIN (`walk_chain`): upward
+from the installed tree, each release against the list of the release before
+it — the installed tree's own list (`HEAD:desktop/release_signers`) only for
+the first step, never a fetched tree's for its own release. What it offers is
+the highest release so reached that the installed list verifies as well: a
+rotation revokes the key it drops for every launcher below it, which takes
+the rotating release first and the new key's releases at its next check. A
+signed release off HEAD's history — a rewritten one — is refused, and only a
+reinstall moves to it; two signed releases that continue the same one apart
+are a fork, and nothing above their common release is taken. Nothing is
+purged. The bootstraps' first clone walks the chain from the installer's own
+release and list (`install-release`, below).
+
+scripts/release.py, the maintainer's tool, walks the chain with the same
+`walk_chain` from its recorded floor, so it can never accept a release
+launchers refuse, nor refuse one they take.
 
 After update: run pending DB migrations, restart backend+tracker. Dependency
 installs are not done here — see perform_update.
@@ -86,19 +95,25 @@ class Survey:
 
     `installed`: the highest signed release HEAD already contains (None
     before the first one). `held`: the highest release tag HEAD contains
-    whose signer HEAD's own list no longer names (a rotation's normal state:
-    the release that brought the list was signed by the key before) — said
-    as "up to date", never a refusal, never a floor for the walk. `offered`: the highest signed release above it
-    whose commit descends from HEAD — what an update moves to. `rewrite`: a
-    signed release above both that does not descend (a rewritten history,
-    which only a reinstall reaches). `refused`: `v*` tags above all of them
-    this checkout does not trust — unsigned, signed by a key the installed
-    list lacks, renamed, broken — as (tag, why)."""
+    whose signer HEAD's own list does not name (a release made before
+    scripts/release.py refused one whose list drops its signer, or a
+    stranger's tag on an old commit) — said as "up to date", never a
+    refusal, never a floor for the walk. `offered`: the highest release the
+    chain reaches above it that the installed list verifies too — what an
+    update moves to. `rewrite`: a signed release above it that does not
+    descend from HEAD (a rewritten history, which only a reinstall reaches).
+    `refused`: `v*` tags above all of them this checkout does not take —
+    unsigned, signed by a key their place in the chain does not list,
+    renamed, broken, a fork — as (tag, why), the newest first. `fork`: when
+    the newest refusal is a fork, (that tag, the release it competes with):
+    two signed continuations of the same release, of which the launcher
+    cannot tell the owner's."""
     installed: Optional[Release] = None
     offered: Optional[Release] = None
     rewrite: Optional[Release] = None
     refused: List[Tuple[str, str]] = field(default_factory=list)
     held: Optional[str] = None
+    fork: Optional[Tuple[str, str]] = None
 
 
 # The update dialog's words (desktop/launcher.py shows them) — drafts for
@@ -117,9 +132,12 @@ def survey_words(survey: Survey) -> Tuple[str, List[str]]:
         paragraphs.append(
             f"{survey.rewrite.label} rewrites the history this copy was installed from, so it "
             "cannot be installed as an update. Reinstalling Sautium moves to it.")
-    # A refusal above an offer is said in the log only: in a rotation the next
-    # release, signed by the key this one adds, sits there until this one is in.
-    if survey.refused and not survey.offered:
+    # A refusal above an offer is said in the log only (D5).
+    if survey.fork and not survey.offered:
+        paragraphs.append(
+            f"Releases {survey.fork[0]} and {survey.fork[1]} continue the same release in two "
+            "different ways, so neither was installed.")
+    elif survey.refused and not survey.offered:
         paragraphs.append(
             f"A release tagged {survey.refused[0][0]} does not carry a signature this copy "
             "trusts, so it was not installed.")
@@ -216,6 +234,16 @@ def installed_signers(cwd: Optional[str] = None) -> List[release_verify.Signer]:
         return []
     return release_verify.parse_allowed_signers(
         result.stdout.decode("utf-8", "replace"), f"HEAD:{SIGNERS_PATH}")
+
+
+def signers_at(commit: str, cwd: Optional[str] = None) -> List[release_verify.Signer]:
+    """The allowed signers a release's own tree carries — the keys that may
+    sign the release after it."""
+    result = _git_bytes(["show", f"{commit}:{SIGNERS_PATH}"], cwd)
+    if result.returncode != 0:
+        return []
+    return release_verify.parse_allowed_signers(
+        result.stdout.decode("utf-8", "replace"), f"{commit[:12]}:{SIGNERS_PATH}")
 
 
 def _objects(refs: List[str], git: List[str], cwd: Optional[str]) -> dict:
@@ -356,67 +384,156 @@ def _tagged_commit(raw: bytes) -> Optional[str]:
     return headers["object"] if headers["type"] == "commit" else None
 
 
-def survey(signers: List[release_verify.Signer], head: Optional[str],
-           cwd: Optional[str] = None) -> Survey:
-    """Judge origin's releases against `signers`, the newest version first;
-    UpdateError when origin cannot be read.
+@dataclass(frozen=True)
+class Link:
+    """A step of the release chain: a release, or the walk's start (HEAD, an
+    installer's list, the maintainer's floor), with the list its tree carries
+    — the keys that may sign the next step. A start with no commit (a first
+    install, a root derived from a list) is continued by whatever verifies
+    first."""
+    release: Optional[Release]
+    commit: Optional[str]
+    signers: Tuple[release_verify.Signer, ...]
+    trusted_at_start: bool = False      # the start's own list verifies it too
 
-    With a `head`, the walk ends at the first signed release HEAD contains:
-    nothing at or below the installed one can be an update, so a version is
-    never taken backwards. Without one — a first install — the newest signed
-    release is the one offered."""
-    remote = _remote_releases(cwd)
+    @property
+    def label(self) -> str:
+        return self.release.name if self.release else "the release this copy holds"
+
+
+@dataclass
+class Chain:
+    """What `walk_chain` reached. `links[0]` is the start; `cut` is the last
+    link an offer may come from when a fork stands at it; each refusal and
+    fork is (version, tag, why); `rewrites` are releases a link's list
+    verifies that descend from no link — off the start's history."""
+    links: List[Link]
+    cut: Optional[int] = None
+    refused: List[Tuple[Tuple[int, int, int], str, str]] = field(default_factory=list)
+    forks: List[Tuple[Tuple[int, int, int], str, str, str]] = field(default_factory=list)
+    rewrites: List[Release] = field(default_factory=list)
+
+    def reach(self) -> List[Link]:
+        """The links above the start that an offer may come from."""
+        return self.links[1:None if self.cut is None else self.cut + 1]
+
+
+def walk_chain(start: Link, candidates: List[Tuple[Tuple[int, int, int], str, str, bytes]],
+               cwd: Optional[str] = None,
+               fetch: Optional[Callable[[str, str], bool]] = None) -> Chain:
+    """Walk origin's releases upward from `start`, the oldest version first —
+    the one rule launchers and scripts/release.py both follow.
+
+    `candidates` are (version, tag, tag object id, the tag object) above the
+    start. Each is verified against the list of the newest link it descends
+    from, never against the start's alone: a key a release drops can sign
+    nothing above that release, for a launcher still below it as well. A
+    release that verifies there, on the newest link, continues the chain; one
+    that verifies there on an OLDER link is a fork — two signed continuations
+    of that link, of which no launcher can tell the owner's (a thief's can
+    take any version, a lower one too) — and nothing above that link may be
+    offered (`cut`) until one of the two tags is gone. A release no link's
+    list verifies is never fetched; one that verifies against some link's is
+    fetched by `fetch(tag, object id)` (False: origin's tag moved meanwhile)
+    before its history is read."""
+    chain = Chain([start])
+    for version, name, oid, raw in sorted(candidates):
+        links = chain.links
+        tags, errors = {}, {}
+        for at, link in enumerate(links):
+            try:
+                tags[at] = release_verify.verify_tag(raw, name, list(link.signers))
+            except release_verify.VerifyError as exc:
+                errors[at] = str(exc)
+        if not tags:
+            chain.refused.append((version, name, errors[len(links) - 1]))
+            continue
+        commit = next(iter(tags.values())).commit
+        if fetch is not None and not fetch(name, oid):
+            chain.refused.append((version, name, "it moved on origin during the check"))
+            continue
+        on, unreadable = None, False
+        for at in range(len(links) - 1, -1, -1):
+            descends = True if links[at].commit is None else _ancestry(links[at].commit, commit, cwd)
+            if descends is None:
+                unreadable = True
+                break
+            if descends:
+                on = at
+                break
+        release = Release(name, version, commit)
+        if unreadable:
+            chain.refused.append((version, name, "its commit cannot be read"))
+        elif on is None:
+            chain.rewrites.append(release)
+        elif on not in tags:
+            chain.refused.append((version, name, errors[on]))
+        elif on == len(links) - 1:
+            links.append(Link(release, commit, tuple(signers_at(commit, cwd)), 0 in tags))
+        else:
+            other = links[on + 1].release.name
+            chain.forks.append((version, name, other,
+                                f"it does not descend from {other}, which continues {links[on].label} too"))
+            chain.cut = on if chain.cut is None else min(chain.cut, on)
+    return chain
+
+
+def survey(signers: List[release_verify.Signer], head: Optional[str],
+           cwd: Optional[str] = None, min_version: Tuple[int, int, int] = (0, 0, 0)) -> Survey:
+    """Judge origin's releases for a checkout at `head` that trusts `signers`
+    (its own list); UpdateError when origin cannot be read.
+
+    With a `head`, the walk starts there, above the first signed release HEAD
+    contains: nothing at or below the installed one can be an update, so a
+    version is never taken backwards. Without one — an installer's first
+    clone — it starts at `signers` alone and at `min_version`, the
+    installer's own release."""
+    remote = [entry for entry in _remote_releases(cwd) if entry[0] >= min_version]
     annotated = [name for _, name, signed in remote if signed]
     objects = _probe(annotated, cwd) if annotated else {}
-    found, kept, history = Survey(), set(), None
-    for version, name, signed in remote:
-        why, tag = None, None
+    found, refused, candidates = Survey(), [], []
+    history = _history(head, cwd) if head else set()
+    for version, name, signed in remote:            # the newest first
         if not signed:
-            why = "a lightweight tag, not a signed release"
-        else:
-            oid, kind, raw = objects[name]
-            if raw is None:
-                why = f"a {kind} too large to be a release tag"
-            elif kind != "tag":
-                why = f"a tag of a {kind}, not a signed release"
-            else:
-                try:
-                    tag = release_verify.verify_tag(raw, name, signers)
-                except release_verify.VerifyError as exc:
-                    why = str(exc)
-                    commit = _tagged_commit(raw)
-                    if head and commit:
-                        if history is None:
-                            history = _history(head, cwd)
-                        if commit in history:
-                            logger.debug(f"tag {name} held: HEAD contains it, its signature does not "
-                                         f"verify here ({why})")
-                            found.held = found.held or name
-                            continue
-        if why is None and not _fetch_release(name, oid, cwd):
-            why = "it moved on origin during the check"
-        if why is None:
-            kept.add(name)
-            release = Release(name, version, tag.commit)
-            if head is None:
-                found.offered = release
-                break
-            contained = _ancestry(tag.commit, head, cwd)
-            if contained:
-                found.installed = release
-                break
-            descends = _ancestry(head, tag.commit, cwd) if contained is False else None
-            if descends:
-                found.offered = found.offered or release
-            elif descends is False:
-                if not (found.offered or found.rewrite):
-                    found.rewrite = release
-            else:
-                why = "its commit cannot be read"
-        if why is not None and not (found.offered or found.rewrite):
-            logger.debug(f"tag {name} refused: {why}")
-            found.refused.append((name, why))
-    _forget_releases_but(kept, cwd)
+            refused.append((version, name, "a lightweight tag, not a signed release"))
+            continue
+        oid, kind, raw = objects[name]
+        if raw is None:
+            refused.append((version, name, f"a {kind} too large to be a release tag"))
+            continue
+        if kind != "tag":
+            refused.append((version, name, f"a tag of a {kind}, not a signed release"))
+            continue
+        if _tagged_commit(raw) in history:
+            try:
+                tag = release_verify.verify_tag(raw, name, signers)
+            except release_verify.VerifyError as exc:
+                logger.debug(f"tag {name} held: HEAD contains it, its signature does not verify here ({exc})")
+                found.held = found.held or name
+                continue
+            found.installed = Release(name, version, tag.commit)
+            break
+        candidates.append((version, name, oid, raw))
+
+    chain = walk_chain(Link(None, head, tuple(signers)), candidates, cwd,
+                       fetch=lambda name, oid: _fetch_release(name, oid, cwd))
+    trusted = [link.release for link in chain.reach() if link.trusted_at_start]
+    found.offered = trusted[-1] if trusted else None
+    above = found.offered.version if found.offered else (0, 0, 0)
+    rewrites = [release for release in chain.rewrites if release.version > above]
+    found.rewrite = max(rewrites, key=lambda release: release.version) if rewrites else None
+    if found.rewrite:
+        above = found.rewrite.version
+    forks = {name: other for _, name, other, _ in chain.forks}
+    refused += chain.refused + [(version, name, why) for version, name, _, why in chain.forks]
+    found.refused = [(name, why) for version, name, why in sorted(refused, reverse=True) if version > above]
+    if found.refused and found.refused[0][0] in forks:
+        found.fork = (found.refused[0][0], forks[found.refused[0][0]])
+    _forget_releases_but({link.release.name for link in chain.links[1:]} |
+                         {release.name for release in chain.rewrites}, cwd)
+    for _, name, other, _ in chain.forks:
+        logger.warning(f"release tags {name} and {other} fork: nothing above what both continue is taken "
+                       "until one of them is gone from origin")
     if found.refused:
         name, why = found.refused[0]
         logger.warning(f"{len(found.refused)} release tag(s) refused; the newest, {name}: {why}")
@@ -648,8 +765,9 @@ def installer_version() -> Tuple[int, int, int]:
 
 def install_release(app_dir: str, signers_file: str) -> Optional[Release]:
     """What an installer's bootstrap checks out (desktop/windows/bootstrap.py,
-    desktop/macos/bootstrap.py): the newest release that verifies against the
-    installer's own list, in `app_dir` — a repository with its origin set.
+    desktop/macos/bootstrap.py), in `app_dir` — a repository with its origin
+    set: the newest release the chain reaches from the installer's own
+    release (its stated version) and list that this list also verifies.
 
     A first install has no HEAD there (files of an earlier attempt or the
     bundled copy may lie in it). A reinstall over a clone does, and it moves
@@ -666,14 +784,14 @@ def install_release(app_dir: str, signers_file: str) -> Optional[Release]:
     signers = release_verify.parse_allowed_signers(
         Path(signers_file).read_text(encoding="utf-8"), signers_file)
     head = _rev("HEAD", app_dir)
+    mine = installer_version()
     if head:
         held = _stated_version(_git_cmd(["show", "HEAD:desktop/build_common.py"], app_dir).stdout)
-        mine = installer_version()
         if mine <= held:
             logger.info(f"this installer ({'.'.join(map(str, mine))}) is not newer than the tree "
                         f"({'.'.join(map(str, held))}) — the tree is left to its own updater")
             return None
-    release = survey(signers, None, app_dir).offered
+    release = survey(signers, None, app_dir, min_version=mine).offered
     if release is None:
         logger.warning("origin holds no release that verifies against the installer's signers")
         return None

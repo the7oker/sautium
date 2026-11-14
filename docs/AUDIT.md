@@ -187,12 +187,18 @@ F. Support diagnostics. The claim: the node sends content-free event
 G. Payload provenance of a published installer (skip if you have none).
    0. The release tag: `python3 scripts/release.py verify <tag>` (needs the
       `cryptography` package) says whether the tag is in the release chain:
-      signed, with the launcher's own verifier, by a key on the list of the
-      release before it, the chain rooted at the first key list `main`
-      carried (docs/RELEASING.md).
-   1. Integrity: download the installer and SHA256SUMS.txt from
-      https://github.com/the7oker/sautium/releases/tag/<tag> and run
-      `sha256sum -c SHA256SUMS.txt --ignore-missing` beside them.
+      signed, with the launcher's own verifier and its own walk of the chain,
+      by a key on the list of the release before it, the chain rooted at the
+      first key list `main` carried — or, after a new root, at the tag object
+      its public notice names, set with `git config sautium.releaseFloor
+      <id>` (docs/RELEASING.md).
+   1. Integrity: download the installer, SHA256SUMS.txt and
+      SHA256SUMS.txt.sig from
+      https://github.com/the7oker/sautium/releases/tag/<tag>; check the list's
+      signature by the release key with `desktop/release_signers` of the tag
+      beside them, `ssh-keygen -Y verify -f release_signers -I release -n
+      sautium-file -s SHA256SUMS.txt.sig < SHA256SUMS.txt`, then run
+      `sha256sum -c SHA256SUMS.txt --ignore-missing`.
    2. Provenance: on the checked-out tag, stage the payload without building
       an installer —
         python3 -c "from pathlib import Path; from desktop.build_common import stage_payload; print(stage_payload(Path('/tmp/sautium-payload')))"
@@ -285,10 +291,13 @@ and by design; the report should list them as matches, not discrepancies:
 - A **third public pin** ships beside the master's: the birth authority's
   key (`backend/birth_authority.py`, `desktop/p2p/birth_cert.py`).
 - The updater takes signed release tags only (`docs/RELEASING.md`): an
-  installed app moves to a `v<version>` tag that a key in its own installed
-  `desktop/release_signers` signed, and whose commit descends from what it
-  runs. A push to `main` alone reaches no installed app. The audit is per
-  commit, and a release is the commit its signed tag names.
+  installed app walks the release chain upward from what it runs — each
+  release signed by a key on the list of the release before it, the first by
+  its own installed `desktop/release_signers`, each descending from the one
+  before — and moves to the highest release so reached that its installed
+  list verifies too; two signed continuations of one release are a fork, and
+  nothing above it is taken. A push to `main` alone reaches no installed app.
+  The audit is per commit, and a release is the commit its signed tag names.
 
 Accepted and out of scope, from `SECURITY.md`: an attacker on the LAN who
 holds the account password, or who answers in the node's place on a

@@ -315,6 +315,49 @@ def test_ssh_keygen_verifies_what_the_test_signer_makes(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+CMD = Path("/mnt/c/Windows/System32/cmd.exe")
+WINDOWS_SSH_KEYGEN = Path("/mnt/c/Windows/System32/OpenSSH/ssh-keygen.exe")
+
+
+def _persons_verify_line(where: Path, ssh_keygen: str, sep: str) -> str:
+    """The one line docs/RELEASING.md and the release notes give a person."""
+    return (f"{ssh_keygen} -Y verify -f {where}{sep}release_signers -I release -n sautium-file "
+            f"-s {where}{sep}SHA256SUMS.txt.sig < {where}{sep}SHA256SUMS.txt")
+
+
+@pytest.mark.parametrize("system", ["posix", "windows"])
+def test_the_persons_verify_line_takes_the_sums_signature_and_nothing_else(tmp_path, key, system):
+    """The installers' SHA256SUMS.txt signed by the daily key (a line that
+    allows `git,sautium-file`, as the shipped one): ssh-keygen's own
+    `-Y verify` takes it — Linux's, and Windows' ssh-keygen.exe through
+    cmd.exe — and refuses a changed byte and a recovery key listed for `git`
+    alone."""
+    if system == "posix" and shutil.which("ssh-keygen") is None:
+        pytest.skip("no ssh-keygen")
+    if system == "windows" and not (CMD.exists() and WINDOWS_SSH_KEYGEN.exists()):
+        pytest.skip("no Windows ssh-keygen.exe here")
+    recovery = Key()
+    sums = b"ab12  Sautium-0.2.0-x64.exe\ncd34  Sautium-0.2.0-arm64.dmg\n"
+
+    def verify(listed: str, signed_by: Key, text: bytes) -> subprocess.CompletedProcess:
+        (tmp_path / "release_signers").write_text(listed)
+        (tmp_path / "SHA256SUMS.txt").write_bytes(text)
+        (tmp_path / "SHA256SUMS.txt.sig").write_bytes(signed_by.sign(sums, namespace="sautium-file"))
+        if system == "posix":
+            return subprocess.run(_persons_verify_line(tmp_path, "ssh-keygen", "/"), shell=True,
+                                  capture_output=True, text=True)
+        where = subprocess.run(["wslpath", "-w", str(tmp_path)], capture_output=True, text=True).stdout.strip()
+        return subprocess.run([str(CMD), "/c", _persons_verify_line(where, "ssh-keygen", "\\")], cwd="/mnt/c",
+                              capture_output=True, text=True)
+
+    shipped_form = key.line("release", 'namespaces="git,sautium-file"') + "\n" + recovery.line("recovery") + "\n"
+    good = verify(shipped_form, key, sums)
+    assert good.returncode == 0 and 'Good "sautium-file" signature for release' in good.stdout, good.stderr
+    assert verify(shipped_form, key, flip(sums, 3)).returncode != 0
+    assert verify(key.line("release") + "\n", key, sums).returncode != 0           # listed for `git` only
+    assert verify(shipped_form, recovery, sums).returncode != 0
+
+
 def test_the_shipped_list_holds_the_owners_two_keys_for_git(caplog):
     """desktop/release_signers as it ships: every line parses, both keys are
     allowed for `git`, and they are the keys the owner named (2026-11-11) —
@@ -339,3 +382,14 @@ def test_the_shipped_security_key_is_the_one_that_made_the_fixture():
         (Path(__file__).parent.parent / "desktop" / "release_signers").read_text()) if s.key_type == rv.SK_ED25519)
     listed, message, sig = hardware()
     assert shipped.key_blob == listed[0].key_blob
+
+
+def test_the_published_copies_of_the_daily_keys_line_are_the_shipped_one():
+    """The README and docs/RELEASING.md publish the line a person verifies the
+    installers' checksums with: the very line the launcher ships."""
+    root = Path(__file__).parent.parent
+    shipped = (root / "desktop" / "release_signers").read_text().splitlines()
+    release = next(line for line in shipped if line.startswith("release "))
+    assert " ".join(release.split()[:4]) in (root / "README.md").read_text()
+    releasing = (root / "docs" / "RELEASING.md").read_text()
+    assert release in releasing and next(line for line in shipped if line.startswith("recovery ")) in releasing

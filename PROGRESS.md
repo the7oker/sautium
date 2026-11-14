@@ -2201,6 +2201,38 @@ The short version of the hard-learned lessons:
   then run the payload's own updater on the runtime with `-B`
   (`python -m desktop.updater install-release`). The bootstraps stay
   stdlib-only, and nothing is written into a signed bundle.
+  **Superseded 2026-11-14 by the chain walk** (below): the installed list
+  decides the first step and the offer, not every release.
+- **The chain walk (2026-11-14).** With the installed list alone, a
+  rotation revoked nothing for a launcher below the rotating release: a thief
+  of the dropped key signed a higher tag on top of the rotation, and every
+  launcher still on the old list took it. Now `updater.walk_chain` goes up
+  from HEAD (a first install: from the payload's stated version and its
+  list), oldest version first, and verifies each release against the list of
+  the newest release it descends from; the offer is the highest release so
+  reached that the installed list verifies too, so a rotation takes two
+  updates. `scripts/release.py` walks with the same function from its floor.
+  - **A fork takes nothing above it.** The design's literal rule (a release
+    off the newest one verified so far is refused) depends on the version
+    order, and a thief picks the version: a tag one patch below the rotation,
+    on the history before it, came first and made the owner's rotation the
+    "fork". Two releases that verify on the same release and do not descend
+    one from the other are therefore both left, and nothing above their
+    common release is offered until one tag is gone — a denial of updates,
+    which a push credential gives anyway, never a thief's release installed.
+  - A release no list on the walk verifies is never fetched; one some list
+    verifies is fetched before its history is read (a rotated-out key's tag
+    costs its history once).
+  - `release.py tag` refuses, before the signature, a key the last release's
+    list or the release's own list does not hold (a rotation signed by the key
+    it drops left every installer built from it unable to verify anything),
+    and a forked chain; `tag --new-root` starts a new chain when every key is
+    lost (confirmation typed, the floor moved, the public notice printed).
+  - The installers' `SHA256SUMS.txt` is signed by the daily key under
+    `sautium-file` (its line allows `git,sautium-file`; the recovery key's
+    `git` alone; a tag counts only under `git`), and the person's one
+    `ssh-keygen -Y verify` line is tested on Linux and Windows'
+    `ssh-keygen.exe`.
 - **A release is fetched only after its tag verifies** (review round 1 found
   that the first cut fetched every `v*` tag's whole history at once, and that
   one name the filesystem cannot store, or one that is not UTF-8, failed the
@@ -2223,7 +2255,8 @@ The short version of the hard-learned lessons:
   only `HEAD` sent the probe's partial-clone settings and its shallow
   boundary into the launcher's own repository). Version parts have six
   digits at most, so every release name is one a filesystem stores.
-- **Judged newest version first:**
+- **Judged newest version first** (since 2026-11-14 only down to the installed
+  release; above it the chain walk goes oldest first):
   - the walk stops at the first signed release HEAD contains (the installed
     one), so a version is never taken backwards and nothing below it is
     judged;

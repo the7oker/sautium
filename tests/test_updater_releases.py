@@ -178,7 +178,7 @@ def test_a_release_that_rotates_the_list_governs_the_next(world):
 
     survey = world.check()
     assert survey.offered.name == "v0.2.0"              # v0.3.0 is not yet trusted here
-    assert survey.refused[0][0] == "v0.3.0" and "not listed" in survey.refused[0][1]
+    assert survey.refused == []                         # but it is the chain's next step, no refusal
 
     world.update()
     assert world.check().offered.name == "v0.3.0"
@@ -221,6 +221,161 @@ def test_an_empty_installed_list_takes_nothing(world):
     later = world.commit("v3\n")
     world.tag("v0.3.0", later)
     assert world.check().offered is None
+
+
+# ── the chain: a rotation revokes for every launcher ──────────────────────
+
+def off_main(world, parent: str, app: str) -> str:
+    """A commit on `parent` that main never carries — pushed as a tag only."""
+    tree = git(world.seed, "rev-parse", f"{parent}^{{tree}}")
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=world.seed, input=app, check=True,
+                          capture_output=True, text=True).stdout.strip()
+    index = world.tmp / "side-index"
+    env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+    subprocess.run(["git", "read-tree", tree], cwd=world.seed, env=env, check=True)
+    subprocess.run(["git", "update-index", "--cacheinfo", f"100644,{blob},app.txt"], cwd=world.seed, env=env,
+                   check=True)
+    side = subprocess.run(["git", "write-tree"], cwd=world.seed, env=env, check=True, capture_output=True,
+                          text=True).stdout.strip()
+    index.unlink()
+    return git(world.seed, "commit-tree", side, "-p", parent, "-m", app.strip())
+
+
+@pytest.fixture
+def rotated(world):
+    """r0 = v0.2.0 lists {A, R} and is installed; r1 = v0.3.0 rotates the
+    list to {B, R}, signed by R: A is the stolen key."""
+    a, r, b = world.key, Key(), Key()
+    r0 = world.commit("r0\n", signers=[a, r])
+    world.tag("v0.2.0", r0)
+    world.update()
+    r1 = world.commit("r1\n", signers=[b, r])
+    world.tag("v0.3.0", r1, key=r)
+    return world, a, r, b, r0, r1
+
+
+def test_a_stolen_keys_tag_on_top_of_a_rotation_is_refused_below_it(rotated):
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.4.0", world.commit("thief\n"), key=a)      # on r1; A is in the installed list
+    survey = world.check()
+    assert survey.offered == updater.Release("v0.3.0", (0, 3, 0), r1)
+    assert survey.refused[0][0] == "v0.4.0" and "not listed" in survey.refused[0][1]
+    world.update()
+    assert world.head() == r1
+    assert world.check().offered is None
+
+
+def test_a_stolen_keys_tag_beside_a_rotation_is_a_fork_and_nothing_above_r0_is_taken(rotated):
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.4.0", off_main(world, r0, "thief\n"), key=a)
+    survey = world.check()
+    assert survey.offered is None
+    assert survey.refused[0][0] == "v0.4.0" and "does not descend from v0.3.0" in survey.refused[0][1]
+    assert survey.fork == ("v0.4.0", "v0.3.0")
+    assert "Releases v0.4.0 and v0.3.0 continue the same release" in updater.survey_words(survey)[1][-1]
+    old, release, error, _ = world.update()
+    assert release is None and world.head() == r0
+    git(world.seed, "push", "-q", "origin", ":refs/tags/v0.4.0")      # the owner deletes it
+    assert world.check().offered.name == "v0.3.0"
+
+
+def test_a_stolen_keys_lower_version_beside_a_rotation_takes_nothing_either(rotated):
+    """The walk goes up by version, and a thief picks any version: one
+    below the rotation, on r0, would come first and make the owner's r1 the
+    fork. Two signed continuations of one release take neither, whatever
+    their versions."""
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.2.5", off_main(world, r0, "thief\n"), key=a)
+    survey = world.check()
+    assert survey.offered is None
+    assert survey.fork == ("v0.3.0", "v0.2.5")
+
+
+def test_a_launcher_below_a_rotation_takes_it_then_the_new_keys_release(rotated):
+    world, a, r, b, r0, r1 = rotated
+    r2 = world.commit("r2\n")
+    world.tag("v0.4.0", r2, key=b)
+    survey = world.check()
+    assert (survey.offered.name, survey.refused) == ("v0.3.0", [])
+    world.update()
+    assert world.check().offered.name == "v0.4.0"
+    world.update()
+    assert world.head() == r2
+
+
+def test_two_rotations_are_walked_in_one_check(rotated):
+    world, a, r, b, r0, r1 = rotated
+    c = Key()
+    r2 = world.commit("r2\n", signers=[c, r])
+    world.tag("v0.4.0", r2, key=r)
+    r3 = world.commit("r3\n")
+    world.tag("v0.5.0", r3, key=c)
+    world.tag("v0.6.0", world.commit("thief a\n"), key=a)      # rotated out at r1
+    world.tag("v0.7.0", world.commit("thief b\n"), key=b)      # rotated out at r2
+    survey = world.check()
+    assert survey.offered.name == "v0.4.0"                        # both rotations at once: R signed them
+    assert [name for name, _ in survey.refused] == ["v0.7.0", "v0.6.0"]
+    world.update()
+    assert world.check().offered.name == "v0.5.0"
+    world.update()
+    assert (world.head(), world.check().offered) == (r3, None)
+
+
+def test_a_key_the_installed_list_holds_is_refused_where_its_predecessor_dropped_it(rotated):
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.4.0", world.commit("r2\n"), key=b)            # B: not in the installed list
+    world.tag("v0.5.0", world.commit("t\n"), key=a)             # A: in it, not in r2's
+    survey = world.check()
+    assert survey.offered.name == "v0.3.0"
+    assert survey.refused == [("v0.5.0", survey.refused[0][1])] and "not listed" in survey.refused[0][1]
+
+
+def test_a_first_install_walks_the_chain_from_the_installers_release(world, monkeypatch):
+    a, r, b = world.key, Key(), Key()
+    r0 = world.commit("r0\n", signers=[a, r], version="0.2.0")
+    world.tag("v0.2.0", r0)
+    r1 = world.commit("r1\n", signers=[b, r], version="0.3.0")
+    world.tag("v0.3.0", r1, key=r)
+    world.tag("v0.9.0", off_main(world, r1, "thief\n"), key=a)  # the payload's list holds A
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 2, 0))
+    app, _ = _fresh(world, "app")
+    assert updater.install_release(str(app), _payload_list(world, a, r)).name == "v0.3.0"
+    assert git(app, "rev-parse", "HEAD") == r1
+    r2 = world.commit("r2\n", version="0.4.0")
+    world.tag("v0.4.0", r2, key=b)
+    assert world.check(app).offered.name == "v0.4.0"
+
+
+def test_a_first_install_never_starts_below_the_installers_release(world, monkeypatch):
+    a, r = world.key, Key()
+    world.tag("v0.2.0", world.commit("r0\n", signers=[a, r], version="0.2.0"))
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 0))
+    app, _ = _fresh(world, "app")
+    assert updater.install_release(str(app), _payload_list(world, a, r)) is None
+
+
+def test_a_new_root_is_no_update_for_the_old_chain_and_its_installer_moves_on(world, monkeypatch):
+    """Both keys lost: a release signed by new keys starts a new chain. An
+    installed launcher stays where it is; an installer built at the new root
+    — a first install or one over the old clone — follows the new chain."""
+    a, r = world.key, Key()
+    r0 = world.commit("r0\n", signers=[a, r], version="0.2.0")
+    world.tag("v0.2.0", r0)
+    world.update()
+    n, r2 = Key(sk=True), Key()
+    world.tag("v0.3.0", world.commit("new root\n", signers=[n, r2], version="0.3.0"), key=n)
+    n1 = world.commit("n1\n", version="0.4.0")
+    world.tag("v0.4.0", n1, key=n)
+    survey = world.check()
+    assert (survey.installed.name, survey.offered, survey.rewrite) == ("v0.2.0", None, None)
+    assert [name for name, _ in survey.refused] == ["v0.4.0", "v0.3.0"]
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 0))
+    app, _ = _fresh(world, "app")
+    assert updater.install_release(str(app), _payload_list(world, n, r2)).name == "v0.4.0"
+    assert updater.install_release(str(world.managed), _payload_list(world, n, r2)).name == "v0.4.0"
+    assert world.head() == n1
+    world.tag("v0.5.0", world.commit("n2\n", version="0.5.0"), key=n)
+    assert world.check().offered.name == "v0.5.0"
 
 
 # ── what is refused ───────────────────────────────────────────────────────
