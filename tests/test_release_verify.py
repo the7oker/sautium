@@ -135,6 +135,25 @@ def test_a_listed_key_is_refused_outside_its_namespaces(key):
         rv.verify_tag(raw, "v0.2.0", signers(key.line(namespaces='namespaces="sautium-file"')))
 
 
+def test_a_comma_list_of_namespaces_allows_each_and_a_tag_verifies_under_git_only(key):
+    listed = signers(key.line(namespaces='namespaces="git,sautium-file"'))
+    assert listed[0].namespaces == ("git", "sautium-file")
+    assert rv.verify_tag(signed_tag_object(key, COMMIT, "v0.2.0"), "v0.2.0", listed).commit == COMMIT
+    message = b"abc  Sautium-0.2.0-x64.exe\n"
+    assert rv.verify(message, key.sign(message, namespace="sautium-file"), listed, "sautium-file")
+    payload = tag_payload(COMMIT, "v0.2.0")
+    with pytest.raises(rv.VerifyError, match="namespace 'sautium-file'"):
+        rv.verify_tag(payload + key.sign(payload, namespace="sautium-file"), "v0.2.0", listed)
+
+
+def test_a_key_listed_for_files_only_signs_no_release(key):
+    listed = signers(key.line(namespaces='namespaces="sautium-file"'))
+    message = b"sums\n"
+    assert rv.verify(message, key.sign(message, namespace="sautium-file"), listed, "sautium-file")
+    with pytest.raises(rv.VerifyError, match="not listed for 'git'"):
+        rv.verify_tag(signed_tag_object(key, COMMIT, "v0.2.0"), "v0.2.0", listed)
+
+
 @pytest.mark.parametrize("flags, missing", [(0x00, "touch"), (0x04, "touch"), (0x01, "PIN")])
 def test_a_security_key_signature_needs_a_touch_and_the_pin(flags, missing):
     key = Key(sk=True)
@@ -299,7 +318,9 @@ def test_ssh_keygen_verifies_what_the_test_signer_makes(tmp_path):
 def test_the_shipped_list_holds_the_owners_two_keys_for_git(caplog):
     """desktop/release_signers as it ships: every line parses, both keys are
     allowed for `git`, and they are the keys the owner named (2026-11-11) —
-    the security key's and the recovery key's fingerprints."""
+    the security key's and the recovery key's fingerprints. The daily key also
+    signs the installers' SHA256SUMS (`sautium-file`, the owner 2026-11-14);
+    the recovery key signs nothing but a rotation."""
     import hashlib
     text = (Path(__file__).parent.parent / "desktop" / "release_signers").read_text()
     listed = rv.parse_allowed_signers(text, "shipped")
@@ -308,7 +329,8 @@ def test_the_shipped_list_holds_the_owners_two_keys_for_git(caplog):
                     for s in listed}
     assert fingerprints == {("release",): "VfUGpBDGFCxAw2J4n8WNeFJj/LcrTac5Zgp73egmpqU",
                             ("recovery",): "a6UW2+JUmY9Ak8b0u62XJchKL3yrPj7D/mHb/PAUCrY"}
-    assert all(s.namespaces == ("git",) for s in listed)
+    assert {s.principals: s.namespaces for s in listed} == {("release",): ("git", "sautium-file"),
+                                                           ("recovery",): ("git",)}
     assert [s.key_type for s in listed] == [rv.SK_ED25519, rv.ED25519]
 
 
