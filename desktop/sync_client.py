@@ -359,6 +359,11 @@ def answer_to(result: dict, asked: set) -> dict:
 HOLDINGS_MAX_AGE_S = 15 * 60
 
 
+class SharingOff(Exception):
+    """The owner turned P2P sharing off while a pull went on: nothing more is
+    asked of the peer."""
+
+
 class SyncClient:
     """Synchronizes enrichment data from a remote source into local DB."""
 
@@ -372,6 +377,7 @@ class SyncClient:
         deliverer: Optional[str] = None,
         carried: Optional[Callable[[dict, str, str], None]] = None,
         run_cache: Optional[dict] = None,
+        sharing_enabled: Callable[[], bool] = lambda: True,
     ):
         # api_client is None on the receiving side of a push: the payload
         # arrives instead of being fetched, but it goes through the same
@@ -394,6 +400,10 @@ class SyncClient:
         # by the broader test.
         self.run_cache = run_cache if run_cache is not None else {}
         self._conn: Optional[psycopg2.extensions.connection] = None
+        # The walk's "P2P sharing" switch, read before every request a pull
+        # makes (_ask): turned off mid-session, nothing more is asked. On
+        # where nothing is asked — a push or a bundle arriving.
+        self._sharing_enabled = sharing_enabled
         # Filled by run_sync's capability probe; the caller reads it to
         # decide whether this peer can also be pushed to.
         self.peer_capabilities: set[str] = set()
@@ -488,6 +498,9 @@ class SyncClient:
         """
         try:
             return self._run_sync_inner(track_uuids, bulk_track_uuids or [])
+        except SharingOff:
+            self._progress("P2P sharing is off — nothing more is asked of this peer.")
+            return {"error": "sharing_off"}
         finally:
             self._close_conn()
 
@@ -561,8 +574,12 @@ class SyncClient:
         120 s at most — retrying sooner lands inside the same window), else
         after 2 s. A refusal under load is a wait, and a failure is mostly
         transient — a TLS handshake interrupted, an HMAC timestamp drifting
-        in a CPU stall, a keep-alive race —: neither ends the run's step."""
+        in a CPU stall, a keep-alive race —: neither ends the run's step.
+        Every request a pull makes after its probe passes here, so the switch
+        is read here: off, SharingOff ends the pull."""
         for attempt in (1, 2):
+            if not self._sharing_enabled():
+                raise SharingOff()
             answer = ask()
             if answer and key in answer:
                 return answer

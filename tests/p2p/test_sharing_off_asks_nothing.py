@@ -9,7 +9,10 @@ artist tail: a node that does not give does not take.
   their status how many wait and why; turned off mid-run, no further batch
   leaves; a source whose /health says it does not share is no source;
 - both DHT services hold the rare-artist tail while sharing is off and drip
-  it again once it is back.
+  it again once it is back;
+- both slice streams ask one source once a gap, across runs; an artist page
+  opened is asked at once, the first time — a run waiting out the pace gives
+  way to it.
 
 No network and no database: the stores are stand-ins."""
 
@@ -120,6 +123,70 @@ def test_no_rare_artist_lookup_once_sharing_went_off_during_the_run(monkeypatch)
     assert looked_up == []
 
 
+def test_turned_off_during_a_peer_s_pull_nothing_more_is_asked_and_nothing_carried(monkeypatch):
+    """The owner turns sharing off while a pull goes on: the pull asks the
+    peer nothing more — no further inventory chunk, no further pull batch —
+    and no carry follows it."""
+    from desktop import sync_client as sc
+    sharing = [True]
+    walk = SyncWalk("postgresql://unused", identity=lambda: _Identity(),
+                    sharing_enabled=lambda: sharing[0])
+    pulled = []
+
+    class _Peer:
+        base_url, peer_pubkey, last_health = "https://198.51.100.5:21000", "cd" * 32, {"sharing": True}
+        carry_offer = carry_push = staticmethod(_refuse)
+
+        def get_health(self):
+            return {"capabilities": ["segments", "carry"]}
+
+        def sync_inventory(self, tracks):
+            return dict(sc.EMPTY_INVENTORY, tracks=list(tracks), audio_features=list(tracks))
+
+        def sync_pull(self, endpoint, uuids):
+            pulled.append(list(uuids))
+            sharing[0] = False            # the owner turns sharing off after the first batch
+            return {"items": []}
+
+    monkeypatch.setattr(sc.SyncClient, "_compute_needed",
+                        lambda self, inventory, use_segments: {"audio_features": inventory["audio_features"]})
+
+    async def db(fn, *args):
+        return False                      # peer_refused: not banned
+
+    walk.db = db
+    tracks = [f"t{i}" for i in range(1200)]
+    out = asyncio.run(walk._sync_from_peer("198.51.100.5:21000", (tracks, []),
+                                           lambda msg: None, None, peer_api=_Peer()))
+    assert out == {"error": "sharing_off"}
+    assert len(pulled) == 1               # batches of 500: the second is never asked
+
+
+def test_turned_off_during_a_carry_no_further_part_leaves(monkeypatch):
+    sharing = [True]
+    walk = SyncWalk("postgresql://unused", identity=lambda: _Identity(),
+                    sharing_enabled=lambda: sharing[0])
+    pushed = []
+    monkeypatch.setattr(sync_walk, "_connect", lambda dsn: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(sync_walk.sync_queries, "get_pushable_tracks",
+                        lambda conn, limit: [{"recordings": ["r1"]}])
+    monkeypatch.setattr(sync_walk.sync_queries, "PULL_HANDLERS",
+                        {c: (lambda conn, uuids: {"items": list(uuids)})
+                         for c in ("segments", "audio_features", "instruments", "track_mbids")})
+    monkeypatch.setattr(sync_walk, "push_parts", lambda payload: [payload, payload])
+
+    def carry_push(category, part):
+        pushed.append(category)
+        sharing[0] = False                # turned off after the first part
+        return {"imported": 1}
+
+    api = SimpleNamespace(carry_offer=lambda recordings: {"wanted": {"audio_features": ["u1"],
+                                                                     "track_mbids": ["u1"]}},
+                          carry_push=carry_push)
+    assert walk._push_to_carrier(api, lambda msg: None) == 1
+    assert pushed == ["audio-features"]
+
+
 # ------------------------------------------------------------- the cycles
 
 def _mb_cycle(sharing, published, monkeypatch, pending=("owned one", "gone quiet")):
@@ -177,7 +244,7 @@ def test_the_lb_cycle_with_sharing_off_probes_no_source_and_says_why(monkeypatch
     monkeypatch.setattr(lb_slice_cycle, "local_dump_available", lambda dsn: None)
     monkeypatch.setattr(lb_slice_cycle, "published_newest", _refuse)
     monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids",
-                        lambda dsn, n, newest: [("0b0c25f4-f31c-46a5-a4fb-ccbf53d663bd", None)])
+                        lambda dsn, n, newest: [("0b0c25f4-f31c-46a5-a4fb-ccbf53d663bd", None, False)])
     cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_refuse, dead=DeadAddresses(),
                                         sharing_enabled=lambda: False)
     cycle.find_sources = _refuse
@@ -308,4 +375,103 @@ def test_one_source_is_asked_at_the_stream_s_pace_across_runs(monkeypatch):
     gaps = [b - a for a, b in zip(asked_at, asked_at[1:])]
     assert min(gaps) >= 0.24
     assert all(len(b) <= mb_slice_cycle.PACKET_NAMES for b in sizes)
+
+
+def _lb_stream(monkeypatch, rows, newest=None):
+    """An LB cycle over one source, its pending set `rows` (mutable), and
+    the statuses it published."""
+    monkeypatch.setattr(lb_slice_cycle, "local_dump_available", lambda dsn: None)
+    monkeypatch.setattr(lb_slice_cycle, "published_newest", lambda dsn, family: None)
+    monkeypatch.setattr(lb_slice_cycle, "analyze_tables", lambda dsn: None)
+    monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, version: list(rows))
+    cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_refuse, dead=DeadAddresses(),
+                                        sharing_enabled=lambda: True)
+    api = SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0)
+    published = []
+
+    async def find_sources(listed):
+        return [(api, "ef" * 32, None)], newest
+
+    async def publish(**state):
+        published.append(state)
+
+    cycle.find_sources, cycle._publish = find_sources, publish
+    return cycle, published
+
+
+def _mbids(prefix, n):
+    return [f"{prefix}0000000-0000-4000-8000-{i:012d}" for i in range(n)]
+
+
+def test_the_lb_stream_asks_a_source_once_a_gap_and_an_opened_page_first(monkeypatch):
+    monkeypatch.setattr(lb_slice_cycle, "PACKET_GAP", 0.25)
+    page, stale, fresh = _mbids("a", 2), _mbids("b", 60), _mbids("c", 60)
+    rows = ([(m, None, True) for m in page] + [(m, "20261101-000000", False) for m in stale]
+            + [(m, None, False) for m in fresh])
+    cycle, published = _lb_stream(monkeypatch, rows, newest="20261108-000000")
+    asked = []
+
+    async def exchange(api, node, source_addr, batch, min_version):
+        asked.append((time.monotonic(), list(batch), min_version))
+        return {"imported": len(batch), "recordings": 0, "missing": [], "dropped": 0}
+
+    cycle._exchange = exchange
+    asyncio.run(cycle.run())
+    _, first, version = asked[0]
+    assert set(page) <= set(first) and len(first) == lb_slice_cycle.PAGE_MBIDS and version is None
+    assert sorted(m for _, b, _ in asked for m in b) == sorted(page + stale + fresh)
+    assert all(v == "20261108-000000" for _, b, v in asked if set(b) & set(stale))
+    assert all(len(b) <= lb_slice_cycle.lb_slice_queries.MAX_MBIDS_PER_REQUEST for _, b, _ in asked)
+    gaps = [b[0] - a[0] for a, b in zip(asked, asked[1:])]
+    assert len(gaps) == 3 and min(gaps) >= 0.24
+    assert (published[-1]["unserved"], published[-1]["reason"]) == (0, "ok")
+
+
+def test_a_page_opened_while_the_lb_stream_waits_out_its_pace_is_asked_at_once(monkeypatch):
+    monkeypatch.setattr(lb_slice_cycle, "PACKET_GAP", 30.0)
+    opened = _mbids("a", 1)[0]
+    rows = [(m, None, False) for m in _mbids("c", 120)]
+    cycle, published = _lb_stream(monkeypatch, rows)
+    asked = []
+
+    async def exchange(api, node, source_addr, batch, min_version):
+        asked.append((time.monotonic(), list(batch)))
+        if len(asked) == 1:
+            rows[:] = [(opened, None, True)]      # the page's request row, the rest served
+            cycle.request("request")              # and its NOTIFY
+        return {"imported": len(batch), "recordings": 0, "missing": [], "dropped": 0}
+
+    cycle._exchange = exchange
+
+    async def go():
+        began = time.monotonic()
+        await cycle.run()
+        took = time.monotonic() - began
+        await cycle.run()
+        return took
+
+    assert asyncio.run(go()) < 5
+    # The run the page cut short published nothing: what it left is no miss.
+    assert len(published) == 1 and published[0]["unserved"] == 0
+    assert len(asked) == 2 and asked[1][1] == [opened] and asked[1][0] - asked[0][0] < 5
+
+
+def test_a_page_asked_at_once_is_paced_when_asked_again(monkeypatch):
+    monkeypatch.setattr(lb_slice_cycle, "PACKET_GAP", 0.3)
+    opened = _mbids("a", 1)[0]
+    cycle, published = _lb_stream(monkeypatch, [(opened, None, True)])
+    asked = []
+
+    async def exchange(api, node, source_addr, batch, min_version):
+        asked.append(time.monotonic())
+        return {"imported": 0, "recordings": 0, "missing": list(batch), "dropped": 0}
+
+    cycle._exchange = exchange
+
+    async def go():
+        await cycle.run()                         # no source had it: it still waits
+        await cycle.run()
+
+    asyncio.run(go())
+    assert len(asked) == 2 and asked[1] - asked[0] >= 0.29
 

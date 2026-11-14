@@ -1017,6 +1017,7 @@ class SyncWalk:
             progress_cb=progress_cb,
             holdings_cache=self._holdings_cache,
             run_cache=self._run_cache,
+            sharing_enabled=self._sharing_enabled,
         )
 
         try:
@@ -1034,8 +1035,9 @@ class SyncWalk:
         # own first-hand canon material: nobody can pull from a node behind
         # CGNAT, so pushing is the only way its analysis ever reaches the
         # network. Never fatal to the sync that just succeeded. The switch
-        # was read for this peer above, as for its pull.
-        if "carry" in sync_client.peer_capabilities:
+        # is read again — the owner may have turned sharing off during the
+        # pull — and before every part the push sends.
+        if "carry" in sync_client.peer_capabilities and self._sharing_enabled():
             try:
                 await asyncio.get_event_loop().run_in_executor(
                     None, partial(self._push_to_carrier, peer_api, _progress))
@@ -1062,7 +1064,7 @@ class SyncWalk:
                 for c in candidates
                 for mbid in (c.get("recordings") or [])
             })
-            if not recordings:
+            if not recordings or not self._sharing_enabled():
                 return 0
             answer = peer_api.carry_offer(recordings) or {}
             wanted = answer.get("wanted") or {}
@@ -1075,6 +1077,9 @@ class SyncWalk:
             def push(category: str, payload: dict) -> int:
                 took = 0
                 for part in push_parts(payload):
+                    if not self._sharing_enabled():
+                        limited["stop"] = True          # turned off: nothing more leaves
+                        break
                     answer = peer_api.carry_push(category.replace("_", "-"), part) or {}
                     if answer.get("retry_after") and not limited["waited"]:
                         # The carrier's window is full: wait it out once, as

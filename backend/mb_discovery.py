@@ -319,11 +319,16 @@ def _fetch_remote_slice(artist_name: str) -> dict:
     try:
         from desktop.api_client import BackendAPIClient
         from desktop.mb_slice_client import MBSliceClient
+        from desktop.p2p.mb_slice_queries import name_key
     except ImportError as e:
         logger.warning(f"MB slice client unavailable in this runtime: {e}")
         return {"ok": False}
     from config import settings as app_settings
     from p2p_identity import peer_identity
+
+    # In the one form the background stream sends every name in: MusicBrainz's
+    # casing would tell a click from a drawn name.
+    asked = name_key(artist_name)
 
     sources = remote_sources()
     ordered = ([s["url"] for s in sources if s.get("kind") == "replica"]
@@ -340,13 +345,13 @@ def _fetch_remote_slice(artist_name: str) -> dict:
             # the slice on (the import records it beside the author's).
             if api.get_health() is None:
                 continue
-            stats = client.run([artist_name])
+            stats = client.run([asked])
             if stats.get("error"):
                 if "retry_after" in stats:
                     retry_after = min(x for x in (retry_after, stats["retry_after"] or 60)
                                       if x is not None)
                 continue
-            if artist_name in (stats.get("missing") or []):
+            if asked in (stats.get("missing") or []):
                 continue
             client.finalize()          # ANALYZE the hot canon tables
             import mb_backend as mb

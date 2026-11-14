@@ -1197,7 +1197,10 @@ def backfill_similar(limit: Optional[int] = None, force: bool = False,
     human listen — no unconditional similar-of-similar recursion.
 
     This is the shared candidate rule for the background `similar` step and
-    manual runs. Recently-listened first; one commit per artist for
+    manual runs. In random order (since 2026-11-14; recently-listened first
+    before): after an imported history the queue is the history's artists,
+    and their stubs minted in the order of the owner's latest listens would
+    enter the MB slice stream's pool in it. One commit per artist for
     resumability; incremental + idempotent. ``force=True`` re-fetches the whole
     engaged set (also the escape hatch for the permanent not_found stamp —
     fetch_and_store_similar stamps a dead name once, forever).
@@ -1217,13 +1220,7 @@ def backfill_similar(limit: Optional[int] = None, force: bool = False,
         WHERE {ARTIST_ENGAGED}
         {where}
         AND a.id <> ALL(CAST(:skip AS uuid[]))
-        ORDER BY a.last_similar_sync NULLS FIRST,
-                 (SELECT MAX(lh.started_at)
-                  FROM listening_history lh
-                  JOIN track_artists ta ON ta.track_id = lh.track_id
-                  WHERE ta.artist_id = a.id
-                    AND lh.completed AND NOT lh.skipped) DESC NULLS LAST,
-                 a.name
+        ORDER BY a.last_similar_sync NULLS FIRST, random()
         {lim}
     """)
     params: Dict[str, Any] = {"skip": internal_failures("artist")}

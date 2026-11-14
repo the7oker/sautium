@@ -48,12 +48,13 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      came to carry its key's fingerprint (2026-11-07). The origins step
      (`slice_origins_v1`) marks the slice blobs kept before a blob came to
      carry its origin by the rules a fetch reads now: those that name the
-     imported history or the owner's own picks serve the node alone from
-     then on (2026-11-14). The slice-records step (`slice_records_cut_v1`)
-     cuts once what a node kept of who asked which artists: the contact rows of
-     the requests about artists, a dump node's builds kept under a
-     requester's spelling, and each kept build's moment of first ask, left
-     to the day (2026-11-14). The rebuild step
+     imported history (for ListenBrainz, any artist neither owned nor played
+     to the end here) serve the node alone from then on, on a node without
+     the family's dump (2026-11-14). The slice-records step
+     (`slice_records_cut_v1`) cuts once what a node kept of who asked which
+     artists: the contact rows of the requests about artists, a dump node's
+     builds kept under a requester's spelling, and each kept build's moment
+     of first ask, left to the day (2026-11-14). The rebuild step
      (`slice_rebuild_v1`) rebuilds a node's catalogue rows once from the
      slices it keeps, under the import's rules of that day — a slice's own
      subtree only, its rows of their columns' kinds, an artist or a group one
@@ -264,23 +265,30 @@ def _mark_local_slices(conn) -> dict:
     """The slice blobs this node kept before a blob came to carry its origin
     (2026-11-14) marked once by the rules a fetch reads now
     (mb_slice_queries / lb_slice_queries LOCAL_ONLY_SQL): those that name
-    the imported history or the owner's own picks serve this node alone
-    from here on. A dump node's own builds (no relay) are nobody's history."""
+    the imported history serve this node alone from here on (a lookup of the
+    owner's own before then left nothing to tell it by, an opened page's
+    ListenBrainz statistics aside). Every blob of a family is a fetched one on a node without
+    that family's dump, whatever its `relay` says — the column came with no
+    backfill (052), so a blob kept before it names none. A dump node's are
+    its own builds, nobody's history: each load empties the family's blobs
+    (an MB load keeps those of its own version, and a dump node passes
+    another author's on only rebuilt as its own)."""
     from desktop.p2p import lb_slice_queries, mb_slice_queries
+    out = {}
     with conn.cursor() as cur:
-        cur.execute("UPDATE mb_slice_blobs b SET local_only = "
-                    + mb_slice_queries.LOCAL_ONLY_SQL.format(nk="b.name_key")
-                    + " WHERE b.relay IS NOT NULL")
-        mb = cur.rowcount
-        cur.execute("UPDATE lb_slice_blobs b SET local_only = "
-                    + lb_slice_queries.LOCAL_ONLY_SQL.format(mbid="b.artist_mbid")
-                    + " WHERE b.relay IS NOT NULL")
-        lb = cur.rowcount
+        if not mb_slice_queries.local_dump_available(conn):
+            cur.execute("UPDATE mb_slice_blobs b SET local_only = "
+                        + mb_slice_queries.LOCAL_ONLY_SQL.format(nk="b.name_key"))
+            out["mb_marked"] = cur.rowcount
+        if not lb_slice_queries.local_dump_available(conn):
+            cur.execute("UPDATE lb_slice_blobs b SET local_only = "
+                        + lb_slice_queries.LOCAL_ONLY_SQL.format(mbid="b.artist_mbid"))
+            out["lb_marked"] = cur.rowcount
         cur.execute("SELECT (SELECT count(*) FROM mb_slice_blobs WHERE local_only), "
                     "       (SELECT count(*) FROM lb_slice_blobs WHERE local_only)")
-        mb_local, lb_local = cur.fetchone()
+        out["mb_local"], out["lb_local"] = cur.fetchone()
     conn.commit()
-    return {"mb_marked": mb, "mb_local": mb_local, "lb_marked": lb, "lb_local": lb_local}
+    return out
 
 
 def _cut_slice_records(conn) -> dict:
@@ -290,7 +298,8 @@ def _cut_slice_records(conn) -> dict:
     moment it asked; the code keeps none from now on), the builds a dump
     node kept under a requester's spelling rather than one MusicBrainz spells
     (mb_slice_queries.MUSICBRAINZ_NAME_SQL), and the moment of each kept
-    build's first ask, left to the day."""
+    build's first ask, of each check of a kept blob and of each check's
+    plan — another node's ask drew it —, left to the day."""
     from desktop.p2p import contact_log, lb_slice_queries, mb_slice_queries
     out = {}
     with conn.cursor() as cur:
@@ -308,6 +317,13 @@ def _cut_slice_records(conn) -> dict:
             cur.execute("UPDATE lb_slice_blobs SET created_at = date_trunc('day', created_at) "
                         "WHERE relay IS NULL")
             out["lb_builds_dated"] = cur.rowcount
+        out["checks_dated"] = 0
+        for table in ("mb_slice_blobs", "lb_slice_blobs"):
+            cur.execute(f"UPDATE {table} SET checked_at = date_trunc('day', checked_at) "
+                        "WHERE checked_at IS NOT NULL")
+            out["checks_dated"] += cur.rowcount
+        cur.execute("UPDATE slice_check_plans SET planned_at = date_trunc('day', planned_at)")
+        out["plans_dated"] = cur.rowcount
     conn.commit()
     return out
 

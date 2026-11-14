@@ -120,12 +120,12 @@ def test_the_assistant_s_resolve_says_the_network_is_off(monkeypatch):
     assert out["status"] == "network_off"
 
 
-def _listening(dsn):
+def _listening(dsn, channels=("sautium_sync_request", "sautium_mb_sources")):
     import psycopg2
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute("LISTEN sautium_sync_request; LISTEN sautium_mb_sources")
+        cur.execute("; ".join(f"LISTEN {c}" for c in channels))
     return conn
 
 
@@ -149,3 +149,51 @@ def test_the_switch_wakes_the_chip_and_turned_on_the_walk(node, scratch_dsn):
         assert _heard(listener) == {"sautium_mb_sources", "sautium_sync_request"}
     finally:
         listener.close()
+
+
+def test_an_opened_artist_wakes_the_statistics_cycle_for_its_new_request_alone(node, scratch_dsn):
+    """The cycle asks a page's artist at once, outside its pace, the first
+    time: the page read again while its request waits — after each batch the
+    cycle imports — wakes nothing, or every read would cut the pace short."""
+    import uuid
+    from routers import artists
+    artist = str(uuid.uuid4())
+    with node.cursor() as cur:
+        cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'Opened Twice')", (artist,))
+        cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES (%s, %s, 'name_exact')",
+                    (str(uuid.uuid4()), artist))
+    _sharing(node, True)
+    listener = _listening(scratch_dsn, ("sautium_lb_request",))
+    try:
+        assert artists.get_artist(artist, sort="release_year", mbid=None)["lb_pending"] is True
+        assert _heard(listener) == {"sautium_lb_request"}
+        assert artists.get_artist(artist, sort="release_year", mbid=None)["lb_pending"] is True
+        assert _heard(listener, timeout=0.5) == set()
+    finally:
+        listener.close()
+
+
+def test_a_click_asks_for_its_name_in_the_stream_s_one_form(node, monkeypatch):
+    """MusicBrainz's casing, as a search result carries it, would tell a
+    click from a name the background stream drew."""
+    import mb_discovery
+    from desktop.p2p import mb_slice_queries
+    asked = []
+
+    class _Source:
+        def __init__(self, url, peer=None):
+            pass
+
+        def get_health(self):
+            return {}
+
+        def mb_slice(self, names):
+            asked.append(list(names))
+            return {"v": mb_slice_queries.PROTOCOL_VERSION, "slices": {}, "missing": list(names)}
+
+    monkeypatch.setattr("desktop.api_client.BackendAPIClient", _Source)
+    monkeypatch.setattr("p2p_identity.peer_identity", lambda settings: None)
+    _sharing(node, True)
+    assert mb_discovery._fetch_remote_slice(" Sigur Rós ")["ok"] is False
+    assert asked == [["sigur rós"]]
+

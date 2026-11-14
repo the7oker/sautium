@@ -220,6 +220,41 @@ def test_the_names_wait_outside_the_slice_stream_while_the_walk_reads(walk, dsn,
         listener.close()
 
 
+def test_the_scrobble_canon_places_nothing_while_a_session_reads_and_its_end_wakes_it(walk, monkeypatch):
+    """A pass mid-walk would place the newest listens first, and the engaged
+    set — the similar artists, both slice streams — would grow in the order
+    the owner listened: the canon takes no scope while a session reads, and
+    the session's end wakes it with every name the pages touched."""
+    import threading
+
+    from canon import scrobbles
+    taken = []
+
+    class _Watching(_FakeLastFm):
+        def recent_tracks_page(self, user, before, after):
+            taken.append(scrobbles._take_scope())
+            return super().recent_tracks_page(user, before, after)
+
+    import lastfm as lastfm_module
+    monkeypatch.setattr(lastfm_module, "LastFmService", _Watching)
+    monkeypatch.setattr(scrobbles, "_scope", {"full": False, "names": set(), "artists": set()})
+    monkeypatch.setattr(scrobbles, "_wake_event", threading.Event())
+    woken, wake = [], scrobbles.wake
+
+    def watched_wake(names=None, artist_ids=None):
+        woken.append((sorted(names or ()), lastfm_history.reading()))
+        wake(names, artist_ids)
+
+    monkeypatch.setattr(scrobbles, "wake", watched_wake)
+    _FakeLastFm.history = [_scrobble(m) for m in (0, 10, 20, 30, 40)]
+    lastfm_history._run("vale", "connected")
+    assert taken and all(t is None for t in taken)
+    # Each page's names are kept while the session reads; the wake that runs
+    # the pass comes once it stopped.
+    assert woken[-1] == ([], False) and all(reading for _, reading in woken[:-1])
+    assert scrobbles._take_scope() == {"full": False, "names": ["sade"], "artists": []}
+
+
 def test_a_failed_session_stops_reading_and_a_start_clears_what_a_dead_one_left(walk, monkeypatch):
     class _Fails(_FakeLastFm):
         def recent_tracks_page(self, user, before, after):

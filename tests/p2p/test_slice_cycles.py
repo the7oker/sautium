@@ -121,7 +121,7 @@ def test_an_lb_refusal_with_evidence_is_recorded_and_its_source_asked_no_more(re
     recorded, dropped, published = [], [], []
     monkeypatch.setattr(lb_slice_cycle, "local_dump_available", lambda dsn: None)
     monkeypatch.setattr(lb_slice_cycle, "published_newest", lambda dsn, family: None)
-    monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None)])
+    monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None, False)])
     cycle = lb_slice_cycle.LbSliceCycle(
         "postgresql://unused", connect=_no_connect, dead=DeadAddresses(), sharing_enabled=lambda: True,
         diag_record=lambda kind, detail: recorded.append((kind, detail)))
@@ -164,7 +164,7 @@ def test_an_lb_refusal_that_is_no_refusal_records_nothing_and_drops_its_source(r
     recorded, dropped, published = [], [], []
     monkeypatch.setattr(lb_slice_cycle, "local_dump_available", lambda dsn: None)
     monkeypatch.setattr(lb_slice_cycle, "published_newest", lambda dsn, family: None)
-    monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None)])
+    monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None, False)])
     cycle = lb_slice_cycle.LbSliceCycle(
         "postgresql://unused", connect=_no_connect, dead=DeadAddresses(), sharing_enabled=lambda: True,
         diag_record=lambda kind, detail: recorded.append((kind, detail)))
@@ -273,7 +273,7 @@ def test_an_lb_source_whose_answer_raises_is_skipped_and_its_artists_asked_of_th
     dropped, published, asked_lb = [], [], []
     monkeypatch.setattr(lb_slice_cycle, "local_dump_available", lambda dsn: None)
     monkeypatch.setattr(lb_slice_cycle, "published_newest", lambda dsn, family: None)
-    monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None)])
+    monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None, False)])
     monkeypatch.setattr(lb_slice_cycle, "analyze_tables", lambda dsn: None)
     cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_no_connect, dead=DeadAddresses(),
                                         sharing_enabled=lambda: True)

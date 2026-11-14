@@ -227,6 +227,8 @@ def test_a_kept_slice_is_passed_on_only_once_this_node_checked_it(conn, scratch_
                                                  ("release", release)}
     assert {r[0] for r in _rows(conn, "SELECT priority FROM mbws_queue")} == {slice_checks.PRIORITY}
     planned = _rows(conn, "SELECT planned_at FROM slice_check_plans")
+    # Another node's ask drew the plan: its day is all the plan keeps.
+    assert planned == _rows(conn, "SELECT date_trunc('day', now())")
     mb_slice_queries.serve_slices(conn, [s.name], own_pubkey=OWN)       # asked again meanwhile
     assert _rows(conn, "SELECT planned_at FROM slice_check_plans") == planned
     # MusicBrainz knows the artist and credits the group to it.
@@ -378,12 +380,14 @@ def test_at_start_a_slice_whose_subject_was_answered_unknown_after_its_check_is_
         conn, scratch_dsn):
     """What a restart took from the slice checker before it ran: an answer
     kept unknown after a kept slice's check takes that check away; one kept
-    before it was read by it."""
+    before its day was read by it. A check keeps its day alone, so an answer
+    of that day counts as after it: that slice is judged again."""
     author, relay = _key(), _key()
     later, earlier = Subtree("Answered Later"), Subtree("Answered Earlier")
     artist_later, replaced = Subtree("Artist Answered Later"), Subtree("Since Replaced")
-    groups = {x.name: x.group() for x in (later, earlier, artist_later, replaced)}
-    for x in (later, earlier, artist_later, replaced):
+    that_day = Subtree("Answered That Day")
+    groups = {x.name: x.group() for x in (later, earlier, artist_later, replaced, that_day)}
+    for x in (later, earlier, artist_later, replaced, that_day):
         _offer(scratch_dsn, author, x, relay=relay)
         _checked(conn, x, groups[x.name][0], groups[x.name][1][0])
     artist, heard = str(uuid.uuid4()), str(uuid.uuid4())
@@ -404,12 +408,17 @@ def test_at_start_a_slice_whose_subject_was_answered_unknown_after_its_check_is_
         # The index row of "since replaced" names another version of its blob.
         cur.execute("UPDATE slice_index SET payload_sha256 = %s WHERE key = 'since replaced'", ("cd" * 32,))
         cur.execute("""UPDATE mbws_answers SET status = 'unknown', target = NULL,
-                              answered_at = now() - interval '1 minute'
+                              answered_at = date_trunc('day', now()) - interval '1 minute'
                         WHERE kind = 'artist' AND mbid = %s""", (earlier.gid,))
-    assert slice_checks.uncheck_answered(conn) == 3
+        cur.execute("""UPDATE mbws_answers SET status = 'unknown', target = NULL,
+                              answered_at = date_trunc('day', now())
+                        WHERE kind = 'artist' AND mbid = %s""", (that_day.gid,))
+    assert _rows(conn, "SELECT bool_and(checked_at = date_trunc('day', now())) FROM mb_slice_blobs") == [(True,)]
+    assert slice_checks.uncheck_answered(conn) == 4
     assert slice_checks.servable(conn, "mb", "answered later", OWN) is None
     assert slice_checks.servable(conn, "mb", "artist answered later", OWN) is None
     assert slice_checks.servable(conn, "lb", artist, OWN) is None
+    assert slice_checks.servable(conn, "mb", "answered that day", OWN) is None
     assert slice_checks.servable(conn, "mb", "answered earlier", OWN) is True
     assert slice_checks.servable(conn, "mb", "since replaced", OWN) is True
     assert slice_checks.uncheck_answered(conn) == 0
@@ -1022,31 +1031,33 @@ def _kept_local(conn, family="mb"):
     return dict(_rows(conn, f"SELECT {col}, local_only FROM {table}"))
 
 
-def test_a_slice_fetched_for_the_imported_history_or_a_pick_is_passed_on_to_no_one(origins, scratch_dsn):
+def test_a_slice_fetched_for_the_imported_history_is_passed_on_to_no_one(origins, scratch_dsn):
     conn = origins
     author, relay = _key(), _key()
     _slice_fed(conn)
-    heard, placed, picked = Subtree("Heard Only"), Subtree("Placed From History"), Subtree("Picked Act")
+    heard, placed, seed_pick = Subtree("Heard Only"), Subtree("Placed From History"), Subtree("Seed Pick")
     stub, owned_too = Subtree("Similar Stub"), Subtree("Heard And Owned")
     _heard(conn, "heard only")
     _local_artist(conn, "Placed From History", imported=True, mbid=placed.gid)
-    _local_artist(conn, "Picked Act", picked=True)
+    # The seed brings the master's own picks under the confidence a pick here
+    # has: a binding tells no pick of this node's (that one is `for_person`).
+    _local_artist(conn, "Seed Pick", picked=True)
     _local_artist(conn, "Similar Stub", similar_of=_local_artist(conn, "Owned Seed", owned=True))
     _heard(conn, "heard and owned")
     _local_artist(conn, "Heard And Owned", owned=True, imported=True)
-    for subtree in (heard, placed, picked, stub, owned_too):
+    for subtree in (heard, placed, seed_pick, stub, owned_too):
         subtree.group()
         _offer(scratch_dsn, author, subtree, relay=relay)
-    assert _kept_local(conn) == {"heard only": True, "placed from history": True, "picked act": True,
+    assert _kept_local(conn) == {"heard only": True, "placed from history": True, "seed pick": False,
                                  "similar stub": False, "heard and owned": False}
-    asked = [heard.name, placed.name, picked.name, stub.name, owned_too.name]
+    asked = [heard.name, placed.name, seed_pick.name, stub.name, owned_too.name]
     out = mb_slice_queries.serve_slices(conn, asked, own_pubkey=OWN)
     assert out["missing"] == asked and not out["slices"]              # none checked yet
-    # Only the two another node may know of wait for their check: the rest is
+    # Only those another node may know of wait for their check: the rest is
     # never passed on, so never checked for it.
-    assert {k for (k,) in _rows(conn, "SELECT key FROM slice_check_plans")} == {"similar stub",
+    assert {k for (k,) in _rows(conn, "SELECT key FROM slice_check_plans")} == {"seed pick", "similar stub",
                                                                                 "heard and owned"}
-    assert slice_checks.checkable_count(conn, "mb", OWN) == 2
+    assert slice_checks.checkable_count(conn, "mb", OWN) == 3
 
 
 def test_the_person_s_own_lookup_is_kept_for_this_node_alone(origins, scratch_dsn):
@@ -1085,22 +1096,65 @@ def test_an_lb_slice_for_an_opened_page_or_the_history_alone_is_passed_on_to_no_
     assert _count(conn, "slice_check_plans") == 0
 
 
-def test_the_blobs_kept_before_their_origin_are_marked_once_by_the_same_rules(origins):
-    conn = origins
-    import db_migrate
-    _heard(conn, "waited")
-    _local_artist(conn, "Owned Long Ago", owned=True)
+def _kept_before(conn, family, key, relay=None):
+    """A blob as a node kept it before blobs carried their origin: no origin,
+    and before 052 no relay either — the column came with no backfill."""
     with conn.cursor() as cur:
-        for key, relay in (("waited", "ab" * 32), ("owned long ago", "ab" * 32), ("built here", None)):
+        if family == "mb":
             cur.execute("""INSERT INTO mb_slice_blobs (name_key, dump_version, author_pubkey, sig,
                                                        blob_gz, relay)
                            VALUES (%s, %s, %s, %s, %s, %s)""",
                         (key, dump_version(3), OWN, "00" * 64, psycopg2.Binary(b"\x00"), relay))
-    _heard(conn, "built here")
-    out = db_migrate._mark_local_slices(conn)
-    assert out["mb_marked"] == 2 and out["mb_local"] == 1
-    assert _kept_local(conn) == {"waited": True, "owned long ago": False, "built here": False}
+        else:
+            cur.execute("""INSERT INTO lb_slice_blobs (artist_mbid, dump_version, author_pubkey, sig,
+                                                       blob_gz, relay)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                        (key, dump_version(3), OWN, "00" * 64, psycopg2.Binary(b"\x00"), relay))
 
+
+def test_the_blobs_kept_before_their_origin_are_marked_once_by_the_same_rules(origins):
+    """Every kept blob of a node without the dump is a fetched one, a blob
+    kept before 052 named no relay included."""
+    conn = origins
+    import db_migrate
+    _heard(conn, "waited")
+    _heard(conn, "waited long ago")
+    _local_artist(conn, "Owned Long Ago", owned=True)
+    history, owned = str(uuid.uuid4()), str(uuid.uuid4())
+    _local_artist(conn, "History Alone", imported=True, mbid=history)
+    _local_artist(conn, "Owned Here", owned=True, mbid=owned)
+    for key, relay in (("waited", "ab" * 32), ("owned long ago", "ab" * 32), ("waited long ago", None)):
+        _kept_before(conn, "mb", key, relay)
+    for mbid in (history, owned):
+        _kept_before(conn, "lb", mbid)
+    out = db_migrate._mark_local_slices(conn)
+    assert out == {"mb_marked": 3, "lb_marked": 2, "mb_local": 2, "lb_local": 1}
+    assert _kept_local(conn) == {"waited": True, "owned long ago": False, "waited long ago": True}
+    assert _kept_local(conn, "lb") == {history: True, owned: False}
+
+
+def test_a_dump_node_s_kept_blobs_are_its_own_builds_and_stay_shared(origins, monkeypatch):
+    """A load empties the family's blobs: what a dump node keeps it built
+    itself, for whoever asked — nobody's history, whatever names it."""
+    conn = origins
+    import db_migrate
+    monkeypatch.setattr(mb_slice_queries, "local_dump_available", lambda conn: dump_version(3))
+    history = str(uuid.uuid4())
+    _heard(conn, "waited")
+    _local_artist(conn, "History Alone", imported=True, mbid=history)
+    _kept_before(conn, "mb", "waited")
+    _kept_before(conn, "lb", history)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('listenbrainz.db_version', %s::jsonb)",
+                    (json.dumps(dump_version(3)),))
+        cur.execute("""INSERT INTO lb_recording (recording_mbid, listen_count, user_count, artist_mbids,
+                                                 dump_version)
+                       VALUES (%s, 10, 3, ARRAY[%s::uuid], %s)""",
+                    (str(uuid.uuid4()), history, dump_version(3)))
+    out = db_migrate._mark_local_slices(conn)
+    assert out == {"mb_local": 0, "lb_local": 0}
+    assert _kept_local(conn) == {"waited": False}
+    assert _kept_local(conn, "lb") == {history: False}
 
 
 def test_the_origin_of_a_name_is_read_through_an_index(origins):
@@ -1116,3 +1170,51 @@ def test_the_origin_of_a_name_is_read_through_an_index(origins):
             cur.execute("RESET enable_seqscan")
     assert "idx_artists_name_key" in plan
     assert "Seq Scan on artists" not in plan
+
+
+def test_health_counts_and_dates_no_blob_kept_for_this_node_alone(origins, scratch_dsn):
+    conn = origins
+    author, relay = _key(), _key()
+    history, owned = str(uuid.uuid4()), str(uuid.uuid4())
+    _local_artist(conn, "History Alone", imported=True, mbid=history)
+    _local_artist(conn, "Owned Here", owned=True, mbid=owned)
+    older, newer = dump_version(9), dump_version(3)
+    for mbid, version in ((owned, older), (history, newer)):
+        entries = {mbid: {"dump_version": version, "artist": [10, 3], "recordings": [], "truncated": False}}
+        assert _offer_lb(scratch_dsn, author, entries, relay, owned=False)["imported"] == 1
+    assert _kept_local(conn, "lb") == {owned: False, history: True}
+    assert lb_slice_queries.max_blob_version(conn) == older
+    # A blob in an own build's shape — no relay, this node's key — kept for
+    # this node alone (a sibling node of the same account built it) is no
+    # more advertised than another author's.
+    mine = str(uuid.uuid4())
+    _kept_before(conn, "lb", mine)
+    counted = slice_checks.checkable_count(conn, "lb", OWN)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE lb_slice_blobs SET local_only = TRUE WHERE artist_mbid = %s", (mine,))
+    assert slice_checks.checkable_count(conn, "lb", OWN) == counted - 1
+
+
+def test_a_kept_blob_failing_the_row_check_is_held_back_in_a_log_that_names_nothing(conn, scratch_dsn,
+                                                                                   caplog):
+    """Met when another node asks for it: a name in the log would tie that
+    ask to what it asked about."""
+    import gzip
+    import logging
+    author, relay = _key(), _key()
+    _slice_fed(conn)
+    s = Subtree("Secret Act")
+    s.group()
+    _offer(scratch_dsn, author, s, relay=relay)
+    (blob,), = _rows(conn, "SELECT blob_gz FROM mb_slice_blobs WHERE name_key = 'secret act'")
+    core = json.loads(gzip.decompress(bytes(blob)))
+    core["truncated"] = ["mb_artist"]                # rows the import's check would not pass
+    with conn.cursor() as cur:
+        cur.execute("UPDATE mb_slice_blobs SET blob_gz = %s WHERE name_key = 'secret act'",
+                    (psycopg2.Binary(gzip.compress(json.dumps(core).encode())),))
+    with caplog.at_level(logging.WARNING, logger="desktop.p2p.slice_checks"):
+        assert mb_slice_queries.serve_slices(conn, [s.name], own_pubkey=OWN)["missing"] == [s.name]
+    assert _rows(conn, "SELECT suspect FROM mb_slice_blobs WHERE name_key = 'secret act'") == [(True,)]
+    assert "fails the import's row check" in caplog.text
+    assert "secret" not in caplog.text.lower()
+

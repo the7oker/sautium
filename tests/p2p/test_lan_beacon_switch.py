@@ -162,15 +162,20 @@ def test_a_switch_moved_while_a_beacon_goes_out_sends_the_next_at_once(monkeypat
     assert ["node_id" in b for b in lan._sock.beacons] == [False, True]
 
 
-def test_the_launcher_beacons_as_the_switch_says():
+def test_the_launcher_beacons_as_the_switch_says_and_asks_for_the_walk_turned_back_on():
     from desktop.p2p.p2p_manager import P2PManager
     lan = LANDiscovery(sync_port=24001, node_id=NODE)
-    for sharing in (True, False, True):
-        node = types.SimpleNamespace(
-            _lan_discovery=lan, _sharing_lock=asyncio.Lock(),
-            _sync_server=types.SimpleNamespace(sharing_changed=lambda s=sharing: s))
+    asked = []
+    node = types.SimpleNamespace(_lan_discovery=lan, _sharing_read=None,
+                                 _walk=types.SimpleNamespace(request=asked.append))
+    for sharing in (True, False, True, True):
+        node._sharing_lock = asyncio.Lock()
+        node._sync_server = types.SimpleNamespace(sharing_changed=lambda s=sharing: s)
         asyncio.run(P2PManager._sharing_changed(node))
         assert lan._sharing is sharing
+    # At start the walk has a first run of its own; turned back on, the run
+    # the owner's move requested may have read this process's cached "off".
+    assert asked == ["sharing"]
 
 
 class _Reads:
@@ -202,7 +207,8 @@ def test_reads_of_the_switch_apply_in_the_order_they_began():
 
     async def run():
         node = types.SimpleNamespace(_lan_discovery=lan, _sync_server=reads,
-                                     _sharing_lock=asyncio.Lock())
+                                     _sharing_lock=asyncio.Lock(), _sharing_read=None,
+                                     _walk=types.SimpleNamespace(request=lambda reason: None))
         loop = asyncio.get_running_loop()
         first = asyncio.create_task(P2PManager._sharing_changed(node))
         await loop.run_in_executor(None, reads.first_in.wait, 5)

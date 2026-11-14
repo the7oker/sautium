@@ -411,6 +411,7 @@ class P2PManager:
         self._stop_event = asyncio.Event()
         self._chat_notify = asyncio.Event()
         self._sharing_lock = asyncio.Lock()
+        self._sharing_read: Optional[bool] = None   # the switch as _sharing_changed last read it
         self._pickup_lock = asyncio.Lock()
         self._walk.bind()
         # Support diagnostics: one sequential worker fed by the master's
@@ -3101,11 +3102,17 @@ class P2PManager:
         beacon names this node on every network it joins only while it is
         on (LANDiscovery.set_beaconing). One read at a time, each applied
         before the next starts: an earlier read finishing later would put
-        back what the switch said before."""
+        back what the switch said before. Turned back on, the walk is asked
+        for here: the one the owner's move requested (NOTIFY
+        sautium_sync_request) may have read this process's cached "off"
+        before this read refreshed it."""
         async with self._sharing_lock:
             on = await asyncio.get_running_loop().run_in_executor(
                 None, self._sync_server.sharing_changed)
             self._lan_discovery.set_beaconing(on)
+            if on and self._sharing_read is False:
+                self._walk.request("sharing")
+            self._sharing_read = on
 
     async def _after_walk(self):
         """What the walk just carried in may name artists canon waits on

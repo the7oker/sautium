@@ -14511,11 +14511,13 @@
   // What the switch does, both ways — draft words for the owner's words
   // review: a node that does not give does not take.
   const SHARING_ON_LINE = 'This node shares the analysis and the catalog facts it holds, and asks other '
-    + 'nodes for what it lacks. Its questions name artists and tracks of your catalog, mixed, '
-    + 'in random order — never when or how often you played.';
-  const SHARING_OFF_LINE = 'Off, this node neither serves nor asks for music data: it takes no analysis '
-    + 'from other nodes, recognises no new artist without the MusicBrainz database, and Discovery\'s '
-    + 'MusicBrainz search and the assistant\'s lookup are off. It still announces its address in the '
+    + 'nodes for what it lacks. Its background questions name artists and tracks of your catalog, '
+    + 'mixed, in random order — never when or how often you played; a search or an artist you open '
+    + 'in Discovery is asked as you make it.';
+  const SHARING_OFF_LINE = 'Off, this node serves no music data and asks no other node for it: it takes no '
+    + 'analysis from other nodes, recognises no new artist without the MusicBrainz database, and '
+    + 'Discovery\'s MusicBrainz search and the assistant\'s lookup are off. It still confirms with '
+    + 'MusicBrainz itself what the catalog facts already here propose, announces its address in the '
     + 'network\'s lookup table, keeps its chats, friends and support contact, relays while Relay for '
     + 'others is on, and has the analysis it signed stamped.';
 

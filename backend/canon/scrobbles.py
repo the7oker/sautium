@@ -26,7 +26,9 @@ What cannot be placed waits — a name MusicBrainz does not know, a recording
 nothing minted (a standalone single, a compilation, a live record) — and is
 tried again when something changes for it: new scrobbles for the name, a slice
 for it, a dump, a mint of its artist. A scan or a sync can bring any track, so
-it re-runs A over everything. No timer: one consumer thread wakes on events.
+it re-runs A over everything. No timer: one consumer thread wakes on events —
+and places nothing while an import session reads pages, newest first; names
+and artists are decided in random order, never most-scrobbled first.
 """
 
 import hashlib
@@ -540,9 +542,12 @@ def _anchor(gid: str) -> Optional[str]:
 def resolve_names(limit: int = _RESOLVE_PER_PASS, *, create: bool = True) -> Row:
     """Stage B for the names due a decision — never tried, new evidence, or new
     MB data (a slice for the name, a dump) since the last try — and covered by
-    MB data at all. With `create` off (the phantom layer switched off) only a
-    gid this node already anchors is taken. Returns counts, the artists
-    resolved, and whether names are left for another pass."""
+    MB data at all, drawn at random: what follows a decision (MusicBrainz's
+    answers asked for it, the listens it places, the lanes that feed on
+    them) must not go most-scrobbled first. With `create` off (the phantom
+    layer switched off) only a gid this node already anchors is taken.
+    Returns counts, the artists resolved, and whether names are left for
+    another pass."""
     import mb_answers
     from canon import algo_canon, confirm
     from discography import _MB_SOURCE_COVERS_SQL
@@ -551,13 +556,13 @@ def resolve_names(limit: int = _RESOLVE_PER_PASS, *, create: bool = True) -> Row
     # A name that waits for MusicBrainz's answers is due again when they wake it.
     due = [r["name_key"] for r in db_query(f"""
         SELECT n.name_key
-          FROM pending_scrobble_artists n JOIN pending_scrobbles p USING (name_key)
+          FROM pending_scrobble_artists n
          WHERE n.artist_id IS NULL
+           AND EXISTS (SELECT 1 FROM pending_scrobbles p WHERE p.name_key = n.name_key)
            AND {_B_DUE_SQL}
            AND ({_MB_SOURCE_COVERS_SQL.format(name='n.name_key')})
            AND NOT {mb_answers.WAITING_SQL.format(subject='scrobble_name', key='n.name_key')}
-         GROUP BY n.name_key
-         ORDER BY count(*) DESC, n.name_key
+         ORDER BY random()
          LIMIT %(lim)s""", {"lim": limit})]
     resolved: Dict[str, str] = {}
     waiting: Set[str] = set()
@@ -617,18 +622,19 @@ def resolve_names(limit: int = _RESOLVE_PER_PASS, *, create: bool = True) -> Row
 
 def mint_resolved(limit: int = _MINT_PER_PASS) -> Row:
     """Stage C: the discography of every resolved artist with scrobbles waiting
-    that was never shelved, most-scrobbled first. Outside the canon lock — the
-    mint probes the dump lock itself, and would read our hold as a reload."""
+    that was never shelved, drawn at random, as stage B draws its names.
+    Outside the canon lock — the mint probes the dump lock itself, and would
+    read our hold as a reload."""
     from discography import sync_artist_discography
     stats: Row = {"statuses": Counter(), "artists": []}
     rows = db_query("""
         SELECT a.id::text AS id, a.name
-          FROM pending_scrobble_artists n
-          JOIN pending_scrobbles p USING (name_key)
-          JOIN artists a ON a.id = n.artist_id
+          FROM artists a
          WHERE a.last_album_sync IS NULL
-         GROUP BY a.id, a.name
-         ORDER BY count(*) DESC, a.name
+           AND EXISTS (SELECT 1 FROM pending_scrobble_artists n
+                         JOIN pending_scrobbles p USING (name_key)
+                        WHERE n.artist_id = a.id)
+         ORDER BY random()
          LIMIT %(lim)s""", {"lim": limit})
     import mb_answers
     for r in rows:
@@ -976,14 +982,29 @@ def start() -> None:
         wake()
 
 
+def _take_scope() -> Optional[Row]:
+    """The scope the next pass takes — None while an import session reads
+    (lastfm_history.reading), the scope kept for the pass the session's end
+    wakes. The session reads the newest scrobbles first: a pass meanwhile
+    would grow the engaged set — and what feeds on it, the similar artists
+    and both slice streams — in the order the owner listened."""
+    import lastfm_history
+    if lastfm_history.reading():
+        return None
+    with _scope_lock:
+        scope = {"full": _scope["full"], "names": sorted(_scope["names"]),
+                 "artists": sorted(_scope["artists"])}
+        _scope.update(full=False, names=set(), artists=set())
+    return scope
+
+
 def _consume() -> None:
     while True:
         _wake_event.wait()
         _wake_event.clear()
-        with _scope_lock:
-            scope = {"full": _scope["full"], "names": sorted(_scope["names"]),
-                     "artists": sorted(_scope["artists"])}
-            _scope.update(full=False, names=set(), artists=set())
+        scope = _take_scope()
+        if scope is None:
+            continue
         try:
             drain = run_pass(scope)
         except Exception as e:

@@ -153,6 +153,19 @@ def test_one_subtree_per_match_set_kept_under_musicbrainz_s_spellings_alone(conn
             cur.execute("DELETE FROM mb_artist_alias WHERE id = 901")
 
 
+def test_a_spelling_musicbrainz_lacks_is_built_once_and_kept_under_musicbrainz_s(conn, dump_node):
+    """Asked first, a requester's spelling found no subtree to be cut from:
+    its build is kept under the name MusicBrainz gives the same artists, so
+    no ask of any spelling builds it again."""
+    out = _serve(conn, ["sigur ros"])
+    assert _verifies("sigur ros", out["slices"]["sigur ros"])
+    assert dump_node == ["sigur ros"] and _kept(conn) == ["sigur rós"]
+    again = _serve(conn, ["SIGUR ROS", "Sigur Rós"])
+    assert all(_verifies(n, again["slices"][n]) for n in ("SIGUR ROS", "Sigur Rós"))
+    assert dump_node == ["sigur ros"]                     # cut from the kept one, no build
+    assert _blob(again["slices"]["Sigur Rós"]) == q.name_blob("Sigur Rós", BUILD(conn, "Sigur Rós"))
+
+
 def test_a_name_key_is_answered_once_and_an_answer_is_bounded(conn, dump_node, monkeypatch):
     out = _serve(conn, ["Sigur Rós", "sigur rós", "Simon & Garfunkel"])
     assert sorted(out["slices"]) == ["Sigur Rós", "Simon & Garfunkel"]
@@ -285,8 +298,13 @@ def test_what_a_node_kept_of_who_asked_is_cut_once(conn, dump_node):
                                                    created_at)
                        VALUES (%s, %s, %s, %s, %s, now() - interval '3 hours')""",
                     (str(uuid.UUID(int=7)), VERSION, PUB, "00" * 64, psycopg2.Binary(b"\x00")))
+        cur.execute("UPDATE mb_slice_blobs SET checked_at = now() - interval '3 hours'")
+        cur.execute("UPDATE lb_slice_blobs SET checked_at = now() - interval '3 hours'")
+        cur.execute("""INSERT INTO slice_check_plans (family, key, subjects, releases, recordings, planned_at)
+                       VALUES ('mb', 'sigur rós', '{}', '{}', '{}', now() - interval '3 hours')""")
     out = db_migrate._cut_slice_records(conn)
     assert out["contact_rows"] == 3 and out["spellings_dropped"] == 1
+    assert out["checks_dated"] == 2 and out["plans_dated"] == 1
     with conn.cursor() as cur:
         cur.execute("SELECT endpoint FROM p2p_contact_events")
         assert cur.fetchall() == [("sync.inventory",)]
@@ -295,4 +313,9 @@ def test_what_a_node_kept_of_who_asked_is_cut_once(conn, dump_node):
         assert cur.fetchall() == [("sigur rós", True)]
         cur.execute("SELECT created_at = date_trunc('day', created_at) FROM lb_slice_blobs")
         assert cur.fetchall() == [(True,)]
+        for table, col in (("mb_slice_blobs", "checked_at"), ("lb_slice_blobs", "checked_at"),
+                           ("slice_check_plans", "planned_at")):
+            cur.execute(f"SELECT bool_and({col} = date_trunc('day', {col})) FROM {table}")
+            assert cur.fetchone() == (True,), table
+        cur.execute("DELETE FROM slice_check_plans")
 

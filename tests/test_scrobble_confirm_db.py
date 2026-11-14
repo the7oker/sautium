@@ -297,9 +297,13 @@ def _heard(conn) -> set:
 
 
 def test_listens_that_land_wake_no_network_lane(node, scratch_dsn, monkeypatch):
-    """The walk and both slice cycles take what an import brought at their own
-    pace, mixed with everything else: placed listens wake what feeds on them
-    here, never a request to the network as the import's echo."""
+    """Placed listens wake what feeds on them here — the enrichment loop, the
+    DB steps, the notary — and no network lane of their own: the walk and
+    both slice cycles hear of an import only through what those bring (the
+    similar artists' stubs, minted albums), at their own pace and mixed with
+    everything else, and nothing at all while its session reads, when the
+    canon places nothing (test_lastfm_history.py) and draws the names it
+    decides at random (test_scrobble_canon.py)."""
     import background_enrichment
     import notary
     from canon import scrobbles

@@ -238,11 +238,12 @@ def _run(user: str, reason: str) -> None:
                 return
             walk = _open_walk(cur, user)
             # While this session reads, the names it stores wait outside the
-            # MB slice stream (mb_slice_queries.pending_slice_names): the
-            # walk reads the newest scrobbles first, and names asked mid-walk
-            # would be the most recent listens'. They join it when the
-            # session stops — done, paused or failed —, at the stream's pace;
-            # the import wakes no cycle of its own.
+            # MB slice stream (mb_slice_queries.pending_slice_names) and the
+            # scrobble canon places none of them (canon.scrobbles._consume):
+            # the walk reads the newest scrobbles first, and names asked or
+            # listens placed mid-walk would be the most recent listens'. They
+            # join when the session stops — done, paused or failed —, at the
+            # stream's pace; the import wakes no cycle of its own.
             cur.execute("UPDATE lastfm_import SET reading_since = now() WHERE username = %s", (user,))
         svc = LastFmService(session_key=settings.lastfm_session_key)
         after = walk["watermark"] - LATE_SCROBBLE_WINDOW if walk["watermark"] else None
@@ -270,6 +271,7 @@ def _run(user: str, reason: str) -> None:
                     _close_walk(cur, user)
             pages += 1
             if touched:
+                # The names a pass takes once the session stops.
                 from canon import scrobbles
                 scrobbles.wake(names=touched)
             total = max(walk["total"] or 0, walk["fetched"])
@@ -306,11 +308,21 @@ def _run(user: str, reason: str) -> None:
             _state["phase"] = "idle"
         _notify()
         db_execute("UPDATE lastfm_import SET reading_since = NULL WHERE username = %s", (user,))
+        # The scrobble canon placed nothing while the session read.
+        from canon import scrobbles
+        scrobbles.wake(names=())
+
+
+def reading() -> bool:
+    """Whether an import session is reading pages now."""
+    return db_query_one("SELECT EXISTS (SELECT 1 FROM lastfm_import "
+                        "WHERE reading_since IS NOT NULL) AS r")["r"]
 
 
 def reset_reading() -> None:
-    """At startup, before resume(): no session reads in a process that has
-    just started, whatever one that ended without its `finally` left."""
+    """At startup, before the scrobble canon and resume(): no session reads in
+    a process that has just started, whatever one that ended without its
+    `finally` left."""
     db_execute("UPDATE lastfm_import SET reading_since = NULL WHERE reading_since IS NOT NULL")
 
 

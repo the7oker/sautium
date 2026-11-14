@@ -121,9 +121,9 @@ def _import(c, mbid, entry, node="peer-a"):
 
 def test_the_opened_page_heads_the_draw_owned_and_engaged_follow_never_phantoms(conn):
     pending = q.pending_slice_mbids(conn, 200, None)
-    assert pending[0] == (M_ASKED, None)
-    assert sorted(m for m, _ in pending[1:]) == sorted([M_OWNED, M_ENGAGED])
-    assert all(v is None for _, v in pending)
+    assert pending[0] == (M_ASKED, None, True)
+    assert sorted(m for m, _, _ in pending[1:]) == sorted([M_OWNED, M_ENGAGED])
+    assert all(v is None and not opened for _, v, opened in pending[1:])
 
 
 def test_owned_and_listened_artists_are_one_pool_drawn_at_random(conn):
@@ -150,7 +150,7 @@ def test_an_artist_owned_at_the_hqplayer_alone_is_owned(conn):
         cur.execute("INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path) "
                     "VALUES (%s, %s, '/hqp/three.flac')", (track, cur.fetchone()[0]))
     try:
-        assert mbid in [m for m, _ in q.pending_slice_mbids(conn, 200, None)]
+        assert mbid in [m for m, _, _ in q.pending_slice_mbids(conn, 200, None)]
     finally:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM hqp_library_files")
@@ -163,10 +163,10 @@ def test_an_artist_owned_at_the_hqplayer_alone_is_owned(conn):
 def test_a_ledger_row_closes_an_mbid_only_at_its_version(conn):
     n = _import(conn, M_OWNED, _entry(M_OWNED, V1, [[REC_1, 5, 2, [M_OWNED]]]))
     assert n == 1
-    assert [m for m, _ in q.pending_slice_mbids(conn, 200, None)] == [M_ASKED, M_ENGAGED]
-    assert [m for m, _ in q.pending_slice_mbids(conn, 200, V1)] == [M_ASKED, M_ENGAGED]
+    assert [m for m, _, _ in q.pending_slice_mbids(conn, 200, None)] == [M_ASKED, M_ENGAGED]
+    assert [m for m, _, _ in q.pending_slice_mbids(conn, 200, V1)] == [M_ASKED, M_ENGAGED]
     stale = q.pending_slice_mbids(conn, 200, V2)
-    assert (M_OWNED, V1) in stale
+    assert (M_OWNED, V1, False) in stale
 
 
 def test_a_signed_zero_match_is_closed_and_reopened_by_a_newer_version(conn):
@@ -174,8 +174,8 @@ def test_a_signed_zero_match_is_closed_and_reopened_by_a_newer_version(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT recordings FROM lb_slice_fetches WHERE artist_mbid = %s", (M_ENGAGED,))
         assert cur.fetchone()[0] == 0
-    assert M_ENGAGED not in [m for m, _ in q.pending_slice_mbids(conn, 200, V1)]
-    assert (M_ENGAGED, V1) in q.pending_slice_mbids(conn, 200, V2)
+    assert M_ENGAGED not in [m for m, _, _ in q.pending_slice_mbids(conn, 200, V1)]
+    assert (M_ENGAGED, V1, False) in q.pending_slice_mbids(conn, 200, V2)
 
 
 def test_import_answers_the_on_demand_request(conn):
@@ -183,7 +183,7 @@ def test_import_answers_the_on_demand_request(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM lb_slice_requests")
         assert cur.fetchone()[0] == 0
-    assert M_ASKED not in [m for m, _ in q.pending_slice_mbids(conn, 200, V1)]
+    assert M_ASKED not in [m for m, _, _ in q.pending_slice_mbids(conn, 200, V1)]
 
 
 def test_imports_move_rows_forward_only_in_any_arrival_order(conn):

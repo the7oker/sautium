@@ -366,3 +366,76 @@ def test_imported_listens_become_album_mix_and_track_cards(db):
     with db.cursor() as cur:
         cur.execute("SELECT id FROM listening_sessions ORDER BY started_at")
         assert [r[0] for r in cur.fetchall()] == [c[0] for c in cards]
+
+
+def test_stage_b_draws_its_names_at_random_never_most_scrobbled_first(db, monkeypatch):
+    """What follows a decision — MusicBrainz's answers, the listens placed,
+    the lanes that feed on them — must not go in the owner's ranking."""
+    with db.cursor() as cur:
+        for i in range(9):
+            _wait(cur, i, f"Song {i}", artist="Heard Often")
+        _wait(cur, 100, "A Song", artist="Heard Once")
+    monkeypatch.setattr(scrobbles, "_evidence", lambda keys: {})     # decided at once, placed nowhere
+    firsts = set()
+    for _ in range(30):
+        with db.cursor() as cur:
+            cur.execute("UPDATE pending_scrobble_artists SET checked_at = NULL")
+        scrobbles.resolve_names(limit=1)
+        with db.cursor() as cur:
+            cur.execute("SELECT name_key FROM pending_scrobble_artists WHERE checked_at IS NOT NULL")
+            firsts |= {r[0] for r in cur.fetchall()}
+    assert firsts == {"heard often", "heard once"}
+
+
+def test_stage_c_mints_at_random_never_most_scrobbled_first(db, monkeypatch):
+    import discography
+    often, once = str(uuid.uuid4()), str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'Heard Often'), (%s, 'Heard Once')",
+                    (often, once))
+        for i in range(9):
+            _wait(cur, i, f"Song {i}", artist="Heard Often")
+        _wait(cur, 100, "A Song", artist="Heard Once")
+        cur.execute("UPDATE pending_scrobble_artists SET artist_id = CASE name_key "
+                    "WHEN 'heard often' THEN %s::uuid ELSE %s::uuid END", (often, once))
+    minted = []
+    monkeypatch.setattr(discography, "sync_artist_discography",
+                        lambda artist_id, name, priority=None: minted.append(name) or {"status": "no_source"})
+    firsts = set()
+    for _ in range(30):
+        minted.clear()
+        scrobbles.mint_resolved(limit=1)
+        firsts.add(minted[0])
+    assert firsts == {"Heard Often", "Heard Once"}
+
+
+def test_the_similar_artists_of_the_engaged_are_fetched_in_random_order(db, monkeypatch):
+    """After an imported history the queue is the history's artists: their
+    stubs minted in the order of the owner's latest listens would enter the
+    MB slice stream's pool in it."""
+    import lastfm
+    recent, old = str(uuid.uuid4()), str(uuid.uuid4())
+    with db.cursor() as cur:
+        for aid, name, days in ((recent, "Heard Lately", 1), (old, "Heard Long Ago", 900)):
+            track = str(uuid.uuid4())
+            cur.execute("INSERT INTO artists (id, name) VALUES (%s, %s)", (aid, name))
+            cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'a song')", (track,))
+            cur.execute("INSERT INTO track_artists (track_id, artist_id) VALUES (%s, %s)", (track, aid))
+            cur.execute("""INSERT INTO listening_history (track_id, started_at, completed, skipped, source)
+                           VALUES (%s, now() - %s * interval '1 day', TRUE, FALSE, 'lastfm')""",
+                        (track, days))
+    fetched = []
+
+    class _LastFm:
+        def fetch_and_store_similar(self, db, artist_id, name):
+            fetched.append(name)
+            return {"stored": 0, "status": "ok"}
+
+    monkeypatch.setattr(lastfm, "LastFmService", _LastFm)
+    firsts = set()
+    for _ in range(30):
+        fetched.clear()
+        lastfm.backfill_similar(limit=1)
+        firsts.add(fetched[0])
+    assert firsts == {"Heard Lately", "Heard Long Ago"}
+

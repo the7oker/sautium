@@ -463,11 +463,12 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to load API cooldowns at startup: {e}")
 
     # The imported Last.fm history: the canon consumer that places waiting
-    # scrobbles, then a walk a restart interrupted, from its cursor.
-    from canon import scrobbles as scrobble_canon
-    scrobble_canon.start()
+    # scrobbles — once no session left by the last process reads —, then a
+    # walk a restart interrupted, from its cursor.
     import lastfm_history
     lastfm_history.reset_reading()
+    from canon import scrobbles as scrobble_canon
+    scrobble_canon.start()
     lastfm_history.resume()
 
     # A node with catalogue slices and no MusicBrainz database re-makes its

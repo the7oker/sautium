@@ -205,8 +205,10 @@ service, LAN discovery (none in a container — it cannot hear the beacon),
 manual peers, the address skip list (the launcher subtracts itself by its
 UPnP external IP; every runtime also recognises its own address by the key
 `/health` returns), the sharing switch (off, since 2026-11-14, the walk asks
-no peer and no DHT key and carries nothing; so do both slice cycles, and the
-DHT holds the rare-artist tail — a node that does not give does not take), the
+no peer and no DHT key and carries nothing — turned off during a peer's
+session, the pull asks nothing more and no carry follows; so do both slice
+cycles, and the DHT holds the rare-artist tail — a node that does not give
+does not take), the
 diag sink, the post-run hook (both runtimes request the MB and LB slice cycles; before
 2026-09-24 only the launcher fetched MB slices). Triggers are the same on both:
 `NOTIFY sautium_sync_request`, the `sync.auto_interval_min` timer, the first
@@ -1065,7 +1067,9 @@ one subtree per *match set* (the matched artist ids, `match_key`), keeps at
 most four spellings of it — since 2026-11-14 only spellings MusicBrainz itself
 has, an artist's name or an alias, each build dated to the day, so the cache
 is no record of who asked what — and cuts any other spelling from the stored
-blob, served unkept; a zero-match is served signed and never kept; a name over 255
+blob, served unkept (asked first, its build is kept under the name
+MusicBrainz gives the same artists, so no spelling of the set is built
+twice); a zero-match is served signed and never kept; a name over 255
 characters, with a control character, or one of MB's special-purpose artists
 is `missing`. Builds have a node-wide budget (two at once, 120 a minute; LB:
 300), a quarter of it for any one requester, and only a build that found
@@ -1136,20 +1140,31 @@ request no longer tells why a name is in it. Every reason canon waits on a
 name — the owner's files, the imported scrobbles, the canonized artists never
 shelved, the similar-artist stubs, the names the ledger does not vouch for —
 is one pool, drawn at random, every name sent as `lower(btrim(name))` (the
-matcher folds case on both of its arms); the waiting room's names join it
-only once the import session that read them stops, so no draw comes from the
-newest scrobbles alone, and the import wakes no network lane of its own (nor
-does the scrobble canon after it: the walk and both slice cycles take what it
-brought at their own pace). A run that fills its cap and is served asks for
-the next at once, whatever waits, and a source is asked at most once every
-`PACKET_GAP` (60 s, `PACKET_NAMES` 25 names — under the quarter of a dump
-node's build budget one requester has, 30 builds in any minute): an import or
-a scan makes the stream longer, never faster. The LB cycle draws its owned and engaged artists the same way, an
-opened page's MBIDs always in the draw, and shuffles each request; the walk
+matcher folds case on both of its arms). While an import session reads pages
+— newest first — its names stay out of the pool and the scrobble canon places
+none of them, so neither a draw nor what follows a placed listen (the
+engaged set, the similar artists, both slice streams) comes from the newest
+scrobbles alone; when the session stops, the canon decides, mints and places
+in random order, never most-scrobbled first, and the similar artists of the
+engaged are fetched in random order too. The import wakes no network lane of
+its own (nor does the canon after it: the walk and both slice cycles take
+what it brought at their own pace). A run that fills its cap and is served
+asks for the next at once, whatever waits, and a source is asked at most once
+every `PACKET_GAP` (60 s, `PACKET_NAMES` 25 names — under the quarter of a
+dump node's build budget one requester has, 30 builds in any minute): an
+import or a scan makes the stream longer, never faster. The LB cycle draws
+its owned and engaged artists the same way, shuffles each request and asks a
+source at most once every 60 s too, 50 MBIDs at a time (two thirds of the 75
+a minute a dump node builds for one requester); an opened artist page's
+MBIDs go at once, the first time, mixed into a request of 25, and a page
+opened while a run waits out the pace ends that run for the next. The walk
 sends its core and bulk tracks as one shuffled list. The cost, in time only:
 the owner's files wait behind the stubs in a large pool, the stubs resolve
 with the rest instead of at the timed pace, and an imported history fills
-Home in the stream's order rather than its most-scrobbled first.
+Home only once its session stops, in no particular order rather than its
+most-scrobbled first. A history past the waiting room's budget (250 000
+scrobbles) is read in sessions with the canon placing between them, so the
+order of those sessions — newest first — still shows at that grain.
 
 **Sources found once, kept while they answer (2026-09-24).** Both families'
 cycles find their sources through `desktop/p2p/slice_sources.py`: manual peers
@@ -1163,7 +1178,7 @@ before, any candidate at all skipped the fallback, and a node whose account
 runs a second node sat "with no source" beside a reachable master. A
 candidate is probed once, the walk's connect being the `/health`, and the
 verified set serves the next runs until a request to it fails or 15 min pass;
-a batch is the protocol's 50. Every run used to probe every candidate twice,
+a batch is at most the protocol's 50 (the MB stream's, `PACKET_NAMES`, 25). Every run used to probe every candidate twice,
 and a history import triggers runs every few seconds: the probes of the nodes
 behind one router spent the master's per-IP window, and a 429 on a probe read
 as "no source". The Docker peer surface counts `/health` in a window of its
@@ -1204,8 +1219,8 @@ pass them on; no key's signature is trusted for what it says.
   and queues no check. **No re-serve by origin** (2026-11-14): a blob
   fetched for the owner's imported history (a name its waiting room holds,
   an artist a placed scrobble or an imported listen engages) or for his own
-  lookup (Discovery's mint, the assistant's resolve, a person's pick, an
-  opened artist page's ListenBrainz statistics) is kept for this node alone
+  lookup (Discovery's mint, the assistant's resolve, an opened artist page's
+  ListenBrainz statistics) is kept for this node alone
   (`local_only`, read at the fetch by `LOCAL_ONLY_SQL` in each family's
   queries) — unless something another node may already know names it too: a
   file owned here or at the HQPlayer, a listen played to the end here. It is

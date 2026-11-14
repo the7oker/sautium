@@ -188,10 +188,10 @@ def servable(conn, family: str, key: str, own_pubkey: Optional[str]) -> Optional
 
 
 def checkable_count(conn, family: str, own_pubkey: Optional[str]) -> int:
-    """The blobs that can be passed on, checked or not yet: this node's own
-    builds, and — on a node that checks — those of verified authors with no
-    penalty, from sources with none, not suspect nor contested, and not kept
-    for this node alone: what `/health` advertises."""
+    """The blobs that can be passed on, checked or not yet, none kept for this
+    node alone: this node's own builds, and — on a node that checks — those
+    of verified authors with no penalty, from sources with none, not suspect
+    nor contested: what `/health` advertises."""
     from desktop.p2p.birth_cert import CERT_VERSION
     table, _ = _TABLE[family]
     contested = "AND NOT b.contested" if family == "mb" else ""
@@ -199,22 +199,24 @@ def checkable_count(conn, family: str, own_pubkey: Optional[str]) -> int:
     with conn.cursor() as cur:
         cur.execute(f"""
             SELECT count(*) FROM {table} b
-             WHERE (b.relay IS NULL AND btrim(b.author_pubkey) = %(own)s)
-                OR (%(checks)s AND NOT b.suspect {contested} AND NOT b.local_only
-                    AND b.dump_version ~ '^[0-9]{{8}}-[0-9]{{6}}$' AND b.dump_version <= %(bound)s
-                    AND EXISTS (SELECT 1 FROM p2p_identities i
-                                 WHERE i.pubkey = btrim(b.author_pubkey) AND i.status = 'verified'
-                                   AND i.cert_v = %(cert_v)s
-                                   AND NOT EXISTS (SELECT 1 FROM slice_burned_mailboxes m
-                                                    WHERE m.email_token = i.email_token))
-                    AND NOT EXISTS (SELECT 1 FROM slice_penalties p
-                                     WHERE p.pubkey IN (btrim(b.author_pubkey),
-                                                        coalesce(btrim(b.relay), btrim(b.author_pubkey))))
-                    AND NOT EXISTS (SELECT 1 FROM p2p_node_bans n
-                                     WHERE lower(n.pubkey) IN (btrim(b.author_pubkey),
-                                                               coalesce(btrim(b.relay), btrim(b.author_pubkey))))
-                    AND NOT EXISTS (SELECT 1 FROM p2p_identities f
-                                     WHERE f.pubkey = btrim(b.relay) AND f.status = 'failed'))
+             WHERE NOT b.local_only
+               AND ((b.relay IS NULL AND btrim(b.author_pubkey) = %(own)s)
+                    OR (%(checks)s AND NOT b.suspect {contested}
+                        AND b.dump_version ~ '^[0-9]{{8}}-[0-9]{{6}}$' AND b.dump_version <= %(bound)s
+                        AND EXISTS (SELECT 1 FROM p2p_identities i
+                                     WHERE i.pubkey = btrim(b.author_pubkey) AND i.status = 'verified'
+                                       AND i.cert_v = %(cert_v)s
+                                       AND NOT EXISTS (SELECT 1 FROM slice_burned_mailboxes m
+                                                        WHERE m.email_token = i.email_token))
+                        AND NOT EXISTS (SELECT 1 FROM slice_penalties p
+                                         WHERE p.pubkey IN (btrim(b.author_pubkey),
+                                                            coalesce(btrim(b.relay), btrim(b.author_pubkey))))
+                        AND NOT EXISTS (SELECT 1 FROM p2p_node_bans n
+                                         WHERE lower(n.pubkey) IN (
+                                               btrim(b.author_pubkey),
+                                               coalesce(btrim(b.relay), btrim(b.author_pubkey))))
+                        AND NOT EXISTS (SELECT 1 FROM p2p_identities f
+                                         WHERE f.pubkey = btrim(b.relay) AND f.status = 'failed')))
         """, {"own": (own_pubkey or "").lower(), "checks": checks,
               "bound": version_bound(conn, family), "cert_v": CERT_VERSION})
         return int(cur.fetchone()[0])
@@ -299,9 +301,12 @@ def request_check(conn, family: str, key: str, rng: Optional[random.Random] = No
         return
     with conn.cursor() as cur:
         # A check under way keeps the facts it drew: asked again meanwhile, it
-        # is not drawn anew (its answers would never all be in).
+        # is not drawn anew (its answers would never all be in). Its day is
+        # all a plan keeps of when it was drawn — another node's ask drew it —,
+        # so it stands the rest of that day and the next.
         cur.execute("""SELECT 1 FROM slice_check_plans WHERE family = %s AND key = %s
-                          AND planned_at > now() - interval '1 day'""", (family, key))
+                          AND planned_at >= date_trunc('day', now()) - interval '1 day'""",
+                    (family, key))
         if cur.fetchone():
             return
     rng = rng or random.SystemRandom()
@@ -322,11 +327,11 @@ def request_check(conn, family: str, key: str, rng: Optional[random.Random] = No
                  + list(extra))
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO slice_check_plans (family, key, subjects, releases, recordings)
-            VALUES (%s, %s, %s::uuid[], %s::uuid[], %s::uuid[])
+            INSERT INTO slice_check_plans (family, key, subjects, releases, recordings, planned_at)
+            VALUES (%s, %s, %s::uuid[], %s::uuid[], %s::uuid[], date_trunc('day', now()))
             ON CONFLICT (family, key) DO UPDATE
                SET subjects = EXCLUDED.subjects, releases = EXCLUDED.releases,
-                   recordings = EXCLUDED.recordings, planned_at = now()""",
+                   recordings = EXCLUDED.recordings, planned_at = EXCLUDED.planned_at""",
                     (family, key, subjects, [m for k, m in extra if k == "release"],
                      [m for k, m in extra if k == "recording"]))
     if items:
@@ -377,13 +382,16 @@ def uncheck_subject(conn, kind: str, mbid: str) -> int:
 def uncheck_answered(conn) -> int:
     """uncheck_subject for every answer stored unknown after the check of a
     kept blob about it — those a restart took from the slice checker before
-    it ran them. Returns the blobs un-checked."""
+    it ran them. A check keeps only its day (_stamp), so an answer of that
+    day counts as after it: such a slice is judged again, from the answers
+    here. Returns the blobs un-checked."""
     from desktop.p2p import slice_rebuild
     with slice_rebuild.verdict(conn), conn.cursor() as cur:
         cur.execute(f"""UPDATE mb_slice_blobs b SET checked_at = NULL
                          WHERE b.checked_at IS NOT NULL AND EXISTS (
                                SELECT 1 FROM slice_index i JOIN mbws_answers a
-                                   ON a.status = 'unknown' AND a.answered_at > b.checked_at
+                                   ON a.status = 'unknown'
+                                  AND date_trunc('day', a.answered_at) >= b.checked_at
                                   AND (a.kind = 'artist' AND a.mbid = ANY(i.subject_artists)
                                        OR a.kind = 'release_group' AND a.mbid = ANY(i.subject_groups))
                                 WHERE i.family = 'mb' AND i.key = b.name_key
@@ -392,8 +400,8 @@ def uncheck_answered(conn) -> int:
         cur.execute("""UPDATE lb_slice_blobs b SET checked_at = NULL
                         WHERE b.checked_at IS NOT NULL AND EXISTS (
                               SELECT 1 FROM mbws_answers a
-                               WHERE a.kind = 'artist' AND a.mbid = b.artist_mbid
-                                 AND a.status = 'unknown' AND a.answered_at > b.checked_at)""")
+                               WHERE a.kind = 'artist' AND a.mbid = b.artist_mbid AND a.status = 'unknown'
+                                 AND date_trunc('day', a.answered_at) >= b.checked_at)""")
         unchecked += cur.rowcount
     if unchecked:
         logger.info("%d kept slice(s) to check again: MusicBrainz answered one of their "
@@ -407,7 +415,9 @@ def _malformed(conn, family: str, key: str, payload: str) -> None:
     replaced it meanwhile."""
     from desktop.p2p import slice_rebuild
     table, col = _TABLE[family]
-    logger.warning("kept %s slice %s fails the import's row check — held back", family, key[:64])
+    # Nameless: met when another node asks, and a name there would tie the
+    # ask to what it asked about.
+    logger.warning("a kept %s slice fails the import's row check — held back", family)
     with slice_rebuild.verdict(conn), conn.cursor() as cur:
         cur.execute(f"UPDATE {table} SET suspect = TRUE WHERE {col}::text = %s AND {_PAYLOAD[family]} = %s",
                     (key, payload))
@@ -746,8 +756,10 @@ def _finish(conn, family: str, key: str, b: dict, facts: int, events: list,
     with slice_rebuild.verdict(conn):
         with conn.cursor() as cur:
             # Suspect stays suspect for this version of the blob; a new version
-            # is stored unsuspected and checked anew (store_slice_blob).
-            cur.execute(f"UPDATE {table} SET checked_at = now(), suspect = suspect OR %s "
+            # is stored unsuspected and checked anew (store_slice_blob). The
+            # check keeps its day alone: it follows another node's ask by the
+            # answers' wait, and its moment would date that ask.
+            cur.execute(f"UPDATE {table} SET checked_at = date_trunc('day', now()), suspect = suspect OR %s "
                         f"WHERE {col}::text = %s AND {_PAYLOAD[family]} = %s", (held, key, b["payload"]))
             if not cur.rowcount:
                 return

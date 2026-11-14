@@ -840,14 +840,15 @@ RESERVE_BLOB_MAX_GZ = 2 * 1024 * 1024
 # owner's imported history and his own lookups brought stays here. Local: the
 # name waits in the waiting room (pending_scrobble_artists), or it names an
 # artist the history placed (a waiting name resolved to it, or a listen
-# imported from Last.fm) or the person picked (Discovery's mint, the
-# assistant's resolve: confidence 'user') — unless a reason another node may
-# already know names it too: a file owned here or at the HQPlayer, or a
-# completed listen on this node (the caveat concedes both). The similar-artist
-# stubs, the seed's picks and carried phantoms re-serve as before. A fetch for
-# the person (Discovery's mint, the assistant's resolve) is local whatever the
-# name (MBSliceClient's `for_person`). Read at the import and by the one-time
-# marking of the blobs kept before (db_migrate `slice_origins_v1`).
+# imported from Last.fm) — unless a reason another node may already know names
+# it too: a file owned here or at the HQPlayer, or a completed listen on this
+# node (the caveat concedes both). A fetch for the person (Discovery's mint,
+# the assistant's resolve) is local whatever the name (MBSliceClient's
+# `for_person`); a pick's binding says nothing here, since the seed brings the
+# master's own picks under the same confidence. The similar-artist stubs, the
+# seed's picks and carried phantoms re-serve as before. Read at the import and
+# by the one-time marking of the blobs kept before (db_migrate
+# `slice_origins_v1`).
 LOCAL_ONLY_SQL = """(
     (EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n WHERE lo_n.name_key = {nk})
      OR EXISTS (SELECT 1 FROM artists lo_a
@@ -856,9 +857,7 @@ LOCAL_ONLY_SQL = """(
                                  WHERE lo_n.artist_id = lo_a.id)
                         OR EXISTS (SELECT 1 FROM track_artists lo_ta
                                      JOIN listening_history lo_lh ON lo_lh.track_id = lo_ta.track_id
-                                    WHERE lo_ta.artist_id = lo_a.id AND lo_lh.source = 'lastfm')
-                        OR EXISTS (SELECT 1 FROM artist_mbids lo_am
-                                    WHERE lo_am.artist_id = lo_a.id AND lo_am.confidence = 'user'))))
+                                    WHERE lo_ta.artist_id = lo_a.id AND lo_lh.source = 'lastfm'))))
     AND NOT EXISTS (SELECT 1 FROM artists lo_a
                      WHERE lower(btrim(lo_a.name)) = {nk}
                        AND (EXISTS (SELECT 1 FROM track_artists lo_ta
@@ -981,6 +980,16 @@ def _musicbrainz_name(conn, nk: str) -> bool:
         return bool(cur.fetchone()[0])
 
 
+def _spelled_by_musicbrainz(conn, ids: list) -> Optional[str]:
+    """The name MusicBrainz gives the first of the artists `ids` — when that
+    name matches exactly those artists (a slice is a closed world per name),
+    so a build kept under it answers any spelling of the match set."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT name FROM mb_artist WHERE id = %s", (ids[0],))
+        row = cur.fetchone()
+    return row[0] if row and match_artist_ids(conn, row[0]) == ids else None
+
+
 def _build(conn, name: str, version: str, sign_fn, author_pubkey: str,
            requester: Optional[str], replace: bool) -> Optional[dict]:
     """A dump node's signed slice of `name`, kept when the name is one
@@ -988,7 +997,9 @@ def _build(conn, name: str, version: str, sign_fn, author_pubkey: str,
     older blob or is among the first such spellings of its match set — None
     past the build budget, or for a subtree larger than any requester takes.
     Any other spelling is served unkept, cut from a kept blob of its match
-    set where one is (_respelled). What is kept is dated to the day: the
+    set where one is (_respelled); where none is, the build is kept under
+    MusicBrainz's own spelling of the set, so the next ask of either is cut
+    from it rather than built again. What is kept is dated to the day: the
     moment of a first ask is no record this node keeps."""
     if not _builds.admit(requester):
         return None
@@ -1008,9 +1019,17 @@ def _build(conn, name: str, version: str, sign_fn, author_pubkey: str,
         sig = sign_fn(receipt_message_for(blob)).hex()
         blob_gz = gzip.compress(blob)
         nk = name_key(name)
-        if match and (kept < VARIANTS_PER_MATCH or replace) and _musicbrainz_name(conn, nk):
-            store_slice_blob(conn, nk, version, author_pubkey, sig, blob_gz,
-                             cap=False, match=match)
+        if match and (kept < VARIANTS_PER_MATCH or replace):
+            if _musicbrainz_name(conn, nk):
+                store_slice_blob(conn, nk, version, author_pubkey, sig, blob_gz,
+                                 cap=False, match=match)
+            elif twin is None:
+                spelled = _spelled_by_musicbrainz(conn, ids)
+                if spelled is not None:
+                    own = _respelled(blob_gz, spelled, ids)
+                    store_slice_blob(conn, name_key(spelled), version, author_pubkey,
+                                     sign_fn(receipt_message_for(own)).hex(), gzip.compress(own),
+                                     cap=False, match=match)
         return {"dump_version": version, "author_pubkey": author_pubkey,
                 "sig": sig, "blob_gz": blob_gz}
     finally:

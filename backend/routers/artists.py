@@ -158,13 +158,15 @@ def get_artist(
     # The on-demand lane of the ListenBrainz slice cycle: an artist whose
     # MBIDs the ledger does not vouch for yet, opened on a node without the
     # statistics dump, is asked of the network now — the durable row is the
-    # request (the cycle serves it first), the NOTIFY only the wake. Version
-    # upgrades are the cycle's job, not this page's. With P2P sharing off no
-    # request is made: a row kept for later would ask, the day sharing comes
-    # back, about every page opened meanwhile.
+    # request (the cycle serves it first), the NOTIFY only the wake — of a
+    # new request alone: the cycle asks a page's artist at once the first
+    # time, outside its pace, and the page opened again while its request
+    # waits (a re-read after each batch the cycle imports) is no new one.
+    # Version upgrades are the cycle's job, not this page's. With P2P sharing
+    # off no request is made: a row kept for later would ask, the day sharing
+    # comes back, about every page opened meanwhile.
     from routers.sync import sharing_enabled
-    if sharing_enabled():
-        db_execute("""
+    if sharing_enabled() and db_execute("""
             INSERT INTO lb_slice_requests (artist_id)
             SELECT %(id)s::uuid
              WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = %(id)s::uuid)
@@ -173,12 +175,11 @@ def get_artist(
                                JOIN artist_mbids am ON am.mbid = f.artist_mbid
                                WHERE am.artist_id = %(id)s::uuid)
             ON CONFLICT (artist_id) DO NOTHING
-        """, {"id": artist_id})
+            RETURNING artist_id""", {"id": artist_id}):
+        db_execute("NOTIFY sautium_lb_request")
     artist["lb_pending"] = db_query_one(
         "SELECT 1 AS x FROM lb_slice_requests WHERE artist_id = %(id)s::uuid",
         {"id": artist_id}) is not None
-    if artist["lb_pending"]:
-        db_execute("NOTIFY sautium_lb_request")
 
     # --- Namesake disambiguation ------------------------------------------
     # One display name can map to several real MB artists (e.g. two bands

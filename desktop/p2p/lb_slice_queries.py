@@ -285,9 +285,10 @@ def count_slice_blobs(conn, own_pubkey: Optional[str] = None) -> int:
 
 def max_blob_version(conn) -> Optional[str]:
     """The newest dump version this node's inventory carries — what a
-    replica-only network still learns a "newest known" from."""
+    replica-only network still learns a "newest known" from — of the blobs
+    it may pass on: one kept for this node alone is no inventory's."""
     with conn.cursor() as cur:
-        cur.execute("SELECT max(dump_version) FROM lb_slice_blobs")
+        cur.execute("SELECT max(dump_version) FROM lb_slice_blobs WHERE NOT local_only")
         row = cur.fetchone()
     return row[0] if row and row[0] else None
 
@@ -415,11 +416,12 @@ def verify_slice_entry(artist_mbid: str, entry: dict,
 
 
 def pending_slice_mbids(conn, limit: int = 200,
-                        newest_version: Optional[str] = None) -> List[Tuple[str, Optional[str]]]:
-    """(artist MBID, ledger version | None) the cycle should ask for, up to
-    `limit`: every MBID of an artist page opened (the on-demand lane —
-    lb_slice_requests, which the page waits on), then a random draw from the
-    OWNED artists (an owned file, here or at the HQPlayer: owned_files) and
+                        newest_version: Optional[str] = None) -> List[Tuple[str, Optional[str], bool]]:
+    """(artist MBID, ledger version | None, an opened page's) the cycle
+    should ask for, up to `limit`: every MBID of an artist page opened (the
+    on-demand lane — lb_slice_requests, which the page waits on), then a
+    random draw from the OWNED artists (an owned file, here or at the
+    HQPlayer: owned_files) and
     the ENGAGED ones (a completed, unskipped listen — the rule that gates
     every per-artist fan-out). One pool and no order inside it: a request
     does not tell an owned artist from a listened one (the mixed stream,
@@ -449,7 +451,7 @@ def pending_slice_mbids(conn, limit: int = 200,
                                WHERE ta.artist_id = am.artist_id
                                  AND lh.completed AND NOT lh.skipped)
             )
-            SELECT c.mbid::text, f.dump_version
+            SELECT c.mbid::text, f.dump_version, bool_or(c.opened)
               FROM cand c
               LEFT JOIN lb_slice_fetches f ON f.artist_mbid = c.mbid
              WHERE f.artist_mbid IS NULL
@@ -458,7 +460,7 @@ def pending_slice_mbids(conn, limit: int = 200,
              ORDER BY bool_or(c.opened) DESC, random()
              LIMIT %(lim)s
         """, {"newest": newest_version, "lim": limit})
-        return [(r[0], r[1]) for r in cur.fetchall()]
+        return [(r[0], r[1], r[2]) for r in cur.fetchall()]
 
 
 def _count(value, bound: int = 2 ** 31) -> bool:
