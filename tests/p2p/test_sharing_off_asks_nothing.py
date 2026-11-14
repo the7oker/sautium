@@ -146,10 +146,11 @@ def test_turned_off_during_a_peer_s_pull_nothing_more_is_asked_and_nothing_carri
         def sync_pull(self, endpoint, uuids):
             pulled.append(list(uuids))
             sharing[0] = False            # the owner turns sharing off after the first batch
-            return {"items": []}
+            return {"items": [{"track_uuid": uuids[0]}]}
 
     monkeypatch.setattr(sc.SyncClient, "_compute_needed",
                         lambda self, inventory, use_segments: {"audio_features": inventory["audio_features"]})
+    monkeypatch.setattr(sc.SyncClient, "_import_items", lambda self, category, result: len(result["items"]))
 
     async def db(fn, *args):
         return False                      # peer_refused: not banned
@@ -158,8 +159,32 @@ def test_turned_off_during_a_peer_s_pull_nothing_more_is_asked_and_nothing_carri
     tracks = [f"t{i}" for i in range(1200)]
     out = asyncio.run(walk._sync_from_peer("198.51.100.5:21000", (tracks, []),
                                            lambda msg: None, None, peer_api=_Peer()))
-    assert out == {"error": "sharing_off"}
+    assert out == {"audio_features": 1, "error": "sharing_off"}     # what came before it counts
     assert len(pulled) == 1               # batches of 500: the second is never asked
+
+
+def test_a_carry_part_refused_for_the_carrier_s_window_is_sent_again_only_while_sharing_is_on(monkeypatch):
+    sharing = [True]
+    walk = SyncWalk("postgresql://unused", identity=lambda: _Identity(),
+                    sharing_enabled=lambda: sharing[0])
+    pushed = []
+    monkeypatch.setattr(sync_walk, "_connect", lambda dsn: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(sync_walk.sync_queries, "get_pushable_tracks",
+                        lambda conn, limit: [{"recordings": ["r1"]}])
+    monkeypatch.setattr(sync_walk.sync_queries, "PULL_HANDLERS",
+                        {c: (lambda conn, uuids: {"items": list(uuids)})
+                         for c in ("segments", "audio_features", "instruments", "track_mbids")})
+    monkeypatch.setattr(sync_walk, "push_parts", lambda payload: [payload])
+
+    def carry_push(category, part):
+        pushed.append(category)
+        sharing[0] = False                # turned off while the carrier's window is waited out
+        return {"retry_after": 1}
+
+    api = SimpleNamespace(carry_offer=lambda recordings: {"wanted": {"audio_features": ["u1"]}},
+                          carry_push=carry_push)
+    assert walk._push_to_carrier(api, lambda msg: None) == 0
+    assert pushed == ["audio-features"]
 
 
 def test_turned_off_during_a_carry_no_further_part_leaves(monkeypatch):
@@ -237,6 +262,28 @@ def test_the_mb_cycle_turned_off_mid_run_sends_no_further_batch(monkeypatch):
     assert len(asked) == 1
     assert published[-1]["reason"] == "sharing_off"
     assert published[-1]["unserved"] == len(names) - len(asked[0])
+
+
+def test_after_a_rate_limit_s_wait_the_mb_stream_asks_again_only_while_sharing_is_on(monkeypatch):
+    sharing, published, asked = [True], [], []
+    cycle = _mb_cycle(sharing, published, monkeypatch)
+    api = SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0)
+
+    async def find_sources():
+        return [(api, "ef" * 32)]
+
+    async def isolated(client, node, batch, avoid):
+        asked.append(list(batch))
+        sharing[0] = False                # turned off while the window is waited out
+        return {"error": "rate limited", "retry_after": 1}
+
+    cycle.find_sources, cycle._isolated = find_sources, isolated
+    monkeypatch.setattr(mb_slice_cycle, "MBSliceClient",
+                        lambda api, db_dsn, source_node: SimpleNamespace(close=lambda: None,
+                                                                         finalize=lambda: None))
+    asyncio.run(cycle.run())
+    assert len(asked) == 1
+    assert published[-1]["reason"] == "sharing_off"
 
 
 def test_the_lb_cycle_with_sharing_off_probes_no_source_and_says_why(monkeypatch):
@@ -377,20 +424,21 @@ def test_one_source_is_asked_at_the_stream_s_pace_across_runs(monkeypatch):
     assert all(len(b) <= mb_slice_cycle.PACKET_NAMES for b in sizes)
 
 
-def _lb_stream(monkeypatch, rows, newest=None):
-    """An LB cycle over one source, its pending set `rows` (mutable), and
-    the statuses it published."""
+def _lb_stream(monkeypatch, rows, newest=None, sources=None, sharing=None):
+    """An LB cycle over `sources` (one by default), its pending set `rows`
+    (mutable), and the statuses it published."""
     monkeypatch.setattr(lb_slice_cycle, "local_dump_available", lambda dsn: None)
     monkeypatch.setattr(lb_slice_cycle, "published_newest", lambda dsn, family: None)
     monkeypatch.setattr(lb_slice_cycle, "analyze_tables", lambda dsn: None)
     monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, version: list(rows))
     cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_refuse, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: True)
-    api = SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0)
+                                        sharing_enabled=lambda: sharing is None or sharing[0])
+    sources = sources or [(SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0),
+                           "ef" * 32, None)]
     published = []
 
     async def find_sources(listed):
-        return [(api, "ef" * 32, None)], newest
+        return sources, newest
 
     async def publish(**state):
         published.append(state)
@@ -474,4 +522,131 @@ def test_a_page_asked_at_once_is_paced_when_asked_again(monkeypatch):
 
     asyncio.run(go())
     assert len(asked) == 2 and asked[1] - asked[0] >= 0.29
+
+
+def _source(n):
+    return SimpleNamespace(base_url=f"https://198.51.100.{n}:21000", session_deadline=0)
+
+
+REPLICA, DUMP = "aa" * 32, "bb" * 32
+
+
+def _replica_ahead(asked):
+    """A replica that holds none of what it is asked, and a dump node that
+    holds all of it — the order find_sources gives them: replicas first."""
+    async def exchange(api, node, source_addr, batch, min_version):
+        asked.append((time.monotonic(), node, list(batch)))
+        if node == REPLICA:
+            return {"imported": 0, "recordings": 0, "missing": list(batch), "dropped": 0}
+        return {"imported": len(batch), "recordings": 0, "missing": [], "dropped": 0}
+    return [(_source(6), REPLICA, None), (_source(5), DUMP, None)], exchange
+
+
+def test_a_page_is_asked_of_the_dump_nodes_first_and_at_once(monkeypatch):
+    """A replica rarely holds the artist a person just opened: the page goes
+    first to a dump node, and the replica is not asked what it answered."""
+    monkeypatch.setattr(lb_slice_cycle, "PACKET_GAP", 0.3)
+    page = _mbids("a", 1)
+    asked = []
+    sources, exchange = _replica_ahead(asked)
+    rows = [(m, None, True) for m in page] + [(m, None, False) for m in _mbids("c", 150)]
+    cycle, published = _lb_stream(monkeypatch, rows, sources=sources)
+    cycle._exchange = exchange
+    began = time.monotonic()
+    asyncio.run(cycle.run())
+    at, node, first = asked[0]
+    assert node == DUMP and page[0] in first and len(first) == lb_slice_cycle.PAGE_MBIDS
+    assert at - began < 0.1
+    assert not any(page[0] in b for _, _, b in asked[1:])
+    # What the dump node answered for the page is not asked of the replica
+    # after it; the rest goes replicas first, at the pace.
+    assert not set(first) & {m for _, n, b in asked[1:] if n == REPLICA for m in b}
+    assert published[-1]["unserved"] == 0
+
+
+def test_pages_opened_one_after_another_reach_the_dump_node_while_the_person_browses(monkeypatch):
+    monkeypatch.setattr(lb_slice_cycle, "PACKET_GAP", 0.5)
+    pages, opened = _mbids("a", 6), []
+    asked = []
+    sources, exchange = _replica_ahead(asked)
+    backlog = [(m, None, False) for m in _mbids("c", 150)]
+    cycle, _ = _lb_stream(monkeypatch, backlog, sources=sources)
+    monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids",
+                        lambda dsn, n, version: [(m, None, True) for m in opened] + list(backlog))
+    cycle._exchange = exchange
+
+    opened_at = {}
+
+    async def go():
+        cycle.bind()
+        dispatch = asyncio.create_task(cycle.dispatch_loop())
+        for p in pages:                   # the person browses, a page every 0.4 s
+            opened.append(p)
+            opened_at[p] = time.monotonic()
+            cycle.request("request")
+            await asyncio.sleep(0.4)
+        cycle.stop()
+        await asyncio.wait_for(dispatch, 5)
+
+    asyncio.run(go())
+    # Each page reaches the dump node at once, while the person goes on
+    # browsing — not after the replica's paced requests, which every next page
+    # would cut short.
+    for p in pages:
+        at = min(t for t, node, b in asked if node == DUMP and p in b)
+        assert at - opened_at[p] < 0.3, p
+
+
+def test_a_page_opened_during_the_timer_s_run_is_asked_by_the_run_after_it(monkeypatch):
+    """The timer's run goes through the dispatcher like any other: a page
+    opened while it waits out the pace cuts it, and the run after it asks
+    for the page — none is dropped for a run in progress."""
+    monkeypatch.setattr(lb_slice_cycle, "PACKET_GAP", 0.5)
+    monkeypatch.setattr(lb_slice_cycle, "FIRST_RUN_DELAY", 0)
+    monkeypatch.setattr(lb_slice_cycle, "read_interval", lambda dsn, default, key=None: 60)
+    opened = _mbids("a", 1)[0]
+    rest = _mbids("c", 120)
+    rows = [(m, None, False) for m in rest]
+    cycle, _ = _lb_stream(monkeypatch, rows)
+    asked = []
+
+    async def exchange(api, node, source_addr, batch, min_version):
+        asked.append(list(batch))
+        if len(asked) == 1:
+            rows[:] = [(opened, None, True)] + [(m, None, False) for m in rest if m not in batch]
+            cycle.request("request")      # the page's NOTIFY, while the timer's run goes on
+        return {"imported": len(batch), "recordings": 0, "missing": [], "dropped": 0}
+
+    cycle._exchange = exchange
+
+    async def go():
+        cycle.bind()
+        tasks = [asyncio.create_task(cycle.dispatch_loop()), asyncio.create_task(cycle.interval_loop())]
+        for _ in range(60):
+            if any(opened in b for b in asked):
+                break
+            await asyncio.sleep(0.05)
+        cycle.stop()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(go())
+    assert any(opened in b for b in asked)
+
+
+def test_after_a_rate_limit_s_wait_the_lb_stream_asks_again_only_while_sharing_is_on(monkeypatch):
+    sharing, asked = [True], []
+    cycle, published = _lb_stream(monkeypatch, [(m, None, False) for m in _mbids("c", 10)],
+                                  sharing=sharing)
+
+    async def exchange(api, node, source_addr, batch, min_version):
+        asked.append(list(batch))
+        sharing[0] = False                # turned off while the window is waited out
+        return {"error": "rate limited", "retry_after": 1}
+
+    cycle._exchange = exchange
+    asyncio.run(cycle.run())
+    assert len(asked) == 1
+    assert published[-1]["reason"] == "sharing_off"
 

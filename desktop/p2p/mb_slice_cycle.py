@@ -179,7 +179,6 @@ class MbSliceCycle:
         self._first_source = first_source
         self._reasons: set[str] = set()
         self._notify: Optional[asyncio.Event] = None
-        self._lock: Optional[asyncio.Lock] = None
         self._probe_lock: Optional[asyncio.Lock] = None
         self._next_at: Optional[float] = None
         self._status_cleared = False       # a dump node dropped its row this process
@@ -190,7 +189,6 @@ class MbSliceCycle:
 
     def bind(self) -> None:
         self._notify = asyncio.Event()
-        self._lock = asyncio.Lock()
         self._probe_lock = asyncio.Lock()
         self._running = True
         if self._reasons:
@@ -263,8 +261,10 @@ class MbSliceCycle:
                 None, read_interval, self.db_dsn, default, INTERVAL_KEY)
             if interval_min and interval_min > 0:
                 self._next_at = time.time() + interval_min * 60
-                await self.run_once(trigger="auto")
-                sleep_for = max(1.0, self._next_at - time.time())
+                # Through the dispatcher like every other trigger: one run at a
+                # time, and a trigger during a run is never dropped for it.
+                self.request("auto")
+                sleep_for = interval_min * 60
             else:
                 self._next_at = None
                 sleep_for = 300   # disabled — re-check the setting later
@@ -274,23 +274,20 @@ class MbSliceCycle:
                 break
 
     async def run_once(self, trigger: str) -> None:
-        """One run, serialised: concurrent triggers merge into the run in
-        progress rather than queueing behind it."""
-        if self._lock.locked():
-            logger.debug(f"MB slice cycle already in progress, skipping {trigger}")
-            return
+        """One run — the dispatcher's alone, one at a time: the triggers that
+        come during it merge into the one run after it (before 2026-11-14 the
+        interval loop ran its own and a trigger meanwhile was dropped)."""
         loop = asyncio.get_event_loop()
-        async with self._lock:
-            try:
-                stats = await self.run(trigger)
-                if stats:
-                    logger.info(f"MB slice run done (trigger={trigger}): {stats}")
-            except Exception as e:
-                logger.error(f"MB slice cycle failed: {e}", exc_info=True)
-                if self._diag_record:
-                    await loop.run_in_executor(
-                        None, self._diag_record, "mb_slice.failed",
-                        {"trigger": trigger, "error": str(e)[:500]})
+        try:
+            stats = await self.run(trigger)
+            if stats:
+                logger.info(f"MB slice run done (trigger={trigger}): {stats}")
+        except Exception as e:
+            logger.error(f"MB slice cycle failed: {e}", exc_info=True)
+            if self._diag_record:
+                await loop.run_in_executor(
+                    None, self._diag_record, "mb_slice.failed",
+                    {"trigger": trigger, "error": str(e)[:500]})
 
     async def refresh_sources(self) -> None:
         """On-demand source re-probe (the backend NOTIFYs when a remote search
@@ -415,7 +412,9 @@ class MbSliceCycle:
                     logger.info(f"MB slice: {node} rate-limited — re-asking in {wait}s")
                     waited = True
                     await asyncio.sleep(wait)
-                    if time.monotonic() >= api.session_deadline:
+                    if not self._sharing_enabled():
+                        reasons.add("sharing_off")
+                    if "sharing_off" in reasons or time.monotonic() >= api.session_deadline:
                         leftovers.extend(asked[i:])
                         break
                     self._asked_at[node] = time.monotonic()

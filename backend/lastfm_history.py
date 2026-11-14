@@ -222,9 +222,14 @@ def _pending_rows() -> int:
 
 def _run(user: str, reason: str) -> None:
     from api_cooldown import cooling_down
+    from canon import scrobbles
     from lastfm import LastFmService, SourceUnavailable
     pages = 0
     try:
+        # A pass of the scrobble canon under way ends before this session reads
+        # a page — the listens it placed meanwhile would be the newest pages';
+        # none starts after it while the session runs (reading()).
+        scrobbles.wait_for_pass()
         if cooling_down('lastfm'):
             _set(paused="Last.fm is rate-limiting this node — Sync again later.")
             return
@@ -272,7 +277,6 @@ def _run(user: str, reason: str) -> None:
             pages += 1
             if touched:
                 # The names a pass takes once the session stops.
-                from canon import scrobbles
                 scrobbles.wake(names=touched)
             total = max(walk["total"] or 0, walk["fetched"])
             _set(progress=f"{walk['fetched']:,} of {total:,} scrobbles read",
@@ -306,17 +310,20 @@ def _run(user: str, reason: str) -> None:
         _state["running"] = False
         if _state["phase"] not in ("done",):
             _state["phase"] = "idle"
+        # The scrobble canon placed nothing while the session ran; it holds no
+        # more (reading() is this process's own flag, cleared above), whatever
+        # the row below — the MB slice stream's view — meets on its way.
+        scrobbles.wake(names=())
         _notify()
         db_execute("UPDATE lastfm_import SET reading_since = NULL WHERE username = %s", (user,))
-        # The scrobble canon placed nothing while the session read.
-        from canon import scrobbles
-        scrobbles.wake(names=())
 
 
 def reading() -> bool:
-    """Whether an import session is reading pages now."""
-    return db_query_one("SELECT EXISTS (SELECT 1 FROM lastfm_import "
-                        "WHERE reading_since IS NOT NULL) AS r")["r"]
+    """Whether an import session runs in this process — from start(), before
+    its thread reads a page, to its end, whatever it reads or writes on the
+    way: the scrobble canon's hold. The row's `reading_since` is the same fact
+    for the MB slice stream, which reads it from another process."""
+    return bool(_state["running"])
 
 
 def reset_reading() -> None:

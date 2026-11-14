@@ -3084,10 +3084,14 @@ class P2PManager:
                 self._lb_sources_changed()),
             # The owner moved P2P sharing (routers/settings.put_sync_prefs).
             "sautium_sharing": lambda: asyncio.create_task(self._sharing_changed()),
-        }, lambda: self._running,
-            # A move while no LISTEN was up (before it, or while it reconnects)
-            # would be lost: the switch is read again whenever it is up.
-            on_listening=lambda: asyncio.create_task(self._sharing_changed()))
+        }, lambda: self._running, on_listening=self._listening_again)
+
+    def _listening_again(self) -> None:
+        """The LISTENs are up — the first time, or after a reconnect: what was
+        said while none was would be lost, so the switch is read again and an
+        artist page's request made meanwhile is asked now."""
+        asyncio.create_task(self._sharing_changed())
+        asyncio.create_task(self._lb_cycle.pages_waiting())
 
     def _sharing_on(self) -> bool:
         """The "P2P sharing" switch as this process reads it — the sync

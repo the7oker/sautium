@@ -1077,7 +1077,8 @@ something counts; both slice routes have a node-wide window of 300 requests
 a minute on top of the per-address one; an answer carries one blob per
 name_key and 16 MiB of blobs at most — a miss past any of these is
 `missing`, and the requester asks elsewhere or later. A finished dump load drops the blobs cut from the
-dump before it.
+dump before it, and every blob the node did not build (one signed by a key it shares, a same-account sibling's,
+would pass for its own).
 
 **Who answers.** `/health` reports `mb_slices` — since 2026-11-07 the blobs
 the node may pass on: its own builds, and, on a node that asks MusicBrainz
@@ -1140,13 +1141,17 @@ request no longer tells why a name is in it. Every reason canon waits on a
 name — the owner's files, the imported scrobbles, the canonized artists never
 shelved, the similar-artist stubs, the names the ledger does not vouch for —
 is one pool, drawn at random, every name sent as `lower(btrim(name))` (the
-matcher folds case on both of its arms). While an import session reads pages
-— newest first — its names stay out of the pool and the scrobble canon places
-none of them, so neither a draw nor what follows a placed listen (the
+matcher folds case on both of its arms). While an import session runs — it
+reads pages newest first — its names stay out of the pool and the scrobble
+canon places none of them (a pass under way ends before the session reads,
+and none starts until it stops; a walk a restart interrupted resumes before
+the canon starts), so neither a draw nor what follows a placed listen (the
 engaged set, the similar artists, both slice streams) comes from the newest
-scrobbles alone; when the session stops, the canon decides, mints and places
-in random order, never most-scrobbled first, and the similar artists of the
-engaged are fetched in random order too. The import wakes no network lane of
+scrobbles alone; when the session stops, the canon decides and mints in
+random order, never most-scrobbled first, and the similar artists of the
+engaged are fetched in random order too (what it can place at once, on
+tracks already here, its first pass still places in the history's order,
+newest first). The import wakes no network lane of
 its own (nor does the canon after it: the walk and both slice cycles take
 what it brought at their own pace). A run that fills its cap and is served
 asks for the next at once, whatever waits, and a source is asked at most once
@@ -1156,8 +1161,11 @@ import or a scan makes the stream longer, never faster. The LB cycle draws
 its owned and engaged artists the same way, shuffles each request and asks a
 source at most once every 60 s too, 50 MBIDs at a time (two thirds of the 75
 a minute a dump node builds for one requester); an opened artist page's
-MBIDs go at once, the first time, mixed into a request of 25, and a page
-opened while a run waits out the pace ends that run for the next. The walk
+MBIDs go first and at once, the first time, of the dump nodes before the
+replicas, mixed into a request of 25 where never-fetched MBIDs wait, and a
+page opened while a run waits out the pace ends that run for the next. Every
+run of either cycle is its dispatcher's, one at a time — the timer's
+included —, so a trigger during a run is never dropped for it. The walk
 sends its core and bulk tracks as one shuffled list. The cost, in time only:
 the owner's files wait behind the stubs in a large pool, the stubs resolve
 with the rest instead of at the timed pace, and an imported history fills
@@ -1218,9 +1226,10 @@ pass them on; no key's signature is trusted for what it says.
   every other node — a dump node included — passes on its own builds only
   and queues no check. **No re-serve by origin** (2026-11-14): a blob
   fetched for the owner's imported history (a name its waiting room holds,
-  an artist a placed scrobble or an imported listen engages) or for his own
-  lookup (Discovery's mint, the assistant's resolve, an opened artist page's
-  ListenBrainz statistics) is kept for this node alone
+  an artist a placed scrobble or an imported listen engages, a spelling no
+  artist here bears — the history's own, once placed under MusicBrainz's) or
+  for his own lookup (Discovery's mint, the assistant's resolve, an opened
+  artist page's ListenBrainz statistics) is kept for this node alone
   (`local_only`, read at the fetch by `LOCAL_ONLY_SQL` in each family's
   queries) — unless something another node may already know names it too: a
   file owned here or at the HQPlayer, a listen played to the end here. It is

@@ -272,7 +272,9 @@ def _mark_local_slices(conn) -> dict:
     backfill (052), so a blob kept before it names none. A dump node's are
     its own builds, nobody's history: each load empties the family's blobs
     (an MB load keeps those of its own version, and a dump node passes
-    another author's on only rebuilt as its own)."""
+    another author's on only rebuilt as its own) — what an MB dump node kept
+    from before its load that it did not build (no match key) goes, as a load
+    drops it now: one a same-account sibling built would pass for its own."""
     from desktop.p2p import lb_slice_queries, mb_slice_queries
     out = {}
     with conn.cursor() as cur:
@@ -280,6 +282,9 @@ def _mark_local_slices(conn) -> dict:
             cur.execute("UPDATE mb_slice_blobs b SET local_only = "
                         + mb_slice_queries.LOCAL_ONLY_SQL.format(nk="b.name_key"))
             out["mb_marked"] = cur.rowcount
+        else:
+            cur.execute("DELETE FROM mb_slice_blobs WHERE match_key IS NULL")
+            out["mb_dropped"] = cur.rowcount
         if not lb_slice_queries.local_dump_available(conn):
             cur.execute("UPDATE lb_slice_blobs b SET local_only = "
                         + lb_slice_queries.LOCAL_ONLY_SQL.format(mbid="b.artist_mbid"))

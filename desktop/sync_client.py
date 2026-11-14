@@ -404,6 +404,7 @@ class SyncClient:
         # makes (_ask): turned off mid-session, nothing more is asked. On
         # where nothing is asked — a push or a bundle arriving.
         self._sharing_enabled = sharing_enabled
+        self._pulled: dict = {}        # what the pull under way imported, per category
         # Filled by run_sync's capability probe; the caller reads it to
         # decide whether this peer can also be pushed to.
         self.peer_capabilities: set[str] = set()
@@ -496,11 +497,12 @@ class SyncClient:
         Returns:
             dict with sync statistics per category.
         """
+        self._pulled = {}
         try:
             return self._run_sync_inner(track_uuids, bulk_track_uuids or [])
         except SharingOff:
             self._progress("P2P sharing is off — nothing more is asked of this peer.")
-            return {"error": "sharing_off"}
+            return {**self._pulled, "error": "sharing_off"}
         finally:
             self._close_conn()
 
@@ -831,6 +833,8 @@ class SyncClient:
 
             imported = self._import_items(cat_key, result)
             total_imported += imported
+            # What a pull that sharing turned off ends still counts (run_sync).
+            self._pulled[cat_key] = total_imported
 
         return total_imported
 

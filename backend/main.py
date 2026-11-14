@@ -462,14 +462,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to load API cooldowns at startup: {e}")
 
-    # The imported Last.fm history: the canon consumer that places waiting
-    # scrobbles — once no session left by the last process reads —, then a
-    # walk a restart interrupted, from its cursor.
+    # The imported Last.fm history: a walk a restart interrupted resumes from
+    # its cursor first — its session holds the canon from that moment, so no
+    # pass places the prefix it read before the restart while it reads on —,
+    # then the canon consumer that places waiting scrobbles.
     import lastfm_history
     lastfm_history.reset_reading()
+    lastfm_history.resume()
     from canon import scrobbles as scrobble_canon
     scrobble_canon.start()
-    lastfm_history.resume()
 
     # A node with catalogue slices and no MusicBrainz database re-makes its
     # canon's irreversible decisions on MusicBrainz's own answers: one consumer
@@ -709,7 +710,9 @@ async def lifespan(app: FastAPI):
                 {"sautium_lb_pending": lambda: _lb_cycle.request("pending"),
                  "sautium_lb_request": lambda: _lb_cycle.request("request"),
                  "sautium_lb_sources": lambda: asyncio.create_task(_lb_sources_changed())},
-                lambda: _lb_cycle.running)),
+                lambda: _lb_cycle.running,
+                # A page's request made while no LISTEN was up is asked now.
+                on_listening=lambda: asyncio.create_task(_lb_cycle.pages_waiting()))),
             asyncio.create_task(_lb_cycle.dispatch_loop()),
             asyncio.create_task(_lb_cycle.interval_loop()),
         ]

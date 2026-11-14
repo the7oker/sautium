@@ -27,10 +27,11 @@ What a run does (`LbSliceCycle.run`):
    asked again with `min_version`, so counts refresh and signed zero-matches
    re-open; each request mixes them in random order, so it does not tell
    an opened page from an owned or a listened artist;
-4. source by source, one request every PACKET_GAP at most, of up to 50
-   MBIDs (the protocol's maximum) — an opened artist page's go at once,
-   mixed into PAGE_MBIDS, and a page opened while a run waits out the pace
-   ends that run for the next: every entry verified against the
+4. an opened artist page's MBIDs first, at once and of the dump nodes before
+   the replicas, mixed into PAGE_MBIDS; then source by source, one request
+   every PACKET_GAP at most, of up to 50 MBIDs (the protocol's maximum) — a
+   page opened while a run waits out the pace ends that run for the next:
+   every entry verified against the
    ORIGINAL author's key, imported in one transaction per batch under the
    loader's lock; `missing` (the peer does not hold it) and DROPPED (it sent
    something that does not verify) both carry to the next source — two
@@ -191,26 +192,31 @@ def local_dump_available(dsn: str) -> Optional[str]:
         conn.close()
 
 
-def _requests(remaining: dict, page: set, newest: Optional[str]) -> list:
-    """(lane, min_version, MBIDs, at once) for one source, in the order
-    asked: an opened page's MBIDs first — never stale, a page asks only for
-    an artist the ledger does not vouch for — mixed with others into
-    PAGE_MBIDS and sent at once; then the rest in requests of
-    MAX_MBIDS_PER_REQUEST, each lane already in random order."""
+def _requests(remaining: dict, opened: set, newest: Optional[str]) -> list:
+    """(lane, min_version, MBIDs) for one source's paced requests, in the
+    order asked: the fresh lane first — never-fetched artists have no counts
+    at all, and an opened page's MBIDs no source answered yet lead it —, then
+    the stale, in requests of MAX_MBIDS_PER_REQUEST, each in random order."""
     size = lb_slice_queries.MAX_MBIDS_PER_REQUEST
-    fresh = remaining["fresh"]
+    fresh = ([m for m in remaining["fresh"] if m in opened]
+             + [m for m in remaining["fresh"] if m not in opened])
     out = []
-    head = [m for m in fresh if m in page][:size]
-    if head:
-        taken = set(head)
-        head += [m for m in fresh if m not in taken][:max(0, PAGE_MBIDS - len(head))]
-        random.shuffle(head)
-        out.append(("fresh", None, head, True))
-        taken = set(head)
-        fresh = [m for m in fresh if m not in taken]
-    for lane, min_version, group in (("stale", newest, remaining["stale"]), ("fresh", None, fresh)):
-        out += [(lane, min_version, group[i:i + size], False) for i in range(0, len(group), size)]
+    for lane, min_version, group in (("fresh", None, fresh), ("stale", newest, remaining["stale"])):
+        for i in range(0, len(group), size):
+            batch = group[i:i + size]
+            random.shuffle(batch)
+            out.append((lane, min_version, batch))
     return out
+
+
+def page_requests_waiting(dsn: str) -> bool:
+    conn = _connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT EXISTS (SELECT 1 FROM lb_slice_requests)")
+            return bool(cur.fetchone()[0])
+    finally:
+        conn.close()
 
 
 def pending_slice_mbids(dsn: str, limit: int, newest: Optional[str]) -> list:
@@ -383,7 +389,6 @@ class LbSliceCycle:
         self._first_source = first_source
         self._reasons: set[str] = set()
         self._notify: Optional[asyncio.Event] = None
-        self._lock: Optional[asyncio.Lock] = None
         self._next_at: Optional[float] = None
         self._status_cleared = False       # a dump node dropped its row this process
         self._published: Optional[str] = None   # MetaBrainz's newest LB dump, per run
@@ -396,7 +401,6 @@ class LbSliceCycle:
 
     def bind(self) -> None:
         self._notify = asyncio.Event()
-        self._lock = asyncio.Lock()
         self._running = True
         if self._reasons:
             self._notify.set()
@@ -431,6 +435,14 @@ class LbSliceCycle:
             self._page.set()
         if self._notify:
             self._notify.set()
+
+    async def pages_waiting(self) -> None:
+        """Whenever the notifications are listened for (the first time and
+        after a reconnect): an artist page that asked while no one listened is
+        asked now — a page wakes the cycle once, for its new request alone."""
+        loop = asyncio.get_event_loop()
+        if await loop.run_in_executor(None, page_requests_waiting, self.db_dsn):
+            self.request("request")
 
     async def request_async(self, reason: str) -> None:
         """The walk's `after_run` shape."""
@@ -472,8 +484,11 @@ class LbSliceCycle:
             interval_min = await loop.run_in_executor(None, read_interval, self.db_dsn, default)
             if interval_min and interval_min > 0:
                 self._next_at = time.time() + interval_min * 60
-                await self.run_once(trigger="auto")
-                sleep_for = max(1.0, self._next_at - time.time())
+                # Through the dispatcher like every other trigger: one run at a
+                # time, and a trigger during a run — an opened page's — is never
+                # dropped for it.
+                self.request("auto")
+                sleep_for = interval_min * 60
             else:
                 self._next_at = None
                 sleep_for = 300   # disabled — re-check the setting later
@@ -483,23 +498,20 @@ class LbSliceCycle:
                 break
 
     async def run_once(self, trigger: str) -> None:
-        """One run, serialised: concurrent triggers merge into the run in
-        progress rather than queueing behind it."""
-        if self._lock.locked():
-            logger.debug(f"LB slice cycle already in progress, skipping {trigger}")
-            return
+        """One run — the dispatcher's alone, one at a time: the triggers that
+        come during it merge into the one run after it (before 2026-11-14 the
+        interval loop ran its own and a trigger meanwhile was dropped)."""
         loop = asyncio.get_event_loop()
-        async with self._lock:
-            try:
-                stats = await self.run(trigger)
-                if stats:
-                    logger.info(f"LB slice run done (trigger={trigger}): {stats}")
-            except Exception as e:
-                logger.error(f"LB slice cycle failed: {e}", exc_info=True)
-                if self._diag_record:
-                    await loop.run_in_executor(
-                        None, self._diag_record, "lb_slice.failed",
-                        {"trigger": trigger, "error": str(e)[:500]})
+        try:
+            stats = await self.run(trigger)
+            if stats:
+                logger.info(f"LB slice run done (trigger={trigger}): {stats}")
+        except Exception as e:
+            logger.error(f"LB slice cycle failed: {e}", exc_info=True)
+            if self._diag_record:
+                await loop.run_in_executor(
+                    None, self._diag_record, "lb_slice.failed",
+                    {"trigger": trigger, "error": str(e)[:500]})
 
     # -------------------------------------------------------------- sources
 
@@ -590,16 +602,20 @@ class LbSliceCycle:
 
         total = {"artists": 0, "recordings": 0}
         reasons: set[str] = set()
-        imported_any = False
+        imported_any, lacked = await self._ask_page(sources, remaining, page, total)
         for api, node, _ in sources:
             if not (remaining["stale"] or remaining["fresh"]) or reasons & {"sharing_off", "page"}:
                 break
             source_addr = lb_slice_queries.addr_uuid(api.base_url)
             api.session_deadline = time.monotonic() + PEER_SESSION_S
-            leftovers = {"stale": [], "fresh": []}
+            # What this source said it lacks when the page was asked goes on to
+            # the next untold.
+            skip = lacked.get(node, set())
+            leftovers = {"stale": [], "fresh": [m for m in remaining["fresh"] if m in skip]}
+            here = {"stale": remaining["stale"], "fresh": [m for m in remaining["fresh"] if m not in skip]}
             waited = limited = failed = False
-            for lane, min_version, batch, at_once in _requests(remaining, page, newest):
-                if not (at_once or reasons & {"sharing_off", "page"}) and await self._paced(node):
+            for lane, min_version, batch in _requests(here, opened, newest):
+                if not reasons & {"sharing_off", "page"} and await self._paced(node):
                     # An artist page opened meanwhile: the run that follows
                     # asks for it at once; what this one had left waits for it.
                     reasons.add("page")
@@ -627,7 +643,9 @@ class LbSliceCycle:
                     logger.info(f"LB slice: {node[:16]} rate-limited — re-asking in {wait}s")
                     waited = True
                     await asyncio.sleep(wait)
-                    if time.monotonic() >= api.session_deadline:
+                    if not self._sharing_enabled():
+                        reasons.add("sharing_off")
+                    if "sharing_off" in reasons or time.monotonic() >= api.session_deadline:
                         leftovers[lane].extend(batch)
                         continue
                     self._asked_at[node] = time.monotonic()
@@ -674,6 +692,43 @@ class LbSliceCycle:
                     else "missing" if unserved else "ok"),
             sources=len(sources), newest=newest)
         return total
+
+    async def _ask_page(self, sources: list, remaining: dict, page: set,
+                        total: dict) -> tuple[bool, dict]:
+        """An opened page's MBIDs, asked at once, of the dump nodes before the
+        replicas — the stream's order reversed: a replica rarely holds the
+        artist a person just opened —, each source once until every one is
+        answered, mixed with fresh MBIDs into PAGE_MBIDS where the backlog has
+        them. What a source lacks goes on to the next; what none answered, and
+        what a failure left (the paced requests judge the source), leads the
+        paced requests. Returns whether anything was imported, and what each
+        source said it lacks (the paced requests do not ask it again)."""
+        size = lb_slice_queries.MAX_MBIDS_PER_REQUEST
+        unserved = [m for m in remaining["fresh"] if m in page][:size]
+        filled: set = set()
+        imported = False
+        lacked: dict = {}
+        for api, node, _ in reversed(sources):
+            if not unserved or not self._sharing_enabled():
+                break
+            fill = [m for m in remaining["fresh"]
+                    if m not in page and m not in filled][:max(0, PAGE_MBIDS - len(unserved))]
+            filled.update(fill)
+            batch = unserved + fill
+            random.shuffle(batch)
+            api.session_deadline = time.monotonic() + PEER_SESSION_S
+            self._asked_at[node] = time.monotonic()
+            result = await self._isolated(api, node, lb_slice_queries.addr_uuid(api.base_url), batch, None)
+            if result is None or "error" in result:
+                continue
+            lacked[node] = set(result["missing"])
+            answered = set(batch) - lacked[node]
+            remaining["fresh"] = [m for m in remaining["fresh"] if m not in answered]
+            unserved = [m for m in unserved if m not in answered]
+            imported = imported or bool(result["imported"])
+            total["artists"] += result["imported"]
+            total["recordings"] += result["recordings"]
+        return imported, lacked
 
     async def _paced(self, node: str) -> bool:
         """Wait until this node may ask `node` again — PACKET_GAP after its

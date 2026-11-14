@@ -27,8 +27,9 @@ nothing minted (a standalone single, a compilation, a live record) — and is
 tried again when something changes for it: new scrobbles for the name, a slice
 for it, a dump, a mint of its artist. A scan or a sync can bring any track, so
 it re-runs A over everything. No timer: one consumer thread wakes on events —
-and places nothing while an import session reads pages, newest first; names
-and artists are decided in random order, never most-scrobbled first.
+and places nothing while an import session runs (it reads pages newest first;
+a pass and its reading never overlap); names and artists are decided and
+minted in random order, never most-scrobbled first.
 """
 
 import hashlib
@@ -953,6 +954,8 @@ def waiting_breakdown() -> Row:
 
 _wake_event = threading.Event()
 _scope_lock = threading.Lock()
+# A pass, or the start of an import session's reading: never both at once.
+_pass_lock = threading.Lock()
 _scope: Row = {"full": False, "names": set(), "artists": set()}
 _started = False
 
@@ -983,11 +986,13 @@ def start() -> None:
 
 
 def _take_scope() -> Optional[Row]:
-    """The scope the next pass takes — None while an import session reads
-    (lastfm_history.reading), the scope kept for the pass the session's end
-    wakes. The session reads the newest scrobbles first: a pass meanwhile
-    would grow the engaged set — and what feeds on it, the similar artists
-    and both slice streams — in the order the owner listened."""
+    """The scope the next pass takes — None while an import session runs
+    (lastfm_history.reading, from its start to its end), the scope kept for
+    the pass the session's end wakes. The session reads the newest scrobbles
+    first: a pass meanwhile would grow the engaged set — and what feeds on
+    it, the similar artists and both slice streams — in the order the owner
+    listened. Taken under _pass_lock, which a session waits on before it reads
+    (wait_for_pass): a pass and a session's reading never overlap."""
     import lastfm_history
     if lastfm_history.reading():
         return None
@@ -998,18 +1003,26 @@ def _take_scope() -> Optional[Row]:
     return scope
 
 
+def wait_for_pass() -> None:
+    """Return once no pass runs — for an import session about to read, which
+    has made lastfm_history.reading() true already, so none starts after."""
+    with _pass_lock:
+        pass
+
+
 def _consume() -> None:
     while True:
         _wake_event.wait()
         _wake_event.clear()
-        scope = _take_scope()
-        if scope is None:
-            continue
-        try:
-            drain = run_pass(scope)
-        except Exception as e:
-            logger.error("scrobble canon pass failed: %s", e, exc_info=True)
-            continue
+        with _pass_lock:
+            scope = _take_scope()
+            if scope is None:
+                continue
+            try:
+                drain = run_pass(scope)
+            except Exception as e:
+                logger.error("scrobble canon pass failed: %s", e, exc_info=True)
+                continue
         if drain:
             wake(names=())
 

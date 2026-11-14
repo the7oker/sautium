@@ -247,11 +247,49 @@ def test_the_scrobble_canon_places_nothing_while_a_session_reads_and_its_end_wak
 
     monkeypatch.setattr(scrobbles, "wake", watched_wake)
     _FakeLastFm.history = [_scrobble(m) for m in (0, 10, 20, 30, 40)]
+    monkeypatch.setitem(lastfm_history._state, "running", True)        # as start() leaves it
     lastfm_history._run("vale", "connected")
     assert taken and all(t is None for t in taken)
     # Each page's names are kept while the session reads; the wake that runs
     # the pass comes once it stopped.
     assert woken[-1] == ([], False) and all(reading for _, reading in woken[:-1])
+    assert scrobbles._take_scope() == {"full": False, "names": ["sade"], "artists": []}
+
+
+def test_a_session_reads_no_page_while_a_pass_runs_and_no_pass_starts_while_it_runs(walk, monkeypatch):
+    """A pass under way when Sync is pressed ends before the session reads a
+    page, and none takes a scope from the moment it is pressed until the
+    session stops: listens placed while pages come in, newest first, would be
+    the newest pages'."""
+    import threading
+    import time
+
+    from canon import scrobbles
+    pages, taken = [], []
+
+    class _Watching(_FakeLastFm):
+        def recent_tracks_page(self, user, before, after):
+            pages.append(time.monotonic())
+            taken.append(scrobbles._take_scope())
+            return super().recent_tracks_page(user, before, after)
+
+    import lastfm as lastfm_module
+    monkeypatch.setattr(lastfm_module, "LastFmService", _Watching)
+    monkeypatch.setattr(scrobbles, "_wake_event", threading.Event())
+    monkeypatch.setattr(scrobbles, "_scope", {"full": False, "names": set(), "artists": set()})
+    _FakeLastFm.history = [_scrobble(m) for m in (0, 10, 20, 30, 40)]
+    scrobbles._pass_lock.acquire()                        # a pass under way, as _consume holds it
+    try:
+        assert lastfm_history.start("sync")
+        assert scrobbles._take_scope() is None            # none starts once Sync is pressed
+        time.sleep(0.3)
+        assert pages == []                                # the session waits for the pass
+    finally:
+        released = time.monotonic()
+        scrobbles._pass_lock.release()
+    next(t for t in threading.enumerate() if t.name == "lastfm-history").join(10)
+    assert pages and min(pages) >= released
+    assert all(t is None for t in taken)
     assert scrobbles._take_scope() == {"full": False, "names": ["sade"], "artists": []}
 
 

@@ -1083,9 +1083,13 @@ class SyncWalk:
                     answer = peer_api.carry_push(category.replace("_", "-"), part) or {}
                     if answer.get("retry_after") and not limited["waited"]:
                         # The carrier's window is full: wait it out once, as
-                        # it says, and send the part again.
+                        # it says, and send the part again — unless sharing
+                        # went off meanwhile.
                         limited["waited"] = True
                         time.sleep(min(int(answer["retry_after"]), 120))
+                        if not self._sharing_enabled():
+                            limited["stop"] = True
+                            break
                         answer = peer_api.carry_push(category.replace("_", "-"), part) or {}
                     if answer.get("retry_after"):
                         limited["stop"] = True          # every further part would be refused

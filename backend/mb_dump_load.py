@@ -641,9 +641,13 @@ def _full_load(version: str, progress_cb: ProgressCb, hold: Callable[[], None]) 
     # mb_release_country is populated).
     from db_pool import db_execute
     db_execute("UPDATE artists SET last_album_sync = NULL")
-    # Blobs cut from an earlier dump: a dump node serves its own builds from
-    # this one (mb_slice_queries.serve_slices), so the rest only takes room.
-    db_execute("DELETE FROM mb_slice_blobs WHERE dump_version <> %s", (version,))
+    # Blobs cut from an earlier dump, and every blob this node did not build
+    # (no match key: one it took as a replica before the load): a dump node
+    # serves its own builds from this one (mb_slice_queries.serve_slices), and
+    # one signed by a key it shares — a sibling node of the same account —
+    # would pass for its own, its presence telling a timed asker what this node
+    # once fetched.
+    db_execute("DELETE FROM mb_slice_blobs WHERE dump_version <> %s OR match_key IS NULL", (version,))
     with open(VERSION_PATH, "w") as f:
         f.write(version)
     # Completion marker IN THE DB — the per-DSN truth that a FULL load

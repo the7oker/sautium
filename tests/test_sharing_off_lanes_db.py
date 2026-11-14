@@ -197,3 +197,24 @@ def test_a_click_asks_for_its_name_in_the_stream_s_one_form(node, monkeypatch):
     assert mb_discovery._fetch_remote_slice(" Sigur Rós ")["ok"] is False
     assert asked == [["sigur rós"]]
 
+
+def test_a_page_s_request_made_while_no_one_listened_is_asked_once_the_listen_is_up(node, scratch_dsn):
+    """A page wakes the statistics cycle once, for its new request: one made
+    while no LISTEN was up (a reconnect, a launcher not yet running) is asked
+    whenever the notifications are listened for again."""
+    import asyncio
+    import uuid
+
+    from desktop.p2p import lb_slice_cycle
+    from desktop.p2p.sync_walk import DeadAddresses
+    cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=_refuse, dead=DeadAddresses(),
+                                        sharing_enabled=lambda: True)
+    asyncio.run(cycle.pages_waiting())
+    assert cycle._reasons == set()
+    artist = str(uuid.uuid4())
+    with node.cursor() as cur:
+        cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'Opened Unheard')", (artist,))
+        cur.execute("INSERT INTO lb_slice_requests (artist_id) VALUES (%s)", (artist,))
+    asyncio.run(cycle.pages_waiting())
+    assert cycle._reasons == {"request"}
+

@@ -100,7 +100,18 @@ def _key() -> Ed25519PrivateKey:
 
 def _offer(dsn, key, subtree, relay=None):
     """`key`'s slice of `subtree` taken through the requester, passed on by
-    `relay` (its author itself by default)."""
+    `relay` (its author itself by default) — for an artist here of that name,
+    as every name the stream draws is but the waiting room's."""
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO artists (id, name) SELECT %(id)s, %(n)s
+                            WHERE NOT EXISTS (SELECT 1 FROM artists
+                                               WHERE lower(btrim(name)) = lower(btrim(%(n)s)))""",
+                        {"id": str(uuid.uuid4()), "n": subtree.name})
+    finally:
+        conn.close()
     peer = Peer({subtree.name: mb_entry(key, subtree.name, subtree.one())}, pub(relay or key))
     client = MBSliceClient(peer, db_dsn=dsn)
     try:
@@ -967,10 +978,10 @@ def test_a_name_is_keyed_one_way_in_the_ledger_and_the_blob(conn, scratch_dsn):
     key = mb_slice_queries.name_key(name)
     assert _rows(conn, "SELECT name_key FROM mb_slice_fetches") == [(key,)]
     assert _rows(conn, "SELECT name_key FROM mb_slice_blobs") == [(key,)]
-    with conn.cursor() as cur:
-        cur.execute("INSERT INTO artists (id, name) VALUES (%s, %s)", (str(uuid.uuid4()), name))
+    with conn.cursor() as cur:                       # the artist _offer asked for, canonized
         cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
                     "SELECT %s, id, 'user' FROM artists WHERE name = %s", (s.gid, name))
+        assert cur.rowcount == 1
     assert mb_slice_queries.name_key(name) not in mb_slice_queries.pending_slice_names(conn)
 
 
@@ -1133,16 +1144,39 @@ def test_the_blobs_kept_before_their_origin_are_marked_once_by_the_same_rules(or
     assert _kept_local(conn, "lb") == {history: True, owned: False}
 
 
+def test_a_history_spelling_whose_scrobbles_were_placed_stays_with_this_node(origins):
+    """The waiting room asked for the scrobbles' own spelling; the canon placed
+    them under MusicBrainz's, and the name's waiting row went with the last
+    of them: no artist here bears the spelling, and nothing the stream draws
+    for another reason is a name no artist bears. A spelling of a history
+    alone names its owner."""
+    conn = origins
+    import db_migrate
+    _local_artist(conn, "Sigur Rós", imported=True, mbid=str(uuid.uuid4()))
+    _kept_before(conn, "mb", "sigur ros", "ab" * 32)
+    db_migrate._mark_local_slices(conn)
+    assert _kept_local(conn) == {"sigur ros": True}
+    assert mb_slice_queries.local_only(conn, "sigur ros")
+    _local_artist(conn, "Sigur Ros", similar_of=_local_artist(conn, "Owned Seed", owned=True))
+    assert not mb_slice_queries.local_only(conn, "sigur ros")       # now a stub's name too
+
+
 def test_a_dump_node_s_kept_blobs_are_its_own_builds_and_stay_shared(origins, monkeypatch):
     """A load empties the family's blobs: what a dump node keeps it built
-    itself, for whoever asked — nobody's history, whatever names it."""
+    itself, for whoever asked — nobody's history, whatever names it. What an
+    MB dump node kept from before its load and did not build (no match key) —
+    a same-account sibling's would pass for its own — goes."""
     conn = origins
     import db_migrate
     monkeypatch.setattr(mb_slice_queries, "local_dump_available", lambda conn: dump_version(3))
     history = str(uuid.uuid4())
     _heard(conn, "waited")
+    _heard(conn, "fetched before the load")
     _local_artist(conn, "History Alone", imported=True, mbid=history)
     _kept_before(conn, "mb", "waited")
+    _kept_before(conn, "mb", "fetched before the load", OWN)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE mb_slice_blobs SET match_key = 'm' WHERE name_key = 'waited'")
     _kept_before(conn, "lb", history)
     with conn.cursor() as cur:
         cur.execute("INSERT INTO user_settings (key, value) VALUES ('listenbrainz.db_version', %s::jsonb)",
@@ -1152,7 +1186,7 @@ def test_a_dump_node_s_kept_blobs_are_its_own_builds_and_stay_shared(origins, mo
                        VALUES (%s, 10, 3, ARRAY[%s::uuid], %s)""",
                     (str(uuid.uuid4()), history, dump_version(3)))
     out = db_migrate._mark_local_slices(conn)
-    assert out == {"mb_local": 0, "lb_local": 0}
+    assert out == {"mb_dropped": 1, "mb_local": 0, "lb_local": 0}
     assert _kept_local(conn) == {"waited": False}
     assert _kept_local(conn, "lb") == {history: False}
 

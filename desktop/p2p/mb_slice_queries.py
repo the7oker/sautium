@@ -840,17 +840,21 @@ RESERVE_BLOB_MAX_GZ = 2 * 1024 * 1024
 # owner's imported history and his own lookups brought stays here. Local: the
 # name waits in the waiting room (pending_scrobble_artists), or it names an
 # artist the history placed (a waiting name resolved to it, or a listen
-# imported from Last.fm) — unless a reason another node may already know names
-# it too: a file owned here or at the HQPlayer, or a completed listen on this
-# node (the caveat concedes both). A fetch for the person (Discovery's mint,
-# the assistant's resolve) is local whatever the name (MBSliceClient's
-# `for_person`); a pick's binding says nothing here, since the seed brings the
-# master's own picks under the same confidence. The similar-artist stubs, the
-# seed's picks and carried phantoms re-serve as before. Read at the import and
-# by the one-time marking of the blobs kept before (db_migrate
-# `slice_origins_v1`).
+# imported from Last.fm), or no artist here bears it at all — a spelling of
+# the history's own once its scrobbles were placed under MusicBrainz's and its
+# waiting row went with the last of them, or a lookup that minted nothing:
+# every name the stream draws for another reason is an artist's here — unless
+# a reason another node may already know names it too: a file owned here or at
+# the HQPlayer, or a completed listen on this node (the caveat concedes both).
+# A fetch for the person (Discovery's mint, the assistant's resolve) is local
+# whatever the name (MBSliceClient's `for_person`); a pick's binding says
+# nothing here, since the seed brings the master's own picks under the same
+# confidence. The similar-artist stubs, the seed's picks and carried phantoms
+# re-serve as before. Read at the import and by the one-time marking of the
+# blobs kept before (db_migrate `slice_origins_v1`).
 LOCAL_ONLY_SQL = """(
     (EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n WHERE lo_n.name_key = {nk})
+     OR NOT EXISTS (SELECT 1 FROM artists lo_x WHERE lower(btrim(lo_x.name)) = {nk})
      OR EXISTS (SELECT 1 FROM artists lo_a
                  WHERE lower(btrim(lo_a.name)) = {nk}
                    AND (EXISTS (SELECT 1 FROM pending_scrobble_artists lo_n
