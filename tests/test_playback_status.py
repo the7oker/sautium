@@ -229,6 +229,31 @@ def test_the_status_a_connection_opens_with_carries_the_floor_of_its_events(monk
     asyncio.run(run())
 
 
+def test_a_queue_edit_while_stopped_keeps_the_outputs_words_on_the_status(monkeypatch):
+    """The manager's own stopped status after a queue edit (an append while
+    nothing plays) is about the queue; what the output said last stands on
+    it until the backend's next tick — a page ends a toast with the status
+    that says its condition no more: without them an append under a
+    takeover's spot ended that toast, and a silent HQPlayer's next status
+    raised "not answering" again for the person who had closed it
+    (ROON-COEX §12.7, review round 1)."""
+    mgr = PlaybackManager()
+    mgr._active = _Stub(mgr._on_backend_status)
+    mgr.queue.replace([QueueItem(track_id="t1", media_file_id=1, source={"kind": "file", "path": "/m/1.flac"},
+                                 title="One", artist="A")])
+    said = {"diagnosis": {"id": 7, "code": "not_played"}, "output_event": {"id": 9, "kind": "took"},
+            "resume": {"index": 1, "position": 47}, "building": {"since": 1.0, "silent": True},
+            "not_answering": "HQPlayer is not answering", "rebuilding": True}
+    monkeypatch.setattr(mgr, "_latest_status", {"state": "stopped", "process_speed": 1.0, **said})
+    mgr._emit_idle_status()
+    assert {k: mgr.latest_status.get(k) for k in said} == said
+    assert mgr.latest_status["song"] == "One" and mgr.latest_status["process_speed"] == 0.0
+    # ...and none of them is made up where the output said none
+    monkeypatch.setattr(mgr, "_latest_status", {"state": "stopped"})
+    mgr._emit_idle_status()
+    assert not set(said) & set(mgr.latest_status)
+
+
 def test_no_playback_class_defines_a_method_twice():
     """Two slices that each add a method of one name to a class rebase onto
     each other without a conflict, and the later definition shadows the

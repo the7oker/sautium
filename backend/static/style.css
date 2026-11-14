@@ -6396,8 +6396,12 @@ select.add-gear-input {
      assistant's answers, a chat's messages, a bio, HQPlayer's log), and
      what is typed. A mouse selects by intent, so a desktop keeps its
      titles and lines selectable.
-   - What a person needs to copy carries a copy button ([data-copy], the
-     page's one copy handler), never a selection to make by hand. */
+   - A link inside that prose is prose: it selects with the words around
+     it, on a desktop too (the rule after the press feedback's list, which
+     makes every link a control; its list of prose is this one's).
+   - What a person needs to copy carries a copy button ([data-copy-text],
+     [data-copy-from]: the page's one copy handler), never a selection to
+     make by hand. */
 html, body { touch-action: manipulation; }
 /* The gaps of a row of buttons: a double-click between two selects nothing */
 .album-actions { user-select: none; -webkit-user-select: none; }
@@ -6454,6 +6458,12 @@ html { -webkit-tap-highlight-color: transparent; }
     filter: var(--own-filter,) opacity(0.55);
     transition-duration: var(--dur-fast);
   }
+}
+/* ...but a link in prose is read with it (the prose of "A tap is a tap") */
+:where(.confirm-sheet, .ai-msg-prose, .ai-msg-user, .bubble, .bio, .bio-text, .identity-bio,
+       .research-prose, .helper-prose, .hqp-card-body, .hqp-log, .is-selectable) a[href] {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* =====================================================================

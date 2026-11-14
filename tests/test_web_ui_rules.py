@@ -66,25 +66,36 @@ def test_on_a_touch_screen_only_prose_and_fields_select():
     assert {"input", "textarea", "[contenteditable]", ".confirm-sheet", ".ai-msg-prose", ".bubble", ".bio",
             ".hqp-log"} <= selects
     assert "user-select: text;" in prose.group(2) and "-webkit-user-select: text;" in prose.group(2)
+    # a link inside that prose selects with it, on a desktop too: the rule after the tap list (which makes
+    # every link a control) names the same prose
+    links = re.search(r":where\(([^)]*)\) a\[href\]\s*\{([^}]*)\}", css, re.S)
+    assert {s.strip() for s in links.group(1).split(",")} == selects - {"input", "textarea", "[contenteditable]"}
+    assert "user-select: text;" in links.group(2) and "-webkit-user-select: text;" in links.group(2)
+    assert css.index(links.group(0)) > css.index(":where(button, a[href], select, summary,")
     # outside that block the body is left alone: a desktop selects what it could before
     assert "user-select" not in _rule(css.replace(block, ""), "body")
     # no control is given its selection back by a rule of its own
-    for m in re.finditer(r"([^{}]+)\{[^{}]*user-select:\s*(text|auto|all)[^{}]*\}", css.replace(block, "")):
+    for m in re.finditer(r"([^{}]+)\{[^{}]*user-select:\s*(text|auto|all)[^{}]*\}",
+                         css.replace(block, "").replace(links.group(0), "")):
         assert not re.search(r"(^|[\s,>])(button|a)\b|-row\b|-btn\b", m.group(1)), m.group(1).strip()
 
 
 def test_what_is_copied_has_a_button_and_one_handler():
     """...and what a person may need to copy carries a button: the page's one
-    copy handler ([data-copy], [data-copy-from]) with the selection-based
-    fallback the plain-HTTP origin needs, appended inside an open dialog
-    (everything outside a modal dialog is inert)."""
+    copy handler ([data-copy-text], [data-copy-from]) with the
+    selection-based fallback the plain-HTTP origin needs, appended inside an
+    open dialog (everything outside a modal dialog is inert). Its attributes
+    are its own: the copy buttons the page had before (`data-copy`,
+    `data-copy-code`, `data-share-copy`, each with its own listener) are not
+    its to answer — it said "Could not copy" over a copy that worked."""
     shell = _shell()
-    assert shell.count("e.target.closest('[data-copy], [data-copy-from]')") == 1
+    assert shell.count("e.target.closest('[data-copy-text], [data-copy-from]')") == 1
+    assert "closest('[data-copy]," not in shell and "btn.dataset.copy " not in shell
     copy = shell[shell.index("  async function copyText(text) {"):shell.index("  window.copyText = copyText;")]
     assert "document.execCommand('copy')" in copy and "dialog[open]" in copy
     # an attempt's details and HQPlayer's log (support asks for them), a sign-in's one-time code
     assert shell.count("""copyButtonHtml('data-copy-from=".hqp-diag"',""") == 2
-    assert 'copyButtonHtml(`data-copy="${escapeProfileHtml(sg.code)}"`' in shell
+    assert 'copyButtonHtml(`data-copy-text="${escapeProfileHtml(sg.code)}"`' in shell
 
 
 def test_the_pickers_row_is_two_lines():
@@ -193,14 +204,18 @@ const a = shell.indexOf('  let hqpPickerWanted = null;'), b = shell.indexOf('  a
 if (a < 0 || b < 0) throw new Error('the picker intent was not found');
 const went = [];
 let hash = 'home', mounted = true;
-const ctx = { navigate: h => went.push(['navigate', h]), parseHash: () => hash,
-              document: { contains: () => mounted } };
+let routed = () => {};
+const ctx = { navigate: h => { went.push(['navigate', h]); hash = h; }, parseHash: () => hash,
+              document: { contains: () => mounted },
+              window: { addEventListener: (type, fn) => { if (type === 'sautium:route') routed = fn; } } };
 vm.runInNewContext(shell.slice(a, b) + `
   this.at = openHqpSettingsAt; this.openers = HQP_PICKER_OPENERS;
   this.mount = (load) => { hqpScreenMounted = load ? { screen: {}, load } : null; };
   this.wanted = () => hqpPickerWanted;`, ctx);
 const out = [];
 ctx.at('filter'); out.push([ctx.wanted(), went.splice(0)]);                 // from another screen
+routed(); out.push([ctx.wanted()]);                                         // ...the route arrived there: the wish stands
+hash = 'home'; routed(); out.push([ctx.wanted()]);                          // the person went elsewhere first: no wish left
 hash = 'more/hqplayer'; ctx.mount(() => went.push(['load'])); ctx.at('rate'); out.push([ctx.wanted(), went.splice(0)]);
 mounted = false; ctx.at('modulator'); out.push([ctx.wanted(), went.splice(0)]);   // a screen no longer in the document
 process.stdout.write(JSON.stringify({ out, openers: ctx.openers }));
@@ -215,7 +230,7 @@ def test_hqplayer_settings_from_a_toast_opens_the_screen_at_one_picker():
     proc = subprocess.run([NODE, "-e", _SETTINGS_AT, "--", str(STATIC / "app-shell.js")], capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     got = json.loads(proc.stdout)
-    assert got["out"] == [["filter", [["navigate", "more/hqplayer"]]], ["rate", [["load"]]],
+    assert got["out"] == [["filter", [["navigate", "more/hqplayer"]]], ["filter"], [None], ["rate", [["load"]]],
                           ["modulator", [["navigate", "more/hqplayer"]]]]
     assert got["openers"] == {"filter": '[data-action="open-filter"]', "modulator": 'button[data-knob="shaper"]',
                               "rate": 'button[data-knob="rate"]'}
@@ -224,6 +239,10 @@ def test_hqplayer_settings_from_a_toast_opens_the_screen_at_one_picker():
     # this draw's alone: taken at its top, opened at its end, a waiting control opening nothing
     assert body.index("hqpPickerWanted = null;") < body.index("const st = s.state || {};")
     assert "if (opener && !opener.disabled) opener.click();" in body
+    # a state that arrives after the person left draws nothing and opens nothing
+    load = shell[shell.index("    async function load() {\n      const fresh = claimFresh('hqp.load');"):shell.index(
+        "    function renderBody(body, s) {")]
+    assert load.index("if (!document.contains(screen)) return;") < load.index("renderBody(body, s);")
     for selector in got["openers"].values():
         marker = selector.split('"')[1]
         assert marker in body or f"data-knob=\"${{knob}}\"" in body, selector

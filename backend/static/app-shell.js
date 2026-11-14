@@ -6295,9 +6295,13 @@
   // `key`. `say(tag, spec)`: the status says it — `tag` names the instance,
   // and only a new one raises the toast (the same tag on a later status
   // redraws changed words in place, and a toast the person closed stays
-  // closed). `know(tag)`: it stands but is no news to this page (minted
-  // before its connection): nothing is raised, and a toast for an earlier
-  // instance goes. `end()`: the status says it no more.
+  // closed). `stand(tag, spec)`: an instance this page told before stands
+  // again where a later one stood (a takeover, once the refusal over it
+  // ended): the toast still up is redrawn as it, in place — one the person
+  // closed is not raised for it. `know(tag)`: it stands but is no news to
+  // this page (minted before its connection): nothing is raised, and a
+  // toast for an earlier instance goes. `end()`: the status says it no
+  // more.
   function statusToast(key) {
     let said = null;
     const leave = (tag) => {
@@ -6311,6 +6315,12 @@
         // this one (the key's): never one leaving while the next comes in
         said = tag;
         notices.toast({ ...spec, key, tag, lasting: true });
+      },
+      stand(tag, spec) {
+        if (tag === said) { notices.amend(key, tag, spec); return; }
+        const up = said !== null && notices.has(key, said);
+        said = tag;
+        if (up) notices.toast({ ...spec, key, tag, lasting: true });
       },
       know(tag) { leave(tag); },
       end() { leave(null); },
@@ -6379,7 +6389,7 @@
 
   const outputEventsMet = new Set();
   let outputEventFloor = 0;
-  let outputEventTold = null;         // the event this page toasted: its words follow the status
+  const outputEventsTold = new Set();  // the events this page told while they ride the status
   const outputEventToast = statusToast('player.other_app');
   function onOutputEvent(data) {
     if (!data) return;
@@ -6387,23 +6397,28 @@
     // lower (its clock set back) is not held to the one before it
     if (data.event_floor != null) outputEventFloor = data.event_floor;
     const ev = data.output_event;
-    // Gone from the status: its toast goes, and should it come back (an
-    // outage between) it is no news — the floor's rule, for a page that told it
-    if (!ev) { outputEventToast.end(); outputEventTold = null; return; }
+    // No event on the status: the toast goes, and whatever comes back (an
+    // outage between) is no news — the floor's rule, for a page that told it
+    if (!ev) { outputEventToast.end(); outputEventsTold.clear(); return; }
     // News once: an id above the connection's floor this page has not met.
-    // The one it told keeps its words true to the status (the spot's second
-    // after a Seek there); any other stands without a word
-    if (ev.id > outputEventFloor && !outputEventsMet.has(ev.id)) outputEventTold = ev.id;
+    const news = ev.id > outputEventFloor && !outputEventsMet.has(ev.id);
     outputEventsMet.add(ev.id);
-    const c = outputEventTold === ev.id ? outputEventCopy(ev, data) : null;
+    if (news) outputEventsTold.add(ev.id);
+    // An event this page told keeps its words true to the status (the
+    // spot's second after a Seek there) and stands again in the toast when
+    // a later one over it ends (the takeover, once the refusal of the other
+    // app's track is over: that app holds the output still). One from
+    // before the connection stands without a word.
+    const c = outputEventsTold.has(ev.id) ? outputEventCopy(ev, data) : null;
     if (!c) { outputEventToast.know(ev.id); return; }
     // Its attempt's failure is said here: the play route's answer for the
     // same attempt, should one follow, says nothing more (answerSays)
     if (ev.attempt != null) saidAttempts.add(ev.attempt);
-    outputEventToast.say(ev.id, {
+    const spec = {
       kind: c.kind, title: c.title, text: c.text, action: c.action || null,
       why: () => (ev.attempt != null ? openHqpDiagnosis(ev.attempt) : openOutputEventSheet(c)),
-    });
+    };
+    if (news) outputEventToast.say(ev.id, spec); else outputEventToast.stand(ev.id, spec);
   }
   document.addEventListener('np-update', (e) => onOutputEvent(e.detail));
 
@@ -9678,6 +9693,11 @@
     if (at && document.contains(at.screen) && parseHash().startsWith('more/hqplayer')) at.load();
     else navigate('more/hqplayer');
   }
+  // The wish is for the screen it led to: a person who went elsewhere
+  // before it was drawn finds no picker open on a later visit
+  window.addEventListener('sautium:route', () => {
+    if (!parseHash().startsWith('more/hqplayer')) hqpPickerWanted = null;
+  });
   const HQP_PICKER_OPENERS = {
     filter: '[data-action="open-filter"]',
     modulator: 'button[data-knob="shaper"]',
@@ -9822,6 +9842,7 @@
       }
       s.diagnostics = await diagnostics;
       if (!fresh()) return;          // a later load owns the panel
+      if (!document.contains(screen)) return;     // left meanwhile: nothing to draw, no picker to open
       // A building HQPlayer answers nothing, and one lent to the benchmark is
       // asked nothing: what it said last stands, the build beside it.
       if (s.building && lastState) s = { ...lastState, building: s.building };
@@ -11880,7 +11901,7 @@
   /* The page's one copy handler. What a person may need to copy — a code,
      an error's details for support — carries a button, never a selection to
      make by hand (on a touch screen the app's chrome selects nothing:
-     style.css "A tap is a tap"). `data-copy` holds the text itself;
+     style.css "A tap is a tap"). `data-copy-text` holds the text itself;
      `data-copy-from` names the element whose text as read is copied (the
      nearest one up the tree: its blocks but the buttons' own, a closed
      <details> opened for the reading). Said by a toast either way. */
@@ -11897,11 +11918,11 @@
     return text.replace(/\n{3,}/g, '\n\n');
   }
   document.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-copy], [data-copy-from]');
+    const btn = e.target.closest('[data-copy-text], [data-copy-from]');
     if (!btn) return;
     onceInFlight(btn, async () => {
       const from = btn.dataset.copyFrom && btn.closest(btn.dataset.copyFrom);
-      const text = from ? readAsShown(from) : (btn.dataset.copy || '');
+      const text = from ? readAsShown(from) : btn.dataset.copyText;
       const ok = !!text && await copyText(text);
       notices.toast(ok ? { kind: 'info', key: 'copy', title: 'Copied' }
                        : { kind: 'error', key: 'copy', title: 'Could not copy',
@@ -12285,13 +12306,28 @@
       const say = { kind, title, text, action, why, lasting, passive, tag };
       const live = key && this._shown.find(t => t.key === key);
       if (live) { this._fill(live, say); this._arm(live); return; }
-      const queued = key && this._queue.find(t => t.key === key);
-      if (queued) { Object.assign(queued, say); return; }
+      let item = key && this._queue.find(t => t.key === key);
+      if (item) {
+        // A repeat redraws the one that waits. A new instance for one that
+        // stepped aside is news itself: it waits no longer behind the rest
+        const again = !item.parked || item.tag === tag;
+        Object.assign(item, say);
+        if (again) return;
+        this._queue.splice(this._queue.indexOf(item), 1);
+        item.parked = false;
+      } else {
+        item = { ...say, key, ttl, el: null, timer: null, parked: false };
+      }
       // News goes before the lasting toasts that stepped aside for news
       const parked = this._queue.findIndex(t => t.parked);
-      this._queue.splice(parked < 0 ? this._queue.length : parked, 0,
-                         { ...say, key, ttl, el: null, timer: null, parked: false });
+      this._queue.splice(parked < 0 ? this._queue.length : parked, 0, item);
       this._pump();
+    },
+
+    /* Whether the toast raised under `key` for `tag` is still up — shown, or
+       waiting its turn: not once the person closed it. */
+    has(key, tag) {
+      return [...this._shown, ...this._queue].some(t => t.key === key && t.tag === tag);
     },
 
     /* The condition a lasting toast said has ended: the toast goes, shown
@@ -12367,9 +12403,15 @@
           <button class="toast-close" type="button" aria-label="Dismiss">×</button>
         </div>` : ''}`;
       if (!tappable) return;
+      // A press takes the toast with it; the second tap of a double-tap
+      // lands on a toast already leaving, and does nothing
       const on = (sel, run) => {
         const b = el.querySelector(sel);
-        if (b) b.addEventListener('click', () => { this._dismiss(t); run(); });
+        if (b) b.addEventListener('click', () => {
+          if (!this._shown.includes(t) || t.el !== el) return;
+          this._dismiss(t);
+          run();
+        });
       };
       on('[data-toast="why"]', () => why());
       on('[data-toast="action"]', () => action.run());
@@ -14239,7 +14281,7 @@
           <div class="row-stack-value" style="${_cliSigninProse}">${link}, sign in to ChatGPT and enter this one-time code:</div>
           <div class="copy-inline">
             <div class="signin-device-code">${sg.code ? escapeProfileHtml(sg.code) : '…'}</div>
-            ${sg.code ? copyButtonHtml(`data-copy="${escapeProfileHtml(sg.code)}"`, 'Copy') : ''}
+            ${sg.code ? copyButtonHtml(`data-copy-text="${escapeProfileHtml(sg.code)}"`, 'Copy') : ''}
           </div>
           <div class="row-stack-sub">The code expires in 15 minutes. Sautium finishes on its own once you enter it.</div>`;
     } else {

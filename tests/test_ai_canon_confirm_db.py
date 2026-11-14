@@ -115,6 +115,22 @@ def test_the_log_says_what_each_decision_was_and_what_it_weighed(node):
     assert batches[-1]["guard_rejected"] == 1 and batches[-1]["canonized"] == 0
 
 
+def test_a_proposed_names_row_carries_musicbrainz_own_disambiguation(node):
+    """A name the model proposed is none of the candidates it was offered:
+    its row reads the artist MusicBrainz answered for (B-86), and says the
+    name was proposed."""
+    conn, fake, ai_canon, monkeypatch = node
+    _model(monkeypatch, ai_canon, "PROPOSE: Jon Anderson")
+    fake.artist(ANDERSON, "Jon Anderson", disambiguation="Yes singer, solo")
+
+    batches = [ev for ev in ai_canon.ai_canonize_stream(dry_run=True) if ev["event"] == "batch"]
+
+    [item] = batches[-1]["items"]
+    assert (item["to"], item["gid"], item["comment"], item["proposed"]) == (
+        "Jon Anderson", ANDERSON, "Yes singer, solo", True)
+    assert ANDERSON not in {c["gid"] for c in item["candidates"]}
+
+
 def test_a_gid_musicbrainz_did_not_answer_for_is_refused(node):
     conn, fake, ai_canon, monkeypatch = node
     _model(monkeypatch, ai_canon, OTHER_JON)

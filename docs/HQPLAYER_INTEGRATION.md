@@ -2010,8 +2010,9 @@ has an id of its own beside its attempt's, which is as old as the press.
 Another app playing through an output the node was not playing on left no
 spot and is no event: nothing of the person's was taken, and Now Playing
 offers Play (it takes the output back). The manager's own stopped status
-after a queue edit carries the event on (as it does a diagnosis): a page
-ends an event's toast with the status that says it no more. A verdict made
+after a queue edit carries the output's words on — the event, a diagnosis,
+`resume`, `building`, `not_answering`, `rebuilding`: a page ends a toast
+with the status that says its condition no more. A verdict made
 after its pass said the status — an attempt's close — wakes the poller, so
 its diagnosis and the `stopped` event ride a status at once, not a poll's
 interval later (since 2026-11-14).
@@ -2028,7 +2029,8 @@ tab back from the background) see the player at its spot and no message;
 newer one supersedes the connect-time one. The toast is a lasting one (since
 2026-11-14): it stays until its close or until a status says the event no
 more — the node's own Play among them — and a toast the person closed is not
-raised again by the statuses that still carry the event. Its Why? opens the
+raised again by the statuses that still carry the event; a takeover the page
+told stands in the toast again once a refusal over it ended. Its Why? opens the
 attempt's sheet (`stopped`, `refused`), or a sheet of the same shell with the
 node's two sentences (`took`, `paused`); a `refused` that names a setting
 carries one action after it, "HQPlayer settings", which opens the picker

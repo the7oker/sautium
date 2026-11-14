@@ -425,9 +425,11 @@ second activation impossible while the first is in flight — never
   on a touch screen (`pointer: coarse`) the whole app is, but what is
   there to be read or typed (a Why? sheet and every dialog, the
   assistant's answers, a chat's messages, a bio, HQPlayer's log, every
-  field — add a prose class to that one list). Text a person needs to
+  field — add a prose class to that list and to the one after the press
+  feedback's, which gives a link inside prose its selection back). Text a
+  person needs to
   copy (a code, an error's details for support) carries a copy button —
-  `[data-copy]` / `[data-copy-from]`, the page's one copy handler —
+  `[data-copy-text]` / `[data-copy-from]`, the page's one copy handler —
   never a selection to make by hand.
 
 Server side, a create that a double-tap could duplicate is made
@@ -515,7 +517,12 @@ and stop for the design session.
   condition the player status says while it lasts — raised once as the
   status first says it, its words redrawn in place while they change
   (`notices.amend`), gone with the status that says it no more, and
-  never raised a second time for the person who closed it.
+  never raised a second time for the person who closed it. An instance
+  it told that stands again where a later one stood (a takeover, once
+  the refusal over it ended) is redrawn into the toast still up
+  (`stand`). The backend must say the condition on every status while it
+  lasts: the manager's own stopped status after a queue edit carries the
+  output's words on for that (`_emit_idle_status`).
 - **`notices.strip(key, html | null)`** — a long-lived condition
   (the link is down). Fixed to the top of the viewport so it stays in
   view at any scroll position (a phone waking mid-page must still see

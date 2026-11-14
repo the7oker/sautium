@@ -443,6 +443,9 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                     # nothing after a rename.
                     st["skipped"] += 1
                     continue
+                # Its row is read before anything is written: what it reads
+                # (the disambiguation) failing leaves no change unreported
+                item = _log_item(it, d, gid, mb_name, "canonized", checked)
                 if not dry_run:
                     try:
                         _apply(it["id"], mb_name, gid)
@@ -451,7 +454,7 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
                         logger.error("ai_canon apply failed for %r: %s", it["name"], e)
                         continue
                 st["canonized"] += 1
-                items.append(_log_item(it, d, gid, mb_name, "canonized", checked))
+                items.append(item)
         st["processed"] += len(batch)
         yield {"event": "batch", **st, "items": items}
 

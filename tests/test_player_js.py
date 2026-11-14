@@ -174,10 +174,11 @@ vm.runInContext([
     else if (ev.seek != null) await ctx.window.playerSeek(ev.seek);
     else if (ev.jump != null) await ctx.__sheet.jumpTo(ev.jump);
   }
-  const shown = t => ({ key: t.key, kind: t.kind, title: t.title, text: t.text, lasting: !!t.lasting,
-                        action: t.why ? 'Why?' : t.action ? t.action.label : null,
-                        second: t.why && t.action ? t.action.label : null });
-  process.stdout.write(JSON.stringify({ calls, toasts: toasts.map(shown), gone: gone.map(shown) }));
+  // A toast's first button: Why? where it has one, else its action's label
+  const shown = t => ({ key: t.key, kind: t.kind, title: t.title, text: t.text,
+                        action: t.why ? 'Why?' : t.action ? t.action.label : null });
+  process.stdout.write(JSON.stringify({ calls, toasts: toasts.map(shown),
+                                        gone: gone.map(t => ({ ...shown(t), lasting: !!t.lasting })) }));
 })().catch(e => { process.stderr.write(String(e && e.stack)); process.exit(1); });
 """
 

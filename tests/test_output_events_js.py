@@ -108,6 +108,8 @@ function page(cap) {
       taps: t.el.classList.contains('is-actionable'), buttons: buttons(t.el.innerHTML) })),
     waiting: () => ctx.notices._queue.map(t => t.key),
     press(key, sel) { ctx.notices._shown.find(t => t.key === key).el.press(sel); },
+    // The two taps of a double-tap: the second lands on the toast as it leaves
+    double(key, sel) { const el = ctx.notices._shown.find(t => t.key === key).el; el.press(sel); el.press(sel); },
   };
 }
 
@@ -118,6 +120,7 @@ for (const [name, steps] of Object.entries(spec.pages)) {
   out[name] = steps.map(step => {
     if (step.pass != null) p.pass(step.pass);
     else if (step.press) p.press(step.press[0], step.press[1]);
+    else if (step.double) p.double(step.double[0], step.double[1]);
     else if (step.toast) p.ctx.notices.toast(step.toast);
     else p.status(step);
     p.pass(0);
@@ -228,6 +231,32 @@ def test_an_event_gone_from_the_status_and_back_is_no_news():
     assert _keys(out["p"]) == [[], ["player.other_app"], [], [], []]
 
 
+def test_a_takeover_stands_in_the_toast_again_once_the_refusal_over_it_ended():
+    """Roon takes HQPlayer (told), HQPlayer refuses Roon's track (told: the
+    toast redrawn in place), then Roon plays a track that works: the status
+    says the takeover again, under its old id. That app holds the output
+    still and nobody pressed Play — the toast stands as the takeover again,
+    in place (review round 1's high: it left, and Now Playing says nothing
+    by design). A toast the person closed is not raised for it; and its
+    words still follow the spot."""
+    start = _st(event_floor=10)
+    out = _run({"stands": [start, _st(TOOK), _st(REFUSED), _st(TOOK), _st(TOOK, resume={"index": 3, "position": 200}),
+                           PLAYING],
+                "closed": [start, _st(TOOK), _st(REFUSED), {"press": ["player.other_app", CLOSE]}, {"pass": 500},
+                           _st(TOOK), _st(TOOK)],
+                "closed_before": [start, _st(TOOK), {"press": ["player.other_app", CLOSE]}, {"pass": 500},
+                                  _st(REFUSED), _st(TOOK)]})
+    assert [[t["title"] for t in step["shown"]] for step in out["stands"]] == [
+        [], ["Another app took HQPlayer Desktop · study-pc"], ["HQPlayer refused the other app's track"],
+        ["Another app took HQPlayer Desktop · study-pc"], ["Another app took HQPlayer Desktop · study-pc"], []]
+    assert out["stands"][3]["shown"][0]["buttons"] == ["Why?", "×"]
+    assert out["stands"][4]["shown"][0]["text"].endswith('<span class="num">3:20</span>.')
+    assert _keys(out["closed"]) == [[], ["player.other_app"], ["player.other_app"], [], [], [], []]
+    # the refusal is news of its own after a closed takeover; the takeover's return rides in its toast
+    assert [[t["title"] for t in step["shown"]] for step in out["closed_before"]][4:] == [
+        ["HQPlayer refused the other app's track"], ["Another app took HQPlayer Desktop · study-pc"]]
+
+
 def test_each_event_says_what_happened_and_what_play_does_and_opens_its_sheet():
     """The four events' words (drafts): what happened in the title, what Play
     does in the text; the other app's stop of the person's own Play is the
@@ -282,7 +311,7 @@ def test_a_refused_setting_offers_hqplayers_settings_at_its_picker():
              "own_filter": [start, _st(diagnosis=own(40, "rate_refused", "filter"))],
              "own_line": [start, _st(diagnosis=own(41, "rate_refused", "line"))],
              "own_modulator": [start, _st(diagnosis=own(42, "rate_refused", "modulator"))],
-             "own_other": [start, _st(diagnosis=own(43, "not_played", None))]}
+             "own_other": [start, _st(diagnosis=own(43, "not_played", "filter"))]}
     key = {k: ("hqplayer.diagnosis" if k.startswith("own") else "player.other_app") for k in pages}
     with_action = [k for k in pages if k not in ("bare", "own_other")]
     out = _run({k: v + ([{"press": [key[k], ACTION]}] if k in with_action else []) for k, v in pages.items()})
@@ -390,6 +419,69 @@ def test_news_never_waits_behind_a_lasting_toast():
     assert [step["waiting"] for step in out["two_lasting"]][2:] == [["player.other_app"]] * 3 + [[]]
 
 
+def test_a_double_tap_on_a_toasts_button_is_one_press():
+    """§ "A double-tap is one tap": the second tap lands on the toast as it
+    leaves (its element keeps taking taps through the leave) and does
+    nothing — one sheet, one route."""
+    out = _run({"why": [_st(event_floor=1), _st(REFUSED), {"double": ["player.other_app", WHY]}],
+                "action": [_st(event_floor=1), _st(REFUSED), {"double": ["player.other_app", ACTION]}]})
+    assert out["why:opened"] == [["attempt", 12]] and out["action:opened"] == [["settings", "rate"]]
+
+
+def test_what_waits_for_its_turn_keeps_its_order_and_its_words():
+    """The queue behind a phone's one place: news goes before a lasting
+    toast that stepped aside, however many come; a repeat for a key that
+    waits redraws the one that waits; a lasting toast's words changed while
+    it waits are the ones shown when it is back; a toast without buttons
+    steps aside as any lasting one; and a new instance for a key whose
+    toast stepped aside is news itself."""
+    def toast(key, title, **more):
+        return {"toast": {"kind": "info", "key": key, "title": title, **more}}
+    build = {"since": 1.0, "command": "Play", "silent": True}
+    out = _run({
+        # two pieces of news over a lasting toast: both before it comes back
+        "order": [_st(event_floor=1), _st(TOOK), toast("a", "First"), toast("b", "Second"), {"pass": 5_000},
+                  {"pass": 5_000}],
+        # a repeat for the key that waits
+        "repeat": [toast("a", "First"), toast("b", "Second"), toast("b", "Second, again"), {"pass": 9_000}],
+        # the spot moved while the takeover's toast waited behind news
+        "amended": [_st(event_floor=1), _st(TOOK), toast("a", "First"), _st(TOOK, resume={"index": 3, "position": 200}),
+                    {"pass": 9_000}],
+        # a build's toast (no buttons) steps aside too
+        "passive": [{"state": "playing", "output": OUT, "building": build}, toast("a", "First")],
+        # a refusal while the takeover's toast waits behind news: news itself, ahead of what else waits
+        "parked_key": [_st(event_floor=1), _st(diagnosis={"id": 40, "code": "not_played", "title": "Not played",
+                                                         "next": "", "track_id": "t", "failing": False}),
+                       _st(TOOK, diagnosis={"id": 40, "code": "not_played", "title": "Not played", "next": "",
+                                            "track_id": "t", "failing": False}),
+                       _st(REFUSED, diagnosis={"id": 40, "code": "not_played", "title": "Not played", "next": "",
+                                               "track_id": "t", "failing": False})]})
+    assert _keys(out["order"]) == [[], ["player.other_app"], ["a"], ["a"], ["b"], ["player.other_app"]]
+    assert out["order"][3]["waiting"] == ["b", "player.other_app"]
+    assert [[t["title"] for t in step["shown"]] for step in out["repeat"]] == [["First"]] * 3 + [["Second, again"]]
+    assert _keys(out["amended"])[-1] == ["player.other_app"]
+    assert out["amended"][-1]["shown"][0]["text"].endswith('<span class="num">3:20</span>.')
+    assert _keys(out["passive"]) == [["hqplayer.building"], ["a"]] and out["passive"][1]["waiting"] == [
+        "hqplayer.building"]
+    # the diagnosis's toast stepped aside for the takeover's; the refusal — a new instance under the takeover's
+    # key, which was on screen — redraws it in place
+    assert _keys(out["parked_key"]) == [[], ["hqplayer.diagnosis"], ["player.other_app"], ["player.other_app"]]
+    assert out["parked_key"][3]["shown"][0]["title"] == "HQPlayer refused the other app's track"
+
+
+def test_a_new_instance_for_a_toast_that_stepped_aside_is_news():
+    """A takeover's toast stepped aside for a failed play's (news, and
+    lasting itself); then another takeover happens. The toast that waits is
+    redrawn as the new one and is news: it shows, the failed play's steps
+    aside for it — it does not wait, unseen, until that one is closed
+    (review round 1, L3)."""
+    took2 = {"id": 21, "kind": "took"}
+    own = {"id": 40, "code": "not_played", "title": "Not played", "next": "", "track_id": "t", "failing": False}
+    out = _run({"p": [_st(event_floor=1), _st(TOOK), _st(TOOK, diagnosis=own), _st(took2, diagnosis=own)]})
+    assert _keys(out["p"]) == [[], ["player.other_app"], ["hqplayer.diagnosis"], ["player.other_app"]]
+    assert out["p"][3]["waiting"] == ["hqplayer.diagnosis"]
+
+
 _PLAYER = r"""
 const fs = require('node:fs'), vm = require('node:vm');
 const painted = [];
@@ -450,54 +542,125 @@ def test_a_connections_floor_reaches_the_page_when_its_first_status_is_supersede
     assert json.loads(proc.stdout) == [[2, 100], [3, None], [4, 200], [5, None]], proc.stdout
 
 
-# What Now Playing's own status handler may read: the player's state alone.
-# A key that carries a notice — what happened to the output, a diagnosis, a
-# build, a spot's words — is a toast's to read (the block "The output's
-# words"), never this screen's.
+# What Now Playing's status handlers — the sheet's and the mini-player's — may
+# read of the status: the player's state alone. A key that carries a notice
+# (what happened to the output, a diagnosis, a build, a spot's words) is a
+# toast's to read (the block "The output's words"), never these screens'.
 NOW_PLAYING_READS = {
     "excerpt", "length", "progress_percent", "position_formatted", "length_formatted", "state", "source",
     "radio_mode", "song", "artist", "album", "cover_id", "media_file_id", "cover_url", "provider_cover_url",
     "preview", "preview_track_id", "provider", "album_id", "track_id",
 }
-# The meta row under the album line: the format badges and the track's own
-# readings — nothing that says what happened
+# ...and everything they write as text or show and hide, statement by statement
+NOW_PLAYING_WRITES = {
+    "sheet": ["this.excerptBadge.hidden = !data.excerpt", "this.timeCurrent.textContent = data.position_formatted || '0:00'",
+              "this.timeTotal.textContent = data.length_formatted || '0:00'", "this.title.textContent = data.song || '—'",
+              "this.artist.textContent = data.artist || ''", "this.albumText.textContent = data.album || ''",
+              "this.year.textContent = ''"],
+    "mini": ["this.el.hidden = true", "this.el.hidden = false", "this.title.textContent = data.song || '—'",
+             "this.artist.textContent = album ? `${artist} · ${album}` : artist"],
+}
+# The helpers they hand the status to: the transport's own (a spinner while a start is in flight)
+NOW_PLAYING_CALLS = {"transportBusy", "_paintProgress", "coverPlaceholderColors", "onStatus", "update"}
+# Every element of the two, by id: the meta row under the album line holds the
+# format badges and the track's own readings — nothing that says what happened
 NOW_PLAYING_META_ROW = ["npQBadge", "npExcerptBadge", "npKeyPill", "npBpm", "npEnergy"]
+NOW_PLAYING_IDS = {
+    "npSheet", "npClose", "npCoverImg", "npCoverFallback", "npLyricsBtn", "npTitleLine", "npArtistLine",
+    "npAlbumText", "npYearText", "npQBadge", "npExcerptBadge", "npKeyPill", "npBpm", "npBpmNum", "npEnergy",
+    "npEnergyDots", "npProgressTrack", "npProgressFill", "npProgressHead", "npTimeCurrent", "npTimeTotal",
+    "npQueueBtn", "npPrev", "npPlayPauseBtn", "npPlayPauseSvg", "npPlayPauseIcon", "npNextBtn", "npRadioBtn",
+    "npSimilar", "npSimilarList", "npSimilarCount",
+    "mpCover", "mpTitle", "mpArtist", "mpPlayPause", "mpPlayPauseIcon", "mpNext",
+}
+
+
+def _now_playing_handlers(shell: str) -> dict:
+    return {"sheet": shell[shell.index("    onStatus(data) {"):shell.index("    // One similar path for owned AND preview")],
+            "mini": shell[shell.index("    update(data) {"):shell.index("\n    setCover(detail) {")]}
+
+
+def now_playing_says_a_notice(html: str, css: str, shell: str) -> list:
+    """Why Now Playing — the sheet or the mini-player — could render a
+    notice, as the page's three files stand: each reason a sentence, none
+    when it shows the player alone."""
+    why = []
+    row = html[html.index('<div class="np-meta-row">'):html.index('<div class="np-progress-wrap">')]
+    depth, children = 0, []
+    for closing, _tag, attrs in re.findall(r"<(/?)(\w+)([^>]*)>", row):
+        if closing:
+            depth -= 1
+            continue
+        if depth == 1:
+            ident = re.search(r'id="(\w+)"', attrs)
+            children.append(ident.group(1) if ident else "(no id)")
+        depth += 1
+    if children != NOW_PLAYING_META_ROW:
+        why.append(f"the meta row holds {children}")
+    if re.search(r"<(button|a)\b", row):
+        why.append("a control in the meta row")
+    ids = set(re.findall(r'id="((?:np|mp)[A-Z]\w*)"', html)) | set(re.findall(r"getElementById\('((?:np|mp)[A-Z]\w*)'\)", shell))
+    if ids - NOW_PLAYING_IDS:
+        why.append(f"elements not of the player: {sorted(ids - NOW_PLAYING_IDS)}")
+    for name, handler in _now_playing_handlers(shell).items():
+        reads = set(re.findall(r"\bdata\.(\w+)", handler))
+        if reads - NOW_PLAYING_READS:
+            why.append(f"the {name}'s handler reads {sorted(reads - NOW_PLAYING_READS)} from the status")
+        # `source` tells one thing here: whose playback it is, for the transport's icon
+        if re.findall(r"data\.source\b(?! !== 'external')", handler):
+            why.append(f"the {name}'s handler reads `source` for more than the transport's icon")
+        writes = [f"{target}.{prop} = {' '.join(value.split())}" for target, prop, value in
+                  re.findall(r"([\w.]+)\.(textContent|innerHTML|innerText|hidden|title)\s*=\s*([^;]+);", handler)]
+        if writes != NOW_PLAYING_WRITES[name]:
+            why.append(f"the {name}'s handler writes {[w for w in writes if w not in NOW_PLAYING_WRITES[name]]}")
+        if re.search(r"insertAdjacent|appendChild|createElement|\.append\(|\.prepend\(|notices\.", handler):
+            why.append(f"the {name}'s handler builds elements or raises a notice of its own")
+        calls = set(re.findall(r"\b(\w+)\(data\b", handler))
+        if calls - NOW_PLAYING_CALLS:
+            why.append(f"the {name}'s handler hands the status to {sorted(calls - NOW_PLAYING_CALLS)}")
+    for gone in ("npHqpTag", "npWhy", "np-output-line", "np-why", "outputLine"):
+        if gone in html or gone in css or gone in shell:
+            why.append(f"{gone} is back")
+    return why
 
 
 def test_now_playing_renders_no_notice():
     """The owner's rule (2026-11-11, restated 2026-11-14; BACKLOG B-87): Now
     Playing shows the player alone — the track, its badges, the bar, the
-    controls. Its meta row holds the badges and readings named here and no
-    other element; its status handler reads the player's state and none of
-    the keys a notice rides on; the stylesheet has no class for a line or a
-    button there. A new notice goes through notices.toast — adding it here
-    fails this test."""
+    controls — and so does the mini-player. Pinned on the page's three files
+    as they stand: the elements the two have, by id; the meta row's children;
+    what their status handlers read of the status, write as text, show and
+    hide, and whom they hand the status to. A new notice goes through
+    notices.toast — adding it here fails this test, in each of the shapes
+    the old box could come back in."""
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     shell = (STATIC / "app-shell.js").read_text(encoding="utf-8")
+    assert now_playing_says_a_notice(html, css, shell) == []
 
-    row = html[html.index('<div class="np-meta-row">'):html.index('<div class="np-progress-wrap">')]
-    depth, children = 0, []
-    for closing, tag, attrs in re.findall(r"<(/?)(\w+)([^>]*)>", row):
-        if closing:
-            depth -= 1
-            continue
-        if depth == 1:
-            children.append(re.search(r'id="(\w+)"', attrs).group(1))
-        depth += 1
-    assert children == NOW_PLAYING_META_ROW
-    assert not re.search(r"<(button|a)\b", row), "a control in Now Playing's meta row"
-
-    handler = shell[shell.index("    onStatus(data) {"):shell.index("    // One similar path for owned AND preview")]
-    reads = set(re.findall(r"\bdata\.(\w+)", handler))
-    assert reads <= NOW_PLAYING_READS, f"Now Playing reads {sorted(reads - NOW_PLAYING_READS)} from the status"
-    for key in ("diagnosis", "output_event", "resume", "building", "not_answering", "rebuilding",
-                "paused_on_device", "error", "dsp_change", "seek_missed"):
-        assert key not in handler, f"Now Playing's status handler names {key}"
-    assert "notices." not in handler and "textContent = " in handler
-
-    for gone in ("npHqpTag", "npWhy", "np-output-line", "np-why", "outputLine"):
-        assert gone not in html and gone not in css and gone not in shell, gone
+    def swap(text, old, new):
+        assert text.count(old) == 1, old
+        return text.replace(old, new)
+    meta_end = '        <div class="np-progress-wrap">'
+    read_excerpt = "      if (this.excerptBadge) this.excerptBadge.hidden = !data.excerpt;\n"
+    mini_title = "      this.title.textContent = data.song || '—';\n      const artist = data.artist || '';"
+    mutants = {
+        # the old mechanism's shape: an element under the badges, filled by a helper from the status
+        "a line under the meta row": (swap(html, meta_end, '        <div id="npStateNote" hidden></div>\n' + meta_end),
+                                      swap(shell, read_excerpt, read_excerpt + "      playerNote(data);\n")),
+        "a button in the meta row": (swap(html, '<div class="np-key-pill" id="npKeyPill" hidden></div>',
+                                          '<button type="button">Why?</button>'
+                                          '<div class="np-key-pill" id="npKeyPill" hidden></div>'), shell),
+        "the mini-player says a build": (html, swap(shell, mini_title, "      if (data.building) this.artist.textContent"
+                                                                      " = 'Building the filter…';\n" + mini_title)),
+        "a sentence where the year stands": (html, swap(shell, "        if (this.year) this.year.textContent = '';", (
+            "        if (this.year) this.year.textContent = data.source === 'external' ? 'Another app has it' : '';"))),
+        "a toast raised from the handler": (html, swap(shell, read_excerpt, read_excerpt + (
+            "      if (data.state === 'stopped') notices.toast({ title: 'Stopped' });\n"))),
+        "a diagnosis read again": (html, swap(shell, read_excerpt, read_excerpt + "      const diag = data.diagnosis;\n")),
+    }
+    for name, (mutant_html, mutant_shell) in mutants.items():
+        assert now_playing_says_a_notice(mutant_html, css, mutant_shell), f"not caught: {name}"
 
 
 def test_a_toast_has_two_buttons_at_most_in_one_order():

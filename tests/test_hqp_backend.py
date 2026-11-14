@@ -1796,16 +1796,22 @@ def test_a_verdict_the_status_says_is_said_by_a_tick_of_its_own(traced, fake, mo
     said its status before the verdict, so the diagnosis — and the event of
     another app's stop — rode the next pass, a poll's interval later. The
     verdict wakes the poller: a tick of its own says it."""
-    said = []
+    said, woken = [], []
     monkeypatch.setattr(traced, "_emit", said.append)
+    poke = traced.poke
+    # The wakes the poller gives itself once an attempt is judged: a
+    # command's own poke comes from the thread that sent it, and before
+    monkeypatch.setattr(traced, "poke", lambda: (
+        woken.append(1) if threading.current_thread() is traced._thread and diag.attempts() else None, poke())[1])
     fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
     monkeypatch.setattr(hb, "_poll_interval", lambda failures: 60.0)
     time.sleep(1.5)                                 # the poller now waits for a poke
     assert traced.play() is False
     if not _wait(lambda: diag.attempts(), 3.0):
-        traced.poke()                               # the pass that judges it
+        poke()                                      # the pass that judges it
     a = _closed(timeout=5.0)
-    assert a.verdict["code"] == "rejected"
+    assert a.verdict["code"] == "rejected"          # a verdict that leaves no spot: nothing else wakes the poller
+    assert _wait(lambda: woken, 5.0), "the verdict did not wake the poller"
     assert _wait(lambda: any((st.extra.get("diagnosis") or {}).get("id") == a.id for st in said), 5.0), (
         "the verdict waits for the next poll to be said")
 
