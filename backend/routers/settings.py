@@ -1308,6 +1308,16 @@ def _notice_items() -> List[Dict[str, Any]]:
                       "data": {"provider": pid,
                                "name": streaming_service.provider_name(pid),
                                "reason": health["reason"]}})
+    # A provider that stepped aside by its own word (streaming.base
+    # SteppedAside): its state read as it stands, under the provider's own
+    # id — never the shared upstream's health key above, which any provider
+    # on that upstream clears by answering. The words are the module's.
+    for prov, aside in streaming_service.providers_aside():
+        items.append({"key": f"streaming.aside.{prov.manifest.id}", "kind": "warning",
+                      "since": aside.since, "until": None,
+                      "data": {"provider": prov.manifest.id, "name": prov.manifest.name,
+                               "code": aside.code, "title": aside.title,
+                               "text": aside.text, "detail": aside.detail}})
     # A dead HQPlayer output, as opposed to one track that would not play: the
     # same failure three plays in a row (playback.hqp_diagnostics). One failed
     # track is the toast Now Playing raises.
@@ -1432,6 +1442,25 @@ def get_guidance() -> Dict[str, Any]:
 @router.get("/notices")
 def get_notices() -> Dict[str, Any]:
     return _notices_state()
+
+
+@router.post("/streaming/providers/{provider_id}/check")
+def post_stream_provider_check(provider_id: str) -> Dict[str, Any]:
+    """The person's "Check again" on a provider that stepped aside: the
+    provider re-reads its own state now (it asks its service — a worker
+    thread waits, never the event loop) and the answer is what it says
+    afterwards. A change wakes the notices channel from the provider itself;
+    the response is for the tap, which hears "still so" as well."""
+    from streaming import service as streaming_service
+    prov = streaming_service.get_provider(provider_id)
+    if prov is None:
+        raise HTTPException(status_code=404, detail="No such stream provider")
+    prov.check_again()
+    aside = prov.stepped_aside()
+    return {"provider": prov.manifest.id, "name": prov.manifest.name,
+            "aside": None if aside is None else {
+                "code": aside.code, "since": aside.since, "title": aside.title,
+                "text": aside.text, "detail": aside.detail}}
 
 
 @router.post("/guidance/{task}/seen")

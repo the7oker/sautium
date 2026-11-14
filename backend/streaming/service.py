@@ -34,7 +34,7 @@ def init(settings) -> bool:
         logger.info("streaming preview disabled (streaming_preview_enabled=false)")
         return False
 
-    _registry = ProviderRegistry()
+    _registry = ProviderRegistry(on_aside_change=_aside_changed)
     # The provider runs the yt-dlp build the refresh loop puts in place (its
     # first pass is at start); until one lands it answers "unavailable", and
     # the excerpt provider below stands in.
@@ -305,12 +305,44 @@ def note_provider_health(silent: dict, answered: set) -> bool:
     return changed
 
 
+def _aside_changed(provider: StreamProvider) -> None:
+    """A provider stepped aside, or came back (its own word,
+    StreamProvider.aside_changed): the notices channel derives the set anew.
+    The ranking and the resolved chains need no wake — both read the
+    provider's state when they run, and a chain is cached under the order it
+    was resolved in."""
+    aside = provider.stepped_aside()
+    if aside is None:
+        logger.info("stream provider %s is offered again", provider.manifest.id)
+    else:
+        logger.warning("stream provider %s stepped aside (%s): %s%s", provider.manifest.id,
+                       aside.code, aside.title, f" — {aside.detail}" if aside.detail else "")
+    from db_pool import db_execute
+    db_execute("NOTIFY sautium_notices")
+
+
+def providers_aside() -> list:
+    """(provider, its SteppedAside) for every registered provider that has
+    stepped aside — read from the providers as they stand, never kept here.
+    Its notice is the provider's own voice, under its own id: a shared
+    upstream's health key (`health_key`) is cleared by any provider on that
+    upstream answering, and an account's state is not the catalog's."""
+    if _registry is None:
+        return []
+    return [(p, aside) for p in sorted(_registry.enabled(), key=lambda p: p.manifest.id)
+            if (aside := p.stepped_aside()) is not None]
+
+
 def providers_preferred() -> list:
-    """All enabled providers, best first: full-length before excerpts, and
+    """The providers on offer, best first: full-length before excerpts, and
     lossless before lossy within that. The per-track resolve waterfall tries
     each in order, so a track absent from the lossless provider still streams
     from YouTube instead of showing up as unavailable, and one the demo
     channel cannot serve still plays as a 30 s excerpt.
+
+    A provider that has stepped aside by its own word (base.SteppedAside) is
+    registered and not on offer: the resolve never asks it, and a chain built
+    while it was offered is another cache key.
 
     A provider may share its API host with photo enrichment (and with another
     provider — `manifest.cooldown_source`), so a 429 there surfaces as an
@@ -322,7 +354,7 @@ def providers_preferred() -> list:
     status()."""
     if _registry is None:
         return []
-    provs = sorted(_registry.enabled(),
+    provs = sorted((p for p in _registry.enabled() if p.stepped_aside() is None),
                    key=lambda p: (p.manifest.excerpt, not p.manifest.lossless, p.manifest.id))
     # cooling_down() is the cheap cache gate; only read the richer status()
     # (a DB hit) on the rare occasions a source is actually cooling.

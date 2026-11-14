@@ -91,6 +91,7 @@ code disagree, the code is what this file records and § 14 names the doc.
 - [auto] Demo policy: a track streams in full from the demo channel once (spent past 90 %), then as the excerpt; no setting turns it off — `streaming/demo.py: CONSUMED_FRACTION`, `consumed`, `link_admissible`
 - [auto] An excerpt is never analysed and never a listen or a scrobble — `streaming/enrichment.py: PreviewEnricher`; `playback/tracker.py` (`item.excerpt`)
 - [auto] A bring-your-own provider is a module the owner installs; core discovers it and knows nothing else about it; lossless providers are asked before lossy ones — `streaming/loader.py: load_external_providers`; `streaming/service.py: providers_preferred`
+- [UI] A provider may step aside by its own word — an account that can no longer serve what the provider is for: it stays registered and is not asked, its notice carries the module's words and a Check again — `streaming/base.py: SteppedAside`, `StreamProvider.stepped_aside`; `streaming/service.py: providers_aside`; `routers/settings.py: post_stream_provider_check`
 - [auto] Each track resolves to a fallback chain of providers, cached for an hour — `routers/player.py: _resolve_waterfall`, `_CHAIN_TTL_S`
 - [auto] Streamed audio is analysed like a file and signed against the stream's own fingerprint, when the catalogue length confirms the recording — `streaming/enrichment.py`
 - [UI] Badges: Demo on the album, 30s on an excerpt row, the streamed quality — `GET /api/player/phantom-availability/{album_id}`

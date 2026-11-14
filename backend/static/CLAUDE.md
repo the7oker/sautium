@@ -545,6 +545,9 @@ ledger, the slice cycles' status rows (`mb_slice.status`,
 `lb_slice.status`), the music folder (owned
 files known but the path empty), the media binaries on PATH, the
 stream providers' health (`streaming.service.provider_health`), the
+providers that stepped aside by their own word (`providers_aside`, since
+2026-11-14: the provider's state read as it stands, its own id for the key
+and its module's words for the copy, with Check again as the action), the
 HQPlayer output's playback trace (the same failure three plays in a row,
 `playback.hqp_diagnostics.failing_run`; the files HQPlayer refused of the
 last batch it was handed, `refused`), a benchmark run cut short whose

@@ -2820,6 +2820,19 @@ channel is an acquaintance tool. A track streams from it in full at most
   the excerpt is always the last resort — and the excerpt provider is
   registered unconditionally, which is what makes a node without yt-dlp
   still preview.
+- **A provider may step aside by its own word (2026-11-14, contract 2).**
+  The ranking read only the static manifest, so a bring-your-own lossless
+  provider whose account had lost its tier stayed first, and nothing said
+  so: the resolve runs on the public catalog, which answers whatever the
+  account is. `StreamProvider.stepped_aside()` (optional; a provider without
+  it is always offered) is read by `providers_preferred()` and by the
+  notices derivation — the state lives in the provider, core keeps no copy.
+  Its notice is `streaming.aside.<provider id>`, never the shared upstream's
+  health key: the catalog answering clears `streaming.silent.<key>`, and an
+  account's state is not the catalog's. The provider calls `aside_changed()`
+  and the host wakes the notices channel; "Check again" on the notice has it
+  re-read (`POST /api/settings/streaming/providers/{id}/check`). No timer
+  reads the state: a provider reads it on its own events.
 
 ### Stream providers are a registry, not an enum (2026-09-18)
 

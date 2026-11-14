@@ -12234,9 +12234,46 @@
     title: 'Codex is signed out',
     text: 'The assistant waits for a new sign-in — More → AI assistant.',
   });
+  // A provider that stepped aside by its own word (streaming/base.py
+  // SteppedAside, routers/settings.py _notice_items): the title and the text
+  // are the provider module's, carried as plain text — it knows its
+  // service's name and what the person lost — and the service's own answer
+  // follows in brackets. Check again has the provider re-read its state.
+  function asideNoticeCopy(n) {
+    const d = n.data || {};
+    const detail = d.detail ? ` (${escapeHtml(d.detail)})` : '';
+    return { title: escapeHtml(d.title || d.name || d.provider || ''),
+             text: `${escapeHtml(d.text || '')}${detail}`,
+             action: { label: 'Check again', run: () => checkProviderAgain(d.provider) } };
+  }
+  // The tap hears the answer either way: a provider that is back says so
+  // once (its notice leaves with the channel's next snapshot), one that is
+  // still aside says its own words again, under its notice's key.
+  async function checkProviderAgain(id) {
+    let res;
+    try {
+      const r = await fetch(`/api/settings/streaming/providers/${encodeURIComponent(id)}/check`,
+                            { method: 'POST' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      res = await r.json();
+    } catch (e) {
+      notices.toast({ kind: 'error', title: 'The provider could not be checked',
+                      text: escapeHtml(e.message || '') });
+      return;
+    }
+    if (!res.aside) {
+      notices.toast({ kind: 'success', title: `${escapeHtml(res.name)} is back`,
+                      text: 'Streamed tracks come from it again.' });
+      return;
+    }
+    const c = asideNoticeCopy({ data: { ...res.aside, provider: id, name: res.name } });
+    notices.toast({ kind: 'warning', title: c.title, text: c.text, action: c.action,
+                    key: `streaming.aside.${id}` });
+  }
   function noticeCopy(n) {
     const fn = NOTICE_COPY[n.key];
     if (fn) return fn(n);
+    if (n.key.startsWith('streaming.aside.')) return asideNoticeCopy(n);
     if (n.key.startsWith('cooldown.')) {
       return { title: `${escapeHtml((n.data && n.data.source) || n.key.slice(9))} paused`,
                text: `Rate-limited — resumes ${fmtUntil(n.until)}.` };

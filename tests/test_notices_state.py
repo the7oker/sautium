@@ -277,3 +277,162 @@ def test_a_rows_button_does_what_the_toasts_does():
                           capture_output=True, check=True)
     assert json.loads(proc.stdout) == {"ran": ["shown", "queued", "why asked"], "shown": ["other"],
                                        "queued": ["waiting"]}
+
+
+# ---- a provider that stepped aside (streaming/base.py SteppedAside) --------
+
+def _providers(monkeypatch, wake=None):
+    """A lossless provider with a live state and the excerpt provider of the
+    same catalog: one health key, which is also the first one's id."""
+    from streaming import service
+    from streaming.base import ProviderManifest, ProviderRegistry, StreamProvider
+
+    class _P(StreamProvider):
+        def __init__(self, pid, **flags):
+            self.manifest = ProviderManifest(id=pid, name="Lossless-X", kind="direct_url",
+                                             cooldown_source="cat", **flags)
+            self.aside, self.checks, self.renewed = None, 0, False
+
+        def fetch(self, query):
+            raise NotImplementedError
+
+        def stepped_aside(self):
+            return self.aside
+
+        def check_again(self):
+            self.checks += 1
+            if self.renewed:
+                self.aside = None
+
+    registry = ProviderRegistry(on_aside_change=wake)
+    lossless, clip = _P("cat", lossless=True), _P("cat_clip", lossless=False, excerpt=True)
+    registry.register(lossless)
+    registry.register(clip)
+    monkeypatch.setattr(service, "_registry", registry)
+    monkeypatch.setattr(service, "provider_health", {})
+    return service, lossless
+
+
+def _aside(**over):
+    from streaming.base import SteppedAside
+    return SteppedAside(**{"code": "no_tier", "since": ONSET,
+                           "title": "Lossless-X: this account no longer has the tier",
+                           "text": "Tracks stream from another provider.", "detail": "", **over})
+
+
+def _streaming_items():
+    return {n["key"]: n for n in settings_router._notice_items() if n["key"].startswith("streaming.")}
+
+
+def test_a_provider_that_stepped_aside_is_a_notice_in_its_own_voice(cur, monkeypatch):
+    """Its state as it stands, the module's words, under the provider's own
+    id — and the catalog answering, which clears the shared upstream's
+    silence under the same name, leaves it."""
+    service, lossless = _providers(monkeypatch)
+    assert _streaming_items() == {}
+    lossless.aside = _aside(detail="the tier ended")
+    service.note_provider_health({"cat": "quota"}, set())
+    items = _streaming_items()
+    assert sorted(items) == ["streaming.aside.cat", "streaming.silent.cat"]
+    assert items["streaming.aside.cat"] == {
+        "key": "streaming.aside.cat", "kind": "warning", "since": ONSET, "until": None, "seen": False,
+        "data": {"provider": "cat", "name": "Lossless-X", "code": "no_tier",
+                 "title": "Lossless-X: this account no longer has the tier",
+                 "text": "Tracks stream from another provider.", "detail": "the tier ended"}}
+    assert service.note_provider_health({}, {"cat"}) is True          # the catalog answers
+    assert sorted(_streaming_items()) == ["streaming.aside.cat"]
+    lossless.aside = None
+    assert _streaming_items() == {}
+
+
+def test_a_providers_change_wakes_the_notices_channel(cur, dsn, monkeypatch):
+    """The provider's own word (aside_changed) is a NOTIFY on the channel
+    every open tab's snapshot waits on — either way."""
+    import select
+    from streaming import service
+    _, lossless = _providers(monkeypatch, wake=service._aside_changed)
+    listener = psycopg2.connect(dsn)
+    listener.autocommit = True
+    try:
+        with listener.cursor() as c:
+            c.execute("LISTEN sautium_notices")
+        for state in (_aside(), None):
+            lossless.aside = state
+            lossless.aside_changed()
+            assert select.select([listener], [], [], 10)[0], "no wake"
+            listener.poll()
+            assert [n.channel for n in listener.notifies] == ["sautium_notices"]
+            listener.notifies.clear()
+    finally:
+        listener.close()
+
+
+def test_check_again_has_the_provider_read_its_state_and_answers_the_tap(cur, monkeypatch):
+    from fastapi import HTTPException
+    _, lossless = _providers(monkeypatch)
+    lossless.aside = _aside()
+    answer = settings_router.post_stream_provider_check("cat")
+    assert lossless.checks == 1
+    assert answer == {"provider": "cat", "name": "Lossless-X", "aside": {
+        "code": "no_tier", "since": ONSET, "title": "Lossless-X: this account no longer has the tier",
+        "text": "Tracks stream from another provider.", "detail": ""}}
+    lossless.renewed = True
+    assert settings_router.post_stream_provider_check("cat") == {
+        "provider": "cat", "name": "Lossless-X", "aside": None}
+    with pytest.raises(HTTPException) as refused:
+        settings_router.post_stream_provider_check("nobody")
+    assert refused.value.status_code == 404
+
+
+_ASIDE_COPY = r"""
+const toasts = [], asked = [];
+let answer;
+const notices = { toast: t => toasts.push({ ...t, action: t.action ? t.action.label : null }) };
+async function fetch(url, init) {
+  asked.push([url, init.method]);
+  if (answer === 'down') return { ok: false, status: 502 };
+  return { ok: true, json: async () => answer };
+}
+(async () => {
+  const data = { provider: 'cat/x', name: 'Lossless-X', title: 'Lossless-X: no <tier>', text: 'Tracks & more.',
+                 detail: 'answer "0"' };
+  const copy = asideNoticeCopy({ key: 'streaming.aside.cat/x', data });
+  const viaNotice = noticeCopy({ key: 'streaming.aside.cat/x', data });
+  answer = { provider: 'cat/x', name: 'Lossless-X', aside: { title: 'Lossless-X: no <tier>', text: 'Still.', detail: '' } };
+  await copy.action.run();
+  answer = { provider: 'cat/x', name: 'Lossless <X>', aside: null };
+  await copy.action.run();
+  answer = 'down';
+  await copy.action.run();
+  process.stdout.write(JSON.stringify({ title: copy.title, text: copy.text, label: copy.action.label,
+    same: viaNotice.title === copy.title && viaNotice.text === copy.text && viaNotice.action.label === 'Check again',
+    bare: asideNoticeCopy({ key: 'streaming.aside.q', data: { provider: 'q', title: 'T', text: 'x' } }).text,
+    asked, toasts }));
+})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_aside_notice_draws_the_modules_words_and_check_again_answers_the_tap():
+    """The module's title and text as escaped text, its service's answer in
+    brackets; Check again posts to the provider's check and the tap hears
+    the answer: still aside (the module's words, under the notice's key),
+    back, or that the check itself failed. app-shell.js's own functions."""
+    src = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
+    fns = [re.search(rf"\n  (?:async )?function {name}\(.*?\) \{{\n.*?\n  \}}\n", src, re.S).group(0)
+           for name in ("escapeHtml", "asideNoticeCopy", "checkProviderAgain", "noticeCopy")]
+    out = subprocess.run([shutil.which("node"), "-e",
+                          "'use strict';const NOTICE_COPY = {};" + "".join(fns) + _ASIDE_COPY],
+                         capture_output=True, text=True, check=True).stdout
+    url = "/api/settings/streaming/providers/cat%2Fx/check"
+    assert json.loads(out) == {
+        "title": "Lossless-X: no &lt;tier&gt;", "text": "Tracks &amp; more. (answer &quot;0&quot;)",
+        "label": "Check again", "same": True, "bare": "x",
+        "asked": [[url, "POST"]] * 3,
+        "toasts": [
+            {"kind": "warning", "title": "Lossless-X: no &lt;tier&gt;", "text": "Still.",
+             "action": "Check again", "key": "streaming.aside.cat/x"},
+            {"kind": "success", "title": "Lossless &lt;X&gt; is back",
+             "text": "Streamed tracks come from it again.", "action": None},
+            {"kind": "error", "title": "The provider could not be checked", "text": "HTTP 502",
+             "action": None}]}, out

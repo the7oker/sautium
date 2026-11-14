@@ -137,9 +137,13 @@ def tokens_shared(a: str, b: str) -> float:
     ta, tb = title_tokens(a), title_tokens(b)
     return len(ta & tb) / len(ta | tb) if ta and tb else 0.0
 
-# Bump only on breaking changes to TrackQuery / FetchedAudio / fetch(). External
-# modules declare the version they were built against so the host can warn.
-CONTRACT_VERSION = 1
+# The version a module is built against. 2 (2026-11-14) adds a provider's own
+# live state — StreamProvider.stepped_aside / check_again / aside_changed,
+# all optional — and changes nothing a version 1 module implements, so the
+# host warns only about a module built for a contract newer than its own. A
+# breaking change to TrackQuery / FetchedAudio / fetch() bumps it too, and
+# then names the oldest version still served.
+CONTRACT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -246,6 +250,24 @@ class ProviderUnavailable(ProviderError):
     nothing about the track, so the host must not remember it as a miss."""
 
 
+@dataclass(frozen=True)
+class SteppedAside:
+    """A provider's own word that it is not to be asked for now: what it is
+    for, it cannot serve (an account that lost the tier the provider exists
+    for, a login its service refuses). It stays registered — its
+    stream_providers row and the analysis it gave keep their provenance — and
+    is left out of the ranking, so a track goes straight to the next provider.
+
+    The words are the module's: it knows its service's name and what the
+    person lost, and the host shows them as text beside its own role-named
+    copy. `detail` is the service's own answer, with no credential in it."""
+    code: str               # the module's stable name for the cause — a new one is a new notice
+    since: str              # ISO 8601, UTC: when the provider first read this cause
+    title: str
+    text: str
+    detail: str = ""
+
+
 class StreamProvider(ABC):
     manifest: ProviderManifest
 
@@ -256,6 +278,28 @@ class StreamProvider(ABC):
         transcode) — the proxy calls it off the request path via prefetch.
         Raises ProviderError on no-match / failure."""
         ...
+
+    # ---- live state (contract 2, optional) --------------------------------
+    # The provider's state is its own and is read where it lives: the host
+    # keeps no copy. A provider without one is always offered.
+    def stepped_aside(self) -> Optional[SteppedAside]:
+        """Why this provider is not to be offered now, or None. Read on every
+        ranking and every notices snapshot: an attribute read, never I/O."""
+        return None
+
+    def check_again(self) -> None:
+        """Re-read the live state now — the person's "Check again" on the
+        notice. Blocking (the provider asks its service); what
+        stepped_aside() returns afterwards is the answer."""
+
+    # The host's ear, set when the provider is registered.
+    _aside_listener = None
+
+    def aside_changed(self) -> None:
+        """Called by the provider after what stepped_aside() returns changed,
+        either way: the host wakes whoever shows it."""
+        if self._aside_listener is not None:
+            self._aside_listener(self)
 
     # Split resolve/download so the host can run a fast availability pass (which
     # tracks exist on this provider) BEFORE the slow downloads — to mark missing
@@ -324,14 +368,15 @@ class ProviderRegistry:
     tag is the seam for future module kinds, which live in their own
     subsystems rather than being forced through this contract."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_aside_change=None) -> None:
         self._by_id: dict[str, StreamProvider] = {}
+        self._on_aside_change = on_aside_change
 
     def register(self, provider: StreamProvider) -> None:
         m = provider.manifest
         if m.type != "stream_provider":
             raise ValueError(f"registry holds stream_provider only, got {m.type!r}")
-        if m.contract_version != CONTRACT_VERSION:
+        if m.contract_version > CONTRACT_VERSION:
             logger.warning("provider %s built for contract v%d, host is v%d",
                            m.id, m.contract_version, CONTRACT_VERSION)
         # The id is the provider's identity everywhere (provenance rows, the
@@ -340,6 +385,7 @@ class ProviderRegistry:
         if m.id in self._by_id:
             raise ValueError(f"stream provider id {m.id!r} is already registered")
         self._by_id[m.id] = provider
+        provider._aside_listener = self._on_aside_change
         logger.info("registered stream provider: %s (%s, lossless=%s, excerpt=%s, "
                     "demo_limited=%s)", m.id, m.kind, m.lossless, m.excerpt, m.demo_limited)
 
