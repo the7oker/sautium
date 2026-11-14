@@ -274,3 +274,72 @@ def test_a_listen_waiting_on_its_recording_is_placed_when_the_answer_wakes_its_n
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM listening_history")
         assert cur.fetchone() == (1,)
+
+
+def _listening(dsn, *channels):
+    import psycopg2
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        for ch in channels:
+            cur.execute(f"LISTEN {ch}")
+    return conn
+
+
+def _heard(conn) -> set:
+    import select
+    got = set()
+    while select.select([conn], [], [], 0.3) != ([], [], []):
+        conn.poll()
+        got |= {n.channel for n in conn.notifies}
+        conn.notifies.clear()
+    return got
+
+
+def test_listens_that_land_wake_no_network_lane(node, scratch_dsn, monkeypatch):
+    """The walk and both slice cycles take what an import brought at their own
+    pace, mixed with everything else: placed listens wake what feeds on them
+    here, never a request to the network as the import's echo."""
+    import background_enrichment
+    import notary
+    from canon import scrobbles
+    from playback import sessions
+    from routers import settings
+    woken = []
+    monkeypatch.setattr(background_enrichment, "wake", lambda why: woken.append(("enrich", why)))
+    monkeypatch.setattr(background_enrichment, "wake_db_steps", lambda why: woken.append(("db", why)))
+    monkeypatch.setattr(notary, "wake", lambda why, full=False: woken.append(("notary", why)))
+    monkeypatch.setattr(sessions, "rebuild_imported_sessions", lambda cur, touched: None)
+    monkeypatch.setattr(settings, "notify_library_subscribers", lambda: None)
+    listener = _listening(scratch_dsn, "sautium_sync_request", "sautium_lb_pending",
+                          "sautium_enrich_done", "sautium_mb_pending")
+    try:
+        scrobbles._after_binding(minted=True, newest=T0)
+        assert _heard(listener) == set()
+    finally:
+        listener.close()
+    assert ("notary", "scrobble canon") in woken and ("enrich", "lastfm import") in woken
+
+
+def test_a_discography_with_no_source_yet_wakes_no_slice_cycle(node, scratch_dsn, monkeypatch):
+    """A resolved artist whose discography has no source here is canonized
+    and never shelved: the MB slice stream asks for it at its own pace."""
+    import uuid
+    import discography
+    from canon import scrobbles
+    conn, _fake = node
+    artist = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'Resolved Act')", (artist,))
+        _wait(cur, 0, "A Song", artist="Resolved Act")
+        cur.execute("UPDATE pending_scrobble_artists SET artist_id = %s WHERE name_key = 'resolved act'",
+                    (artist,))
+    monkeypatch.setattr(discography, "sync_artist_discography",
+                        lambda artist_id, name, priority=None: {"status": "no_source"})
+    listener = _listening(scratch_dsn, "sautium_mb_pending")
+    try:
+        assert scrobbles.mint_resolved()["statuses"]["no_source"] == 1
+        assert _heard(listener) == set()
+    finally:
+        listener.close()
+

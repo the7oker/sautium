@@ -824,7 +824,7 @@ def test_a_signed_zero_match_reopens_after_thirty_days(conn, scratch_dsn):
                        ('still closed', 0, %s, now() - interval '29 days'),
                        ('matched long ago', 3, %s, now() - interval '400 days')""",
                     (pub(closer), pub(other), pub(other)))
-    assert mb_slice_queries.pending_slice_names(conn) == [("gone quiet", 1)]
+    assert mb_slice_queries.pending_slice_names(conn) == ["gone quiet"]
     assert mb_slice_cycle.reopened_authors(scratch_dsn, ["Gone Quiet", "Never Asked"]) == {
         "Gone Quiet": pub(closer)}
 

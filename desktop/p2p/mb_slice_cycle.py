@@ -23,17 +23,21 @@ What a run does (`MbSliceCycle.run`):
    kept between runs until a source fails; a new map is persisted as
    `mb.search_sources` for the backend's request-time consumers and
    announced with NOTIFY sautium_mb_sources;
-3. the pending names in priority order (mb_slice_queries.pending_slice_names:
-   owned artists, then the names imported scrobbles wait on, then the rest);
+3. the pending names, drawn at random from everything canon waits on, in
+   one form (mb_slice_queries.pending_slice_names) — the owner's files, the
+   imported scrobbles, the stubs and the re-asks are one stream, mixed in
+   every request, so a request does not tell why this node asks;
 4. source by source, batches through MBSliceClient (verified against the
-   original author's key); a replica's `missing` and outright failures carry
-   to the next source; a rate-limited source is waited out once;
+   original author's key), one request to a source every PACKET_GAP at
+   most; a replica's `missing` and outright failures carry to the next
+   source; a rate-limited source is waited out once;
 5. after an importing run: ANALYZE, then `after_import` (the canon trigger);
    `mb_slice.status` published on every run, an all-clear included;
-6. a run that filled its cap with names of the first two tiers — the owner's
-   files, the imported scrobbles — asks for the next run at once, while the
-   phantom-stub tiers keep the timed pace so dump nodes are not hammered for
-   discovery stubs.
+6. a run that filled its cap and was served asks for the next one at once:
+   the stream goes on at that one pace while anything waits, whatever
+   waits — an import or a scan makes it longer, never faster. Until
+   2026-11-14 a run of the owner's files or the imported scrobbles drained
+   at once while the stubs kept the 6-h pace, and the pace told the tier.
 
 Blocking DB work runs in the executor (`psycopg2.connect` blocks the loop for
 the whole handshake — see sync_walk).
@@ -64,7 +68,12 @@ STATUS_KEY = "mb_slice.status"
 SOURCES_KEY = "mb.search_sources"
 FIRST_SOURCE_MAX_DELAY = 60          # like the walk: wait for a source, not a clock
 FIRST_RUN_DELAY = 120                # let the first sync walk spend the peers' windows first
-_DRAIN_TIER = 1                      # tiers 0-1: owned files, imported scrobbles
+# The stream's one pace: a request of MAX_NAMES_PER_REQUEST names to a source
+# every PACKET_GAP at most — 25 names a minute, under the quarter of a dump
+# node's build budget one requester has (mb_slice_queries.BuildBudget: 30
+# builds a minute), with room left for a person's click. A request sent
+# faster finds the budget spent and comes back `missing`.
+PACKET_GAP = 120.0
 
 
 def _connect(dsn: str):
@@ -173,6 +182,7 @@ class MbSliceCycle:
         self._next_at: Optional[float] = None
         self._status_cleared = False       # a dump node dropped its row this process
         self._running = False
+        self._asked_at: dict[str, float] = {}   # source -> when this node last asked it
 
     # ------------------------------------------------------------ lifecycle
 
@@ -351,7 +361,7 @@ class MbSliceCycle:
                                 reason="no_sources", sources=0)
             return {}
 
-        names = [name for name, _ in pending]
+        names = list(pending)
         reopened = await loop.run_in_executor(None, reopened_authors, self.db_dsn, names)
         batch_size = mb_slice_queries.MAX_NAMES_PER_REQUEST
         logger.info(f"MB slice: {len(names)} pending names, {len(peers)} source(s) (replicas first)")
@@ -378,6 +388,7 @@ class MbSliceCycle:
             waited = False
             for i in range(0, len(asked), batch_size):
                 batch = asked[i:i + batch_size]
+                await self._paced(node)
                 if not self._sharing_enabled():
                     # Turned off while the run went on: nothing more leaves.
                     reasons.add("sharing_off")
@@ -388,6 +399,7 @@ class MbSliceCycle:
                     # stays pending for the next source or cycle.
                     leftovers.extend(asked[i:])
                     break
+                self._asked_at[node] = time.monotonic()
                 stats = await self._isolated(client, node, batch, avoid)
                 if stats is None:
                     reasons.add("error")
@@ -404,6 +416,7 @@ class MbSliceCycle:
                     if time.monotonic() >= api.session_deadline:
                         leftovers.extend(asked[i:])
                         break
+                    self._asked_at[node] = time.monotonic()
                     stats = await self._isolated(client, node, batch, avoid)
                     if stats is None:
                         reasons.add("error")
@@ -458,10 +471,17 @@ class MbSliceCycle:
                     else "error" if "error" in reasons
                     else "missing" if remaining else "ok"),
             sources=len(peers))
-        if (len(pending) >= PENDING_PER_CYCLE and served
-                and any(tier <= _DRAIN_TIER for _, tier in pending)):
-            self.request("drain")
+        if len(pending) >= PENDING_PER_CYCLE and served:
+            # More waits than one run draws: the stream goes on, at its pace.
+            self.request("stream")
         return total
+
+    async def _paced(self, node: str) -> None:
+        """Wait until this node may ask `node` again: PACKET_GAP after its
+        last request there, across runs."""
+        wait = self._asked_at.get(node, float("-inf")) + PACKET_GAP - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
 
     async def _isolated(self, client: MBSliceClient, node: str, batch: list,
                         avoid: dict) -> Optional[dict]:

@@ -22,9 +22,11 @@ What a run does (`LbSliceCycle.run`):
    version it serves or re-serves, and the newest of those is what the
    ledger is measured against;
 3. the pending set (lb_slice_queries.pending_slice_mbids): the on-demand
-   lane first, then owned, then engaged artists, minus ledger rows at the
-   newest version — a row older than that is STALE and asked again with
-   `min_version`, so counts refresh and signed zero-matches re-open;
+   lane whole, and a random draw from the owned and engaged artists, minus
+   ledger rows at the newest version — a row older than that is STALE and
+   asked again with `min_version`, so counts refresh and signed zero-matches
+   re-open; each request mixes them in random order, so it does not tell
+   an opened page from an owned or a listened artist;
 4. source by source, batches of 50 (the protocol's maximum): every entry verified against the
    ORIGINAL author's key, imported in one transaction per batch under the
    loader's lock; `missing` (the peer does not hold it) and DROPPED (it sent
@@ -43,6 +45,7 @@ for the whole handshake — see sync_walk).
 import asyncio
 import json
 import logging
+import random
 import threading
 import time
 from datetime import datetime, timezone
@@ -531,6 +534,10 @@ class LbSliceCycle:
         # and are re-asked as stale next run if it was older.
         remaining = {"stale": [m for m, v in pending if v is not None],
                      "fresh": [m for m, v in pending if v is None]}
+        # The opened pages' MBIDs head the draw; where they ride in the
+        # requests is chance, like everything else's.
+        for group in remaining.values():
+            random.shuffle(group)
         logger.info(f"LB slice: {len(pending)} pending ({len(remaining['stale'])} stale), "
                     f"{len(sources)} source(s), newest {newest} (trigger={trigger})")
 

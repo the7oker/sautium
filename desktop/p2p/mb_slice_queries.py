@@ -701,54 +701,51 @@ def get_slice_one(conn, name: str, artist_ids: Optional[list] = None) -> dict:
 # ---------------------------------------------------------------------------
 
 def pending_slice_names(conn, limit: int = 200) -> list:
-    """(name, tier) for the artist names the local canon pipeline is waiting
-    on, IN PRIORITY ORDER: owned artists past their last_mb_sync watermark
-    (canonicalize_pending's feed) first; then the names imported Last.fm
-    scrobbles wait on (pending_scrobble_artists, the most scrobbled first —
-    canon.scrobbles can only place them once their slice is here); then
-    phantom stubs without an artist_mbids row (phantom canon's feed) —
-    minus names already answered by a peer (mb_slice_fetches — zero-match
-    included, the slice is a closed world per name).
+    """The artist names the local canon pipeline waits on — up to `limit` of
+    them, DRAWN AT RANDOM from all of them, each in one form (lower(btrim()),
+    the slice key the matcher folds case to anyway). What a packet carries
+    must not tell why this node asks (the mixed stream, 2026-11-14): the
+    owner's files and the names imported scrobbles wait on, the similar
+    artists Sautium discovers and the names canon re-asks are one pool, and
+    a request mixes them in random order, with no ranking and no casing to
+    tell them apart. A receiver learns that this node asks about a name,
+    never which of its reasons it is.
 
-    Ordering is the point. The queue drains ~200 names per cycle against
-    thousands of similar-derived phantoms (4033 measured on the reference
-    library), so alphabetical order — what this used to do — parked a
-    Z-named OWNED artist behind four thousand discovery stubs for days.
-    Owned canon is not a nicety: album canon, editions, discographies and
-    carry pushability all gate on it. Next come canonized artists that
-    have never been shelved (artist_mbids row, no files, last_album_sync
-    NULL) — the seed picks and carried phantoms a fresh replica arrives
-    with: the discography sync answers no_source for them until their
-    slice lands (discography._mb_source_covers), so this queue is the only
-    thing that turns a curated pick into a discography. Within the phantom
-    stub layer the tiers mirror discography.stale_canonized_artists —
-    listened-to first, then artists similar to those, then the rest — so
-    the part of the discovery graph you actually touch resolves first.
-
-    Last come canonized artists the ledger no longer vouches for: an
-    artist_mbids row and no mb_slice_fetches row. Their facts arrived in a
-    slice whose provenance row is gone (016 reset the ledger when the wire
-    format grew) or through a peer's sealed canon rather than a slice of
-    their own name. Canon is done for them, so no other tier lists them —
-    yet discography._mb_source_covers and the Buy resolver both read a
-    fetch row as "the local facts for this name are complete and current",
-    and without one they answer no_source / unknown for good. Re-asking
-    restores that invariant (measured on the macOS node after 016: 299 of
-    547 canonized names, 6 695 of 7 280 phantom albums stuck on unknown).
+    The pool, minus the names a peer already answered (mb_slice_fetches — a
+    zero-match included, the slice is a closed world per name):
+    - owned artists past their last_mb_sync watermark — here or at the
+      HQPlayer (canonicalize_pending's feed): album canon, editions,
+      discographies and carry pushability gate on them;
+    - the names imported Last.fm scrobbles wait on (pending_scrobble_artists)
+      — canon.scrobbles places them once their slice is here — but not
+      while an import's walk is reading pages: the walk reads the newest
+      scrobbles first, and names drawn mid-walk would be the most recent
+      listens'. They join once the walk stops, at the stream's own pace;
+    - canonized artists never shelved (artist_mbids row, no files,
+      last_album_sync NULL): the seed picks and carried phantoms a fresh
+      replica arrives with, and the scrobble canon's artists asked again
+      under MusicBrainz's spelling — the discography sync answers no_source
+      for them until their slice lands (discography._mb_source_covers);
+    - phantom stubs without an artist_mbids row (phantom canon's feed);
+    - canonized artists the ledger no longer vouches for: an artist_mbids
+      row and no mb_slice_fetches row (016 reset the ledger when the wire
+      format grew; canon a peer sealed rather than a slice of the name's
+      own). discography._mb_source_covers and the Buy resolver read a fetch
+      row as "the local facts for this name are complete and current", and
+      without one they answer no_source / unknown for good; re-asking
+      restores that invariant (measured on the macOS node after 016: 299
+      of 547 canonized names, 6 695 of 7 280 phantom albums stuck on
+      unknown).
     MB's special-purpose artists ([unknown], [traditional], Various
     Artists…) are left out: their subtree is every record on Earth, capped
-    and useless."""
+    and useless. Until 2026-11-14 the pool was asked tier by tier — the
+    owned first, the waiting room by scrobble count (the only tier sent
+    lowercased), the stubs near a recent listen before the rest — which put
+    the reason for each name on the wire."""
     with conn.cursor() as cur:
         cur.execute("""
-            WITH listened AS (
-                SELECT DISTINCT ta.artist_id
-                FROM track_artists ta
-                JOIN listening_history lh ON lh.track_id = ta.track_id
-                WHERE ta.role = 'primary'
-                  AND lh.started_at > now() - interval '6 months'
-            ),
-            pending AS (
-                SELECT ar.name, 0 AS tier, NULL::bigint AS weight
+            WITH pending AS (
+                SELECT ar.name
                 FROM artists ar
                 WHERE EXISTS (
                     SELECT 1 FROM track_artists ta
@@ -756,15 +753,13 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                     WHERE ta.artist_id = ar.id AND ta.role = 'primary'
                       AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
                 UNION ALL
-                SELECT n.name_key, 1 AS tier, count(*) AS weight
+                SELECT n.name_key
                 FROM pending_scrobble_artists n
-                JOIN pending_scrobbles ps ON ps.name_key = n.name_key
                 WHERE n.artist_id IS NULL
-                  AND n.name_key !~ '^\\[.*\\]$'
-                  AND n.name_key <> 'various artists'
-                GROUP BY n.name_key
+                  AND EXISTS (SELECT 1 FROM pending_scrobbles ps WHERE ps.name_key = n.name_key)
+                  AND NOT EXISTS (SELECT 1 FROM lastfm_import li WHERE li.reading_since IS NOT NULL)
                 UNION ALL
-                SELECT a.name, 2 AS tier, NULL
+                SELECT a.name
                 FROM artists a
                 WHERE a.last_album_sync IS NULL
                   AND EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
@@ -772,12 +767,7 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                                   JOIN owned_files mf ON mf.track_id = ta.track_id
                                   WHERE ta.artist_id = a.id)
                 UNION ALL
-                SELECT a.name,
-                       CASE WHEN EXISTS (SELECT 1 FROM similar_artists sa
-                                          JOIN listened l ON l.artist_id = sa.artist_id
-                                         WHERE sa.similar_artist_id = a.id) THEN 3
-                            ELSE 4 END AS tier,
-                       NULL
+                SELECT a.name
                 FROM artists a
                 WHERE EXISTS (SELECT 1 FROM similar_artists sa
                               WHERE sa.similar_artist_id = a.id)
@@ -786,43 +776,44 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                   AND NOT EXISTS (SELECT 1 FROM artist_mbids am
                                   WHERE am.artist_id = a.id)
                 UNION ALL
-                SELECT a.name, 5 AS tier, NULL
+                SELECT a.name
                 FROM artists a
                 WHERE EXISTS (SELECT 1 FROM artist_mbids am
                               WHERE am.artist_id = a.id)
-                  AND a.name !~ '^\\[.*\\]$'
-                  AND lower(a.name) <> 'various artists'
+            ),
+            keyed AS (
+                SELECT DISTINCT lower(btrim(p.name)) AS key
+                FROM pending p
+                WHERE p.name IS NOT NULL AND btrim(p.name) <> ''
+                  -- what a dump node serves (servable_name): asked otherwise,
+                  -- a name would come back `missing` every cycle
+                  AND length(btrim(p.name)) <= %(name_max)s
+                  AND p.name !~ '[[:cntrl:]]'
+                  AND lower(btrim(p.name)) !~ '^\\[.*\\]$'
+                  AND lower(btrim(p.name)) <> 'various artists'
             )
-            SELECT p.name, MIN(p.tier) FROM pending p
-            WHERE p.name IS NOT NULL AND btrim(p.name) <> ''
-              -- what a dump node serves (servable_name): asked otherwise,
-              -- a name would come back `missing` every cycle
-              AND length(btrim(p.name)) <= %(name_max)s
-              AND p.name !~ '[[:cntrl:]]'
-              AND lower(btrim(p.name)) !~ '^\\[.*\\]$'
-              AND lower(btrim(p.name)) <> 'various artists'
-              -- a signed zero-match closes a name for 30 days, then it is asked
-              -- again — of another author's source where one answers; a void
-              -- answer (its blob lost a clash, a rebuild left it out) closes
-              -- nothing
-              AND NOT EXISTS (SELECT 1 FROM mb_slice_fetches f
-                              WHERE f.name_key = lower(btrim(p.name)) AND NOT f.void
+            SELECT k.key FROM keyed k
+            -- a signed zero-match closes a name for 30 days, then it is asked
+            -- again — of another author's source where one answers; a void
+            -- answer (its blob lost a clash, a rebuild left it out) closes
+            -- nothing
+            WHERE NOT EXISTS (SELECT 1 FROM mb_slice_fetches f
+                              WHERE f.name_key = k.key AND NOT f.void
                                 AND (f.matched_ids > 0 OR f.fetched_at > now() - interval '30 days'))
-            GROUP BY p.name
-            ORDER BY MIN(p.tier), MAX(p.weight) DESC NULLS LAST, p.name
+            ORDER BY random()
             LIMIT %(lim)s
         """, {"lim": limit, "name_max": NAME_MAX_CHARS})
-        rows = cur.fetchall()
+        names = [r[0] for r in cur.fetchall()]
         # The ledger is keyed by name_key, which SQL's lower(btrim()) matches
         # for every name but a few (a non-breaking space, a dotted capital I):
         # those are told by the key itself, or they would be asked every cycle.
-        keys = {r[0]: name_key(r[0]) for r in rows}
+        keys = {n: name_key(n) for n in names}
         cur.execute("""SELECT name_key FROM mb_slice_fetches
                         WHERE name_key = ANY(%s) AND NOT void
                           AND (matched_ids > 0 OR fetched_at > now() - interval '30 days')""",
                     (sorted(set(keys.values())),))
         closed = {r[0] for r in cur.fetchall()}
-        return [(r[0], r[1]) for r in rows if keys[r[0]] not in closed]
+        return [n for n in names if keys[n] not in closed]
 
 
 # ---------------------------------------------------------------------------

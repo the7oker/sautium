@@ -25,6 +25,7 @@ node-local and every node fetches its own by name.
 import base64
 import logging
 import math
+import random
 import struct
 import time
 import unicodedata
@@ -522,8 +523,12 @@ class SyncClient:
         # was always asked in full: a 3M-track master paid 48 exact
         # requests per peer per run for what the filter answers in a
         # second.
-        inventory = self._holdings_inventory(
-            health, list(track_uuids) + list(bulk_track_uuids))
+        # One list in random order: the core (the engaged artists' tracks)
+        # and the bulk ride the same requests, so a request's order or its
+        # chunk does not tell which tracks this node owns or listened to.
+        asked = list(track_uuids) + list(bulk_track_uuids)
+        random.shuffle(asked)
+        inventory = self._holdings_inventory(health, asked)
         if inventory is None:
             self._progress("Inventory request failed.")
             return {"error": "inventory_failed"}
@@ -664,6 +669,7 @@ class SyncClient:
         hits = filters["tracks"].hits([t for t in tracks if t not in only_instruments])
         if filters.get("instruments") is not None:
             hits += filters["instruments"].hits([t for t in tracks if t in only_instruments])
+            random.shuffle(hits)
         self._progress(
             f"  holdings filter: {len(hits)} of {len(tracks)} tracks worth asking")
         if not hits:

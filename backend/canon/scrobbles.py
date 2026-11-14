@@ -639,11 +639,11 @@ def mint_resolved(limit: int = _MINT_PER_PASS) -> Row:
             stats["artists"].append(r["id"])
         if status in ("mb_loading", "rate_limited"):
             break
-    if stats["statuses"]["no_source"]:
-        # A slice node holds the name the scrobbles carried, not always the
-        # canonical one the mint asks about: the "canonized, never shelved"
-        # tier fetches it.
-        db_execute("NOTIFY sautium_mb_pending")
+    # A slice node holds the name the scrobbles carried, not always the
+    # canonical one the mint asks about: a `no_source` artist is canonized and
+    # never shelved, so the MB slice stream asks for its name — at the
+    # stream's own pace, never on the import's wake (mb_slice_queries.
+    # pending_slice_names).
     stats["drain"] = len(rows) >= limit
     return stats
 
@@ -1028,9 +1028,13 @@ def run_pass(scope: Row) -> bool:
 
 def _after_binding(minted: bool, newest) -> None:
     """Listens landed (the latest of them began at `newest`): the
-    Listening-history cards follow them, and the engaged set grew. Wake what feeds on it — the background loop (bios, similars),
-    the DB steps (credit heads, shelves), the P2P walk (analysis for the new
-    canonical tracks), the LB slices — and the screens."""
+    Listening-history cards follow them, and the engaged set grew. Wake what
+    feeds on it here — the background loop (bios, similars), the DB steps
+    (credit heads, shelves), the notary for the new canonical tracks — and the
+    screens. The network lanes are not woken: the walk (analysis for the new
+    canonical tracks) and both slice cycles take what the import brought at
+    their own pace, mixed with everything else they ask about, so no request
+    follows an import as its echo."""
     import background_enrichment
     from playback.sessions import rebuild_imported_sessions
     from routers.settings import notify_library_subscribers
@@ -1040,12 +1044,9 @@ def _after_binding(minted: bool, newest) -> None:
     background_enrichment.wake("lastfm import")
     background_enrichment.wake_db_steps("lastfm import")
     notify_library_subscribers()
-    db_execute("NOTIFY sautium_sync_request")
-    db_execute("NOTIFY sautium_lb_pending")
     if minted:
         import notary
         notary.wake("scrobble canon", full=True)
-        db_execute("NOTIFY sautium_enrich_done")
 
 
 # --------------------------------------------------------------------------

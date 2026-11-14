@@ -1655,7 +1655,11 @@ CREATE TABLE IF NOT EXISTS session_tracks (
 -- row, and the walk resumes from walk_cursor_at after a restart.
 -- watermark_at: every scrobble at or before it has been fetched.
 -- walk_top_at: the fixed upper bound of the walk in progress (NULL when
--- idle); walk_cursor_at: how far down it has committed.
+-- idle); walk_cursor_at: how far down it has committed. reading_since: a
+-- session is reading pages now (set when it starts, cleared when it stops and
+-- at every backend start) — the waiting names stay out of the MB slice
+-- stream meanwhile (mb_slice_queries.pending_slice_names), so no request is
+-- drawn from the newest scrobbles alone.
 CREATE TABLE IF NOT EXISTS lastfm_import (
     username       TEXT PRIMARY KEY,
     watermark_at   TIMESTAMPTZ,
@@ -1664,7 +1668,8 @@ CREATE TABLE IF NOT EXISTS lastfm_import (
     walk_total     INTEGER,
     walk_fetched   INTEGER NOT NULL DEFAULT 0,
     last_sync_at   TIMESTAMPTZ,
-    last_error     TEXT
+    last_error     TEXT,
+    reading_since  TIMESTAMPTZ
 );
 
 -- One row per artist name the pending scrobbles carry: the canon decision is

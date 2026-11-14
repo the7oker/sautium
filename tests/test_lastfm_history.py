@@ -172,6 +172,72 @@ def test_the_walk_fills_the_waiting_room_without_this_nodes_own_listens(walk):
     assert lastfm_history.status()["waiting"] == 6
 
 
+def _listener(dsn, *channels):
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        for ch in channels:
+            cur.execute(f"LISTEN {ch}")
+    return conn
+
+
+def _heard(conn) -> set:
+    import select
+    got = set()
+    while select.select([conn], [], [], 0.3) != ([], [], []):
+        conn.poll()
+        got |= {n.channel for n in conn.notifies}
+        conn.notifies.clear()
+    return got
+
+
+def test_the_names_wait_outside_the_slice_stream_while_the_walk_reads(walk, dsn, monkeypatch):
+    """While a session reads pages its row says so — the MB slice stream
+    leaves the waiting room's names out meanwhile, so no request is drawn
+    from the newest scrobbles alone — and the walk wakes no slice cycle of
+    its own: the names join the stream when the session stops, at its pace."""
+    seen = []
+
+    class _Watching(_FakeLastFm):
+        def recent_tracks_page(self, user, before, after):
+            with walk.cursor() as cur:
+                cur.execute("SELECT reading_since IS NOT NULL FROM lastfm_import WHERE username = 'vale'")
+                seen.append(cur.fetchone()[0])
+            return super().recent_tracks_page(user, before, after)
+
+    import lastfm as lastfm_module
+    monkeypatch.setattr(lastfm_module, "LastFmService", _Watching)
+    _FakeLastFm.history = [_scrobble(m) for m in (0, 10, 20, 30, 40)]
+    listener = _listener(dsn, "sautium_mb_pending")
+    try:
+        lastfm_history._run("vale", "connected")
+        assert seen and all(seen)
+        with walk.cursor() as cur:
+            cur.execute("SELECT reading_since FROM lastfm_import WHERE username = 'vale'")
+            assert cur.fetchone() == (None,)
+        assert _heard(listener) == set()
+    finally:
+        listener.close()
+
+
+def test_a_failed_session_stops_reading_and_a_start_clears_what_a_dead_one_left(walk, monkeypatch):
+    class _Fails(_FakeLastFm):
+        def recent_tracks_page(self, user, before, after):
+            raise RuntimeError("Last.fm went away")
+
+    import lastfm as lastfm_module
+    monkeypatch.setattr(lastfm_module, "LastFmService", _Fails)
+    lastfm_history._run("vale", "connected")
+    with walk.cursor() as cur:
+        cur.execute("SELECT reading_since FROM lastfm_import WHERE username = 'vale'")
+        assert cur.fetchone() == (None,)
+        cur.execute("UPDATE lastfm_import SET reading_since = now()")   # a process killed mid-walk
+    lastfm_history.reset_reading()
+    with walk.cursor() as cur:
+        cur.execute("SELECT count(*) FROM lastfm_import WHERE reading_since IS NOT NULL")
+        assert cur.fetchone() == (0,)
+
+
 def test_a_second_sync_reads_behind_the_watermark_and_adds_nothing_twice(walk):
     _FakeLastFm.history = [_scrobble(m) for m in (0, 10, 20)]
     lastfm_history._run("vale", "connected")

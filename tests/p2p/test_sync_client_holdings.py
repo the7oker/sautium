@@ -160,3 +160,18 @@ def test_merged_inventory_never_aliases_the_shared_empty_constant():
     assert inv["tracks"] == tracks
     assert EMPTY_INVENTORY == {"tracks": [], "embeddings": [], "audio_features": [],
                                "instruments": []}
+
+
+def test_the_core_and_the_bulk_ride_one_list_in_random_order():
+    """Which tracks this node owns or listened to (the core) must not show
+    as the head of a request: one list, shuffled, whatever the route."""
+    core_t, bulk_t = _uuids(100), _uuids(100)
+    api = _Api([], capabilities=())
+    client = _client(api)
+    client.api = api
+    out = client._run_sync_inner(core_t, bulk_t)
+    assert "error" not in out
+    asked = [u for tracks in api.asked for u in tracks]
+    assert sorted(asked) == sorted(core_t + bulk_t)
+    assert asked[:100] != core_t and set(asked[:100]) != set(core_t)
+

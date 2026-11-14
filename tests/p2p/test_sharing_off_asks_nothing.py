@@ -16,6 +16,7 @@ No network and no database: the stores are stand-ins."""
 import asyncio
 import importlib
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -121,7 +122,7 @@ def test_no_rare_artist_lookup_once_sharing_went_off_during_the_run(monkeypatch)
 
 # ------------------------------------------------------------- the cycles
 
-def _mb_cycle(sharing, published, monkeypatch, pending=(("owned one", None), ("gone quiet", None))):
+def _mb_cycle(sharing, published, monkeypatch, pending=("owned one", "gone quiet")):
     monkeypatch.setattr(mb_slice_cycle, "local_dump_available", lambda dsn: None)
     monkeypatch.setattr(mb_slice_cycle, "published_newest", lambda dsn, family: None)
     monkeypatch.setattr(mb_slice_cycle, "pending_names", lambda dsn, n: list(pending))
@@ -148,8 +149,9 @@ def test_the_mb_cycle_with_sharing_off_probes_no_source_and_says_why(monkeypatch
 
 def test_the_mb_cycle_turned_off_mid_run_sends_no_further_batch(monkeypatch):
     sharing, published, asked = [True], [], []
-    names = [(f"name {i}", None) for i in range(120)]
+    names = [f"name {i}" for i in range(120)]
     cycle = _mb_cycle(sharing, published, monkeypatch, pending=names)
+    monkeypatch.setattr(mb_slice_cycle, "PACKET_GAP", 0.0)
     api = SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0)
 
     async def find_sources():
@@ -246,3 +248,62 @@ def test_the_rare_artist_tail_is_held_while_sharing_is_off(which, monkeypatch):
     held = asyncio.run(go())
     assert held == 0
     assert announced                      # back on: the drip goes on
+
+
+# ------------------------------------------------------- the stream's pace
+
+def test_a_run_that_filled_its_cap_streams_on_whatever_waits(monkeypatch):
+    """Not the owner's files or the imported scrobbles alone: any reason that
+    fills a run keeps the stream going, at its one pace."""
+    published = []
+    names = [f"name {i}" for i in range(mb_slice_cycle.PENDING_PER_CYCLE)]
+    cycle = _mb_cycle([True], published, monkeypatch, pending=names)
+    monkeypatch.setattr(mb_slice_cycle, "PACKET_GAP", 0.0)
+    api = SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0)
+
+    async def find_sources():
+        return [(api, "ef" * 32)]
+
+    async def isolated(client, node, batch, avoid):
+        return {"names": len(batch), "missing": []}
+
+    cycle.find_sources, cycle._isolated = find_sources, isolated
+    monkeypatch.setattr(mb_slice_cycle, "MBSliceClient",
+                        lambda api, db_dsn, source_node: SimpleNamespace(close=lambda: None,
+                                                                         finalize=lambda: None))
+
+    async def go():
+        cycle.bind()
+        await cycle.run()
+        return set(cycle._reasons)
+
+    assert asyncio.run(go()) == {"stream"}
+
+
+def test_one_source_is_asked_at_the_stream_s_pace_across_runs(monkeypatch):
+    published, asked_at = [], []
+    names = [f"name {i}" for i in range(120)]
+    cycle = _mb_cycle([True], published, monkeypatch, pending=names)
+    monkeypatch.setattr(mb_slice_cycle, "PACKET_GAP", 0.25)
+    api = SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0)
+
+    async def find_sources():
+        return [(api, "ef" * 32)]
+
+    async def isolated(client, node, batch, avoid):
+        asked_at.append(time.monotonic())
+        return {"names": len(batch), "missing": []}
+
+    cycle.find_sources, cycle._isolated = find_sources, isolated
+    monkeypatch.setattr(mb_slice_cycle, "MBSliceClient",
+                        lambda api, db_dsn, source_node: SimpleNamespace(close=lambda: None,
+                                                                         finalize=lambda: None))
+
+    async def go():
+        await cycle.run()                 # three requests of 50, 50 and 20 names
+        await cycle.run()                 # the next run's first waits its turn too
+    asyncio.run(go())
+    assert len(asked_at) == 6
+    gaps = [b - a for a, b in zip(asked_at, asked_at[1:])]
+    assert min(gaps) >= 0.24
+

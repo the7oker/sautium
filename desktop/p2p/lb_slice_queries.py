@@ -389,10 +389,14 @@ def verify_slice_entry(artist_mbid: str, entry: dict,
 
 def pending_slice_mbids(conn, limit: int = 200,
                         newest_version: Optional[str] = None) -> List[Tuple[str, Optional[str]]]:
-    """(artist MBID, ledger version | None) the cycle should ask for, in
-    priority order: the on-demand lane first (an artist page opened —
-    lb_slice_requests), then OWNED artists, then ENGAGED ones (a completed,
-    unskipped listen — the same rule that gates every per-artist fan-out).
+    """(artist MBID, ledger version | None) the cycle should ask for, up to
+    `limit`: every MBID of an artist page opened (the on-demand lane —
+    lb_slice_requests, which the page waits on), then a random draw from the
+    OWNED artists (an owned file, here or at the HQPlayer: owned_files) and
+    the ENGAGED ones (a completed, unskipped listen — the rule that gates
+    every per-artist fan-out). One pool and no order inside it: a request
+    does not tell an owned artist from a listened one (the mixed stream,
+    2026-11-14; until then the tiers went in order, the owned first).
     Phantom artists nobody opened are never asked in bulk.
 
     A ledger row closes an MBID only at its version: with a newer version
@@ -401,17 +405,17 @@ def pending_slice_mbids(conn, limit: int = 200,
     with conn.cursor() as cur:
         cur.execute("""
             WITH cand AS (
-                SELECT am.mbid, -1 AS tier, r.requested_at AS ts
+                SELECT am.mbid, TRUE AS opened
                   FROM lb_slice_requests r
                   JOIN artist_mbids am ON am.artist_id = r.artist_id
                 UNION ALL
-                SELECT am.mbid, 0, NULL::timestamptz
+                SELECT am.mbid, FALSE
                   FROM artist_mbids am
                  WHERE EXISTS (SELECT 1 FROM track_artists ta
-                               JOIN media_files mf ON mf.track_id = ta.track_id
+                               JOIN owned_files f ON f.track_id = ta.track_id
                                WHERE ta.artist_id = am.artist_id)
                 UNION ALL
-                SELECT am.mbid, 1, NULL::timestamptz
+                SELECT am.mbid, FALSE
                   FROM artist_mbids am
                  WHERE EXISTS (SELECT 1 FROM track_artists ta
                                JOIN listening_history lh ON lh.track_id = ta.track_id
@@ -424,7 +428,7 @@ def pending_slice_mbids(conn, limit: int = 200,
              WHERE f.artist_mbid IS NULL
                 OR (%(newest)s IS NOT NULL AND f.dump_version < %(newest)s)
              GROUP BY c.mbid, f.dump_version
-             ORDER BY MIN(c.tier), MAX(c.ts) DESC NULLS LAST, c.mbid
+             ORDER BY bool_or(c.opened) DESC, random()
              LIMIT %(lim)s
         """, {"newest": newest_version, "lim": limit})
         return [(r[0], r[1]) for r in cur.fetchall()]

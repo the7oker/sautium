@@ -47,9 +47,6 @@ LATE_SCROBBLE_WINDOW = timedelta(days=14)
 # many (~250 B each) the walk pauses until the canon has bound enough of them.
 PENDING_ROW_BUDGET = 250_000
 RESUME_BELOW = int(PENDING_ROW_BUDGET * 0.8)
-# Pages between wakes of the MB slice cycle, which fetches catalogue data for
-# the names that wait (the first page wakes it at once).
-_MB_WAKE_EVERY = 50
 _PRIVATE_PROFILE = "17"
 
 _state: Dict[str, Any] = {"running": False, "phase": "idle", "progress": "",
@@ -240,6 +237,13 @@ def _run(user: str, reason: str) -> None:
             if _cancel.is_set():
                 return
             walk = _open_walk(cur, user)
+            # While this session reads, the names it stores wait outside the
+            # MB slice stream (mb_slice_queries.pending_slice_names): the
+            # walk reads the newest scrobbles first, and names asked mid-walk
+            # would be the most recent listens'. They join it when the
+            # session stops — done, paused or failed —, at the stream's pace;
+            # the import wakes no cycle of its own.
+            cur.execute("UPDATE lastfm_import SET reading_since = now() WHERE username = %s", (user,))
         svc = LastFmService(session_key=settings.lastfm_session_key)
         after = walk["watermark"] - LATE_SCROBBLE_WINDOW if walk["watermark"] else None
         logger.info("Last.fm history: walk for %s (%s) from %s", user, reason,
@@ -268,8 +272,6 @@ def _run(user: str, reason: str) -> None:
             if touched:
                 from canon import scrobbles
                 scrobbles.wake(names=touched)
-            if pages == 1 or pages % _MB_WAKE_EVERY == 0 or done:
-                db_execute("NOTIFY sautium_mb_pending")
             total = max(walk["total"] or 0, walk["fetched"])
             _set(progress=f"{walk['fetched']:,} of {total:,} scrobbles read",
                  pct=int(walk["fetched"] * 100 / total) if total else None)
@@ -303,6 +305,13 @@ def _run(user: str, reason: str) -> None:
         if _state["phase"] not in ("done",):
             _state["phase"] = "idle"
         _notify()
+        db_execute("UPDATE lastfm_import SET reading_since = NULL WHERE username = %s", (user,))
+
+
+def reset_reading() -> None:
+    """At startup, before resume(): no session reads in a process that has
+    just started, whatever one that ended without its `finally` left."""
+    db_execute("UPDATE lastfm_import SET reading_since = NULL WHERE reading_since IS NOT NULL")
 
 
 def remove_imported() -> Dict[str, int]:

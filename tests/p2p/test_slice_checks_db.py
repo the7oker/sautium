@@ -931,4 +931,4 @@ def test_a_name_is_keyed_one_way_in_the_ledger_and_the_blob(conn, scratch_dsn):
         cur.execute("INSERT INTO artists (id, name) VALUES (%s, %s)", (str(uuid.uuid4()), name))
         cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
                     "SELECT %s, id, 'user' FROM artists WHERE name = %s", (s.gid, name))
-    assert name not in [n for n, _tier in mb_slice_queries.pending_slice_names(conn)]
+    assert mb_slice_queries.name_key(name) not in mb_slice_queries.pending_slice_names(conn)

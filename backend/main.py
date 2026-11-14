@@ -467,6 +467,7 @@ async def lifespan(app: FastAPI):
     from canon import scrobbles as scrobble_canon
     scrobble_canon.start()
     import lastfm_history
+    lastfm_history.reset_reading()
     lastfm_history.resume()
 
     # A node with catalogue slices and no MusicBrainz database re-makes its

@@ -372,7 +372,7 @@ def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
     asked, dropped, published = [], [], []
     cycle = cycle_mod.MbSliceCycle.__new__(cycle_mod.MbSliceCycle)
     cycle.db_dsn, cycle.config, cycle._status_cleared = "postgresql://unused", {}, False
-    cycle._sharing_enabled = lambda: True
+    cycle._sharing_enabled, cycle._asked_at = (lambda: True), {}
     cycle._sources = SimpleNamespace(drop=dropped.append)
 
     async def publish(**state):
@@ -395,7 +395,7 @@ def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
     cycle._publish, cycle.find_sources = publish, sources
     monkeypatch.setattr(cycle_mod, "local_dump_available", lambda dsn: False)
     monkeypatch.setattr(cycle_mod, "published_newest", lambda dsn, family: None)
-    monkeypatch.setattr(cycle_mod, "pending_names", lambda dsn, n: [("A", 1), ("B", 1)])
+    monkeypatch.setattr(cycle_mod, "pending_names", lambda dsn, n: ["A", "B"])
     monkeypatch.setattr(cycle_mod, "reopened_authors", lambda dsn, names: {})
     monkeypatch.setattr(cycle_mod, "PEER_SESSION_S", 0)
     monkeypatch.setattr(cycle_mod, "MBSliceClient", _Client)

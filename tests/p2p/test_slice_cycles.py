@@ -97,7 +97,7 @@ def mb_steps(monkeypatch):
     reopened: dict = {}
     monkeypatch.setattr(mb_slice_cycle, "local_dump_available", lambda dsn: None)
     monkeypatch.setattr(mb_slice_cycle, "published_newest", lambda dsn, family: None)
-    monkeypatch.setattr(mb_slice_cycle, "pending_names", lambda dsn, n: [("Owned One", 0), ("Gone Quiet", 1)])
+    monkeypatch.setattr(mb_slice_cycle, "pending_names", lambda dsn, n: ["Owned One", "Gone Quiet"])
     monkeypatch.setattr(mb_slice_cycle, "reopened_authors",
                         lambda dsn, names: {n: a for n, a in reopened.items() if n in names})
     return reopened

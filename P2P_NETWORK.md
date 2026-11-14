@@ -1121,6 +1121,26 @@ credit head; a run that fills its cap with those first two tiers and serves
 something asks for the next at once, the discovery-stub tiers keep the timed
 pace.
 
+**One stream, one form, one pace (2026-11-14).** The tiers left the wire: a
+request no longer tells why a name is in it. Every reason canon waits on a
+name — the owner's files, the imported scrobbles, the canonized artists never
+shelved, the similar-artist stubs, the names the ledger does not vouch for —
+is one pool, drawn at random, every name sent as `lower(btrim(name))` (the
+matcher folds case on both of its arms); the waiting room's names join it
+only once the import session that read them stops, so no draw comes from the
+newest scrobbles alone, and the import wakes no network lane of its own (nor
+does the scrobble canon after it: the walk and both slice cycles take what it
+brought at their own pace). A run that fills its cap and is served asks for
+the next at once, whatever waits, and a source is asked at most once every
+`PACKET_GAP` (120 s, 50 names — under the quarter of a dump node's build
+budget one requester has): an import or a scan makes the stream longer, never
+faster. The LB cycle draws its owned and engaged artists the same way, an
+opened page's MBIDs always in the draw, and shuffles each request; the walk
+sends its core and bulk tracks as one shuffled list. The cost, in time only:
+the owner's files wait behind the stubs in a large pool, the stubs resolve
+with the rest instead of at the timed pace, and an imported history fills
+Home in the stream's order rather than its most-scrobbled first.
+
 **Sources found once, kept while they answer (2026-09-24).** Both families'
 cycles find their sources through `desktop/p2p/slice_sources.py`: manual peers
 → LAN → every holder of the DHT capability key (the lookup gathers all

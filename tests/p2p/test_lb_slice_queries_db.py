@@ -119,10 +119,45 @@ def _import(c, mbid, entry, node="peer-a"):
     return q.import_slice(c, mbid, core, blob_gz, entry, node, None)
 
 
-def test_pending_tiers_on_demand_then_owned_then_engaged_never_phantoms(conn):
+def test_the_opened_page_heads_the_draw_owned_and_engaged_follow_never_phantoms(conn):
     pending = q.pending_slice_mbids(conn, 200, None)
-    assert [m for m, _ in pending] == [M_ASKED, M_OWNED, M_ENGAGED]
+    assert pending[0] == (M_ASKED, None)
+    assert sorted(m for m, _ in pending[1:]) == sorted([M_OWNED, M_ENGAGED])
     assert all(v is None for _, v in pending)
+
+
+def test_owned_and_listened_artists_are_one_pool_drawn_at_random(conn):
+    # The owned went first until the mixed stream: a request then told an
+    # owned artist from a listened one by its place.
+    firsts = {q.pending_slice_mbids(conn, 2, None)[1][0] for _ in range(60)}
+    assert firsts == {M_OWNED, M_ENGAGED}
+
+
+def test_an_artist_owned_at_the_hqplayer_alone_is_owned(conn):
+    artist, mbid, track = uuid.UUID(int=51), str(uuid.UUID(int=52)), uuid.UUID(int=53)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'At The HQPlayer')", (artist,))
+        cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES (%s, %s, 'phantom')",
+                    (mbid, artist))
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'three')", (track,))
+        cur.execute("INSERT INTO track_artists (track_id, artist_id, role) VALUES (%s, %s, 'primary')",
+                    (track, artist))
+        cur.execute("INSERT INTO hqp_endpoints (name) VALUES ('box') RETURNING id")
+        endpoint = cur.fetchone()[0]
+        cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'HQ')", (uuid.UUID(int=54),))
+        cur.execute("INSERT INTO album_variants (album_id, directory_path, location, hqp_endpoint_id) "
+                    "VALUES (%s, '/hqp', 'hqplayer', %s) RETURNING id", (uuid.UUID(int=54), endpoint))
+        cur.execute("INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path) "
+                    "VALUES (%s, %s, '/hqp/three.flac')", (track, cur.fetchone()[0]))
+    try:
+        assert mbid in [m for m, _ in q.pending_slice_mbids(conn, 200, None)]
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM hqp_library_files")
+            cur.execute("DELETE FROM album_variants WHERE location = 'hqplayer'")
+            cur.execute("DELETE FROM hqp_endpoints")
+            cur.execute("DELETE FROM tracks WHERE id = %s", (track,))
+            cur.execute("DELETE FROM artists WHERE id = %s", (artist,))
 
 
 def test_a_ledger_row_closes_an_mbid_only_at_its_version(conn):
