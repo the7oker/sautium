@@ -214,10 +214,13 @@ def test_a_tab_toasts_an_onset_once_through_a_gap_and_a_reload():
 
 _ROWS = r"""
 const notices = { list: () => [{ key: 'hqplayer.rate_check', kind: 'warning' }, { key: 'x"<y', kind: 'info' },
-                               { key: 'cooldown.lastfm', kind: 'info' }] };
+                               { key: 'cooldown.lastfm', kind: 'info' }, { key: 'both', kind: 'error' }] };
 function noticeCopy(n) {
   if (n.key === 'cooldown.lastfm') return { title: 'Last.fm paused', text: 'Rate-limited' };
-  return { title: 'A title', text: 'Its text', action: { label: n.key === 'x"<y' ? 'Go <on>' : 'Why?', run() {} } };
+  const copy = { title: 'A title', text: 'Its text' };
+  if (n.key !== 'x"<y') copy.why = () => {};
+  if (n.key !== 'hqplayer.rate_check') copy.action = { label: n.key === 'both' ? 'Settings' : 'Go <on>', run() {} };
+  return copy;
 }
 process.stdout.write(_renderNoticeRows());
 """
@@ -225,19 +228,20 @@ process.stdout.write(_renderNoticeRows());
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_a_notice_row_draws_its_copys_action_as_a_button():
-    """A copy's action is its row's button too, as on its toast: the
-    toast's label beside the title, keyed by its notice, both escaped. A
-    copy without one draws none. app-shell.js's own functions, run as
-    written."""
+    """A copy's buttons are its row's too, as on its toast and in its order
+    — Why?, then the one action under the toast's label — beside the title,
+    keyed by their notice, both escaped. A copy without one draws none.
+    app-shell.js's own functions, run as written."""
     src = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
     fns = [re.search(rf"\n  function {name}\(.*?\) \{{\n.*?\n  \}}\n", src, re.S).group(0)
            for name in ("escapeHtml", "_renderNoticeRows")]
     out = subprocess.run([shutil.which("node"), "-e", "'use strict';" + "".join(fns) + _ROWS],
                          capture_output=True, text=True, check=True).stdout
+    button = '<button class="btn-link" type="button" data-notice-action="%s" data-which="%s">%s</button>'
     assert re.findall(r"<button[^>]*>[^<]*</button>", out) == [
-        '<button class="btn-link" type="button" data-notice-action="hqplayer.rate_check">Why?</button>',
-        '<button class="btn-link" type="button" data-notice-action="x&quot;&lt;y">Go &lt;on&gt;</button>']
-    assert out.count('class="form-row stacked notice-row') == 3 and out.count("<span></span>") == 1
+        button % ("hqplayer.rate_check", "why", "Why?"), button % ("x&quot;&lt;y", "action", "Go &lt;on&gt;"),
+        button % ("both", "why", "Why?"), button % ("both", "action", "Settings")]
+    assert out.count('class="form-row stacked notice-row') == 4 and out.count("<span></span>") == 1
 
 
 _ACT = r"""
@@ -248,23 +252,28 @@ const ran = [];
 const toast = key => ({ key, timer: 0, el: { classList: { remove() {} }, remove() {} } });
 const context = { window: { dispatchEvent() {} }, CustomEvent: class {}, setTimeout: () => 0, clearTimeout() {},
                   modalIsOpen: () => false, layoutMode: () => 'compact',
-                  noticeCopy: n => ({ title: '', text: '', action: { label: 'Why?', run: () => ran.push(n.key) } }) };
+                  noticeCopy: n => ({ title: '', text: '', why: () => ran.push('why ' + n.key),
+                                      action: { label: 'Settings', run: () => ran.push(n.key) } }) };
 vm.runInNewContext(`'use strict';\n${literal}\nthis.notices = notices;`, context);
 const n = context.notices;
 n.items = new Map(['shown', 'queued', 'other'].map(key => [key, { key }]));
 n._shown = [toast('shown'), toast('other')];
-n._queue = [toast('queued'), toast('waiting')];
+n._queue = [toast('queued'), toast('waiting'), toast('asked')];
+n.items.set('asked', { key: 'asked' });
 n.act('shown');
-n.act('queued');
+n.act('queued', 'action');
+n.act('asked', 'why');
 process.stdout.write(JSON.stringify({ ran, shown: n._shown.map(t => t.key), queued: n._queue.map(t => t.key) }));
 """
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_a_rows_button_does_what_the_toasts_does():
-    """A notice's action taken from its row closes the notice's toast, shown
+    """A notice's button pressed on its row closes the notice's toast, shown
     or still queued, as the toast's own button closes it, and runs the
-    copy's action; another notice's toasts stay."""
+    copy's action — or its Why?, for that button; another notice's toasts
+    stay."""
     proc = subprocess.run([shutil.which("node"), "-e", _ACT, "--", str(BACKEND / "static" / "app-shell.js")],
                           capture_output=True, check=True)
-    assert json.loads(proc.stdout) == {"ran": ["shown", "queued"], "shown": ["other"], "queued": ["waiting"]}
+    assert json.loads(proc.stdout) == {"ran": ["shown", "queued", "why asked"], "shown": ["other"],
+                                       "queued": ["waiting"]}
