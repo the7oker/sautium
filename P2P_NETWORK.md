@@ -1062,8 +1062,10 @@ fastest.
 **What a dump node builds for strangers (since 2026-11-03).** A request names
 the spelling; the storage follows what the slice covers. A dump node builds
 one subtree per *match set* (the matched artist ids, `match_key`), keeps at
-most four spellings of it and cuts any other spelling from the stored blob,
-served unkept; a zero-match is served signed and never kept; a name over 255
+most four spellings of it — since 2026-11-14 only spellings MusicBrainz itself
+has, an artist's name or an alias, each build dated to the day, so the cache
+is no record of who asked what — and cuts any other spelling from the stored
+blob, served unkept; a zero-match is served signed and never kept; a name over 255
 characters, with a control character, or one of MB's special-purpose artists
 is `missing`. Builds have a node-wide budget (two at once, 120 a minute; LB:
 300), a quarter of it for any one requester, and only a build that found
@@ -1377,7 +1379,10 @@ owed it over 30 s let go — a slower but steady one gets the whole answer, a
 close waiting for it under TLS too —, a new bulk answer held back while all
 peers are owed over 256 MiB together (a 503 that says when, which requesters
 wait out; answers under way are not cut, so ones begun together can pass it),
-no access line and no WebSocket upgrade, a connection ceiling of half the
+no access line and no WebSocket upgrade (and, since 2026-11-14, a master
+front whose default log drops a failed request's address and URI, and a
+contact log that keeps no name a request carried and no row of a request
+about artists — only its cost), a connection ceiling of half the
 process's descriptors with 256 per address and three quarters of it for wake
 streams (the Docker gateway, which an address-hiding NAT gives every peer, has
 no per-address share — the totals bound it); a support bundle's warrant is

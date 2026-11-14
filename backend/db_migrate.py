@@ -49,7 +49,11 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      (`slice_origins_v1`) marks the slice blobs kept before a blob came to
      carry its origin by the rules a fetch reads now: those that name the
      imported history or the owner's own picks serve the node alone from
-     then on (2026-11-14). The rebuild step
+     then on (2026-11-14). The slice-records step (`slice_records_cut_v1`)
+     cuts once what a node kept of who asked which artists: the contact rows of
+     the requests about artists, a dump node's builds kept under a
+     requester's spelling, and each kept build's moment of first ask, left
+     to the day (2026-11-14). The rebuild step
      (`slice_rebuild_v1`) rebuilds a node's catalogue rows once from the
      slices it keeps, under the import's rules of that day — a slice's own
      subtree only, its rows of their columns' kinds, an artist or a group one
@@ -277,6 +281,35 @@ def _mark_local_slices(conn) -> dict:
         mb_local, lb_local = cur.fetchone()
     conn.commit()
     return {"mb_marked": mb, "mb_local": mb_local, "lb_marked": lb, "lb_local": lb_local}
+
+
+def _cut_slice_records(conn) -> dict:
+    """What a node kept of who asked which artists, cut once (2026-11-14):
+    the contact rows of the requests about artists (slices of either family,
+    the catalogue search — each with its requester's key and address and the
+    moment it asked; the code keeps none from now on), the builds a dump
+    node kept under a requester's spelling rather than one MusicBrainz spells
+    (mb_slice_queries.MUSICBRAINZ_NAME_SQL), and the moment of each kept
+    build's first ask, left to the day."""
+    from desktop.p2p import contact_log, lb_slice_queries, mb_slice_queries
+    out = {}
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM p2p_contact_events WHERE endpoint = ANY(%s)",
+                    (sorted(contact_log.ARTIST_FAMILIES),))
+        out["contact_rows"] = cur.rowcount
+        if mb_slice_queries.local_dump_available(conn):
+            cur.execute("DELETE FROM mb_slice_blobs b WHERE b.match_key IS NOT NULL AND NOT "
+                        + mb_slice_queries.MUSICBRAINZ_NAME_SQL.format(nk="b.name_key"))
+            out["spellings_dropped"] = cur.rowcount
+        cur.execute("UPDATE mb_slice_blobs SET created_at = date_trunc('day', created_at) "
+                    "WHERE match_key IS NOT NULL")
+        out["mb_builds_dated"] = cur.rowcount
+        if lb_slice_queries.local_dump_available(conn):
+            cur.execute("UPDATE lb_slice_blobs SET created_at = date_trunc('day', created_at) "
+                        "WHERE relay IS NULL")
+            out["lb_builds_dated"] = cur.rowcount
+    conn.commit()
+    return out
 
 
 def _bind_master_stub(conn) -> int:
@@ -655,6 +688,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "slice_origins_v1"):
             out["slice_origins"] = _mark_local_slices(conn)
             _mark(conn, "slice_origins_v1")
+
+        if not _marked(conn, "slice_records_cut_v1"):
+            out["slice_records_cut"] = _cut_slice_records(conn)
+            _mark(conn, "slice_records_cut_v1")
 
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):

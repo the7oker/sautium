@@ -22,6 +22,13 @@
 # body no larger than the largest the peer app takes (a support bundle,
 # p2p_app.BODY_CAPS). Paths are relative to this directory, which is the
 # service's working directory (sautium-front.xml).
+#
+# No log line names a peer or what it asked: there is no access log, and the
+# entries Caddy writes for a request a handler failed (the upstream refused
+# while the backend restarts) carry the request — the client's address and
+# the URI, a catalogue search's text in its query — so the default log drops
+# those fields from every entry, whatever logger writes it. The status, the
+# error and the time stay.
 {
 	admin off
 	auto_https off
@@ -29,6 +36,16 @@
 		protocols h1 h2
 		timeouts {
 			read_header 10s
+		}
+	}
+	log default {
+		format filter {
+			request>remote_ip delete
+			request>remote_port delete
+			request>client_ip delete
+			request>uri delete
+			request>headers delete
+			wrap json
 		}
 	}
 }

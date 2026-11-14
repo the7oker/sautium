@@ -261,7 +261,7 @@ class SyncServer:
         timer = contact_log.RequestTimer()
         route_path = self._route_path(request)
         peer_pubkey = lane = None
-        items = targets = None
+        items = None
         gate_price = gate_status = None
         response = None
         try:
@@ -285,9 +285,7 @@ class SyncServer:
                 response = await handler(request)
                 return response
             peer_pubkey, status, lane, cert, refusal = await self._authenticate_peer(request)
-            query = request.rel_url.raw_query_string           # as sent: the shape reader decodes it once
-            items, targets = contact_log.extract_request_shape(
-                route_path + (f"?{query}" if query else ""), await request.read())
+            items = contact_log.request_items(route_path, await request.read())
             if refusal is not None:
                 response = refusal
                 return response
@@ -344,7 +342,7 @@ class SyncServer:
                 addr=request.remote, lane=lane,
                 bytes_in=request.content_length or 0,
                 bytes_out=_response_bytes(response),
-                items=items, targets=targets,
+                items=items,
                 gate_price=gate_price, gate_status=gate_status)
 
     async def _authenticate_peer(self, request: web.Request):

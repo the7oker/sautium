@@ -117,9 +117,8 @@ def test_the_contact_log_keeps_what_its_columns_hold():
                bytes_in=10 ** 12, bytes_out=10 ** 12)
     row = log._queue[-1]
     assert row[7] == 2 ** 31 - 1 and row[8] == 2 ** 31 - 1
-    items, targets = contact_log.extract_request_shape(
-        "/api/mb/slice", json.dumps({"names": ["Nul\u0000name"]}).encode())
-    assert items == 1 and targets == ["nulname"]
+    assert contact_log.request_items(
+        "/api/mb/slice", json.dumps({"names": ["Nul\u0000name"]}).encode()) == 1
 
 
 def test_delivery_has_no_unauthenticated_trigger(monkeypatch):

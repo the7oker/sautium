@@ -3,12 +3,19 @@
 
 Every request a peer surface serves becomes one row in
 `p2p_contact_events` (who: pubkey when signed, pseudonymised address +
-/24 subnet; what: endpoint family, lane, status, request items /
-target names; how much: bytes in/out, wall and CPU milliseconds) and —
-for served (2xx) responses only — one sample in the per-endpoint cost
-EMA (`p2p_action_costs`, the `base(action)` of the pricing formula,
+/24 subnet; what: endpoint family, lane, status, how many items it named;
+how much: bytes in/out, wall and CPU milliseconds) and — for served (2xx)
+responses only — one sample in the per-endpoint cost EMA
+(`p2p_action_costs`, the `base(action)` of the pricing formula,
 calibrated per node). Raw rows live 30 days under a row cap; aggregates
 are the report's business.
+
+What a request names is never kept (2026-11-14), and a request about
+artists — a slice of either family, a catalogue search — leaves no row at
+all, only its cost sample: the names it carried, and the moment a key or an
+address asked, together tell which artists a node asked for, and that is
+no record this node keeps. Until then a row kept the first eight names or
+MBIDs of a slice request, or a search's text.
 
 Local by construction — this history is never shared and never becomes a
 banlist. Recording is off the request path: `record()` appends to an
@@ -36,7 +43,6 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Callable, Optional
-from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid5
 
 logger = logging.getLogger(__name__)
@@ -46,7 +52,8 @@ RAW_ROWS_CAP = 1_000_000
 FLUSH_INTERVAL_SECONDS = 5.0
 FLUSH_BATCH = 200
 EMA_ALPHA = 0.05
-MAX_TARGETS = 8
+# The requests about artists: their cost is sampled, their contact is not kept.
+ARTIST_FAMILIES = frozenset({"mb.slice", "lb.slice", "mb.search"})
 
 _SAUTIUM_NAMESPACE = UUID("adc1ec0b-2c81-5e26-9938-a369c6f7a5e1")
 
@@ -67,8 +74,7 @@ SCHEMA_SQL = (
          bytes_out   INTEGER NOT NULL DEFAULT 0,
          wall_ms     REAL NOT NULL,
          cpu_ms      REAL NOT NULL,
-         items       INTEGER,
-         targets     TEXT[]
+         items       INTEGER
        )""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_ts ON p2p_contact_events (ts)""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_pubkey_ts
@@ -77,6 +83,7 @@ SCHEMA_SQL = (
     """CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_endpoint_ts ON p2p_contact_events (endpoint, ts)""",
     """ALTER TABLE p2p_contact_events ADD COLUMN IF NOT EXISTS gate_price SMALLINT""",
     """ALTER TABLE p2p_contact_events ADD COLUMN IF NOT EXISTS gate_status TEXT""",
+    """ALTER TABLE p2p_contact_events DROP COLUMN IF EXISTS targets""",
     """CREATE TABLE IF NOT EXISTS p2p_action_costs (
          endpoint      TEXT PRIMARY KEY,
          ema_cpu_ms    REAL NOT NULL,
@@ -126,44 +133,23 @@ def addr_ids(host: Optional[str]):
     return addr, subnet
 
 
-def extract_request_shape(path: str, body: bytes):
-    """(items, targets) for the request families that carry names or ids:
-    mb.search → the query as one target; mb.slice → up to MAX_TARGETS
-    name keys + count; lb.slice → artist MBIDs the same way; sync.* → item
-    count only. Never raises."""
-    family = endpoint_family(path)
+def request_items(path: str, body: bytes) -> Optional[int]:
+    """How many ids or names a request carried (a slice request's names or
+    MBIDs, a sync request's uuids), or None — the count only, never what
+    they are. Never raises."""
+    if not body:
+        return None
     try:
-        if family == "mb.search":
-            q = _target(parse_qs(urlsplit(path).query).get("q", [""])[0], 200)
-            return (1, [q]) if q else (None, None)
-        if not body:
-            return None, None
         from desktop.p2p import wire
         data = wire.loads(body)
         if not isinstance(data, dict):
-            return None, None
-        if family == "mb.slice":
-            names = data.get("names") or []
-            keys = [k for k in (_target(n, 200) for n in names) if k][:MAX_TARGETS]
-            return len(names), keys or None
-        if family == "lb.slice":
-            mbids = data.get("artist_mbids") or []
-            keys = [k for k in (_target(m, 36) for m in mbids) if k][:MAX_TARGETS]
-            return len(mbids), keys or None
-        for key in ("track_uuids", "uuids", "recordings", "items"):
+            return None
+        for key in ("names", "artist_mbids", "track_uuids", "uuids", "recordings", "items"):
             if isinstance(data.get(key), list):
-                return len(data[key]), None
+                return len(data[key])
     except (ValueError, TypeError):
         pass
-    return None, None
-
-
-def _target(value, width: int) -> str:
-    """One name or id as the log keeps it: trimmed, lowercased, cut to
-    `width`, without what the database refuses in text — a NUL, a lone
-    surrogate a JSON escape can make."""
-    text = str(value).replace("\x00", "").encode("utf-8", "ignore").decode("utf-8")
-    return text.strip().lower()[:width]
+    return None
 
 
 # bytes_in/bytes_out are INTEGER columns; a declared length past it would
@@ -202,15 +188,18 @@ class ContactLog:
     def record(self, *, endpoint: str, status: int, wall_ms: float, cpu_ms: float,
                pubkey: Optional[str] = None, addr: Optional[str] = None,
                lane: Optional[str] = None, bytes_in: int = 0, bytes_out: int = 0,
-               items: Optional[int] = None, targets: Optional[list] = None,
+               items: Optional[int] = None,
                gate_price: Optional[int] = None, gate_status: Optional[str] = None) -> None:
-        addr_id, subnet_id = addr_ids(addr)
-        row = (datetime.now(timezone.utc), pubkey.lower() if pubkey else None, addr_id, subnet_id,
-               endpoint, lane, int(status), min(int(bytes_in or 0), _INT_MAX),
-               min(int(bytes_out or 0), _INT_MAX),
-               float(wall_ms), float(cpu_ms), items, targets, gate_price, gate_status)
+        keep = endpoint not in ARTIST_FAMILIES
+        if keep:
+            addr_id, subnet_id = addr_ids(addr)
+            row = (datetime.now(timezone.utc), pubkey.lower() if pubkey else None, addr_id,
+                   subnet_id, endpoint, lane, int(status), min(int(bytes_in or 0), _INT_MAX),
+                   min(int(bytes_out or 0), _INT_MAX),
+                   float(wall_ms), float(cpu_ms), items, gate_price, gate_status)
         with self._lock:
-            self._queue.append(row)
+            if keep:
+                self._queue.append(row)
             if 200 <= int(status) < 300:
                 # base(action) is what a SERVED request costs us; refusals
                 # (402/403/429, ~0 ms, 0 bytes) would drag the EMA toward
@@ -264,7 +253,7 @@ class ContactLog:
                     execute_values(cur, """
                         INSERT INTO p2p_contact_events
                             (ts, pubkey, addr, subnet, endpoint, lane, status,
-                             bytes_in, bytes_out, wall_ms, cpu_ms, items, targets,
+                             bytes_in, bytes_out, wall_ms, cpu_ms, items,
                              gate_price, gate_status)
                         VALUES %s
                     """, rows, page_size=500)

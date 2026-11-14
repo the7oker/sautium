@@ -3517,8 +3517,7 @@ CREATE TABLE IF NOT EXISTS p2p_contact_events (
     bytes_out   INTEGER NOT NULL DEFAULT 0,
     wall_ms     REAL NOT NULL,
     cpu_ms      REAL NOT NULL,                      -- process-wide CPU delta (over-attributes under concurrency)
-    items       INTEGER,                            -- request size in ids/names when known
-    targets     TEXT[],                             -- up to 8 name keys (mb.search / mb.slice)
+    items       INTEGER,                            -- request size in ids/names when known, never what they are
     gate_price  SMALLINT,                           -- would-be admission price (shadow) / charged (enforce)
     gate_status TEXT                                -- ok | required | failed | replay | expired | busy | invalid
 );

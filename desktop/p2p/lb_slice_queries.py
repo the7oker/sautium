@@ -245,16 +245,20 @@ def store_slice_blob(conn, mbid: str, dump_version: str, author_pubkey: str,
     their verdict."""
     if cap and len(blob_gz) > RESERVE_BLOB_MAX_GZ:
         return False
+    # A dump node's own build (cap False) is dated to the day: the moment of
+    # a first ask is no record it keeps. A replica's blob keeps its arrival.
+    created = "date_trunc('day', now())" if not cap else "now()"
     with conn.cursor() as cur:
         cur.execute("""DELETE FROM slice_check_plans p
                         WHERE p.family = 'lb' AND p.key = %s
                           AND NOT EXISTS (SELECT 1 FROM lb_slice_blobs b
                                            WHERE b.artist_mbid = %s AND b.blob_gz = %s)""",
                     (mbid, mbid, blob_gz))
-        cur.execute("""
+        cur.execute(f"""
             INSERT INTO lb_slice_blobs
-                   (artist_mbid, dump_version, author_pubkey, sig, blob_gz, relay, local_only)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   (artist_mbid, dump_version, author_pubkey, sig, blob_gz, relay, local_only,
+                    created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, {created})
             ON CONFLICT (artist_mbid) DO UPDATE SET
                 dump_version = EXCLUDED.dump_version,
                 author_pubkey = EXCLUDED.author_pubkey,
@@ -266,7 +270,7 @@ def store_slice_blob(conn, mbid: str, dump_version: str, author_pubkey: str,
                                   THEN lb_slice_blobs.checked_at END,
                 suspect = lb_slice_blobs.blob_gz = EXCLUDED.blob_gz AND lb_slice_blobs.suspect,
                 created_at = CASE WHEN lb_slice_blobs.blob_gz = EXCLUDED.blob_gz
-                                  THEN lb_slice_blobs.created_at ELSE now() END
+                                  THEN lb_slice_blobs.created_at ELSE EXCLUDED.created_at END
             WHERE EXCLUDED.dump_version >= lb_slice_blobs.dump_version""",
             (mbid, dump_version, author_pubkey, sig, blob_gz, relay, local))
     return True

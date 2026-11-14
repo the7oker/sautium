@@ -14,11 +14,11 @@ from desktop.p2p.sync_server import SyncServer
 class _Log:
     def __init__(self):
         self.endpoints = []
-        self.targets = []
+        self.recorded = []
 
-    def record(self, *, endpoint, targets=None, **_):
+    def record(self, *, endpoint, **fields):
         self.endpoints.append(endpoint)
-        self.targets.append(targets)
+        self.recorded.append(fields)
 
 
 class _Pricer:
@@ -87,8 +87,9 @@ def test_a_method_the_route_does_not_take_is_the_routers_405_ungated():
     assert status == 405 and actions == [] and endpoints == ["other"]
 
 
-def test_the_query_a_search_names_is_logged_decoded_once():
+def test_the_text_a_search_sends_is_logged_nowhere():
     log = _Log()
     status, _, _, actions = asyncio.run(_exchange("/api/mb/search?q=a%2541", log=log))
     assert status == 200 and actions == ["mb.search"]
-    assert log.targets == [["a%41"]]
+    assert log.endpoints == ["mb.search"]
+    assert "a%41" not in repr(log.recorded) and "a%2541" not in repr(log.recorded)

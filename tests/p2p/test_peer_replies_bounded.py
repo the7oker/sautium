@@ -359,7 +359,8 @@ def test_a_holdings_refusal_that_says_when_names_its_wait_as_a_posts_does(peer):
 
 def test_lone_surrogates_are_neither_logged_nor_served():
     from desktop.p2p import contact_log
-    assert contact_log._target("Sa\ud800de", 64) == "sade"
+    # The contact log keeps no name at all: a count is all it reads of one.
+    assert contact_log.request_items("/api/mb/slice", json.dumps({"names": ["Sa\ud800de"]}).encode()) == 1
     assert not mb_slice_queries.servable_name("Sa\ud800de")
     body, _ = wire.render({"missing": ["Sa\ud800de"]}, False)
     assert json.loads(body) == {"missing": ["Sa\ud800de"]}       # echoed as its own escape

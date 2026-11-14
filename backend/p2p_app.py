@@ -109,7 +109,7 @@ class PeerAuthMiddleware:
         pubkey, status, lane = None, None, None
         gate_result = None
         gate = {"price": None, "status": None}
-        items = targets = None
+        items = None
         body = b""
 
         def _record():
@@ -119,7 +119,7 @@ class PeerAuthMiddleware:
                 status=outcome["status"], wall_ms=wall_ms, cpu_ms=cpu_ms,
                 pubkey=pubkey, addr=addr, lane=lane,
                 bytes_in=len(body) or int(headers.get("content-length") or 0),
-                bytes_out=outcome["bytes_out"], items=items, targets=targets,
+                bytes_out=outcome["bytes_out"], items=items,
                 gate_price=gate["price"], gate_status=gate["status"])
 
         async def send_wrapper(message):
@@ -165,11 +165,11 @@ class PeerAuthMiddleware:
         def _shape_and_signer():
             # Off the loop: a body is up to its route's cap, and both its
             # parse and its hash cost per byte.
-            return (contact_log.extract_request_shape(raw_target, body),
+            return (contact_log.request_items(raw_target, body),
                     peer_auth.verify_request(headers, own, scope["method"], raw_target, body)
                     if own else (None, None))
 
-        (items, targets), (pubkey, err) = await in_peer_lane(_shape_and_signer)
+        items, (pubkey, err) = await in_peer_lane(_shape_and_signer)
 
         async def replay():
             return {"type": "http.request", "body": body, "more_body": False}

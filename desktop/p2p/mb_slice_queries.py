@@ -903,6 +903,9 @@ def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
     what waited on the one it replaces — its clashes, its check's draw — goes
     with it; the same bytes again keep their verdict and their arrival."""
     payload = hashlib.sha256(blob_gz).hexdigest()
+    # A dump node's own build (cap False) is dated to the day; a replica's
+    # blob keeps the moment it arrived, which its checks read.
+    created = "date_trunc('day', now())" if not cap else "now()"
     with conn.cursor() as cur:
         cur.execute("""DELETE FROM slice_check_plans p
                         WHERE p.family = 'mb' AND p.key = %(k)s
@@ -915,11 +918,11 @@ def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
             cur.execute("DELETE FROM mb_slice_blobs WHERE name_key = %s", (nk,))
             cur.execute("DELETE FROM slice_clashes WHERE family = 'mb' AND key = %s", (nk,))
             return False
-        cur.execute("""
+        cur.execute(f"""
             INSERT INTO mb_slice_blobs
                    (name_key, dump_version, author_pubkey, sig, blob_gz, match_key, relay,
-                    contested, payload_sha256, mbids, local_only)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid[], %s)
+                    contested, payload_sha256, mbids, local_only, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid[], %s, {created})
             ON CONFLICT (name_key) DO UPDATE SET
                 dump_version = EXCLUDED.dump_version,
                 author_pubkey = EXCLUDED.author_pubkey,
@@ -935,7 +938,7 @@ def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
                 suspect = coalesce(mb_slice_blobs.payload_sha256 = EXCLUDED.payload_sha256, FALSE)
                           AND mb_slice_blobs.suspect,
                 created_at = CASE WHEN mb_slice_blobs.payload_sha256 = EXCLUDED.payload_sha256
-                                  THEN mb_slice_blobs.created_at ELSE now() END,
+                                  THEN mb_slice_blobs.created_at ELSE EXCLUDED.created_at END,
                 payload_sha256 = EXCLUDED.payload_sha256""",
             (nk, dump_version, author_pubkey, sig, blob_gz, match, relay, contested, payload,
              list(mbids), local))
@@ -964,12 +967,29 @@ def _respelled(blob_gz: bytes, name: str, artist_ids: list) -> bytes:
                       ensure_ascii=False).encode("utf-8")
 
 
+# A name MusicBrainz itself spells so — an artist's name or an alias — as the
+# slice key folds it: the only keys a dump node keeps a build under. Kept under
+# the spelling a requester sent, the cache was a record of who asked what: a
+# one-off spelling of an imported history names its owner without any log.
+MUSICBRAINZ_NAME_SQL = """(EXISTS (SELECT 1 FROM mb_artist mn_a WHERE lower(mn_a.name) = {nk})
+                         OR EXISTS (SELECT 1 FROM mb_artist_alias mn_al WHERE lower(mn_al.name) = {nk}))"""
+
+
+def _musicbrainz_name(conn, nk: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT " + MUSICBRAINZ_NAME_SQL.format(nk="%(nk)s"), {"nk": nk})
+        return bool(cur.fetchone()[0])
+
+
 def _build(conn, name: str, version: str, sign_fn, author_pubkey: str,
            requester: Optional[str], replace: bool) -> Optional[dict]:
-    """A dump node's signed slice of `name`, kept when it replaces this
-    name's older blob or is among the first spellings of its match set —
-    None past the build budget, or for a subtree larger than any requester
-    takes."""
+    """A dump node's signed slice of `name`, kept when the name is one
+    MusicBrainz spells so (MUSICBRAINZ_NAME_SQL) and it replaces this name's
+    older blob or is among the first such spellings of its match set — None
+    past the build budget, or for a subtree larger than any requester takes.
+    Any other spelling is served unkept, cut from a kept blob of its match
+    set where one is (_respelled). What is kept is dated to the day: the
+    moment of a first ask is no record this node keeps."""
     if not _builds.admit(requester):
         return None
     ids = []
@@ -980,13 +1000,16 @@ def _build(conn, name: str, version: str, sign_fn, author_pubkey: str,
         blob = (_respelled(twin, name, ids) if twin is not None
                 else name_blob(name, get_slice_one(conn, name, ids)))
         if len(blob) > BLOB_RAW_MAX:
-            logger.warning("MB slice for %r: %d bytes, over what requesters take — not served",
-                           name[:64], len(blob))
+            # The name stays out of the log: a requester's spelling is no
+            # record this node keeps.
+            logger.warning("An MB slice of %d bytes, over what requesters take — not served",
+                           len(blob))
             return None
         sig = sign_fn(receipt_message_for(blob)).hex()
         blob_gz = gzip.compress(blob)
-        if match and (kept < VARIANTS_PER_MATCH or replace):
-            store_slice_blob(conn, name_key(name), version, author_pubkey, sig, blob_gz,
+        nk = name_key(name)
+        if match and (kept < VARIANTS_PER_MATCH or replace) and _musicbrainz_name(conn, nk):
+            store_slice_blob(conn, nk, version, author_pubkey, sig, blob_gz,
                              cap=False, match=match)
         return {"dump_version": version, "author_pubkey": author_pubkey,
                 "sig": sig, "blob_gz": blob_gz}

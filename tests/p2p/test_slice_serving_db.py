@@ -123,18 +123,34 @@ def _verifies(name, entry) -> bool:
     return q.verify_slice_entry(name, entry) is not None
 
 
-def test_one_subtree_per_match_set_and_a_few_spellings_kept(conn, dump_node, monkeypatch):
+def test_one_subtree_per_match_set_kept_under_musicbrainz_s_spellings_alone(conn, dump_node, monkeypatch):
+    """The cache is no record of who asked what: a build is kept only under a
+    spelling MusicBrainz itself has — the artist's name or an alias — and
+    dated to the day; a requester's own spelling is served, cut from the
+    kept subtree, and never kept."""
     monkeypatch.setattr(q, "VARIANTS_PER_MATCH", 2)
     spellings = ["Sigur Rós", "sigur ros", "SIGUR  RÓS"]              # three name_keys, one match set
     out = _serve(conn, spellings)
     assert out["missing"] == []
     assert all(_verifies(n, out["slices"][n]) for n in spellings)
     assert dump_node == ["Sigur Rós"]                     # one build for the three
-    assert len(_kept(conn)) == 2
+    assert _kept(conn) == ["sigur rós"]                   # MusicBrainz's spelling alone
     for name in spellings:                                # a spelling cut from the stored subtree
         assert _blob(out["slices"][name]) == q.name_blob(name, BUILD(conn, name))
-    again = _serve(conn, ["sigur ros"])                     # a kept spelling: no work
+    again = _serve(conn, ["sigur ros"])                     # cut again from the kept one: no build
     assert _verifies("sigur ros", again["slices"]["sigur ros"]) and dump_node == ["Sigur Rós"]
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO mb_artist_alias (id, artist, name, sort_name) "
+                    "VALUES (901, 1, 'Sigur Ros', 'Sigur Ros')")
+    try:
+        _serve(conn, ["SIGUR ROS"])                          # now one of MusicBrainz's spellings
+        assert _kept(conn) == ["sigur ros", "sigur rós"]
+        with conn.cursor() as cur:
+            cur.execute("SELECT bool_and(created_at = date_trunc('day', now())) FROM mb_slice_blobs")
+            assert cur.fetchone()[0] is True
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM mb_artist_alias WHERE id = 901")
 
 
 def test_a_name_key_is_answered_once_and_an_answer_is_bounded(conn, dump_node, monkeypatch):
@@ -204,18 +220,25 @@ def test_a_blob_cut_from_an_earlier_dump_is_rebuilt(conn, dump_node):
 def test_an_earlier_dumps_blob_is_replaced_when_its_match_set_is_full(conn, dump_node, monkeypatch):
     import gzip
     monkeypatch.setattr(q, "VARIANTS_PER_MATCH", 1)
-    _serve(conn, ["Sigur Rós"])                                          # the one spelling kept
-    one = BUILD(conn, "sigur ros")
-    one["dump_version"] = "20200101-000000"
-    blob = q.name_blob("sigur ros", one)
-    q.store_slice_blob(conn, q.name_key("sigur ros"), "20200101-000000", PUB,
-                       KEY.sign(q.receipt_message_for(blob)).hex(), gzip.compress(blob), cap=False)
-    dump_node.clear()
-    assert _serve(conn, ["sigur ros"])["slices"]["sigur ros"]["dump_version"] == VERSION
-    assert dump_node == []                                               # cut from the kept subtree
-    with conn.cursor() as cur:
-        cur.execute("SELECT dump_version FROM mb_slice_blobs WHERE name_key = 'sigur ros'")
-        assert cur.fetchall() == [(VERSION,)]
+    with conn.cursor() as cur:                                           # a spelling of MusicBrainz's own
+        cur.execute("INSERT INTO mb_artist_alias (id, artist, name, sort_name) "
+                    "VALUES (902, 1, 'Sigur Ros', 'Sigur Ros')")
+    try:
+        _serve(conn, ["Sigur Rós"])                                      # the one spelling kept
+        one = BUILD(conn, "sigur ros")
+        one["dump_version"] = "20200101-000000"
+        blob = q.name_blob("sigur ros", one)
+        q.store_slice_blob(conn, q.name_key("sigur ros"), "20200101-000000", PUB,
+                           KEY.sign(q.receipt_message_for(blob)).hex(), gzip.compress(blob), cap=False)
+        dump_node.clear()
+        assert _serve(conn, ["sigur ros"])["slices"]["sigur ros"]["dump_version"] == VERSION
+        assert dump_node == []                                           # cut from the kept subtree
+        with conn.cursor() as cur:
+            cur.execute("SELECT dump_version FROM mb_slice_blobs WHERE name_key = 'sigur ros'")
+            assert cur.fetchall() == [(VERSION,)]
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM mb_artist_alias WHERE id = 902")
 
 
 def test_an_mbid_listenbrainz_does_not_know_is_served_and_never_kept(conn):
@@ -242,3 +265,34 @@ def test_lb_builds_share_the_loaders_lock_among_themselves(conn, dsn):
             lb.get_slice_one(conn, str(uuid.UUID(int=7)), VERSION)
     finally:
         other.close()
+
+
+def test_what_a_node_kept_of_who_asked_is_cut_once(conn, dump_node):
+    """The contact rows of the requests about artists, a build kept under a
+    requester's spelling, and the moment each build was first asked for go —
+    once, at the first start of a release that keeps none of them."""
+    import db_migrate
+    with conn.cursor() as cur:
+        for endpoint in ("mb.slice", "lb.slice", "mb.search", "sync.inventory"):
+            cur.execute("""INSERT INTO p2p_contact_events (endpoint, status, wall_ms, cpu_ms, pubkey)
+                           VALUES (%s, 200, 1, 1, %s)""", (endpoint, "ab" * 32))
+        for key in ("sigur rós", "sigur  rós"):
+            cur.execute("""INSERT INTO mb_slice_blobs (name_key, dump_version, author_pubkey, sig, blob_gz,
+                                                       match_key, created_at)
+                           VALUES (%s, %s, %s, %s, %s, 'm', now() - interval '3 hours')""",
+                        (key, VERSION, PUB, "00" * 64, psycopg2.Binary(b"\x00")))
+        cur.execute("""INSERT INTO lb_slice_blobs (artist_mbid, dump_version, author_pubkey, sig, blob_gz,
+                                                   created_at)
+                       VALUES (%s, %s, %s, %s, %s, now() - interval '3 hours')""",
+                    (str(uuid.UUID(int=7)), VERSION, PUB, "00" * 64, psycopg2.Binary(b"\x00")))
+    out = db_migrate._cut_slice_records(conn)
+    assert out["contact_rows"] == 3 and out["spellings_dropped"] == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT endpoint FROM p2p_contact_events")
+        assert cur.fetchall() == [("sync.inventory",)]
+        cur.execute("DELETE FROM p2p_contact_events")
+        cur.execute("SELECT name_key, created_at = date_trunc('day', created_at) FROM mb_slice_blobs")
+        assert cur.fetchall() == [("sigur rós", True)]
+        cur.execute("SELECT created_at = date_trunc('day', created_at) FROM lb_slice_blobs")
+        assert cur.fetchall() == [(True,)]
+
