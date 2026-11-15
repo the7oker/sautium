@@ -704,3 +704,28 @@ def test_the_migration_ledger_is_read_by_its_own_column():
     source = BODY.read_text()
     assert f"SELECT string_agg(filename, ',' ORDER BY filename) FROM {db_init.MIGRATIONS_TABLE}" in source
     assert "filename VARCHAR(255) NOT NULL UNIQUE" in Path(db_init.__file__).read_text()
+
+
+def test_the_pre_update_dump_leaves_out_the_dump_loaders_tables_and_nothing_else():
+    """The patterns `mb_*` / `lb_*` also named tables of the node's own whose
+    keys point into the catalogue: on the Pi the way back's restore failed on
+    `DROP CONSTRAINT artists_pkey` and left the node down."""
+    sys.path.insert(0, str(REPO / "backend"))
+    import lb_dump_load
+    import mb_dump_load
+    assert set(ha.DUMP_TABLES) == {table for table, _ in mb_dump_load.TABLES} | set(lb_dump_load.TABLES)
+    assert "-T" not in BODY.read_text().split("def _dump(", 1)[1].split("def _restore(", 1)[0]
+
+
+def test_an_answer_the_node_did_not_take_is_said_first_at_the_next_run(checkout, node, monkeypatch):
+    handler, api = node
+    monkeypatch.setenv("SAUTIUM_HOST_STARTER_API", "1")
+    (checkout / "run" / "requests" / "update").write_text("")
+    ha.run(checkout, "http://127.0.0.1:9", now=10.0, verbs={"update": lambda s, n, r: ("undone", "back", "v0.3.0", None)},
+           start_probe=lambda: None)
+    assert ha.load_state(checkout)["unsent"] == [["update", "undone", "back", "v0.3.0", None]]
+    (checkout / "run" / "requests" / "check").write_text("")
+    ha.run(checkout, api, now=20.0, verbs={"check": lambda s, n, r: ("current", "x", None, None)},
+           start_probe=lambda: None)
+    assert [json.loads(b)["verb"] for _, _, b in handler.seen] == ["update", "check"]
+    assert "unsent" not in ha.load_state(checkout)

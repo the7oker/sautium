@@ -107,6 +107,22 @@ VERIFY_MAX = 1024 * 1024
 # (backend/device_auth._SETUP_CODE_FORM): never in a diagnostics report
 SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){2}")
 
+# The tables the dump loaders fill (backend/mb_dump_load.TABLES,
+# lb_dump_load.TABLES; a test holds them together): tens of GB a loader makes
+# again, left out of the pre-update dump whole and so left as they are by its
+# restore. Never a pattern: `mb_*` also names tables of the node's own
+# (mb_refuted_bindings, lb_slice_requests) whose keys point into the
+# catalogue, and a restore that cleans the catalogue cannot drop a key those
+# hold on it.
+DUMP_TABLES = (
+    "mb_area", "mb_release_group_primary_type", "mb_release_group_secondary_type", "mb_artist",
+    "mb_artist_alias", "mb_artist_credit", "mb_artist_credit_name", "mb_release_group",
+    "mb_release_group_secondary_type_join", "mb_release", "mb_release_country", "mb_release_unknown_country",
+    "mb_medium_format", "mb_medium", "mb_recording", "mb_track", "mb_release_label", "mb_url",
+    "mb_l_artist_url", "mb_l_release_url", "mb_tag", "mb_artist_tag", "mb_release_group_tag",
+    "lb_recording", "lb_artist",
+)
+
 UNIT = "sautium-host-agent"
 STARTER_NAME = "sautium-host-agent"
 
@@ -454,9 +470,8 @@ def _migrations(root: Path, env: Dict[str, str]) -> str:
 
 def _dump(root: Path, env: Dict[str, str]) -> Path:
     """The database before the move, streamed out of its own container into
-    ./host/pre-update/ — one kept. The dump tables (`mb_*`, `lb_*`) are left
-    out whole, schema too, as tens of GB the loaders make again: a restore
-    leaves them as they are."""
+    ./host/pre-update/ — one kept. The dump loaders' tables (DUMP_TABLES) are
+    left out whole, schema too: a restore leaves them as they are."""
     folder = host_dir(root) / "pre-update"
     folder.mkdir(mode=0o700, exist_ok=True)
     tmp = folder / f".dump.{os.getpid()}"
@@ -464,7 +479,8 @@ def _dump(root: Path, env: Dict[str, str]) -> Path:
     try:
         with os.fdopen(fd, "wb") as out:
             _run(["docker", "exec", POSTGRES, "pg_dump", "-U", env.get("POSTGRES_USER", "musicai"),
-                  "-d", env.get("POSTGRES_DB", "music_ai"), "-Fc", "-T", "mb_*", "-T", "lb_*"],
+                  "-d", env.get("POSTGRES_DB", "music_ai"), "-Fc",
+                  *[f"--exclude-table=public.{name}" for name in DUMP_TABLES]],
                  cwd=root, stdout=out, timeout=4 * 3600)
             out.flush()
             os.fsync(out.fileno())
@@ -567,12 +583,21 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     compose("stop", "backend", root=root, check=False)
     git("-c", "advice.detachedHead=false", "checkout", "--quiet", "--force", "--detach", old_commit, root=root)
     set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", old_image)
-    restored = _migrations(root, env) != ledger
+    restored, unrestored = _migrations(root, env) != ledger, None
     if restored:
-        _restore(root, env, dump)
+        try:
+            _restore(root, env, dump)
+        except Refusal as e:
+            # The release before starts all the same: its schema is older, its
+            # migrations idempotent, and a node left down answers nobody
+            unrestored = e.detail
+            log(f"the database could not be put back ({unrestored}); the dump stays in {dump}")
     if not _healthy(root):
         return "failed", (f"Sautium {name[1:]} {why}, and the release before it did not start again "
                           "after the way back: see the node's log"), name, None
+    if unrestored:
+        return "failed", (f"Sautium {name[1:]} {why}: the node is back on the release before it, but "
+                          f"its database could not be put back as it was ({unrestored})"), name, None
     return "undone", (f"Sautium {name[1:]} {why}: the node is back on the release before it"
                       + (", its database as it was before the update" if restored else "")), name, None
 
@@ -712,6 +737,9 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = load_state(root)
+        for held in state.pop("unsent", []):
+            if not answer(*held, key, api):
+                state.setdefault("unsent", []).append(held)
         asked, _left = drain(root)
         for verb in asked:
             moment = time.time() if now is None else now
@@ -724,8 +752,11 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
             if outcome == "failed":
                 state["failed_since_installed"] = True
             log(f"{verb}: {outcome} — {detail}")
+            if not answer(verb, outcome, detail, release, report, key, api):
+                # The node was down (an update that could not start it); the
+                # next run, whatever its request, says it first
+                state.setdefault("unsent", []).append([verb, outcome, detail, release, None])
             save_state(state, root)
-            answer(verb, outcome, detail, release, report, key, api)
         note = maintain_starter(state, time.time() if now is None else now, root, start_probe)
         if note:
             log(note)
