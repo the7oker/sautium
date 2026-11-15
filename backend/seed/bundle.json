@@ -1,8 +1,8 @@
 {
-  "version": 3,
-  "url": "https://github.com/the7oker/sautium/releases/download/seed-v3/seed_v3.json.gz",
-  "sha256": "36223915e3dd629ea617dfc2ff212a85f10d4d3f10a6dd463f79c15df790ddc8",
-  "size": 17030165,
+  "version": 4,
+  "url": "https://github.com/the7oker/sautium/releases/download/seed-v4/seed_v4.json.gz",
+  "sha256": "8ddfbb152069a743152c5cfcb345fb8cc930ee0b94d028995d21202965206043",
+  "size": 18610548,
   "picks": 48,
   "analyzed_tracks": 517
 }
