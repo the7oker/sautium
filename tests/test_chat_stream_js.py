@@ -49,7 +49,6 @@ const ai = {
 %(pump)s
   _newStreamCtx() {
     return {
-      lastEventAt: 0,
       finish() { log.push('finish'); },
       fail(err) { log.push('fail: ' + err.message); },
       reset() { log.push('reset'); },
@@ -75,6 +74,8 @@ console.warn = () => {};
   const out = {};
   for (const [name, text] of Object.entries(JSON.parse(require('node:fs').readFileSync(0, 'utf8')))) {
     log.length = 0;
+    // A wake aborted the reader (auth.js `sautium:wake`): its reason rides the abort
+    ai._streamAbort = name === 'woke' ? { signal: { reason: 'wake' } } : null;
     await ai.consumeStream(body(text), {});
     out[name] = log.slice();
   }
@@ -95,6 +96,7 @@ def test_a_reply_is_finished_by_its_done_and_a_close_before_it_is_a_drop():
         "cut short": _sse(("meta", {"model": "m"}), ("delta", {"text": "Hel"})),
         "replied": _sse(("meta", {"model": "m"}), ("delta", {"text": "Hello"}), ("done", {"model": "m"})),
         "failed": _sse(("delta", {"text": "Hel"}), ("error", {"message": "the provider refused"})),
+        "woke": _sse(("meta", {"model": "m"}), ("delta", {"text": "Hel"})),
     }
     proc = subprocess.run([NODE, "-e", script], input=json.dumps(cases).encode(), capture_output=True,
                           check=True)
@@ -102,4 +104,6 @@ def test_a_reply_is_finished_by_its_done_and_a_close_before_it_is_a_drop():
         "cut short": ["delta: Hel", "pip: reconnecting…", "reset", "reattach", "the messages"],
         "replied": ["delta: Hello", "finish"],
         "failed": ["delta: Hel", "fail: the provider refused"],
+        # A page back from the background re-reads the reply at once: no word, no try spent (B-81)
+        "woke": ["delta: Hel", "reset", "reattach", "the messages"],
     }, proc.stdout

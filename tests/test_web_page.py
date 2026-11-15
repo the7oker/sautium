@@ -70,7 +70,7 @@ const ctx = vm.createContext({
   window, navigator, Image, MediaMetadata: class { constructor(m) { Object.assign(this, m); } },
   document: { readyState: 'loading', addEventListener() {}, visibilityState: 'visible' },
   fetch: async () => ({ ok: false, status: 404, json: async () => ({}) }),
-  crypto: require('node:crypto').webcrypto, CustomEvent: class {},
+  crypto: require('node:crypto').webcrypto, CustomEvent: class {}, AbortController,
   console: { warn() {}, log() {}, error() {} }, setTimeout, clearTimeout,
 });
 vm.runInContext(cut('  /* ---------- Cover URL builder', '  /* ---------- Lightweight markdown')

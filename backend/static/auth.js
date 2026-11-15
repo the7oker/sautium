@@ -33,6 +33,8 @@
 //     replacement that uses fetch+ReadableStream so we can attach
 //     auth headers (EventSource API can't), and awaitReconnectWindow(ms),
 //     the backoff wait every stream reconnect sits out,
+//   • raises `sautium:wake` on window when the page comes back from the
+//     background — the one signal everything that must re-read listens to,
 //   • exports Sautium.auth for the login screen (login / pair / forget).
 //
 // Whitelisted backend paths (see backend/auth_hmac.py) accept
@@ -180,9 +182,14 @@
     let resp = await _origFetch(input, { ...init, headers: signedHeaders(init, signed) });
 
     // Three 401s say nothing about the token itself, and each is repaired by
-    // signing again:
-    //   stale-ts — the request sat in the network queue past the replay
-    //     window; a frozen phone tab flushes minutes-old signatures on wake.
+    // signing again, once (a second refusal is the caller's to read):
+    //   stale-ts, for a read — the request sat in the browser past the replay
+    //     window: a phone that leaves the browser holds what the page had just
+    //     signed (a stream reconnecting as its socket died) and sends it when
+    //     it comes back, minutes later. A change is not sent again: the tap
+    //     was made then, and doing it now would surprise its maker — the
+    //     refusal goes back to the caller (the transport's reporter says it;
+    //     another caller shows its own refusal).
     //   bad-sig over a token that is no longer the stored one — the browser
     //     signed in (a pairing link, another tab) while this request was in
     //     flight, so what the server rejected is a key that has already been
@@ -194,9 +201,9 @@
       ? resp.headers.get("X-Sautium-Auth-Error") : null;
     const superseded = authError === "bad-sig" &&
       storedToken() && storedToken() !== signed.token;
-    const reread = authError === "replayed" && (method === "GET" || method === "HEAD");
+    const read = method === "GET" || method === "HEAD";
 
-    if (authError === "stale-ts" || superseded || reread) {
+    if (((authError === "stale-ts" || authError === "replayed") && read) || superseded) {
       const fresh = await signRequest(method, pathAndQuery, body);
       if (fresh) {
         resp = await _origFetch(input, { ...init, headers: signedHeaders(init, fresh) });
@@ -801,6 +808,38 @@
     bootAuth();
   }
 
+  // -- the page's own lifecycle ------------------------------------------------
+
+  // A page the phone put away and brought back cannot trust anything it holds
+  // from before: its streams' sockets may have died without a word (no FIN —
+  // the phone suspended, the Wi-Fi slept, a NAT forgot), and what it shows is
+  // what was true when it left. So its coming back is an event, raised once
+  // per trip (`sautium:wake`, window): every stream re-opens on it with a
+  // fresh signature (one that claims rather than reads opts out), and what
+  // the page shows is read again from the node.
+  // Away is any of the browser's words for it — hidden, frozen (Chrome),
+  // hidden in the back/forward cache — and back is the page visible again
+  // after one of them. A page frozen while still hidden comes back when it is
+  // shown, not when it is thawed. No threshold on how long it was away: when
+  // an OS kills a sleeping app's sockets is not the page's to guess, and a
+  // re-open costs one request per stream.
+  // A page loaded hidden (opened in a background tab) is away already
+  let away = document.visibilityState !== "visible";
+  const goneAway = () => { away = true; };
+  const cameBack = (why) => {
+    if (!away || document.hidden) return;
+    away = false;
+    window.dispatchEvent(new CustomEvent("sautium:wake", { detail: { why } }));
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) goneAway();
+    else cameBack("visible");
+  });
+  document.addEventListener("freeze", goneAway);
+  document.addEventListener("resume", () => cameBack("resume"));
+  window.addEventListener("pagehide", goneAway);
+  window.addEventListener("pageshow", () => cameBack("pageshow"));
+
   // -- SSE replacement -------------------------------------------------------
 
   // Every backend SSE generator emits at least a keepalive comment every
@@ -808,9 +847,10 @@
   // full cadences therefore means the socket died without a FIN — the
   // phone slept, the AP roamed, NAT rebound — and the pending read()
   // would otherwise hang for however long the OS takes to notice, with
-  // the UI frozen on stale data the whole time. A frozen tab freezes
-  // this timer too; on resume it fires immediately, which is exactly
-  // the moment to declare the pre-sleep socket dead.
+  // the UI frozen on stale data the whole time. It counts from the last
+  // byte, so it is no answer for a page back from a short trip — the
+  // re-open on `sautium:wake` is; this is for a socket that dies while the
+  // page looks on.
   const SSE_IDLE_MS = 45000;
 
   // Reads the SSE wire format from a ReadableStream reader and yields
@@ -823,8 +863,12 @@
     while (true) {
       let idleTimer;
       const idle = new Promise(r => { idleTimer = setTimeout(() => r("idle"), SSE_IDLE_MS); });
-      const read = await Promise.race([reader.read(), idle]);
-      clearTimeout(idleTimer);
+      let read;
+      try {
+        read = await Promise.race([reader.read(), idle]);
+      } finally {
+        clearTimeout(idleTimer);
+      }
       if (read === "idle") {
         console.warn("SSE idle >" + SSE_IDLE_MS / 1000 + "s, reconnecting:", path);
         // Resolves the pending read() with done:true — the stream ends
@@ -854,26 +898,26 @@
 
   // One reconnect wait. The timer is the schedule; the browser's own
   // signals that the odds just changed end it early: `online`
-  // (connectivity is back) and the tab becoming visible (a phone woke —
-  // its retries ran on throttled timers while it slept, and the wait
-  // armed last may have most of its 30 s left, strip up, music playing).
+  // (connectivity is back) and the page coming back (`sautium:wake` — a
+  // phone woke: its retries ran on throttled timers while it slept, and the
+  // wait armed last may have most of its 30 s left, strip up, music playing).
   // `navigator.onLine` stays true through most real drops (Wi-Fi/LTE
   // handoff, NAT timeout, a router blip), so neither event can replace
   // the schedule. Resolves with what ended the wait: "timer", "online"
-  // or "visible" — a cut-short wait means the schedule should restart.
+  // or "wake" — a cut-short wait means the schedule should restart.
   window.awaitReconnectWindow = function (ms) {
     return new Promise(resolve => {
       const done = (why) => {
         clearTimeout(timer);
         window.removeEventListener("online", onOnline);
-        document.removeEventListener("visibilitychange", onVisible);
+        window.removeEventListener("sautium:wake", onWake);
         resolve(why);
       };
       const onOnline = () => done("online");
-      const onVisible = () => { if (!document.hidden) done("visible"); };
+      const onWake = () => done("wake");
       const timer = setTimeout(() => done("timer"), ms);
       window.addEventListener("online", onOnline);
-      document.addEventListener("visibilitychange", onVisible);
+      window.addEventListener("sautium:wake", onWake);
     });
   };
 
@@ -884,8 +928,22 @@
   // backoff (1 s … 30 s) that restarts from 1 s whenever a wake or
   // `online` cut a wait short: the network that just came back needs a
   // few quick tries, not one attempt and then the long tail.
-  window.sseStream = function (path, onMessage, onError) {
+  //
+  // A page that comes back re-opens the stream at once (`sautium:wake`):
+  // the connection it holds may be a dead socket the 45 s idle check would
+  // find only after the page had shown its old state for that long, and a
+  // fresh connection is signed now and opens with the node's current state.
+  // The re-open is no error — onError hears nothing of it. A stream that
+  // claims rather than reads opts out (`reopenOnWake: false`).
+  window.sseStream = function (path, onMessage, onError, { reopenOnWake = true } = {}) {
     const ctrl = new AbortController();
+    let conn = null;                 // this connection's own abort
+    const reopen = () => { if (conn) conn.abort(); };
+    if (reopenOnWake) window.addEventListener("sautium:wake", reopen);
+    ctrl.signal.addEventListener("abort", () => {
+      window.removeEventListener("sautium:wake", reopen);
+      reopen();
+    });
     (async () => {
       let backoff = 1000;
       const waitOut = async () => {
@@ -893,11 +951,13 @@
         backoff = why === "timer" ? Math.min(backoff * 2, 30000) : 1000;
       };
       while (!ctrl.signal.aborted) {
+        conn = new AbortController();
+        const { signal } = conn;
         try {
           const resp = await fetch(path, {
             method: "GET",
             headers: { Accept: "text/event-stream" },
-            signal: ctrl.signal,
+            signal,
             cache: "no-store",
           });
           if (!resp.ok) {
@@ -914,10 +974,15 @@
               if (onError) onError(e);
             }
           }
-          // Server closed the stream normally — reconnect after a beat.
-          if (!ctrl.signal.aborted) await new Promise(r => setTimeout(r, 1000));
+          // Server closed the stream normally — reconnect after a beat (a
+          // wake or `online` cuts it short).
+          if (!signal.aborted) await window.awaitReconnectWindow(1000);
         } catch (e) {
           if (ctrl.signal.aborted) return;
+          if (signal.aborted) {
+            backoff = 1000;
+            continue;
+          }
           if (onError) onError(e);
           await waitOut();
         }

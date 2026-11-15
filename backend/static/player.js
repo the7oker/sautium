@@ -163,7 +163,15 @@
           window.dispatchEvent(new CustomEvent('sautium:notice',
             { detail: msg.d }));
         } else if (msg.t === 'hello') {
-          // A (re)connected stream: what this page wants from it, again.
+          // A (re)connected stream. A playlist read the status chain still
+          // waits on was asked before it, on a connection the page has left,
+          // and may never be answered (a socket that died while the phone was
+          // away): it is let go, so this connection's status is not held
+          // behind it for good. Then what this page wants from it, again.
+          // A status of the connection before, still waiting, paints nothing
+          // either: the newest speaks, and this connection's comes next.
+          if (_chainRead) _chainRead.abort();
+          _statusSeq++;
           meterInterest.restate();
         } else if (msg.t === 'meter') {
           // 'dropped': this page stopped reading long enough to lose its
@@ -179,21 +187,37 @@
         // errors during backoff keep the original deadline so the paint
         // lands at the earliest honest moment, not backoff-times later.
         if (_disconnectPaint) return;
-        console.debug('events stream down; painting disconnected in',
-          DISCONNECT_GRACE_MS / 1000 + 's');
-        _disconnectPaint = setTimeout(() => {
-          _disconnectPaint = null;
-          console.debug('events stream still down; painting disconnected');
-          _statusSeq++;
-          currentState = 'disconnected';
-          document.dispatchEvent(new CustomEvent('np-update', {
-            detail: { state: 'disconnected' },
-          }));
-          announceLink(false);
-        }, DISCONNECT_GRACE_MS);
+        armDisconnectPaint();
       }
     );
   }
+
+  function armDisconnectPaint() {
+    console.debug('events stream down; painting disconnected in',
+      DISCONNECT_GRACE_MS / 1000 + 's');
+    _disconnectPaint = setTimeout(() => {
+      _disconnectPaint = null;
+      console.debug('events stream still down; painting disconnected');
+      _statusSeq++;
+      currentState = 'disconnected';
+      document.dispatchEvent(new CustomEvent('np-update', {
+        detail: { state: 'disconnected' },
+      }));
+      announceLink(false);
+    }, DISCONNECT_GRACE_MS);
+  }
+
+  // A page back from the background shows what was true when it left until
+  // the re-opened stream (auth.js, `sautium:wake`) brings the node's state:
+  // the grace is counted from now — one armed before the phone left would
+  // fire as the page comes back and paint "disconnected" over a page about
+  // to be current — and armed whatever the stream said before, so a
+  // re-open that does not get through is said (the link strip) instead of
+  // leaving the old state on screen in silence.
+  window.addEventListener('sautium:wake', () => {
+    if (_disconnectPaint) clearTimeout(_disconnectPaint);
+    armDisconnectPaint();
+  });
 
   // SSE events are dispatched as soon as the message lands; if we made
   // the handler async directly, two rapid playlist mutations would race
@@ -212,6 +236,7 @@
   // playlist hands it on.
   let _sseChain = Promise.resolve();
   let _statusSeq = 0;
+  let _chainRead = null;     // the abort of the playlist read the chain waits on
   let _floorOwed = null;
   function handleStatusEvent(data) {
     // A real message means the stream is back — the pending
@@ -288,7 +313,11 @@
       // The marker moves only once the playlist actually arrived: a failed
       // fetch leaves it behind, so the next status event retries instead of
       // every consumer reading a stale queue until the next mutation.
-      if (await fetchPlaylist()) lastPlaylistVersion = data.playlist_version;
+      const read = new AbortController();
+      _chainRead = read;
+      const fetched = await fetchPlaylist(read.signal);
+      if (_chainRead === read) _chainRead = null;
+      if (fetched) lastPlaylistVersion = data.playlist_version;
     }
     if (seq !== _statusSeq) return;   // a newer event arrived during the fetch
     // After the playlist settles, so the fallback reads the queue this
@@ -306,9 +335,9 @@
   }
 
   // --- Playlist --------------------------------------------------------
-  async function fetchPlaylist() {
+  async function fetchPlaylist(signal) {
     try {
-      const resp = await fetch('/api/player/playlist');
+      const resp = await fetch('/api/player/playlist', { signal });
       if (!resp.ok) {
         console.warn('fetchPlaylist: HTTP', resp.status);
         return false;
@@ -318,7 +347,8 @@
       document.dispatchEvent(new CustomEvent('playlist-loaded', { detail: data }));
       return true;
     } catch (e) {
-      console.warn('fetchPlaylist error:', e);
+      if (e && e.name === 'AbortError') console.debug('fetchPlaylist let go:', e);
+      else console.warn('fetchPlaylist error:', e);
       return false;
     }
   }
@@ -463,7 +493,15 @@
           try { this._onDirective(JSON.parse(msg.data)); }
           catch (e) { console.warn('browser renderer directive error:', e); }
         },
-        () => {});
+        () => {},
+        // The channel is a claim on the output, not a read: opening it
+        // primes the tab paused at the node's slot and takes the output from
+        // any other tab (browser_backend.attach_tab), so re-opening it at
+        // every return would flip a playing tab to paused, re-prime a slot
+        // the tab has moved past, and take the output back from a device
+        // that took it meanwhile. It reconnects on a drop, as it did; a
+        // channel that resumes instead of claiming is a design of its own.
+        { reopenOnWake: false });
     },
 
     detach() {

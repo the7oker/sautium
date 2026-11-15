@@ -627,5 +627,8 @@ silence, a queue it takes again, a renderer being attached again — as
 lasting toasts while the status says them.
 
 `title` and `text` are HTML — escape anything user-controlled, exactly
-as for the dialogs. Transport commands (next, previous, volume) get no
-toast: their feedback is the control's own pressed state.
+as for the dialogs. A transport command (next, previous, volume) that went
+through gets no toast: its feedback is the control's own pressed state. One
+that did not is said by `reportPlaybackResult` — the output's refusal, or a
+tap the browser held past the replay window while the page was in the
+background ("‹Pause› came too late", since 2026-11-15).

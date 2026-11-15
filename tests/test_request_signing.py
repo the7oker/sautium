@@ -343,15 +343,19 @@ const fs = require('node:fs'), vm = require('node:vm');
 const [shaPath, authPath, origin, mode] = process.argv.slice(-4);
 const sent = [];
 const store = new Map([['sautium.device_token', 'page token']]);
-// mode "replayed": the node answers each first send of a request "replayed"
+// mode "replayed": the node answers each first send of a request "replayed";
+// "stale": every send is older than the window; "media": a media URL past its
+// own expiry, the route's 401 with no word about the signature
 const answer = () => mode === 'replayed' && sent.length % 2
   ? { status: 401, headers: new Headers({ 'X-Sautium-Auth-Error': 'replayed' }) }
+  : mode === 'stale' ? { status: 401, headers: new Headers({ 'X-Sautium-Auth-Error': 'stale-ts' }) }
+  : mode === 'media' ? { status: 401, headers: new Headers() }
   : { status: 200, headers: new Headers() };
 const ctx = {
   window: { fetch: async (input, init) => { sent.push({ url: String(input), method: init.method || 'GET',
                                                         headers: [...new Headers(init.headers)] });
                                             return answer(); },
-            addEventListener() {}, dispatchEvent() {} },
+            addEventListener() {}, dispatchEvent(e) { if (e.type === 'sautium:auth-required') sent.push('signed out'); } },
   localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k) },
   location: { origin, hash: '', pathname: '/', search: '' },
   document: { readyState: 'complete', addEventListener() {}, getElementById: () => null },
@@ -364,9 +368,11 @@ vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(shaPath, 'utf8'), ctx);
 vm.runInContext(fs.readFileSync(authPath, 'utf8'), ctx);
 (async () => {
-  if (mode === 'replayed') {
+  if (mode === 'replayed' || mode === 'stale') {
     await ctx.window.fetch('/api/status');
     await ctx.window.fetch('/api/player/next', { method: 'POST', body: '{}' });
+  } else if (mode === 'media') {
+    await ctx.window.fetch('/api/player/media/file/7?exp=1&sig=00');
   } else {
     await ctx.window.fetch('/api/item/café?q=a b', { method: 'POST', body: '{"x":1}' });
     await ctx.window.fetch('/api/item/café?q=a b', { method: 'POST', body: '{"x":1}' });
@@ -401,3 +407,25 @@ def test_the_page_signs_a_read_the_node_called_replayed_again_and_never_sends_a_
     first, again = (dict(r["headers"]) for r in sent[:2])
     assert first["x-sautium-nonce"] != again["x-sautium-nonce"]
     _verify(again, b"page token", "GET", "/api/status", b"")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_stale_read_is_signed_again_once_and_a_stale_change_is_never_sent_again():
+    """A phone holds what the page signed as it left the browser and sends it
+    on its return, past the window: a read is signed afresh once (a second
+    refusal is the caller's), a change goes out once only — done minutes after
+    the tap, it would surprise the person who tapped (B-81)."""
+    sent = _page_sends("stale")
+    assert [r["method"] for r in sent] == ["GET", "GET", "POST"]
+    first, again = (dict(r["headers"]) for r in sent[:2])
+    assert first["x-sautium-nonce"] != again["x-sautium-nonce"]
+    _verify(again, b"page token", "GET", "/api/status", b"")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_media_url_past_its_own_expiry_is_sent_once_and_keeps_the_token():
+    """A media URL carries its own signed expiry (media_urls.py, 4 h): the
+    route's refusal says nothing of the request's signature, so the page
+    neither signs it again nor reads it as a dead token."""
+    sent = _page_sends("media")
+    assert [r["url"] for r in sent] == ["/api/player/media/file/7?exp=1&sig=00"]

@@ -2290,13 +2290,6 @@
   // the reply is still safe in the DB and reopening the chat shows it.
   const STREAM_RECONNECT_DELAYS_MS = [1000, 3000, 9000, 20000];
 
-  // The chat stream emits a keepalive comment every 15s (chat.py's
-  // KEEPALIVE_INTERVAL_SEC). Silence three keepalives long means the
-  // socket died without the reader ever erroring — the classic phone
-  // sleep / NAT timeout, where the reader would otherwise hang on
-  // typing dots forever. Only ever checked when the tab comes back.
-  const STREAM_SILENCE_MS = 45000;
-
   // Each delay is sat out through window.awaitReconnectWindow (auth.js),
   // which ends it early on `online` or the tab coming back into view.
 
@@ -2313,7 +2306,7 @@
     activeSessionId: null,
     sending: false,
     _streamCtx: null,        // render state of the reply being streamed
-    _streamAbort: null,      // aborts the reader when the socket is stale
+    _streamAbort: null,      // aborts the reply's reader (another session, a wake)
     _streamSession: null,    // session of the send / stream in flight
 
     init() {
@@ -2350,13 +2343,12 @@
 
       // A sleeping phone can drop the chat socket without either side
       // sending a FIN: the reader then never resolves and the thread
-      // sits on typing dots forever, input locked. When the tab comes
-      // back, silence longer than the server's keepalive means exactly
-      // that — abort so consumeStream takes its reconnect path.
-      document.addEventListener('visibilitychange', () => {
-        if (document.hidden || !this._streamCtx || !this._streamAbort) return;
-        if (Date.now() - this._streamCtx.lastEventAt < STREAM_SILENCE_MS) return;
-        this._streamAbort.abort();
+      // sits on typing dots forever, input locked. A page back from the
+      // background (auth.js, `sautium:wake`) cannot tell a live socket
+      // from such a one, so a reply in flight takes the reconnect path:
+      // the reattach replays it into the same bubble.
+      window.addEventListener('sautium:wake', () => {
+        if (this._streamCtx && this._streamAbort) this._streamAbort.abort('wake');
       });
 
       document.addEventListener('keydown', e => {
@@ -2807,6 +2799,7 @@
       this._streamCtx = ctx;
       let stream = resp;
       let reconnects = 0;
+      let woke = false;
 
       try {
         while (true) {
@@ -2823,22 +2816,29 @@
               return;
             } catch (err) {
               if (err && err.fatal) { ctx.fail(err); return; }
-              console.warn('chat stream dropped:', err);
               stream = null;
+              // A wake's re-open is no drop: reattached at once, nothing
+              // said, no try spent (sseStream's rule)
+              woke = !!(this._streamAbort && this._streamAbort.signal.reason === 'wake');
+              if (!woke) console.warn('chat stream dropped:', err);
             }
           }
 
           if (this.activeSessionId !== sessionId) return;
-          if (reconnects >= STREAM_RECONNECT_DELAYS_MS.length) {
-            ctx.fail(new Error('Connection lost. Reopen this chat to see the reply.'));
-            return;
+          if (!woke) {
+            if (reconnects >= STREAM_RECONNECT_DELAYS_MS.length) {
+              ctx.fail(new Error('Connection lost. Reopen this chat to see the reply.'));
+              return;
+            }
+            ctx.showPip('reconnecting…');
+            await window.awaitReconnectWindow(STREAM_RECONNECT_DELAYS_MS[reconnects++]);
+            if (this.activeSessionId !== sessionId) return;
           }
-          ctx.showPip('reconnecting…');
-          await window.awaitReconnectWindow(STREAM_RECONNECT_DELAYS_MS[reconnects++]);
-          if (this.activeSessionId !== sessionId) return;
+          woke = false;
 
           ctx.reset();
           const next = await this._openReattach(sessionId);
+          if (next === 'wake') { woke = true; continue; }   // a wake during the reattach: again, at once
           if (next === 'gone') {
             await this._finishFromDb(sessionId, ctx);
             return;
@@ -2852,24 +2852,21 @@
 
     // GET the live-generation stream for a reconnect. 'gone' means the
     // run finished while we were disconnected (404) and its reply is
-    // already persisted; null means the request itself failed.
+    // already persisted; 'wake' that a wake cut the request short; null
+    // means the request itself failed.
     async _openReattach(sessionId) {
       const url = '/api/chat/sessions/' + sessionId + '/stream';
       const opts = { headers: { 'Accept': 'text/event-stream' } };
       try {
+        // A stale signature (a phone that held this read past the window)
+        // is signed again by auth.js's fetch, once.
         this._streamAbort = new AbortController();
-        let resp = await fetch(url, { ...opts, signal: this._streamAbort.signal });
-        // A tab frozen between signing and sending replays a stale
-        // HMAC timestamp (auth_hmac's window is 60s) and gets 401 on
-        // its first request after waking. Re-signing fixes it.
-        if (resp.status === 401) {
-          this._streamAbort = new AbortController();
-          resp = await fetch(url, { ...opts, signal: this._streamAbort.signal });
-        }
+        const resp = await fetch(url, { ...opts, signal: this._streamAbort.signal });
         if (resp.status === 404) return 'gone';
         if (!resp.ok) return null;
         return resp;
       } catch (err) {
+        if (this._streamAbort && this._streamAbort.signal.reason === 'wake') return 'wake';
         console.warn('chat reattach failed:', err);
         return null;
       }
@@ -3021,11 +3018,7 @@
       };
 
       return {
-        // Stamped on every chunk read; the visibility hook compares it
-        // against the server's keepalive cadence to spot a socket that
-        // died without the reader ever noticing.
         sessionId,
-        lastEventAt: Date.now(),
 
         onModel, onDelta, onBlocks, showPip,
 
@@ -3033,7 +3026,7 @@
         // has to rebuild from zero. The DOM stays untouched — the
         // replay lands in one chunk and repaints it before the browser
         // gets a frame in edgewise.
-        reset() { proseText = ''; this.lastEventAt = Date.now(); },
+        reset() { proseText = ''; },
 
         finish() {
           if (typing.parentNode) typing.remove();
@@ -3097,7 +3090,6 @@
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        ctx.lastEventAt = Date.now();
         buffer += decoder.decode(value, { stream: true });
         // SSE messages are separated by a blank line (\n\n).
         let sep;
@@ -3177,7 +3169,10 @@
       this.thread.appendChild(typing);
       this.scrollToBottom();
       try {
-        const resp = await this._openReattach(sessionId);
+        let resp;
+        // A wake that cut the request short opens it again (each answer
+        // 'wake' is a wake of its own)
+        do resp = await this._openReattach(sessionId); while (resp === 'wake');
         if (resp === 'gone') {
           if (typing.parentNode) typing.remove();
           await this.switchToSession(sessionId);
@@ -6642,6 +6637,19 @@
       notices.toast({ kind: 'error', key: body.attempt != null ? 'hqplayer.diagnosis' : 'player.refused',
                       title: escapeProfileHtml(`${name} did not take the ${TRANSPORT_WORDS[word] || 'command'}`),
                       text: escapeProfileHtml(body.refusal) });
+      return false;
+    }
+    // A tap the phone held while the page was in the background, sent as it
+    // came back: the node refused it as older than its window, and a change
+    // is never sent again on its own (auth.js) — done minutes after the tap,
+    // it would be a surprise. Nothing happened, and the person is told so.
+    if (resp && resp.status === 401 && resp.headers.get('X-Sautium-Auth-Error') === 'stale-ts') {
+      notices.toast({ kind: 'info', key: 'player.stale',
+                      title: `${TRANSPORT_WORDS[word] || 'The command'} came too late`,
+                      text: 'This browser held it while the page was in the background and sent it '
+                        + 'only now, so the node refused it as too old. Press it again if you still '
+                        + 'want it. If this keeps happening, check that the clocks of this device and '
+                        + 'of the node are right.' });
       return false;
     }
     // A Response body is one-shot: callers that already read resp.json() must
@@ -14918,6 +14926,15 @@
     // this screen.
     if (!rescan) _scanOnce(root);
   }
+
+  // A page back from the background shows the outputs as they were when it
+  // left; the open picker reads them again (auth.js, `sautium:wake`).
+  window.addEventListener('sautium:wake', () => {
+    const root = screenRoot();
+    // A scan in flight repaints the picker when it lands (_scanOnce)
+    if (_scanInFlight || !root || !root.querySelector('[data-output-content]')) return;
+    renderOutputSettings(root, 'soft');
+  });
 
   // Opening the picker starts a scan and so does the Rescan button. Both share
   // one request and one repaint: two would race to replace the same list, and

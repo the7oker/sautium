@@ -1219,7 +1219,7 @@ async def browser_channel(tab: str):
         except asyncio.CancelledError:
             pass
         finally:
-            backend.detach_tab(tab)
+            backend.detach_tab(tab, channel)
 
     return EventStream(event_generator())
 

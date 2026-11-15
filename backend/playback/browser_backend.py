@@ -170,11 +170,15 @@ class BrowserBackend(PlayerBackend):
                 self._state = "paused"
                 self._emit_now()
 
-    def detach_tab(self, tab: str) -> None:
+    def detach_tab(self, tab: str, channel: asyncio.Queue) -> None:
         """The tab's SSE stream ended (closed tab / navigation). After a
-        short grace (reloads reconnect quickly) the output reports stopped."""
+        short grace (reloads reconnect quickly) the output reports stopped.
+        Only the connection that holds the output lets it go: a tab that
+        reconnects after a drop opens its new channel before the node learns
+        the old socket is gone, and the old stream's end, minutes later, is
+        no news about the new one."""
         with self._lock:
-            if self._tab != tab:
+            if self._tab != tab or self._channel is not channel:
                 return
             self._channel = None
             self._loop = None

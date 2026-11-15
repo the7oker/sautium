@@ -4370,8 +4370,21 @@ device on the network; none of them may hold for it more than a bound.
   distinct failure modes, both hit by phones: (1) a socket that dies without
   a FIN leaves `reader.read()` pending forever — every backend generator
   keepalives at 15-20s, so `sseStream` (auth.js) cancels the reader after
-  45s of byte-level silence and reconnects; a frozen tab freezes that timer
-  too, so on wake it fires immediately, which is exactly right. (2) A
+  45s of byte-level silence and reconnects. That check alone left a page
+  back from a short trip away on its old state, with nothing said, for what
+  remained of the 45 s counted from its last byte before it left (B-81,
+  measured 2026-11-15: 20–30 s after a 20 s trip). Since 2026-11-15 the
+  page's return is an event (`sautium:wake`, auth.js — hidden, frozen or
+  bfcached, then shown): every stream re-opens on it with a fresh
+  signature (but the renderer's channel, below), and its connect-time
+  snapshot is the re-read; the grace below is counted from the return. A status chain waiting on a playlist read
+  that a dead socket never answers is let go by the next connection's
+  `hello`. A read the browser held past the replay window is signed again
+  once; a change is never sent again (a transport tap is said to have come
+  too late). The browser renderer's command channel is a claim on the
+  output, not a read, so it does not re-open on a return: its dead socket is
+  still found by the idle check (a channel that resumes instead of claiming
+  is a design still to make). (2) A
   transport error says nothing about playback — the music keeps playing on
   the renderer — so player.js holds the last known state for a 10s grace
   before dispatching `disconnected` (mp.update treats that state as

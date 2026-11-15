@@ -37,7 +37,7 @@ const document = { readyState: 'loading', addEventListener() {}, visibilityState
 const fetch = async () => ({ ok: false, status: 409,
                              json: async () => ({ detail: 'HQPlayer is not answering' }) });
 vm.runInNewContext(fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'), {
-  window, document, fetch, crypto: require('node:crypto').webcrypto, CustomEvent: class {},
+  window, document, fetch, crypto: require('node:crypto').webcrypto, CustomEvent: class {}, AbortController,
   console: { warn() {}, log() {}, error() {} }, setTimeout, clearTimeout,
 });
 (async () => {
@@ -75,7 +75,7 @@ const document = { readyState: 'loading', addEventListener() {}, visibilityState
 const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
 const fetch = async () => ({ ok: true, status: 200, json: async () => spec.answer });
 vm.runInNewContext(fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'), {
-  window, document, fetch, crypto: require('node:crypto').webcrypto, CustomEvent: class {},
+  window, document, fetch, crypto: require('node:crypto').webcrypto, CustomEvent: class {}, AbortController,
   console: { warn() {}, log() {}, error() {} }, setTimeout, clearTimeout,
 });
 (async () => {
@@ -149,7 +149,7 @@ const ctx = {
     const a = spec.answers[url];
     return { ok: a.status >= 200 && a.status < 300, status: a.status, json: async () => a.body };
   },
-  crypto: require('node:crypto').webcrypto, CustomEvent: class {},
+  crypto: require('node:crypto').webcrypto, CustomEvent: class {}, AbortController,
   console: { warn() {}, log() {}, error() {}, debug() {} }, setTimeout, clearTimeout,
   notices: { toast, resolve, amend() {}, restate() {},
              has: (key, tag) => toasts.some(x => x.key === key && x.tag === tag) },
@@ -575,7 +575,7 @@ const window = {
   sseStream: (url, fn) => { onMessage = fn; return { abort() {} }; },
 };
 vm.runInNewContext(fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'), {
-  window, crypto: require('node:crypto').webcrypto, CustomEvent: class {},
+  window, crypto: require('node:crypto').webcrypto, CustomEvent: class {}, AbortController,
   document: { readyState: 'complete', visibilityState: 'visible', addEventListener() {}, dispatchEvent() {} },
   fetch: async (url) => { sent.push(url); return { ok: true, status: 200, json: async () => ({ ok: true, tracks: [] }) }; },
   sessionStorage: { getItem: k => store[k] || null, setItem: (k, v) => { store[k] = v; } },
@@ -709,3 +709,33 @@ def test_j_the_sheet_of_another_apps_track_names_its_uri_and_says_sautium_sent_n
     assert uri in html and "Another app&#39;s track" in html
     assert "Nothing reached HQPlayer" not in html and "media server saw" not in html
 
+
+
+def test_the_old_channel_of_a_tab_that_opened_a_new_one_lets_nothing_go(monkeypatch):
+    """B-81: a renderer tab that reconnects after a drop opens its command
+    channel again before the node learns the old socket is gone; the old
+    stream's end, later, detaches nothing — the new channel keeps the output
+    and its directives. The end of the channel that holds it still does."""
+    import asyncio
+    import time
+
+    from playback import browser_backend
+    from playback.browser_backend import BrowserBackend
+
+    monkeypatch.setattr(browser_backend, "_DISCONNECT_GRACE_S", 0.05)
+    mgr = PlaybackManager()
+    mgr.queue.replace([QueueItem(track_id="t1", media_file_id=1,
+                                 source={"kind": "file", "path": "/music/1.flac", "format": "FLAC"},
+                                 title="T1", artist="A")])
+    b = BrowserBackend(emit=mgr._on_backend_status, queue=mgr.queue)
+    loop = asyncio.new_event_loop()
+    old, new = asyncio.Queue(), asyncio.Queue()
+    b.attach_tab("tab-1", old, loop)
+    b.attach_tab("tab-1", new, loop)
+    b.detach_tab("tab-1", old)
+    time.sleep(0.2)
+    assert b._channel is new
+    b.detach_tab("tab-1", new)
+    time.sleep(0.2)
+    assert b._channel is None
+    loop.close()

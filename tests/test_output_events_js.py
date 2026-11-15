@@ -551,7 +551,7 @@ const fetch = async (url) => {
 class CustomEvent { constructor(type, init) { this.type = type; this.detail = init && init.detail; } }
 const sessionStorage = { getItem: () => null, setItem() {} };
 vm.runInNewContext(fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'), {
-  window, document, fetch, sessionStorage, crypto: require('node:crypto').webcrypto, CustomEvent,
+  window, document, fetch, sessionStorage, crypto: require('node:crypto').webcrypto, CustomEvent, AbortController,
   console: { warn() {}, log() {}, error() {}, debug() {} }, setTimeout, clearTimeout, location: { reload() {} },
 });
 const send = msg => onMessage({ data: JSON.stringify(msg) });
