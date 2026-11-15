@@ -141,7 +141,7 @@ class FakeGitHub:
 def _held() -> list:
     """What the cache holds: each build folder by its release's tag."""
     return sorted(p.name.rsplit("-", 1)[0] if p.is_dir() else p.name
-                  for p in ytdlp_release.root().iterdir() if p.name != "verified_for")
+                  for p in ytdlp_release.root().iterdir())
 
 
 @pytest.fixture
@@ -159,7 +159,7 @@ def test_a_pass_puts_the_signed_release_in_place_and_runs_it(github):
     github.publish(TAG, _build(TAG))
     assert ytdlp_release.refresh() == TAG
     exe = ytdlp_release.executable()
-    assert exe.parent.parent == ytdlp_release.root() and exe.parent.name.startswith(f"{TAG}-")
+    assert exe.parent.parent.parent == ytdlp_release.root() and exe.parent.parent.name.startswith(f"{TAG}-")
     assert exe.name == ytdlp_release._asset()[1]
     assert os.access(exe, os.X_OK)
     github.asked.clear()
@@ -296,29 +296,41 @@ def test_a_newer_release_replaces_the_build_and_keeps_the_one_before(github):
     assert _held() == ["2026.11.02", "2026.11.03", "current"]
 
 
-def test_a_build_another_commit_of_the_code_put_in_place_is_never_run(github, monkeypatch):
-    """The cache is the node's to write: a program a node that was controlled
-    once put there must not outlive the code's update. The build counts for
-    the commit that checked it; a new commit installs its own, checked again."""
-    monkeypatch.setattr(ytdlp_release, "_code_commit", lambda: "a" * 12)
+def _new_process(monkeypatch):
+    """What a process after this one finds: nothing it unpacked yet."""
+    monkeypatch.setattr(ytdlp_release, "_ready", {})
+
+
+def test_a_program_changed_in_the_cache_is_never_run_by_a_later_process(github, monkeypatch):
+    """The cache is the node's to write: a node controlled once could change
+    the program there, and its next release — or its next start — would run
+    it. A process runs the build only from a folder it unpacked itself from
+    the kept release, checked again against the pinned key."""
     github.publish(TAG, _build(TAG))
     assert ytdlp_release.refresh() == TAG
     first = ytdlp_release.executable()
-    monkeypatch.setattr(ytdlp_release, "_code_commit", lambda: "b" * 12)
-    assert ytdlp_release.executable() is None and ytdlp_release.in_place() is None
-    github.asked.clear()
-    assert ytdlp_release.refresh() == TAG
-    name, _ = ytdlp_release._asset()
-    assert any(p.endswith(f"/{TAG}/{name}") for p in github.asked)     # fetched and checked again
-    assert ytdlp_release.executable() not in (None, first)
-    assert (ytdlp_release.root() / "verified_for").read_text() == "b" * 12
+    first.write_text("#!/bin/sh\necho planted\n")
+    (first.parent / "planted.so").write_text("x")
+    _new_process(monkeypatch)
+    again = ytdlp_release.executable()
+    assert again != first and again.read_text() != "#!/bin/sh\necho planted\n"
+    assert not first.parent.exists()                       # the earlier folder, plant and all, removed
+    assert ytdlp_release.in_place() == TAG
 
 
-def test_a_packaged_tree_keeps_its_build(github, monkeypatch):
-    monkeypatch.setattr(ytdlp_release, "_code_commit", lambda: None)
+@pytest.mark.parametrize("changed", ["SHA2-256SUMS", "SHA2-256SUMS.sig", "archive"])
+def test_a_kept_release_that_no_longer_checks_is_not_run_and_is_installed_again(github, monkeypatch, changed):
     github.publish(TAG, _build(TAG))
     assert ytdlp_release.refresh() == TAG
-    assert ytdlp_release.executable() is not None
+    release = ytdlp_release.executable().parent.parent / "release"
+    target = release / (ytdlp_release._asset()[0] if changed == "archive" else changed)
+    target.write_bytes(target.read_bytes()[:-4] + b"xxxx")
+    _new_process(monkeypatch)
+    assert ytdlp_release.executable() is None and ytdlp_release.in_place() is None
+    github.asked.clear()
+    assert ytdlp_release.refresh() == TAG                  # fetched and checked again, then in place
+    name, _ = ytdlp_release._asset()
+    assert any(p.endswith(f"/{TAG}/{name}") for p in github.asked)
 
 
 # -- how the provider runs it -----------------------------------------------------------------

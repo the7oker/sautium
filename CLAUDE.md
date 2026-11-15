@@ -459,9 +459,10 @@ See:
   mount never goes inside a folder the node writes (a node could leave a
   link where its point will be); the code's own mount points ship in the
   tree (`backend/desktop/`, `backend/mcp/`) — Docker cannot make one in a
-  read-only folder. What the node writes is untrusted to RUN: the yt-dlp
-  build counts only for the commit that checked it
-  (`ytdlp_release.verified_for`), and in Docker the Claude CLI reads no
+  read-only folder. What the node writes is untrusted to RUN: a process
+  runs the yt-dlp build only from a folder it unpacked itself after
+  checking the kept release (signed sums, signature, archive) against the
+  pinned key again (`ytdlp_release._checked_unpack`), and in Docker the Claude CLI reads no
   settings or hooks from the node's own `~/.claude` (`--setting-sources
   project`, `disableAllHooks`). No keep-file in a folder a
   container writes: each is ignored WHOLE (`folder/`, never `folder/*`), so

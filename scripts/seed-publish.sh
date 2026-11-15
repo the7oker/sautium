@@ -31,11 +31,22 @@ url = f"https://github.com/the7oker/sautium/releases/download/seed-v{version}/se
 assert d["url"] == url and re.fullmatch("[0-9a-f]{64}", sha), "bundle.json is not a seed digest"
 print(version, url, sha, size, picks, analyzed)' "$info")
 [ -n "$sha" ] || { echo "$info is not a seed digest" >&2; exit 1; }
-file="$seed_dir/seed_v${version}.json.gz"
-name=$(basename "$file")
-[ -f "$file" ] || { echo "no bundle at $file — run seed_export.py first" >&2; exit 1; }
-echo "$sha  $file" | sha256sum -c --quiet \
-    || { echo "bundle.json does not describe $file — re-run seed_export.py" >&2; exit 1; }
+name="seed_v${version}.json.gz"
+# The bundle is a file of the node's too: opened once, without following a
+# link, into a file of this script's own; that copy is what is checked and
+# what is uploaded
+held=$(mktemp)
+check=$(mktemp)
+trap 'rm -f "$held" "$check"' EXIT
+python3 -I -c '
+import os, shutil, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)
+assert stat.S_ISREG(os.fstat(fd).st_mode), "the bundle is no regular file"
+with os.fdopen(fd, "rb") as src, open(sys.argv[2], "wb") as dst:
+    shutil.copyfileobj(src, dst)' "$seed_dir/$name" "$held" \
+    || { echo "no bundle at $seed_dir/$name — run seed_export.py first" >&2; exit 1; }
+echo "$sha  $held" | sha256sum -c --quiet \
+    || { echo "bundle.json does not describe $seed_dir/$name — re-run seed_export.py" >&2; exit 1; }
 
 token=${GITHUB_TOKEN:-$(printf 'protocol=https\nhost=github.com\n\n' \
     | git credential fill | sed -n 's/^password=//p')}
@@ -68,11 +79,9 @@ if [ -n "$aid" ]; then
     api -X DELETE "https://api.github.com/repos/$repo/releases/assets/$aid"
     echo "replaced the previous $name"
 fi
-api -X POST -H "Content-Type: application/gzip" --data-binary @"$file" \
+api -X POST -H "Content-Type: application/gzip" --data-binary @"$held" \
     "https://uploads.github.com/repos/$repo/releases/$rid/assets?name=$name" >/dev/null
 
-check=$(mktemp)
-trap 'rm -f "$check"' EXIT
 curl -sSfL -o "$check" "$url"
 echo "$sha  $check" | sha256sum -c --quiet
 # The tree's copy is written from the fields checked above, never copied: the

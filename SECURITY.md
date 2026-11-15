@@ -37,8 +37,8 @@ A Docker node runs its code read-only (since 2026-11-15): a node that could
 write the tree it runs from could stop an update, outlive it, or choose the
 next image built from it. What it still writes — its database, its data
 folders, its caches, its assistant's own folder — is treated as untrusted
-to run: the yt-dlp build in its cache counts only for the code that checked
-it, and its assistant CLI reads no settings or hooks from its own folder.
+to run: each process runs the yt-dlp build in its cache only after checking
+it again against yt-dlp's release key, and its assistant CLI reads no settings or hooks from its own folder.
 A node that was fully controlled can still keep its database and data as it
 left them, and so make a new release fail its start and come back to the
 one before; that is the limit of an update made on the node's own
