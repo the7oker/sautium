@@ -303,29 +303,8 @@ def test_a_node_that_refuses_the_answer_is_said_not_fatal(node, capfd):
     assert "did not take the answer" in capfd.readouterr().err
 
 
-def test_the_nodes_door_admits_the_channels_key_on_the_answer_alone(monkeypatch):
-    sys.path.insert(0, str(REPO / "backend"))
-    import auth_hmac
-    import host_channel
-    monkeypatch.setattr(host_channel, "_KEY", KEY.encode())
-    door = auth_hmac.HMACAuthMiddleware(None, Path("/nonexistent"))
-    monkeypatch.setattr(door, "_get_secret", lambda: b"s" * 64)
-    digest = hashlib.sha256(b"{}").hexdigest()
-
-    def judged(path, key):
-        sig = auth_hmac._mac(key, "POST", path, "1", "0" * 32, digest)
-        return door._judge({}, "POST", path, path, "1", 1, "0" * 32, digest, sig)
-
-    scope = {}
-    sig = auth_hmac._mac(KEY.encode(), "POST", host_channel.ANSWER_PATH, "2", "0" * 32, digest)
-    refusal, _ = door._judge(scope, "POST", host_channel.ANSWER_PATH, host_channel.ANSWER_PATH,
-                             "2", 2, "0" * 32, digest, sig)
-    assert refusal is None and scope["state"]["signer"] == "host-agent"
-    assert judged("/api/host/update", KEY.encode())[0] is not None          # nowhere else
-    assert judged("/api/settings", KEY.encode())[0] is not None
-    assert judged(host_channel.ANSWER_PATH, b"s" * 64)[0] is not None       # no other signer there
-    monkeypatch.setattr(host_channel, "_KEY", None)
-    assert judged(host_channel.ANSWER_PATH, KEY.encode())[0] is not None    # no agent, no door
+# The node's door on the answer's path (the channel's key there alone, no other
+# signer there): test_host_channel_db.py, behind the real middleware and database.
 
 
 # -- a run ---------------------------------------------------------------------
