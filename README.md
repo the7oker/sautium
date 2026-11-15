@@ -215,7 +215,11 @@ Edit `.env`:
 - `SAUTIUM_HOST_IPS` — your host's LAN IP, so the backend accepts requests
   addressed to it (the Host guard) and phones can open
   `http://<lan-ip>:8800` (Docker can't auto-detect it from inside the
-  container).
+  container). Not needed with `docker-compose.pi.yml`, whose backend runs on
+  the host's own network and sees its addresses; a name for the machine (a
+  tailnet's) still goes here.
+- `SAUTIUM_ALLOWED_HOSTS` — the name of a TLS front you put before the HTTP
+  port (`tailscale serve`, a reverse proxy), if any (`SECURITY.md`).
 
 ### 3. Start services
 
@@ -237,7 +241,21 @@ docker compose -f docker-compose.pi.yml up -d --build
 
 This starts PostgreSQL and the FastAPI backend; on its first start the
 backend builds the schema (`desktop/migrations/001_initial.sql` plus the
-numbered deltas, `backend/db_migrate.py`).
+numbered deltas, `backend/db_migrate.py`). The container reads its code
+read-only — what the node writes lives in `backend/data/` and `data/` — and
+the Web UI and the media ports answer on IPv4 alone.
+
+On Linux the node can update itself from the Web UI through the host agent
+(`scripts/host_agent.py`): a few user-level systemd units that take a
+signed release the installed tree verifies, build its image and move the
+node to it, and move it back if the new one does not start. Install it as
+the user who cloned the folder (not root):
+
+```bash
+python3 -I scripts/host_agent.py install
+docker compose -f docker-compose.pi.yml up -d    # the node learns of the agent
+sudo loginctl enable-linger "$USER"              # once: the agent runs with nobody logged in
+```
 
 ### 4. Verify
 
@@ -570,7 +588,8 @@ docker compose down
   `docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi`.
 - **Phone can't reach the Web UI** — confirm `SAUTIUM_HOST_IPS` lists the host's
   LAN IP (the Host guard answers 421 to any address that is not the node's
-  own), then `docker restart sautium-backend`.
+  own), then `docker compose up -d`: Compose reads `.env` when it makes the
+  container, so a `docker restart` keeps the old value.
 - **"Claude Code is signed out" / "Codex is signed out"** (the assistant
   says so, gear research waits for Claude Code, a notice names it and an
   amber trail leads to the Sign in button) — the mounted `~/.claude` or

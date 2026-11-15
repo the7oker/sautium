@@ -26,11 +26,22 @@ that does not is an ordinary issue.
 
 | Surface | Bind | Authentication |
 |---|---|---|
-| Web UI and API (backend, 8800; launcher 18000) | all interfaces, plain HTTP | HMAC-SHA256 request signing with a per-browser device token, earned once with the account password or a pairing code the launcher shows as a QR code (a Docker node has no surface for one: its doors are the password and the first-run account), through an exchange boxed end to end (NaCl box to a per-exchange key the node's identity signs; the browser pins that identity on first sign-in); 60 s replay window |
-| Media proxy and DLNA eventing (8830/8831; launcher 8832/8833) | all interfaces, plain HTTP; for the LAN, never forwarded | unguessable tokens — an owned file's is an HMAC of its path under the node secret, served only while a queue registers the file; a stream buffer's and a cover's are random and die with the queue — exist because HQPlayer, on this machine or on another one on the LAN, and DLNA renderers cannot sign requests |
+| Web UI and API (backend, 8800; launcher 18000) | all IPv4 interfaces, plain HTTP | HMAC-SHA256 request signing with a per-browser device token, earned once with the account password or a pairing code the launcher shows as a QR code (a Docker node has no surface for one: its doors are the password and the first-run account), through an exchange boxed end to end (NaCl box to a per-exchange key the node's identity signs; the browser pins that identity on first sign-in); 60 s replay window |
+| Media proxy and DLNA eventing (8830/8831; launcher 8832/8833) | all IPv4 interfaces, plain HTTP; for the LAN (the owner's own tailnet counts as his LAN), never forwarded | unguessable tokens — an owned file's is an HMAC of its path under the node secret, served only while a queue registers the file; a stream buffer's and a cover's are random and die with the queue — exist because HQPlayer, on this machine or on another one on the LAN, and DLNA renderers cannot sign requests |
 | Peer surface (launcher: a random port in 20000–29999, UPnP-mapped; Docker: 8801) | internet, TLS pinned to the node's Ed25519 key | per-IP limits; sync pulls are open by design; chat, relay and diagnostics need an invite-code↔pubkey binding plus timestamp-bound Ed25519 signatures |
 | Peer discovery (DHT `19001/udp`, launcher: peer port + 1; LAN discovery `19002/udp`, launcher only) | all interfaces | none — public DHT announces and a LAN JSON broadcast carry no secrets; everything that follows goes through the peer surface |
 | PostgreSQL (5432; launcher 15432) | loopback only | — |
+| Host agent (a Docker node on Linux, `scripts/host_agent.py`) | no port | the node asks by the name of an empty file — `check`, `update`, `diagnostics` — in the one folder of the agent's it can write; the agent reads no content, opens nothing there but by handles, and answers through the Web UI port on loopback, signed with a key of the channel's own that signs nothing else |
+
+A Docker node runs its code read-only (since 2026-11-15): a node that could
+write the tree it runs from could stop an update, outlive it, or choose the
+next image built from it. Every Compose file publishes the Web UI and the
+media ports on IPv4 alone — published with no address, Docker answers on
+IPv6 as well, which a router passing IPv6 would put on the internet. The
+Linux file runs the backend on the host's network: the node binds its ports
+itself, and the container holds no capability beyond the few its entrypoint
+needs to hand its folders over and drop root — none that would let it read
+or forge the LAN's traffic.
 
 The table lists what listens. One thing only sends: opening the Output
 picker (or Rescan) asks the LAN for players — an SSDP M-SEARCH to UDP 1900
