@@ -544,6 +544,8 @@ def test_the_restore_unit_does_nothing_without_a_trial(checkout, tmp_path):
 
 def test_the_units_watch_the_requests_folder_and_start_the_starter(checkout):
     units = ha.units(checkout)
+    for name in (f"{ha.UNIT}.service", f"{ha.UNIT}-probe.service"):
+        assert f"StandardError=append:{checkout}/host/agent.log\n" in units[name]
     assert f"DirectoryNotEmpty={checkout}/run/requests\n" in units[f"{ha.UNIT}.path"]
     for name in (f"{ha.UNIT}.service", f"{ha.UNIT}-probe.service"):
         assert f"ExecStart={checkout}/host/bin/{ha.STARTER_NAME}\n" in units[name]

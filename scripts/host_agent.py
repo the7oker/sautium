@@ -100,6 +100,7 @@ STARTER_TRIES = 3
 DETAIL_MAX = 2000
 REPORT_MAX = 4 * 1024 * 1024
 LOG_TAIL = 400
+LOG_MAX = 1024 * 1024                    # host/agent.log, one previous kept
 STATE_MAX = 64 * 1024
 VERIFY_MAX = 1024 * 1024
 # The setup code a node logs at each start until its account exists
@@ -122,7 +123,7 @@ exec python3 -I "$root/scripts/host_agent.py" run
 
 
 def log(message: str) -> None:
-    print(f"[host-agent] {message}", file=sys.stderr, flush=True)
+    print(f"[host-agent] {time.strftime('%Y-%m-%d %H:%M:%S')} {message}", file=sys.stderr, flush=True)
 
 
 class Refusal(Exception):
@@ -484,8 +485,12 @@ def _restore(root: Path, env: Dict[str, str], dump: Path) -> None:
 
 def _healthy(root: Path) -> bool:
     """The new node up and answering its health check, by Docker's own wait."""
-    return compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "1800", root=root,
-                   timeout=2000, check=False).returncode == 0
+    result = compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "1800", root=root,
+                     timeout=2000, check=False)
+    if result.returncode != 0:
+        said = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        log(f"the node did not come up healthy: {' / '.join(said[-3:]) or 'exit ' + str(result.returncode)}")
+    return result.returncode == 0
 
 
 def _front_restarted(root: Path, old: str, new: str) -> Optional[str]:
@@ -533,6 +538,7 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
         archive.wait()
     if archive.returncode != 0:
         return "failed", f"git archive of {name} failed: nothing moved", name, None
+    log("stopping the node, then the dump")
     compose("stop", "backend", root=root)
     try:
         ledger = _migrations(root, env)
@@ -541,6 +547,7 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
         # The node as it was, and answering before the answer is sent
         _healthy(root)
         raise
+    log(f"moving the checkout to {name} and starting it")
     try:
         git("-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit, root=root)
         set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", tag)
@@ -602,6 +609,7 @@ def verb_diagnostics(state: dict, now: float, root: Path = None) -> Tuple[str, s
     section("containers", [*compose_cmd(root), "ps", "--all"])
     for name in (BACKEND, POSTGRES):
         section(f"log: {name}", ["docker", "logs", "--tail", str(LOG_TAIL), name])
+    section("log: the host agent", ["tail", "-n", str(LOG_TAIL), str(host_dir(root) / "agent.log")])
     report = _scrub("".join(parts))
     if len(report.encode()) > REPORT_MAX:
         report = report.encode()[-REPORT_MAX:].decode("utf-8", "ignore")
@@ -697,6 +705,9 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
         log("not started by a starter (no SAUTIUM_HOST_STARTER_API): refused")
         return 2
     key = channel_key(root)
+    agent_log = host_dir(root) / "agent.log"
+    if agent_log.is_file() and agent_log.stat().st_size > LOG_MAX:
+        os.replace(agent_log, agent_log.with_name("agent.log.1"))   # this run writes on in the old one
     lock = os.open(host_dir(root) / "agent.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -742,8 +753,12 @@ def units(root: Path) -> Dict[str, str]:
         f"mv -f {bin_dir}/{STARTER_NAME}.previous {starter} && rm -f \"$t\"; "
         f"else echo \"$n\" > \"$t\"; fi; "
         f"systemctl --user start --no-block {UNIT}-probe.service")
+    # The agent's own log, beside its files: a person's user journal is not
+    # always kept, nor readable by them
+    log_file = host_dir(root) / "agent.log"
     service = (f"[Unit]\nDescription=Sautium host agent: %s\nOnFailure={UNIT}-restore.service\n\n"
                f"[Service]\nType=oneshot\nExecStart={starter}\nTimeoutStartSec=6h\n"
+               f"StandardOutput=append:{log_file}\nStandardError=append:{log_file}\n"
                "NoNewPrivileges=yes\n")
     return {
         f"{UNIT}.path": (f"[Unit]\nDescription=Sautium host agent: the node's requests\n\n"
