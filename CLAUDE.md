@@ -477,7 +477,7 @@ See:
   `backend/host_channel.py`): what a container cannot do for itself —
   `check`, `update` (a release the installed tree's own chain walk verifies,
   in a container with no network; the image built from a tree git made;
-  the dump and the way back through the database's container),
+  a copy of the database beside it, in its own container, and the way back),
   `diagnostics` — asked by the NAME of an empty file in `./run/requests`,
   the one folder of the agent's a container writes. **The host's side never
   opens a path a container can write**: the folder is emptied by handles

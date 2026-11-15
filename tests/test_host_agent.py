@@ -695,26 +695,26 @@ def test_the_linux_file_drops_every_capability_but_the_entrypoints():
     assert backend["env_file"] == [{"path": "./host/agent.env", "required": False}]
 
 
-def test_the_migration_ledger_is_read_by_its_own_column():
-    """The update compares the ledger before and after a failed start to
-    know whether to restore: on the Pi the first try named a column the
-    table does not have, and the update failed before it moved."""
-    sys.path.insert(0, str(REPO))
-    from desktop import db_init
-    source = BODY.read_text()
-    assert f"SELECT string_agg(filename, ',' ORDER BY filename) FROM {db_init.MIGRATIONS_TABLE}" in source
-    assert "filename VARCHAR(255) NOT NULL UNIQUE" in Path(db_init.__file__).read_text()
-
-
-def test_the_pre_update_dump_leaves_out_the_dump_loaders_tables_and_nothing_else():
-    """The patterns `mb_*` / `lb_*` also named tables of the node's own whose
-    keys point into the catalogue: on the Pi the way back's restore failed on
-    `DROP CONSTRAINT artists_pkey` and left the node down."""
-    sys.path.insert(0, str(REPO / "backend"))
-    import lb_dump_load
-    import mb_dump_load
-    assert set(ha.DUMP_TABLES) == {table for table, _ in mb_dump_load.TABLES} | set(lb_dump_load.TABLES)
-    assert "-T" not in BODY.read_text().split("def _dump(", 1)[1].split("def _restore(", 1)[0]
+def test_the_database_is_copied_and_put_back_inside_its_own_container(monkeypatch):
+    """The way back is exact: a copy of the whole database (the dump
+    loaders' tables too) made beside it while the backend is stopped, renamed
+    into place. On the Pi a clean restore of a dump that leaves those tables
+    out failed on what they hold on the rest — a key, then a function their
+    indexes use — and the first one left the node down."""
+    ran = []
+    monkeypatch.setattr(ha, "_run", lambda args, **kw: ran.append(args) or subprocess.CompletedProcess(args, 0, b"", b""))
+    env = {"POSTGRES_DB": "music_ai", "POSTGRES_USER": "musicai"}
+    copy = ha._snapshot(Path("/x"), env)
+    ha._restore(Path("/x"), env, copy)
+    statements = [a[i + 1] for a in ran for i, v in enumerate(a) if v == "-c"]
+    assert statements == ['DROP DATABASE IF EXISTS "music_ai_pre_update"',
+                          'CREATE DATABASE "music_ai_pre_update" TEMPLATE "music_ai" STRATEGY FILE_COPY',
+                          'DROP DATABASE "music_ai" WITH (FORCE)',
+                          'ALTER DATABASE "music_ai_pre_update" RENAME TO "music_ai"']
+    assert all(a[:4] == ["docker", "exec", ha.POSTGRES, "psql"] and "postgres" in a for a in ran)
+    for bad in ('x"; DROP DATABASE y; --', "Music", "a-b", ""):
+        with pytest.raises(ha.Refusal):
+            ha._snapshot(Path("/x"), {"POSTGRES_DB": bad})
 
 
 def test_an_answer_the_node_did_not_take_is_said_first_at_the_next_run(checkout, node, monkeypatch):

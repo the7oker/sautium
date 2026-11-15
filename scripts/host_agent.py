@@ -107,22 +107,6 @@ VERIFY_MAX = 1024 * 1024
 # (backend/device_auth._SETUP_CODE_FORM): never in a diagnostics report
 SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){2}")
 
-# The tables the dump loaders fill (backend/mb_dump_load.TABLES,
-# lb_dump_load.TABLES; a test holds them together): tens of GB a loader makes
-# again, left out of the pre-update dump whole and so left as they are by its
-# restore. Never a pattern: `mb_*` also names tables of the node's own
-# (mb_refuted_bindings, lb_slice_requests) whose keys point into the
-# catalogue, and a restore that cleans the catalogue cannot drop a key those
-# hold on it.
-DUMP_TABLES = (
-    "mb_area", "mb_release_group_primary_type", "mb_release_group_secondary_type", "mb_artist",
-    "mb_artist_alias", "mb_artist_credit", "mb_artist_credit_name", "mb_release_group",
-    "mb_release_group_secondary_type_join", "mb_release", "mb_release_country", "mb_release_unknown_country",
-    "mb_medium_format", "mb_medium", "mb_recording", "mb_track", "mb_release_label", "mb_url",
-    "mb_l_artist_url", "mb_l_release_url", "mb_tag", "mb_artist_tag", "mb_release_group_tag",
-    "lb_recording", "lb_artist",
-)
-
 UNIT = "sautium-host-agent"
 STARTER_NAME = "sautium-host-agent"
 
@@ -459,44 +443,42 @@ def verb_check(state: dict, now: float, root: Path = None) -> Tuple[str, str, Op
     return outcome, detail, release, None
 
 
-def _migrations(root: Path, env: Dict[str, str]) -> str:
-    """The migration ledger's names, one line: what a start applied shows
-    as a difference."""
-    return _run(["docker", "exec", POSTGRES, "psql", "-U", env.get("POSTGRES_USER", "musicai"),
-                 "-d", env.get("POSTGRES_DB", "music_ai"), "-Atc",
-                 "SELECT string_agg(filename, ',' ORDER BY filename) FROM _schema_migrations"],
-                cwd=root).stdout.decode().strip()
+def _psql(root: Path, env: Dict[str, str], *statements: str) -> None:
+    """Statements run one by one in the database's own container, on its
+    maintenance database: a database is copied, dropped and renamed only from
+    outside it."""
+    args = ["docker", "exec", POSTGRES, "psql", "-v", "ON_ERROR_STOP=1", "-U",
+            env.get("POSTGRES_USER", "musicai"), "-d", "postgres"]
+    for statement in statements:
+        args += ["-c", statement]
+    _run(args, cwd=root, timeout=4 * 3600)
 
 
-def _dump(root: Path, env: Dict[str, str]) -> Path:
-    """The database before the move, streamed out of its own container into
-    ./host/pre-update/ — one kept. The dump loaders' tables (DUMP_TABLES) are
-    left out whole, schema too: a restore leaves them as they are."""
-    folder = host_dir(root) / "pre-update"
-    folder.mkdir(mode=0o700, exist_ok=True)
-    tmp = folder / f".dump.{os.getpid()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as out:
-            _run(["docker", "exec", POSTGRES, "pg_dump", "-U", env.get("POSTGRES_USER", "musicai"),
-                  "-d", env.get("POSTGRES_DB", "music_ai"), "-Fc",
-                  *[f"--exclude-table=public.{name}" for name in DUMP_TABLES]],
-                 cwd=root, stdout=out, timeout=4 * 3600)
-            out.flush()
-            os.fsync(out.fileno())
-        dump = folder / "pre-update.dump"
-        os.replace(tmp, dump)
-        return dump
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+def _database(env: Dict[str, str]) -> str:
+    name = env.get("POSTGRES_DB", "music_ai")
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,40}", name):
+        raise Refusal("failed", f"the database's name {name!r} is not one the agent copies")
+    return name
 
 
-def _restore(root: Path, env: Dict[str, str], dump: Path) -> None:
-    with open(dump, "rb") as source:
-        _run(["docker", "exec", "-i", POSTGRES, "pg_restore", "-U", env.get("POSTGRES_USER", "musicai"),
-              "-d", env.get("POSTGRES_DB", "music_ai"), "--clean", "--if-exists", "--single-transaction"],
-             cwd=root, stdin=source, timeout=4 * 3600)
+def _snapshot(root: Path, env: Dict[str, str]) -> str:
+    """The database before the move, whole — the dump loaders' tables
+    included — as a copy beside it in the database's own container, made
+    while the backend is stopped; one kept, the previous update's dropped
+    first. The way back renames it into place: exact, where a restore of a
+    dump into the live database is not (on the Pi a clean restore failed
+    twice on what the tables left out of it hold on the rest — a key, a
+    function their indexes use), and nothing of it passes through the host."""
+    name = _database(env)
+    copy = f"{name}_pre_update"
+    _psql(root, env, f'DROP DATABASE IF EXISTS "{copy}"',
+          f'CREATE DATABASE "{copy}" TEMPLATE "{name}" STRATEGY FILE_COPY')
+    return copy
+
+
+def _restore(root: Path, env: Dict[str, str], copy: str) -> None:
+    name = _database(env)
+    _psql(root, env, f'DROP DATABASE "{name}" WITH (FORCE)', f'ALTER DATABASE "{copy}" RENAME TO "{name}"')
 
 
 def _healthy(root: Path) -> bool:
@@ -524,7 +506,7 @@ def _front_restarted(root: Path, old: str, new: str) -> Optional[str]:
 
 def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, Optional[str], Optional[str]]:
     """C4's update, unattended once the person asked: verify, build from a
-    tree git made of the verified commit, stop, dump, move, start; the way
+    tree git made of the verified commit, stop, copy the database, move, start; the way
     back when the new node does not come up."""
     root = root or ROOT
     noop = state.get("update_noop_at", 0)
@@ -554,11 +536,10 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
         archive.wait()
     if archive.returncode != 0:
         return "failed", f"git archive of {name} failed: nothing moved", name, None
-    log("stopping the node, then the dump")
+    log("stopping the node, then the copy of its database")
     compose("stop", "backend", root=root)
     try:
-        ledger = _migrations(root, env)
-        dump = _dump(root, env)
+        copy = _snapshot(root, env)
     except Refusal:
         # The node as it was, and answering before the answer is sent
         _healthy(root)
@@ -583,23 +564,22 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     compose("stop", "backend", root=root, check=False)
     git("-c", "advice.detachedHead=false", "checkout", "--quiet", "--force", "--detach", old_commit, root=root)
     set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", old_image)
-    restored, unrestored = _migrations(root, env) != ledger, None
-    if restored:
-        try:
-            _restore(root, env, dump)
-        except Refusal as e:
-            # The release before starts all the same: its schema is older, its
-            # migrations idempotent, and a node left down answers nobody
-            unrestored = e.detail
-            log(f"the database could not be put back ({unrestored}); the dump stays in {dump}")
+    unrestored = None
+    try:
+        _restore(root, env, copy)
+    except Refusal as e:
+        # The release before starts all the same: its migrations are
+        # idempotent, and a node left down answers nobody
+        unrestored = e.detail
+        log(f"the database could not be put back ({unrestored}); the copy {copy} stays beside it")
     if not _healthy(root):
         return "failed", (f"Sautium {name[1:]} {why}, and the release before it did not start again "
                           "after the way back: see the node's log"), name, None
     if unrestored:
         return "failed", (f"Sautium {name[1:]} {why}: the node is back on the release before it, but "
                           f"its database could not be put back as it was ({unrestored})"), name, None
-    return "undone", (f"Sautium {name[1:]} {why}: the node is back on the release before it"
-                      + (", its database as it was before the update" if restored else "")), name, None
+    return "undone", (f"Sautium {name[1:]} {why}: the node is back on the release before it, "
+                      "its database as it was before the update"), name, None
 
 
 def _scrub(text: str) -> str:
@@ -871,7 +851,7 @@ def uninstall(systemctl=None) -> int:
     for name in units(ROOT):
         (folder / name).unlink(missing_ok=True)
     ctl("daemon-reload")
-    print("The host agent's units are removed; ./host/ is kept (its key, the last dump).")
+    print("The host agent's units are removed; ./host/ is kept (its key, its log).")
     return 0
 
 
