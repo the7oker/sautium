@@ -684,10 +684,21 @@ def test_the_linux_file_drops_every_capability_but_the_entrypoints():
     spec = yaml.safe_load((REPO / "docker-compose.pi.yml").read_text())["services"]
     backend = spec["backend"]
     assert backend["cap_drop"] == ["ALL"]
-    assert set(backend["cap_add"]) <= {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"}
+    assert sorted(backend["cap_add"]) == ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
     assert "NET_RAW" not in backend["cap_add"] and "NET_ADMIN" not in backend["cap_add"]
     assert backend["environment"]["UVICORN_PORT"] == 8800
     assert backend["environment"]["POSTGRES_HOST"] == "127.0.0.1"
     assert backend["environment"]["BACKEND_URL"] == "http://127.0.0.1:8800"
     assert spec["postgres"]["ports"] == ["127.0.0.1:5432:5432"]
     assert backend["env_file"] == [{"path": "./host/agent.env", "required": False}]
+
+
+def test_the_migration_ledger_is_read_by_its_own_column():
+    """The update compares the ledger before and after a failed start to
+    know whether to restore: on the Pi the first try named a column the
+    table does not have, and the update failed before it moved."""
+    sys.path.insert(0, str(REPO))
+    from desktop import db_init
+    source = BODY.read_text()
+    assert f"SELECT string_agg(filename, ',' ORDER BY filename) FROM {db_init.MIGRATIONS_TABLE}" in source
+    assert "filename VARCHAR(255) NOT NULL UNIQUE" in Path(db_init.__file__).read_text()

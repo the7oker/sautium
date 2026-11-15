@@ -127,18 +127,20 @@ services:
     # take a privilege back (a setuid binary, a file capability).
     security_opt:
       - no-new-privileges:true
-    # No capability beyond what the entrypoint needs while it is root, to
-    # hand the node's folders over and drop to the node's user
-    # (node_user.py; measured on the Pi, PI-NODE-2A). In the host's network
-    # namespace NET_RAW would let a container's root sniff and spoof on the
-    # LAN; NET_BIND_SERVICE, NET_ADMIN and the rest are not needed either:
+    # No capability beyond what root needs here (measured on a Pi 5,
+    # PI-NODE-2A): the entrypoint hands the node's folders over — CHOWN, and
+    # DAC_OVERRIDE to walk the folders of a user it is not — and drops to the
+    # node's user (SETGID, SETUID); a `docker exec` as root (the weekly
+    # backup's) reads the node's identity with DAC_OVERRIDE. With none the
+    # start fails; without DAC_OVERRIDE folders stay unhanded. In the host's
+    # network namespace NET_RAW would let a container's root sniff and spoof
+    # on the LAN; NET_BIND_SERVICE, NET_ADMIN and the rest are not needed:
     # every port is above 1024 and the node configures no interface.
     cap_drop:
       - ALL
     cap_add:
       - CHOWN
       - DAC_OVERRIDE
-      - FOWNER
       - SETGID
       - SETUID
     # The host agent's channel key, which its install writes to ./host/

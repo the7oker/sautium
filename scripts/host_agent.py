@@ -447,7 +447,7 @@ def _migrations(root: Path, env: Dict[str, str]) -> str:
     as a difference."""
     return _run(["docker", "exec", POSTGRES, "psql", "-U", env.get("POSTGRES_USER", "musicai"),
                  "-d", env.get("POSTGRES_DB", "music_ai"), "-Atc",
-                 "SELECT string_agg(name, ',' ORDER BY name) FROM _schema_migrations"],
+                 "SELECT string_agg(filename, ',' ORDER BY filename) FROM _schema_migrations"],
                 cwd=root).stdout.decode().strip()
 
 
@@ -538,7 +538,8 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
         ledger = _migrations(root, env)
         dump = _dump(root, env)
     except Refusal:
-        compose("up", "-d", "--no-build", root=root)
+        # The node as it was, and answering before the answer is sent
+        _healthy(root)
         raise
     try:
         git("-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit, root=root)
