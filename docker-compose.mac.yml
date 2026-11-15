@@ -215,10 +215,10 @@ services:
       # git ignores whole, so nothing written there is a change to the checkout.
       - ./backend/data:/app/data
       - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
-      - ./data/generated_eq:/app/data/generated_eq
+      - ./data/generated_eq:/var/lib/sautium/generated_eq
       # Measurement-registry clones (AutoEq sparse checkout) — read-only
       # source for gear_registry.py imports; refreshed via git pull.
-      - ./data/registry:/app/data/registry:ro
+      - ./data/registry:/var/lib/sautium/registry:ro
       # The peer surface's TLS cert (pinned to the node key; tls_gen.py).
       - ./data/tls:/app/data/tls
       - ./data/node_identity:/app/data/node_identity   # identity certificate + mined proof (survive recreation)

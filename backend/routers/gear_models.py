@@ -201,7 +201,7 @@ def refresh_registries() -> Dict[str, Any]:
     except Exception as e:
         out["spinorama"] = {"error": f"fetch failed: {e}"}
 
-    autoeq_root = "/app/data/registry/autoeq"
+    autoeq_root = "/var/lib/sautium/registry/autoeq"
     if os.path.isdir(os.path.join(autoeq_root, "measurements")):
         try:
             out["autoeq"] = import_autoeq(autoeq_root)

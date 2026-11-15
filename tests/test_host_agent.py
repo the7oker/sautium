@@ -173,7 +173,8 @@ def test_a_drain_removes_at_most_its_budget_and_says_the_rest(checkout, monkeypa
     for i in range(12):
         (requests / f"x{i}").write_text("")
     asked, left = ha.drain(checkout)
-    assert asked == [] and left == 7
+    assert asked == [] and left > 0
+    assert len(list((checkout / "run" / "requests").iterdir())) == 7
 
 
 # -- what the agent writes: only under ./host/ -----------------------------------
@@ -306,7 +307,7 @@ def test_the_nodes_door_admits_the_channels_key_on_the_answer_alone(monkeypatch)
     sys.path.insert(0, str(REPO / "backend"))
     import auth_hmac
     import host_channel
-    monkeypatch.setenv("SAUTIUM_HOST_CHANNEL_KEY", KEY)
+    monkeypatch.setattr(host_channel, "_KEY", KEY.encode())
     door = auth_hmac.HMACAuthMiddleware(None, Path("/nonexistent"))
     monkeypatch.setattr(door, "_get_secret", lambda: b"s" * 64)
     digest = hashlib.sha256(b"{}").hexdigest()
@@ -323,7 +324,7 @@ def test_the_nodes_door_admits_the_channels_key_on_the_answer_alone(monkeypatch)
     assert judged("/api/host/update", KEY.encode())[0] is not None          # nowhere else
     assert judged("/api/settings", KEY.encode())[0] is not None
     assert judged(host_channel.ANSWER_PATH, b"s" * 64)[0] is not None       # no other signer there
-    monkeypatch.delenv("SAUTIUM_HOST_CHANNEL_KEY")
+    monkeypatch.setattr(host_channel, "_KEY", None)
     assert judged(host_channel.ANSWER_PATH, KEY.encode())[0] is not None    # no agent, no door
 
 
@@ -456,10 +457,10 @@ def test_an_old_starter_runs_a_new_body_and_a_new_starter_an_old_body(checkout):
     assert _start(checkout).returncode == 0
 
 
-def _verified(checkout, monkeypatch, at=0.0):
+def _verified(checkout, monkeypatch, at=0.0, runs_ok=1):
     head = "f" * 40
     monkeypatch.setattr(ha, "head", lambda root=None: head)
-    return {"installed": {"name": "v0.3.0", "commit": head, "at": at}}
+    return {"installed": {"name": "v0.3.0", "commit": head, "at": at, "runs_ok": runs_ok}}
 
 
 def test_the_starter_moves_only_after_a_verified_release_ran_healthy_for_its_time(checkout, monkeypatch):
@@ -471,6 +472,9 @@ def test_the_starter_moves_only_after_a_verified_release_ran_healthy_for_its_tim
     assert ha.maintain_starter({**state, "failed_since_installed": True}, ha.STARTER_AFTER, checkout,
                                lambda: probes.append(1)) is None
     assert ha.maintain_starter({}, ha.STARTER_AFTER, checkout, lambda: probes.append(1)) is None
+    # the release's body has not run once since the move
+    assert ha.maintain_starter(_verified(checkout, monkeypatch, runs_ok=0), ha.STARTER_AFTER, checkout,
+                               lambda: probes.append(1)) is None
     other = {"installed": {**state["installed"], "commit": "e" * 40}}
     assert ha.maintain_starter(other, ha.STARTER_AFTER, checkout, lambda: probes.append(1)) is None
     assert probes == [] and current.read_bytes() == b"#!/bin/sh\n# the old starter\n"
@@ -562,7 +566,7 @@ def test_install_makes_the_folders_the_key_the_starter_and_the_units(tmp_path, m
     monkeypatch.setattr(ha, "_run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"yes", b""))
     calls = []
     ha.install(root, systemctl=lambda *args: calls.append(args))
-    assert calls == [("daemon-reload",), ("enable", "--now", f"{ha.UNIT}.path")]
+    assert calls == [("daemon-reload",), ("enable", f"{ha.UNIT}.service"), ("enable", "--now", f"{ha.UNIT}.path")]
     for folder in (root / "host", root / "host" / "bin", root / "run" / "requests"):
         assert stat.S_IMODE(folder.stat().st_mode) == 0o700
     key = ha.channel_key(root)
@@ -698,24 +702,42 @@ def test_the_linux_file_drops_every_capability_but_the_entrypoints():
 def test_the_database_is_copied_and_put_back_inside_its_own_container(monkeypatch):
     """The way back is exact: a copy of the whole database (the dump
     loaders' tables too) made beside it while the backend is stopped, renamed
-    into place. On the Pi a clean restore of a dump that leaves those tables
-    out failed on what they hold on the rest — a key, then a function their
-    indexes use — and the first one left the node down."""
+    into place, the live one renamed away first and dropped last. On the Pi a
+    clean restore of a dump that leaves those tables out failed on what they
+    hold on the rest — a key, then a function their indexes use — and the
+    first one left the node down."""
     ran = []
-    monkeypatch.setattr(ha, "_run", lambda args, **kw: ran.append(args) or subprocess.CompletedProcess(args, 0, b"", b""))
+
+    def fake(args, **kw):
+        ran.append(args)
+        out = b"music_ai\nmusic_ai_pre_update\npostgres" if any("SELECT datname" in a for a in args) else b""
+        return subprocess.CompletedProcess(args, 0, out, b"")
+
+    monkeypatch.setattr(ha, "_run", fake)
     env = {"POSTGRES_DB": "music_ai", "POSTGRES_USER": "musicai"}
     copy = ha._snapshot(Path("/x"), env)
     ha._restore(Path("/x"), env, copy)
     statements = [a[i + 1] for a in ran for i, v in enumerate(a) if v == "-c"]
-    assert statements == ['DROP DATABASE IF EXISTS "music_ai_pre_update"',
-                          'CREATE DATABASE "music_ai_pre_update" TEMPLATE "music_ai" STRATEGY FILE_COPY',
-                          'DROP DATABASE "music_ai" WITH (FORCE)',
-                          'ALTER DATABASE "music_ai_pre_update" RENAME TO "music_ai"']
+    ddl = [s for s in statements if not s.startswith("SELECT")]
+    assert ddl == ['DROP DATABASE IF EXISTS "music_ai_pre_update"',
+                   'CREATE DATABASE "music_ai_pre_update" TEMPLATE "music_ai" STRATEGY FILE_COPY',
+                   'DROP DATABASE IF EXISTS "music_ai_failed_update" WITH (FORCE)',
+                   'ALTER DATABASE "music_ai" RENAME TO "music_ai_failed_update"',
+                   'ALTER DATABASE "music_ai_pre_update" RENAME TO "music_ai"',
+                   'DROP DATABASE IF EXISTS "music_ai_failed_update" WITH (FORCE)']
     assert all(a[:4] == ["docker", "exec", ha.POSTGRES, "psql"] and "postgres" in a for a in ran)
     for bad in ('x"; DROP DATABASE y; --', "Music", "a-b", ""):
         with pytest.raises(ha.Refusal):
             ha._snapshot(Path("/x"), {"POSTGRES_DB": bad})
 
+
+def test_a_way_back_cut_short_after_its_renames_is_finished_not_undone(monkeypatch):
+    """A way back interrupted between its renames is resumed: with the copy
+    already in place there is nothing to rename."""
+    monkeypatch.setattr(ha, "_run", lambda args, **kw: subprocess.CompletedProcess(
+        args, 0, b"music_ai\nmusic_ai_failed_update\npostgres" if any("SELECT datname" in a for a in args) else b"",
+        b""))
+    ha._restore(Path("/x"), {"POSTGRES_DB": "music_ai"}, "music_ai_pre_update")
 
 def test_an_answer_the_node_did_not_take_is_said_first_at_the_next_run(checkout, node, monkeypatch):
     handler, api = node
@@ -723,9 +745,228 @@ def test_an_answer_the_node_did_not_take_is_said_first_at_the_next_run(checkout,
     (checkout / "run" / "requests" / "update").write_text("")
     ha.run(checkout, "http://127.0.0.1:9", now=10.0, verbs={"update": lambda s, n, r: ("undone", "back", "v0.3.0", None)},
            start_probe=lambda: None)
-    assert ha.load_state(checkout)["unsent"] == [["update", "undone", "back", "v0.3.0", None]]
+    assert ha.load_state(checkout)["unsent"] == {"update": ["undone", "back", "v0.3.0"]}
     (checkout / "run" / "requests" / "check").write_text("")
     ha.run(checkout, api, now=20.0, verbs={"check": lambda s, n, r: ("current", "x", None, None)},
            start_probe=lambda: None)
     assert [json.loads(b)["verb"] for _, _, b in handler.seen] == ["update", "check"]
     assert "unsent" not in ha.load_state(checkout)
+
+
+def test_a_starter_the_restore_unit_put_back_is_never_tried_again(checkout, monkeypatch):
+    """The probe failed it three times and the restore unit put the previous
+    one back: the body must not install the same starter at its next run (a
+    loop of trials, the review's probe)."""
+    current, previous, trial = ha._starter_paths(checkout)
+    current.write_bytes(b"#!/bin/sh\n# the old starter\n")
+    state = _verified(checkout, monkeypatch)
+    assert ha.maintain_starter(state, ha.STARTER_AFTER, checkout, lambda: None) == "a new starter is on trial"
+    # what the restore unit does after the third failed start
+    os.replace(previous, current)
+    trial.unlink()
+    assert "not tried again" in ha.maintain_starter(state, ha.STARTER_AFTER + 1, checkout, lambda: None)
+    assert ha.maintain_starter(state, ha.STARTER_AFTER + 2, checkout, lambda: None) is None
+    assert current.read_bytes() == b"#!/bin/sh\n# the old starter\n"
+
+
+def test_a_good_run_counts_for_the_installed_release_and_a_failed_one_stops_the_starters_move(
+        checkout, node, monkeypatch):
+    handler, api = node
+    monkeypatch.setenv("SAUTIUM_HOST_STARTER_API", "1")
+    ha.save_state({"installed": {"name": "v0.3.0", "commit": "f" * 40, "at": 0.0, "runs_ok": 0}}, checkout)
+    (checkout / "run" / "requests" / "check").write_text("")
+    ha.run(checkout, api, now=10.0, verbs={"check": lambda s, n, r: ("current", "x", None, None)},
+           start_probe=lambda: None)
+    assert ha.load_state(checkout)["installed"]["runs_ok"] == 1
+    (checkout / "run" / "requests" / "check").write_text("")
+    ha.run(checkout, api, now=20.0, verbs={"check": lambda s, n, r: ("failed", "x", None, None)},
+           start_probe=lambda: None)
+    assert ha.load_state(checkout)["failed_since_installed"] is True
+
+
+def test_a_verbs_unexpected_error_is_an_answer_with_its_trace_in_the_log(checkout, node, monkeypatch, capfd):
+    handler, api = node
+    monkeypatch.setenv("SAUTIUM_HOST_STARTER_API", "1")
+    (checkout / "run" / "requests" / "check").write_text("")
+
+    def broken(state, now, root):
+        raise KeyError("offered")
+
+    assert ha.run(checkout, api, now=10.0, verbs={"check": broken}, start_probe=lambda: None) == 0
+    assert json.loads(handler.seen[0][2])["outcome"] == "failed"
+    assert "Traceback" in capfd.readouterr().err
+
+
+def test_the_body_answers_its_selftest(checkout):
+    _install_copy(checkout)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SAUTIUM_HOST")}
+    body = checkout / "scripts" / "host_agent.py"
+    assert subprocess.run([sys.executable, "-I", str(body), "selftest"], env=env).returncode == 2
+    assert subprocess.run([sys.executable, "-I", str(body), "selftest"],
+                          env={**env, "SAUTIUM_HOST_STARTER_API": "1"}).returncode == 0
+
+
+class _Update:
+    """verb_update with git, docker and the survey replaced by a record of
+    what they were asked: the order of the steps, and what a failure at each
+    one leaves."""
+
+    def __init__(self, checkout, monkeypatch, *, fail_at=None, healthy=(True,), body_ok=True):
+        self.calls, self.fail_at, self.healthy, self.root = [], fail_at, list(healthy), checkout
+        (checkout / ".env").write_text("POSTGRES_DB=music_ai\nSAUTIUM_BACKEND_IMAGE=sautium-backend:v0.2.0-old\n")
+        offered = {"name": "v0.3.0", "commit": "c" * 40}
+        monkeypatch.setattr(ha, "survey", lambda root=None: {"head": "a" * 40, "installed": None, "offered": offered,
+                                                            "rewrite": None, "refused": [], "fork": None})
+        monkeypatch.setattr(ha, "leftovers", lambda root=None: [])
+        monkeypatch.setattr(ha, "_room_for_copy", lambda root, env: None)
+        monkeypatch.setattr(ha, "head", lambda root=None: "a" * 40)
+        monkeypatch.setattr(ha, "_body_answers", lambda root: body_ok)
+        monkeypatch.setattr(ha, "_front_restarted", lambda root, old, new: None)
+        monkeypatch.setattr(ha, "_healthy", lambda root: self.healthy.pop(0) if self.healthy else True)
+        monkeypatch.setattr(ha, "_run", self.run)
+        monkeypatch.setattr(ha.subprocess, "Popen", self.popen)
+
+    def step(self, name):
+        self.calls.append(name)
+        if name == self.fail_at:
+            raise ha.Refusal("failed", f"{name} failed")
+
+    def run(self, args, **kw):
+        joined = " ".join(args)
+        for needle, name in (("stop backend", "stop"), ("CREATE DATABASE", "copy"),
+                             ("RENAME TO", "restore"), ("checkout --quiet --detach", "move"),
+                             ("checkout --quiet --force --detach", "back"), ("docker build", "build"),
+                             ("SELECT datname", "databases"), ("status --porcelain", "status")):
+            if needle in joined:
+                self.step(name)
+                out = b"music_ai music_ai_pre_update" if name == "databases" else b""
+                return subprocess.CompletedProcess(args, 0, out, b"")
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    def popen(self, args, **kw):
+        class Archive:
+            stdout = type("S", (), {"close": lambda self: None})()
+            returncode = 0
+
+            def wait(self):
+                return 0
+        return Archive()
+
+
+def test_an_update_moves_with_its_database_copied_first(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch)
+    state = {}
+    outcome, detail, release, _ = ha.verb_update(state, 1000.0, checkout)
+    assert (outcome, release) == ("updated", "v0.3.0")
+    assert up.calls == ["status", "build", "stop", "copy", "move"]
+    assert "moving" not in state and state["installed"]["commit"] == "c" * 40
+    assert ha.read_env(checkout / ".env")["SAUTIUM_BACKEND_IMAGE"] == "sautium-backend:v0.3.0-cccccccccccc"
+
+
+@pytest.mark.parametrize("fail_at", ["copy", "move"])
+def test_a_failure_after_the_stop_always_ends_on_the_way_back_with_the_node_started(checkout, monkeypatch, fail_at):
+    up = _Update(checkout, monkeypatch, fail_at=fail_at)
+    state = {}
+    outcome, detail, release, _ = ha.verb_update(state, 1000.0, checkout)
+    assert outcome in ("undone", "failed") and "could not be put in place" in detail
+    assert up.calls[-2:] == (["stop", "back"] if fail_at == "copy" else ["back", "databases"]) or "back" in up.calls
+    assert "moving" not in state and state["update_failed"]["commit"] == "c" * 40
+    assert ha.read_env(checkout / ".env")["SAUTIUM_BACKEND_IMAGE"] == "sautium-backend:v0.2.0-old"
+
+
+def test_a_release_whose_agent_does_not_start_is_taken_back(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch, body_ok=False)
+    state = {}
+    outcome, detail, _, _ = ha.verb_update(state, 1000.0, checkout)
+    assert outcome == "undone" and "host agent does not start" in detail
+    assert "restore" in up.calls and "back" in up.calls
+
+
+def test_a_release_that_did_not_start_is_not_tried_again_for_a_day(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch, healthy=(False, True))
+    state = {}
+    assert ha.verb_update(state, 1000.0, checkout)[0] == "undone"
+    up.calls.clear()
+    assert ha.verb_update(state, 1001.0, checkout)[0] == "floor"
+    assert up.calls == []                                   # no build, no stop: the forged loop costs nothing
+    up.healthy = [True]
+    assert ha.verb_update(state, 1000.0 + ha.UPDATE_NOOP_FLOOR, checkout)[0] == "updated"
+
+
+def test_an_update_a_run_did_not_finish_is_undone_at_the_next_start(checkout, node, monkeypatch):
+    handler, api = node
+    up = _Update(checkout, monkeypatch)
+    monkeypatch.setenv("SAUTIUM_HOST_STARTER_API", "1")
+    ha.save_state({"moving": {"from": "a" * 40, "image": "sautium-backend:v0.2.0-old", "to": "c" * 40,
+                              "name": "v0.3.0", "tag": "sautium-backend:v0.3.0-cccccccccccc",
+                              "copy": "music_ai_pre_update"}}, checkout)
+    ha.set_env(checkout / ".env", "SAUTIUM_BACKEND_IMAGE", "sautium-backend:v0.3.0-cccccccccccc")
+    assert ha.run(checkout, api, now=50.0, verbs={}, start_probe=lambda: None) == 0
+    said = json.loads(handler.seen[0][2])
+    assert (said["verb"], said["outcome"]) == ("update", "undone") and "did not finish" in said["detail"]
+    assert "back" in up.calls and "restore" in up.calls
+    assert "moving" not in ha.load_state(checkout)
+    assert ha.read_env(checkout / ".env")["SAUTIUM_BACKEND_IMAGE"] == "sautium-backend:v0.2.0-old"
+
+
+def test_files_git_does_not_know_among_the_code_stop_the_update(tmp_path):
+    root = tmp_path / "co"
+    (root / "backend" / "routers").mkdir(parents=True)
+    (root / "mcp").mkdir()
+    (root / "backend" / "main.py").write_text("x = 1\n")
+    (root / ".gitignore").write_text("backend/data/\n__pycache__/\n*.pyc\n**/.env\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+                   check=True)
+    (root / "backend" / "data").mkdir()
+    (root / "backend" / "data" / ".node_key").write_text("k")
+    (root / "backend" / "__pycache__").mkdir()
+    (root / "backend" / "__pycache__" / "main.cpython-311.pyc").write_bytes(b"x")
+    assert ha.leftovers(root) == []
+    (root / "backend" / ".env").write_text("POSTGRES_HOST=elsewhere\n")
+    (root / "backend" / "json.py").write_text("print('shadow')\n")
+    (root / "backend" / "routers" / "sync.pyc").write_bytes(b"x")
+    (root / "mcp" / "extra.py").write_text("x")
+    assert sorted(ha.leftovers(root)) == ["backend/.env", "backend/json.py", "backend/routers/sync.pyc",
+                                          "mcp/extra.py"]
+
+
+def test_uninstall_takes_the_key_so_the_node_learns_it_has_no_agent(checkout, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    ha.uninstall(checkout, systemctl=lambda *a: None)
+    assert not (checkout / "host" / "agent.env").exists()
+
+
+def test_the_agent_runs_at_the_user_managers_start_too():
+    units = ha.units(Path("/srv/sautium"))
+    assert "[Install]\nWantedBy=default.target\n" in units[f"{ha.UNIT}.service"]
+    assert "[Install]" not in units[f"{ha.UNIT}-probe.service"]
+
+
+# Mount points inside a folder a container writes, as they stood before
+# PI-NODE-2A: a node can leave a link where a NEW one would be, and the mount
+# lands where the link points (over the code). None may be added.
+NESTED_IN_WRITABLE = {"/app/data/tls", "/app/data/node_identity", "/app/data/mbdump", "/app/data/lbdump",
+                      "/app/data/support", "/app/data/backup", "/app/data/export", "/app/data/seed",
+                      "/app/data/atlas", "/home/agent/.claude/projects"}
+
+
+@pytest.mark.parametrize("name", COMPOSE_FILES)
+def test_no_new_mount_lands_inside_a_folder_the_node_writes(name):
+    yaml = pytest.importorskip("yaml")
+    mounts = _mounts(yaml.safe_load((REPO / name).read_text())["services"]["backend"])
+    writable = [target for _, target, ro in mounts if not ro and target != "/app"]
+    nested = {target for _, target, _ in mounts
+              if any(target != w and target.startswith(w + "/") for w in writable)}
+    assert nested <= NESTED_IN_WRITABLE, (name, nested - NESTED_IN_WRITABLE)
+
+
+def test_a_release_whose_image_did_not_build_is_not_built_again_for_a_day(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch, fail_at="build")
+    state = {}
+    with pytest.raises(ha.Refusal, match="did not build"):
+        ha.verb_update(state, 1000.0, checkout)
+    assert "stop" not in up.calls
+    up.calls.clear()
+    assert ha.verb_update(state, 1001.0, checkout)[0] == "floor" and up.calls == []

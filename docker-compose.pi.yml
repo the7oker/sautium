@@ -284,10 +284,10 @@ services:
       # nothing else. The one folder of the agent's a container writes.
       - ./run/requests:/run/sautium/requests
       - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
-      - ./data/generated_eq:/app/data/generated_eq
+      - ./data/generated_eq:/var/lib/sautium/generated_eq
       # Measurement-registry clones (AutoEq sparse checkout) — read-only
       # source for gear_registry.py imports; refreshed via git pull.
-      - ./data/registry:/app/data/registry:ro
+      - ./data/registry:/var/lib/sautium/registry:ro
       # The peer surface's TLS cert (pinned to the node key; tls_gen.py).
       - ./data/tls:/app/data/tls
       - ./data/node_identity:/app/data/node_identity   # identity certificate + mined proof (survive recreation)
@@ -327,6 +327,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # The image's check, with a start of its own: the migrations run before
+    # the node serves, and on a Pi a release's can take minutes, while the
+    # image's 40 s and three misses would call the node unhealthy at about
+    # two and the host agent's update would take it back. A failing check
+    # counts after half an hour; a node that answers is healthy at once,
+    # checked every 5 s meanwhile.
+    healthcheck:
+      start_period: 1800s
+      start_interval: 5s
     restart: unless-stopped
     logging: *bounded-log
     # Docker kills a container ~3 s after SIGTERM unless told otherwise

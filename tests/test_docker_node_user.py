@@ -656,3 +656,18 @@ def test_a_data_folder_the_entrypoint_cannot_read_says_why_the_uid_stays(tmp_pat
                                      str(accounts.group)) is accounts.pw
     assert (f"{data} could not be read (Input/output error): the node's user stays uid "
             f"{accounts.pw.pw_uid}") in capfd.readouterr().err
+
+
+def test_in_docker_the_cli_reads_no_settings_from_the_nodes_own_claude_folder(monkeypatch):
+    """A Docker node's ~/.claude is a folder the node writes: a hook a node
+    that was controlled once left in its settings.json ran at every chat
+    turn of every release after (measured with the image's CLI: the hook ran
+    without these flags and not with them). A launcher's CLI reads its
+    person's own settings as before."""
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", True)
+    for tools in (claude_code_runner.LIBRARY, claude_code_runner.RESEARCH, claude_code_runner.TEXT):
+        flags = claude_code_runner._tool_flags(tools)
+        assert flags[flags.index("--setting-sources") + 1] == "project"
+        assert flags[flags.index("--settings") + 1] == '{"disableAllHooks": true}'
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", False)
+    assert "--setting-sources" not in claude_code_runner._tool_flags(claude_code_runner.LIBRARY)

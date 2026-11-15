@@ -141,7 +141,7 @@ class FakeGitHub:
 def _held() -> list:
     """What the cache holds: each build folder by its release's tag."""
     return sorted(p.name.rsplit("-", 1)[0] if p.is_dir() else p.name
-                  for p in ytdlp_release.root().iterdir())
+                  for p in ytdlp_release.root().iterdir() if p.name != "verified_for")
 
 
 @pytest.fixture
@@ -294,6 +294,31 @@ def test_a_newer_release_replaces_the_build_and_keeps_the_one_before(github):
     github.publish("2026.11.03", _build("2026.11.03"))
     assert ytdlp_release.refresh() == "2026.11.03"
     assert _held() == ["2026.11.02", "2026.11.03", "current"]
+
+
+def test_a_build_another_commit_of_the_code_put_in_place_is_never_run(github, monkeypatch):
+    """The cache is the node's to write: a program a node that was controlled
+    once put there must not outlive the code's update. The build counts for
+    the commit that checked it; a new commit installs its own, checked again."""
+    monkeypatch.setattr(ytdlp_release, "_code_commit", lambda: "a" * 12)
+    github.publish(TAG, _build(TAG))
+    assert ytdlp_release.refresh() == TAG
+    first = ytdlp_release.executable()
+    monkeypatch.setattr(ytdlp_release, "_code_commit", lambda: "b" * 12)
+    assert ytdlp_release.executable() is None and ytdlp_release.in_place() is None
+    github.asked.clear()
+    assert ytdlp_release.refresh() == TAG
+    name, _ = ytdlp_release._asset()
+    assert any(p.endswith(f"/{TAG}/{name}") for p in github.asked)     # fetched and checked again
+    assert ytdlp_release.executable() not in (None, first)
+    assert (ytdlp_release.root() / "verified_for").read_text() == "b" * 12
+
+
+def test_a_packaged_tree_keeps_its_build(github, monkeypatch):
+    monkeypatch.setattr(ytdlp_release, "_code_commit", lambda: None)
+    github.publish(TAG, _build(TAG))
+    assert ytdlp_release.refresh() == TAG
+    assert ytdlp_release.executable() is not None
 
 
 # -- how the provider runs it -----------------------------------------------------------------

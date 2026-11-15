@@ -453,11 +453,17 @@ See:
   `./backend` → `/app:ro` and `./mcp` → `/app/mcp:ro` — a node that could
   write its tree could pin, outlive or undo an update and decide the next
   image built from it. What the node writes has a bind of its own:
-  `./backend/data` → `/app/data` (its own source, so Docker makes it), and
-  under it `generated_eq`, the registry and the `./data/*` folders; the
-  checkout's `.git` mounts beside `/app` (`/checkout`); the code's own
-  mount points ship in the tree (`backend/desktop/`, `backend/mcp/`) —
-  Docker cannot make one in a read-only folder. No keep-file in a folder a
+  `./backend/data` → `/app/data` (its own source, so Docker makes it; the
+  `./data/*` folders under it as before); `generated_eq` and the registry
+  at `/var/lib/sautium/`, the checkout's `.git` at `/checkout` — a NEW
+  mount never goes inside a folder the node writes (a node could leave a
+  link where its point will be); the code's own mount points ship in the
+  tree (`backend/desktop/`, `backend/mcp/`) — Docker cannot make one in a
+  read-only folder. What the node writes is untrusted to RUN: the yt-dlp
+  build counts only for the commit that checked it
+  (`ytdlp_release.verified_for`), and in Docker the Claude CLI reads no
+  settings or hooks from the node's own `~/.claude` (`--setting-sources
+  project`, `disableAllHooks`). No keep-file in a folder a
   container writes: each is ignored WHOLE (`folder/`, never `folder/*`), so
   nothing written there is a change to the checkout. The node reads no
   bytecode it cannot write (`PYTHONPYCACHEPREFIX`, root's, compiled at the
@@ -477,7 +483,10 @@ See:
   `backend/host_channel.py`): what a container cannot do for itself —
   `check`, `update` (a release the installed tree's own chain walk verifies,
   in a container with no network; the image built from a tree git made;
-  a copy of the database beside it, in its own container, and the way back),
+  a copy of the database beside it, in its own container, and the way back
+  — after any failure past the node's stop, and at the next start for an
+  update a run did not finish; a release that did not start is not tried
+  again for a day),
   `diagnostics` — asked by the NAME of an empty file in `./run/requests`,
   the one folder of the agent's a container writes. **The host's side never
   opens a path a container can write**: the folder is emptied by handles

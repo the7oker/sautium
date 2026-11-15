@@ -17,6 +17,13 @@ is not the one in place — a build is in place when it starts and names its
 own release; a release older than a working build is refused (an older
 release is validly signed too). A release whose install failed is not
 fetched again for a day, unless a newer one is out.
+
+Which code checked it: the build in place counts only for the commit of the
+code that installed it (`verified_for`, beside it). The cache is a folder
+the node writes, so a node that was controlled once could have put another
+program there; a new release of the code (the host agent's update, a
+by-hand move) finds no build of its own and installs one checked again,
+before anything runs it (PI-NODE-2A).
 """
 
 import base64
@@ -145,6 +152,23 @@ def _build_folder() -> Optional[str]:
     return name if _BUILD_FOLDER.fullmatch(name) else None
 
 
+def _code_commit() -> Optional[str]:
+    """The commit of the code running (config.build_identity), None for a
+    packaged tree, whose builds are its own."""
+    from config import build_identity
+    return build_identity()["commit"]
+
+
+def _verified_here() -> bool:
+    commit = _code_commit()
+    if commit is None:
+        return True
+    try:
+        return (root() / "verified_for").read_text(encoding="ascii").strip() == commit
+    except FileNotFoundError:
+        return False
+
+
 def installed_tag() -> Optional[str]:
     name = _build_folder()
     return _BUILD_FOLDER.fullmatch(name).group(1) if name else None
@@ -154,7 +178,7 @@ def executable() -> Optional[Path]:
     """The build in place; None before the first one lands, or on a platform
     yt-dlp publishes no build for."""
     name = _build_folder()
-    if name is None:
+    if name is None or not _verified_here():
         return None
     try:
         exe = root() / name / _asset()[1]
@@ -343,6 +367,11 @@ def _install(client: httpx.Client, tag: str) -> None:
     current = folder / "current.part"
     current.write_text(build.name, encoding="ascii")
     os.replace(current, folder / "current")
+    commit = _code_commit()
+    if commit is not None:
+        mark = folder / "verified_for.part"
+        mark.write_text(commit, encoding="ascii")
+        os.replace(mark, folder / "verified_for")
     for old in folder.iterdir():
         if old.is_dir() and old.name not in (build.name, previous):
             # A build still running on Windows cannot go yet: the next pass takes it

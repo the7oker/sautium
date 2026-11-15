@@ -45,6 +45,9 @@ root line, the owner's.
     python3 -I scripts/host_agent.py uninstall
     python3 -I scripts/host_agent.py status
 
+Every body answers `selftest` (an update keeps a release only once its body
+starts) and `run`.
+
 The standard library only, Python 3.9's language: a host's own Python.
 """
 
@@ -58,10 +61,12 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import stat
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -205,7 +210,7 @@ def set_env(path: Path, key: str, value: str) -> None:
     """One key of .env set, every other line kept as it is; the file's mode
     kept (it holds the database password: the person's alone)."""
     raw = _read_bounded(path, STATE_MAX) or b""
-    lines = raw.decode("utf-8").splitlines()
+    lines = raw.decode("utf-8", "surrogateescape").splitlines()
     out, done = [], False
     for line in lines:
         if line.split("=", 1)[0].strip() == key and not line.lstrip().startswith("#"):
@@ -219,7 +224,7 @@ def set_env(path: Path, key: str, value: str) -> None:
     mode = stat.S_IMODE(os.stat(path).st_mode) if path.exists() else 0o600
     tmp = path.with_name(f".{path.name}.{os.getpid()}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write("\n".join(out) + "\n")
         f.flush()
         os.fsync(f.fileno())
@@ -268,7 +273,9 @@ def _remove_tree(dir_fd: int, name: str, depth: int, budget: List[int]) -> bool:
             return _remove_tree(dir_fd, name, depth, budget)
         raise
     try:
-        gone = all([_remove_tree(sub, child, depth - 1, budget) for child in os.listdir(sub)])
+        with os.scandir(sub) as entries:
+            children = [entry.name for _, entry in zip(range(DRAIN_MAX), entries)]
+        gone = all([_remove_tree(sub, child, depth - 1, budget) for child in children])
     finally:
         os.close(sub)
     if not gone:
@@ -300,11 +307,14 @@ def drain(root: Path = None) -> Tuple[List[str], int]:
         os.close(run)
     asked, budget = set(), [DRAIN_MAX]
     try:
-        for name in os.listdir(folder):
+        with os.scandir(folder) as entries:          # names read up to the bound: memory stays bounded
+            names = [entry.name for _, entry in zip(range(DRAIN_MAX), entries)]
+        for name in names:
             if name in VERBS:
                 asked.add(name)
             _remove_tree(folder, name, DRAIN_DEPTH, budget)
-        left = len(os.listdir(folder))
+        with os.scandir(folder) as entries:
+            left = sum(1 for _ in zip(range(DRAIN_MAX), entries))
     finally:
         os.close(folder)
     if left:
@@ -435,23 +445,23 @@ def _judged(found: dict) -> Tuple[str, str, Optional[str]]:
 # -- the verbs -----------------------------------------------------------------
 
 def verb_check(state: dict, now: float, root: Path = None) -> Tuple[str, str, Optional[str], Optional[str]]:
-    last = state.get("check_at", 0)
-    if now - last < CHECK_FLOOR:
+    last = state.get("check_at")
+    if last is not None and now - last < CHECK_FLOOR:
         return "floor", f"checked {int(now - last)} s ago; at most once an hour", None, None
     state["check_at"] = now
     outcome, detail, release = _judged(survey(root))
     return outcome, detail, release, None
 
 
-def _psql(root: Path, env: Dict[str, str], *statements: str) -> None:
+def _psql(root: Path, env: Dict[str, str], *statements: str, timeout: int = 3600) -> str:
     """Statements run one by one in the database's own container, on its
     maintenance database: a database is copied, dropped and renamed only from
-    outside it."""
-    args = ["docker", "exec", POSTGRES, "psql", "-v", "ON_ERROR_STOP=1", "-U",
+    outside it. What the last one printed."""
+    args = ["docker", "exec", POSTGRES, "psql", "-v", "ON_ERROR_STOP=1", "-At", "-U",
             env.get("POSTGRES_USER", "musicai"), "-d", "postgres"]
     for statement in statements:
         args += ["-c", statement]
-    _run(args, cwd=root, timeout=4 * 3600)
+    return _run(args, cwd=root, timeout=timeout).stdout.decode("utf-8", "replace").strip()
 
 
 def _database(env: Dict[str, str]) -> str:
@@ -461,41 +471,89 @@ def _database(env: Dict[str, str]) -> str:
     return name
 
 
+def _databases(root: Path, env: Dict[str, str]) -> List[str]:
+    return _psql(root, env, "SELECT datname FROM pg_database").split()
+
+
+def _close_sessions(name: str) -> str:
+    return (f"SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+            f"WHERE datname = '{name}' AND pid <> pg_backend_pid()")
+
+
+def _room_for_copy(root: Path, env: Dict[str, str]) -> None:
+    """The copy needs the database's size again on the volume, with room to
+    spare: a full disk would stop PostgreSQL, the node's and the way back's."""
+    name = _database(env)
+    size = int(_psql(root, env, f"SELECT pg_database_size('{name}')"))
+    free = _run(["docker", "exec", POSTGRES, "df", "-B1", "--output=avail", "/var/lib/postgresql"],
+                cwd=root).stdout.decode().split()[-1]
+    if int(free) < size * 1.2 + (1 << 30):
+        raise Refusal("refused", f"the database ({size >> 20} MB) has no room for its copy beside it "
+                                 f"({int(free) >> 20} MB free): nothing moved")
+
+
 def _snapshot(root: Path, env: Dict[str, str]) -> str:
     """The database before the move, whole — the dump loaders' tables
     included — as a copy beside it in the database's own container, made
-    while the backend is stopped; one kept, the previous update's dropped
-    first. The way back renames it into place: exact, where a restore of a
-    dump into the live database is not (on the Pi a clean restore failed
-    twice on what the tables left out of it hold on the rest — a key, a
-    function their indexes use), and nothing of it passes through the host."""
+    while the backend is stopped and dropped once the new node is up. The way
+    back renames it into place: exact, where a restore of a dump into the
+    live database is not (on the Pi a clean restore failed twice on what the
+    tables left out of it hold on the rest — a key, a function their indexes
+    use), and nothing of it passes through the host."""
     name = _database(env)
     copy = f"{name}_pre_update"
-    _psql(root, env, f'DROP DATABASE IF EXISTS "{copy}"',
+    _psql(root, env, f'DROP DATABASE IF EXISTS "{copy}"', _close_sessions(name),
           f'CREATE DATABASE "{copy}" TEMPLATE "{name}" STRATEGY FILE_COPY')
     return copy
 
 
 def _restore(root: Path, env: Dict[str, str], copy: str) -> None:
+    """The copy renamed into place, the live database renamed away first and
+    dropped last: at every step one of the two is whole under a name a next
+    try finds (an interrupted way back is resumed, run())."""
     name = _database(env)
-    _psql(root, env, f'DROP DATABASE "{name}" WITH (FORCE)', f'ALTER DATABASE "{copy}" RENAME TO "{name}"')
+    held = _databases(root, env)
+    if copy not in held:
+        if name in held:
+            return                       # put back already, by a way back cut short after its renames
+        raise Refusal("failed", f"neither {name} nor its copy {copy} is in the database server")
+    failed = f"{name}_failed_update"
+    steps = [f'DROP DATABASE IF EXISTS "{failed}" WITH (FORCE)']
+    if name in held:
+        steps += [_close_sessions(name), f'ALTER DATABASE "{name}" RENAME TO "{failed}"']
+    steps += [f'ALTER DATABASE "{copy}" RENAME TO "{name}"', f'DROP DATABASE IF EXISTS "{failed}" WITH (FORCE)']
+    _psql(root, env, *steps)
 
 
 def _healthy(root: Path) -> bool:
-    """The new node up and answering its health check, by Docker's own wait."""
-    result = compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "1800", root=root,
-                     timeout=2000, check=False)
+    """The new node up and answering its health check, by Docker's own wait
+    (the Linux file gives a start half an hour before a failing check
+    counts: its migrations run before it serves)."""
+    result = compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "2400", root=root,
+                     timeout=2500, check=False)
     if result.returncode != 0:
         said = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
         log(f"the node did not come up healthy: {' / '.join(said[-3:]) or 'exit ' + str(result.returncode)}")
     return result.returncode == 0
 
 
+def _body_answers(root: Path) -> bool:
+    """The checkout's body starts and speaks the starter's interface: a
+    release whose agent cannot run would leave the node with no way to ask
+    for the next one, this update's way back included."""
+    env = {**os.environ, "SAUTIUM_HOST_STARTER_API": str(STARTER_API)}
+    result = _run([sys.executable, "-I", str(root / "scripts" / "host_agent.py"), "selftest"], cwd=root,
+                  env=env, check=False, timeout=60)
+    if result.returncode != 0:
+        log(f"the release's host agent does not start: {(result.stderr or b'').decode('utf-8', 'replace')[-300:]}")
+    return result.returncode == 0
+
+
 def _front_restarted(root: Path, old: str, new: str) -> Optional[str]:
     """On a master — the machine whose owner installed the trusted front's
-    user unit (scripts/master-front/) — the front comes back with an update
-    that changed it. The agent never reads the node's identity: it is in a
-    folder the node writes."""
+    user unit, `sautium-front.service` (scripts/master-front/ holds what it
+    runs) — the front comes back with an update that changed it. The agent
+    never reads the node's identity: it is in a folder the node writes."""
     if _run(["systemctl", "--user", "cat", "sautium-front.service"], cwd=root, check=False).returncode != 0:
         return None
     if not git("diff", "--name-only", old, new, "--", "scripts/master-front/", root=root):
@@ -504,13 +562,78 @@ def _front_restarted(root: Path, old: str, new: str) -> Optional[str]:
     return "the trusted front restarted"
 
 
+# What may lie in the code's folders beside what git tracks: the node's own
+# data folder (its bind), bytecode caches no image interpreter reads
+# (PYTHONPYCACHEPREFIX), what the host puts there itself (the atlas's file,
+# the owner's provider modules), and the MCP config earlier releases wrote.
+# Anything else was left by a node from before its code was read-only — a
+# backend/.env Settings would read, a module named like the standard
+# library's, a bytecode file without its source — and would run in every
+# release after this one.
+LEFT_ALLOWED = re.compile(r"(backend/data/|.*/__pycache__/|.*\.pyc|backend/hqp_atlas\.json|"
+                          r"backend/hqp_atlas\.version\.json|backend/streaming/providers/.*|"
+                          r"backend/mcp-docker\.json)")
+
+
+def leftovers(root: Path = None) -> List[str]:
+    """Untracked or ignored paths in the code's folders that LEFT_ALLOWED does
+    not name. A bytecode file is allowed only inside __pycache__/: one beside
+    its folder's sources is imported even with no source."""
+    out = _run(["git", "status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=all",
+                "--", "backend", "mcp"], cwd=root).stdout.decode("utf-8", "surrogateescape")
+    found = []
+    for entry in out.split("\0"):
+        if entry[:3] not in ("?? ", "!! "):
+            continue
+        path = entry[3:]
+        sourceless = path.endswith(".pyc") and "/__pycache__/" not in path
+        if sourceless or not LEFT_ALLOWED.fullmatch(path):
+            found.append(path)
+    return found
+
+
+def _way_back(root: Path, env: Dict[str, str], moving: dict) -> Tuple[str, str]:
+    """The release before, its image and its database put back, and the node
+    started: each step tried whatever the one before did — a node left down
+    answers nobody. (outcome, what happened)."""
+    problems = []
+
+    def step(what: str, do) -> None:
+        try:
+            do()
+        except (Refusal, OSError, ValueError, subprocess.SubprocessError) as e:
+            problems.append(f"{what}: {getattr(e, 'detail', e)}")
+            log(f"the way back could not {what}: {getattr(e, 'detail', e)}")
+
+    step("stop the node", lambda: compose("stop", "backend", root=root, check=False))
+    step("check the release before out", lambda: git("-c", "advice.detachedHead=false", "checkout", "--quiet",
+                                                       "--force", "--detach", moving["from"], root=root))
+    step("name its image", lambda: set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", moving["image"]))
+    step("remove the release's container", lambda: compose("rm", "-f", "backend", root=root, check=False))
+    if moving.get("tag") and moving["tag"] != moving["image"]:
+        step("remove the release's image", lambda: _run(["docker", "image", "rm", moving["tag"]], cwd=root,
+                                                         check=False))
+    if moving.get("copy"):
+        step("put the database back", lambda: _restore(root, env, moving["copy"]))
+    if not _healthy(root):
+        return "failed", ("the release before it did not start again after the way back"
+                          + (f" ({'; '.join(problems)})" if problems else "") + ": see the node's log")
+    if problems:
+        return "failed", f"the node is back on the release before it, but: {'; '.join(problems)}"
+    return "undone", ("the node is back on the release before it"
+                      + (", its database as it was before the update" if moving.get("copy") else ""))
+
+
 def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, Optional[str], Optional[str]]:
     """C4's update, unattended once the person asked: verify, build from a
-    tree git made of the verified commit, stop, copy the database, move, start; the way
-    back when the new node does not come up."""
+    tree git made of the verified commit, stop, copy the database, move,
+    start; the way back when the new node or its agent does not come up, and
+    whatever stops the update after the node stopped. A release that did not
+    start here is not tried again for a day, nor is an update that found
+    nothing to do."""
     root = root or ROOT
-    noop = state.get("update_noop_at", 0)
-    if now - noop < UPDATE_NOOP_FLOOR:
+    noop = state.get("update_noop_at")
+    if noop is not None and now - noop < UPDATE_NOOP_FLOOR:
         return "floor", "an update found nothing to do less than a day ago", None, None
     found = survey(root)
     state["check_at"] = now
@@ -519,69 +642,92 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
         state["update_noop_at"] = now
         return ("current" if outcome == "current" else "refused"), detail, release, None
     name, commit = found["offered"]["name"], found["offered"]["commit"]
+    tried = state.get("update_failed") or {}
+    if tried.get("commit") == commit and now - tried["at"] < UPDATE_NOOP_FLOOR:
+        return "floor", f"Sautium {name[1:]} did not start here less than a day ago", name, None
     if git("status", "--porcelain", "--untracked-files=no", root=root):
         state["update_noop_at"] = now
         return "refused", "the checkout has local changes: an update never moves a tree someone edits", name, None
-    old_commit, old_image = head(root), image_of(root)
+    left = leftovers(root)
+    if left:
+        state["update_noop_at"] = now
+        return "refused", ("files git does not know of lie among the code, and would run in every release: "
+                           + ", ".join(left[:5]) + (" …" if len(left) > 5 else "")), name, None
     env = read_env(root / ".env")
+    _room_for_copy(root, env)
     tag = f"sautium-backend:{name}-{commit[:12]}"
     log(f"building {tag} from {name} ({commit})")
     archive = subprocess.Popen(["git", "archive", "--format=tar", f"{commit}:backend"], cwd=str(root),
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         _run(["docker", "build", "-f", DOCKERFILE, "-t", tag, "-"], cwd=root,
-             stdin=archive.stdout, timeout=4 * 3600)
+             stdin=archive.stdout, timeout=3 * 3600)
+    except Refusal as r:
+        # A build is the heaviest thing a forged request asks for: once a day
+        state["update_failed"] = {"commit": commit, "at": now}
+        raise Refusal("failed", f"the image of {name} did not build ({r.detail}): nothing moved", name) from r
     finally:
         archive.stdout.close()
         archive.wait()
     if archive.returncode != 0:
+        state["update_failed"] = {"commit": commit, "at": now}
         return "failed", f"git archive of {name} failed: nothing moved", name, None
-    log("stopping the node, then the copy of its database")
-    compose("stop", "backend", root=root)
+    old_commit = head(root)
+    # Kept before the node stops: a run that dies past this point (power,
+    # a kill) is undone by the next start of the agent, at boot included
+    moving = state["moving"] = {"from": old_commit, "image": image_of(root), "to": commit, "name": name,
+                                "tag": tag, "copy": None}
+    save_state(state, root)
+    healthy, why = False, "did not come up healthy"
     try:
-        copy = _snapshot(root, env)
-    except Refusal:
-        # The node as it was, and answering before the answer is sent
-        _healthy(root)
-        raise
-    log(f"moving the checkout to {name} and starting it")
-    try:
+        log("stopping the node, then the copy of its database")
+        compose("stop", "backend", root=root)
+        moving["copy"] = _snapshot(root, env)
+        save_state(state, root)
+        log(f"moving the checkout to {name} and starting it")
         git("-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit, root=root)
         set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", tag)
-        healthy, why = _healthy(root), "did not come up healthy"
-    except (Refusal, OSError) as e:
-        healthy, why = False, f"could not be put in place ({e})"
+        healthy = _healthy(root)
+        if healthy and not _body_answers(root):
+            healthy, why = False, "came up, but its host agent does not start"
+    except Exception as e:                # whatever stopped it, the way back below runs
+        why = f"could not be put in place ({getattr(e, 'detail', None) or f'{type(e).__name__}: {e}'})"
+        log(f"the update stopped: {why}")
     if healthy:
         former = (state.get("installed") or {}).get("previous")
-        state["installed"] = {"name": name, "commit": commit, "at": now, "image": tag, "previous": old_image}
-        state.pop("update_noop_at", None)
-        state.pop("failed_since_installed", None)
-        if former and former not in (tag, old_image) and former.startswith("sautium-backend:v"):
+        state["installed"] = {"name": name, "commit": commit, "at": now, "image": tag,
+                              "previous": moving["image"], "runs_ok": 0}
+        for key in ("update_noop_at", "failed_since_installed", "update_failed", "moving"):
+            state.pop(key, None)
+        try:
+            _psql(root, env, f'DROP DATABASE IF EXISTS "{moving["copy"]}"')
+        except Refusal as e:
+            log(f"the database's copy stays beside it: {e.detail}")
+        if former and former not in (tag, moving["image"]) and former.startswith("sautium-backend:v"):
             _run(["docker", "image", "rm", former], cwd=root, check=False)
         front = _front_restarted(root, old_commit, commit)
         return "updated", f"moved to Sautium {name[1:]}" + (f"; {front}" if front else ""), name, None
     log(f"{name} {why}: the way back to {old_commit[:12]}")
-    compose("stop", "backend", root=root, check=False)
-    git("-c", "advice.detachedHead=false", "checkout", "--quiet", "--force", "--detach", old_commit, root=root)
-    set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", old_image)
-    compose("rm", "-f", "backend", root=root, check=False)
-    _run(["docker", "image", "rm", tag], cwd=root, check=False)          # a release that did not start keeps no image
-    unrestored = None
-    try:
-        _restore(root, env, copy)
-    except Refusal as e:
-        # The release before starts all the same: its migrations are
-        # idempotent, and a node left down answers nobody
-        unrestored = e.detail
-        log(f"the database could not be put back ({unrestored}); the copy {copy} stays beside it")
-    if not _healthy(root):
-        return "failed", (f"Sautium {name[1:]} {why}, and the release before it did not start again "
-                          "after the way back: see the node's log"), name, None
-    if unrestored:
-        return "failed", (f"Sautium {name[1:]} {why}: the node is back on the release before it, but "
-                          f"its database could not be put back as it was ({unrestored})"), name, None
-    return "undone", (f"Sautium {name[1:]} {why}: the node is back on the release before it, "
-                      "its database as it was before the update"), name, None
+    outcome, back = _way_back(root, env, moving)
+    state.pop("moving", None)
+    state["update_failed"] = {"commit": commit, "at": now}
+    return outcome, f"Sautium {name[1:]} {why}: {back}", name, None
+
+
+def resume(state: dict, now: float, root: Path = None) -> Optional[Tuple[str, str, Optional[str], Optional[str]]]:
+    """An update a run did not finish — the machine lost power, the agent was
+    killed, the unit's time ran out — is undone at the next start of the
+    agent (the units start it at boot as well): its answer, or None."""
+    moving = state.get("moving")
+    if not moving:
+        return None
+    root = root or ROOT
+    log(f"an update to {moving['name']} did not finish: the way back to {moving['from'][:12]}")
+    outcome, back = _way_back(root, read_env(root / ".env"), moving)
+    state.pop("moving", None)
+    state["update_failed"] = {"commit": moving["to"], "at": now}
+    return "undone" if outcome == "undone" else "failed", \
+        f"the update to Sautium {moving['name'][1:]} did not finish: {back}", moving["name"], None
 
 
 def _scrub(text: str) -> str:
@@ -592,8 +738,8 @@ def verb_diagnostics(state: dict, now: float, root: Path = None) -> Tuple[str, s
     """F2's table: what the two containers logged, the power, the disk, the
     versions — no journal, no kernel log, no file listing."""
     root = root or ROOT
-    last = state.get("diagnostics_at", 0)
-    if now - last < DIAGNOSTICS_FLOOR:
+    last = state.get("diagnostics_at")
+    if last is not None and now - last < DIAGNOSTICS_FLOOR:
         return "floor", f"made {int(now - last)} s ago; at most once in ten minutes", None, None
     state["diagnostics_at"] = now
     parts = []
@@ -648,12 +794,23 @@ def answer(verb: str, outcome: str, detail: str, release: Optional[str], report:
         "Content-Type": "application/json", "X-Sautium-Ts": ts, "X-Sautium-Nonce": nonce,
         "X-Sautium-Body-Sha256": digest, "X-Sautium-Sig": sig})
     opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
+
+    def late(signum, frame):
+        raise TimeoutError("no answer within 20 s")
+
+    # The socket's own timeout bounds each read, not the whole: a node that
+    # sends a byte every few seconds would hold the agent for hours
+    before = signal.signal(signal.SIGALRM, late)
+    signal.alarm(20)
     try:
         with opener.open(request, timeout=10) as response:
             return 200 <= response.status < 300
     except (urllib.error.URLError, OSError) as e:
         log(f"the node did not take the answer to {verb}: {e}")
         return False
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, before)
 
 
 # -- the starter ---------------------------------------------------------------
@@ -670,16 +827,23 @@ def _starter_paths(root: Path = None) -> Tuple[Path, Path, Path]:
 def maintain_starter(state: dict, now: float, root: Path = None, start_probe=None) -> Optional[str]:
     """The starter's own update, under PI5-PLAN's four conditions; what
     happened, or None. A trial in progress ends here: the starter that ran
-    this run is the new one, so it is kept."""
+    this run is the new one, so it is kept. One the restore unit put back
+    is never tried again."""
     current, previous, trial = _starter_paths(root)
     if trial.exists():
         trial.unlink()
+        state.pop("starter_trying", None)
         state["starter_since"] = now
         return "the new starter ran: kept"
-    installed = state.get("installed")
-    if not installed or now - installed["at"] < STARTER_AFTER or state.get("failed_since_installed"):
-        return None
     wanted = starter_text()
+    digest = hashlib.sha256(wanted).hexdigest()
+    if state.get("starter_trying"):
+        state["starter_refused"] = state.pop("starter_trying")
+        return "the new starter failed its starts and the previous one is back: it is not tried again"
+    installed = state.get("installed")
+    if (not installed or now - installed["at"] < STARTER_AFTER or state.get("failed_since_installed")
+            or installed.get("runs_ok", 0) < 1 or state.get("starter_refused") == digest):
+        return None
     try:
         held = _read_bounded(current, STATE_MAX)
     except OSError:
@@ -688,6 +852,7 @@ def maintain_starter(state: dict, now: float, root: Path = None, start_probe=Non
         return None             # nothing to change, or HEAD is no release the agent verified and moved to
     _write_private(previous, held, 0o755)
     _write_private(trial, b"0\n", 0o600)
+    state["starter_trying"] = digest
     _write_private(current, wanted, 0o755)
     (start_probe or _start_probe)()
     log("a new starter is in place; the probe tries it, and the previous one comes back "
@@ -703,9 +868,10 @@ def _start_probe() -> None:
 
 def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
         verbs: Optional[dict] = None, start_probe=None) -> int:
-    """One start of the service: the requests drained, each asked verb run
-    and answered, the starter looked after. 0 unless the body itself broke —
-    a verb's failure is an answer, not a failed start."""
+    """One start of the service: an update a run did not finish undone, the
+    requests drained, each asked verb run and answered, the starter looked
+    after. 0 unless the body itself broke — a verb's failure is an answer,
+    not a failed start."""
     root = root or ROOT
     api_version = os.environ.get("SAUTIUM_HOST_STARTER_API", "")
     if not api_version.isdigit() or int(api_version) < 1:
@@ -719,9 +885,30 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = load_state(root)
-        for held in state.pop("unsent", []):
-            if not answer(*held, key, api):
-                state.setdefault("unsent", []).append(held)
+        failed = False
+
+        def said(verb: str, outcome: str, detail: str, release: Optional[str], report: Optional[str]) -> None:
+            nonlocal failed
+            failed = failed or outcome == "failed"
+            log(f"{verb}: {outcome} — {detail}")
+            unsent = state.setdefault("unsent", {})
+            if answer(verb, outcome, detail, release, report, key, api):
+                unsent.pop(verb, None)
+            else:
+                # The node was down (an update that could not start it): the
+                # next run, whatever its request, says it first. The last
+                # answer of each verb only.
+                unsent[verb] = [outcome, detail, release]
+            if not unsent:
+                state.pop("unsent")
+            save_state(state, root)
+
+        for verb, (outcome, detail, release) in list((state.get("unsent") or {}).items()):
+            said(verb, outcome, detail, release, None)
+        moment = time.time() if now is None else now
+        resumed = resume(state, moment, root)
+        if resumed:
+            said("update", *resumed)
         asked, _left = drain(root)
         for verb in asked:
             moment = time.time() if now is None else now
@@ -729,22 +916,34 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
                 outcome, detail, release, report = (verbs or VERB)[verb](state, moment, root)
             except Refusal as r:
                 outcome, detail, release, report = r.outcome, r.detail, r.release, None
-            except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+            except Exception as e:        # the verb's failure is its answer; the log keeps the trace
+                log(traceback.format_exc().rstrip())
                 outcome, detail, release, report = "failed", f"{type(e).__name__}: {e}", None, None
-            if outcome == "failed":
-                state["failed_since_installed"] = True
-            log(f"{verb}: {outcome} — {detail}")
-            if not answer(verb, outcome, detail, release, report, key, api):
-                # The node was down (an update that could not start it); the
-                # next run, whatever its request, says it first
-                state.setdefault("unsent", []).append([verb, outcome, detail, release, None])
-            save_state(state, root)
+            said(verb, outcome, detail, release, report)
+        installed = state.get("installed")
+        if failed:
+            state["failed_since_installed"] = True
+        elif installed and asked:
+            installed["runs_ok"] = installed.get("runs_ok", 0) + 1
         note = maintain_starter(state, time.time() if now is None else now, root, start_probe)
         if note:
             log(note)
         save_state(state, root)
     finally:
         os.close(lock)
+    return 0
+
+
+def selftest(root: Path = None) -> int:
+    """What an update asks of a release's body before it keeps the release:
+    it starts, under a starter's interface, and reads its own folder."""
+    root = root or ROOT
+    api_version = os.environ.get("SAUTIUM_HOST_STARTER_API", "")
+    if not api_version.isdigit() or int(api_version) < 1:
+        return 2
+    channel_key(root)
+    load_state(root)
+    units(root)
     return 0
 
 
@@ -769,15 +968,20 @@ def units(root: Path) -> Dict[str, str]:
     # The agent's own log, beside its files: a person's user journal is not
     # always kept, nor readable by them
     log_file = host_dir(root) / "agent.log"
+    # A start's steps are bounded each (the build 3 h, the copy and its way
+    # back an hour, the waits for health 40 min): the unit's bound is above
+    # their sum, so a run ends by its own steps, never cut midway
     service = (f"[Unit]\nDescription=Sautium host agent: %s\nOnFailure={UNIT}-restore.service\n\n"
-               f"[Service]\nType=oneshot\nExecStart={starter}\nTimeoutStartSec=6h\n"
+               f"[Service]\nType=oneshot\nExecStart={starter}\nTimeoutStartSec=9h\n"
                f"StandardOutput=append:{log_file}\nStandardError=append:{log_file}\n"
                "NoNewPrivileges=yes\n")
     return {
         f"{UNIT}.path": (f"[Unit]\nDescription=Sautium host agent: the node's requests\n\n"
                          f"[Path]\nDirectoryNotEmpty={root}/run/requests\nUnit={UNIT}.service\n\n"
                          "[Install]\nWantedBy=default.target\n"),
-        f"{UNIT}.service": service % "a request from the node",
+        # Also at the user manager's start — at boot, with lingering on — so an
+        # update the machine's power cut short is undone with no request
+        f"{UNIT}.service": service % "a request from the node" + "\n[Install]\nWantedBy=default.target\n",
         f"{UNIT}-probe.service": service % "a new starter tried",
         f"{UNIT}-restore.service": (f"[Unit]\nDescription=Sautium host agent: the previous starter back "
                                     f"after {STARTER_TRIES} failed starts\n\n"
@@ -802,6 +1006,11 @@ def install(root: Path = None, systemctl=None) -> int:
                          "carry: put the checkout at a plain path (letters, digits, . _ - /)")
     if root.stat().st_uid != os.getuid():
         raise SystemExit(f"[host-agent] {root} is not this user's: run install as its owner")
+    left = leftovers(root)
+    if left:
+        raise SystemExit("[host-agent] files git does not know of lie among the code (a node from before its "
+                         "code was read-only could have left them, and they would run in every release): "
+                         + ", ".join(left[:20]) + " — remove them, or check them out again from git")
     host = host_dir(root)
     host.mkdir(mode=0o700, exist_ok=True)
     (host / "bin").mkdir(mode=0o700, exist_ok=True)
@@ -835,6 +1044,7 @@ def install(root: Path = None, systemctl=None) -> int:
         _write_private(folder / name, text.encode(), 0o644)
     ctl = systemctl or (lambda *args: _run(["systemctl", "--user", *args], cwd=root))
     ctl("daemon-reload")
+    ctl("enable", f"{UNIT}.service")
     ctl("enable", "--now", f"{UNIT}.path")
     print(f"The host agent is installed for {root}.")
     user = os.environ.get("USER") or str(os.getuid())
@@ -846,14 +1056,20 @@ def install(root: Path = None, systemctl=None) -> int:
     return 0
 
 
-def uninstall(systemctl=None) -> int:
+def uninstall(root: Path = None, systemctl=None) -> int:
+    """The units removed, and the channel's key: the node made again then
+    knows it has no agent. ./host/ keeps the agent's log and state."""
+    root = root or ROOT
     ctl = systemctl or (lambda *args: _run(["systemctl", "--user", *args], check=False))
     ctl("disable", "--now", f"{UNIT}.path")
+    ctl("disable", f"{UNIT}.service")
     folder = unit_dir()
-    for name in units(ROOT):
+    for name in units(root):
         (folder / name).unlink(missing_ok=True)
     ctl("daemon-reload")
-    print("The host agent's units are removed; ./host/ is kept (its key, its log).")
+    (host_dir(root) / "agent.env").unlink(missing_ok=True)
+    print("The host agent's units and key are removed. The node learns of it when it is made again: "
+          "docker compose up -d")
     return 0
 
 
@@ -868,10 +1084,12 @@ def status(root: Path = None) -> int:
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(prog="host_agent.py", description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("run", "install", "uninstall", "status"))
+    parser.add_argument("command", choices=("run", "install", "uninstall", "status", "selftest"))
     args = parser.parse_args(argv)
     if args.command == "run":
         return run()
+    if args.command == "selftest":
+        return selftest()
     if args.command == "install":
         return install()
     if args.command == "uninstall":

@@ -32,7 +32,7 @@ NODE_USER = "agent"
 # A tree or folder reached through a
 # link is not handed (_real_dir): a host whose ~/.claude/projects is itself a
 # link has its sessions folder refused, and said, at each start.
-NODE_TREES = ("/app/data", "/home/agent/.cache",
+NODE_TREES = ("/app/data", "/var/lib/sautium/generated_eq", "/home/agent/.cache",
               "/home/agent/.claude/projects")
 NODE_FOLDERS = ("/home/agent/.claude", "/home/agent/.codex", "/run/sautium/requests")
 # Where compose files mounted the model cache while the backend ran as root

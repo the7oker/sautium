@@ -245,11 +245,12 @@ numbered deltas, `backend/db_migrate.py`). The container reads its code
 read-only — what the node writes lives in `backend/data/` and `data/` — and
 the Web UI and the media ports answer on IPv4 alone.
 
-On Linux the node can update itself from the Web UI through the host agent
-(`scripts/host_agent.py`): a few user-level systemd units that take a
-signed release the installed tree verifies, build its image and move the
-node to it, and move it back if the new one does not start. Install it as
-the user who cloned the folder (not root):
+With `docker-compose.pi.yml` (Linux; Docker Compose 2.24 or later) the
+node can ask the machine to move it to a signed release through the host
+agent (`scripts/host_agent.py`): a few user-level systemd units that check
+the release with the installed tree's own verifier, build its image, move
+the node to it, and move it back — its database too — if the new one does
+not start. Install it as the user who cloned the folder (not root):
 
 ```bash
 python3 -I scripts/host_agent.py install

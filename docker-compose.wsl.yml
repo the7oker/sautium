@@ -172,7 +172,7 @@ services:
       # git ignores whole, so nothing written there is a change to the checkout.
       - ./backend/data:/app/data
       - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
-      - ./data/generated_eq:/app/data/generated_eq
+      - ./data/generated_eq:/var/lib/sautium/generated_eq
       - ./data/tls:/app/data/tls
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       - ./data/lbdump:/app/data/lbdump   # ListenBrainz statistics dump (download + aggregate)

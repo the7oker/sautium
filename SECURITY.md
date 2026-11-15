@@ -35,13 +35,22 @@ that does not is an ordinary issue.
 
 A Docker node runs its code read-only (since 2026-11-15): a node that could
 write the tree it runs from could stop an update, outlive it, or choose the
-next image built from it. Every Compose file publishes the Web UI and the
+next image built from it. What it still writes — its database, its data
+folders, its caches, its assistant's own folder — is treated as untrusted
+to run: the yt-dlp build in its cache counts only for the code that checked
+it, and its assistant CLI reads no settings or hooks from its own folder.
+A node that was fully controlled can still keep its database and data as it
+left them, and so make a new release fail its start and come back to the
+one before; that is the limit of an update made on the node's own
+machine. Every Compose file publishes the Web UI and the
 media ports on IPv4 alone — published with no address, Docker answers on
 IPv6 as well, which a router passing IPv6 would put on the internet. The
 Linux file runs the backend on the host's network: the node binds its ports
 itself, and the container holds no capability beyond the few its entrypoint
 needs to hand its folders over and drop root — none that would let it read
-or forge the LAN's traffic.
+or forge the LAN's traffic. On the host's network the node also reaches
+what this machine serves on its own loopback; keep nothing there that trusts
+any local process (an unauthenticated Docker API, an admin page).
 
 The table lists what listens. One thing only sends: opening the Output
 picker (or Rescan) asks the LAN for players — an SSDP M-SEARCH to UDP 1900

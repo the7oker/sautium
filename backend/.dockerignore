@@ -6,8 +6,8 @@
 
 # Bytecode a host's interpreter left beside the sources: the image's /app holds
 # sources alone, and the node reads no cache it cannot write (Dockerfile).
-__pycache__/
-*.pyc
+**/__pycache__/
+**/*.pyc
 
 # The node's own files: the backend's node key, the API secret where it used
 # to live, and where compose mounts nothing over them the identity directory

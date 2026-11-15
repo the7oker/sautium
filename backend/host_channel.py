@@ -43,11 +43,21 @@ RELEASE_MAX = 64
 REPORT_MAX = 4 * 1024 * 1024
 
 
+def _read_key() -> Optional[bytes]:
+    key = os.getenv("SAUTIUM_HOST_CHANNEL_KEY", "").strip()
+    return key.encode("ascii") if len(key) == 64 and all(c in "0123456789abcdef" for c in key) else None
+
+
+# Read at import, before the lifespan drops the credentials from the
+# environment (serving.hold_secrets: config.SECRET_ENV names it), so no child
+# of the node — an agent CLI, ffmpeg — inherits it
+_KEY = _read_key()
+
+
 def channel_key() -> Optional[bytes]:
     """The channel's key as the agent signs with it, or None when this node
     has no agent. The key is the hex text of 32 random bytes."""
-    key = os.getenv("SAUTIUM_HOST_CHANNEL_KEY", "").strip()
-    return key.encode("ascii") if len(key) == 64 and all(c in "0123456789abcdef" for c in key) else None
+    return _KEY
 
 
 def available() -> bool:

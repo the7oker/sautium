@@ -506,4 +506,4 @@ def test_the_node_reads_no_bytecode_it_cannot_write():
         assert text.index("PYTHONPYCACHEPREFIX") < text.index("COPY . .")
         assert "CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/ || exit 1" in text
     ignored = (REPO / "backend" / ".dockerignore").read_text(encoding="utf-8").splitlines()
-    assert "__pycache__/" in ignored and "*.pyc" in ignored
+    assert "**/__pycache__/" in ignored and "**/*.pyc" in ignored

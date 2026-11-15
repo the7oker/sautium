@@ -42,7 +42,7 @@ def node(scratch_dsn, tmp_path, monkeypatch):
     requests = tmp_path / "requests"
     requests.mkdir()
     monkeypatch.setattr(host_channel, "REQUESTS_DIR", requests)
-    monkeypatch.setenv("SAUTIUM_HOST_CHANNEL_KEY", KEY)
+    monkeypatch.setattr(host_channel, "_KEY", KEY.encode())
     woken = []
     monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: woken.append(1))
     monkeypatch.setattr(device_auth, "current_token", lambda secret: TOKEN)
@@ -82,7 +82,7 @@ def test_a_request_is_an_empty_file_of_the_verbs_name_and_a_row(node):
 
 def test_a_node_without_an_agent_says_so_and_writes_nothing(node, monkeypatch):
     client, requests, conn, _ = node
-    monkeypatch.delenv("SAUTIUM_HOST_CHANNEL_KEY")
+    monkeypatch.setattr(host_channel, "_KEY", None)
     assert _signed(client, "/api/host/check", {}, TOKEN.encode()).status_code == 409
     assert list(requests.iterdir()) == []
     state = client.get("/api/host", headers=_get_headers("/api/host"))
@@ -141,3 +141,8 @@ def test_a_request_never_follows_a_link_the_folder_holds(node, tmp_path):
     with pytest.raises(OSError):
         host_channel.ask("check")
     assert target.read_text() == "kept\n"
+
+
+def test_the_channels_key_is_read_once_and_no_child_inherits_it():
+    import config
+    assert "SAUTIUM_HOST_CHANNEL_KEY" in config.SECRET_ENV

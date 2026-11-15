@@ -25,6 +25,6 @@ mv data/registry/spinorama/metadata.json.new data/registry/spinorama/metadata.js
 echo "== import (guardrails inside) =="
 docker exec -u agent -e PYTHONPATH=/app -w /app sautium-backend \
     python gear_registry.py \
-    --import-autoeq /app/registry/autoeq \
-    --import-spinorama /app/registry/spinorama/metadata.json \
+    --import-autoeq /var/lib/sautium/registry/autoeq \
+    --import-spinorama /var/lib/sautium/registry/spinorama/metadata.json \
     --match --stats

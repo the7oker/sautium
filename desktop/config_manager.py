@@ -343,6 +343,11 @@ def mcp_servers(python: str, mcp_dir: Path, backend_dir: Path, *, db: dict, back
     the prompt describes them."""
     db_env = {"DB_HOST": db["host"], "DB_PORT": str(db["port"]), "DB_USER": db["user"],
               "DB_PASSWORD": db["password"], "DB_NAME": db["name"]}
+    # A Docker node's interpreters keep their bytecode under the image's
+    # prefix (backend/Dockerfile): codex starts a server with this env alone
+    prefix = os.environ.get("PYTHONPYCACHEPREFIX")
+    if prefix:
+        db_env["PYTHONPYCACHEPREFIX"] = prefix
     return {
         "mcpServers": {
             "postgres": {

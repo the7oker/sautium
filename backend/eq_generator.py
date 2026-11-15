@@ -25,7 +25,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Directory for generated EQ files
-EQ_OUTPUT_DIR = Path(os.environ.get("EQ_OUTPUT_DIR", "/app/data/generated_eq"))
+EQ_OUTPUT_DIR = Path(os.environ.get("EQ_OUTPUT_DIR", "/var/lib/sautium/generated_eq"))
 
 # REW filter type codes
 REW_FILTER_TYPES = {
