@@ -564,6 +564,8 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     compose("stop", "backend", root=root, check=False)
     git("-c", "advice.detachedHead=false", "checkout", "--quiet", "--force", "--detach", old_commit, root=root)
     set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", old_image)
+    compose("rm", "-f", "backend", root=root, check=False)
+    _run(["docker", "image", "rm", tag], cwd=root, check=False)          # a release that did not start keeps no image
     unrestored = None
     try:
         _restore(root, env, copy)
