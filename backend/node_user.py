@@ -47,6 +47,13 @@ ROOT_CACHE = "/root/.cache"
 # tracked file in a folder the node writes let the node make the checkout
 # "changed" and so refuse every update, PI-NODE-2A.)
 HOST_OWNED = "/app"
+# The node's own data folder, a bind whose source is the checkout's
+# backend/data. Until 2026-11-15 that folder was inside the node's writable
+# /app: a node of then could have made it a link, and Docker follows a link
+# in a bind's source — the host's folder it names would be mounted here
+# writable and handed to the node's user. The bind's root, as the kernel
+# records it, must be that folder (PI-NODE-2A).
+DATA_BIND, DATA_SOURCE = "/app/data", "/backend/data"
 PASSWD, GROUP = "/etc/passwd", "/etc/group"
 MOUNTINFO = "/proc/self/mountinfo"
 
@@ -69,13 +76,35 @@ def _write_entries(path: str, entries: list) -> None:
     os.replace(tmp, path)
 
 
+def _unescape(field: str) -> str:
+    """A mountinfo path: a space, a tab, a newline or a backslash is octal-escaped"""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
 def _mount_points() -> set:
     points = set()
     with open(MOUNTINFO, encoding="utf-8") as f:
         for line in f:
             # a space, a tab, a newline or a backslash in a path is octal-escaped
-            points.add(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), line.split()[4]))
+            points.add(_unescape(line.split()[4]))
     return points
+
+
+def _mount_roots() -> dict:
+    """{mount point: the root of its source, as the kernel records it}"""
+    roots = {}
+    with open(MOUNTINFO, encoding="utf-8") as f:
+        for line in f:
+            fields = line.split()
+            roots[_unescape(fields[4])] = _unescape(fields[3])
+    return roots
+
+
+def data_bind_is_the_checkouts() -> bool:
+    """True when /app/data is not mounted, or is mounted from a folder that
+    is the checkout's backend/data and not where a link put it."""
+    root = _mount_roots().get(DATA_BIND)
+    return root is None or root.rstrip("/").endswith(DATA_SOURCE)
 
 
 def _real_dir(path: str) -> bool:
@@ -248,6 +277,10 @@ def main(argv) -> None:
     if not argv:
         raise SystemExit("[node-user] no command to run")
     if os.geteuid() == 0:
+        if not data_bind_is_the_checkouts():
+            raise SystemExit(f"[node-user] {DATA_BIND} is mounted from {_mount_roots()[DATA_BIND]}, not the "
+                             f"checkout's backend/data: a link stood in that folder's place. Nothing is "
+                             f"handed over; make backend/data a folder of the checkout again")
         if os.path.ismount(ROOT_CACHE):
             _say(f"the model cache is mounted at {ROOT_CACHE}, where the node's user does not "
                  "read it: mount it at /home/agent/.cache, as the compose files do")

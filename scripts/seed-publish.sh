@@ -22,7 +22,7 @@ info="$seed_dir/bundle.json"
 # the tree sees it
 read -r version url sha size picks analyzed < <(python3 -I -c '
 import json, os, re, stat, sys
-fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
 assert stat.S_ISREG(os.fstat(fd).st_mode), "bundle.json is no regular file"
 d = json.loads(os.read(fd, 65536))
 version, sha, size = int(d["version"]), d["sha256"], int(d["size"])
@@ -40,7 +40,7 @@ check=$(mktemp)
 trap 'rm -f "$held" "$check"' EXIT
 python3 -I -c '
 import os, shutil, stat, sys
-fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
 assert stat.S_ISREG(os.fstat(fd).st_mode), "the bundle is no regular file"
 with os.fdopen(fd, "rb") as src, open(sys.argv[2], "wb") as dst:
     shutil.copyfileobj(src, dst)' "$seed_dir/$name" "$held" \

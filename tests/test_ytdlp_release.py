@@ -333,6 +333,24 @@ def test_a_kept_release_that_no_longer_checks_is_not_run_and_is_installed_again(
     assert any(p.endswith(f"/{TAG}/{name}") for p in github.asked)
 
 
+def test_callers_at_once_get_one_checked_folder_and_a_live_processs_folder_stays(github, monkeypatch):
+    import threading
+    github.publish(TAG, _build(TAG))
+    assert ytdlp_release.refresh() == TAG
+    build = ytdlp_release.executable().parent.parent
+    other = build / "run-1-1"                       # pid 1: alive in any container or host
+    other.mkdir()
+    _new_process(monkeypatch)
+    found = []
+    workers = [threading.Thread(target=lambda: found.append(ytdlp_release.executable())) for _ in range(8)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(30)
+    assert len(found) == 8 and len(set(found)) == 1 and found[0].is_file()
+    assert other.exists()
+
+
 # -- how the provider runs it -----------------------------------------------------------------
 
 def test_a_yt_dlp_child_carries_none_of_the_nodes_credentials(monkeypatch):

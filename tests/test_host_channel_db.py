@@ -143,6 +143,17 @@ def test_a_request_never_follows_a_link_the_folder_holds(node, tmp_path):
     assert target.read_text() == "kept\n"
 
 
-def test_the_channels_key_is_read_once_and_no_child_inherits_it():
+def test_the_channels_key_is_read_once_and_no_child_inherits_it(monkeypatch):
+    """Read at import; the lifespan then drops it from the environment
+    (serving.hold_secrets), and the node still verifies answers with it."""
+    import importlib
     import config
     assert "SAUTIUM_HOST_CHANNEL_KEY" in config.SECRET_ENV
+    monkeypatch.setenv("SAUTIUM_HOST_CHANNEL_KEY", KEY)
+    fresh = importlib.reload(host_channel)
+    try:
+        monkeypatch.delenv("SAUTIUM_HOST_CHANNEL_KEY")
+        assert fresh.channel_key() == KEY.encode()
+    finally:
+        monkeypatch.undo()
+        importlib.reload(host_channel)

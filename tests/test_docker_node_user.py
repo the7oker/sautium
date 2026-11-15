@@ -671,3 +671,21 @@ def test_in_docker_the_cli_reads_no_settings_from_the_nodes_own_claude_folder(mo
         assert flags[flags.index("--settings") + 1] == '{"disableAllHooks": true}'
     monkeypatch.setattr(claude_code_runner, "IN_DOCKER", False)
     assert "--setting-sources" not in claude_code_runner._tool_flags(claude_code_runner.LIBRARY)
+
+
+def test_a_data_folder_mounted_from_where_a_link_pointed_is_refused(tmp_path, monkeypatch):
+    """Until 2026-11-15 backend/data was inside the node's writable /app: a
+    node of then could make it a link, and Docker follows a link in a bind's
+    source (measured: the kernel records the link's target as the bind's
+    root). The entrypoint refuses to hand over a /app/data mounted from
+    anywhere but a checkout's backend/data."""
+    import node_user
+    mountinfo = tmp_path / "mountinfo"
+    line = "100 50 0:42 {root} /app/data rw,relatime - ext4 /dev/sda1 rw\n"
+    monkeypatch.setattr(node_user, "MOUNTINFO", str(mountinfo))
+    for root, good in (("/home/pi/sautium/backend/data", True), ("/ai/djai/backend/data", True),
+                       ("/etc", False), ("/home/pi", False), ("/home/pi/sautium/backend/data\\040x", False)):
+        mountinfo.write_text(line.format(root=root))
+        assert node_user.data_bind_is_the_checkouts() is good, root
+    mountinfo.write_text("100 50 0:42 / /app rw - ext4 /dev/sda1 rw\n")
+    assert node_user.data_bind_is_the_checkouts()

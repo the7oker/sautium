@@ -545,7 +545,7 @@ def test_install_makes_the_folders_the_key_the_starter_and_the_units(tmp_path, m
     monkeypatch.setattr(ha, "_run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"yes", b""))
     calls = []
     ha.install(root, systemctl=lambda *args: calls.append(args))
-    assert calls == [("daemon-reload",), ("enable", f"{ha.UNIT}.service"), ("enable", "--now", f"{ha.UNIT}.path")]
+    assert calls == [("daemon-reload",), ("enable", f"{ha.UNIT}-boot.service"), ("enable", "--now", f"{ha.UNIT}.path")]
     for folder in (root / "host", root / "host" / "bin", root / "run" / "requests"):
         assert stat.S_IMODE(folder.stat().st_mode) == 0o700
     key = ha.channel_key(root)
@@ -702,21 +702,28 @@ def test_the_database_is_copied_and_put_back_inside_its_own_container(monkeypatc
                    'CREATE DATABASE "music_ai_pre_update" TEMPLATE "music_ai" STRATEGY FILE_COPY',
                    'DROP DATABASE IF EXISTS "music_ai_failed_update" WITH (FORCE)',
                    'ALTER DATABASE "music_ai" RENAME TO "music_ai_failed_update"',
-                   'ALTER DATABASE "music_ai_pre_update" RENAME TO "music_ai"',
-                   'DROP DATABASE IF EXISTS "music_ai_failed_update" WITH (FORCE)']
-    assert all(a[:4] == ["docker", "exec", ha.POSTGRES, "psql"] and "postgres" in a for a in ran)
+                   'ALTER DATABASE "music_ai_pre_update" RENAME TO "music_ai"']
+    # this node's database container, by its compose project: never a container's global name
+    assert all(a[:6] == ["docker", "compose", "-f", ha.COMPOSE_FILE, "exec", "-T"] and a[6:8] == ["postgres", "psql"]
+               for a in ran)
     for bad in ('x"; DROP DATABASE y; --', "Music", "a-b", ""):
         with pytest.raises(ha.Refusal):
             ha._snapshot(Path("/x"), {"POSTGRES_DB": bad})
 
 
-def test_a_way_back_cut_short_after_its_renames_is_finished_not_undone(monkeypatch):
-    """A way back interrupted between its renames is resumed: with the copy
-    already in place there is nothing to rename."""
-    monkeypatch.setattr(ha, "_run", lambda args, **kw: subprocess.CompletedProcess(
-        args, 0, b"music_ai\nmusic_ai_failed_update\npostgres" if any("SELECT datname" in a for a in args) else b"",
-        b""))
+def test_a_way_back_cut_short_after_its_renames_renames_nothing_more(monkeypatch):
+    """A way back interrupted after its renames is resumed: the copy is in
+    place already, and the failed release's database stays beside it."""
+    ran = []
+
+    def fake(args, **kw):
+        ran.append(args)
+        out = b"music_ai\nmusic_ai_failed_update\npostgres" if any("SELECT datname" in a for a in args) else b""
+        return subprocess.CompletedProcess(args, 0, out, b"")
+
+    monkeypatch.setattr(ha, "_run", fake)
     ha._restore(Path("/x"), {"POSTGRES_DB": "music_ai"}, "music_ai_pre_update")
+    assert len(ran) == 1
 
 def test_an_answer_the_node_did_not_take_is_said_first_at_the_next_run(checkout, node, monkeypatch):
     handler, api = node
@@ -801,7 +808,12 @@ class _Update:
         monkeypatch.setattr(ha, "head", lambda root=None: "a" * 40)
         monkeypatch.setattr(ha, "_body_answers", lambda root: body_ok)
         monkeypatch.setattr(ha, "_front_restarted", lambda root, old, new: None)
-        monkeypatch.setattr(ha, "_healthy", lambda root: self.healthy.pop(0) if self.healthy else True)
+        self.started = False
+
+        def healthy(root):
+            self.started = True
+            return self.healthy.pop(0) if self.healthy else True
+        monkeypatch.setattr(ha, "_healthy", healthy)
         monkeypatch.setattr(ha, "_run", self.run)
         monkeypatch.setattr(ha.subprocess, "Popen", self.popen)
 
@@ -848,7 +860,10 @@ def test_a_failure_after_the_stop_always_ends_on_the_way_back_with_the_node_star
     state = {}
     outcome, detail, release, _ = ha.verb_update(state, 1000.0, checkout)
     assert outcome in ("undone", "failed") and "could not be put in place" in detail
-    assert up.calls[-2:] == (["stop", "back"] if fail_at == "copy" else ["back", "databases"]) or "back" in up.calls
+    # the way back stops the node again first, then puts each thing back
+    assert up.calls[up.calls.index("stop"):] == (["stop", "copy", "stop", "back"] if fail_at == "copy"
+                                                 else ["stop", "copy", "move", "stop", "back", "databases", "restore"])
+    assert up.started, "the way back ends with the node started"
     assert "moving" not in state and state["update_failed"]["commit"] == "c" * 40
     assert ha.read_env(checkout / ".env")["SAUTIUM_BACKEND_IMAGE"] == "sautium-backend:v0.2.0-old"
 
@@ -917,10 +932,13 @@ def test_uninstall_takes_the_key_so_the_node_learns_it_has_no_agent(checkout, tm
     assert not (checkout / "host" / "agent.env").exists()
 
 
-def test_the_agent_runs_at_the_user_managers_start_too():
+def test_the_agent_runs_at_the_user_managers_start_too_until_the_database_is_up():
     units = ha.units(Path("/srv/sautium"))
-    assert "[Install]\nWantedBy=default.target\n" in units[f"{ha.UNIT}.service"]
-    assert "[Install]" not in units[f"{ha.UNIT}-probe.service"]
+    boot = units[f"{ha.UNIT}-boot.service"]
+    assert "[Install]\nWantedBy=default.target\n" in boot and "Restart=on-failure\n" in boot
+    assert "StartLimitIntervalSec=0\n" in boot
+    for name in (f"{ha.UNIT}.service", f"{ha.UNIT}-probe.service"):
+        assert "[Install]" not in units[name] and "Restart=" not in units[name]
 
 
 # Mount points inside a folder a container writes, as they stood before
@@ -949,3 +967,127 @@ def test_a_release_whose_image_did_not_build_is_not_built_again_for_a_day(checko
     assert "stop" not in up.calls
     up.calls.clear()
     assert ha.verb_update(state, 1001.0, checkout)[0] == "floor" and up.calls == []
+
+
+def test_an_update_whose_run_died_after_a_good_start_is_kept_not_undone(checkout, node, monkeypatch):
+    """The power went while the release was starting; Docker started it again
+    at boot and it ran: the agent's next start keeps it (the checkout moved,
+    .env names its image, it is up and its agent answers) — it never puts
+    the old database over what the release has written since."""
+    handler, api = node
+    up = _Update(checkout, monkeypatch)
+    monkeypatch.setenv("SAUTIUM_HOST_STARTER_API", "1")
+    monkeypatch.setattr(ha, "git", lambda *a, **k: "c" * 40 if a[:2] == ("rev-parse", "--verify") else "")
+    ha.set_env(checkout / ".env", "SAUTIUM_BACKEND_IMAGE", "sautium-backend:v0.3.0-cccccccccccc")
+    ha.save_state({"moving": {"from": "a" * 40, "image": "sautium-backend:v0.2.0-old", "to": "c" * 40,
+                              "name": "v0.3.0", "tag": "sautium-backend:v0.3.0-cccccccccccc",
+                              "copy": "music_ai_pre_update"}}, checkout)
+    assert ha.run(checkout, api, now=50.0, verbs={}, start_probe=lambda: None) == 0
+    said = json.loads(handler.seen[0][2])
+    assert (said["verb"], said["outcome"]) == ("update", "updated") and "finished" in said["detail"]
+    assert "restore" not in up.calls and "back" not in up.calls
+    state = ha.load_state(checkout)
+    assert "moving" not in state and state["installed"]["commit"] == "c" * 40
+
+
+def test_an_unfinished_update_waits_for_the_database_and_touches_nothing_before(checkout, node, monkeypatch):
+    handler, api = node
+    up = _Update(checkout, monkeypatch)
+    monkeypatch.setenv("SAUTIUM_HOST_STARTER_API", "1")
+    monkeypatch.setattr(ha, "_database_up", lambda root: False)
+    moving = {"from": "a" * 40, "image": "sautium-backend:v0.2.0-old", "to": "c" * 40, "name": "v0.3.0",
+              "tag": "sautium-backend:v0.3.0-cccccccccccc", "copy": "music_ai_pre_update"}
+    ha.save_state({"moving": moving}, checkout)
+    assert ha.run(checkout, api, now=50.0, verbs={}, start_probe=lambda: None) == 3     # the boot unit retries
+    assert up.calls == [] and handler.seen == [] and ha.load_state(checkout)["moving"] == moving
+
+
+def test_a_way_back_whose_database_did_not_go_back_is_tried_again(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch, fail_at="restore", healthy=(False, True, True))
+    state = {}
+    outcome, detail, _, _ = ha.verb_update(state, 1000.0, checkout)
+    assert outcome == "failed" and "put the database back" in detail
+    assert state["moving"]["back_tried_at"] == 1000.0                      # kept: not the new schema forever
+    assert ha.resume(state, 1000.0 + ha.RETRY_BACK - 1, checkout) is None
+    up.fail_at = None
+    outcome, detail, _, _ = ha.resume(state, 1000.0 + ha.RETRY_BACK, checkout)
+    assert outcome == "undone" and "moving" not in state
+
+
+def test_a_successful_update_is_saved_before_its_copy_is_dropped(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch)
+    seen = {}
+    real = ha._psql
+
+    def psql(root, env, *statements, **kw):
+        if any(s.startswith("DROP DATABASE IF EXISTS \"music_ai_pre_update\"") for s in statements) and "copy" in up.calls:
+            seen["saved"] = ha.load_state(checkout)
+        return real(root, env, *statements, **kw)
+
+    monkeypatch.setattr(ha, "_psql", psql)
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "updated"
+    assert "moving" not in seen["saved"] and seen["saved"]["installed"]["commit"] == "c" * 40
+
+
+def test_a_build_that_times_out_is_not_built_again_for_a_day(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch)
+    real = up.run
+
+    def slow(args, **kw):
+        if args[:2] == ["docker", "build"]:
+            raise subprocess.TimeoutExpired(args, 3 * 3600)
+        return real(args, **kw)
+
+    monkeypatch.setattr(ha, "_run", slow)
+    state = {}
+    with pytest.raises(ha.Refusal, match="did not build"):
+        ha.verb_update(state, 1000.0, checkout)
+    assert ha.verb_update(state, 1001.0, checkout)[0] == "floor"
+
+
+def test_a_refusal_for_the_checkouts_own_files_holds_for_minutes_not_a_day(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch)
+    monkeypatch.setattr(ha, "leftovers", lambda root=None: ["backend/.env"])
+    state = {}
+    assert ha.verb_update(state, 1000.0, checkout)[0] == "refused"
+    assert ha.verb_update(state, 1001.0, checkout)[0] == "floor"
+    monkeypatch.setattr(ha, "leftovers", lambda root=None: [])
+    assert ha.verb_update(state, 1000.0 + ha.HELD_FLOOR, checkout)[0] == "updated"
+
+
+def test_provider_packages_are_the_ones_the_person_named(tmp_path):
+    root = tmp_path / "co"
+    providers = root / "backend" / "streaming" / "providers"
+    providers.mkdir(parents=True)
+    (root / "mcp").mkdir()
+    (root / ".gitignore").write_text("backend/streaming/providers/\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+                   check=True)
+    (providers / "mine").mkdir()
+    (providers / "planted").mkdir()
+    (root / "host").mkdir()
+    (root / "host" / "allowed-providers").write_text("# the person's\nmine\n")
+    assert ha.leftovers(root) == ["backend/streaming/providers/planted"]
+    (providers / "planted").rmdir()
+    (providers / "mine").rmdir()
+    (providers / "mine").symlink_to(tmp_path)
+    assert ha.leftovers(root) == ["backend/streaming/providers/mine"]
+
+
+def test_a_folder_with_more_entries_than_one_listing_is_left_not_a_crash(checkout, monkeypatch):
+    monkeypatch.setattr(ha, "DRAIN_MAX", 4)
+    deep = checkout / "run" / "requests" / "update"
+    deep.mkdir()
+    for i in range(10):
+        (deep / f"x{i}").write_text("")
+    asked, left = ha.drain(checkout)
+    assert asked == ["update"] and left > 0
+
+
+def test_env_lines_are_split_at_newlines_alone(tmp_path):
+    env = tmp_path / ".env"
+    env.write_bytes(b"A=1\r\nB=x\x0cy\nSAUTIUM_BACKEND_IMAGE=old\n")
+    ha.set_env(env, "SAUTIUM_BACKEND_IMAGE", "new")
+    assert env.read_bytes() == b"A=1\r\nB=x\x0cy\nSAUTIUM_BACKEND_IMAGE=new\n"

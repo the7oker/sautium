@@ -94,6 +94,8 @@ RELEASE_REFS = "refs/sautium/releases/"
 CHECK_FLOOR = 3600                       # a fetch from the project's own remote, at most hourly
 UPDATE_NOOP_FLOOR = 24 * 3600            # not again within a day of one that changed nothing
 DIAGNOSTICS_FLOOR = 600
+HELD_FLOOR = 600                         # after a refusal for the checkout's own files: the person fixes them
+RETRY_BACK = 3600                        # a way back whose database did not go back, tried again
 # The requests folder: what one run removes at most, and how deep
 DRAIN_MAX = 10000
 DRAIN_DEPTH = 8
@@ -210,7 +212,8 @@ def set_env(path: Path, key: str, value: str) -> None:
     """One key of .env set, every other line kept as it is; the file's mode
     kept (it holds the database password: the person's alone)."""
     raw = _read_bounded(path, STATE_MAX) or b""
-    lines = raw.decode("utf-8", "surrogateescape").splitlines()
+    text = raw.decode("utf-8", "surrogateescape")
+    lines = text.split("\n")[:-1] if text.endswith("\n") else text.split("\n") if text else []
     out, done = [], False
     for line in lines:
         if line.split("=", 1)[0].strip() == key and not line.lstrip().startswith("#"):
@@ -285,6 +288,10 @@ def _remove_tree(dir_fd: int, name: str, depth: int, budget: List[int]) -> bool:
         os.rmdir(name, dir_fd=dir_fd)
     except FileNotFoundError:
         pass
+    except OSError as e:
+        if e.errno != errno.ENOTEMPTY:   # more children than one listing takes, or new ones meanwhile
+            raise
+        return False
     return True
 
 
@@ -454,10 +461,11 @@ def verb_check(state: dict, now: float, root: Path = None) -> Tuple[str, str, Op
 
 
 def _psql(root: Path, env: Dict[str, str], *statements: str, timeout: int = 3600) -> str:
-    """Statements run one by one in the database's own container, on its
-    maintenance database: a database is copied, dropped and renamed only from
-    outside it. What the last one printed."""
-    args = ["docker", "exec", POSTGRES, "psql", "-v", "ON_ERROR_STOP=1", "-At", "-U",
+    """Statements run one by one in this node's database container (by its
+    compose project, never a container's global name: another node's could
+    have it), on the maintenance database: a database is copied, dropped and
+    renamed only from outside it. What the last one printed."""
+    args = [*compose_cmd(root), "exec", "-T", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-At", "-U",
             env.get("POSTGRES_USER", "musicai"), "-d", "postgres"]
     for statement in statements:
         args += ["-c", statement]
@@ -480,13 +488,30 @@ def _close_sessions(name: str) -> str:
             f"WHERE datname = '{name}' AND pid <> pg_backend_pid()")
 
 
+def _database_up(root: Path) -> bool:
+    """The database's container up and healthy: after a power cut the agent
+    may start before Docker has, or while PostgreSQL recovers."""
+    return compose("up", "-d", "--wait", "--wait-timeout", "600", "postgres", root=root, timeout=700,
+                   check=False).returncode == 0
+
+
+def _clear_copies(root: Path, env: Dict[str, str]) -> None:
+    """What earlier updates left beside the database, dropped before a new
+    one: the copy a cut run made, the database a failed release left (kept
+    until now, so nothing it wrote was lost unasked)."""
+    name = _database(env)
+    _psql(root, env, *[f'DROP DATABASE IF EXISTS "{name}_{kind}" WITH (FORCE)'
+                       for kind in ("pre_update", "failed_update")])
+
+
 def _room_for_copy(root: Path, env: Dict[str, str]) -> None:
     """The copy needs the database's size again on the volume, with room to
-    spare: a full disk would stop PostgreSQL, the node's and the way back's."""
+    spare: a full disk would stop PostgreSQL, the node's and the way back's.
+    Asked after the build, whose image lands on the same disk."""
     name = _database(env)
     size = int(_psql(root, env, f"SELECT pg_database_size('{name}')"))
-    free = _run(["docker", "exec", POSTGRES, "df", "-B1", "--output=avail", "/var/lib/postgresql"],
-                cwd=root).stdout.decode().split()[-1]
+    free = _run([*compose_cmd(root), "exec", "-T", "postgres", "df", "-B1", "--output=avail",
+                 "/var/lib/postgresql"], cwd=root).stdout.decode().split()[-1]
     if int(free) < size * 1.2 + (1 << 30):
         raise Refusal("refused", f"the database ({size >> 20} MB) has no room for its copy beside it "
                                  f"({int(free) >> 20} MB free): nothing moved")
@@ -508,9 +533,10 @@ def _snapshot(root: Path, env: Dict[str, str]) -> str:
 
 
 def _restore(root: Path, env: Dict[str, str], copy: str) -> None:
-    """The copy renamed into place, the live database renamed away first and
-    dropped last: at every step one of the two is whole under a name a next
-    try finds (an interrupted way back is resumed, run())."""
+    """The copy renamed into place, the live database renamed away to
+    `<db>_failed_update` and KEPT (the next update drops it): at every step
+    one of the two is whole under a name a next try finds, and nothing the
+    failed release wrote is lost unasked."""
     name = _database(env)
     held = _databases(root, env)
     if copy not in held:
@@ -521,7 +547,7 @@ def _restore(root: Path, env: Dict[str, str], copy: str) -> None:
     steps = [f'DROP DATABASE IF EXISTS "{failed}" WITH (FORCE)']
     if name in held:
         steps += [_close_sessions(name), f'ALTER DATABASE "{name}" RENAME TO "{failed}"']
-    steps += [f'ALTER DATABASE "{copy}" RENAME TO "{name}"', f'DROP DATABASE IF EXISTS "{failed}" WITH (FORCE)']
+    steps += [f'ALTER DATABASE "{copy}" RENAME TO "{name}"']
     _psql(root, env, *steps)
 
 
@@ -558,27 +584,36 @@ def _front_restarted(root: Path, old: str, new: str) -> Optional[str]:
         return None
     if not git("diff", "--name-only", old, new, "--", "scripts/master-front/", root=root):
         return None
-    _run(["systemctl", "--user", "restart", "sautium-front.service"], cwd=root)
-    return "the trusted front restarted"
+    done = _run(["systemctl", "--user", "restart", "sautium-front.service"], cwd=root, check=False)
+    return "the trusted front restarted" if done.returncode == 0 else "the trusted front did not restart: see its unit"
 
 
 # What may lie in the code's folders beside what git tracks: the node's own
 # data folder (its bind), bytecode caches no image interpreter reads
-# (PYTHONPYCACHEPREFIX), what the host puts there itself (the atlas's file,
-# the owner's provider modules), and the MCP config earlier releases wrote.
-# Anything else was left by a node from before its code was read-only — a
-# backend/.env Settings would read, a module named like the standard
-# library's, a bytecode file without its source — and would run in every
-# release after this one.
+# (PYTHONPYCACHEPREFIX), what the host puts there itself (the atlas's file),
+# and the MCP config earlier releases wrote. Anything else was left by a node
+# from before its code was read-only — a backend/.env Settings would read, a
+# module named like the standard library's, a bytecode file without its
+# source — and would run in every release after this one. The providers
+# folder is code the node imports at every start: each package in it must be
+# one the person named in host/allowed-providers (a file no container sees).
 LEFT_ALLOWED = re.compile(r"(backend/data/|.*/__pycache__/|.*\.pyc|backend/hqp_atlas\.json|"
-                          r"backend/hqp_atlas\.version\.json|backend/streaming/providers/.*|"
-                          r"backend/mcp-docker\.json)")
+                          r"backend/hqp_atlas\.version\.json|backend/mcp-docker\.json)")
+PROVIDERS = "backend/streaming/providers"
+
+
+def _allowed_providers(root: Path) -> set:
+    raw = _read_bounded(host_dir(root) / "allowed-providers", STATE_MAX) or b""
+    return {line.strip() for line in raw.decode("utf-8", "replace").splitlines()
+            if line.strip() and not line.startswith("#")}
 
 
 def leftovers(root: Path = None) -> List[str]:
     """Untracked or ignored paths in the code's folders that LEFT_ALLOWED does
-    not name. A bytecode file is allowed only inside __pycache__/: one beside
-    its folder's sources is imported even with no source."""
+    not name, and provider packages the person did not name. A bytecode file
+    is allowed only inside __pycache__/: one beside its folder's sources is
+    imported even with no source."""
+    root = root or ROOT
     out = _run(["git", "status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=all",
                 "--", "backend", "mcp"], cwd=root).stdout.decode("utf-8", "surrogateescape")
     found = []
@@ -586,24 +621,42 @@ def leftovers(root: Path = None) -> List[str]:
         if entry[:3] not in ("?? ", "!! "):
             continue
         path = entry[3:]
+        if path.rstrip("/") == PROVIDERS or path.startswith(PROVIDERS + "/"):
+            continue                     # judged by name below
         sourceless = path.endswith(".pyc") and "/__pycache__/" not in path
         if sourceless or not LEFT_ALLOWED.fullmatch(path):
             found.append(path)
+    providers, allowed = root / PROVIDERS, _allowed_providers(root)
+    try:
+        with os.scandir(providers) as entries:
+            for entry in entries:
+                if entry.name == "__pycache__" and entry.is_dir(follow_symlinks=False):
+                    continue
+                tracked = _run(["git", "ls-files", "--error-unmatch", "--", f"{PROVIDERS}/{entry.name}"],
+                               cwd=root, check=False).returncode == 0
+                if tracked:
+                    continue
+                if entry.name not in allowed or entry.is_symlink():
+                    found.append(f"{PROVIDERS}/{entry.name}")
+    except FileNotFoundError:
+        pass
     return found
 
 
-def _way_back(root: Path, env: Dict[str, str], moving: dict) -> Tuple[str, str]:
+def _way_back(root: Path, env: Dict[str, str], moving: dict) -> Tuple[str, str, bool]:
     """The release before, its image and its database put back, and the node
     started: each step tried whatever the one before did — a node left down
-    answers nobody. (outcome, what happened)."""
-    problems = []
+    answers nobody. (outcome, what happened, whether the database is back)."""
+    problems, restored = [], not moving.get("copy")
 
-    def step(what: str, do) -> None:
+    def step(what: str, do) -> bool:
         try:
             do()
+            return True
         except (Refusal, OSError, ValueError, subprocess.SubprocessError) as e:
             problems.append(f"{what}: {getattr(e, 'detail', e)}")
             log(f"the way back could not {what}: {getattr(e, 'detail', e)}")
+            return False
 
     step("stop the node", lambda: compose("stop", "backend", root=root, check=False))
     step("check the release before out", lambda: git("-c", "advice.detachedHead=false", "checkout", "--quiet",
@@ -614,14 +667,49 @@ def _way_back(root: Path, env: Dict[str, str], moving: dict) -> Tuple[str, str]:
         step("remove the release's image", lambda: _run(["docker", "image", "rm", moving["tag"]], cwd=root,
                                                          check=False))
     if moving.get("copy"):
-        step("put the database back", lambda: _restore(root, env, moving["copy"]))
+        restored = step("put the database back", lambda: _restore(root, env, moving["copy"]))
     if not _healthy(root):
         return "failed", ("the release before it did not start again after the way back"
-                          + (f" ({'; '.join(problems)})" if problems else "") + ": see the node's log")
+                          + (f" ({'; '.join(problems)})" if problems else "") + ": see the node's log"), restored
     if problems:
-        return "failed", f"the node is back on the release before it, but: {'; '.join(problems)}"
+        return "failed", f"the node is back on the release before it, but: {'; '.join(problems)}", restored
     return "undone", ("the node is back on the release before it"
-                      + (", its database as it was before the update" if moving.get("copy") else ""))
+                      + (", its database as it was before the update (the one the release left is kept "
+                         "beside it until the next update)" if moving.get("copy") else "")), restored
+
+
+def _finished(state: dict, root: Path, env: Dict[str, str], moving: dict, now: float) -> str:
+    """The release kept: the state saved first — a cut after this point
+    leaves nothing to undo — then the copy and the image before dropped."""
+    former = (state.get("installed") or {}).get("previous")
+    state["installed"] = {"name": moving["name"], "commit": moving["to"], "at": now, "image": moving["tag"],
+                          "previous": moving["image"], "runs_ok": 0}
+    for key in ("update_noop_at", "update_held_at", "failed_since_installed", "update_failed", "moving"):
+        state.pop(key, None)
+    save_state(state, root)
+    try:
+        _psql(root, env, f'DROP DATABASE IF EXISTS "{moving["copy"]}"')
+    except Refusal as e:
+        log(f"the database's copy stays beside it until the next update: {e.detail}")
+    if former and former not in (moving["tag"], moving["image"]) and former.startswith("sautium-backend:v"):
+        _run(["docker", "image", "rm", former], cwd=root, check=False)
+    front = _front_restarted(root, moving["from"], moving["to"])
+    return f"moved to Sautium {moving['name'][1:]}" + (f"; {front}" if front else "")
+
+
+def _go_back(state: dict, root: Path, env: Dict[str, str], moving: dict, now: float,
+             why: str) -> Tuple[str, str, Optional[str], Optional[str]]:
+    log(f"{moving['name']} {why}: the way back to {moving['from'][:12]}")
+    outcome, back, restored = _way_back(root, env, moving)
+    state["update_failed"] = {"commit": moving["to"], "at": now}
+    if restored:
+        state.pop("moving", None)
+    else:
+        # The database is not back: the next start of the agent tries again
+        # (not sooner than RETRY_BACK), never leaving it on the new schema
+        moving["back_tried_at"] = now
+        moving["from_only"] = True
+    return outcome, f"Sautium {moving['name'][1:]} {why}: {back}", moving["name"], None
 
 
 def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, Optional[str], Optional[str]]:
@@ -629,12 +717,17 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     tree git made of the verified commit, stop, copy the database, move,
     start; the way back when the new node or its agent does not come up, and
     whatever stops the update after the node stopped. A release that did not
-    start here is not tried again for a day, nor is an update that found
-    nothing to do."""
+    start or build here is not tried again for a day, nor is an update that
+    found nothing to do."""
     root = root or ROOT
+    if state.get("moving"):
+        return "floor", "an update is still being put back; the agent tries again at its next start", None, None
     noop = state.get("update_noop_at")
     if noop is not None and now - noop < UPDATE_NOOP_FLOOR:
         return "floor", "an update found nothing to do less than a day ago", None, None
+    held = state.get("update_held_at")
+    if held is not None and now - held < HELD_FLOOR:
+        return "floor", "an update was refused for the checkout's own files minutes ago", None, None
     found = survey(root)
     state["check_at"] = now
     if not found["offered"]:
@@ -646,36 +739,38 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     if tried.get("commit") == commit and now - tried["at"] < UPDATE_NOOP_FLOOR:
         return "floor", f"Sautium {name[1:]} did not start here less than a day ago", name, None
     if git("status", "--porcelain", "--untracked-files=no", root=root):
-        state["update_noop_at"] = now
+        state["update_held_at"] = now
         return "refused", "the checkout has local changes: an update never moves a tree someone edits", name, None
     left = leftovers(root)
     if left:
-        state["update_noop_at"] = now
+        state["update_held_at"] = now
         return "refused", ("files git does not know of lie among the code, and would run in every release: "
                            + ", ".join(left[:5]) + (" …" if len(left) > 5 else "")), name, None
     env = read_env(root / ".env")
-    _room_for_copy(root, env)
     tag = f"sautium-backend:{name}-{commit[:12]}"
     log(f"building {tag} from {name} ({commit})")
+    # A build is the heaviest thing a forged request asks for: once a day,
+    # whatever ends it
+    state["update_failed"] = {"commit": commit, "at": now}
+    save_state(state, root)
     archive = subprocess.Popen(["git", "archive", "--format=tar", f"{commit}:backend"], cwd=str(root),
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         _run(["docker", "build", "-f", DOCKERFILE, "-t", tag, "-"], cwd=root,
              stdin=archive.stdout, timeout=3 * 3600)
-    except Refusal as r:
-        # A build is the heaviest thing a forged request asks for: once a day
-        state["update_failed"] = {"commit": commit, "at": now}
-        raise Refusal("failed", f"the image of {name} did not build ({r.detail}): nothing moved", name) from r
+    except Exception as e:
+        raise Refusal("failed", f"the image of {name} did not build "
+                                f"({getattr(e, 'detail', None) or type(e).__name__}): nothing moved", name) from e
     finally:
         archive.stdout.close()
         archive.wait()
     if archive.returncode != 0:
-        state["update_failed"] = {"commit": commit, "at": now}
         return "failed", f"git archive of {name} failed: nothing moved", name, None
-    old_commit = head(root)
+    _clear_copies(root, env)
+    _room_for_copy(root, env)
     # Kept before the node stops: a run that dies past this point (power,
-    # a kill) is undone by the next start of the agent, at boot included
-    moving = state["moving"] = {"from": old_commit, "image": image_of(root), "to": commit, "name": name,
+    # a kill) is finished or undone by the next start of the agent
+    moving = state["moving"] = {"from": head(root), "image": image_of(root), "to": commit, "name": name,
                                 "tag": tag, "copy": None}
     save_state(state, root)
     healthy, why = False, "did not come up healthy"
@@ -694,40 +789,37 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
         why = f"could not be put in place ({getattr(e, 'detail', None) or f'{type(e).__name__}: {e}'})"
         log(f"the update stopped: {why}")
     if healthy:
-        former = (state.get("installed") or {}).get("previous")
-        state["installed"] = {"name": name, "commit": commit, "at": now, "image": tag,
-                              "previous": moving["image"], "runs_ok": 0}
-        for key in ("update_noop_at", "failed_since_installed", "update_failed", "moving"):
-            state.pop(key, None)
-        try:
-            _psql(root, env, f'DROP DATABASE IF EXISTS "{moving["copy"]}"')
-        except Refusal as e:
-            log(f"the database's copy stays beside it: {e.detail}")
-        if former and former not in (tag, moving["image"]) and former.startswith("sautium-backend:v"):
-            _run(["docker", "image", "rm", former], cwd=root, check=False)
-        front = _front_restarted(root, old_commit, commit)
-        return "updated", f"moved to Sautium {name[1:]}" + (f"; {front}" if front else ""), name, None
-    log(f"{name} {why}: the way back to {old_commit[:12]}")
-    outcome, back = _way_back(root, env, moving)
-    state.pop("moving", None)
-    state["update_failed"] = {"commit": commit, "at": now}
-    return outcome, f"Sautium {name[1:]} {why}: {back}", name, None
+        return "updated", _finished(state, root, env, moving, now), name, None
+    return _go_back(state, root, env, moving, now, why)
+
+
+class NotReady(Exception):
+    """Docker or the database is not up yet: the agent's boot unit starts the
+    body again shortly."""
 
 
 def resume(state: dict, now: float, root: Path = None) -> Optional[Tuple[str, str, Optional[str], Optional[str]]]:
     """An update a run did not finish — the machine lost power, the agent was
-    killed, the unit's time ran out — is undone at the next start of the
-    agent (the units start it at boot as well): its answer, or None."""
+    killed, the unit's time ran out — finished at the next start of the agent
+    (the boot unit starts it at boot too): kept when the checkout had moved
+    and the release is up and its agent answers, else taken back. Its answer,
+    or None. Nothing is touched until the database is up."""
     moving = state.get("moving")
     if not moving:
         return None
     root = root or ROOT
-    log(f"an update to {moving['name']} did not finish: the way back to {moving['from'][:12]}")
-    outcome, back = _way_back(root, read_env(root / ".env"), moving)
-    state.pop("moving", None)
-    state["update_failed"] = {"commit": moving["to"], "at": now}
-    return "undone" if outcome == "undone" else "failed", \
-        f"the update to Sautium {moving['name'][1:]} did not finish: {back}", moving["name"], None
+    if moving.get("back_tried_at") is not None and now - moving["back_tried_at"] < RETRY_BACK:
+        return None
+    if not _database_up(root):
+        raise NotReady("the database's container is not up")
+    env = read_env(root / ".env")
+    moved = (not moving.get("from_only") and image_of(root) == moving["tag"]
+             and git("rev-parse", "--verify", "HEAD", root=root) == moving["to"])
+    if moved and _healthy(root) and _body_answers(root):
+        log(f"an update to {moving['name']} did not finish its run, and the release is up: kept")
+        return "updated", "the update finished at the agent's next start: " + \
+            _finished(state, root, env, moving, now), moving["name"], None
+    return _go_back(state, root, env, moving, now, "did not finish")
 
 
 def _scrub(text: str) -> str:
@@ -760,8 +852,8 @@ def verb_diagnostics(state: dict, now: float, root: Path = None) -> Tuple[str, s
     section("disk", ["sh", "-c", f"df -h {shlex.quote(str(root))} \"$(docker info --format "
                                  "'{{.DockerRootDir}}')\""])
     section("containers", [*compose_cmd(root), "ps", "--all"])
-    for name in (BACKEND, POSTGRES):
-        section(f"log: {name}", ["docker", "logs", "--tail", str(LOG_TAIL), name])
+    for service in ("backend", "postgres"):
+        section(f"log: {service}", [*compose_cmd(root), "logs", "--no-color", "--tail", str(LOG_TAIL), service])
     section("log: the host agent", ["tail", "-n", str(LOG_TAIL), str(host_dir(root) / "agent.log")])
     report = _scrub("".join(parts))
     if len(report.encode()) > REPORT_MAX:
@@ -905,11 +997,17 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
 
         for verb, (outcome, detail, release) in list((state.get("unsent") or {}).items()):
             said(verb, outcome, detail, release, None)
-        moment = time.time() if now is None else now
-        resumed = resume(state, moment, root)
+        asked, _left = drain(root)
+        try:
+            resumed = resume(state, time.time() if now is None else now, root)
+        except NotReady as e:
+            # Nothing touched; a failed start, which the boot unit retries.
+            # What was asked meanwhile is dropped with the node down: it asks again
+            log(f"an unfinished update waits: {e}")
+            save_state(state, root)
+            return 3
         if resumed:
             said("update", *resumed)
-        asked, _left = drain(root)
         for verb in asked:
             moment = time.time() if now is None else now
             try:
@@ -968,21 +1066,25 @@ def units(root: Path) -> Dict[str, str]:
     # The agent's own log, beside its files: a person's user journal is not
     # always kept, nor readable by them
     log_file = host_dir(root) / "agent.log"
-    # A start's steps are bounded each (the build 3 h, the copy and its way
-    # back an hour, the waits for health 40 min): the unit's bound is above
-    # their sum, so a run ends by its own steps, never cut midway
-    service = (f"[Unit]\nDescription=Sautium host agent: %s\nOnFailure={UNIT}-restore.service\n\n"
-               f"[Service]\nType=oneshot\nExecStart={starter}\nTimeoutStartSec=9h\n"
+    # A start's steps are bounded each (the build 3 h, each database step an
+    # hour, the waits for health 40 min): the unit's bound is above their sum
+    # at worst, about 13 h, so a run ends by its own steps
+    service = (f"[Unit]\nDescription=Sautium host agent: %s\nOnFailure={UNIT}-restore.service\n%s\n"
+               f"[Service]\nType=oneshot\nExecStart={starter}\nTimeoutStartSec=14h\n"
                f"StandardOutput=append:{log_file}\nStandardError=append:{log_file}\n"
-               "NoNewPrivileges=yes\n")
+               "NoNewPrivileges=yes\n%s")
     return {
         f"{UNIT}.path": (f"[Unit]\nDescription=Sautium host agent: the node's requests\n\n"
                          f"[Path]\nDirectoryNotEmpty={root}/run/requests\nUnit={UNIT}.service\n\n"
                          "[Install]\nWantedBy=default.target\n"),
-        # Also at the user manager's start — at boot, with lingering on — so an
-        # update the machine's power cut short is undone with no request
-        f"{UNIT}.service": service % "a request from the node" + "\n[Install]\nWantedBy=default.target\n",
-        f"{UNIT}-probe.service": service % "a new starter tried",
+        f"{UNIT}.service": service % ("a request from the node", "", ""),
+        f"{UNIT}-probe.service": service % ("a new starter tried", "", ""),
+        # At the user manager's start — at boot, with lingering on — so an
+        # update the machine's power cut short is finished or undone with no
+        # request; started again until Docker and the database are up
+        f"{UNIT}-boot.service": service % ("an unfinished update, at the start", "StartLimitIntervalSec=0\n",
+                                           "Restart=on-failure\nRestartSec=30s\n\n"
+                                           "[Install]\nWantedBy=default.target\n"),
         f"{UNIT}-restore.service": (f"[Unit]\nDescription=Sautium host agent: the previous starter back "
                                     f"after {STARTER_TRIES} failed starts\n\n"
                                     f"[Service]\nType=oneshot\nExecStart=/bin/sh -c '{restore}'\n"),
@@ -1044,7 +1146,7 @@ def install(root: Path = None, systemctl=None) -> int:
         _write_private(folder / name, text.encode(), 0o644)
     ctl = systemctl or (lambda *args: _run(["systemctl", "--user", *args], cwd=root))
     ctl("daemon-reload")
-    ctl("enable", f"{UNIT}.service")
+    ctl("enable", f"{UNIT}-boot.service")
     ctl("enable", "--now", f"{UNIT}.path")
     print(f"The host agent is installed for {root}.")
     user = os.environ.get("USER") or str(os.getuid())
@@ -1062,7 +1164,7 @@ def uninstall(root: Path = None, systemctl=None) -> int:
     root = root or ROOT
     ctl = systemctl or (lambda *args: _run(["systemctl", "--user", *args], check=False))
     ctl("disable", "--now", f"{UNIT}.path")
-    ctl("disable", f"{UNIT}.service")
+    ctl("disable", f"{UNIT}-boot.service")
     folder = unit_dir()
     for name in units(root):
         (folder / name).unlink(missing_ok=True)

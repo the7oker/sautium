@@ -35,6 +35,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -158,8 +159,27 @@ def installed_tag() -> Optional[str]:
 
 
 # The folder each build in place was unpacked into by THIS process, after
-# its release was checked again: nothing an earlier process left is run
+# its release was checked again: nothing an earlier process left is run.
+# One check and unpack at a time: the resolve workers and the refresh pass
+# ask together at a start.
 _ready: dict = {}
+_ready_lock = threading.Lock()
+_RUN = re.compile(r"run-(\d+)-\d+(?:\.part)?")
+
+
+def _gone(pid: int) -> bool:
+    """Whether the process that unpacked a folder has ended. On Windows
+    os.kill(pid, 0) would send that process a Ctrl+C: there no other
+    process's folder is ever taken."""
+    if pid == os.getpid() or sys.platform == "win32":
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _checked_unpack(build: Path) -> Optional[Path]:
@@ -191,8 +211,10 @@ def _checked_unpack(build: Path) -> Optional[Path]:
         logger.error("the yt-dlp build %s does not check again: %s", build.name, e)
         return None
     for old in build.iterdir():
-        if old.name.startswith("run-") and old != run:
-            # A program still running on Windows cannot go yet: a later process takes it
+        owner = _RUN.fullmatch(old.name)
+        if owner and old != run and (int(owner.group(1)) == os.getpid() or _gone(int(owner.group(1)))):
+            # Another live process's folder stays: it may be running from it.
+            # A program still running on Windows cannot go yet: a later pass takes it
             shutil.rmtree(old, ignore_errors=True)
     return run / exe
 
@@ -208,12 +230,14 @@ def executable() -> Optional[Path]:
         _asset()
     except Refused:
         return None
-    if name not in _ready:
-        exe = _checked_unpack(root() / name)
-        if exe is None:
-            return None
-        _ready[name] = exe
-    return _ready[name] if _ready[name].is_file() else None
+    with _ready_lock:
+        if name not in _ready or not _ready[name].is_file():
+            exe = _checked_unpack(root() / name)
+            if exe is None:
+                _ready.pop(name, None)
+                return None
+            _ready[name] = exe
+        return _ready[name]
 
 
 def child_env() -> dict:
@@ -402,7 +426,8 @@ def _install(client: httpx.Client, tag: str) -> None:
     current = folder / "current.part"
     current.write_text(build.name, encoding="ascii")
     os.replace(current, folder / "current")
-    _ready[build.name] = program
+    with _ready_lock:
+        _ready[build.name] = program
     for old in folder.iterdir():
         if old.is_dir() and old.name not in (build.name, previous):
             # A build still running on Windows cannot go yet: the next pass takes it

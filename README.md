@@ -245,7 +245,7 @@ numbered deltas, `backend/db_migrate.py`). The container reads its code
 read-only — what the node writes lives in `backend/data/` and `data/` — and
 the Web UI and the media ports answer on IPv4 alone.
 
-With `docker-compose.pi.yml` (Linux; Docker Compose 2.24 or later) the
+With `docker-compose.pi.yml` (Linux; Docker Engine 25 and Compose 2.24 or later) the
 node can ask the machine to move it to a signed release through the host
 agent (`scripts/host_agent.py`): a few user-level systemd units that check
 the release with the installed tree's own verifier, build its image, move
@@ -257,6 +257,11 @@ python3 -I scripts/host_agent.py install
 docker compose -f docker-compose.pi.yml up -d    # the node learns of the agent
 sudo loginctl enable-linger "$USER"              # once: the agent runs with nobody logged in
 ```
+
+Run `install` again after an update whose notes say its units changed. A
+provider module you put in `backend/streaming/providers/` is named, one per
+line, in `host/allowed-providers`: the agent refuses to move a tree that
+holds code it does not know of.
 
 ### 4. Verify
 
