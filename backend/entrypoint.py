@@ -98,8 +98,13 @@ def main() -> int:
     # Built here, not by uvicorn.run, which imports the app before its server
     # holds the signals: PID 1 has no default action for SIGTERM, so a stop
     # during the import was not heard at all
+    # proxy_headers off: uvicorn otherwise takes X-Forwarded-For from any
+    # process of this machine as the client's address, and on the host's
+    # network (the Linux file) that is every local process. Nothing on this
+    # port authenticates by address (CLAUDE.md rule 5), and a TLS front
+    # before it is a client like any other.
     server = Server(uvicorn.Config("main:app", host=HOST, port=PORT, timeout_graceful_shutdown=2,
-                                   log_config=LOGGING_CONFIG))
+                                   log_config=LOGGING_CONFIG, proxy_headers=False))
     try:
         server.run()
     except KeyboardInterrupt:

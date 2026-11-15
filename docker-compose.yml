@@ -181,8 +181,13 @@ services:
       # SAUTIUM_HOST_IPS=192.168.1.10                  (the LAN address)
       # SAUTIUM_HOST_IPS=192.168.1.10,100.101.102.103  (plus a Tailscale one)
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
+      # The names a TLS front before the HTTP port answers to (a reverse proxy's, `tailscale serve`'s):
+      # the Host guard accepts them too (SECURITY.md).
+      SAUTIUM_ALLOWED_HOSTS: ${SAUTIUM_ALLOWED_HOSTS:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: http://localhost:8000
+      # The checkout's .git, mounted beside the code (below)
+      SAUTIUM_CHECKOUT: /checkout
       MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
       LB_DUMP_DIR: /app/data/lbdump        # writable mount for the ListenBrainz statistics dump
       # Disable uvicorn auto-reload in Docker. The bind-mounted ./backend
@@ -195,13 +200,24 @@ services:
       # Allow container to access Windows host services (like HQPlayer)
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./backend:/app
-      - ./mcp:/app/mcp
+      # Every mount inside the read-only /app needs its mount point there
+      # already, in the checkout: Docker cannot make one in a read-only
+      # folder. ./backend/data is its own source (Docker makes it); the
+      # code's own folders ship their points (backend/desktop, backend/mcp);
+      # everything else mounts outside /app or under /app/data.
+      # The code is the checkout's, and the node only reads it (SEC-DESIGN-2026-11-03 Q6): a node that could
+      # write ./backend could pin, outlive or undo an update and decide the next image built from the tree.
+      # What the node writes has a bind of its own — never a folder of the code's.
+      - ./backend:/app:ro
+      - ./mcp:/app/mcp:ro
+      # The node's own files (its key, the API secret where it used to live, the transcode cache): a folder
+      # git ignores whole, so nothing written there is a change to the checkout.
+      - ./backend/data:/app/data
       - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
-      - ./data/generated_eq:/app/generated_eq
+      - ./data/generated_eq:/var/lib/sautium/generated_eq
       # Measurement-registry clones (AutoEq sparse checkout) — read-only
       # source for gear_registry.py imports; refreshed via git pull.
-      - ./data/registry:/app/registry:ro
+      - ./data/registry:/var/lib/sautium/registry:ro
       # The peer surface's TLS cert (pinned to the node key; tls_gen.py).
       - ./data/tls:/app/data/tls
       - ./data/node_identity:/app/data/node_identity   # identity certificate + mined proof (survive recreation)
@@ -216,12 +232,6 @@ services:
       # Docker turns a single-file mount whose source is missing into a
       # directory of that name.
       - ./data/atlas:/app/data/atlas:ro
-      # Single-source P2P slice module (desktop/p2p owns it; the launcher sync
-      # server imports the same file) — lets the Docker backend serve
-      # /api/mb/slice to dump-less peers. Directory mount on purpose: a
-      # single-FILE bind mount breaks on docker restart after the host file
-      # is edited (WSL2 inode swap).
-      - ./desktop/p2p:/app/desktop_p2p:ro
       # The launcher tree as an importable `desktop` package — the peer
       # surface reuses its sync_client import gate for pushed enrichment
       # instead of mirroring the seal verification (see routers/sync.py
@@ -230,7 +240,8 @@ services:
       - ./desktop:/app/desktop:ro
       # The checkout's .git, read-only: /config and the backup manifest report
       # the running commit (desktop/updater.head_commit reads HEAD by hand).
-      - ./.git:/app/.git:ro
+      # Beside /app, not in it: no .git folder can ship as a mount point.
+      - ./.git:/checkout/.git:ro
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
@@ -276,7 +287,9 @@ services:
       # primary workflow. Internet exposure is blocked at the UPnP layer
       # (p2p_manager.py never maps this port, and desktop/portmap.py
       # refuses it). See CLAUDE.md "Security Posture" before changing this.
-      - "8800:8000"
+      # The LAN-only ports on IPv4 alone: Docker publishes a port with no address on [::] as well, and where
+      # the router passes IPv6 the Web UI and the media ports would answer the internet.
+      - "0.0.0.0:8800:8000"
       # The peer surface (backend/p2p_app.py) — sync protocol only, no Web
       # UI, no API secret. THIS is the port that may be published to the
       # internet (desktop/portmap.py map ...), never 8800.
@@ -293,9 +306,9 @@ services:
       # P2P DHT MUST stay on 0.0.0.0 — that's the public peer surface.
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
       # Phantom-preview media proxy (plain http — HQPlayer pulls from it).
-      - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"
+      - "0.0.0.0:${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"
       # DLNA GENA event callbacks from LAN renderers (plain http listener).
-      - "8831:8831"
+      - "0.0.0.0:8831:8831"
     networks:
       - sautium-network
     depends_on:

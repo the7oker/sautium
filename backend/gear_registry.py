@@ -12,8 +12,8 @@ normalized-name match, or later when the user promotes it to 'want'.
 Band deltas are comparable ONLY within one source (measurer = rig);
 the source string keeps that boundary explicit everywhere downstream.
 
-CLI (inside the backend container, registry bind-mounted at /app/registry):
-    python gear_registry.py --import-autoeq /app/registry/autoeq
+CLI (inside the backend container, registry bind-mounted at /var/lib/sautium/registry):
+    python gear_registry.py --import-autoeq /var/lib/sautium/registry/autoeq
     python gear_registry.py --match
     python gear_registry.py --stats
 """

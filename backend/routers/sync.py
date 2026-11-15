@@ -87,8 +87,8 @@ def _require_sharing() -> None:
     if not sharing_enabled():
         raise HTTPException(status_code=403, detail="sharing disabled")
 
-# Single source: desktop/p2p/mb_slice_queries.py. In Docker the desktop/p2p
-# dir is bind-mounted at /app/desktop_p2p; a native repo run finds it at
+# Single source: desktop/p2p/mb_slice_queries.py. In Docker the desktop tree
+# is bind-mounted at /app/desktop; a native repo run finds it at
 # ../desktop/p2p. Loaded by file path (not sys.path) so desktop modules can
 # never shadow backend ones. Absent → the endpoint 404s (launcher-mode
 # backends serve slices through the launcher's own sync server instead).
@@ -127,7 +127,7 @@ async def _answer(request: Request, run) -> Response:
 def _load_mb_slice_queries():
     import importlib.util
     here = Path(__file__).parent.parent
-    for candidate in (here / "desktop_p2p" / "mb_slice_queries.py",
+    for candidate in (here / "desktop" / "p2p" / "mb_slice_queries.py",
                       here.parent / "desktop" / "p2p" / "mb_slice_queries.py"):
         if candidate.exists():
             spec = importlib.util.spec_from_file_location(

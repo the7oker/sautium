@@ -43,11 +43,14 @@ wheels/
 # VS Code
 .vscode/
 
-# Data directories (keep structure, exclude content)
-# Docker volume, root-owned on the host — compose creates it; no keep-file
+# Data directories. Every folder a container writes is ignored WHOLE — never
+# `folder/*` with a keep-file beside it: git then never looks inside, so
+# nothing the node writes there is a change to the checkout, and an update
+# that refuses a changed checkout cannot be stopped from inside a container
+# (PI-NODE-2A). Docker makes the ones that are missing.
+# Docker volume, root-owned on the host — compose creates it
 data/postgres/
-data/cache/*
-!data/cache/.gitkeep
+data/cache/
 # Runtime caches and generated presets
 data/registry/
 data/generated_eq/
@@ -66,11 +69,13 @@ data/mbdump/
 # ListenBrainz statistics dump (~21 GB archive) — re-downloadable, aggregated into pg
 data/lbdump/
 
-# HMAC API secret — generated per-instance at backend startup. The folder itself
-# ships: its owner is the host user the Docker node's user takes the uid of
-# (backend/node_user.py HOST_OWNED)
-backend/data/*
-!backend/data/.gitkeep
+# The node's own files in a Docker node's /app/data (its key, the transcode
+# cache, the API secret where it used to live) — a bind of its own
+backend/data/
+# The host agent's (scripts/host_agent.py): ./host/ is bound into no
+# container; ./run/requests is the one folder a container writes there
+/host/
+/run/
 
 # Logs
 *.log

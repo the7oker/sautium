@@ -12,11 +12,19 @@
 #     own ./data/claude (sign in from the Web UI);
 #   - the music folder is named in .env, MUSIC_LIBRARY_PATH — there is no
 #     default to guess on Linux;
-#   - PostgreSQL sized for a 16 GB board with an NVMe disk (below).
+#   - PostgreSQL sized for a 16 GB board with an NVMe disk (below);
+#   - the backend on the host's own network (network_mode: host, since
+#     2026-11-15): it sees this machine's addresses as a launcher node does —
+#     the Host guard and the DLNA output find them, nothing is told to it in
+#     SAUTIUM_HOST_IPS to rot at the next lease, the Output scan's multicast
+#     and HQPlayer's broadcast leave the machine, an HQPlayer here is
+#     127.0.0.1 — and it binds its ports itself, IPv4 alone; PostgreSQL stays
+#     on its bridge, published on loopback;
+#   - the host agent's requests folder (scripts/host_agent.py).
 # Native Docker keeps the host's uids across a bind: the node's user takes the
-# uid of whoever owns the checkout's backend/data (backend/node_user.py), so
+# uid of whoever owns the checkout's backend/ (backend/node_user.py), so
 # run compose as the user who cloned it. A checkout an earlier image ran has
-# that folder (and data/) handed to uid 1000: give them back to the user who
+# backend/data and data/ handed to uid 1000: give them back to the user who
 # cloned it once, `sudo chown -R "$USER:" backend/data data`.
 
 # Docker keeps a container's output with no bound unless told, and the
@@ -104,14 +112,47 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.mac
+    # The image the host agent's update built from a verified release, named
+    # in .env (scripts/host_agent.py); a build by hand tags this name too.
+    image: ${SAUTIUM_BACKEND_IMAGE:-sautium-backend:local}
     container_name: sautium-backend
+    # The host's network namespace (the header says why). No port is
+    # published: the node binds 8800, 8830 and 8831 on every IPv4 address
+    # itself, as a launcher node does — the Web UI on the LAN by design, the
+    # phone on the Wi-Fi (CLAUDE.md "Security Posture"); never forward these
+    # three to this machine — and the peer port and the DHT's, the only two
+    # that may ever be forwarded to it.
+    network_mode: host
     # The image's entrypoint drops root itself; nothing in the container may
     # take a privilege back (a setuid binary, a file capability).
     security_opt:
       - no-new-privileges:true
+    # No capability beyond what root needs here (measured on a Pi 5,
+    # PI-NODE-2A): the entrypoint hands the node's folders over — CHOWN, and
+    # DAC_OVERRIDE to walk the folders of a user it is not — and drops to the
+    # node's user (SETGID, SETUID); a `docker exec` as root (the weekly
+    # backup's) reads the node's identity with DAC_OVERRIDE. With none the
+    # start fails; without DAC_OVERRIDE folders stay unhanded. In the host's
+    # network namespace NET_RAW would let a container's root sniff and spoof
+    # on the LAN; NET_BIND_SERVICE, NET_ADMIN and the rest are not needed:
+    # every port is above 1024 and the node configures no interface.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    # The host agent's channel key, which its install writes to ./host/
+    # (bound into no container). No file, no agent: the node says the command
+    # to run on the machine instead.
+    env_file:
+      - path: ./host/agent.env
+        required: false
     environment:
-      # Database configuration
-      POSTGRES_HOST: postgres
+      # Database configuration: PostgreSQL's loopback port, from the host's
+      # namespace
+      POSTGRES_HOST: 127.0.0.1
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-music_ai}
       POSTGRES_USER: ${POSTGRES_USER:-musicai}
@@ -130,8 +171,8 @@ services:
       # Application settings
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
-      # HQPlayer integration
-      HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
+      # HQPlayer integration (an HQPlayer Embedded on this board is loopback)
+      HQPLAYER_HOST: ${HQPLAYER_HOST:-127.0.0.1}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
       HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
       # HQPlayer Desktop's folder on the host, mounted read-only below:
@@ -158,8 +199,10 @@ services:
       # the only thing reaching the published peer port: the container
       # serves it plain HTTP and takes the peer's address from the front's
       # X-Forwarded-For (signals only — pricing, backstops, similarity —
-      # never auth). Pair with P2P_SYNC_PUBLISH=127.0.0.1:<upstream port>
-      # below; a directly reachable upstream lets anyone set that header.
+      # never auth). On the host's network the node then binds its peer port
+      # on loopback alone, where the front reaches it: P2P_SYNC_PORT=18801
+      # (the upstream), P2P_ANNOUNCE_PORT=8801 (the front's). A directly
+      # reachable upstream would let anyone set that header.
       P2P_TRUSTED_FRONT: ${P2P_TRUSTED_FRONT:-0}
       P2P_USERNAME: ${P2P_USERNAME:-}
       P2P_PASSWORD: ${P2P_PASSWORD:-}
@@ -199,8 +242,17 @@ services:
       # SAUTIUM_HOST_IPS=192.168.1.10                  (the LAN address)
       # SAUTIUM_HOST_IPS=192.168.1.10,100.101.102.103  (plus a Tailscale one)
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
+      # The names a TLS front before the HTTP port answers to (a reverse proxy's, `tailscale serve`'s):
+      # the Host guard accepts them too (SECURITY.md).
+      SAUTIUM_ALLOWED_HOSTS: ${SAUTIUM_ALLOWED_HOSTS:-}
+      # On the host's network the Web UI's port is the node's own: no port
+      # map turns 8000 into 8800.
+      UVICORN_PORT: 8800
+      SAUTIUM_HOST_NETWORK: "1"
       # Intra-container backend self-calls (Claude Code tools, MCP server).
-      BACKEND_URL: http://localhost:8000
+      BACKEND_URL: http://127.0.0.1:8800
+      # The checkout's .git, mounted beside the code (below)
+      SAUTIUM_CHECKOUT: /checkout
       MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
       LB_DUMP_DIR: /app/data/lbdump        # writable mount for the ListenBrainz statistics dump
       # Disable uvicorn auto-reload in Docker. The bind-mounted ./backend
@@ -210,17 +262,32 @@ services:
       # `docker restart sautium-backend` is the documented workflow anyway.
       UVICORN_RELOAD: "false"
     extra_hosts:
-      # Allow container to access the host's own services (like HQPlayer
-      # Embedded on the same board)
+      # The bridge-era name of this machine, which a stored output may still
+      # carry
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./backend:/app
-      - ./mcp:/app/mcp
+      # Every mount inside the read-only /app needs its mount point there
+      # already, in the checkout: Docker cannot make one in a read-only
+      # folder. ./backend/data is its own source (Docker makes it); the
+      # code's own folders ship their points (backend/desktop, backend/mcp);
+      # everything else mounts outside /app or under /app/data.
+      # The code is the checkout's, and the node only reads it (SEC-DESIGN-2026-11-03 Q6): a node that could
+      # write ./backend could pin, outlive or undo an update and decide the next image built from the tree.
+      # What the node writes has a bind of its own — never a folder of the code's.
+      - ./backend:/app:ro
+      - ./mcp:/app/mcp:ro
+      # The node's own files (its key, the API secret where it used to live, the transcode cache): a folder
+      # git ignores whole, so nothing written there is a change to the checkout.
+      - ./backend/data:/app/data
+      # The host agent's requests: the node leaves an empty file named for
+      # what it asks (backend/host_channel.py); the agent reads the names and
+      # nothing else. The one folder of the agent's a container writes.
+      - ./run/requests:/run/sautium/requests
       - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
-      - ./data/generated_eq:/app/generated_eq
+      - ./data/generated_eq:/var/lib/sautium/generated_eq
       # Measurement-registry clones (AutoEq sparse checkout) — read-only
       # source for gear_registry.py imports; refreshed via git pull.
-      - ./data/registry:/app/registry:ro
+      - ./data/registry:/var/lib/sautium/registry:ro
       # The peer surface's TLS cert (pinned to the node key; tls_gen.py).
       - ./data/tls:/app/data/tls
       - ./data/node_identity:/app/data/node_identity   # identity certificate + mined proof (survive recreation)
@@ -235,12 +302,6 @@ services:
       # Docker turns a single-file mount whose source is missing into a
       # directory of that name.
       - ./data/atlas:/app/data/atlas:ro
-      # Single-source P2P slice module (desktop/p2p owns it; the launcher sync
-      # server imports the same file) — lets the Docker backend serve
-      # /api/mb/slice to dump-less peers. Directory mount on purpose: a
-      # single-FILE bind mount breaks on docker restart after the host file
-      # is edited (WSL2 inode swap).
-      - ./desktop/p2p:/app/desktop_p2p:ro
       # The launcher tree as an importable `desktop` package — the peer
       # surface reuses its sync_client import gate for pushed enrichment
       # instead of mirroring the seal verification (see routers/sync.py
@@ -249,7 +310,8 @@ services:
       - ./desktop:/app/desktop:ro
       # The checkout's .git, read-only: /config and the backup manifest report
       # the running commit (desktop/updater.head_commit reads HEAD by hand).
-      - ./.git:/app/.git:ro
+      # Beside /app, not in it: no .git folder can ship as a mount point.
+      - ./.git:/checkout/.git:ro
       # Mount music library as read-only
       # The music folder on this host, e.g. MUSIC_LIBRARY_PATH=/srv/music in .env
       - ${MUSIC_LIBRARY_PATH:?Set MUSIC_LIBRARY_PATH to the music folder in .env}:/music:ro
@@ -262,40 +324,18 @@ services:
       # in from the Web UI. A folder Docker makes is root's; the image's
       # entrypoint hands it to the node's user while it is empty.
       - ./data/claude:/home/agent/.claude
-    ports:
-      # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
-      # primary workflow. Internet exposure is blocked at the UPnP layer
-      # (p2p_manager.py never maps this port, and desktop/portmap.py
-      # refuses it). See CLAUDE.md "Security Posture" before changing this.
-      # Native Docker publishes past the host's own firewall (its iptables
-      # rules come first): 8800, 8830 and 8831 answer whatever reaches this
-      # host, so it stays on the LAN, and only the peer port and the DHT may
-      # ever be forwarded to it.
-      - "8800:8000"
-      # The peer surface (backend/p2p_app.py) — sync protocol only, no Web
-      # UI, no API secret. THIS is the port that may be published to the
-      # internet (desktop/portmap.py map ...), never 8800.
-      # Docker Desktop (Windows/macOS) forwards published ports through
-      # user-space hops that rewrite the source address — the container sees
-      # every peer as the bridge gateway. A node that wants real peer
-      # addresses (the master: similarity axes, per-peer backstops, a working
-      # probe-connect) runs a TLS-terminating front on the host instead
-      # (scripts/master-front/) and publishes the upstream on loopback ONLY:
-      #   P2P_SYNC_PUBLISH=127.0.0.1:18801   P2P_TRUSTED_FRONT=1
-      # Native-Linux Docker (iptables DNAT) sees real addresses and needs none
-      # of this.
-      - "${P2P_SYNC_PUBLISH:-${P2P_SYNC_PORT:-8801}}:${P2P_SYNC_PORT:-8801}"
-      # P2P DHT MUST stay on 0.0.0.0 — that's the public peer surface.
-      - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
-      # Phantom-preview media proxy (plain http — HQPlayer pulls from it).
-      - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"
-      # DLNA GENA event callbacks from LAN renderers (plain http listener).
-      - "8831:8831"
-    networks:
-      - sautium-network
     depends_on:
       postgres:
         condition: service_healthy
+    # The image's check, with a start of its own: the migrations run before
+    # the node serves, and on a Pi a release's can take minutes, while the
+    # image's 40 s and three misses would call the node unhealthy at about
+    # two and the host agent's update would take it back. A failing check
+    # counts after half an hour; a node that answers is healthy at once,
+    # checked every 5 s meanwhile.
+    healthcheck:
+      start_period: 1800s
+      start_interval: 5s
     restart: unless-stopped
     logging: *bounded-log
     # Docker kills a container ~3 s after SIGTERM unless told otherwise

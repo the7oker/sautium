@@ -13,8 +13,11 @@ exported after the master's re-seal is stamped.
 The bundle never enters the tree (17 MB per version, for ever, in every
 clone): it is published as the asset of the GitHub release `seed-v{N}` by
 scripts/seed-publish.sh, and what the tree carries is backend/seed/
-bundle.json — version, URL, sha256, size — written here and read by the
-importer, which downloads and checks the file on a node's first start.
+bundle.json — version, URL, sha256, size — read by the importer, which
+downloads and checks the file on a node's first start. This writes that
+digest beside the bundle, in <seed_dir>: a Docker node reads its code
+read-only (PI-NODE-2A), and the publish script, on the host, copies the
+digest into the tree once the published file matches it.
 
 The bundle has two halves. The structural half (albums, tracklists,
 artists, descriptions, picks) has no P2P wire representation — the v3
@@ -45,7 +48,7 @@ churn.
 Run inside the backend container, then publish from the host:
     docker exec -u agent sautium-backend python seed_export.py --report   # coverage only
     docker exec -u agent sautium-backend python seed_export.py            # export
-    scripts/seed-publish.sh                                      # release asset
+    scripts/seed-publish.sh                                      # release asset + backend/seed/bundle.json
     git commit backend/seed/bundle.json
 """
 
@@ -63,9 +66,8 @@ from desktop.p2p import sync_queries as sq
 from caa import CAA_FRONT_URL as _CAA_FRONT_URL
 from uuid_utils import IDENTITY_RULE, album_uuid, artist_uuid
 
-SEED_DIR = Path(__file__).resolve().parent / "seed"
-MANIFEST_PATH = SEED_DIR / "manifest_v1.json"
-BUNDLE_INFO_PATH = SEED_DIR / "bundle.json"
+MANIFEST_PATH = Path(__file__).resolve().parent / "seed" / "manifest_v1.json"
+BUNDLE_INFO_PATH = Path(settings.seed_dir) / "bundle.json"
 
 BUNDLE_FORMAT = "sautium-seed"
 BUNDLE_VERSION = 4
@@ -426,8 +428,8 @@ def main() -> int:
     print(f"exported {len(shipped)}/{len(picks)} picks, {seg_tracks} analyzed tracks: "
           f"{BUNDLE_PATH} ({info['size'] / 1_048_576:.1f} MB gz, "
           f"{len(raw) / 1_048_576:.1f} MB raw)\n"
-          f"digest written to {BUNDLE_INFO_PATH.name} — publish with "
-          f"scripts/seed-publish.sh, then commit it")
+          f"digest written to {BUNDLE_INFO_PATH} — publish with "
+          f"scripts/seed-publish.sh, then commit backend/seed/bundle.json")
     return 1 if excluded else 0
 
 

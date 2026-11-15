@@ -229,9 +229,11 @@ See:
   `Don’t`/`Don't`/`Dont` are one id; a name that folds to nothing (`!!!`)
   keeps its key form. Identifier-like keys (model names, spec attribute
   keys, registry sources) use `normalize_key` (NFC/lower/trim only).
-  **Changing either is an identity migration** — run
-  `python -m canon.migrations --renormalize` with the backend stopped on
-  every live node; the seals bind the uuids and get re-signed.
+  **Changing either is an identity migration** — bump
+  `uuid_utils.IDENTITY_RULE` with it: every node's backend re-normalizes at
+  its next start (`db_migrate`, marker `identity_rule_v{N}`,
+  `canon.migrations.renormalize_identities`); the seals bind the uuids and
+  get re-signed.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.
 - **Genre is a track property**, not album. Many-to-many via `track_genres`.
@@ -446,6 +448,57 @@ See:
 ## Docker & Runtime Layout
 
 - `sautium-backend` owns **play tracking** (`listening_history` + `local_play_stats` + Last.fm scrobbling) inside its status poller — keyed source-agnostically on `track_id`, so streamed phantom plays track like owned files. There is **no separate tracker daemon** (consolidated 2026-06-30; the old `sautium-playback-tracker` was retired).
+- **The code is read-only to the node** (since 2026-11-15, PI-NODE-2A; the
+  design session's answer of 2026-11-03): every compose file mounts
+  `./backend` → `/app:ro` and `./mcp` → `/app/mcp:ro` — a node that could
+  write its tree could pin, outlive or undo an update and decide the next
+  image built from it. What the node writes has a bind of its own:
+  `./backend/data` → `/app/data` (its own source, so Docker makes it; the
+  `./data/*` folders under it as before); `generated_eq` and the registry
+  at `/var/lib/sautium/`, the checkout's `.git` at `/checkout` — a NEW
+  mount never goes inside a folder the node writes (a node could leave a
+  link where its point will be); the code's own mount points ship in the
+  tree (`backend/desktop/`, `backend/mcp/`) — Docker cannot make one in a
+  read-only folder. What the node writes is untrusted to RUN: a process
+  runs the yt-dlp build only from a folder it unpacked itself after
+  checking the kept release (signed sums, signature, archive) against the
+  pinned key again (`ytdlp_release._checked_unpack`), and in Docker the Claude CLI reads no
+  settings or hooks from the node's own `~/.claude` (`--setting-sources
+  project`, `disableAllHooks`). No keep-file in a folder a
+  container writes: each is ignored WHOLE (`folder/`, never `folder/*`), so
+  nothing written there is a change to the checkout. The node reads no
+  bytecode it cannot write (`PYTHONPYCACHEPREFIX`, root's, compiled at the
+  build). The node user's uid is `/app`'s owner (`node_user.HOST_OWNED`).
+  The LAN-only ports are published on IPv4 alone (`0.0.0.0:8800:8000`,
+  8830, 8831): an address-less publish answers on `[::]` too.
+- **The Linux file runs the backend on the host's network** (since
+  2026-11-15, `docker-compose.pi.yml`): `network_mode: host`, PostgreSQL on
+  its bridge published on loopback; `cap_drop: [ALL]` with only the
+  entrypoint's hand-over and drop added back (never `NET_RAW`: in the host's
+  namespace it would let the container sniff and spoof on the LAN); the
+  node binds 8800 (`UVICORN_PORT`), 8830 and 8831 on IPv4 itself, as a
+  launcher node does, and sees its own addresses (no `SAUTIUM_HOST_IPS`
+  literal to rot). Behind a trusted front the peer surface binds loopback
+  (`SAUTIUM_HOST_NETWORK`).
+- **The host agent** (Linux, since 2026-11-15; `scripts/host_agent.py`,
+  `backend/host_channel.py`): what a container cannot do for itself —
+  `check`, `update` (a release the installed tree's own chain walk verifies,
+  in a container with no network; the image built from a tree git made;
+  a copy of the database beside it, in its own container, and the way back
+  — after any failure past the node's stop, and at the next start for an
+  update a run did not finish; a release that did not start is not tried
+  again for a day),
+  `diagnostics` — asked by the NAME of an empty file in `./run/requests`,
+  the one folder of the agent's a container writes. **The host's side never
+  opens a path a container can write**: the folder is emptied by handles
+  (links unlinked, FIFOs never opened), its own files live in `./host/`
+  (bound into no container), the answer goes back through the node's API
+  on loopback signed with the channel's key (`./host/agent.env`; the
+  middleware admits it on `/api/host/answer` alone), never `.api_secret`.
+  User units (a path unit, a one-shot service, the probe and the restore
+  units); a starter in `./host/bin/` that runs the checkout's body, updated
+  by the body only under PI5-PLAN's four conditions with `OnFailure=` as the
+  floor. Lingering is the owner's one root line.
 - Launcher tree mounted read-only: `./desktop` → `/app/desktop:ro`, so the peer
   surface imports `desktop.sync_client.import_pushed`,
   `desktop.p2p.sync_queries` and the whole pull side,
@@ -467,8 +520,9 @@ See:
   HQPlayer's own log there, and the DSP measurements its CUDA offload
   (`settings.xml` + `HQPlayer*Desktop.log`, nothing else); unset, an empty
   folder and the diagnostics say where the log is.
-- Build identity: `./.git` → `/app/.git:ro` in every compose file
-  (since 2026-09-21). `config.build_identity()` is the one reader — `/config`,
+- Build identity: `./.git` → `/checkout/.git:ro` in every compose file
+  (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`
+  names it). `config.build_identity()` is the one reader — `/config`,
   the backup manifest and the share export report the running commit through
   it; HEAD is read from `.git` by hand (`desktop/updater.head_commit`), never
   by spawning git.
@@ -523,7 +577,10 @@ below bind with or without it.
    container is down; the launcher auto-creates its firewall rule
    "Sautium (TCP 8832,8833)" (profile=any). Same LAN-only rules apply.
    None of these ports may ever be UPnP-forwarded or otherwise exposed
-   beyond the LAN.
+   beyond the LAN. Since 2026-11-15 (the owner's answer to PI-NODE-1 Q27)
+   the owner's own tailnet counts as his LAN for them: they may be
+   reached over it, never over a public route (no Funnel, no forward).
+   Every compose file publishes them on IPv4 alone.
    The browser output adds NO new port: `<audio>` media rides the
    Web UI origin at `/api/player/media/{kind}/{id}` behind
    short-lived signed query params (`backend/media_urls.py`, 4 h TTL,
@@ -703,6 +760,7 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
+| `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
 | `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange rides — the Web UI has no TLS (rule 8) |
 | `desktop/agent_login.py` | Headless CLI sign-in driver (`claude auth login`, `codex login [--device-auth]` over pipes) shared by the wizard and the backend's `/api/settings/ai/<agent>/signin` — no console, completion is an event |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |

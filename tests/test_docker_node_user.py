@@ -574,14 +574,15 @@ def test_a_cli_put_under_the_node_users_home_never_stands_in_for_the_images(tmp_
     assert codex_cli.get_codex_executable() not in planted
 
 
-def test_the_folder_whose_owner_the_node_user_takes_ships_with_the_clone():
-    """/app/data is the checkout's backend/data: a clone makes it its user's
-    (a folder Docker had to make for the binds under it would be root's)."""
+def test_the_folder_whose_owner_the_node_user_takes_is_the_clones_code():
+    """/app is the checkout's backend/, which a clone makes its user's, and
+    no keep-file ships in a folder the node writes (a folder Docker makes
+    for a bind is root's, and says nothing)."""
     import node_user
-    assert node_user.HOST_OWNED == "/app/data"
-    assert (REPO / "backend" / "data" / ".gitkeep").is_file()
+    assert node_user.HOST_OWNED == "/app"
+    assert not (REPO / "backend" / "data" / ".gitkeep").exists()
     compose = (REPO / "docker-compose.pi.yml").read_text(encoding="utf-8")
-    assert "      - ./backend:/app\n" in compose
+    assert "      - ./backend:/app:ro\n" in compose and "      - ./backend/data:/app/data\n" in compose
 
 
 @as_root_with_the_node_user
@@ -655,3 +656,36 @@ def test_a_data_folder_the_entrypoint_cannot_read_says_why_the_uid_stays(tmp_pat
                                      str(accounts.group)) is accounts.pw
     assert (f"{data} could not be read (Input/output error): the node's user stays uid "
             f"{accounts.pw.pw_uid}") in capfd.readouterr().err
+
+
+def test_in_docker_the_cli_reads_no_settings_from_the_nodes_own_claude_folder(monkeypatch):
+    """A Docker node's ~/.claude is a folder the node writes: a hook a node
+    that was controlled once left in its settings.json ran at every chat
+    turn of every release after (measured with the image's CLI: the hook ran
+    without these flags and not with them). A launcher's CLI reads its
+    person's own settings as before."""
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", True)
+    for tools in (claude_code_runner.LIBRARY, claude_code_runner.RESEARCH, claude_code_runner.TEXT):
+        flags = claude_code_runner._tool_flags(tools)
+        assert flags[flags.index("--setting-sources") + 1] == "project"
+        assert flags[flags.index("--settings") + 1] == '{"disableAllHooks": true}'
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", False)
+    assert "--setting-sources" not in claude_code_runner._tool_flags(claude_code_runner.LIBRARY)
+
+
+def test_a_data_folder_mounted_from_where_a_link_pointed_is_refused(tmp_path, monkeypatch):
+    """Until 2026-11-15 backend/data was inside the node's writable /app: a
+    node of then could make it a link, and Docker follows a link in a bind's
+    source (measured: the kernel records the link's target as the bind's
+    root). The entrypoint refuses to hand over a /app/data mounted from
+    anywhere but a checkout's backend/data."""
+    import node_user
+    mountinfo = tmp_path / "mountinfo"
+    line = "100 50 0:42 {root} /app/data rw,relatime - ext4 /dev/sda1 rw\n"
+    monkeypatch.setattr(node_user, "MOUNTINFO", str(mountinfo))
+    for root, good in (("/home/pi/sautium/backend/data", True), ("/ai/djai/backend/data", True),
+                       ("/etc", False), ("/home/pi", False), ("/home/pi/sautium/backend/data\\040x", False)):
+        mountinfo.write_text(line.format(root=root))
+        assert node_user.data_bind_is_the_checkouts() is good, root
+    mountinfo.write_text("100 50 0:42 / /app rw - ext4 /dev/sda1 rw\n")
+    assert node_user.data_bind_is_the_checkouts()

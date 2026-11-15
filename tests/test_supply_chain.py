@@ -449,7 +449,7 @@ def _backend(name: str) -> tuple:
     spec = _compose(name)["services"]
     backend = spec["backend"]
     return (set(backend["environment"]), {_mount(v)[1] for v in backend["volumes"]},
-            set(backend["ports"]), set(spec["postgres"]["command"].split()))
+            set(backend.get("ports", ())), set(spec["postgres"]["command"].split()))
 
 
 def test_the_arm64_compose_files_are_the_release_file_but_for_what_their_host_needs():
@@ -459,12 +459,17 @@ def test_the_arm64_compose_files_are_the_release_file_but_for_what_their_host_ne
     Codex CLI and, on Linux, a host user's ~/.claude."""
     env, mounts, ports, flags = _backend("docker-compose.yml")
     cuda_and_codex = {"CUDA_VISIBLE_DEVICES", "PYTORCH_CUDA_ALLOC_CONF", "CODEX_CLI_ENABLED"}
-    for name, other_mounts in (("docker-compose.mac.yml", set()),
-                               ("docker-compose.pi.yml", {"/home/agent/.claude/projects"})):
+    # The Linux file runs the backend on the host's network (its own ports,
+    # its own port for the Web UI, nothing published) and mounts the host
+    # agent's requests folder
+    host_network = ({"UVICORN_PORT", "SAUTIUM_HOST_NETWORK"}, {"/run/sautium/requests"}, set())
+    for name, other_mounts, (more_env, more_mounts, their_published) in (
+            ("docker-compose.mac.yml", set(), (set(), set(), ports)),
+            ("docker-compose.pi.yml", {"/home/agent/.claude/projects"}, host_network)):
         their_env, their_mounts, their_ports, their_flags = _backend(name)
-        assert their_env == env - cuda_and_codex, name
-        assert their_mounts == mounts - {"/home/agent/.codex"} - other_mounts, name
-        assert their_ports == ports, name
+        assert their_env == (env - cuda_and_codex) | more_env, name
+        assert their_mounts == (mounts - {"/home/agent/.codex"} - other_mounts) | more_mounts, name
+        assert their_ports == their_published, name
         assert {"wal_level=minimal", "max_wal_senders=0", "jit=off"} <= their_flags, name
         backend = _compose(name)["services"]["backend"]
         assert backend["build"]["dockerfile"] == "Dockerfile.mac" and "deploy" not in backend
@@ -477,7 +482,7 @@ def test_the_linux_arm64_file_binds_and_mounts_by_the_security_rules():
     a 16 GB Pi 5 on NVMe; the music folder named, never guessed."""
     spec = _compose("docker-compose.pi.yml")["services"]
     assert spec["postgres"]["ports"] == ["127.0.0.1:5432:5432"]
-    assert "8800:8000" in spec["backend"]["ports"]
+    assert spec["backend"]["network_mode"] == "host" and "ports" not in spec["backend"]
     sources = [_mount(v)[0] for v in spec["backend"]["volumes"]]
     assert not [s for s in sources if "HOME" in s or "USERPROFILE" in s or "SAUTIUM_WSL_HOME" in s]
     assert "./data/claude" in sources
@@ -487,3 +492,18 @@ def test_the_linux_arm64_file_binds_and_mounts_by_the_security_rules():
             "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-8GB}", "random_page_cost=1.1",
             "effective_io_concurrency=200", "checkpoint_timeout=15min"} <= flags
     assert not {"synchronous_commit=off", "fsync=off"} & flags
+
+
+def test_the_node_reads_no_bytecode_it_cannot_write():
+    """/app is read-only to the node (PI-NODE-2A): a .pyc beside its sources
+    would be read for as long as its source keeps its mtime. Every image
+    interpreter keeps its cache under a prefix of root's, the libraries'
+    compiled there at the build, and the image's /app holds no bytecode."""
+    for name in ("Dockerfile", "Dockerfile.mac"):
+        text = _dockerfile(name)
+        assert "ENV PYTHONPYCACHEPREFIX=/usr/local/lib/sautium/pycache" in text
+        assert "ENV PYTHONDONTWRITEBYTECODE=1" in text
+        assert text.index("PYTHONPYCACHEPREFIX") < text.index("COPY . .")
+        assert "CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/ || exit 1" in text
+    ignored = (REPO / "backend" / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    assert "**/__pycache__/" in ignored and "**/*.pyc" in ignored

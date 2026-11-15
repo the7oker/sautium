@@ -17,6 +17,13 @@ is not the one in place — a build is in place when it starts and names its
 own release; a release older than a working build is refused (an older
 release is validly signed too). A release whose install failed is not
 fetched again for a day, unless a newer one is out.
+
+Checked again before each process runs it: the cache is a folder the node
+writes, so a node that was controlled once could have changed the program
+there, and a mark of its own beside it would prove nothing. A build keeps
+its release as fetched — the signed sums, their signature, the archive —
+and a process runs it only from a folder it unpacked itself after checking
+that release again against the pinned key (PI-NODE-2A).
 """
 
 import base64
@@ -28,6 +35,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -150,17 +158,86 @@ def installed_tag() -> Optional[str]:
     return _BUILD_FOLDER.fullmatch(name).group(1) if name else None
 
 
+# The folder each build in place was unpacked into by THIS process, after
+# its release was checked again: nothing an earlier process left is run.
+# One check and unpack at a time: the resolve workers and the refresh pass
+# ask together at a start.
+_ready: dict = {}
+_ready_lock = threading.Lock()
+_RUN = re.compile(r"run-(\d+)-\d+(?:\.part)?")
+
+
+def _gone(pid: int) -> bool:
+    """Whether the process that unpacked a folder has ended. On Windows
+    os.kill(pid, 0) would send that process a Ctrl+C: there no other
+    process's folder is ever taken."""
+    if pid == os.getpid() or sys.platform == "win32":
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _checked_unpack(build: Path) -> Optional[Path]:
+    """The build's release checked again — the sums' signature by the pinned
+    key, the archive's digest by the sums — and unpacked into a folder of
+    this process's own: the program in it, or None when the release does not
+    check (the next pass installs one that does)."""
+    name, exe = _asset()
+    release = build / "release"
+    try:
+        sums = (release / "SHA2-256SUMS").read_bytes()
+        verify_signature(sums, (release / "SHA2-256SUMS.sig").read_bytes())
+        digest = hashlib.sha256()
+        with open(release / name, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != _digest(sums, name):
+            raise Refused(f"the archive kept in {build.name} is not the one its signed sums name")
+        run = build / f"run-{os.getpid()}-{time.time_ns()}"
+        part = build / f"{run.name}.part"
+        try:
+            _unpack(release / name, part)
+            if not (part / exe).is_file():
+                raise Refused(f"the archive kept in {build.name} holds no {exe}")
+            os.replace(part, run)
+        finally:
+            shutil.rmtree(part, ignore_errors=True)
+    except (OSError, Refused, zipfile.BadZipFile) as e:
+        logger.error("the yt-dlp build %s does not check again: %s", build.name, e)
+        return None
+    for old in build.iterdir():
+        owner = _RUN.fullmatch(old.name)
+        if owner and old != run and (int(owner.group(1)) == os.getpid() or _gone(int(owner.group(1)))):
+            # Another live process's folder stays: it may be running from it.
+            # A program still running on Windows cannot go yet: a later pass takes it
+            shutil.rmtree(old, ignore_errors=True)
+    return run / exe
+
+
 def executable() -> Optional[Path]:
-    """The build in place; None before the first one lands, or on a platform
+    """The build in place, as this process unpacked and checked it; None
+    before the first one lands, when it does not check, or on a platform
     yt-dlp publishes no build for."""
     name = _build_folder()
     if name is None:
         return None
     try:
-        exe = root() / name / _asset()[1]
+        _asset()
     except Refused:
         return None
-    return exe if exe.is_file() else None
+    with _ready_lock:
+        if name not in _ready or not _ready[name].is_file():
+            exe = _checked_unpack(root() / name)
+            if exe is None:
+                _ready.pop(name, None)
+                return None
+            _ready[name] = exe
+        return _ready[name]
 
 
 def child_env() -> dict:
@@ -314,28 +391,34 @@ def _install(client: httpx.Client, tag: str) -> None:
     folder = root()
     folder.mkdir(parents=True, exist_ok=True)
     build = folder / f"{tag}-{time.time_ns()}"
-    archive = folder / f"{build.name}.zip.part"
-    unpacked = folder / f"{build.name}.part"
+    staging = folder / f"{build.name}.part"
+    release = staging / "release"
+    run = f"run-{os.getpid()}-{time.time_ns()}"
     digest = hashlib.sha256()
     try:
+        release.mkdir(parents=True)
+        # The release kept as fetched: each later process checks it again
+        # before it runs the program (_checked_unpack)
+        (release / "SHA2-256SUMS").write_bytes(sums.content)
+        (release / "SHA2-256SUMS.sig").write_bytes(signature.content)
         with client.stream("GET", _ASSET_URL.format(tag=tag, name=name)) as r:
             r.raise_for_status()
-            with open(archive, "wb") as out:
+            with open(release / name, "wb") as out:
                 for chunk in r.iter_bytes(1 << 20):
                     out.write(chunk)
                     digest.update(chunk)
         if digest.hexdigest() != expected:
             raise Refused(f"{name} of {tag} is not the archive its signed sums name")
-        _unpack(archive, unpacked)
-        if not (unpacked / exe).is_file():
+        _unpack(release / name, staging / run)
+        if not (staging / run / exe).is_file():
             raise Refused(f"{name} of {tag} holds no {exe}")
         # Named before it first runs: a folder whose program has just run may
         # stay locked on Windows a while (a scan on first run)
-        os.replace(unpacked, build)
+        os.replace(staging, build)
     finally:
-        archive.unlink(missing_ok=True)
-        shutil.rmtree(unpacked, ignore_errors=True)
-    said = _version(build / exe)
+        shutil.rmtree(staging, ignore_errors=True)
+    program = build / run / exe
+    said = _version(program)
     if said != tag:
         shutil.rmtree(build, ignore_errors=True)
         raise Refused(f"the build of {tag} says it is {said!r}")
@@ -343,6 +426,8 @@ def _install(client: httpx.Client, tag: str) -> None:
     current = folder / "current.part"
     current.write_text(build.name, encoding="ascii")
     os.replace(current, folder / "current")
+    with _ready_lock:
+        _ready[build.name] = program
     for old in folder.iterdir():
         if old.is_dir() and old.name not in (build.name, previous):
             # A build still running on Windows cannot go yet: the next pass takes it

@@ -238,7 +238,20 @@ def _tool_flags(tools: str) -> list[str]:
         flags = ["--tools", "", "--mcp-config", _NO_MCP, "--max-turns", "1"]
     else:
         raise ValueError(f"unknown tool profile {tools!r}")
-    return flags + ["--strict-mcp-config", "--permission-mode", "dontAsk"]
+    return flags + ["--strict-mcp-config", "--permission-mode", "dontAsk", *_settings_flags()]
+
+
+# A Docker node's ~/.claude is a folder the node writes (its sign-in and
+# sessions live there, PI-NODE-2A): settings there — hooks, plugins, a
+# helper that runs a command — would run in every release after a node
+# that was controlled once. In Docker the CLI reads the settings of its own
+# working directory alone (in the container's own filesystem, made again
+# with each image) and no hook at all.
+IN_DOCKER = Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
+def _settings_flags() -> list[str]:
+    return ["--setting-sources", "project", "--settings", '{"disableAllHooks": true}'] if IN_DOCKER else []
 
 
 def agent_workdir(name: str) -> Path:
