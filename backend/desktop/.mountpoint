@@ -1,0 +1,2 @@
+The mount point of the checkout's desktop/ in a Docker node, whose /app is this folder read-only:
+Docker cannot make a mount point in a read-only folder (docker-compose*.yml, PI-NODE-2A).

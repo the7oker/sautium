@@ -4,6 +4,11 @@
 # image's copy (every compose file mounts ./backend over /app), so leaving
 # these out costs nothing at runtime.
 
+# Bytecode a host's interpreter left beside the sources: the image's /app holds
+# sources alone, and the node reads no cache it cannot write (Dockerfile).
+__pycache__/
+*.pyc
+
 # The node's own files: the backend's node key, the API secret where it used
 # to live, and where compose mounts nothing over them the identity directory
 # (the API secret now, the certificate, the proof) and the peer surface's TLS

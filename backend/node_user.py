@@ -5,11 +5,12 @@ process, then run the container's command as that user.
 The image copies this file to a folder of root's and runs it as root with
 `python3 -I -S`: no PYTHON* variable, no site-packages, no folder anyone else
 can write on its path. It imports the standard library alone, so at the
-container's start nothing the node's user could change — /app is the host's
-./backend, which that user can write — runs as root. The command it runs
-after the drop (`python entrypoint.py`) is the backend, as the node's user.
-A `docker exec` without `-u agent` runs as root, and so runs /app's code as
-root: the maintenance commands documented in the tree say `-u agent`.
+container's start nothing the node's user could change runs as root. The
+command it runs after the drop (`python entrypoint.py`) is the backend, as the
+node's user. /app is the host's ./backend, mounted read-only since 2026-11-15
+(PI-NODE-2A): what runs there is the checkout's, and a `docker exec` without
+`-u agent` runs it as root — the weekly backup does (SEC-DESIGN-2026-11-03
+Q7) — never code the node's user left there.
 """
 
 import os
@@ -26,23 +27,26 @@ NODE_USER = "agent"
 # start. The host's ~/.claude and ~/.codex are the owner's and stay as they
 # are: only an agent's folder itself while it is root's and empty is handed —
 # what Docker creates for a host folder that did not exist (the Linux arm64
-# file's ./data/claude; the other files mount projects/ inside ~/.claude, so
-# Docker's folder there is never empty). A tree or folder reached through a
+# file's ./data/claude and ./run/requests, the host agent's; the other files
+# mount projects/ inside ~/.claude, so Docker's folder there is never empty).
+# A tree or folder reached through a
 # link is not handed (_real_dir): a host whose ~/.claude/projects is itself a
 # link has its sessions folder refused, and said, at each start.
-NODE_TREES = ("/app/data", "/app/generated_eq", "/home/agent/.cache",
+NODE_TREES = ("/app/data", "/home/agent/.cache",
               "/home/agent/.claude/projects")
-NODE_FOLDERS = ("/home/agent/.claude", "/home/agent/.codex")
+NODE_FOLDERS = ("/home/agent/.claude", "/home/agent/.codex", "/run/sautium/requests")
 # Where compose files mounted the model cache while the backend ran as root
 ROOT_CACHE = "/root/.cache"
 # The folder whose owner the node's user becomes. A native Linux host keeps
 # its uids across a bind, so the image's fixed uid 1000 is whoever that is on
 # the host (a Pi's first user), and the host user running the node loses its
-# own folders to it. /app/data is the checkout's backend/data, which the clone
-# ships (backend/data/.gitkeep): its owner is the host user the node runs for.
-# root's — a folder Docker made, a mount Docker Desktop shows as root's —
-# says nothing, and the image's uid stays.
-HOST_OWNED = "/app/data"
+# own folders to it. /app is the checkout's backend/, which the clone makes:
+# its owner is the host user the node runs for. root's — a mount Docker
+# Desktop shows as root's — says nothing, and the image's uid stays. (It was
+# /app/data until 2026-11-15, a folder the clone shipped with a keep-file; a
+# tracked file in a folder the node writes let the node make the checkout
+# "changed" and so refuse every update, PI-NODE-2A.)
+HOST_OWNED = "/app"
 PASSWD, GROUP = "/etc/passwd", "/etc/group"
 MOUNTINFO = "/proc/self/mountinfo"
 
@@ -76,7 +80,7 @@ def _mount_points() -> set:
 
 def _real_dir(path: str) -> bool:
     """A directory reached through no symlink. The node's user can write
-    where these paths lead (./backend is /app; ./data/claude holds
+    where these paths lead (./backend/data is /app/data; ./data/claude holds
     projects/), so a component it swapped for a link would point root's
     chown, or the uid it takes, at a path of its choosing. Nothing of the
     node user's runs while the entrypoint does: a fresh container's start."""

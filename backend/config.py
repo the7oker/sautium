@@ -155,6 +155,10 @@ class Settings(BaseSettings):
     # X-Forwarded-For. Needed on Docker Desktop (Windows/macOS), whose
     # user-space port forwarders show every peer as the bridge gateway.
     p2p_trusted_front: bool = False
+    # The container runs in the host's network namespace (docker-compose.pi.yml):
+    # no bridge, no gateway every host-local connection arrives from — a front
+    # on this machine reaches the peer surface on loopback, where it binds.
+    sautium_host_network: bool = False
     p2p_username: str = ""
     p2p_password: str = ""
 
@@ -342,8 +346,12 @@ def build_identity() -> dict:
     packaged build id, None where either does not apply. The one reader for
     /config, a backup manifest and a share export; HEAD is read from `.git`
     by hand (desktop/updater.head_commit), never by spawning git."""
-    from desktop.updater import current_commit, installed_build
-    return {"commit": current_commit(), "build": installed_build()}
+    from desktop.updater import current_commit, head_commit, installed_build
+    # A Docker node's checkout .git is mounted beside its read-only code, not
+    # in it (the compose files' SAUTIUM_CHECKOUT)
+    checkout = os.environ.get("SAUTIUM_CHECKOUT")
+    return {"commit": head_commit(Path(checkout)) if checkout else current_commit(),
+            "build": installed_build()}
 
 
 def get_settings() -> Settings:

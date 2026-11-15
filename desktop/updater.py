@@ -511,6 +511,34 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
     remote = [entry for entry in _remote_releases(cwd) if entry[0] >= min_version]
     annotated = [name for _, name, signed in remote if signed]
     objects = _probe(annotated, cwd) if annotated else {}
+    return _judge(signers, head, cwd, remote, objects,
+                  fetch=lambda name, oid: _fetch_release(name, oid, cwd), forget=True)
+
+
+def survey_fetched(signers: List[release_verify.Signer], head: str, cwd: str) -> Survey:
+    """`survey` over the release tags already fetched into RELEASE_REFS,
+    touching no network and writing nothing: a Docker node's host agent
+    (scripts/host_agent.py) fetches them, then runs this from the installed
+    commit's own desktop/ in a container with no network and the checkout's
+    .git read-only. The same judgement, the same walk."""
+    listing = _git_cmd(["for-each-ref", "--format=%(refname)", RELEASE_REFS], cwd)
+    if listing.returncode != 0:
+        raise UpdateError(f"git for-each-ref failed: {listing.stderr.strip()}")
+    names = [ref[len(RELEASE_REFS):] for ref in listing.stdout.split()]
+    names = [name for name in names if _RELEASE_NAME.fullmatch(name.encode())]
+    objects = _objects([f"{RELEASE_REFS}{name}" for name in names], [], cwd) if names else {}
+    objects = {name: objects[f"{RELEASE_REFS}{name}"] for name in names}
+    remote = sorted(((release_verify.parse_version(name), name, objects[name][1] == "tag")
+                     for name in names if release_verify.parse_version(name) > FLOOR), reverse=True)
+    return _judge(signers, head, cwd, remote, objects, fetch=None, forget=False)
+
+
+def _judge(signers: List[release_verify.Signer], head: Optional[str], cwd: Optional[str],
+           remote: List[Tuple[Tuple[int, int, int], str, bool]], objects: dict,
+           fetch: Optional[Callable[[str, str], bool]], forget: bool) -> Survey:
+    """The survey's judgement of `remote` — (version, tag, annotated), the
+    newest first — whose tag objects are `objects`: the installed release,
+    then the walk above it."""
     found, refused, candidates = Survey(), [], []
     history = _history(head, cwd) if head else set()
     # No release HEAD holds is above the version HEAD's own tree states (on a
@@ -552,8 +580,7 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
             break
         candidates.append((version, name, oid, raw))
 
-    chain = walk_chain(Link(None, head, tuple(signers)), candidates, cwd,
-                       fetch=lambda name, oid: _fetch_release(name, oid, cwd))
+    chain = walk_chain(Link(None, head, tuple(signers)), candidates, cwd, fetch=fetch)
     trusted = [link.release for link in chain.reach() if link.trusted_at_start]
     found.offered = trusted[-1] if trusted else None
     above = found.offered.version if found.offered else (0, 0, 0)
@@ -566,8 +593,9 @@ def survey(signers: List[release_verify.Signer], head: Optional[str],
     forks = sorted((version, name, other) for version, name, _, other, _ in chain.forks if version > above)
     if forks:
         found.fork = forks[-1][1:]
-    _forget_releases_but({link.release.name for link in chain.links[1:]} |
-                         {release.name for release in chain.rewrites}, cwd)
+    if forget:
+        _forget_releases_but({link.release.name for link in chain.links[1:]} |
+                             {release.name for release in chain.rewrites}, cwd)
     for _, name, _, other, _ in chain.forks:
         logger.warning(f"release tags {name} and {other} fork: nothing above what both continue is taken "
                        "until one of them is gone from origin")

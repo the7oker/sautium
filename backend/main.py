@@ -332,17 +332,25 @@ async def _serve_p2p(port: int) -> None:
     peer_chat.limit_wake_streams(connections * 3 // 4)
     bounds = dict(head_s=_PEER_HEAD_S, head_max=_PEER_HEAD_MAX, stall_s=_PEER_STALL_S,
                   max_connections=connections)
-    gateway = _default_gateway()
+    # On the host's own network a front on this machine connects from
+    # loopback, and the surface behind it binds there alone: the port the
+    # front forwards to must answer nobody else, or anyone could set the
+    # X-Forwarded-For it trusts. Behind a bridge the front arrives from the
+    # gateway, and the port is published on loopback by compose
+    # (P2P_SYNC_PUBLISH).
+    gateway = None if settings.sautium_host_network else _default_gateway()
     if settings.p2p_trusted_front:
-        if gateway is None:
+        bind, front = (("127.0.0.1", "127.0.0.1") if settings.sautium_host_network
+                       else ("0.0.0.0", gateway))
+        if front is None:
             logger.warning("P2P peer surface on :%d behind a trusted front, but no default "
                            "gateway in /proc/net/route — X-Forwarded-For will be ignored", port)
         else:
-            logger.info("P2P peer surface on :%d behind a trusted front — plain HTTP, "
-                        "X-Forwarded-For trusted from %s", port, gateway)
+            logger.info("P2P peer surface on %s:%d behind a trusted front — plain HTTP, "
+                        "X-Forwarded-For trusted from %s", bind, port, front)
         config = PeerSurfaceConfig(
-            peer_app, host="0.0.0.0", port=port,
-            proxy_headers=True, forwarded_allow_ips=gateway,
+            peer_app, host=bind, port=port,
+            proxy_headers=True, forwarded_allow_ips=front,
             timeout_graceful_shutdown=_PEER_GRACE_S, timeout_keep_alive=_PEER_KEEPALIVE_S,
             http=peer_protocol(AutoHTTPProtocol, per_address=None, **bounds),
         )
@@ -2356,6 +2364,9 @@ app.include_router(settings_router)
 
 from routers.support import router as support_router
 app.include_router(support_router)
+
+from routers.host import router as host_router
+app.include_router(host_router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

@@ -574,14 +574,15 @@ def test_a_cli_put_under_the_node_users_home_never_stands_in_for_the_images(tmp_
     assert codex_cli.get_codex_executable() not in planted
 
 
-def test_the_folder_whose_owner_the_node_user_takes_ships_with_the_clone():
-    """/app/data is the checkout's backend/data: a clone makes it its user's
-    (a folder Docker had to make for the binds under it would be root's)."""
+def test_the_folder_whose_owner_the_node_user_takes_is_the_clones_code():
+    """/app is the checkout's backend/, which a clone makes its user's, and
+    no keep-file ships in a folder the node writes (a folder Docker makes
+    for a bind is root's, and says nothing)."""
     import node_user
-    assert node_user.HOST_OWNED == "/app/data"
-    assert (REPO / "backend" / "data" / ".gitkeep").is_file()
+    assert node_user.HOST_OWNED == "/app"
+    assert not (REPO / "backend" / "data" / ".gitkeep").exists()
     compose = (REPO / "docker-compose.pi.yml").read_text(encoding="utf-8")
-    assert "      - ./backend:/app\n" in compose
+    assert "      - ./backend:/app:ro\n" in compose and "      - ./backend/data:/app/data\n" in compose
 
 
 @as_root_with_the_node_user

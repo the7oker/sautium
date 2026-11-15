@@ -163,6 +163,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends gnupg ca-certif
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 ENV PG_BIN=/usr/lib/postgresql/18/bin
 
+# The node reads no bytecode it cannot write (PI-NODE-2A). /app is the
+# checkout's backend/, read-only to the node: a .pyc beside its sources — a
+# host interpreter's, or one a node left before that mount — would be read
+# for as long as its source keeps its mtime, an update included. Every
+# interpreter of the image but node_user.py's (isolated, -I) keeps its cache
+# under this prefix instead: the libraries' compiled here, root's, and the
+# node's own modules compiled as they are imported, written nowhere. A
+# library file that does not compile on 3.11 (torch ships 3.12 syntax among
+# its tests) is one nothing imports.
+ENV PYTHONPYCACHEPREFIX=/usr/local/lib/sautium/pycache
+RUN python -c "import compileall, sys; [compileall.compile_dir(p, quiet=1, workers=0) for p in sys.path if p.startswith('/usr/') and p.endswith(('python3.11', 'dist-packages'))]" \
+    && test -d /usr/local/lib/sautium/pycache/usr/lib/python3.11
+
 # Copy application code
 COPY . .
 
@@ -176,7 +189,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/ || exit 1
+    CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/ || exit 1
 
 # Default command (can be overridden in docker-compose.yml)
 CMD ["python", "entrypoint.py"]

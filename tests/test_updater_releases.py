@@ -1016,3 +1016,73 @@ def test_an_unreachable_origin_fails_a_reinstall_loudly(world, monkeypatch, tmp_
     monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 0))
     with pytest.raises(updater.UpdateError):
         updater.install_release(str(world.managed), _payload_list(world, world.key))
+
+
+# ── the host agent's verifier: the same judgement over tags already fetched ──
+
+def _host_fetch(tree) -> None:
+    """What scripts/host_agent.py fetches before its verifier runs."""
+    git(tree, "fetch", "-q", "--no-tags", "--prune", "origin", "+refs/tags/v*:refs/sautium/releases/v*")
+
+
+def _git_state(tree) -> dict:
+    """Every file of the git folder with its bytes: a read-only verifier
+    leaves it as it was."""
+    folder = Path(tree) / ".git"
+    return {p.relative_to(folder): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+
+
+def _fetched(world, tree=None) -> updater.Survey:
+    tree = str(tree or world.managed)
+    _host_fetch(tree)
+    before = _git_state(tree)
+    found = updater.survey_fetched(updater.installed_signers(tree), updater._rev("HEAD", tree), tree)
+    assert _git_state(tree) == before
+    return found
+
+
+def _same(a: updater.Survey, b: updater.Survey) -> None:
+    assert (a.installed, a.offered, a.rewrite, a.refused, a.fork) == \
+        (b.installed, b.offered, b.rewrite, b.refused, b.fork)
+
+
+def test_the_fetched_survey_offers_what_the_launchers_does(world):
+    tip = world.commit("v2\n", version="0.2.0")
+    world.tag("v0.2.0", tip)
+    world.lightweight("v0.2.5", tip)
+    world.tag("v0.3.0", world.commit("v3\n", version="0.3.0"), key=Key())
+    fetched = _fetched(world)
+    _same(fetched, world.check())
+    assert fetched.offered.commit == tip
+    assert [name for name, _ in fetched.refused] == ["v0.3.0", "v0.2.5"]
+
+
+def test_the_fetched_survey_walks_a_rotation_and_refuses_the_stolen_key(rotated):
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.3.1", world.commit("stolen\n", version="0.3.1"), key=a)
+    fetched = _fetched(world)
+    _same(fetched, world.check())
+    assert fetched.offered.name == "v0.3.0" and fetched.refused[0][0] == "v0.3.1"
+
+
+def test_the_fetched_survey_says_a_rewrite_and_a_fork(rotated):
+    world, a, r, b, r0, r1 = rotated
+    world.tag("v0.3.5", off_main(world, r0, "beside r1\n", signers=[a, r]))
+    fetched = _fetched(world)
+    _same(fetched, world.check())
+    assert fetched.fork == ("v0.3.5", "v0.3.0")
+    world.tag("v0.9.0", git(world.seed, "commit-tree", git(world.seed, "rev-parse", "HEAD^{tree}"),
+                            "-m", "rewritten"), key=b)
+    fetched = _fetched(world)
+    _same(fetched, world.check())
+    assert fetched.rewrite.name == "v0.9.0"
+
+
+def test_the_fetched_survey_needs_no_network(world):
+    tip = world.commit("v2\n", version="0.2.0")
+    world.tag("v0.2.0", tip)
+    _host_fetch(str(world.managed))
+    git(world.managed, "remote", "set-url", "origin", str(world.tmp / "gone.git"))
+    found = updater.survey_fetched(updater.installed_signers(str(world.managed)),
+                                   updater._rev("HEAD", str(world.managed)), str(world.managed))
+    assert found.offered.commit == tip

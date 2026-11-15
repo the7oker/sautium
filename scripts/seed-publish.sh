@@ -2,8 +2,9 @@
 # Publish the seed bundle seed_export.py wrote: create the GitHub release
 # `seed-v<N>` when it does not exist, upload the bundle as its asset (a
 # same-named asset is replaced), then fetch it back over the public URL and
-# check the sha256 against backend/seed/bundle.json — the file every node
-# reads before downloading. Commit bundle.json afterwards.
+# check the sha256 against the digest seed_export.py wrote beside it
+# (<seed dir>/bundle.json), and copy that digest into backend/seed/bundle.json
+# — the file every node reads before downloading. Commit it afterwards.
 #
 # Token: $GITHUB_TOKEN, else `git credential fill` through whatever helper git
 # has configured (a one-off `-c credential.helper=…` goes in
@@ -13,13 +14,14 @@ export GIT_TERMINAL_PROMPT=0
 
 repo=the7oker/sautium
 root=$(cd "$(dirname "$0")/.." && pwd)
-info="$root/backend/seed/bundle.json"
+seed_dir="${SEED_DIR:-$root/data/seed}"
+info="$seed_dir/bundle.json"
 
 read -r version url sha size < <(python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
 print(d["version"], d["url"], d["sha256"], d["size"])' "$info")
-file="${SEED_DIR:-$root/data/seed}/seed_v${version}.json.gz"
+file="$seed_dir/seed_v${version}.json.gz"
 name=$(basename "$file")
 [ -f "$file" ] || { echo "no bundle at $file — run seed_export.py first" >&2; exit 1; }
 echo "$sha  $file" | sha256sum -c --quiet \
@@ -63,4 +65,5 @@ check=$(mktemp)
 trap 'rm -f "$check"' EXIT
 curl -sSfL -o "$check" "$url"
 echo "$sha  $check" | sha256sum -c --quiet
-echo "published $url ($size bytes, sha256 $sha)"
+cp "$info" "$root/backend/seed/bundle.json"
+echo "published $url ($size bytes, sha256 $sha); its digest is in backend/seed/bundle.json — commit it"

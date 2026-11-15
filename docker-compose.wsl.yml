@@ -144,7 +144,12 @@ services:
       OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
+      # The names a TLS front before the HTTP port answers to (a reverse proxy's, `tailscale serve`'s):
+      # the Host guard accepts them too (SECURITY.md).
+      SAUTIUM_ALLOWED_HOSTS: ${SAUTIUM_ALLOWED_HOSTS:-}
       BACKEND_URL: http://localhost:8000
+      # The checkout's .git, mounted beside the code (below)
+      SAUTIUM_CHECKOUT: /checkout
       MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
       LB_DUMP_DIR: /app/data/lbdump        # writable mount for the ListenBrainz statistics dump
       # Disable uvicorn auto-reload — see docker-compose.yml for rationale
@@ -153,10 +158,21 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./backend:/app
-      - ./mcp:/app/mcp
+      # Every mount inside the read-only /app needs its mount point there
+      # already, in the checkout: Docker cannot make one in a read-only
+      # folder. ./backend/data is its own source (Docker makes it); the
+      # code's own folders ship their points (backend/desktop, backend/mcp);
+      # everything else mounts outside /app or under /app/data.
+      # The code is the checkout's, and the node only reads it (SEC-DESIGN-2026-11-03 Q6): a node that could
+      # write ./backend could pin, outlive or undo an update and decide the next image built from the tree.
+      # What the node writes has a bind of its own — never a folder of the code's.
+      - ./backend:/app:ro
+      - ./mcp:/app/mcp:ro
+      # The node's own files (its key, the API secret where it used to live, the transcode cache): a folder
+      # git ignores whole, so nothing written there is a change to the checkout.
+      - ./backend/data:/app/data
       - ./data/cache:/home/agent/.cache   # model caches, in the home of the node's user
-      - ./data/generated_eq:/app/generated_eq
+      - ./data/generated_eq:/app/data/generated_eq
       - ./data/tls:/app/data/tls
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       - ./data/lbdump:/app/data/lbdump   # ListenBrainz statistics dump (download + aggregate)
@@ -177,7 +193,8 @@ services:
       - ./desktop:/app/desktop:ro
       # The checkout's .git, read-only: /config and the backup manifest report
       # the running commit (desktop/updater.head_commit reads HEAD by hand).
-      - ./.git:/app/.git:ro
+      # Beside /app, not in it: no .git folder can ship as a mount point.
+      - ./.git:/checkout/.git:ro
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
       # HQPlayer Desktop's data folder on this host, read-only — the playback
       # diagnostics read its log (only settings.xml and HQPlayer*Desktop.log are
@@ -203,10 +220,12 @@ services:
       # off would desync index from rollouts (see docker-compose.yml).
       - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.codex:/home/agent/.codex
     ports:
-      - "8800:8000"
-      - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"   # phantom-preview media proxy (plain http, HQPlayer pulls)
+      # The LAN-only ports on IPv4 alone: Docker publishes a port with no address on [::] as well, and where
+      # the router passes IPv6 the Web UI and the media ports would answer the internet.
+      - "0.0.0.0:8800:8000"
+      - "0.0.0.0:${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"   # phantom-preview media proxy (plain http, HQPlayer pulls)
       # DLNA GENA event callbacks from LAN renderers (plain http listener).
-      - "8831:8831"
+      - "0.0.0.0:8831:8831"
       # The peer surface — the ONLY port that may be forwarded to the
       # internet (sync + chat/relay protocol, no secrets; see p2p_app.py).
       # Behind the host front: P2P_SYNC_PUBLISH=127.0.0.1:18801 publishes

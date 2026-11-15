@@ -87,6 +87,7 @@ from typing import Optional
 from starlette.datastructures import Headers
 
 import device_auth
+import host_channel
 from serving import BodyBudget, refuse, replaying, request_target
 
 logger = logging.getLogger(__name__)
@@ -510,7 +511,8 @@ class HMACAuthMiddleware:
     def _judge(self, scope, method, path, target, ts_raw, ts_int, nonce, digest, sig) -> tuple:
         """(None, the signature's entry) for a signature that verifies and is
         new — taken now (_take) — else (the refusal's detail and kind, None).
-        Which key signed is the request's `state.signer`: "host" or "device".
+        Which key signed is the request's `state.signer`: "host", "device"
+        or "host-agent".
 
         Two keys are accepted, for two kinds of caller:
           * the DEVICE TOKEN — what a browser gets after logging in. The page
@@ -519,10 +521,16 @@ class HMACAuthMiddleware:
           * the SERVER SECRET — for callers that already live on the host and
             read the file directly (launcher, MCP server). Nothing is gained
             by rejecting them: whoever can read the file has the host
-            anyway."""
+            anyway.
+        And a third on one path alone: the host agent's CHANNEL KEY on its
+        answer (host_channel.ANSWER_PATH), which takes no other signer — a
+        key a container knows signs nothing else here."""
         secret = self._get_secret()
-        signer = next((who for who, key in (("device", device_auth.current_token(secret).encode()),
-                                            ("host", secret))
+        keys = [("device", device_auth.current_token(secret).encode()), ("host", secret)]
+        if path == host_channel.ANSWER_PATH:
+            channel = host_channel.channel_key()
+            keys = [("host-agent", channel)] if channel else []
+        signer = next((who for who, key in keys
                        if hmac.compare_digest(sig, _mac(key, method, target, ts_raw, nonce, digest))), None)
         if signer is None:
             logger.warning("bad request signature: %s %s", method, path)

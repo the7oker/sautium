@@ -1438,6 +1438,34 @@ CREATE TABLE IF NOT EXISTS user_settings (
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+-- ============================================================
+-- What the node asked of the host agent and what the agent answered
+-- (backend/host_channel.py, scripts/host_agent.py): one row per verb. A
+-- request is an empty file named for the verb in the folder the agent
+-- watches; its answer comes back signed with the channel's key through the
+-- node's own API, and a page reads it here. A fact about this machine: never
+-- synced, never signed.
+-- ============================================================
+
+DO $$ BEGIN
+    CREATE TYPE host_verb AS ENUM ('check', 'update', 'diagnostics');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE host_outcome AS ENUM ('current', 'offered', 'rewrite', 'updated', 'undone',
+                                      'done', 'refused', 'floor', 'failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS host_requests (
+    verb host_verb PRIMARY KEY,
+    asked_at TIMESTAMPTZ,
+    outcome host_outcome,
+    detail TEXT,
+    release TEXT,
+    report TEXT,
+    answered_at TIMESTAMPTZ
+);
+
 -- The settings rows the assistant's own queries read (assistant_queries.
 -- active_hqp_endpoint). The assistant's login (desktop/db_init.ASSISTANT_ROLE)
 -- reads this view, never the table, whose other rows hold keys and tokens.
