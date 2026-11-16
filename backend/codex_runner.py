@@ -116,8 +116,8 @@ INSTRUCTIONS_FILE = "instructions.md"
 # their tools; view_image — a reader of any image file the sandbox can
 # read, sent on to the model; hooks — commands a hooks file in CODEX_HOME
 # runs, trusted by a record kept there too: that folder is the node's to write
-# (B-94), so nothing in it may run in a later release (on by default in 0.149;
-# `--disable hooks` taken, measured). Names come from `codex features list`; an
+# (B-94), so nothing in it may run in a later release (on by default in 0.149 and
+# in 0.166, the pinned one; `--disable hooks` taken by both, measured). Names come from `codex features list`; an
 # unknown name is a hard CLI error, so check that list before adding one.
 _DISABLED_FEATURES = ("plugins", "apps", "multi_agent", "tool_suggest",
                       "goals", "image_generation", "view_image", "hooks")
@@ -382,7 +382,8 @@ def call_codex_stream(
     A thread the CLI does not hold — its folder is the node's own since
     B-94, so a chat begun on the host's ~/.codex names a thread that is not
     there, or the folder was cleared — fails the resume before anything is
-    said (measured on 0.149: "no rollout found for thread id …"): the turn
+    said (measured on 0.149 and on 0.166, the pinned one: "no rollout found for
+    thread id …"): the turn
     goes on as a new thread, whose id the chat then keeps. The model starts
     without that thread's context; the chat's own history is untouched."""
     with library_turn():
@@ -397,8 +398,10 @@ def call_codex_stream(
             yield event
 
 
-# What the CLI says when `exec resume` names a thread it does not hold
-_UNKNOWN_THREAD = re.compile(r"no rollout found for thread id|thread not found|session not found", re.I)
+# What the CLI says when `exec resume` names a thread it does not hold — that
+# message alone: a looser one could match the CLI's log chatter and restart a
+# turn that failed for another reason
+_UNKNOWN_THREAD = re.compile(r"thread/resume failed: no rollout found for thread id")
 
 
 def _codex_stream(

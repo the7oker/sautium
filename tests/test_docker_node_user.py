@@ -758,3 +758,53 @@ def test_an_agents_folder_mounted_from_anywhere_but_the_nodes_data_is_never_hand
     node_user.hand_over(pw, (str(claude), str(codex)), ())
     assert chowned and all(p.startswith(str(codex)) for p in chowned)
     assert f"{claude} is mounted from /home/pi/.claude" in capfd.readouterr().err
+
+
+def test_a_codex_failure_after_the_answer_began_is_the_answer_as_it_was(monkeypatch):
+    import contextlib
+    import codex_runner
+    from providers.base import StreamDone, TextDelta
+    calls = []
+
+    def stream(message, player_context, thread_id, resume, model):
+        calls.append(resume)
+        yield TextDelta(text="part of an answer")
+        yield StreamDone(model="m", provider="codex",
+                         error="thread/resume failed: no rollout found for thread id 0199")
+
+    monkeypatch.setattr(codex_runner, "library_turn", contextlib.nullcontext)
+    monkeypatch.setattr(codex_runner, "_codex_stream", stream)
+    events = list(codex_runner.call_codex_stream("hi", None, thread_id="0199", resume=True))
+    assert calls == [True] and "no rollout found" in events[-1].error
+    # the CLI's log chatter naming a "session not found" is no unknown thread
+    assert not codex_runner._UNKNOWN_THREAD.search("WARN mcp: session not found, retrying")
+
+
+def test_the_agent_folder_guard_inside_an_accepted_mount(tmp_path, monkeypatch, capfd):
+    """An accepted ./data/claude with ./data/claude_sessions over projects/ is
+    walked whole; a folder or a file mounted in it from elsewhere is left;
+    a node home mounted from elsewhere whole leaves every agent folder."""
+    import node_user
+    claude = tmp_path / "agent" / ".claude"
+    for sub in ("projects", "plugins", "x"):
+        (claude / sub).mkdir(parents=True)
+        (claude / sub / "f").write_text("x")
+    (claude / ".credentials.json").write_text("{}")
+    mountinfo = tmp_path / "mountinfo"
+    lines = [f"1 0 0:1 /srv/sautium/data/claude {claude} rw - ext4 /dev/sda1 rw",
+             f"2 0 0:1 /srv/sautium/data/claude_sessions {claude}/projects rw - ext4 /dev/sda1 rw",
+             f"3 0 0:1 /home/pi/.claude/plugins {claude}/plugins rw - ext4 /dev/sda1 rw",
+             f"4 0 0:1 /home/pi/.claude/.credentials.json {claude}/.credentials.json rw - ext4 /dev/sda1 rw"]
+    mountinfo.write_text("\n".join(lines) + "\n")
+    monkeypatch.setattr(node_user, "MOUNTINFO", str(mountinfo))
+    monkeypatch.setattr(node_user, "AGENT_HOMES", (str(claude), str(tmp_path / "agent" / ".codex")))
+    chowned = []
+    monkeypatch.setattr(node_user.os, "chown", lambda path, *a, **k: chowned.append(str(path)))
+    pw = pwd.struct_passwd(("agent", "x", os.getuid() + 1, os.getgid(), "", str(tmp_path), "/bin/sh"))
+    node_user.hand_over(pw, (str(claude),), ())
+    assert str(claude / "projects" / "f") in chowned and str(claude / "x" / "f") in chowned
+    assert not [p for p in chowned if "/plugins" in p or p.endswith(".credentials.json")]
+    chowned.clear()
+    mountinfo.write_text(f"9 0 0:1 /home/pi {tmp_path / 'agent'} rw - ext4 /dev/sda1 rw\n")
+    node_user.hand_over(pw, (str(claude),), ())
+    assert chowned == [] and "lies in a home mounted from /home/pi" in capfd.readouterr().err

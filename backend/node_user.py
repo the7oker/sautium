@@ -218,11 +218,19 @@ def hand_over(pw, trees, folders) -> tuple:
             refuse(e)
 
     roots = _mount_roots()
+    # The node user's home mounted from elsewhere whole (an override): its
+    # agent folders are then no mounts of their own, and none is handed
+    home_mounted = os.path.dirname(AGENT_HOMES[0]) in roots
 
     def foreign(path: str) -> bool:
-        """An agent's folder, or a mount in one, from anywhere but the
-        node's own data folders."""
-        if not path.startswith(AGENT_HOMES) or path not in roots:
+        """An agent's folder, or a mount in one (a folder or a file), from
+        anywhere but the node's own data folders."""
+        if not path.startswith(AGENT_HOMES):
+            return False
+        if home_mounted:
+            _say(f"not handed over: {path} lies in a home mounted from {roots[os.path.dirname(AGENT_HOMES[0])]}")
+            return True
+        if path not in roots:
             return False
         if roots[path].rstrip("/").endswith(AGENT_SOURCES):
             return False
@@ -246,7 +254,8 @@ def hand_over(pw, trees, folders) -> tuple:
             dirs[:] = [d for d in dirs if writable(os.path.join(top, d)) and not foreign(os.path.join(top, d))]
             take(top)
             for name in files:
-                take(os.path.join(top, name))
+                if not foreign(os.path.join(top, name)):
+                    take(os.path.join(top, name))
     for folder in folders:
         try:
             st = os.lstat(folder)

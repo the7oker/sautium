@@ -206,8 +206,10 @@ cp .env.example .env
 Edit `.env`:
 - `ANTHROPIC_API_KEY` — Anthropic key (or set `CLAUDE_CODE_ENABLED=true` and
   sign Claude Code in from the Web UI once the node is up). A node that ran an
-  earlier release with these files mounted your own `~/.claude` and `~/.codex`
-  and could write there: look in `~/.claude/settings.json` (hooks) and
+  earlier release with `docker-compose.yml`, `.wsl.yml` or `.mac.yml` mounted
+  your own Claude Code folder (`%USERPROFILE%\.claude` on Windows, `~/.claude`
+  in WSL or on a Mac) — and, but for the Mac's, your Codex folder — and could
+  write there: look in `~/.claude/settings.json` (hooks) and
   `~/.codex/config.toml` (`mcp_servers`, `notify`) for entries you did not
   add; the node's old Codex threads stay in `~/.codex/sessions`.
 - `MUSIC_LIBRARY_PATH` — host path Docker mounts read-only (e.g. `E:\Music`).

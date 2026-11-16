@@ -528,7 +528,7 @@ def test_no_compose_file_mounts_a_host_users_home():
             source, target = _mount(volume)
             if not volume.endswith(":ro"):
                 writable[source] = target
-        assert all(source.startswith("./") for source in writable), (name, writable)
+        assert all(source.startswith("./") and ".." not in source.split("/") for source in writable), (name, writable)
         at_agents = {s for s, t in writable.items() if t.startswith(node_user.AGENT_HOMES)}
         assert at_agents == agents[name], name
         for source in at_agents:
