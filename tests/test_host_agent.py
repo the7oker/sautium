@@ -654,6 +654,11 @@ def test_the_lan_only_ports_are_published_on_ipv4_alone(name):
         assert spec["network_mode"] == "host" and "ports" not in spec
         return
     lan = [p for p in spec["ports"] if "8800" in p or "8830" in p or "8831" in p]
+    if name == "docker-compose.yml":
+        # The Windows host's file: its LAN forward (netsh portproxy) holds 0.0.0.0 on these ports, so a
+        # publish there would keep the backend from starting; they carry no address.
+        assert len(lan) == 3 and not any(p.startswith("0.0.0.0:") for p in lan), lan
+        return
     assert len(lan) == 3 and all(p.startswith("0.0.0.0:") for p in lan), lan
 
 

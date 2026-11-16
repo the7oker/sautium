@@ -44,9 +44,12 @@ Its assistants' sign-ins live in its own folders, never in the person's own
 A node that was fully controlled can still keep its database and data as it
 left them, and so make a new release fail its start and come back to the
 one before; that is the limit of an update made on the node's own
-machine. Every Compose file publishes the Web UI and the
+machine. The Compose files for macOS and WSL publish the Web UI and the
 media ports on IPv4 alone — published with no address, Docker answers on
-IPv6 as well, which a router passing IPv6 would put on the internet. The
+IPv6 as well, which a router passing IPv6 would put on the internet. On a
+Windows host with Docker Desktop the LAN reaches them through the host's own
+forward and firewall, which hold the IPv4 address themselves, so that file
+publishes them with no address. The
 Linux file runs the backend on the host's network: the node binds its ports
 itself, and the container holds no capability beyond the few its entrypoint
 needs to hand its folders over and drop root — none that would let it read

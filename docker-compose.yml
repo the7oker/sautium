@@ -267,9 +267,12 @@ services:
       # primary workflow. Internet exposure is blocked at the UPnP layer
       # (p2p_manager.py never maps this port, and desktop/portmap.py
       # refuses it). See CLAUDE.md "Security Posture" before changing this.
-      # The LAN-only ports on IPv4 alone: Docker publishes a port with no address on [::] as well, and where
-      # the router passes IPv6 the Web UI and the media ports would answer the internet.
-      - "0.0.0.0:8800:8000"
+      # The LAN-only ports carry no address in this file, the Windows host's (Docker Desktop): the LAN reaches
+      # them through the host's own forward (netsh portproxy on 0.0.0.0:8800, 8830, 8831 to the WSL VM) and
+      # its firewall, and a publish on 0.0.0.0 would take the very address that forward listens on — the
+      # backend then does not start ("ports are not available", 2026-11-16). The other files publish these
+      # ports on IPv4 alone; the Linux file binds them itself on the host's network.
+      - "8800:8000"
       # The peer surface (backend/p2p_app.py) — sync protocol only, no Web
       # UI, no API secret. THIS is the port that may be published to the
       # internet (desktop/portmap.py map ...), never 8800.
@@ -286,9 +289,9 @@ services:
       # P2P DHT MUST stay on 0.0.0.0 — that's the public peer surface.
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
       # Phantom-preview media proxy (plain http — HQPlayer pulls from it).
-      - "0.0.0.0:${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"
+      - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"
       # DLNA GENA event callbacks from LAN renderers (plain http listener).
-      - "0.0.0.0:8831:8831"
+      - "8831:8831"
     networks:
       - sautium-network
     depends_on:

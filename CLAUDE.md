@@ -470,7 +470,11 @@ See:
   bytecode it cannot write (`PYTHONPYCACHEPREFIX`, root's, compiled at the
   build). The node user's uid is `/app`'s owner (`node_user.HOST_OWNED`).
   The LAN-only ports are published on IPv4 alone (`0.0.0.0:8800:8000`,
-  8830, 8831): an address-less publish answers on `[::]` too.
+  8830, 8831): an address-less publish answers on `[::]` too — except in
+  `docker-compose.yml`, the Windows host's (since 2026-11-16): there the
+  LAN reaches them through the host's own forward (netsh portproxy on
+  `0.0.0.0`) and its firewall, and a publish on `0.0.0.0` takes the
+  forward's address and the backend does not start.
 - **The node's agent sign-ins are its own** (since 2026-11-16, B-94): every
   compose file mounts `./data/claude` → `/home/agent/.claude`, and those
   whose image has Codex `./data/codex` → `/home/agent/.codex` (the bridge files keep
@@ -588,7 +592,8 @@ below bind with or without it.
    beyond the LAN. Since 2026-11-15 (the owner's answer to PI-NODE-1 Q27)
    the owner's own tailnet counts as his LAN for them: they may be
    reached over it, never over a public route (no Funnel, no forward).
-   Every compose file publishes them on IPv4 alone.
+   Every compose file but the Windows host's publishes them on IPv4 alone
+   (there the host's portproxy holds `0.0.0.0`; see Docker & Runtime Layout).
    The browser output adds NO new port: `<audio>` media rides the
    Web UI origin at `/api/player/media/{kind}/{id}` behind
    short-lived signed query params (`backend/media_urls.py`, 4 h TTL,

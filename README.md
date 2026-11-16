@@ -248,7 +248,8 @@ This starts PostgreSQL and the FastAPI backend; on its first start the
 backend builds the schema (`desktop/migrations/001_initial.sql` plus the
 numbered deltas, `backend/db_migrate.py`). The container reads its code
 read-only — what the node writes lives in `backend/data/` and `data/` — and
-the Web UI and the media ports answer on IPv4 alone.
+the Web UI and the media ports answer on IPv4 alone (on a Windows host the
+LAN reaches them through the host's own forward instead).
 
 With `docker-compose.pi.yml` (Linux; Docker Engine 25 and Compose 2.24 or later) the
 node can ask the machine to move it to a signed release through the host
