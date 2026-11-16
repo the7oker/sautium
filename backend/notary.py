@@ -233,6 +233,11 @@ class _Notary:
             # stamp does; the clash is named at every pass that meets it
             # (sign_audio's error) and in the notary's status.
             self._took(e.result)
+            # Never sooner than the pace, even when nothing else stamped: a
+            # witness backstop due inside the clashing batch would otherwise
+            # bring the loop straight back to it.
+            with self._lock:
+                self._earliest = max(self._earliest, time.time() + STAMP_MIN_SPACING_S)
             self._set(last_error=str(e)[:200])
             return
         self._took(result)

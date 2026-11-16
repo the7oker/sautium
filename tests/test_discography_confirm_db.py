@@ -379,3 +379,34 @@ def test_a_group_of_the_same_name_that_cannot_mint_never_takes_the_row(node):
             assert [r[0] for r in _shelf(cur, aid)] == [RG2]
             cur.execute("SELECT count(*) FROM albums WHERE id = %s", (str(album_uuid(ARTIST, ARTIST)),))
             assert cur.fetchone() == (1,)
+
+
+def test_the_first_mint_of_a_same_named_pair_moves_no_listen(node):
+    """Every upsert of a pass runs before its tracklists: had the second group
+    taken the first's fresh row, its tracklist would have re-keyed the
+    first's slot tracks into its own, a heard track's listen with them
+    (NOTARY-ROOT, review round 2)."""
+    from discography import sync_artist_discography
+    from uuid_utils import track_uuid
+    conn, _fake = node
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"test\"')")
+        aid = _phantom(cur, ARTIST, A)
+        s = Slice(cur)
+        a = s.artist(A, ARTIST)
+        c = s.credit((a, ARTIST))
+        s.release(R1, ARTIST, s.release_group(RG1, ARTIST, c, primary="Album"), c,
+                  [("Get the Devil Out", 200000, REC1), ("Other Side", 180000, REC2)])
+        s.release(R_ELSEWHERE, ARTIST, s.release_group(RG2, ARTIST, c, primary="EP"), c,
+                  [("Filler", 100000, REC3)])
+        heard = str(track_uuid("Get the Devil Out", ARTIST))
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'Get the Devil Out')", (heard,))
+        cur.execute("INSERT INTO track_artists (track_id, artist_id, role) VALUES (%s, %s, 'primary')",
+                    (heard, aid))
+        cur.execute("INSERT INTO listening_history (track_id, started_at, completed) "
+                    "VALUES (%s, now(), true)", (heard,))
+    assert sync_artist_discography(aid, ARTIST)["status"] == "success"
+    with conn.cursor() as cur:
+        cur.execute("SELECT t.id::text, t.title FROM listening_history lh JOIN tracks t ON t.id = lh.track_id")
+        assert cur.fetchall() == [(heard, "Get the Devil Out")]
+        assert len(_shelf(cur, aid)) == 1

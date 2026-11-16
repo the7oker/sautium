@@ -617,7 +617,10 @@ def _held_stamp(cur, root: str):
 
 
 def _stamp_holds(root: str, ts) -> bool:
-    return (ts["authority"] in birth_authority.TRUSTED_AUTHORITIES
+    # A pre-v2 batch carries no ip_hash (it waits for --resign): it holds
+    # nothing, and is stamped again.
+    return (ts["ip_hash"] is not None
+            and ts["authority"] in birth_authority.TRUSTED_AUTHORITIES
             and rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
                                     ts["authority"], int(ts["v"])))
 
@@ -716,21 +719,22 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
                 raise RuntimeError("Worker timestamp failed verification against the trusted "
                                    "authorities — aborting")
             # The row the table holds is the stamp every record of the root
-            # names: a stamper beside this one (the CLI beside the notary)
-            # may have stored it first, and a held stamp this node no longer
-            # trusts (an authority retired since) takes the fresh one, as
-            # resign_timestamps would — the Worker keeps the root's date.
-            cur.execute("""INSERT INTO signing_batches
-                             (batch_root, author_pubkey, worker_date, ip_hash,
-                              worker_sig, authority, timestamp_version)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s)
-                           ON CONFLICT (batch_root) DO UPDATE
-                              SET worker_date = EXCLUDED.worker_date,
-                                  ip_hash = EXCLUDED.ip_hash,
-                                  worker_sig = EXCLUDED.worker_sig,
-                                  authority = EXCLUDED.authority,
-                                  timestamp_version = EXCLUDED.timestamp_version
-                            WHERE signing_batches.author_pubkey = EXCLUDED.author_pubkey""",
+            # names. A held stamp this node no longer trusts (an authority
+            # retired since) takes the fresh one, as resign_timestamps would
+            # — the Worker keeps the root's date; a root another stamper
+            # (the CLI beside the notary) stored meanwhile is left as stored.
+            conflict = ("""DO UPDATE SET worker_date = EXCLUDED.worker_date,
+                                         ip_hash = EXCLUDED.ip_hash,
+                                         worker_sig = EXCLUDED.worker_sig,
+                                         authority = EXCLUDED.authority,
+                                         timestamp_version = EXCLUDED.timestamp_version
+                            WHERE signing_batches.author_pubkey = EXCLUDED.author_pubkey"""
+                        if ts is not None else "DO NOTHING")
+            cur.execute(f"""INSERT INTO signing_batches
+                              (batch_root, author_pubkey, worker_date, ip_hash,
+                               worker_sig, authority, timestamp_version)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (batch_root) {conflict}""",
                         (root, author, fresh["date"], fresh["ip_hash"], fresh["sig"],
                          fresh["authority"], int(fresh["v"])))
             ts = _held_stamp(cur, root)

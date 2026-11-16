@@ -390,6 +390,18 @@ def test_a_held_stamp_no_longer_trusted_is_stamped_again(worker, conn, stage):
     assert _mbid_root(conn, first) == root
 
 
+def test_a_held_batch_from_before_the_ip_hash_is_stamped_again(worker, conn, stage):
+    first, root = _mbid_row(conn, NODE_PUB, "00000000")
+    assert sign_audio.stamp(stage).stamped == 1
+    with conn.cursor() as cur:                             # pre-v2, awaiting --resign
+        cur.execute("UPDATE signing_batches SET ip_hash = NULL WHERE batch_root = %s", (root,))
+        cur.execute("UPDATE track_mbids SET batch_root = NULL, merkle_proof = NULL "
+                    "WHERE recording_mbid = %s", (first,))
+    assert sign_audio.stamp(stage).stamped == 1
+    assert _held_batch(conn, root)["ip_hash"] is not None
+    assert _mbid_root(conn, first) == root
+
+
 def _clash(conn) -> tuple:
     """A waiting row whose root signing_batches holds under another author —
     impossible by construction, so made by hand — read before one of this
@@ -521,6 +533,17 @@ def test_a_pass_stuck_on_a_root_it_holds_resumes_and_leaves_the_ladder(worker, c
     assert _mbid_root(conn, first) == root
     assert (n._failures, n._stamp_at) == (0, None)
     n._drop_conn()
+
+
+def test_a_clash_alone_waits_for_the_pace(worker, conn, stage):
+    clashing, root, _, mine = _clash(conn)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM track_mbids WHERE recording_mbid = %s", (mine,))
+    n = notary._Notary()
+    n._stamp_if_due()
+    assert n._earliest >= time.time() + notary.STAMP_MIN_SPACING_S - 5
+    n._drop_conn()
+    _drop_clash(conn, clashing, root)
 
 
 def test_a_clash_holds_no_other_author_to_the_retry_ladder(worker, conn, stage):

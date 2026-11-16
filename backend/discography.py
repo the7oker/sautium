@@ -272,8 +272,13 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
     signed group and year twice in one pass, shed its seal each time and
     was signed again over the same content — the batch root it was once
     stamped under, which stopped the master's notary (2026-11-16). A row
-    bound to a group the shelf no longer lists, or holding no tracklist (an
-    unsealed shelf entry that plays nothing), is free to be rebound.
+    bound to a group the shelf no longer lists is free to be rebound. Not
+    one bound to a group of the shelf with no tracklist yet: every upsert
+    of a pass runs before its tracklists, so the second group would take
+    the first's fresh row and its tracklist would re-key the first's slot
+    tracks — listens and analysis with them — into its own (round 2 of the
+    review). Which group the row's first mint takes is the caller's: one
+    that cannot be given a tracklist never gets there.
     """
     existing = db_query_one(
         "SELECT id::text FROM albums WHERE musicbrainz_id = %(rg)s::uuid LIMIT 1",
@@ -314,9 +319,7 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
                     SELECT 1 FROM album_variants av WHERE av.album_id = albums.id
                 )
                   AND (albums.musicbrainz_id IS NULL
-                       OR NOT (albums.musicbrainz_id::text = ANY(%(shelf)s))
-                       OR NOT EXISTS (SELECT 1 FROM album_tracks t
-                                      WHERE t.album_id = albums.id))
+                       OR NOT (albums.musicbrainz_id::text = ANY(%(shelf)s)))
             RETURNING id, (xmax = 0) AS inserted
         ),
         link AS (
