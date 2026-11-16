@@ -472,8 +472,8 @@ See:
   The LAN-only ports are published on IPv4 alone (`0.0.0.0:8800:8000`,
   8830, 8831): an address-less publish answers on `[::]` too.
 - **The node's agent sign-ins are its own** (since 2026-11-16, B-94): every
-  compose file mounts `./data/claude` → `/home/agent/.claude` and
-  `./data/codex` → `/home/agent/.codex` (the bridge files keep
+  compose file mounts `./data/claude` → `/home/agent/.claude`, and those
+  whose image has Codex `./data/codex` → `/home/agent/.codex` (the bridge files keep
   `./data/claude_sessions` over `projects/`, the chat history's old place),
   never a host user's `~/.claude`/`~/.codex`: a node that could write those
   could leave a hook or an MCP command that runs on the host at the

@@ -205,7 +205,11 @@ cp .env.example .env
 
 Edit `.env`:
 - `ANTHROPIC_API_KEY` — Anthropic key (or set `CLAUDE_CODE_ENABLED=true` and
-  sign Claude Code in from the Web UI once the node is up).
+  sign Claude Code in from the Web UI once the node is up). A node that ran an
+  earlier release with these files mounted your own `~/.claude` and `~/.codex`
+  and could write there: look in `~/.claude/settings.json` (hooks) and
+  `~/.codex/config.toml` (`mcp_servers`, `notify`) for entries you did not
+  add; the node's old Codex threads stay in `~/.codex/sessions`.
 - `MUSIC_LIBRARY_PATH` — host path Docker mounts read-only (e.g. `E:\Music`).
 - `MUSIC_HOST_PATH` — native OS path stored in the DB so HQPlayer can open
   files directly (e.g. `E:/Music`).
@@ -225,10 +229,10 @@ Edit `.env`:
 Pick the Compose file for your host:
 
 ```bash
-# Windows / Linux with an NVIDIA GPU (Claude Code login on the Windows side)
+# Windows / Linux with an NVIDIA GPU (compose run from PowerShell or a Linux shell)
 docker compose up -d --build
 
-# Windows where your active Claude Code login lives inside WSL
+# Windows with compose run from a WSL shell
 docker compose -f docker-compose.wsl.yml up -d --build
 
 # macOS (Apple Silicon, CPU-only PyTorch)
@@ -431,7 +435,7 @@ cache and `~/.cache/huggingface` are left alone.
 ```
 sautium/
 ├── docker-compose.yml              # default (WSL2/Windows + NVIDIA GPU)
-├── docker-compose.wsl.yml          # Claude Code login inside WSL
+├── docker-compose.wsl.yml          # Windows, compose run from WSL
 ├── docker-compose.mac.yml          # Apple Silicon (CPU-only)
 ├── docker-compose.pi.yml           # Linux arm64, e.g. Raspberry Pi 5 (CPU-only)
 ├── .env.example                    # environment template

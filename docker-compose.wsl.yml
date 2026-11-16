@@ -12,7 +12,7 @@
 # itself in a WSL context. (UNC paths like //wsl.localhost/<distro>/...
 # silently mount as empty directories from PowerShell.)
 #
-# Everything else is identical to docker-compose.yml. Keep them in sync.
+# Otherwise docker-compose.yml's twin. Keep them in step.
 
 # Docker keeps a container's output with no bound unless told, and the
 # backend's says what the node does — requests, errors: three files of 10 MB

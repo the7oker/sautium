@@ -7,9 +7,9 @@
 #     reservation. With no accelerator the node resolves to the lite profile
 #     (backend/hardware_profile.py): it serves, syncs and plays, and analyses
 #     no library in bulk;
-#   - no Codex CLI in that image, so no CODEX_CLI_ENABLED and no ~/.codex mount;
-#   - no host ~/.claude: the assistant's CLI keeps its sign-in in the node's
-#     own ./data/claude (sign in from the Web UI);
+#   - no Codex CLI in that image, so no CODEX_CLI_ENABLED and no ./data/codex;
+#   - the assistant's sessions inside ./data/claude (no ./data/claude_sessions
+#     over projects/: a Pi node never kept them apart);
 #   - the music folder is named in .env, MUSIC_LIBRARY_PATH — there is no
 #     default to guess on Linux;
 #   - PostgreSQL sized for a 16 GB board with an NVMe disk (below);
@@ -320,9 +320,9 @@ services:
       # opened). Unset: an empty folder, and the diagnostics say where the log is.
       - ${HQPLAYER_DATA_DIR:-./data/hqplayer}:/hqplayer:ro
       # The assistant CLI's own folder — its sign-in and its sessions — in
-      # the node's data, not a host user's home: a Pi node signs Claude Code
-      # in from the Web UI. A folder Docker makes is root's; the image's
-      # entrypoint hands it to the node's user while it is empty.
+      # the node's data, never a host user's home (B-94): the node signs
+      # Claude Code in from the Web UI. A folder Docker makes is root's; the
+      # image's entrypoint hands it to the node's user.
       - ./data/claude:/home/agent/.claude
     depends_on:
       postgres:

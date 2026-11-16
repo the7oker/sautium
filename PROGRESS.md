@@ -2158,11 +2158,13 @@ The short version of the hard-learned lessons:
   `OPENAI_API_KEY` when one is set), and the row under its Switch account
   (Sign in with ChatGPT, on a key) says so.
 - **Docker signs in from the Web UI now.** Both CLIs are baked into the
-  image and `~/.claude` / `~/.codex` are host mounts, so `host_unsupported`
-  shrank to "a container without the CLI"; the sign-in process runs as the
-  agent user like every chat turn, which is what puts the credentials in the
-  mounted HOME (since 2026-11-02 the backend itself runs as that user: the
-  image's entrypoint, `node_user.py`, drops root before it starts).
+  image, so `host_unsupported` shrank to "a container without the CLI"; the
+  sign-in process runs as the agent user like every chat turn, which is what
+  puts the credentials in the mounted HOME — the host user's `~/.claude` /
+  `~/.codex` until 2026-11-16, the node's own `./data/claude` /
+  `./data/codex` since (B-94) (since 2026-11-02 the backend itself runs as
+  that user: the image's entrypoint, `node_user.py`, drops root before it
+  starts).
 - **Completion is an event, not a poll.** The driver's reader thread wakes
   the settings SSE stream on every parsed change and on exit — the wizard's
   2-second credential poll (5 minutes, then "click Refresh") and the Web
