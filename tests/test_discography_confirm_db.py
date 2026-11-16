@@ -4,7 +4,8 @@ only the groups MusicBrainz's own browse credits to the artist, under its
 titles, each with the tracklist MusicBrainz gives for a release it files
 under that group. A shelf waits, unstamped, while an answer is missing; a
 binding MusicBrainz refutes is withdrawn and stays so; a node with neither the
-dump nor slices has no source. On a real PostgreSQL built from the
+dump nor slices has no source. On a node with the dump, two groups whose name
+keys one album uuid leave its row as it is. On a real PostgreSQL built from the
 migrations, MusicBrainz faked (tests/mb_fakes.py) — skipped without a
 cluster."""
 
@@ -313,3 +314,99 @@ def test_a_credit_head_named_as_musicbrainz_credits_it_keeps_its_binding(node):
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM mb_refuted_bindings")
         assert cur.fetchone() == (0,)
+
+
+def test_two_groups_of_one_name_leave_the_phantom_row_and_its_seal_as_they_are(node):
+    """A node with the dump (the master): an album and an EP titled after the
+    artist share one name-keyed album uuid. The reconcile rebound the row to
+    the other group and back in one pass, which shed its seal over content
+    that came back unchanged — signed again, the record's root was the one
+    it had been stamped under, and the notary stopped on it (NOTARY-ROOT,
+    2026-11-16)."""
+    from discography import sync_artist_discography
+    from uuid_utils import album_uuid
+    conn, _fake = node
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"test\"')")
+        aid = _phantom(cur, ARTIST, A)
+        s = Slice(cur)
+        a = s.artist(A, ARTIST)
+        c = s.credit((a, ARTIST))
+        s.release(R1, ARTIST, s.release_group(RG1, ARTIST, c, primary="Album"), c,
+                  [("Get the Devil Out", 200000, REC1), ("Other Side", 180000, REC2)])
+        s.release(R_ELSEWHERE, ARTIST, s.release_group(RG2, ARTIST, c, primary="EP"), c,
+                  [("Filler", 100000, REC3)])
+    album = str(album_uuid(ARTIST, ARTIST))
+
+    assert sync_artist_discography(aid, ARTIST)["status"] == "success"
+    with conn.cursor() as cur:
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        (group,) = cur.fetchone()
+        assert group in (RG1, RG2)
+        cur.execute("SELECT count(*) > 0 FROM album_tracks WHERE album_id = %s", (album,))
+        assert cur.fetchone() == (True,)                  # a shelf album the reconcile keeps
+        cur.execute("UPDATE albums SET author_pubkey = %s, signature = %s WHERE id = %s",
+                    ("a" * 64, "b" * 128, album))
+
+    for _ in range(2):
+        assert sync_artist_discography(aid, ARTIST)["status"] == "success"
+        with conn.cursor() as cur:
+            cur.execute("SELECT musicbrainz_id::text, signature FROM albums WHERE id = %s", (album,))
+            assert cur.fetchone() == (group, "b" * 128)
+
+
+def test_a_group_of_the_same_name_that_cannot_mint_never_takes_the_row(node):
+    """The other order of the same pair: the album has no fully timed release,
+    the EP has. Whichever the dump lists first, the shelf holds the EP with
+    its tracklist — the album never claims the name-keyed uuid it could not
+    fill (NOTARY-ROOT, review round 1)."""
+    from discography import sync_artist_discography
+    from uuid_utils import album_uuid
+    conn, _fake = node
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"test\"')")
+        aid = _phantom(cur, ARTIST, A)
+        s = Slice(cur)
+        a = s.artist(A, ARTIST)
+        c = s.credit((a, ARTIST))
+        s.release(R1, ARTIST, s.release_group(RG1, ARTIST, c, primary="Album"), c,
+                  [("Get the Devil Out", None, REC1), ("Other Side", 180000, REC2)])
+        s.release(R_ELSEWHERE, ARTIST, s.release_group(RG2, ARTIST, c, primary="EP"), c,
+                  [("Filler", 100000, REC3)])
+    for _ in range(2):
+        assert sync_artist_discography(aid, ARTIST)["status"] == "success"
+        with conn.cursor() as cur:
+            assert [r[0] for r in _shelf(cur, aid)] == [RG2]
+            cur.execute("SELECT count(*) FROM albums WHERE id = %s", (str(album_uuid(ARTIST, ARTIST)),))
+            assert cur.fetchone() == (1,)
+
+
+def test_the_first_mint_of_a_same_named_pair_moves_no_listen(node):
+    """Every upsert of a pass runs before its tracklists: had the second group
+    taken the first's fresh row, its tracklist would have re-keyed the
+    first's slot tracks into its own, a heard track's listen with them
+    (NOTARY-ROOT, review round 2)."""
+    from discography import sync_artist_discography
+    from uuid_utils import track_uuid
+    conn, _fake = node
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"test\"')")
+        aid = _phantom(cur, ARTIST, A)
+        s = Slice(cur)
+        a = s.artist(A, ARTIST)
+        c = s.credit((a, ARTIST))
+        s.release(R1, ARTIST, s.release_group(RG1, ARTIST, c, primary="Album"), c,
+                  [("Get the Devil Out", 200000, REC1), ("Other Side", 180000, REC2)])
+        s.release(R_ELSEWHERE, ARTIST, s.release_group(RG2, ARTIST, c, primary="EP"), c,
+                  [("Filler", 100000, REC3)])
+        heard = str(track_uuid("Get the Devil Out", ARTIST))
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'Get the Devil Out')", (heard,))
+        cur.execute("INSERT INTO track_artists (track_id, artist_id, role) VALUES (%s, %s, 'primary')",
+                    (heard, aid))
+        cur.execute("INSERT INTO listening_history (track_id, started_at, completed) "
+                    "VALUES (%s, now(), true)", (heard,))
+    assert sync_artist_discography(aid, ARTIST)["status"] == "success"
+    with conn.cursor() as cur:
+        cur.execute("SELECT t.id::text, t.title FROM listening_history lh JOIN tracks t ON t.id = lh.track_id")
+        assert cur.fetchall() == [(heard, "Get the Devil Out")]
+        assert len(_shelf(cur, aid)) == 1

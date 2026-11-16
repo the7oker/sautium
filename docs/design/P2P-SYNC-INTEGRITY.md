@@ -451,7 +451,14 @@ did: 30 streamed tracks sat unsigned until an unrelated scan).
 on the notary's own cadence (≥ 15 min apart: one stamp per listening burst
 against the Worker's per-IP budget, which a CGNAT cohort shares), and a
 Worker failure or 429 now defers the stamp instead of discarding the
-batch. A record still travels only once stamped — the pull and carry gates
+batch. Since 2026-11-16 a root the node holds already is that batch — a
+record whose seal was shed and that was signed again over unchanged content
+has the same (deterministic Ed25519) signature and, alone in its batch, the
+root once stamped — so its rows take the stored stamp with no Worker call,
+each author's batch commits on its own, and a root held under another author
+stamps nothing of that author's and fails naming the root once the others
+have stamped; before, the insert failed the whole pass, and the master
+stamped nothing for eleven hours behind one phantom album. A record still travels only once stamped — the pull and carry gates
 read `batch_root` — so the stamp remains the admission signal that binds a
 free key to an address.
 

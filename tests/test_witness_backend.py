@@ -7,6 +7,11 @@ serve mode, a throwaway authority):
 - sign_audio signs witness rows on their own, stamps them with an analysis
   batch or alone when allowed, copies the stamp into the row, refuses a stamp
   under an untrusted authority, and verify_all checks them;
+- a batch root the node holds already is that batch: its rows take the
+  stored stamp with no Worker call (stamped again when it no longer
+  verifies), and a pass stuck on one resumes; a root held under another
+  author fails naming it once the other authors stamped, and the notary
+  keeps the others at its pace;
 - the notary signs on the listener's wake without a catalogue scan, and its
   backstop is a permission: armed from the oldest waiting row, never ahead of
   the pace, kept through failures, one Worker call per retry rung;
@@ -274,6 +279,159 @@ def test_a_stamp_under_an_untrusted_authority_is_refused(worker, conn, stage, mo
         assert cur.fetchone()["n"] == batches
 
 
+# ---------------------------------------------------------------------------
+# A batch root the node holds already (NOTARY-ROOT, 2026-11-16)
+# ---------------------------------------------------------------------------
+
+def _album_stamped_alone(conn, stage, group: str) -> str:
+    """An album of this node's canon, sealed and stamped in a batch of its
+    own, as the master's phantom album was: its tracklist row on a track
+    this node analysed stamped first, the album bound to its group later."""
+    tid, aid = str(uuid.uuid4()), str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'One')", (tid,))
+        cur.execute("INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds) "
+                    "VALUES (%s, %s, 200)", (tid, "AQAA" + uuid.uuid4().hex))
+        cur.execute("INSERT INTO albums (id, title, release_year) VALUES (%s, 'Self Titled', 2002)", (aid,))
+        cur.execute("INSERT INTO album_tracks (album_id, track_id, disc, position) VALUES (%s, %s, 1, 1)",
+                    (aid, tid))
+    sign_audio.sign(stage, full=True)
+    sign_audio.stamp(stage)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE albums SET musicbrainz_id = %s WHERE id = %s", (group, aid))
+    assert sign_audio.sign(stage, full=True).signed == 1
+    assert sign_audio.stamp(stage).stamped == 1
+    return aid
+
+
+def _album(conn, aid) -> dict:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM albums WHERE id = %s", (aid,))
+        return cur.fetchone()
+
+
+def _held_batch(conn, root) -> dict:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM signing_batches WHERE batch_root = %s", (root,))
+        return cur.fetchone()
+
+
+def test_a_record_signed_again_over_its_content_takes_the_stamp_its_root_holds(worker, conn, stage):
+    ep, album = str(uuid.uuid4()), str(uuid.uuid4())
+    aid = _album_stamped_alone(conn, stage, ep)
+    first = _album(conn, aid)
+    held = _held_batch(conn, first["batch_root"])
+    # The reconcile rebound the row to the other group and back in one pass:
+    # the guard shed the seal, the content came back as it was.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE albums SET musicbrainz_id = %s, release_year = 1992 WHERE id = %s", (album, aid))
+        cur.execute("UPDATE albums SET musicbrainz_id = %s, release_year = 2002 WHERE id = %s", (ep, aid))
+    assert _album(conn, aid)["signature"] is None
+    assert sign_audio.sign(stage, full=True).signed == 1
+    again = _album(conn, aid)
+    assert again["signature"] == first["signature"]       # Ed25519: the same bytes, the same signature
+    before = _calls(worker)
+    assert sign_audio.stamp(stage).stamped == 1
+    assert _calls(worker) == before                        # no Worker call for a root it holds
+    row = _album(conn, aid)
+    assert (row["batch_root"], row["merkle_proof"]) == (first["batch_root"], first["merkle_proof"])
+    assert _held_batch(conn, row["batch_root"]) == held
+    assert record_sig.verify_proof(record_sig.record_leaf(row["signature"]), row["merkle_proof"],
+                                   row["batch_root"])
+    assert sign_audio.verify_all()
+
+
+def _mbid_row(conn, author: str, prefix: str) -> tuple:
+    """A track_mbids row signed by `author`, waiting for its stamp; `prefix`
+    places it in the stamp's read order (by MBID)."""
+    tid, mbid = str(uuid.uuid4()), prefix + str(uuid.uuid4())[len(prefix):]
+    signature = os.urandom(64).hex()
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'x')", (tid,))
+        cur.execute("INSERT INTO track_mbids (recording_mbid, track_id, author_pubkey, signature) "
+                    "VALUES (%s, %s, %s, %s)", (mbid, tid, author, signature))
+    return mbid, record_sig.record_leaf(signature)
+
+
+def _mbid_root(conn, mbid) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SELECT batch_root FROM track_mbids WHERE recording_mbid = %s", (mbid,))
+        return cur.fetchone()["batch_root"]
+
+
+def test_one_authors_held_root_holds_back_no_other_authors_stamp(worker, conn, stage):
+    retired = _key_hex()
+    first, root = _mbid_row(conn, retired, "00000000")
+    assert sign_audio.stamp(stage).stamped == 1
+    with conn.cursor() as cur:                             # its seal shed and made again, unchanged
+        cur.execute("UPDATE track_mbids SET batch_root = NULL, merkle_proof = NULL "
+                    "WHERE recording_mbid = %s", (first,))
+    mine, _ = _mbid_row(conn, NODE_PUB, "ffffffff")        # read after the retired key's row
+    before = _calls(worker)
+    assert sign_audio.stamp(stage).stamped == 2
+    assert _calls(worker) == before + 1                    # only the batch it did not hold
+    assert _mbid_root(conn, first) == root
+    assert _held_batch(conn, _mbid_root(conn, mine))["author_pubkey"] == NODE_PUB
+
+
+def test_a_held_stamp_no_longer_trusted_is_stamped_again(worker, conn, stage):
+    first, root = _mbid_row(conn, NODE_PUB, "00000000")
+    assert sign_audio.stamp(stage).stamped == 1
+    held = _held_batch(conn, root)
+    with conn.cursor() as cur:                             # an authority retired since
+        cur.execute("UPDATE signing_batches SET authority = %s WHERE batch_root = %s", ("0" * 64, root))
+        cur.execute("UPDATE track_mbids SET batch_root = NULL, merkle_proof = NULL "
+                    "WHERE recording_mbid = %s", (first,))
+    before = _calls(worker)
+    assert sign_audio.stamp(stage).stamped == 1
+    assert _calls(worker) == before + 1
+    again = _held_batch(conn, root)
+    assert (again["authority"], again["worker_date"]) == (held["authority"], held["worker_date"])
+    assert _mbid_root(conn, first) == root
+
+
+def test_a_held_batch_from_before_the_ip_hash_is_stamped_again(worker, conn, stage):
+    first, root = _mbid_row(conn, NODE_PUB, "00000000")
+    assert sign_audio.stamp(stage).stamped == 1
+    with conn.cursor() as cur:                             # pre-v2, awaiting --resign
+        cur.execute("UPDATE signing_batches SET ip_hash = NULL WHERE batch_root = %s", (root,))
+        cur.execute("UPDATE track_mbids SET batch_root = NULL, merkle_proof = NULL "
+                    "WHERE recording_mbid = %s", (first,))
+    assert sign_audio.stamp(stage).stamped == 1
+    assert _held_batch(conn, root)["ip_hash"] is not None
+    assert _mbid_root(conn, first) == root
+
+
+def _clash(conn) -> tuple:
+    """A waiting row whose root signing_batches holds under another author —
+    impossible by construction, so made by hand — read before one of this
+    node's own."""
+    held_by = _key_hex()
+    clashing, root = _mbid_row(conn, _key_hex(), "00000000")
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO signing_batches (batch_root, author_pubkey, worker_date, worker_sig, authority) "
+                    "VALUES (%s, %s, now(), %s, %s)", (root, held_by, "0" * 128, "0" * 64))
+    mine, _ = _mbid_row(conn, NODE_PUB, "ffffffff")
+    return clashing, root, held_by, mine
+
+
+def _drop_clash(conn, clashing, root) -> None:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM track_mbids WHERE recording_mbid = %s", (clashing,))
+        cur.execute("DELETE FROM signing_batches WHERE batch_root = %s", (root,))
+
+
+def test_a_root_held_under_another_author_fails_naming_it_after_the_others_stamp(worker, conn, stage):
+    clashing, root, held_by, mine = _clash(conn)
+    with pytest.raises(sign_audio.BatchRootClash, match=root) as raised:
+        sign_audio.stamp(stage)
+    assert raised.value.result.stamped == 1                # this node's own batch stamped
+    assert _mbid_root(conn, mine) is not None
+    assert _mbid_root(conn, clashing) is None
+    assert _held_batch(conn, root)["author_pubkey"] == held_by
+    _drop_clash(conn, clashing, root)
+
+
 def test_verify_all_finds_a_witness_row_whose_evidence_does_not_hold(scratch_dsn, monkeypatch):
     # A database of its own: the row this test writes can never be deleted.
     with _fresh_database(scratch_dsn, "sautium_witness_forged") as (name, c):
@@ -361,6 +519,44 @@ def test_a_backstop_inside_the_workers_not_before_waits_for_it(worker, conn, sta
     n._stamp_if_due()
     assert _calls(worker) == before and n._stamp_at == pytest.approx(n._earliest, abs=1)
     n._drop_conn()
+
+
+def test_a_pass_stuck_on_a_root_it_holds_resumes_and_leaves_the_ladder(worker, conn, stage):
+    first, root = _mbid_row(conn, NODE_PUB, "00000000")
+    assert sign_audio.stamp(stage).stamped == 1
+    with conn.cursor() as cur:
+        cur.execute("UPDATE track_mbids SET batch_root = NULL, merkle_proof = NULL "
+                    "WHERE recording_mbid = %s", (first,))
+    n = notary._Notary()
+    n._failures = len(notary._RETRY_S)                    # at the top rung, as the master was
+    n._stamp_if_due()
+    assert _mbid_root(conn, first) == root
+    assert (n._failures, n._stamp_at) == (0, None)
+    n._drop_conn()
+
+
+def test_a_clash_alone_waits_for_the_pace(worker, conn, stage):
+    clashing, root, _, mine = _clash(conn)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM track_mbids WHERE recording_mbid = %s", (mine,))
+    n = notary._Notary()
+    n._stamp_if_due()
+    assert n._earliest >= time.time() + notary.STAMP_MIN_SPACING_S - 5
+    n._drop_conn()
+    _drop_clash(conn, clashing, root)
+
+
+def test_a_clash_holds_no_other_author_to_the_retry_ladder(worker, conn, stage):
+    clashing, root, _, mine = _clash(conn)
+    n = notary._Notary()
+    n._failures = 2
+    n._stamp_if_due()
+    assert _mbid_root(conn, mine) is not None
+    assert (n._failures, n._stamp_at) == (0, None)         # the pace, not a rung
+    assert n._earliest >= time.time() + notary.STAMP_MIN_SPACING_S - 5
+    assert root in n.status()["last_error"]
+    n._drop_conn()
+    _drop_clash(conn, clashing, root)
 
 
 class _Refusing(BaseHTTPRequestHandler):

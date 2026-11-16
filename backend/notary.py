@@ -226,6 +226,24 @@ class _Notary:
             self._defer_stamp(wait)
             self._set(last_error="Worker throttled")
             return
+        except sign_audio.BatchRootClash as e:
+            # Not the retry ladder: no wait mends a stored row that names the
+            # wrong author, and the ladder would hold every other author's
+            # stamps to its rungs. The others stamped and set the pace as any
+            # stamp does; the clash is named at every pass that meets it
+            # (sign_audio's error) and in the notary's status.
+            self._took(e.result)
+            # Never sooner than the pace, even when nothing else stamped: a
+            # witness backstop due inside the clashing batch would otherwise
+            # bring the loop straight back to it.
+            with self._lock:
+                self._earliest = max(self._earliest, time.time() + STAMP_MIN_SPACING_S)
+            self._set(last_error=str(e)[:200])
+            return
+        self._took(result)
+
+    def _took(self, result) -> None:
+        import sign_audio
         capped = result.stamped >= sign_audio.MAX_RECORDS_PER_BATCH
         with self._lock:
             self._stamp_at = None
