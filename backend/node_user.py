@@ -128,8 +128,11 @@ def _real_dir(path: str) -> bool:
 def _rehome(home: str, old_uid: int, uid: int, gid: int) -> None:
     """The image's own files in the node user's home follow its new uid;
     whatever is mounted there (the model cache, the agents' folders) is not
-    walked — the hand-over takes the node's trees."""
+    walked — the hand-over takes the node's trees — nor the home itself
+    when it is mounted whole (an override): those files are not the image's."""
     mounts = _mount_points()
+    if home in mounts:
+        return
     for top, dirs, files in os.walk(home):
         dirs[:] = [d for d in dirs if os.path.join(top, d) not in mounts]
         for path in [top, *(os.path.join(top, name) for name in files)]:

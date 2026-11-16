@@ -604,7 +604,9 @@ def _codex_stream(
             stderr = "".join(stderr_chunks).strip()
             raw = transient_error or stderr or (
                 f"Codex exited with code {rc}" if rc != 0 else None)
-            if raw and _auth_error(raw):
+            if raw and _UNKNOWN_THREAD.search(raw):
+                error_msg = raw       # call_codex_stream goes on as a new thread; not a sign-in matter
+            elif raw and _auth_error(raw):
                 codex_cli.auth.refused(raw)
                 error_msg = CODEX_LOGIN_MSG
             elif raw:
