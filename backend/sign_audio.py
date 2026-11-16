@@ -139,6 +139,20 @@ class NotaryThrottled(Exception):
         self.retry_after = retry_after
 
 
+class BatchRootClash(Exception):
+    """A batch's root is already in signing_batches under another author.
+    A leaf is the hash of an author's signature, so one root under two
+    authors is impossible by construction: some row holds a seal its
+    author_pubkey did not make. Raised once every other author's batch has
+    stamped, with what they stamped in `result`."""
+
+    def __init__(self, clashes: list, result):
+        super().__init__("; ".join(f"batch root {root} of {author}'s records is held under {held}"
+                                   for root, author, held in clashes))
+        self.clashes = clashes
+        self.result = result
+
+
 def _timestamp_roots(roots: list, key, author: str) -> dict:
     """POST the roots to the Worker under this node's signature. Returns the
     response body: {stamps: [{root, date, ip_hash, sig, authority}], v,
@@ -588,6 +602,13 @@ _STAMP_TABLES = ("embedding_segments", "audio_features", "track_instruments", "a
 _TABLE_PK[_WITNESS_TABLE] = ("id", "bigint")
 
 
+def _held_stamp(cur, root: str):
+    cur.execute("""SELECT author_pubkey, worker_date AS date, ip_hash::text AS ip_hash,
+                          worker_sig AS sig, authority, timestamp_version AS v
+                     FROM signing_batches WHERE batch_root = %s""", (root,))
+    return cur.fetchone()
+
+
 def _oldest_waiting_witness(cur):
     cur.execute("""SELECT min(seen_at) AS at FROM p2p_witness
                     WHERE signature IS NOT NULL AND batch_root IS NULL""")
@@ -609,6 +630,11 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
     notary's backstop is due). A Worker that answers under an authority this
     node does not trust stamps nothing: the witness rows keep their copy of
     the stamp forever, and every peer would refuse the analysis seals.
+
+    Each author's batch is a transaction of its own. A root this node holds
+    already is that batch: no Worker call, its rows take the stored stamp.
+    A root held under another author stamps nothing of that author's and
+    raises BatchRootClash once the other authors' batches have stamped.
 
     Returns the records stamped, the Worker's `not_before`, and the seen_at
     of the oldest witness row still waiting; a count that fills the cap
@@ -645,7 +671,7 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
     for rec in pending:
         by_author.setdefault(rec[2], []).append(rec)
 
-    stamped, not_before = 0, None
+    stamped, not_before, clashes = 0, None, []
     for author, recs in by_author.items():
         leaves = [rs.record_leaf(sig) for _, _, _, sig in recs]
         root, proofs = rs.merkle_tree(leaves)
@@ -655,21 +681,46 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
             stamped += len(recs)
             continue
 
-        ts = _timestamp_root(root, key, me)
-        not_before = ts.get("not_before") or not_before
-        if (ts["authority"] not in birth_authority.TRUSTED_AUTHORITIES
-                or not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
-                                           ts["authority"], int(ts["v"]))):
+        # Ed25519 is deterministic: a record whose seal was shed and that
+        # was signed again over the same content has the signature, the
+        # leaf and — alone in its batch — the root the Worker once stamped.
+        # That batch is this one; its rows take the stamp it holds (the
+        # Worker would keep the root's first date anyway). Inserting it
+        # again failed the pass whole, and no author's records stamped
+        # behind it (the master, 2026-11-16).
+        ts, welcome = _held_stamp(cur, root), None
+        if ts is None:
+            ts = _timestamp_root(root, key, me)
+            welcome = ts.get("not_before")
+            not_before = welcome or not_before
+            if (ts["authority"] not in birth_authority.TRUSTED_AUTHORITIES
+                    or not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
+                                               ts["authority"], int(ts["v"]))):
+                conn.rollback()
+                raise RuntimeError("Worker timestamp failed verification against the trusted "
+                                   "authorities — aborting")
+            # A stamper beside this one (the CLI beside the notary) may
+            # have stored the root first: the row the table holds is the
+            # stamp every record of the root names.
+            cur.execute("""INSERT INTO signing_batches
+                             (batch_root, author_pubkey, worker_date, ip_hash,
+                              worker_sig, authority, timestamp_version)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (batch_root) DO NOTHING""",
+                        (root, author, ts["date"], ts["ip_hash"], ts["sig"],
+                         ts["authority"], int(ts["v"])))
+            ts = _held_stamp(cur, root)
+        else:
+            logger.info("batch %s is held already (stamped %s): its %d record(s) take "
+                        "that stamp", root[:16], ts["date"], len(recs))
+        if ts["author_pubkey"] != author:
+            # Only this author's batch waits: the others' are other
+            # transactions, and none of them is wrong.
             conn.rollback()
-            raise RuntimeError("Worker timestamp failed verification against the trusted "
-                               "authorities — aborting")
-
-        cur.execute("""INSERT INTO signing_batches
-                         (batch_root, author_pubkey, worker_date, ip_hash,
-                          worker_sig, authority, timestamp_version)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (root, author, ts["date"], ts["ip_hash"], ts["sig"],
-                     ts["authority"], int(ts["v"])))
+            logger.error("batch root %s of %s's %d record(s) is held under author %s — "
+                         "left unstamped", root, author, len(recs), ts["author_pubkey"])
+            clashes.append((root, author, ts["author_pubkey"]))
+            continue
         by_table: dict = {}
         for (table, pk, _, sig), proof in zip(recs, proofs):
             by_table.setdefault(table, []).append((pk, sig, root, json.dumps(proof)))
@@ -724,8 +775,8 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
         conn.commit()
         logger.info("stamped %d record(s) in batch %s @ %s (next stamp welcome %s)",
                     len(recs), root[:16], ts["date"],
-                    "any time" if not ts.get("not_before")
-                    else time.strftime("%H:%M:%SZ", time.gmtime(ts["not_before"])))
+                    "any time" if not welcome
+                    else time.strftime("%H:%M:%SZ", time.gmtime(welcome)))
         stamped += len(recs)
 
     if dry_run:
@@ -738,7 +789,10 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
                     max_records)
     waiting = _oldest_waiting_witness(cur)
     conn.rollback()
-    return StampResult(stamped, not_before, waiting)
+    result = StampResult(stamped, not_before, waiting)
+    if clashes:
+        raise BatchRootClash(clashes, result)
+    return result
 
 
 def run(stage="both", limit=None, dry_run=False, until_done=False,

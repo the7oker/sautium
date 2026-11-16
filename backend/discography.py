@@ -252,10 +252,12 @@ def _artist_mbids(artist_id: str) -> List[str]:
 
 
 def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
-                          artist_mbid: str) -> tuple[Optional[str], bool]:
+                          artist_mbid: str, shelf: list) -> tuple[Optional[str], bool]:
     """Persist one missing release-group as a phantom album + artist link.
     Returns ``(album_id, inserted)``; album_id is None when the UUID
-    collided with an owned row (the guard suppressed the upsert).
+    collided with an owned row, or with a phantom bound to another group of
+    `shelf` (the reconcile's missing groups — the guard suppressed the
+    upsert).
 
     A release-group already in the DB under another UUID (a collaboration
     synced from the other member first) only gains the artist link — the
@@ -263,6 +265,14 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
     The ON CONFLICT guard (`WHERE NOT EXISTS album_variants`) makes the
     upsert a no-op on an owned album, so an owned record's data can never
     be clobbered even if a UUID somehow collides.
+
+    Two groups of one shelf can share the name-keyed UUID (an album and an
+    EP both titled after the artist). The row stays the group's that holds
+    it: rebound to the other on every reconcile and back, it changed its
+    signed group and year twice in one pass, shed its seal each time and
+    was signed again over the same content — the batch root it was once
+    stamped under, which stopped the master's notary (2026-11-16). A row
+    bound to a group the shelf no longer lists is free to be rebound.
     """
     existing = db_query_one(
         "SELECT id::text FROM albums WHERE musicbrainz_id = %(rg)s::uuid LIMIT 1",
@@ -302,6 +312,8 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
                 WHERE NOT EXISTS (
                     SELECT 1 FROM album_variants av WHERE av.album_id = albums.id
                 )
+                  AND (albums.musicbrainz_id IS NULL
+                       OR NOT (albums.musicbrainz_id::text = ANY(%(shelf)s)))
             RETURNING id, (xmax = 0) AS inserted
         ),
         link AS (
@@ -319,6 +331,7 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
         "cover": _CAA_FRONT_URL.format(rg=rg["rg_mbid"]),
         "ar": artist_id,
         "mbid": artist_mbid,
+        "shelf": shelf,
     })
     if not res:
         return None, False
@@ -1183,7 +1196,8 @@ def sync_artist_discography(artist_id, artist_name: str,
             confirmed = _confirmed_release(rg["rg_mbid"], asks)
             if confirmed is confirm.WAIT or confirmed is None:
                 continue
-        album_id, inserted = _upsert_phantom_album(artist_id, artist_name, rg, mbid)
+        album_id, inserted = _upsert_phantom_album(artist_id, artist_name, rg, mbid,
+                                                   list(missing))
         if inserted:
             stats["new"] += 1
         if album_id:

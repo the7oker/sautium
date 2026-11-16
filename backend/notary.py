@@ -226,10 +226,21 @@ class _Notary:
             self._defer_stamp(wait)
             self._set(last_error="Worker throttled")
             return
+        except sign_audio.BatchRootClash as e:
+            # The other authors' batches stamped and set the pace as any
+            # stamp does; the clash is a failed pass all the same and climbs
+            # the retry ladder in the loop's handler.
+            self._took(e.result, complete=False)
+            raise
+        self._took(result, complete=True)
+
+    def _took(self, result, complete: bool) -> None:
+        import sign_audio
         capped = result.stamped >= sign_audio.MAX_RECORDS_PER_BATCH
         with self._lock:
             self._stamp_at = None
-            self._failures = 0
+            if complete:
+                self._failures = 0
             if result.stamped:
                 # The Worker's `not_before` is the budget's lower bound, not
                 # a "stamp now": the node's own spacing is what coalesces a
