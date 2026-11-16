@@ -507,3 +507,18 @@ def test_the_node_reads_no_bytecode_it_cannot_write():
         assert "CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/ || exit 1" in text
     ignored = (REPO / "backend" / ".dockerignore").read_text(encoding="utf-8").splitlines()
     assert "**/__pycache__/" in ignored and "**/*.pyc" in ignored
+
+
+def test_no_compose_file_mounts_a_host_users_home():
+    """A node that could write the person's own ~/.claude or ~/.codex could
+    leave a hook or an MCP command there that runs on the host at their next
+    use of the CLI (PI-NODE-2A round 1's H2; B-94): the node's agents keep
+    their sign-ins in folders of its own, signed in from the Web UI."""
+    for name in COMPOSE_FILES:
+        backend = _compose(name)["services"]["backend"]
+        sources = {_mount(v)[0]: _mount(v)[1] for v in backend["volumes"]}
+        assert not [s for s in sources if any(home in s for home in ("HOME", "USERPROFILE", "SAUTIUM_WSL_HOME", "~"))], name
+        assert sources.get("./data/claude") == "/home/agent/.claude", name
+        if "/home/agent/.codex" in sources.values():
+            assert sources["./data/codex"] == "/home/agent/.codex", name
+        assert not {"SAUTIUM_WSL_HOME"} & set(backend["environment"]), name

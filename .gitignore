@@ -64,6 +64,8 @@ data/support/
 data/claude_sessions/
 # The Linux arm64 compose file's Claude Code folder: its sign-in and its sessions
 data/claude/
+# The node's Codex folder (B-94)
+data/codex/
 # MusicBrainz dump (~7GB tarball + extracted TSVs) — re-downloadable, loaded into pg
 data/mbdump/
 # ListenBrainz statistics dump (~21 GB archive) — re-downloadable, aggregated into pg

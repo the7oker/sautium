@@ -1,19 +1,11 @@
-# Compose variant for hosts where the active Claude Code lives in WSL.
+# Compose variant for a Windows host whose compose runs from a WSL shell.
 #
 # WHY THIS EXISTS
-# Sautium relies on Claude Code as its AI provider. Claude Code stores
-# its OAuth refresh tokens in the home directory of whatever user
-# actually runs the CLI. If you `claude /login` from Windows, tokens
-# refresh in %USERPROFILE%\.claude\. If you do it from a WSL distro,
-# they refresh in /home/<user>/.claude/ and the Windows-side file (if
-# any, from an old install) goes stale.
-#
-# docker-compose.yml mounts the Windows-side .credentials.json — fine
-# when Claude is installed natively on Windows. For WSL-installed
-# Claude, that mount delivers a stale token and the backend chats
-# with Anthropic and gets 401.
-#
-# This file mounts the WSL-side file directly. Run with:
+# Until 2026-11-16 this file mounted the WSL user's ~/.claude and ~/.codex,
+# for a Claude Code signed in inside WSL rather than on Windows. Since B-94
+# no compose file mounts a host user's home: the node keeps its agents'
+# sign-ins in its own ./data/claude and ./data/codex and signs them in from
+# the Web UI. What stays is the shell it runs from:
 #   docker compose -f docker-compose.wsl.yml up -d
 # from a WSL bash shell, NOT from PowerShell — Docker Desktop only
 # bind-mounts native Linux paths cleanly when the compose process is
@@ -200,25 +192,19 @@ services:
       # diagnostics read its log (only settings.xml and HQPlayer*Desktop.log are
       # opened). Unset: an empty folder, and the diagnostics say where the log is.
       - ${HQPLAYER_DATA_DIR:-./data/hqplayer}:/hqplayer:ro
-      # Claude Code OAuth credentials from WSL home — refreshed by `claude`
-      # running inside WSL. We can't use ${HOME} here: when compose is
-      # invoked via docker.exe from a WSL shell, the WSL HOME variable
-      # doesn't cross the WSL→Windows boundary (only WSLENV-listed vars
-      # do), and Docker substitutes empty → mounts /.credentials.json
-      # (an empty dir) and Claude logs out. SAUTIUM_WSL_HOME in .env
-      # is an explicit, shell-independent path. Required, not optional.
-      #
-      # Mount the WHOLE .claude directory (see the equivalent block in
-      # docker-compose.yml for why): single-file bind pins the inode and
-      # the CLI rewrites credentials via atomic rename, so the container
-      # would otherwise stick to a stale token until restart.
-      - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.claude:/home/agent/.claude
+      # The assistant CLIs' own folders — their sign-ins and their state —
+      # in the node's data, never a host user's home (B-94, 2026-11-16): a
+      # node that could write the person's own ~/.claude or ~/.codex could
+      # leave a hook or an MCP command there that runs on this machine the
+      # next time the person uses the CLI. The node signs its agents in from
+      # the Web UI (More › AI assistant); the person's own CLI keeps its own
+      # sign-in. A folder Docker makes is root's: the image's entrypoint
+      # hands it to the node's user.
+      - ./data/claude:/home/agent/.claude
+      # Claude Code's sessions where earlier releases kept them, so the
+      # node's chat history carries over
       - ./data/claude_sessions:/home/agent/.claude/projects
-      # OpenAI Codex auth + sessions — whole-dir mount, same rationale
-      # as .claude. No sessions sub-overlay: codex keeps its thread
-      # index in sqlite files at the .codex root, splitting sessions/
-      # off would desync index from rollouts (see docker-compose.yml).
-      - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.codex:/home/agent/.codex
+      - ./data/codex:/home/agent/.codex
     ports:
       # The LAN-only ports on IPv4 alone: Docker publishes a port with no address on [::] as well, and where
       # the router passes IPv6 the Web UI and the media ports would answer the internet.

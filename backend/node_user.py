@@ -24,17 +24,16 @@ NODE_USER = "agent"
 # What the node writes, as the compose files mount it. Anything there that is
 # not the node user's — a root backend's file from before the node ran as its
 # own user, a folder a Windows mount shows as root's — is handed to it at each
-# start. The host's ~/.claude and ~/.codex are the owner's and stay as they
-# are: only an agent's folder itself while it is root's and empty is handed —
-# what Docker creates for a host folder that did not exist (the Linux arm64
-# file's ./data/claude and ./run/requests, the host agent's; the other files
-# mount projects/ inside ~/.claude, so Docker's folder there is never empty).
-# A tree or folder reached through a
-# link is not handed (_real_dir): a host whose ~/.claude/projects is itself a
-# link has its sessions folder refused, and said, at each start.
+# start. The agents' folders are the node's own in every compose file since
+# 2026-11-16 (B-94: ./data/claude, ./data/codex — never a host user's home),
+# so they are trees like the rest. Of a folder another party writes in too —
+# the host agent's requests folder — only the folder itself is handed, while
+# it is root's and empty: what Docker made for it before the agent's install.
+# A tree or folder reached through a link is not handed (_real_dir), and
+# said, at each start.
 NODE_TREES = ("/app/data", "/var/lib/sautium/generated_eq", "/home/agent/.cache",
-              "/home/agent/.claude/projects")
-NODE_FOLDERS = ("/home/agent/.claude", "/home/agent/.codex", "/run/sautium/requests")
+              "/home/agent/.claude", "/home/agent/.claude/projects", "/home/agent/.codex")
+NODE_FOLDERS = ("/run/sautium/requests",)
 # Where compose files mounted the model cache while the backend ran as root
 ROOT_CACHE = "/root/.cache"
 # The folder whose owner the node's user becomes. A native Linux host keeps

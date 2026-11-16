@@ -471,6 +471,14 @@ See:
   build). The node user's uid is `/app`'s owner (`node_user.HOST_OWNED`).
   The LAN-only ports are published on IPv4 alone (`0.0.0.0:8800:8000`,
   8830, 8831): an address-less publish answers on `[::]` too.
+- **The node's agent sign-ins are its own** (since 2026-11-16, B-94): every
+  compose file mounts `./data/claude` → `/home/agent/.claude` and
+  `./data/codex` → `/home/agent/.codex` (the bridge files keep
+  `./data/claude_sessions` over `projects/`, the chat history's old place),
+  never a host user's `~/.claude`/`~/.codex`: a node that could write those
+  could leave a hook or an MCP command that runs on the host at the
+  person's next use of the CLI. The node signs in from the Web UI
+  (`desktop/agent_login.py`); the person's own CLI keeps its own sign-in.
 - **The Linux file runs the backend on the host's network** (since
   2026-11-15, `docker-compose.pi.yml`): `network_mode: host`, PostgreSQL on
   its bridge published on loopback; `cap_drop: [ALL]` with only the
