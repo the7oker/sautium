@@ -141,10 +141,11 @@ class NotaryThrottled(Exception):
 
 class BatchRootClash(Exception):
     """A batch's root is already in signing_batches under another author.
-    A leaf is the hash of an author's signature, so one root under two
-    authors is impossible by construction: some row holds a seal its
-    author_pubkey did not make. Raised once every other author's batch has
-    stamped, with what they stamped in `result`."""
+    A leaf is the hash of an author's signature, so a root is one author's:
+    another author on it means a stored row names the wrong one — a record
+    holding a seal its author_pubkey did not make, or a peer's batch row
+    imported under another author than its records'. Raised once every
+    other author's batch has stamped, with what they stamped in `result`."""
 
     def __init__(self, clashes: list, result):
         super().__init__("; ".join(f"batch root {root} of {author}'s records is held under {held}"
@@ -603,10 +604,22 @@ _TABLE_PK[_WITNESS_TABLE] = ("id", "bigint")
 
 
 def _held_stamp(cur, root: str):
-    cur.execute("""SELECT author_pubkey, worker_date AS date, ip_hash::text AS ip_hash,
-                          worker_sig AS sig, authority, timestamp_version AS v
+    """The stamp signing_batches holds for `root`, in the Worker's own form
+    (the date as the Worker writes it, whole seconds UTC — what
+    verify_timestamp and verify_all read)."""
+    cur.execute("""SELECT author_pubkey,
+                          to_char(worker_date AT TIME ZONE 'UTC',
+                                  'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS date,
+                          ip_hash::text AS ip_hash, worker_sig AS sig, authority,
+                          timestamp_version AS v
                      FROM signing_batches WHERE batch_root = %s""", (root,))
     return cur.fetchone()
+
+
+def _stamp_holds(root: str, ts) -> bool:
+    return (ts["authority"] in birth_authority.TRUSTED_AUTHORITIES
+            and rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
+                                    ts["authority"], int(ts["v"])))
 
 
 def _oldest_waiting_witness(cur):
@@ -632,7 +645,9 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
     the stamp forever, and every peer would refuse the analysis seals.
 
     Each author's batch is a transaction of its own. A root this node holds
-    already is that batch: no Worker call, its rows take the stored stamp.
+    already is that batch: no Worker call, its rows take the stored stamp
+    (stamped again when it no longer verifies against the trusted
+    authorities).
     A root held under another author stamps nothing of that author's and
     raises BatchRootClash once the other authors' batches have stamped.
 
@@ -689,30 +704,36 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH,
         # again failed the pass whole, and no author's records stamped
         # behind it (the master, 2026-11-16).
         ts, welcome = _held_stamp(cur, root), None
-        if ts is None:
-            ts = _timestamp_root(root, key, me)
-            welcome = ts.get("not_before")
+        if ts is not None and ts["author_pubkey"] == author and _stamp_holds(root, ts):
+            logger.info("batch %s is held already (stamped %s): its %d record(s) take "
+                        "that stamp", root[:16], ts["date"], len(recs))
+        elif ts is None or ts["author_pubkey"] == author:
+            fresh = _timestamp_root(root, key, me)
+            welcome = fresh.get("not_before")
             not_before = welcome or not_before
-            if (ts["authority"] not in birth_authority.TRUSTED_AUTHORITIES
-                    or not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
-                                               ts["authority"], int(ts["v"]))):
+            if not _stamp_holds(root, fresh):
                 conn.rollback()
                 raise RuntimeError("Worker timestamp failed verification against the trusted "
                                    "authorities — aborting")
-            # A stamper beside this one (the CLI beside the notary) may
-            # have stored the root first: the row the table holds is the
-            # stamp every record of the root names.
+            # The row the table holds is the stamp every record of the root
+            # names: a stamper beside this one (the CLI beside the notary)
+            # may have stored it first, and a held stamp this node no longer
+            # trusts (an authority retired since) takes the fresh one, as
+            # resign_timestamps would — the Worker keeps the root's date.
             cur.execute("""INSERT INTO signing_batches
                              (batch_root, author_pubkey, worker_date, ip_hash,
                               worker_sig, authority, timestamp_version)
                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                           ON CONFLICT (batch_root) DO NOTHING""",
-                        (root, author, ts["date"], ts["ip_hash"], ts["sig"],
-                         ts["authority"], int(ts["v"])))
+                           ON CONFLICT (batch_root) DO UPDATE
+                              SET worker_date = EXCLUDED.worker_date,
+                                  ip_hash = EXCLUDED.ip_hash,
+                                  worker_sig = EXCLUDED.worker_sig,
+                                  authority = EXCLUDED.authority,
+                                  timestamp_version = EXCLUDED.timestamp_version
+                            WHERE signing_batches.author_pubkey = EXCLUDED.author_pubkey""",
+                        (root, author, fresh["date"], fresh["ip_hash"], fresh["sig"],
+                         fresh["authority"], int(fresh["v"])))
             ts = _held_stamp(cur, root)
-        else:
-            logger.info("batch %s is held already (stamped %s): its %d record(s) take "
-                        "that stamp", root[:16], ts["date"], len(recs))
         if ts["author_pubkey"] != author:
             # Only this author's batch waits: the others' are other
             # transactions, and none of them is wrong.

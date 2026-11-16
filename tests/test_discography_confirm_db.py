@@ -353,3 +353,29 @@ def test_two_groups_of_one_name_leave_the_phantom_row_and_its_seal_as_they_are(n
         with conn.cursor() as cur:
             cur.execute("SELECT musicbrainz_id::text, signature FROM albums WHERE id = %s", (album,))
             assert cur.fetchone() == (group, "b" * 128)
+
+
+def test_a_group_of_the_same_name_that_cannot_mint_never_takes_the_row(node):
+    """The other order of the same pair: the album has no fully timed release,
+    the EP has. Whichever the dump lists first, the shelf holds the EP with
+    its tracklist — the album never claims the name-keyed uuid it could not
+    fill (NOTARY-ROOT, review round 1)."""
+    from discography import sync_artist_discography
+    from uuid_utils import album_uuid
+    conn, _fake = node
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"test\"')")
+        aid = _phantom(cur, ARTIST, A)
+        s = Slice(cur)
+        a = s.artist(A, ARTIST)
+        c = s.credit((a, ARTIST))
+        s.release(R1, ARTIST, s.release_group(RG1, ARTIST, c, primary="Album"), c,
+                  [("Get the Devil Out", None, REC1), ("Other Side", 180000, REC2)])
+        s.release(R_ELSEWHERE, ARTIST, s.release_group(RG2, ARTIST, c, primary="EP"), c,
+                  [("Filler", 100000, REC3)])
+    for _ in range(2):
+        assert sync_artist_discography(aid, ARTIST)["status"] == "success"
+        with conn.cursor() as cur:
+            assert [r[0] for r in _shelf(cur, aid)] == [RG2]
+            cur.execute("SELECT count(*) FROM albums WHERE id = %s", (str(album_uuid(ARTIST, ARTIST)),))
+            assert cur.fetchone() == (1,)

@@ -272,7 +272,8 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
     signed group and year twice in one pass, shed its seal each time and
     was signed again over the same content — the batch root it was once
     stamped under, which stopped the master's notary (2026-11-16). A row
-    bound to a group the shelf no longer lists is free to be rebound.
+    bound to a group the shelf no longer lists, or holding no tracklist (an
+    unsealed shelf entry that plays nothing), is free to be rebound.
     """
     existing = db_query_one(
         "SELECT id::text FROM albums WHERE musicbrainz_id = %(rg)s::uuid LIMIT 1",
@@ -313,7 +314,9 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
                     SELECT 1 FROM album_variants av WHERE av.album_id = albums.id
                 )
                   AND (albums.musicbrainz_id IS NULL
-                       OR NOT (albums.musicbrainz_id::text = ANY(%(shelf)s)))
+                       OR NOT (albums.musicbrainz_id::text = ANY(%(shelf)s))
+                       OR NOT EXISTS (SELECT 1 FROM album_tracks t
+                                      WHERE t.album_id = albums.id))
             RETURNING id, (xmax = 0) AS inserted
         ),
         link AS (
@@ -1190,11 +1193,17 @@ def sync_artist_discography(artist_id, artist_name: str,
     stats["found"] = len(missing)
     phantoms: List[tuple] = []  # (album_id, rg_mbid)
     for rg, mbid in missing.values():
-        if asks is not None and not _has_tracklist(rg["rg_mbid"]):
-            # Minted only with a tracklist MusicBrainz confirms, so the
-            # reconcile's "no tracklist" rule never unlinks it in between.
-            confirmed = _confirmed_release(rg["rg_mbid"], asks)
-            if confirmed is confirm.WAIT or confirmed is None:
+        if not _has_tracklist(rg["rg_mbid"]):
+            # Minted only with a tracklist it can be given — MusicBrainz's
+            # confirmed one, or the dump's fully timed pick — so the
+            # reconcile's "no tracklist" rule never unlinks it in between,
+            # and a group that cannot mint never takes the name-keyed uuid
+            # from one of the same name that can.
+            if asks is not None:
+                confirmed = _confirmed_release(rg["rg_mbid"], asks)
+                if confirmed is confirm.WAIT or confirmed is None:
+                    continue
+            elif _pick_canonical_release(mb.fetch_release_tracklists(rg["rg_mbid"])) is None:
                 continue
         album_id, inserted = _upsert_phantom_album(artist_id, artist_name, rg, mbid,
                                                    list(missing))

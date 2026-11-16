@@ -8,8 +8,10 @@ serve mode, a throwaway authority):
   batch or alone when allowed, copies the stamp into the row, refuses a stamp
   under an untrusted authority, and verify_all checks them;
 - a batch root the node holds already is that batch: its rows take the
-  stored stamp with no Worker call, and a pass stuck on one resumes; a root
-  held under another author fails naming it once the other authors stamped;
+  stored stamp with no Worker call (stamped again when it no longer
+  verifies), and a pass stuck on one resumes; a root held under another
+  author fails naming it once the other authors stamped, and the notary
+  keeps the others at its pace;
 - the notary signs on the listener's wake without a catalogue scan, and its
   backstop is a permission: armed from the oldest waiting row, never ahead of
   the pace, kept through failures, one Worker call per retry rung;
@@ -372,6 +374,22 @@ def test_one_authors_held_root_holds_back_no_other_authors_stamp(worker, conn, s
     assert _held_batch(conn, _mbid_root(conn, mine))["author_pubkey"] == NODE_PUB
 
 
+def test_a_held_stamp_no_longer_trusted_is_stamped_again(worker, conn, stage):
+    first, root = _mbid_row(conn, NODE_PUB, "00000000")
+    assert sign_audio.stamp(stage).stamped == 1
+    held = _held_batch(conn, root)
+    with conn.cursor() as cur:                             # an authority retired since
+        cur.execute("UPDATE signing_batches SET authority = %s WHERE batch_root = %s", ("0" * 64, root))
+        cur.execute("UPDATE track_mbids SET batch_root = NULL, merkle_proof = NULL "
+                    "WHERE recording_mbid = %s", (first,))
+    before = _calls(worker)
+    assert sign_audio.stamp(stage).stamped == 1
+    assert _calls(worker) == before + 1
+    again = _held_batch(conn, root)
+    assert (again["authority"], again["worker_date"]) == (held["authority"], held["worker_date"])
+    assert _mbid_root(conn, first) == root
+
+
 def _clash(conn) -> tuple:
     """A waiting row whose root signing_batches holds under another author —
     impossible by construction, so made by hand — read before one of this
@@ -505,15 +523,15 @@ def test_a_pass_stuck_on_a_root_it_holds_resumes_and_leaves_the_ladder(worker, c
     n._drop_conn()
 
 
-def test_a_clash_sets_the_pace_from_what_stamped_and_keeps_climbing_the_ladder(worker, conn, stage):
+def test_a_clash_holds_no_other_author_to_the_retry_ladder(worker, conn, stage):
     clashing, root, _, mine = _clash(conn)
     n = notary._Notary()
     n._failures = 2
-    with pytest.raises(sign_audio.BatchRootClash):
-        n._stamp_if_due()
-    assert n._failures == 2                               # the loop's handler climbs from here
-    assert n._earliest >= time.time() + notary.STAMP_MIN_SPACING_S - 5
+    n._stamp_if_due()
     assert _mbid_root(conn, mine) is not None
+    assert (n._failures, n._stamp_at) == (0, None)         # the pace, not a rung
+    assert n._earliest >= time.time() + notary.STAMP_MIN_SPACING_S - 5
+    assert root in n.status()["last_error"]
     n._drop_conn()
     _drop_clash(conn, clashing, root)
 
