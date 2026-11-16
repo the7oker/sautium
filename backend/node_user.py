@@ -24,17 +24,23 @@ NODE_USER = "agent"
 # What the node writes, as the compose files mount it. Anything there that is
 # not the node user's — a root backend's file from before the node ran as its
 # own user, a folder a Windows mount shows as root's — is handed to it at each
-# start. The host's ~/.claude and ~/.codex are the owner's and stay as they
-# are: only an agent's folder itself while it is root's and empty is handed —
-# what Docker creates for a host folder that did not exist (the Linux arm64
-# file's ./data/claude and ./run/requests, the host agent's; the other files
-# mount projects/ inside ~/.claude, so Docker's folder there is never empty).
-# A tree or folder reached through a
-# link is not handed (_real_dir): a host whose ~/.claude/projects is itself a
-# link has its sessions folder refused, and said, at each start.
+# start. The agents' folders are the node's own in every compose file since
+# 2026-11-16 (B-94: ./data/claude, ./data/codex — never a host user's home),
+# so they are trees like the rest. Of a folder another party writes in too —
+# the host agent's requests folder — only the folder itself is handed, while
+# it is root's and empty: what Docker made for it before the agent's install.
+# A tree or folder reached through a link is not handed (_real_dir), and
+# said, at each start.
 NODE_TREES = ("/app/data", "/var/lib/sautium/generated_eq", "/home/agent/.cache",
-              "/home/agent/.claude/projects")
-NODE_FOLDERS = ("/home/agent/.claude", "/home/agent/.codex", "/run/sautium/requests")
+              "/home/agent/.claude", "/home/agent/.codex")
+# The agents' folders are handed over only as the compose files mount them,
+# from the node's own data folders; a mount there from anywhere else — an
+# override that mounts a person's ~/.claude again, a link standing in for
+# ./data/claude, which Docker follows — is left as it is, and said: the
+# person's own files are never re-owned to the node.
+AGENT_HOMES = ("/home/agent/.claude", "/home/agent/.codex")
+AGENT_SOURCES = ("/data/claude", "/data/claude_sessions", "/data/codex")
+NODE_FOLDERS = ("/run/sautium/requests",)
 # Where compose files mounted the model cache while the backend ran as root
 ROOT_CACHE = "/root/.cache"
 # The folder whose owner the node's user becomes. A native Linux host keeps
@@ -121,9 +127,12 @@ def _real_dir(path: str) -> bool:
 
 def _rehome(home: str, old_uid: int, uid: int, gid: int) -> None:
     """The image's own files in the node user's home follow its new uid;
-    whatever is mounted there (the model cache, a host's ~/.claude) is not
-    walked — the hand-over takes the node's trees, a host's stay its own."""
+    whatever is mounted there (the model cache, the agents' folders) is not
+    walked — the hand-over takes the node's trees — nor the home itself
+    when it is mounted whole (an override): those files are not the image's."""
     mounts = _mount_points()
+    if home in mounts:
+        return
     for top, dirs, files in os.walk(home):
         dirs[:] = [d for d in dirs if os.path.join(top, d) not in mounts]
         for path in [top, *(os.path.join(top, name) for name in files)]:
@@ -211,6 +220,26 @@ def hand_over(pw, trees, folders) -> tuple:
         except OSError as e:
             refuse(e)
 
+    roots = _mount_roots()
+    # The node user's home mounted from elsewhere whole (an override): its
+    # agent folders are then no mounts of their own, and none is handed
+    home_mounted = os.path.dirname(AGENT_HOMES[0]) in roots
+
+    def foreign(path: str) -> bool:
+        """An agent's folder, or a mount in one (a folder or a file), from
+        anywhere but the node's own data folders."""
+        if not path.startswith(AGENT_HOMES):
+            return False
+        if home_mounted:
+            _say(f"not handed over: {path} lies in a home mounted from {roots[os.path.dirname(AGENT_HOMES[0])]}")
+            return True
+        if path not in roots:
+            return False
+        if roots[path].rstrip("/").endswith(AGENT_SOURCES):
+            return False
+        _say(f"not handed over: {path} is mounted from {roots[path]}, not a folder of the node's own")
+        return True
+
     for tree in trees:
         try:
             os.lstat(tree)
@@ -222,13 +251,14 @@ def hand_over(pw, trees, folders) -> tuple:
         if not _real_dir(tree):
             _say(f"not handed over: {tree} is reached through a link or is no folder")
             continue
-        if not writable(tree):
+        if not writable(tree) or foreign(tree):
             continue
         for top, dirs, files in os.walk(tree, onerror=refuse):
-            dirs[:] = [d for d in dirs if writable(os.path.join(top, d))]
+            dirs[:] = [d for d in dirs if writable(os.path.join(top, d)) and not foreign(os.path.join(top, d))]
             take(top)
             for name in files:
-                take(os.path.join(top, name))
+                if not foreign(os.path.join(top, name)):
+                    take(os.path.join(top, name))
     for folder in folders:
         try:
             st = os.lstat(folder)

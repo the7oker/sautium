@@ -456,7 +456,7 @@ def test_the_arm64_compose_files_are_the_release_file_but_for_what_their_host_ne
     """docker-compose.mac.yml lacked the release's WAL lines, its peer and
     media ports and its identity mounts; the arm64 files follow the release
     file, short only of what their image or host has none of: CUDA, the
-    Codex CLI and, on Linux, a host user's ~/.claude."""
+    Codex CLI and, on Linux, the sessions' own folder."""
     env, mounts, ports, flags = _backend("docker-compose.yml")
     cuda_and_codex = {"CUDA_VISIBLE_DEVICES", "PYTORCH_CUDA_ALLOC_CONF", "CODEX_CLI_ENABLED"}
     # The Linux file runs the backend on the host's network (its own ports,
@@ -507,3 +507,31 @@ def test_the_node_reads_no_bytecode_it_cannot_write():
         assert "CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/ || exit 1" in text
     ignored = (REPO / "backend" / ".dockerignore").read_text(encoding="utf-8").splitlines()
     assert "**/__pycache__/" in ignored and "**/*.pyc" in ignored
+
+
+def test_no_compose_file_mounts_a_host_users_home():
+    """A node that could write the person's own ~/.claude or ~/.codex could
+    leave a hook or an MCP command there that runs on the host at their next
+    use of the CLI (PI-NODE-2A round 1's H2; B-94): the node's agents keep
+    their sign-ins in folders of its own, signed in from the Web UI. Every
+    folder the node writes is the checkout's; each agent folder is one the
+    entrypoint hands over as a tree, and from where it accepts it."""
+    import node_user
+    agents = {"docker-compose.yml": {"./data/claude", "./data/claude_sessions", "./data/codex"},
+              "docker-compose.wsl.yml": {"./data/claude", "./data/claude_sessions", "./data/codex"},
+              "docker-compose.mac.yml": {"./data/claude", "./data/claude_sessions"},
+              "docker-compose.pi.yml": {"./data/claude"}}
+    for name in COMPOSE_FILES:
+        backend = _compose(name)["services"]["backend"]
+        writable = {}
+        for volume in backend["volumes"]:
+            source, target = _mount(volume)
+            if not volume.endswith(":ro"):
+                writable[source] = target
+        assert all(source.startswith("./") and ".." not in source.split("/") for source in writable), (name, writable)
+        at_agents = {s for s, t in writable.items() if t.startswith(node_user.AGENT_HOMES)}
+        assert at_agents == agents[name], name
+        for source in at_agents:
+            target = writable[source]
+            assert any(target == tree or target.startswith(tree + "/") for tree in node_user.NODE_TREES), target
+            assert source[1:].endswith(node_user.AGENT_SOURCES), source

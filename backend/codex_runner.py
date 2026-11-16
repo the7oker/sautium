@@ -114,10 +114,13 @@ INSTRUCTIONS_FILE = "instructions.md"
 # regardless — that one falls to `agents.enabled=false` below);
 # tool_suggest — request_plugin_install; goals and image_generation —
 # their tools; view_image — a reader of any image file the sandbox can
-# read, sent on to the model. Names come from `codex features list`; an
+# read, sent on to the model; hooks — commands a hooks file in CODEX_HOME
+# runs, trusted by a record kept there too: that folder is the node's to write
+# (B-94), so nothing in it may run in a later release (on by default in 0.149 and
+# in 0.166, the pinned one; `--disable hooks` taken by both, measured). Names come from `codex features list`; an
 # unknown name is a hard CLI error, so check that list before adding one.
 _DISABLED_FEATURES = ("plugins", "apps", "multi_agent", "tool_suggest",
-                      "goals", "image_generation", "view_image")
+                      "goals", "image_generation", "view_image", "hooks")
 
 CODEX_LOGIN_MSG = (
     "Codex is signed out — its sign-in expired or is missing. Sign in "
@@ -375,9 +378,30 @@ def call_codex_stream(
     resume: bool = False,
     model: Optional[str] = None,
 ) -> Iterator[StreamEvent]:
-    """`_codex_stream` as one library turn (claude_code_runner.library_turn)."""
+    """`_codex_stream` as one library turn (claude_code_runner.library_turn).
+    A thread the CLI does not hold — its folder is the node's own since
+    B-94, so a chat begun on the host's ~/.codex names a thread that is not
+    there, or the folder was cleared — fails the resume before anything is
+    said (measured on 0.149 and on 0.166, the pinned one: "no rollout found for
+    thread id …"): the turn
+    goes on as a new thread, whose id the chat then keeps. The model starts
+    without that thread's context; the chat's own history is untouched."""
     with library_turn():
-        yield from _codex_stream(message, player_context, thread_id, resume, model)
+        said = False
+        for event in _codex_stream(message, player_context, thread_id, resume, model):
+            if (isinstance(event, StreamDone) and resume and thread_id and not said
+                    and event.error and _UNKNOWN_THREAD.search(event.error)):
+                logger.info(f"Codex holds no thread {thread_id}: the turn goes on as a new thread")
+                yield from _codex_stream(message, player_context, None, False, model)
+                return
+            said = said or not isinstance(event, StreamDone)
+            yield event
+
+
+# What the CLI says when `exec resume` names a thread it does not hold — that
+# message alone: a looser one could match the CLI's log chatter and restart a
+# turn that failed for another reason
+_UNKNOWN_THREAD = re.compile(r"thread/resume failed: no rollout found for thread id")
 
 
 def _codex_stream(
@@ -580,7 +604,9 @@ def _codex_stream(
             stderr = "".join(stderr_chunks).strip()
             raw = transient_error or stderr or (
                 f"Codex exited with code {rc}" if rc != 0 else None)
-            if raw and _auth_error(raw):
+            if raw and _UNKNOWN_THREAD.search(raw):
+                error_msg = raw       # call_codex_stream goes on as a new thread; not a sign-in matter
+            elif raw and _auth_error(raw):
                 codex_cli.auth.refused(raw)
                 error_msg = CODEX_LOGIN_MSG
             elif raw:

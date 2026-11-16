@@ -178,9 +178,11 @@ tracks, plus the optional ~21 GB MusicBrainz catalogue.
 - Docker and Docker Compose
 - NVIDIA GPU with CUDA support + NVIDIA Container Toolkit (Linux/WSL2 path).
   Apple Silicon and Linux arm64 use a CPU-only variant — see below.
-- An LLM provider: an Anthropic API key, or a logged-in Claude Code CLI whose
-  `~/.claude` is mounted into the backend (default provider is `claude_code`);
-  an OpenAI Codex CLI login works as the second selectable agent.
+- An LLM provider: an Anthropic API key, or Claude Code signed in from the
+  Web UI (More › AI assistant; default provider is `claude_code`); an OpenAI
+  Codex sign-in works as the second selectable agent. The node keeps its
+  agents' sign-ins in its own `data/claude` and `data/codex` — never your
+  own `~/.claude` or `~/.codex`, whose sign-in stays yours alone.
 - A Last.fm API key for metadata enrichment and scrobbling (optional).
 - HQPlayer, a DLNA renderer or neither — the browser plays out of the box;
   the host's own sound device needs the desktop launcher (a Docker backend
@@ -203,13 +205,16 @@ cp .env.example .env
 
 Edit `.env`:
 - `ANTHROPIC_API_KEY` — Anthropic key (or set `CLAUDE_CODE_ENABLED=true` and
-  rely on a mounted Claude Code login).
+  sign Claude Code in from the Web UI once the node is up). A node that ran an
+  earlier release with `docker-compose.yml`, `.wsl.yml` or `.mac.yml` mounted
+  your own Claude Code folder (`%USERPROFILE%\.claude` on Windows, `~/.claude`
+  in WSL or on a Mac) — and, but for the Mac's, your Codex folder — and could
+  write there: look in `~/.claude/settings.json` (hooks) and
+  `~/.codex/config.toml` (`mcp_servers`, `notify`) for entries you did not
+  add; the node's old Codex threads stay in `~/.codex/sessions`.
 - `MUSIC_LIBRARY_PATH` — host path Docker mounts read-only (e.g. `E:\Music`).
 - `MUSIC_HOST_PATH` — native OS path stored in the DB so HQPlayer can open
   files directly (e.g. `E:/Music`).
-- `SAUTIUM_WSL_HOME` — only for `docker-compose.wsl.yml`: the WSL home whose
-  `~/.claude` and `~/.codex` are mounted (e.g. `/home/<user>`); that compose
-  file refuses to start without it.
 - `POSTGRES_PASSWORD` — database password.
 - `LASTFM_API_KEY` / `LASTFM_API_SECRET` — for enrichment + scrobbling (optional).
 - `SAUTIUM_HOST_IPS` — your host's LAN IP, so the backend accepts requests
@@ -226,10 +231,10 @@ Edit `.env`:
 Pick the Compose file for your host:
 
 ```bash
-# Windows / Linux with an NVIDIA GPU (Claude Code login on the Windows side)
+# Windows / Linux with an NVIDIA GPU (compose run from PowerShell or a Linux shell)
 docker compose up -d --build
 
-# Windows where your active Claude Code login lives inside WSL
+# Windows with compose run from a WSL shell
 docker compose -f docker-compose.wsl.yml up -d --build
 
 # macOS (Apple Silicon, CPU-only PyTorch)
@@ -432,7 +437,7 @@ cache and `~/.cache/huggingface` are left alone.
 ```
 sautium/
 ├── docker-compose.yml              # default (WSL2/Windows + NVIDIA GPU)
-├── docker-compose.wsl.yml          # Claude Code login inside WSL
+├── docker-compose.wsl.yml          # Windows, compose run from WSL
 ├── docker-compose.mac.yml          # Apple Silicon (CPU-only)
 ├── docker-compose.pi.yml           # Linux arm64, e.g. Raspberry Pi 5 (CPU-only)
 ├── .env.example                    # environment template
@@ -598,11 +603,10 @@ docker compose down
   container, so a `docker restart` keeps the old value.
 - **"Claude Code is signed out" / "Codex is signed out"** (the assistant
   says so, gear research waits for Claude Code, a notice names it and an
-  amber trail leads to the Sign in button) — the mounted `~/.claude` or
-  `~/.codex` holds no working sign-in: its tokens expired or were revoked,
-  or the Compose variant mounts a different home than the one you signed in
-  from (Windows vs WSL). Sign in again from More › AI assistant; the node
-  picks it up without a restart.
+  amber trail leads to the Sign in button) — the node's own `data/claude` or
+  `data/codex` holds no working sign-in: its tokens expired or were revoked,
+  or the node has not been signed in yet. Sign in from More › AI assistant;
+  the node picks it up without a restart.
 
 ## Documentation
 

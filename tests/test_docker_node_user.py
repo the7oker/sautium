@@ -351,8 +351,9 @@ def test_a_path_the_filesystem_will_not_read_is_counted_not_fatal(tmp_path, node
 
 @as_root_with_the_node_user
 def test_only_an_empty_folder_docker_made_as_roots_is_handed(tmp_path, node_user, capfd):
-    """Not a host user's own folder, nor root's own Codex folder on a host
-    where compose runs as root: each is left, and said."""
+    """A folder another party writes in too (the host agent's requests
+    folder) is handed only while Docker's: root's and empty. One a person
+    owns, or root's holding files, is left, and said."""
     agent = pwd.getpwnam("agent")
     made_by_docker = tmp_path / "codex-made"
     the_owners = tmp_path / "codex-owned"
@@ -689,3 +690,121 @@ def test_a_data_folder_mounted_from_where_a_link_pointed_is_refused(tmp_path, mo
         assert node_user.data_bind_is_the_checkouts() is good, root
     mountinfo.write_text("100 50 0:42 / /app rw - ext4 /dev/sda1 rw\n")
     assert node_user.data_bind_is_the_checkouts()
+
+
+def test_a_codex_chat_whose_thread_the_cli_does_not_hold_goes_on_as_a_new_thread(monkeypatch):
+    """B-94 gives a Docker node its own ~/.codex: a chat begun when the
+    host's was mounted names a thread the CLI no longer holds, and `exec
+    resume` fails before anything is said (measured, codex 0.149). The turn
+    goes on as a new thread, whose id the chat then keeps; any other failure,
+    or one after the answer began, is the answer as it was."""
+    import contextlib
+    import codex_runner
+    from providers.base import StreamDone, TextDelta
+    calls = []
+
+    def stream(message, player_context, thread_id, resume, model):
+        calls.append((thread_id, resume))
+        if resume:
+            yield StreamDone(model="m", provider="codex",
+                             error="thread/resume failed: no rollout found for thread id 0199 (code -32600)")
+        else:
+            yield TextDelta(text="hello")
+            yield StreamDone(model="m", provider="codex", agent_session_id="new-thread")
+
+    monkeypatch.setattr(codex_runner, "library_turn", contextlib.nullcontext)
+    monkeypatch.setattr(codex_runner, "_codex_stream", stream)
+    events = list(codex_runner.call_codex_stream("hi", None, thread_id="0199", resume=True))
+    assert calls == [("0199", True), (None, False)]
+    assert events[-1].agent_session_id == "new-thread" and events[-1].error is None
+
+    def other(message, player_context, thread_id, resume, model):
+        calls.append((thread_id, resume))
+        yield StreamDone(model="m", provider="codex", error="Codex timed out after 150s")
+
+    calls.clear()
+    monkeypatch.setattr(codex_runner, "_codex_stream", other)
+    events = list(codex_runner.call_codex_stream("hi", None, thread_id="0199", resume=True))
+    assert calls == [("0199", True)] and events[-1].error == "Codex timed out after 150s"
+
+
+def test_codex_runs_no_hook_from_the_nodes_own_folder():
+    """CODEX_HOME is a folder the node writes (B-94); codex 0.149 runs the
+    hooks a file there names, trusted by a record kept there too."""
+    import codex_runner
+    flags = codex_runner._base_flags("m", "low", with_mcp=False, instructions=Path("/x"))
+    assert [flags[i + 1] for i, f in enumerate(flags) if f == "--disable"].count("hooks") == 1
+    assert "--ignore-user-config" in flags and "--ignore-rules" in flags
+
+
+def test_an_agents_folder_mounted_from_anywhere_but_the_nodes_data_is_never_handed(tmp_path, monkeypatch, capfd):
+    """Since B-94 the agents' folders are trees of the node's: walked and
+    re-owned at each start. Mounted from a person's own ~/.claude (an
+    override, a link standing in for ./data/claude), they are left as they
+    are, and said."""
+    import node_user
+    claude, codex = tmp_path / "agent" / ".claude", tmp_path / "agent" / ".codex"
+    for folder in (claude, codex):
+        (folder / "sub").mkdir(parents=True)
+        (folder / "sub" / "f").write_text("x")
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(f"1 0 0:1 /home/pi/.claude {claude} rw - ext4 /dev/sda1 rw\n"
+                         f"2 0 0:1 /srv/sautium/data/codex {codex} rw - ext4 /dev/sda1 rw\n")
+    monkeypatch.setattr(node_user, "MOUNTINFO", str(mountinfo))
+    monkeypatch.setattr(node_user, "AGENT_HOMES", (str(claude), str(codex)))
+    chowned = []
+    monkeypatch.setattr(node_user.os, "chown", lambda path, *a, **k: chowned.append(str(path)))
+    pw = pwd.struct_passwd(("agent", "x", os.getuid() + 1, os.getgid(), "", str(tmp_path), "/bin/sh"))
+    node_user.hand_over(pw, (str(claude), str(codex)), ())
+    assert chowned and all(p.startswith(str(codex)) for p in chowned)
+    assert f"{claude} is mounted from /home/pi/.claude" in capfd.readouterr().err
+
+
+def test_a_codex_failure_after_the_answer_began_is_the_answer_as_it_was(monkeypatch):
+    import contextlib
+    import codex_runner
+    from providers.base import StreamDone, TextDelta
+    calls = []
+
+    def stream(message, player_context, thread_id, resume, model):
+        calls.append(resume)
+        yield TextDelta(text="part of an answer")
+        yield StreamDone(model="m", provider="codex",
+                         error="thread/resume failed: no rollout found for thread id 0199")
+
+    monkeypatch.setattr(codex_runner, "library_turn", contextlib.nullcontext)
+    monkeypatch.setattr(codex_runner, "_codex_stream", stream)
+    events = list(codex_runner.call_codex_stream("hi", None, thread_id="0199", resume=True))
+    assert calls == [True] and "no rollout found" in events[-1].error
+    # the CLI's log chatter naming a "session not found" is no unknown thread
+    assert not codex_runner._UNKNOWN_THREAD.search("WARN mcp: session not found, retrying")
+
+
+def test_the_agent_folder_guard_inside_an_accepted_mount(tmp_path, monkeypatch, capfd):
+    """An accepted ./data/claude with ./data/claude_sessions over projects/ is
+    walked whole; a folder or a file mounted in it from elsewhere is left;
+    a node home mounted from elsewhere whole leaves every agent folder."""
+    import node_user
+    claude = tmp_path / "agent" / ".claude"
+    for sub in ("projects", "plugins", "x"):
+        (claude / sub).mkdir(parents=True)
+        (claude / sub / "f").write_text("x")
+    (claude / ".credentials.json").write_text("{}")
+    mountinfo = tmp_path / "mountinfo"
+    lines = [f"1 0 0:1 /srv/sautium/data/claude {claude} rw - ext4 /dev/sda1 rw",
+             f"2 0 0:1 /srv/sautium/data/claude_sessions {claude}/projects rw - ext4 /dev/sda1 rw",
+             f"3 0 0:1 /home/pi/.claude/plugins {claude}/plugins rw - ext4 /dev/sda1 rw",
+             f"4 0 0:1 /home/pi/.claude/.credentials.json {claude}/.credentials.json rw - ext4 /dev/sda1 rw"]
+    mountinfo.write_text("\n".join(lines) + "\n")
+    monkeypatch.setattr(node_user, "MOUNTINFO", str(mountinfo))
+    monkeypatch.setattr(node_user, "AGENT_HOMES", (str(claude), str(tmp_path / "agent" / ".codex")))
+    chowned = []
+    monkeypatch.setattr(node_user.os, "chown", lambda path, *a, **k: chowned.append(str(path)))
+    pw = pwd.struct_passwd(("agent", "x", os.getuid() + 1, os.getgid(), "", str(tmp_path), "/bin/sh"))
+    node_user.hand_over(pw, (str(claude),), ())
+    assert str(claude / "projects" / "f") in chowned and str(claude / "x" / "f") in chowned
+    assert not [p for p in chowned if "/plugins" in p or p.endswith(".credentials.json")]
+    chowned.clear()
+    mountinfo.write_text(f"9 0 0:1 /home/pi {tmp_path / 'agent'} rw - ext4 /dev/sda1 rw\n")
+    node_user.hand_over(pw, (str(claude),), ())
+    assert chowned == [] and "lies in a home mounted from /home/pi" in capfd.readouterr().err
