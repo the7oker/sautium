@@ -423,7 +423,7 @@ def test_the_support_contact_waiting_unbound_is_bound_to_the_masters_key_once(co
 
 
 def test_a_contacts_nudge_is_spent_once(scratch_dsn, conn):
-    from desktop.p2p.p2p_manager import P2PManager
+    from desktop.p2p.chat_client import nudge_invite
     me = _service(scratch_dsn, ME)
     with conn.cursor() as cur:
         cur.execute("INSERT INTO friends (username, public_key_hex, invite_code, key_fingerprint, accepted_invite_id)"
@@ -432,10 +432,10 @@ def test_a_contacts_nudge_is_spent_once(scratch_dsn, conn):
                      INVITE))
         fid = cur.fetchone()[0]
     [friend] = me.get_friends()
-    assert P2PManager._nudge_invite(friend, FRIEND.pub) == INVITE
+    assert nudge_invite(friend, FRIEND.pub) == INVITE
     me.nudged(fid)
     [friend] = me.get_friends()
-    assert friend["accepted_invite_id"] is None and P2PManager._nudge_invite(friend, FRIEND.pub) is None
+    assert friend["accepted_invite_id"] is None and nudge_invite(friend, FRIEND.pub) is None
 
 
 def test_an_unbound_friendship_waits_for_the_key_it_held(scratch_dsn, conn):

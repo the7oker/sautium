@@ -16,7 +16,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from desktop.p2p import contact_log, p2p_manager, sync_server
+from desktop.p2p import chat_client, contact_log, p2p_manager, sync_server
 from desktop.p2p.sync_server import SyncServer
 
 
@@ -156,7 +156,7 @@ def test_a_stored_reply_wakes_that_friends_stream():
              SimpleNamespace(channel="sautium_chat", payload="msg:8:in"),
              SimpleNamespace(channel="sautium_diag", payload="msg:9:out"),
              SimpleNamespace(channel="sautium_chat", payload="msg:x:out")]
-    assert p2p_manager.replied_friends(notes) == {7}
+    assert chat_client.replied_friends(notes) == {7}
 
     pinged = []
     manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
@@ -196,7 +196,7 @@ def test_notices_a_query_collected_are_handled_before_the_next_wait(monkeypatch)
     handled, waits = [], []
     manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
     manager._running = True
-    manager._chat_notify = None
+    manager._chat_client = None
     manager._sync_server = None
     manager._on_identity_rotated_cb = None
     manager.db_dsn = "postgresql://unused"
@@ -248,7 +248,7 @@ def test_the_relay_off_notice_ends_the_slots_and_the_capability(monkeypatch):
     from desktop.p2p import sync_walk
     closed, withdrawn = [], []
     manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
-    manager._running, manager._chat_notify, manager._on_identity_rotated_cb = True, None, None
+    manager._running, manager._chat_client, manager._on_identity_rotated_cb = True, None, None
     manager.db_dsn = "postgresql://unused"
     manager._sync_server = SimpleNamespace(close_relay_clients=lambda: closed.append(True))
     manager._dht_service = SimpleNamespace(withdraw_capability=withdrawn.append)
@@ -294,7 +294,8 @@ def test_the_relay_cap_step_ends_the_slots_while_the_switch_is_off(monkeypatch):
     from desktop.p2p import dht_service
     closed, looked = [], []
     manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
-    manager._running, manager._reachability_status = True, "reachable"
+    manager._running = True
+    manager._chat_client = SimpleNamespace(reachability="reachable")
     manager._sync_server = SimpleNamespace(close_relay_clients=lambda: closed.append(True))
 
     async def lookup(capability):

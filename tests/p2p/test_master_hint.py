@@ -76,13 +76,12 @@ class _Lan:
 
 
 def _node(lan=None):
-    return types.SimpleNamespace(_lan_discovery=lan, _friend_peer_cache={},
-                                 _dht_service=None, _dht_refresh_inflight=set())
+    from desktop.p2p.chat_client import ChatClient
+    return ChatClient(types.SimpleNamespace(), identity=lambda: None, announce_port=lambda: 1, lan=lan)
 
 
 def _peers_of(node, friend):
-    from desktop.p2p.p2p_manager import P2PManager
-    return asyncio.run(P2PManager._find_friend_peers(node, friend))
+    return asyncio.run(node.find_friend_peers(friend))
 
 
 def test_a_newborns_pending_master_contact_gets_the_hint(monkeypatch):

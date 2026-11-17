@@ -30,11 +30,9 @@ from aiohttp import web
 
 from desktop.p2p import (addrs, admission, chat_wire, contact_log, lb_slice_queries,
                          mb_slice_queries, peer_auth, sync_queries, wire, witness)
+from desktop.p2p.chat_wire import (FORWARD_ACK_TIMEOUT, RELAY_HEADER, delivery_payload,
+                                 voucher_payload)
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
-
-# On a wake stream's answer: "off" — a voucher came, and this node does not
-# relay (mirror of backend/routers/peer_chat).
-RELAY_HEADER = "X-Sautium-Relay"
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +97,6 @@ PROBE_TIMEOUT = 3
 PROBE_HEALTH_CAP = 256 * 1024
 # Forwarding caps — mirror backend/routers/peer_chat.py, keep in step (the
 # stream caps live in desktop/p2p/wake_registry.py, which both import).
-FORWARD_ACK_TIMEOUT = 10
 FORWARD_INFLIGHT_PER_SENDER = 10
 # Peer-relay caps (Phase D) — mirror backend/routers/peer_chat.py.
 # The cap counts FOREIGN clients (voucher-registered, not friends); it is
@@ -110,26 +107,9 @@ FORWARD_INFLIGHT_PER_SENDER = 10
 RELAY_CAP_BASE = 20
 RELAY_CAP_MAX = 100
 RELAY_CAP_STEP = 20
-# Voucher lifetime: the client re-issues on every (re)subscribe, so this
-# only bounds how long a sender may trust a voucher from a relay whose
-# client silently vanished mid-window.
-VOUCHER_TTL = 24 * 3600
-
-
-def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
-    """Canonical delivery-receipt string — mirrored in
-    backend/routers/peer_chat.py. No timestamp: a receipt is a permanent
-    fact the sender must be able to re-verify from what it already has."""
-    return f"sautium-delivery:v1:{message_uuid}:{ciphertext_sha256}"
-
-
-def voucher_payload(client_pubkey: str, relay_pubkey: str, until: int) -> str:
-    """Canonical relay-voucher string the CLIENT signs — mirrored in
-    backend/routers/peer_chat.py. The relay pubkey inside the payload means
-    a voucher issued to one relay cannot be presented by another; `until`
-    bounds how long the authority lives without re-issue."""
-    return (f"sautium-relay-voucher:v1:{client_pubkey.lower()}"
-            f":{relay_pubkey.lower()}:{int(until)}")
+# The voucher's lifetime (chat_wire.VOUCHER_TTL): the client re-issues on
+# every (re)subscribe, so it only bounds how long a sender may trust a
+# voucher from a relay whose client silently vanished mid-window.
 
 
 class SyncServer:

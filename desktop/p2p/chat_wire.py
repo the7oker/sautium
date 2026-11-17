@@ -199,6 +199,29 @@ def export_page(rows: list, seal, after: Optional[tuple] = None
     return page, out_ids, cursor, n < len(rows)
 
 
+# The relay protocol (relay forwarding, Phase D): what a relay and its
+# clients — the chat client on either runtime — must spell alike.
+RELAY_HEADER = "X-Sautium-Relay"       # "off": a friend's relay that is not relaying
+FORWARD_ACK_TIMEOUT = 10               # a relay holds a forward this long for the receipt
+VOUCHER_TTL = 24 * 3600
+
+
+def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
+    """Canonical delivery-receipt string: the recipient signs it, the relay
+    and the sender verify it. No timestamp: a receipt is a permanent fact
+    the sender must be able to re-verify from what it already has."""
+    return f"sautium-delivery:v1:{message_uuid}:{ciphertext_sha256}"
+
+
+def voucher_payload(client_pubkey: str, relay_pubkey: str, until: int) -> str:
+    """Canonical relay-voucher string the CLIENT signs. The relay pubkey
+    inside the payload means a voucher issued to one relay cannot be
+    presented by another; `until` bounds how long the authority lives
+    without re-issue."""
+    return (f"sautium-relay-voucher:v1:{client_pubkey.lower()}"
+            f":{relay_pubkey.lower()}:{int(until)}")
+
+
 def sent_time(ts_iso: str) -> datetime:
     """The instant a message's sender signed, from the time its box carries
     — ValueError for a time with no offset, which names no instant."""
