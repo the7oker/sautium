@@ -4205,6 +4205,57 @@ device on the network; none of them may hold for it more than a bound.
   no build argument (a rootless or user-namespaced Docker, which shows the
   host user as root, keeps uid 1000 as before).
 
+### New music appears by itself (2026-11-17)
+
+A new album cost a tap, and a tag fixed in a tag editor never reached the
+catalogue: the scan compared paths only, Rescan included
+(LIBRARY-WATCH-DESIGN.md in the private docs, the owner's answers there).
+
+- **A watcher where the mount delivers events, over the OS's own calls.**
+  `library_watch.py` arms inotify, ReadDirectoryChangesW or FSEvents where
+  the library's mount carries other programs' writes — known by the mount
+  (fstype, drive type), never by writing into the library. Measured: Docker
+  Desktop's bind of a Windows path gives a container no event for anything
+  Windows or WSL writes; a Linux bind of a local disk gives every one, also
+  for writes a file server makes for another machine (a Pi's share). Not
+  `watchdog`: it drops the OS's "events were lost" on all three platforms,
+  and "no lost event" rests on it — an overflow queues the whole library.
+- **Completeness by event, never a quiet timer.** Every read records the
+  stat it took before reading, and a later change of it (or a write event)
+  brings the file back: a read during a copy is undone by the copy's end.
+  Linux reads on close-write; Windows reads only when an open that denies
+  writers succeeds — every copier measured is notified again after its
+  close. What is signed is gated on the content: a FLAC caught mid-copy
+  declares its whole length, reads every tag and decodes 40 % with exit
+  code 0, and the analysis made of it was sealed; the decode must now reach
+  the declared length, the file unchanged under it.
+- **One scan queue.** Every scan is a request merged into the pending one;
+  one worker scans until nothing is pending, so a change during a scan is
+  scanned after; a request while a job runs is queued, never refused. The
+  canon runs once the queue drains.
+- **The folder is the unit of album identity.** A canon move of an album's
+  first files (an edition renamed or split, a twin folded) sent the later
+  ones to a second album the edition rules never folded; a compilation's
+  first file stayed an album of its own. A file now joins the copy its
+  folder (or its sibling disc folder) holds for its raw group, and a
+  folder's shape is re-applied to its files as they arrive.
+- **A re-read is in place.** `media_files.id` is kept (listens, sessions,
+  the queue and analysis links name it); a changed title or artist moves
+  the file to the track its tags name — the track follows its last file —
+  and a changed album by the folder rule, a copy whose files all move going
+  whole. The change time catches an editor that keeps the mtime (POSIX
+  ctime, NTFS ChangeTime).
+- **No irreversible canon decision on a partial album.** An album whose
+  own files declare positions that are not all here waits for an explicit
+  scan or its missing files — measured in the SQL: a title track alone
+  bound to the same-titled single and folded into the owned single for
+  good. Few tracks is no incomplete album: only the album's own words make
+  it wait.
+- **Arrival is the file's birth here.** A copy keeps its source's mtime, so
+  "New in my collection" orders by the birth time on this disk (statx,
+  CreationTime, st_birthtime), else the first read — never the mtime.
+  Through WSL's drvfs and Docker Desktop's 9p there is no birth time.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build
