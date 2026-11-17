@@ -4,7 +4,7 @@
 -- (sql_queries.QUALITY_GATE). Columns appended, so the view is replaced in
 -- place. Mirrors the 001 baseline.
 
--- A no-op on a baseline whose view already carries arrived_at (064,
+-- A no-op on a baseline whose view already carries arrived_at (065,
 -- LIBRARY-WATCH, 2026-11-17): 001 has the quality columns too, and replacing
 -- the view here would rename its column back, which PostgreSQL refuses.
 DO $$ BEGIN
