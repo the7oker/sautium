@@ -19,6 +19,7 @@ the bridge gateway's is not."""
 import asyncio
 import hashlib
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -278,7 +279,7 @@ def test_the_verdict_is_recorded_and_its_consumers_follow_it(conn, scratch_dsn, 
         client.running = False                                 # one cycle
         return cc._ProbeResult(verdict, "the master's word")
     client._probe_reachability_via_master = probe
-    monkeypatch.setattr(cc.asyncio, "sleep", _no_sleep)
+    client._rest = _no_sleep
     asyncio.run(client._reachability_loop())
     assert heard == [status] and client.reachability == status
     assert _rows(conn, "SELECT value FROM user_settings WHERE key = %s",
@@ -339,3 +340,118 @@ def test_a_message_kept_past_the_mailboxs_keep_is_waiting_again(conn, scratch_ds
     store.mark_parked(row["id"])
     (row,) = store.get_pending_messages()
     assert row["parked_at"] is not None              # kept again, from now
+
+
+def test_a_peer_relay_that_sends_more_than_a_relay_does_is_let_go(monkeypatch):
+    """A stranger recruited as a peer relay streams frames without end: the
+    client lets it go past its budget, and asks it again only in an hour."""
+    from collections import deque
+    frames, refusals = deque(), deque()
+    assert not any(cc.ChatClient._over_budget(frames, refusals, None)
+                   for _ in range(cc.RELAY_FRAMES_PER_WINDOW))
+    assert cc.ChatClient._over_budget(frames, refusals, None)
+    frames, refusals = deque(), deque()
+    assert not any(cc.ChatClient._over_budget(frames, refusals, "rejected")
+                   for _ in range(cc.RELAY_REFUSALS_PER_WINDOW))
+    assert cc.ChatClient._over_budget(frames, refusals, "duplicate")
+
+    import aiohttp
+
+    class Content:
+        def __aiter__(self):
+            async def lines():
+                for _ in range(10_000):
+                    yield b"data: {}\n"
+            return lines()
+
+    class Resp:
+        status, headers, content = 200, {}, Content()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class Session:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def get(self, url, headers=None):
+            return Resp()
+    monkeypatch.setattr(aiohttp, "ClientSession", Session)
+    monkeypatch.setattr(aiohttp, "TCPConnector", lambda **k: None)
+    monkeypatch.setattr(cc, "pinned_ssl_context", lambda *a: None)
+    client = cc.ChatClient(SimpleNamespace(), identity=lambda: _ident(ME), announce_port=lambda: 1)
+    client.running = True
+    handled = []
+
+    async def frame(*a):
+        handled.append(1)
+    client._handle_relay_frame = frame
+
+    async def resolve():
+        return None, ("192.0.2.9", 1)
+    asyncio.run(asyncio.wait_for(client._relay_subscription_loop(RELAY.pub, resolve, is_master=False), 10))
+    assert len(handled) == cc.RELAY_FRAMES_PER_WINDOW + 1
+    assert client._relay_refused_until[RELAY.pub] > time.time() + 3000
+
+
+def test_a_beacon_names_a_handful_of_siblings_at_most():
+    from desktop.p2p import lan_discovery
+    import json
+    lan = lan_discovery.LANDiscovery(sync_port=1, node_id="me")
+    beacon = json.dumps({"sautium": lan_discovery.PROTOCOL_VERSION, "node_id": "other", "sync_port": 24001,
+                         "nodes": list(range(30000, 30150))}).encode()
+    parsed = lan._parse_beacon(beacon, "192.0.2.9")
+    assert parsed is not None and len(parsed[2]["nodes"]) == lan_discovery.MAX_SIBLINGS
+
+
+def test_a_frame_from_the_master_pulls_and_then_pushes_what_is_still_kept(monkeypatch, master):
+    client = cc.ChatClient(SimpleNamespace(), identity=lambda: _ident(ME), announce_port=lambda: 1)
+    calls = []
+
+    async def pull(friend, peers):
+        calls.append("pull")
+
+    async def push(friend, ip, port):
+        calls.append("push")
+    client._sync_chat_history, client._push_master_outbox = pull, push
+    row = {"id": 1, "public_key_hex": MASTER.pub}
+    assert asyncio.run(client._handle_relay_frame('{"type": "message"}', row, MASTER.pub,
+                                                  "192.0.2.9", 1)) is None
+    assert calls == ["pull", "push"]
+    calls.clear()
+    asyncio.run(client._handle_relay_frame('{"type": "message"}', {"id": 2}, FRIEND.pub, "192.0.2.9", 1))
+    assert calls == ["pull"]                          # another friend's relay: its history only
+
+
+def test_a_mapping_of_the_peer_port_asks_the_verdict_again(monkeypatch):
+    monkeypatch.chdir(REPO / "backend")
+    import main
+    import p2p_chat
+    rechecks, ports = [], []
+    monkeypatch.setattr(p2p_chat, "_client", SimpleNamespace(recheck_reachability=lambda: rechecks.append(1)))
+    monkeypatch.setattr(main, "_dht_service", SimpleNamespace(set_announce_port=ports.append))
+    ready = asyncio.Event
+    upnp = SimpleNamespace(is_available=True, open_ports=lambda: "198.51.100.1",
+                           get_external_port=lambda p: 28801)
+
+    async def keep(port, on_external):
+        on_external(28802)                            # the router rebooted, a new external port
+    upnp.keep_mapped = keep
+    monkeypatch.setattr(main, "_upnp", upnp)
+    monkeypatch.setattr(main.settings, "p2p_sync_port", 8801)
+
+    async def scene():
+        main._peer_ready = ready()
+        main._peer_ready.set()
+        await main._map_peer_port()
+    asyncio.run(scene())
+    assert ports == [28801, 28802] and rechecks == [1, 1]

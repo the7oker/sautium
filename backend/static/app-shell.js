@@ -13736,7 +13736,7 @@
     { id: 240, label: 'Every 4 hours' },
   ];
   // The node itself is always announced; this sizes the extra per-artist
-  // keys published for the RAREST owned artists (see backend/dht_service.py).
+  // keys published for the RAREST owned artists (see desktop/p2p/dht_service.py).
   // 150 = half the DHT traversal lane: a pass refreshes every key inside
   // one entry lifetime with the rare-artist search beside it; 300 takes the
   // whole lane and the oldest keys lapse while a search runs.

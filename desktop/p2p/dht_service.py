@@ -113,7 +113,7 @@ DHT_BOOTSTRAP_TIMEOUT = 30
 # ~19 s but every reply arrives in its first seconds (measured 2026-08-24:
 # three holders at 0.4, 0.4 and 1.4 s), so the tail of the traversal only
 # costs latency — on an empty key it is pure dead time, which is what the
-# sync walk's rare-artist step used to burn. Matches backend/dht_service.py.
+# sync walk's rare-artist step used to burn.
 GET_PEERS_TIMEOUT = 15
 
 # Peer cache TTL (seconds)

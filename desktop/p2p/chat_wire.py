@@ -38,7 +38,7 @@ ENVELOPE_VERSION = 3
 # (`next`) and whether the thread goes on (`more`). The exporter marks the
 # outgoing messages a page carries delivered, so a page a requester refused
 # would be lost: it stays well under the requester's bound
-# (p2p_manager.PEER_ANSWER_CAP). One pull reads at most
+# (chat_client.PEER_ANSWER_CAP). One pull reads at most
 # HISTORY_PAGES_PER_PULL pages; the next one goes on from its cursor.
 HISTORY_EXPORT_MAX = 2000
 HISTORY_EXPORT_BYTES = 4 * 1024 * 1024

@@ -252,8 +252,9 @@ _RECORD_ARMS = _ANALYSIS_ARMS + (
 SIGNING_KEY_SETTING = "identity.signing_key"
 SIGNING_KEY_SQL = ("(SELECT value #>> '{}' FROM user_settings"
                    " WHERE key = 'identity.signing_key')")
-# The account key the launcher's last P2P run held (P2PManager
-# _reintroduce_after_identity_change writes it; a Docker node keeps none):
+# The account key the last chat client's run held (ChatClient
+# _reintroduce_after_identity_change writes it, the launcher's and — since
+# 2026-11-17 — a Docker node's):
 # for a node that lost its folder before its first start on this release,
 # which recorded no signing key.
 BOUND_IDENTITY_SQL = ("(SELECT value #>> '{}' FROM user_settings"

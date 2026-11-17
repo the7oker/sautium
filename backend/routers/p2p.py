@@ -346,15 +346,19 @@ _FRIENDS_SELECT = f"""
 def _friend_row_out(row: dict) -> dict:
     """A friend row as the client renders it. `mailbox`: Support (the
     resolved master contact) is offline and what is written to it is kept in
-    its Worker mailbox (B-92) — its row and the chat header say so; a
-    `pending:` Support contact has nothing kept for it yet."""
+    its Worker mailbox (B-92) — its row and the chat header say so. Only
+    where this node deposits at all: P2P on, and a certificate the Worker
+    issued (it takes mail from no other key); a `pending:` Support contact
+    has nothing kept for it yet."""
     import master_node
+    from p2p_identity import served_certificate
     for k in ("added_at", "last_seen", "last_activity_at"):
         if row.get(k):
             row[k] = row[k].isoformat()
     if "public_key_hex" in row:
         row["mailbox"] = (row["public_key_hex"] == master_node.MASTER_PUBKEY_HEX
-                          and not row.get("is_online"))
+                          and not row.get("is_online") and settings.p2p_enabled
+                          and served_certificate(settings) is not None)
     return row
 
 

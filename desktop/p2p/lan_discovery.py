@@ -32,6 +32,7 @@ import secrets
 import socket
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, Optional, Tuple
 
 from desktop.p2p.addrs import fmt_addr
@@ -39,6 +40,14 @@ from desktop.p2p.addrs import fmt_addr
 logger = logging.getLogger(__name__)
 
 LAN_DISCOVERY_PORT = 19002
+# The sibling ports one beacon may name (a host's Docker backend and the
+# like: a handful). A beacon is an unauthenticated datagram; each new address
+# costs a warm-up probe.
+MAX_SIBLINGS = 8
+# This service's own threads — the receive, the sends and the warm-up probes
+# wait here, never in the process's default executor, which the backend's
+# requests and listeners share (a beacon naming dead addresses held them).
+_THREADS = 3
 BEACON_INTERVAL = 30          # seconds between broadcasts
 PEER_EXPIRY = BEACON_INTERVAL * 4  # remove peer after 4 missed beacons
 PROTOCOL_VERSION = 1
@@ -71,6 +80,7 @@ class LANDiscovery:
         # {(ip, sync_port): {"node_id": ..., "artists": ..., "invite_code": ..., "last_seen": ...}}
         self._peers: Dict[Tuple[str, int], dict] = {}
         self._running = False
+        self._pool = ThreadPoolExecutor(max_workers=_THREADS, thread_name_prefix="lan-discovery")
         self._sock: Optional[socket.socket] = None
         # Whether the owner shares (set_beaconing) — off until told — and
         # the wake that sends a changed beacon at once.
@@ -138,7 +148,7 @@ class LANDiscovery:
             return None
 
         nodes = [p for p in (msg.get("nodes") or [])
-                 if isinstance(p, int) and 0 < p < 65536]
+                 if isinstance(p, int) and 0 < p < 65536][:MAX_SIBLINGS]
         sync_port = msg.get("sync_port")
         if not isinstance(sync_port, int):
             if not nodes:
@@ -158,6 +168,7 @@ class LANDiscovery:
 
         self._running = True
         loop = asyncio.get_event_loop()
+        self._pool = ThreadPoolExecutor(max_workers=_THREADS, thread_name_prefix="lan-discovery")
 
         # Create UDP socket for both sending and receiving
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -200,6 +211,7 @@ class LANDiscovery:
         if self._sock:
             self._sock.close()
             self._sock = None
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
         logger.info("LAN discovery stopped")
 
@@ -223,7 +235,7 @@ class LANDiscovery:
                     for addr in targets:
                         try:
                             await loop.run_in_executor(
-                                None,
+                                self._pool,
                                 lambda a=addr: self._sock.sendto(
                                     beacon, (a, self.discovery_port)
                                 ),
@@ -276,7 +288,7 @@ class LANDiscovery:
         while self._running:
             try:
                 data, addr = await loop.run_in_executor(
-                    None, lambda: self._receive_with_timeout()
+                    self._pool, lambda: self._receive_with_timeout()
                 )
                 if data is None:
                     continue
@@ -364,7 +376,7 @@ class LANDiscovery:
                 pass
 
         try:
-            await loop.run_in_executor(None, _probe)
+            await loop.run_in_executor(self._pool, _probe)
             logger.debug(f"LAN peer warmup done: {ip}:{port}")
         except Exception:
             pass

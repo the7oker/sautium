@@ -96,7 +96,7 @@ beyond ~2–3k tracks)**. Feasibility of local analysis is a function of
 | Loop | Interval | Toggle today |
 |---|---|---|
 | HQPlayer status poller (`playback/hqp_backend.py`, `_poll_loop`) | **1 s** while HQPlayer is the active output | owned by the active backend (§6.12); at the time of the audit it ran always, even with no HQPlayer configured |
-| DHT alert pump ×2 (backend `dht_service.py`, launcher `p2p/dht_service.py`) | **0.5 s** | via `p2p_enabled` only |
+| DHT alert pump (`desktop/p2p/dht_service.py`, one per runtime) | **0.5 s** | via `p2p_enabled` only |
 | DHT re-announce (∝ enriched artists) | 15 min | announce_limit setting |
 | Background enrichment (network-only) | 30 min interval; a network backlog drains pass-to-pass (DB-only steps stay on the timer); wakes on the playback falling edge and the canon trigger — no sync coupling since 2026-09-22 (the Last.fm layer is node-local); 1s cancel ticks | `enrichment.background_enabled` (default **on**) |
 | P2P auto-sync (launcher) | first source after start (LAN beacon / DHT ready, ≤60 s), after a scan that added files, when a LAN peer appears, then every `sync.auto_interval_min` (30 min) | interval setting — no manual button since 2026-09-05 |

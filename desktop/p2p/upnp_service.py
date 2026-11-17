@@ -94,12 +94,16 @@ def list_mappings(u, limit: int = 200) -> list[dict]:
 class UPnPService:
     """Manages UPnP port mappings for P2P connectivity."""
 
-    def __init__(self, ports: list[int] = None):
+    def __init__(self, ports: list[int] = None, gate: Optional[Callable[[], bool]] = None):
         """
         Args:
             ports: list of internal TCP ports to map (sync server, Docker, etc.)
+            gate: asked before every (re)map — a Docker node's check that the
+                port answers as the peer surface (answers_as_peer_surface):
+                behind a front another process owns it.
         """
         self._ports = ports or []
+        self._gate = gate
         self._upnp = None
         self._mapped: list[Tuple[int, int]] = []  # (external, internal)
         self._external_ip: Optional[str] = None
@@ -129,6 +133,9 @@ class UPnPService:
             return None
 
         if not self._ports:
+            return None
+        if self._gate is not None and not self._gate():
+            logger.warning("UPnP: %s does not answer as the peer surface — not mapped", self._ports)
             return None
 
         try:

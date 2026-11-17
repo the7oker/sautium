@@ -33,6 +33,7 @@ import random
 import secrets
 import time
 import uuid as uuid_mod
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -56,6 +57,9 @@ logger = logging.getLogger(__name__)
 # fields. Each request's session already bounds its time.
 PEER_ANSWER_CAP = 8 * wire.MiB
 PEER_HEALTH_CAP = 256 * wire.KiB
+# A handshake's, a voucher's, a probe's or a forward's answer: a few fields
+# (a grant at most) — over channels anyone claiming an invite may answer.
+PEER_SMALL_CAP = 64 * wire.KiB
 # A relay holds our forward open until the recipient signs a receipt; give
 # it that window plus the round trip before we give up on the request.
 FORWARD_TIMEOUT = FORWARD_ACK_TIMEOUT + 10
@@ -63,6 +67,12 @@ FORWARD_TIMEOUT = FORWARD_ACK_TIMEOUT + 10
 # of its handshake in at most one resolver pass in this long while the
 # answers are busy ones.
 NUDGE_RETRY_S = 600
+# A peer relay is a stranger that announced the capability: what its stream
+# may send before this node lets it go (and asks it again in an hour). A
+# real relay sends a frame per message forwarded to us — a few a minute.
+RELAY_FRAMES_PER_WINDOW = 30
+RELAY_REFUSALS_PER_WINDOW = 5          # deliveries that did not open, or came again
+RELAY_WINDOW_S = 60
 
 
 def replied_friends(notes) -> set:
@@ -298,6 +308,8 @@ class ChatClient:
         self.reachability = "unknown"
         # Kept messages the master refused on a direct push, said once each.
         self._refusals_said: set = set()
+        self._master_pick = 0          # the master's candidate a stream tries next
+        self._recheck: Optional[asyncio.Event] = None
 
     # ------------------------------------------------------------------
     # Lifecycle and the runtime's events
@@ -309,6 +321,7 @@ class ChatClient:
         self._loop = asyncio.get_running_loop()
         self._notify = asyncio.Event()
         self._resolve_nudge = asyncio.Event()
+        self._recheck = asyncio.Event()
         self.running = True
         try:
             await self._reintroduce_after_identity_change()
@@ -355,10 +368,10 @@ class ChatClient:
     def _on_notes(self, notes: list) -> None:
         if not self.running:
             return
-        # A message stored, either way — one of ours to send, or a friend's,
-        # who is then online. Not a presence bump (no payload) nor a state
-        # change (state:{fid}), which the pass itself causes.
-        if any(note.channel == "sautium_chat" and (note.payload or "").startswith("msg:")
+        # A message stored, or a friend seen (a presence bump: they reached
+        # us, so what we hold for them may go now) — not a state change
+        # (state:{fid}), which the pass itself causes.
+        if any(note.channel == "sautium_chat" and not (note.payload or "").startswith("state:")
                for note in notes):
             self._notify.set()
         replies = replied_friends(notes)
@@ -370,6 +383,12 @@ class ChatClient:
         was picked up, our identity proof was mined."""
         if self._resolve_nudge is not None:
             self._soon(self._resolve_nudge.set)
+
+    def recheck_reachability(self) -> None:
+        """Probe again now (any thread): what the probe would see changed —
+        the router mapped the peer port."""
+        if self._recheck is not None:
+            self._soon(self._recheck.set)
 
     async def _db(self, fn, *args):
         """fn(*args) on the store's own thread."""
@@ -639,6 +658,11 @@ class ChatClient:
             return None
 
     async def _import_history_page(self, friend: dict, friend_pubkey: str, data: dict) -> dict:
+        """One page opened and imported on the store's thread: up to
+        HISTORY_EXPORT_MAX boxes to open is no work for the loop."""
+        return await self._db(self._import_page_blocking, friend, friend_pubkey, data)
+
+    def _import_page_blocking(self, friend: dict, friend_pubkey: str, data: dict) -> dict:
         """Open each message's envelope of one page and import them: a
         message's uuid and time are the box's, never the listing's, and its
         size is a message's, as on the direct path."""
@@ -669,7 +693,7 @@ class ChatClient:
             })
         if not decrypted:
             return {}
-        return await self._db(self.store.import_history, friend["id"], decrypted)
+        return self.store.import_history(friend["id"], decrypted)
 
     # ------------------------------------------------------------------
     # Contacts: the resolver, the nudge, the master contact, rotations
@@ -789,7 +813,7 @@ class ChatClient:
                             timeout=aiohttp.ClientTimeout(total=10),
                         ) as resp:
                             if resp.status == 200:
-                                result = await wire.read_json(resp, PEER_ANSWER_CAP)
+                                result = await wire.read_json(resp, PEER_SMALL_CAP)
                                 if result.get("accepted"):
                                     peer_pubkey = accepted_pubkey(
                                         result, invite,
@@ -815,7 +839,7 @@ class ChatClient:
                             if resp.status == 403:
                                 err = ""
                                 try:
-                                    err = (await wire.read_json(resp, PEER_ANSWER_CAP)).get("error", "")
+                                    err = (await wire.read_json(resp, PEER_SMALL_CAP)).get("error", "")
                                 except Exception:
                                     pass
                                 if err.startswith("identity"):
@@ -1101,24 +1125,32 @@ class ChatClient:
         if not master_node.master_configured():
             return
         while self.running:
-            ident = self._identity()
-            if (not ident or master_runs_none(ident.public_key_hex)
-                    or await self.setting("p2p.master_removed")):
-                await asyncio.sleep(60)
-                continue
-            if not await self.master_contact():
-                await asyncio.sleep(30)  # not resolved yet
-                continue
-            break
+            try:
+                ident = self._identity()
+                if (not ident or master_runs_none(ident.public_key_hex)
+                        or await self.setting("p2p.master_removed")):
+                    await asyncio.sleep(60)
+                    continue
+                if await self.master_contact():
+                    break
+            except Exception as e:
+                logger.warning(f"master wake loop: {e}")
+            await asyncio.sleep(30)  # not resolved yet
         if not self.running:
             return
 
         async def resolve():
+            # Each attempt the next candidate: an address that answers
+            # under another key (a LAN host beaconing the master's public
+            # invite) fails the pin and must not hold the stream for good.
             master_row = await self.master_contact()
             if not master_row or await self.setting("p2p.master_removed"):
                 return None
             peers = await self.find_friend_peers(master_row)
-            return (master_row, peers[0]) if peers else None
+            if not peers:
+                return None
+            self._master_pick += 1
+            return master_row, peers[(self._master_pick - 1) % len(peers)]
 
         await self._relay_subscription_loop(master_node.MASTER_PUBKEY_HEX, resolve, is_master=True)
 
@@ -1316,13 +1348,22 @@ class ChatClient:
                         if is_master and relay_row:
                             await self._master_stream_connected(relay_row, ip, port)
                         last_bump = time.time()
+                        frames, refusals = deque(), deque()
                         async for raw in resp.content:
                             if not self.running:
                                 break
+                            # Lines already buffered come back without a
+                            # suspension: the loop serves others between them.
+                            await asyncio.sleep(0)
                             line = raw.decode("utf-8", "replace").strip()
                             if line.startswith("data:"):
-                                await self._handle_relay_frame(line[5:], relay_row,
-                                                               relay_pubkey, ip, port)
+                                outcome = await self._handle_relay_frame(
+                                    line[5:], relay_row, relay_pubkey, ip, port)
+                                if not is_master and self._over_budget(frames, refusals, outcome):
+                                    self._relay_refused_until[relay_pubkey] = time.time() + 3600
+                                    logger.warning("Peer relay %s… sent more than a relay does — "
+                                                   "released", relay_pubkey[:8])
+                                    return
                             elif relay_row and time.time() - last_bump >= 120:
                                 # Keepalives prove the relay is alive.
                                 # Throttled to the cadence the relay uses
@@ -1349,16 +1390,36 @@ class ChatClient:
         directly — a row the drain missed is delivered now, the master
         dedups by uuid. The runtime hears of it (the launcher's support
         diagnostics resume)."""
+        self._master_pick -= 1         # a reconnect tries this address first
         await self._sync_chat_history(master, [(ip, port)])
+        await self._push_master_outbox(master, ip, port)
+        if self._on_master_reachable:
+            self._on_master_reachable((ip, port))
+
+    @staticmethod
+    def _over_budget(frames: deque, refusals: deque, outcome: Optional[str]) -> bool:
+        """One more frame on a peer relay's stream — past what a relay
+        sends (RELAY_FRAMES_PER_WINDOW), or past RELAY_REFUSALS_PER_WINDOW
+        deliveries that did not open or came again, in RELAY_WINDOW_S."""
+        now = time.monotonic()
+        for window in (frames, refusals):
+            while window and now - window[0] > RELAY_WINDOW_S:
+                window.popleft()
+        frames.append(now)
+        if outcome in ("rejected", "duplicate"):
+            refusals.append(now)
+        return len(frames) > RELAY_FRAMES_PER_WINDOW or len(refusals) > RELAY_REFUSALS_PER_WINDOW
+
+    async def _push_master_outbox(self, master: dict, ip: str, port: int) -> None:
+        """What is still on its way to the master, the messages kept in its
+        mailbox included, pushed directly to it at (ip, port) — it is up."""
         leftover = await self._pending_for(master["id"], with_kept=True)
         if leftover:
             await self._push_pending_messages(master["id"], master["public_key_hex"],
                                               leftover, [(ip, port)])
-        if self._on_master_reachable:
-            self._on_master_reachable((ip, port))
 
     async def _handle_relay_frame(self, data: str, relay: Optional[dict],
-                                  relay_pubkey: str, ip: str, port: int) -> None:
+                                  relay_pubkey: str, ip: str, port: int) -> Optional[str]:
         """One SSE frame from a relay.
 
         `deliver` carries a forwarded message and is answered with a signed
@@ -1366,10 +1427,14 @@ class ChatClient:
         heard of — falls back to the history pull when the relay is a FRIEND
         (the master): the two are separately deployed binaries, so an
         unknown frame must degrade, not break. A peer relay is not a friend
-        and holds no history — there the degradation is a no-op."""
+        and holds no history — there the degradation is a no-op. → the
+        delivery's outcome (stored | duplicate | rejected), None for any
+        other frame."""
         try:
             frame = json.loads(data)
         except ValueError:
+            frame = {}
+        if not isinstance(frame, dict):
             frame = {}
         if frame.get("type") == diag_protocol.FRAME_TYPE:
             # A support warrant rides ONLY the master's own stream; a peer
@@ -1388,9 +1453,16 @@ class ChatClient:
         if frame.get("type") != "deliver":
             if relay:
                 await self._sync_chat_history(relay, [(ip, port)])
-            return
+                if relay_pubkey == master_node.MASTER_PUBKEY_HEX:
+                    # The drain's ping (B-92): the pull shows what it stored —
+                    # unless our cursor had passed its time; then the kept
+                    # message goes to the master directly, deduped by uuid.
+                    await self._push_master_outbox(relay, ip, port)
+            return None
 
-        envelope = frame.get("envelope") or {}
+        envelope = frame.get("envelope")
+        if not isinstance(envelope, dict):
+            return "rejected"
         result = await self._db(
             partial(self.store.handle_incoming,
                     envelope.get("from_public_key", ""),
@@ -1401,14 +1473,17 @@ class ChatClient:
             # Unknown sender, blocked, oversized or undecryptable — no
             # receipt, so the sender keeps it queued and nobody is misled.
             logger.warning("Relayed message from %s… rejected",
-                           envelope.get("from_public_key", "")[:8])
-            return
+                           str(envelope.get("from_public_key", ""))[:8])
+            return "rejected"
 
+        # A duplicate is receipted too — the first receipt may be what was
+        # lost; a relay replaying one is bounded by its budget (_over_budget).
         await self._send_delivery_receipt(envelope, relay_pubkey, ip, port)
         if result.get("duplicate"):
-            return   # already had it; the receipt above is what was missing
+            return "duplicate"   # already had it; the receipt above is what was missing
         if self._on_incoming:
             self._incoming(result)
+        return "stored"
 
     async def _send_delivery_receipt(self, envelope: dict, relay_pubkey: str,
                                      ip: str, port: int) -> None:
@@ -1515,7 +1590,7 @@ class ChatClient:
                             return _ProbeResult(None, "master probe on cooldown", retry_soon=True)
                         if resp.status != 200:
                             continue
-                        data = await wire.read_json(resp, PEER_ANSWER_CAP)
+                        data = await wire.read_json(resp, PEER_SMALL_CAP)
                         await self._note_peer_alive(master.get("id"),
                                                     master_node.MASTER_PUBKEY_HEX, ip, mport)
                         seen = fmt_addr(data.get("observed_ip") or "unknown", port)
@@ -1543,7 +1618,7 @@ class ChatClient:
         and returned no verdict is settled too. Passive inbound proof
         overrides in between via note_inbound_reachable."""
         RETRY_UNKNOWN = 60
-        await asyncio.sleep(20)  # let UPnP/DHT settle after startup
+        await self._rest(20)  # let UPnP/DHT settle after startup
         while self.running:
             retry_soon = True
             try:
@@ -1564,7 +1639,15 @@ class ChatClient:
                 raise
             except Exception as e:
                 logger.debug(f"Reachability check error: {e}")
-            await asyncio.sleep(RETRY_UNKNOWN if retry_soon else 6 * 3600)
+            await self._rest(RETRY_UNKNOWN if retry_soon else 6 * 3600)
+
+    async def _rest(self, seconds: float) -> None:
+        """The verdict's cadence — cut short by recheck_reachability."""
+        try:
+            await asyncio.wait_for(self._recheck.wait(), seconds)
+        except asyncio.TimeoutError:
+            pass
+        self._recheck.clear()
 
     # ------------------------------------------------------------------
     # Outbox
@@ -1760,7 +1843,7 @@ class ChatClient:
                             return delivered_any
                         if resp.status != 200:
                             continue
-                        data = await wire.read_json(resp, PEER_ANSWER_CAP)
+                        data = await wire.read_json(resp, PEER_SMALL_CAP)
                         if relay_row:
                             await self._note_peer_alive(relay_row.get("id"), relay_pubkey, ip, port)
                     if not data.get("delivered"):
@@ -1836,7 +1919,7 @@ class ChatClient:
                     f"?invite={quote(invite)}", ssl=channel_ctx) as r:
                 if r.status != 200:
                     return None
-                v = await wire.read_json(r, PEER_ANSWER_CAP)
+                v = await wire.read_json(r, PEER_SMALL_CAP)
             if (v.get("client_pubkey", "").lower() != friend_pubkey.lower()
                     or v.get("relay_pubkey", "").lower() != node_id.lower()
                     or int(v.get("until") or 0) <= int(time.time())):

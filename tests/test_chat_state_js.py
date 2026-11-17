@@ -96,8 +96,13 @@ def test_the_api_names_each_outgoing_messages_state_and_supports_kept_mail(scrat
                            postgres_db=url.path.lstrip("/")).items():
         monkeypatch.setattr(settings, key, value)
     db_pool.close_pool()
+    import p2p_identity
     master = "ab" * 32
     monkeypatch.setattr(master_node, "MASTER_PUBKEY_HEX", master)
+    monkeypatch.setattr(settings, "p2p_enabled", True)
+    certified = {"yes": True}
+    monkeypatch.setattr(p2p_identity, "served_certificate",
+                        lambda s: {"pubkey": "x"} if certified["yes"] else None)
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     try:
@@ -122,6 +127,10 @@ def test_the_api_names_each_outgoing_messages_state_and_supports_kept_mail(scrat
         rows = asyncio.run(p2p.list_friends())
         flags = {r["username"]: r["mailbox"] for r in rows["pinned"] + rows["items"]}
         assert flags == {"Sautium": True, "ada": False, "bo": False}
+        certified["yes"] = False                     # the Worker takes mail from no other key
+        rows = asyncio.run(p2p.list_friends())
+        assert {r["username"]: r["mailbox"] for r in rows["items"]}["Sautium"] is False
+        certified["yes"] = True
         with conn.cursor() as cur:
             cur.execute("UPDATE friends SET last_seen = now() WHERE id = %s", (support,))
         rows = asyncio.run(p2p.list_friends())

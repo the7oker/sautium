@@ -200,10 +200,12 @@ async def _relay_cap_loop() -> None:
     advertising Sautium-cap:relay so newcomers don't knock in vain; if it
     then sees NO other relay in the DHT it grows the cap instead of letting
     the network starve. Binary signal, one-sided reaction on the re-announce
-    cadence — no oscillation. The Docker surface has no observed external
-    IP to subtract itself from the lookup, so "others visible" is the crude
-    but safe `more than one announcer` (we are one of them while we
-    announce; miscounts only delay a cap step by one cycle)."""
+    cadence — no oscillation. Only while this node relays at all (_relays:
+    the master, or the chat client's verdict says reachable). The lookup
+    names addresses, and ours behind a router or a front may not be one this
+    node can tell for its own, so "others visible" is the crude but safe
+    `more than one announcer` (we are one of them while we announce;
+    miscounts only delay a cap step by one cycle)."""
     from desktop.p2p.dht_service import REANNOUNCE_INTERVAL
     from routers.peer_chat import adapt_relay_cap, close_relay_clients, relay_has_room
     from routers.settings import _read
@@ -268,12 +270,23 @@ async def _apply_reachability(status: str, _detail: str) -> None:
 def _announce_port() -> int:
     """The port peers dial: the router's external one when this node mapped
     it, else P2P_ANNOUNCE_PORT, else the peer port itself."""
-    mapped = _upnp.get_external_port(_peer_port()) if _upnp is not None else None
+    mapped = _upnp.get_external_port(_listen_port()) if _upnp is not None else None
     return mapped or _peer_port()
 
 
 def _peer_port() -> int:
+    """The port the DHT names: P2P_ANNOUNCE_PORT (a router's or a front's
+    number) or the peer port itself."""
     return settings.p2p_announce_port or settings.p2p_sync_port
+
+
+def _listen_port() -> int:
+    """The port that answers peers on this host — the front's (the announce
+    port) behind a trusted front, whose upstream listens on loopback alone,
+    else the peer surface's own. What LAN peers are told and UPnP maps to."""
+    if settings.p2p_trusted_front:
+        return _peer_port()
+    return settings.p2p_sync_port
 
 
 def _start_host_network() -> None:
@@ -297,37 +310,38 @@ def _start_host_network() -> None:
         if client is not None:
             client.resolve_soon()
 
-    _lan_discovery = LANDiscovery(sync_port=_peer_port(), node_id=ident.get("node_id", ""),
+    _lan_discovery = LANDiscovery(sync_port=_listen_port(), node_id=ident.get("node_id", ""),
                                   invite_code=ident.get("invite_code", ""), on_new_peer=new_peer)
-    # Only the port peers dial (rule 4: never 8800, 8830, 8831), and only
-    # once it answers as the peer surface (_map_peer_port).
-    _upnp = UPnPService(ports=[_peer_port()])
+    # Only the port that answers peers (rule 4: never 8800, 8830, 8831), and
+    # only while it answers as the peer surface — asked before every map,
+    # a router's reboot's re-map included.
+    from desktop.p2p.upnp_service import answers_as_peer_surface
+    port = _listen_port()
+    _upnp = UPnPService(ports=[port], gate=lambda: answers_as_peer_surface(port))
 
 
 async def _map_peer_port() -> None:
-    """Map the peer port on the router once the peer surface listens — only
-    when it answers as the peer surface (upnp_service.answers_as_peer_surface,
-    the portmap CLI's own gate) — then keep the lease, the DHT announcing the
-    external port."""
-    from desktop.p2p.upnp_service import answers_as_peer_surface
+    """Map the peer port on the router once the peer surface listens (the
+    service's gate: only while it answers as the peer surface, the portmap
+    CLI's own check), then keep the lease. A mapping is what the master's
+    probe would now see: the DHT announces the external port and the chat
+    client probes again; the verdict alone gates the announces."""
     if not _upnp.is_available:
         logger.info("UPnP: miniupnpc not installed — the peer port is not mapped")
         return
     await _peer_ready.wait()
-    port = _peer_port()
-    if not await asyncio.to_thread(answers_as_peer_surface, port):
-        logger.warning("UPnP: :%d does not answer as the peer surface — not mapped", port)
-        return
-    ext_ip = await asyncio.to_thread(_upnp.open_ports)
-    if ext_ip and _dht_service is not None:
-        _dht_service.set_announce_port(_announce_port())
-        # The router's own tells gate the announces at once, as on the
-        # launcher; the chat client's probe settles the verdict.
-        heuristic = _upnp_heuristic()
-        if heuristic:
-            _dht_service.set_announces_enabled(False)
-            logger.info("Reachability: %s — DHT announces suppressed", heuristic[0])
-    await _upnp.keep_mapped(port, lambda ext: _dht_service and _dht_service.set_announce_port(ext))
+
+    def mapped(ext: int) -> None:
+        if _dht_service is not None:
+            _dht_service.set_announce_port(ext)
+        from p2p_chat import chat_client
+        client = chat_client()
+        if client is not None:
+            client.recheck_reachability()
+
+    if await asyncio.to_thread(_upnp.open_ports):
+        mapped(_announce_port())
+    await _upnp.keep_mapped(_listen_port(), mapped)
 
 
 def _upnp_heuristic():
@@ -486,8 +500,11 @@ async def _serve_p2p(port: int) -> None:
         # Peers that arrive from the gateway — all of them behind Docker
         # Desktop's published port — have no per-address share.
         serving.SHARED_ADDRESSES = frozenset({gateway}) if gateway else frozenset()
+        # No proxy headers: uvicorn trusts loopback's X-Forwarded-For by
+        # default, and on the host's network any local process could then
+        # name the peer's address (the inbound proof reads it).
         config = PeerSurfaceConfig(
-            peer_app, host="0.0.0.0", port=port,
+            peer_app, host="0.0.0.0", port=port, proxy_headers=False,
             timeout_graceful_shutdown=_PEER_GRACE_S, timeout_keep_alive=_PEER_KEEPALIVE_S,
             http=peer_protocol(AutoHTTPProtocol, per_address=_PEER_PER_ADDRESS,
                                shared=serving.SHARED_ADDRESSES, tls=tls, **bounds),
@@ -879,7 +896,11 @@ async def lifespan(app: FastAPI):
             try:
                 await _lan_discovery.start()
                 _lan_discovery.set_beaconing(sharing_enabled())
-                sharing_hooks.append(lambda: _lan_discovery.set_beaconing(sharing_enabled()))
+                # The switch moves in a request's worker thread; the beacon
+                # lives on this loop.
+                loop = asyncio.get_running_loop()
+                sharing_hooks.append(lambda: loop.call_soon_threadsafe(
+                    _lan_discovery.set_beaconing, sharing_enabled()))
                 logger.info("LAN discovery on the host's network (peer port %d)", announce_port)
             except OSError as e:
                 logger.warning(f"LAN discovery could not start: {e}")
