@@ -344,9 +344,17 @@ _FRIENDS_SELECT = f"""
 
 
 def _friend_row_out(row: dict) -> dict:
+    """A friend row as the client renders it. `mailbox`: Support (the
+    resolved master contact) is offline and what is written to it is kept in
+    its Worker mailbox (B-92) — its row and the chat header say so; a
+    `pending:` Support contact has nothing kept for it yet."""
+    import master_node
     for k in ("added_at", "last_seen", "last_activity_at"):
         if row.get(k):
             row[k] = row[k].isoformat()
+    if "public_key_hex" in row:
+        row["mailbox"] = (row["public_key_hex"] == master_node.MASTER_PUBKEY_HEX
+                          and not row.get("is_online"))
     return row
 
 
@@ -814,7 +822,13 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
     limit = min(limit, 500)
     rows = _db_query("""
         SELECT id, direction, content, timestamp, delivered, read,
-               message_uuid
+               message_uuid,
+               -- an outgoing message's state (B-92): delivered is the proof;
+               -- kept = handed to the master's Worker mailbox; waiting = here
+               CASE WHEN direction = 'in' THEN NULL
+                    WHEN delivered THEN 'delivered'
+                    WHEN parked_at IS NOT NULL THEN 'kept'
+                    ELSE 'waiting' END AS state
         FROM p2p_messages
         WHERE friend_id = %s
         ORDER BY timestamp DESC, id DESC LIMIT %s
