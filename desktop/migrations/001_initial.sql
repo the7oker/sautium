@@ -744,6 +744,16 @@ CREATE TABLE IF NOT EXISTS media_files (
     recording_mbid UUID,                            -- materialized MB recording for THIS file (its concrete performance)
     cover_id UUID REFERENCES covers(id) ON DELETE SET NULL,
     cover_processed_at TIMESTAMPTZ,                  -- NULL = pending cover resolution
+    -- The file's stat at its last read (backend/file_stat.py: the change time
+    -- is POSIX ctime / NTFS ChangeTime, which a tag editor that restores the
+    -- mtime still moves). A scan reads a file again when its stat differs;
+    -- NULL = read before the stat was recorded, so read again once.
+    stat_mtime_ns BIGINT,
+    stat_ctime_ns BIGINT,
+    -- The analysis passes refused this file's decode (short of the length its
+    -- header declares, or changed under the decode): out of their queues until
+    -- the file is read again — every read clears it (LIBRARY-WATCH M6).
+    decode_refused BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_media_files_path_cue

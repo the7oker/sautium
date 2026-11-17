@@ -582,6 +582,12 @@ class MediaFile(Base):
     cover_id = Column(UUID(as_uuid=True), ForeignKey("covers.id", ondelete="SET NULL"))
     cover_processed_at = Column(DateTime(timezone=True))  # NULL = pending
 
+    # The stat at the last read (file_stat.FileStat); NULL = read before it was kept
+    stat_mtime_ns = Column(BigInteger)
+    stat_ctime_ns = Column(BigInteger)
+    # The analysis passes refused the decode; cleared by the next read
+    decode_refused = Column(Boolean, nullable=False, default=False, server_default="false")
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
