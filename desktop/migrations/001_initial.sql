@@ -1889,13 +1889,16 @@ CREATE INDEX IF NOT EXISTS idx_media_files_cover_pending ON media_files(id)
 -- a file on this node's disk or a file the HQPlayer it drives holds.
 -- Presence, coverage and "content newer than the artist's last canon" read
 -- this view; the analysis source stays on media_files, the only rows with bytes.
+-- The three quality columns serve the quality gate (sql_queries.QUALITY_GATE).
 CREATE OR REPLACE VIEW owned_files AS
     SELECT track_id, album_variant_id, 'local'::variant_location AS location,
-           duration_seconds, recording_mbid, created_at
+           duration_seconds, recording_mbid, created_at,
+           is_lossless, sample_rate, bit_depth
     FROM media_files
     UNION ALL
     SELECT track_id, album_variant_id, 'hqplayer'::variant_location,
-           duration_seconds, recording_mbid, first_seen_at
+           duration_seconds, recording_mbid, first_seen_at,
+           is_lossless, sample_rate, bit_depth
     FROM hqp_library_files;
 
 -- Cover art indexes

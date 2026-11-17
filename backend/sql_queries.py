@@ -77,8 +77,9 @@ def owned_rank(alias: str, style: str = "psycopg") -> str:
 # Hi-res is lossless past CD on either axis — more than 16 bits, or more than
 # 48 kHz: JEITA's definition, and the one the hi-res stores label by. A 24/44.1
 # rip is hi-res and so is DSD (1 bit at MHz rates); 16/48 (DAT) is CD-class.
-# Every badge — the album header, an edition card, Now Playing — is this one
-# expression, so no two can call the same file different things.
+# Every badge — the album header, an edition card, Now Playing — and the
+# quality gate below are this one expression, so no two can call the same file
+# different things.
 
 def rip_quality(lossless: str, sample_rate: str, bit_depth: str) -> str:
     """SQL expression naming a rip 'hi-res', 'lossless' or 'lossy' from its
@@ -87,6 +88,49 @@ def rip_quality(lossless: str, sample_rate: str, bit_depth: str) -> str:
     axis alone makes a rip hi-res, so the best rip decides."""
     return (f"CASE WHEN {lossless} AND ({bit_depth} > 16 OR {sample_rate} > 48000) "
             f"THEN 'hi-res' WHEN {lossless} THEN 'lossless' ELSE 'lossy' END")
+
+
+# ---------------------------------------------------------------------------
+# The year and quality gates: one predicate each for Discovery's engine
+# (discovery_engine.TOOLS) and the CLI's track filter (track_filter.py)
+# ---------------------------------------------------------------------------
+# Year: the album's release year; a track has the years of its albums, and an
+# album with no year matches no range. An open end binds as the outermost year.
+
+YEAR_GATE = "al.release_year BETWEEN :year_from AND :year_to"
+
+
+def year_params(year_from, year_to) -> dict:
+    return {"year_from": 0 if year_from is None else year_from,
+            "year_to": 9999 if year_to is None else year_to}
+
+
+# Quality: a track's tier is its best copy's — a copy here or at the HQPlayer
+# (owned_files) — so a CD rip owned beside a 24/96 one is hi-res. "Lossless"
+# means lossless or better, the way a listener filters lossy out; "Lossy" is a
+# track with no lossless copy, the one to replace. A track with no copy (a
+# phantom, which plays as a stream) has no tier: what a stream delivers is the
+# serving provider's, known only once it plays, so no quality gate passes it.
+
+QUALITY_TIERS = ("lossy", "lossless", "hi-res")
+
+
+def quality_params(tier: str) -> dict:
+    """A tier's choice as the gate's two lists: some copy is one of
+    `quality_in`, and no copy is one of `quality_above`."""
+    lo = QUALITY_TIERS.index(tier)
+    hi = 0 if tier == "lossy" else len(QUALITY_TIERS) - 1
+    return {"quality_in": list(QUALITY_TIERS[lo:hi + 1]),
+            "quality_above": list(QUALITY_TIERS[hi + 1:])}
+
+
+QUALITY_GATE = (
+    "EXISTS (SELECT 1 FROM owned_files oq WHERE oq.track_id = t.id AND "
+    f"{rip_quality('oq.is_lossless', 'oq.sample_rate', 'oq.bit_depth')} "
+    "= ANY(CAST(:quality_in AS text[])) AND NOT EXISTS ("
+    "SELECT 1 FROM owned_files oq2 WHERE oq2.track_id = t.id AND "
+    f"{rip_quality('oq2.is_lossless', 'oq2.sample_rate', 'oq2.bit_depth')} "
+    "= ANY(CAST(:quality_above AS text[]))))")
 
 
 # One track's files (%(tid)s) from both places files live — the per-track

@@ -219,7 +219,8 @@ def _translate_loader():
 
 
 def _engine_filters(bpm_min, bpm_max, key, mode, vocalist, gender,
-                    danceable, energy, instruments, genres=()) -> dict:
+                    danceable, energy, instruments, genres=(),
+                    year_from=None, year_to=None, quality=None) -> dict:
     """Map the Discovery filter chips to engine tool values."""
     a: dict = {}
     if genres:
@@ -227,6 +228,10 @@ def _engine_filters(bpm_min, bpm_max, key, mode, vocalist, gender,
     if bpm_min is not None or bpm_max is not None:
         a["bpm"] = (bpm_min if bpm_min is not None else 0.0,
                     bpm_max if bpm_max is not None else 9999.0)
+    if year_from is not None or year_to is not None:
+        a["year"] = (year_from, year_to)
+    if quality:
+        a["quality"] = quality
     if key:
         a["key"] = key
     if mode and mode != "any":
@@ -401,6 +406,9 @@ def discovery_search(
     offset: int = Query(0, ge=0, le=RETRIEVE_K),
     bpm_min: Optional[float] = Query(None),
     bpm_max: Optional[float] = Query(None),
+    year_from: Optional[int] = Query(None, ge=0, le=9999),
+    year_to: Optional[int] = Query(None, ge=0, le=9999),
+    quality: Optional[str] = Query(None, pattern="^(lossy|lossless|hi-res)$"),
     key: Optional[str] = Query(None),
     mode: Optional[str] = Query(None),
     vocalist: Optional[str] = Query(None),
@@ -421,8 +429,9 @@ def discovery_search(
     relevance source, so every block answers "similar to this" — AND-composable
     with the gates. `artists` = typeahead-picked artist UUIDs (hard filter).
 
-    `quality` is not an engine tool (owned-only file tiers were dropped; returns
-    later as a two-source file+stream tool), so the chip row is gone from the UI.
+    `quality` is the best copy's tier, "lossless" meaning lossless or better;
+    a phantom track has none (sql_queries.QUALITY_GATE). `year_from`/`year_to`
+    bound the album's release year, either end open.
 
     `offset` walks the block deeper (the client echoes next_cursor back with the
     same query + chips). A title query saturates — 72 tracks named "Casanova" all
@@ -431,7 +440,8 @@ def discovery_search(
     """
     return run_search(
         target=target, q=q, scope=scope, sound=sound, lyrics=lyrics, limit=limit,
-        offset=offset, bpm_min=bpm_min, bpm_max=bpm_max, key=key, mode=mode,
+        offset=offset, bpm_min=bpm_min, bpm_max=bpm_max, year_from=year_from,
+        year_to=year_to, quality=quality, key=key, mode=mode,
         vocalist=vocalist, gender=gender, danceable=danceable, energy=energy,
         instruments=instruments, genres=genres, seed_track_id=seed_track_id,
         artists=artists, corpus=corpus)
@@ -447,6 +457,9 @@ def run_search(
     offset: int = 0,
     bpm_min: Optional[float] = None,
     bpm_max: Optional[float] = None,
+    year_from: Optional[int] = None,
+    year_to: Optional[int] = None,
+    quality: Optional[str] = None,
     key: Optional[str] = None,
     mode: Optional[str] = None,
     vocalist: Optional[str] = None,
@@ -483,7 +496,8 @@ def run_search(
     if artists:
         active["artist"] = artists
     active.update(_engine_filters(bpm_min, bpm_max, key, mode, vocalist,
-                                  gender, danceable, energy, instruments, genres))
+                                  gender, danceable, energy, instruments, genres,
+                                  year_from, year_to, quality))
     # Warming is scope-aware: the default names scope needs no model at all.
     # It is also computed against PROFILE-AVAILABLE models only — on a
     # profile that never ships the translator, "warming" would otherwise

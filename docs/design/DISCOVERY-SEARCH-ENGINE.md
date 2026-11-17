@@ -109,8 +109,8 @@ level — typically `EXISTS`).
 | `moods` | track | `zero_shot_scores` (derived from the track's segments since 2026-11-10; a mood is present at its own threshold, `zero_shot.MOOD_MIN[key]`, 0.048..0.089, set 2026-11-11 so that each gate keeps the share of a ~41 000-track library the stored value passed), fixed 8-label set ("happy and upbeat", "sad and melancholic", "energetic and intense", "calm and relaxing", "dark and ominous", "romantic and dreamy", "aggressive and angry", "mysterious and atmospheric"). A tool in the engine registry; not exposed by the endpoint or the UI. |
 | `instruments` | track | `track_instruments.instruments` JSONB `?|` (the instruments record, apart from the features since 2026-11-10). **Sparse by catalog nature** (54% empty — ambient). Valid filter where present; pair with `clap` for recall. |
 | `genre` | **album** | **album-grain now** via `album_genres` (track_genres dropped). `EXISTS (album_genres ⋈ genres)`. Present on phantoms too (mb source). |
-| `year` | album | `albums.release_year` |
-| `quality` | file | `media_files.is_lossless` + `sample_rate` + `bit_depth` (lossy/lossless/hi-res) |
+| `year` | album | `albums.release_year` (`sql_queries.YEAR_GATE`, the CLI's `--year-from/--year-to` too; bound in the endpoint and the UI since 2026-11-17) |
+| `quality` | track | the best copy in `owned_files` (`is_lossless` + `sample_rate` + `bit_depth`, `sql_queries.rip_quality`): lossy / lossless-or-better / hi-res, `sql_queries.QUALITY_GATE`, since 2026-11-17. A phantom has no tier (below) |
 
 ### Axis 4 — Corpus layer
 
@@ -254,9 +254,11 @@ phantom-only. So edges are declared explicitly with corpus semantics; path
 composition (shortest, dedup of shared tables) runs BFS over the declared edges.
 `corpus` therefore **selects a bridge** (owned→owned_files, phantom→album_tracks,
 all→both), not just a WHERE filter. Any path through `owned_files` is owned-only,
-so a file-level tool (quality) is physically inapplicable to phantoms — dropped for
-now; it returns as a **two-source** tool (file-tier for owned, stream-tier for
-phantom: YouTube lossy / a lossless provider).
+so a file-level tool (quality) is physically inapplicable to phantoms. It came back
+on 2026-11-17 as a track-level gate over the track's own copies, not a
+two-source tool: a stream's tier is the serving provider's, decided at play time
+(the demo channel, a lossless provider, the 30 s excerpt), and the database holds
+none per track, so a phantom passes no quality gate.
 
 **`corpus='all'` branches only at the `owned_files` boundary, not the whole query.**
 The owned/phantom split is LOCAL — only `track↔album` differs; `artist↔track`,

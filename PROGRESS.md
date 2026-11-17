@@ -143,6 +143,21 @@ implementation details live in the code, DB and git history.
   ListenBrainz rank, not a Last.fm figure. Listeners range from 6 to 300k+
   → power-law distribution → log normalization. Without boost, obscure tracks
   dominate by chance; with >15% boost, popular tracks crowd everything else.
+- **Hi-Res is defined once (2026-11-17, SEARCH-GATES): lossless past CD on
+  either axis — more than 16 bits or more than 48 kHz, DSD included (1 bit
+  at MHz rates)** — `sql_queries.rip_quality`, the expression every quality
+  badge and Discovery's quality gate read. The gate takes a track's tier from
+  its best copy in `owned_files` (here or at the HQPlayer): a CD rip owned
+  beside a 24/96 one is Hi-Res, and only a track with no lossless copy is
+  Lossy. "Lossless" is lossless or better, the way a listener filters lossy
+  out. A phantom has no tier — what a stream delivers is the serving
+  provider's, decided at play time and stored per track nowhere — so no
+  quality gate passes one; the older plan of a stream tier beside the file
+  tier was dropped for that reason. The year gate is the album's release
+  year (`sql_queries.YEAR_GATE`), shared with the CLI's `--year-from/--year-to`;
+  alone it answers albums and artists, as a genre does. Both run in SQL: the
+  quality gate is an `EXISTS` over `owned_files` on the `track_id` indexes of
+  both file tables, the year gate a range on `idx_albums_release_year`.
 
 ### Audio analysis
 

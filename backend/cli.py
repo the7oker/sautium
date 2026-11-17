@@ -28,19 +28,14 @@ def cli():
     pass
 
 
-def _resolve_filters(filter_artist, filter_album, filter_genre, filter_path,
-                     filter_tag, filter_track_number, filter_lossless):
+def _resolve_filters(filter_kwargs: dict):
     """
-    Resolve track filter options into a list of track IDs.
+    Resolve track filter options (track_filter_options' `filters`) into a
+    list of track IDs.
 
     Returns None if no filters are active, or a list of matching track IDs.
     Prints filter info and early-exits with empty list if nothing matched.
     """
-    filter_kwargs = dict(
-        artist=filter_artist, album=filter_album, genre=filter_genre,
-        path=filter_path, tag=filter_tag, track_number=filter_track_number,
-        lossless=filter_lossless,
-    )
     filter_desc = describe_filters(**filter_kwargs)
     if not filter_desc:
         return None
@@ -161,8 +156,7 @@ def scan(limit, no_skip, path, prune, yes):
 @track_filter_options
 def sonic_pass(limit, batch_size, newest_first, max_duration,
                worker_id, worker_count, force,
-               filter_artist, filter_album, filter_genre, filter_path,
-               filter_tag, filter_track_number, filter_lossless):
+               filters):
     """The sonic pass: CLAP segments and librosa features, one decode a track."""
     import hardware_profile
     hardware_profile.cap_torch_threads()   # the paces are kept per the profile's threads
@@ -198,10 +192,7 @@ def sonic_pass(limit, batch_size, newest_first, max_duration,
         click.echo(f"👷 Worker {worker_id + 1}/{worker_count}")
 
     # Resolve track filters
-    track_ids = _resolve_filters(
-        filter_artist, filter_album, filter_genre, filter_path,
-        filter_tag, filter_track_number, filter_lossless,
-    )
+    track_ids = _resolve_filters(filters)
     if track_ids is not None and len(track_ids) == 0:
         return
 
@@ -724,8 +715,7 @@ def enrich_lastfm(limit, artist, genres, no_skip):
 @track_filter_options
 def instrument_pass(limit, force, newest_first, max_duration,
                     worker_id, worker_count,
-                    filter_artist, filter_album, filter_genre, filter_path,
-                    filter_tag, filter_track_number, filter_lossless):
+                    filters):
     """The instrument pass: the AST+PaSST tagger, one decode a track — whatever
     the Recognise instruments switch says (a run by hand is the owner's)."""
     import hardware_profile
@@ -757,10 +747,7 @@ def instrument_pass(limit, force, newest_first, max_duration,
         click.echo(f"👷 Worker {worker_id + 1}/{worker_count}")
 
     # Resolve track filters
-    track_ids = _resolve_filters(
-        filter_artist, filter_album, filter_genre, filter_path,
-        filter_tag, filter_track_number, filter_lossless,
-    )
+    track_ids = _resolve_filters(filters)
     if track_ids is not None and len(track_ids) == 0:
         return
 
@@ -828,8 +815,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
                   skip_lyrics, skip_instruments, force_sonic,
                   force_instruments,
                   worker_id, worker_count,
-                  filter_artist, filter_album, filter_genre, filter_path,
-                  filter_tag, filter_track_number, filter_lossless):
+                  filters):
     """
     Comprehensive track enrichment with parallel pipelines.
 
@@ -898,10 +884,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_sonic, skip_lastfm,
         click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
     # Resolve track filters
-    track_ids = _resolve_filters(
-        filter_artist, filter_album, filter_genre, filter_path,
-        filter_tag, filter_track_number, filter_lossless,
-    )
+    track_ids = _resolve_filters(filters)
     if track_ids is not None and len(track_ids) == 0:
         return
 
