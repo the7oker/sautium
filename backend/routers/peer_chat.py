@@ -504,7 +504,13 @@ def mailbox_import(m: dict) -> None:
     checks as /message above, minus the transport: friendship right, size,
     handle_incoming (dedup by message_uuid, decrypt, store → the insert
     trigger wakes the UI). A refused message is dropped, not retried: the
-    mailbox is a parking lot for the direct path, not a second protocol."""
+    mailbox is a parking lot for the direct path, not a second protocol.
+
+    A message stored fresh pings its sender's own streams here (B-92): the
+    sender pulls history, as on any frame from the master, and its row kept
+    in the mailbox becomes delivered at once. The ping writes nothing and
+    carries nothing; it goes only to the key that signed the deposit. A
+    sender offline now learns at its next connect (the connect-time pull)."""
     svc = get_peer_chat()
     if svc is None:
         raise RuntimeError("chat not available")          # skips the ack → served again later
@@ -524,6 +530,8 @@ def mailbox_import(m: dict) -> None:
                                  message_uuid=m.get("message_uuid") or None)
     if result is None:
         logger.info("mailbox: message %s from %s rejected", (m.get("message_uuid") or "")[:8], sender_pubkey[:8])
+    elif not result.get("duplicate"):
+        ping_wake(sender_pubkey)
 
 
 @chat_router.post("/key-rotation")

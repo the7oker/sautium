@@ -296,6 +296,8 @@ class ChatClient:
         self._wake_instance = secrets.token_hex(8)
         # unknown | reachable | cgnat | unreachable — see _reachability_loop
         self.reachability = "unknown"
+        # Kept messages the master refused on a direct push, said once each.
+        self._refusals_said: set = set()
 
     # ------------------------------------------------------------------
     # Lifecycle and the runtime's events
@@ -353,7 +355,11 @@ class ChatClient:
     def _on_notes(self, notes: list) -> None:
         if not self.running:
             return
-        if any(note.channel == "sautium_chat" for note in notes):
+        # A message stored, either way — one of ours to send, or a friend's,
+        # who is then online. Not a presence bump (no payload) nor a state
+        # change (state:{fid}), which the pass itself causes.
+        if any(note.channel == "sautium_chat" and (note.payload or "").startswith("msg:")
+               for note in notes):
             self._notify.set()
         replies = replied_friends(notes)
         if replies:
@@ -1335,10 +1341,19 @@ class ChatClient:
             backoff = min(backoff * 2, 300.0)
 
     async def _master_stream_connected(self, master: dict, ip: str, port: int) -> None:
-        """The master is reachable again, at (ip, port): the connect-time
-        catch-up pull covers the wakes missed offline; the runtime hears of
-        it (the launcher's support diagnostics resume)."""
+        """The master is reachable again, at (ip, port) — the event for what
+        is still on its way to it. The connect-time catch-up pull covers the
+        wakes missed offline and marks delivered what its drain stored (the
+        import marks our rows the master holds); then what is left of its
+        outbox, the messages kept in its mailbox included, is pushed to it
+        directly — a row the drain missed is delivered now, the master
+        dedups by uuid. The runtime hears of it (the launcher's support
+        diagnostics resume)."""
         await self._sync_chat_history(master, [(ip, port)])
+        leftover = await self._pending_for(master["id"], with_kept=True)
+        if leftover:
+            await self._push_pending_messages(master["id"], master["public_key_hex"],
+                                              leftover, [(ip, port)])
         if self._on_master_reachable:
             self._on_master_reachable((ip, port))
 
@@ -1603,6 +1618,7 @@ class ChatClient:
                                 # Aborting here used to let any bystander
                                 # answering first block delivery entirely.
                                 logger.debug(f"Push rejected (403) by {ip}:{port}")
+                                self._kept_refused(pubkey, msg)
                     except Exception:
                         pass
                 if not delivered:
@@ -1616,12 +1632,28 @@ class ChatClient:
         if undelivered:
             await self._relay_forward(friend_id, pubkey, undelivered)
 
+    def _kept_refused(self, pubkey: str, msg: dict) -> None:
+        """A message kept in the master's mailbox that the master refused on
+        a direct push (it blocked or removed this node after the handshake):
+        it stays "kept" (B92 Q7) — a support signal, said once."""
+        uid = msg.get("message_uuid")
+        if (msg.get("parked_at") and pubkey == master_node.MASTER_PUBKEY_HEX
+                and uid not in self._refusals_said):
+            self._refusals_said.add(uid)
+            logger.warning("Message %s kept for Support was refused by the master (403)", uid)
+
     async def _mailbox_deposit(self, friend_id: int, messages: list[dict]) -> None:
         """The master's off-master fallback (Ф16): what the direct path could
         not deliver is parked, still E2E-encrypted, in the Worker mailbox the
-        master drains when it is back. Acceptance counts as delivery — the
-        master dedups by message_uuid, so an older undelivered copy pushed
-        directly later is harmless."""
+        master drains when it is back. The Worker's acceptance is "kept",
+        never "delivered" (B-92): the row is marked parked, and becomes
+        delivered only on a proof — a direct push answered, the history pull
+        that follows the master's ping on its drain or our next connect to
+        it. Only a resolved master contact gets here (the pass never pushes
+        to a `pending:` one), so the master holds us as a friend that may
+        message it, and its drain keeps what we deposit. A message already
+        kept is not deposited again; a refusal (the mailbox full, a cap)
+        leaves the rest waiting here."""
         import aiohttp
         from desktop.p2p import mailbox_client
         ident = self._identity()
@@ -1631,7 +1663,7 @@ class ChatClient:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
                                          headers={"Accept-Encoding": "gzip"}) as session:
             for msg in messages:
-                if not msg.get("message_uuid"):
+                if not msg.get("message_uuid") or msg.get("parked_at"):
                     continue                       # pre-uuid rows stay on the direct path
                 sent_at = _iso_utc(msg["timestamp"])
                 try:
@@ -1644,11 +1676,11 @@ class ChatClient:
                     session, master_pubkey=master_pubkey,
                     sender_pubkey=self.store.public_key_hex, sign=ident.sign,
                     encrypted=encrypted, timestamp_iso=sent_at,
-                    message_uuid=msg["message_uuid"])
+                    message_uuid=msg["message_uuid"], worker_url=mailbox_client.WORKER_URL)
                 if result is None:
                     return                         # unreachable or refused: the outbox keeps the rest
-                await self._db(self.store.mark_delivered, msg["id"])
-                logger.info("Message %s parked in the master mailbox", msg["message_uuid"][:8])
+                await self._db(self.store.mark_parked, msg["id"])
+                logger.info("Message %s kept in the master mailbox", msg["message_uuid"][:8])
 
     async def _relay_forward(self, friend_id: int, friend_pubkey: str,
                              messages: list[dict]) -> None:
@@ -1831,8 +1863,12 @@ class ChatClient:
                 self._push_tasks.add(task)
                 task.add_done_callback(self._push_tasks.discard)
 
-    async def _pending_for(self, fid: int) -> list[dict]:
-        return [m for m in await self._db(self.store.get_pending_messages) if m["friend_id"] == fid]
+    async def _pending_for(self, fid: int, with_kept: bool = False) -> list[dict]:
+        """A friend's undelivered messages; those kept in the master's
+        mailbox only `with_kept` — they wait for the master's stream, not for
+        the pass or a push (_master_stream_connected)."""
+        return [m for m in await self._db(self.store.get_pending_messages)
+                if m["friend_id"] == fid and (with_kept or not m.get("parked_at"))]
 
     async def _push_to(self, fid: int) -> None:
         try:
@@ -1863,7 +1899,8 @@ class ChatClient:
         what it retries without an event is a friend coming back online that
         this node cannot observe — they cannot reach us, so only our retry
         through their relays delivers. A friend with nothing pending costs
-        nothing. Replacing it by a per-friend backoff is a behaviour change
+        nothing, and a message kept in the master's mailbox is not retried
+        here: the master's stream connecting is its event. Replacing it by a per-friend backoff is a behaviour change
         of its own (BACKLOG B-98's follow-up).
 
         Hybrid (pull + push):
@@ -1895,7 +1932,7 @@ class ChatClient:
         seen_friends: set[int] = set()
         for msg in pending:
             fid = msg["friend_id"]
-            if fid in seen_friends or fid in self._pushing:
+            if fid in seen_friends or fid in self._pushing or msg.get("parked_at"):
                 continue
             seen_friends.add(fid)
             pubkey = msg["public_key_hex"]

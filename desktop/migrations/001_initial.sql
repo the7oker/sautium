@@ -2247,7 +2247,11 @@ CREATE TABLE IF NOT EXISTS p2p_messages (
     -- theirs. NULL on outgoing rows (this node signs its own as it boxes
     -- them) and on rows from before (049, 2026-11-07).
     sender_sig BYTEA CONSTRAINT p2p_messages_sender_sig_len CHECK (octet_length(sender_sig) = 64),
-    sent_at TIMESTAMPTZ
+    sent_at TIMESTAMPTZ,
+    -- An outgoing message to the master handed to its Worker mailbox
+    -- (Ф16): kept for it, not yet proven at the master — `delivered` stays
+    -- the one proof (chat_client._mailbox_deposit; 063, 2026-11-17, B-92).
+    parked_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS pending_key_rotations (
@@ -2426,6 +2430,23 @@ $$ LANGUAGE plpgsql;
 DO $$ BEGIN
     CREATE TRIGGER trg_p2p_messages_notify AFTER INSERT ON p2p_messages
         FOR EACH ROW EXECUTE FUNCTION notify_p2p_message();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- A message's state moved (delivered, or kept for the master): the chat on
+-- screen repaints. One notice per friend and transaction (pg_notify folds
+-- equal payloads), so an export that marks a page delivered says it once.
+CREATE OR REPLACE FUNCTION notify_p2p_message_state() RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_notify('sautium_chat', 'state:' || NEW.friend_id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+    CREATE TRIGGER trg_p2p_messages_state AFTER UPDATE OF delivered, parked_at ON p2p_messages
+        FOR EACH ROW WHEN (OLD.delivered IS DISTINCT FROM NEW.delivered
+                           OR OLD.parked_at IS DISTINCT FROM NEW.parked_at)
+        EXECUTE FUNCTION notify_p2p_message_state();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================================
