@@ -92,8 +92,18 @@ class FavoriteRequest(BaseModel):
     action: str                         # 'add' | 'remove'
 
 
+class BenchmarkEntry(BaseModel):
+    """One picker entry measured alone, for the source its mark is read at
+    (the state's headroom.source)."""
+    kind: str                           # 'filter' | 'shaper'
+    name: str
+    src_rate: int
+    src_channels: int
+
+
 class BenchmarkRequest(BaseModel):
     mode: Optional[str] = None          # 'pcm' | 'sdm'; None = the mode HQPlayer is in
+    entry: Optional[BenchmarkEntry] = None      # one entry alone, in the mode HQPlayer is in
     fixed_volume_ok: bool = False       # the owner turned the amplifier down: HQPlayer cannot
 
 
@@ -143,6 +153,9 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     response["endpoint_id"] = ep["id"] if ep else None
     response["name"] = ep["name"] if ep else None
     response["label"] = hqp_library.label(ep["name"], ep["product"]) if ep else None
+    # An Embedded box scans its library from its web interface (the Library
+    # block's scan line): what it last said of itself, then what it says now
+    response["embedded"] = hqp_library.is_embedded(ep["product"]) if ep else False
     # Its library, when it has one of its own (another machine): what this
     # node holds of it and the running job — the screen's Library section.
     from routers.settings import _hqp_library_state
@@ -196,6 +209,8 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     really_connected = bool(info and info.get("product"))
     response["connected"] = really_connected
     response["info"] = info or {}
+    if info:
+        response["embedded"] = hqp_library.is_embedded(info.get("product"))
     response["state"] = state or {}
     # A list HQPlayer did not give (a refusal, a lost answer) is null and
     # named in `missing`, its refusal in `refused` — never an empty one: an
@@ -345,7 +360,7 @@ def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) ->
     give."""
     from hqplayer_client import PlaybackState
     from playback import hqp_load
-    from playback.hqp_benchmark import running_filter
+    from playback.hqp_benchmark import measurable, running_filter
     if not ep or not ep.get("hqp_engine") or not state:
         return {}
     if (status is not None and status.src_rate and status.src_channels
@@ -367,9 +382,14 @@ def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) ->
                                state["filterNx"], state["filter1x"], src[0])
         shaper = next((sh["name"] for sh in lists["shapers"] if sh["index"] == state["shaper"]), "")
     ctx = hqp_load.context(ep, mode=mode, state=state)
+    # The rate a benchmark point at the owner's setting asked: the rate slot's,
+    # 0 at an automatic one — what its refusals are keyed by
+    asked = {r["index"]: r["rate"] for r in lists.get("rates") or ()}.get(state["rate"], 0)
+    # `measurable`: a run of one entry can fill a mark here (hqp_benchmark.entry_grid)
     return {**hqp_load.headroom(ctx, rate_out=rate_out, filter=filt, shaper=shaper,
-                                src_rate=src[0], src_channels=src[1]),
-            "setting": {"rate_out": rate_out, "filter": filt, "shaper": shaper}}
+                                src_rate=src[0], src_channels=src[1], asked_rate=asked),
+            "setting": {"rate_out": rate_out, "filter": filt, "shaper": shaper},
+            "measurable": measurable(*src)}
 
 
 def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
@@ -672,8 +692,18 @@ def start_benchmark(req: BenchmarkRequest) -> Dict[str, Any]:
     from playback import hqp_benchmark
     if req.mode not in (None, "pcm", "sdm"):
         raise HTTPException(status_code=400, detail="mode must be 'pcm' or 'sdm'")
+    entry = None
+    if req.entry is not None:
+        e = req.entry
+        if req.mode is not None:
+            raise HTTPException(status_code=400, detail="an entry is measured in the mode HQPlayer is in")
+        if e.kind not in ("filter", "shaper") or not e.name:
+            raise HTTPException(status_code=400, detail="entry.kind must be 'filter' or 'shaper', with a name")
+        if not hqp_benchmark.measurable(e.src_rate, e.src_channels):
+            raise HTTPException(status_code=400, detail="a run measures one entry on a PCM stereo source only")
+        entry = hqp_benchmark.Entry(e.kind, e.name, e.src_rate, e.src_channels)
     try:
-        return hqp_benchmark.start(req.mode, fixed_volume_ok=req.fixed_volume_ok)
+        return hqp_benchmark.start(req.mode, fixed_volume_ok=req.fixed_volume_ok, entry=entry)
     except hqp_benchmark.BenchmarkRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
 

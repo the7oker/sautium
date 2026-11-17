@@ -98,6 +98,47 @@ def test_sdm_grid_from_a_real_hqplayers_lists():
     assert _grid("desktop_sdm.json")[2].points == pts
 
 
+def _entry_grid(entry, name="desktop_sdm.json", covered=frozenset()):
+    d, cur = _lists(name)
+    return d, cur, bench.entry_grid(entry, filters=d["filters"], shapers=d["shapers"], rates=d["rates"],
+                                    current=cur, covered=set(covered), keeps_up={})
+
+
+def test_one_entry_is_measured_at_the_owners_setting_after_it_the_key_its_mark_reads():
+    """HQP-WORDS-S: Measure on a picker row — the owner's setting first (the
+    run's control), then the entry with the rest of it, on the source the
+    row's mark is read for; no ladder, no drift check, covered or not."""
+    d, cur = _lists("desktop_sdm.json")
+    names = {f["index"]: f["name"] for f in d["filters"]}
+    shapers = {s["index"]: s["name"] for s in d["shapers"]}
+    rate = next(r["rate"] for r in d["rates"] if r["index"] == cur["rate"])
+    other = next(s for s in d["shapers"] if s["index"] != cur["shaper"])
+    own_filter = names[cur["filterNx"]]           # what runs for a 96 kHz source: the Nx slot
+    _, _, grid = _entry_grid(bench.Entry("shaper", other["name"], 96000, 2))
+    assert [p.own for p in grid.points] == [True, False]
+    assert [p.key for p in grid.points] == [(rate, own_filter, shapers[cur["shaper"]], 96000, 2),
+                                            (rate, own_filter, other["name"], 96000, 2)]
+    assert all(p.ladder is None for p in grid.points) and not grid.sweep and grid.asks() == 2
+    flt = next(f for f in d["filters"] if f["index"] not in (cur["filterNx"], cur["filter1x"]))
+    _, _, grid = _entry_grid(bench.Entry("filter", flt["name"], 44100, 2), covered={
+        (rate, flt["name"], shapers[cur["shaper"]], 44100, 2)})
+    one = grid.points[1]
+    assert (one.filter, one.filter1x, one.shaper, one.rate) == (flt["index"], flt["index"], cur["shaper"], cur["rate"])
+    assert one.key == (rate, flt["name"], shapers[cur["shaper"]], 44100, 2)      # asked though covered
+    # the owner's own entry is the one point
+    _, _, grid = _entry_grid(bench.Entry("shaper", shapers[cur["shaper"]], 44100, 2))
+    assert [p.own for p in grid.points] == [True]
+    with pytest.raises(bench._Abort, match="does not list nothing-such"):
+        _entry_grid(bench.Entry("filter", "nothing-such", 44100, 2))
+
+
+def test_a_run_of_one_entry_plays_only_a_pcm_stereo_source():
+    assert bench.measurable(44100, 2) and bench.measurable(768000, 2)
+    assert not bench.measurable(2822400, 2)        # a DSD source
+    assert not bench.measurable(44100, 1) and not bench.measurable(48000, 6)
+    assert not bench.measurable(0, 2) and not bench.measurable(12345, 2)      # no signal for any rate asked
+
+
 def test_a_later_run_fills_only_the_gaps():
     _, _, first = _grid("desktop_sdm.json", seed=1)
     covered = {p.key for p in first.points[1:-11]}   # all but ten points asked since
@@ -852,6 +893,111 @@ def test_a_run_measures_into_the_ledger_puts_hqplayer_back_and_returns_the_outpu
     # a second run only checks the owner's setting again: every point was
     # asked, the refused ones included
     assert [p.own for p in _plan_now(run)] == [True, True]
+
+
+def test_measure_runs_the_benchmark_for_one_entry_and_fills_its_mark(run):
+    fake, mgr = run.fake, run.mgr
+    before = fake.settings()
+    bench.start(entry=bench.Entry("shaper", "ASDM7EC-super", 44100, 2))
+    assert _wait(lambda: mgr.held is not None, 5)
+    assert _wait(lambda: not bench.running(), 60)
+    st = bench.state()
+    assert st["outcome"] == "done", st["note"]
+    assert run.q("SELECT rate_hz, filter, shaper, src_rate, result::text FROM hqp_benchmark_points ORDER BY id") == [
+        (11289600, "poly-sinc-gauss-long", "ASDM7EC", 44100, "measured"),
+        (11289600, "poly-sinc-gauss-long", "ASDM7EC-super", 44100, "measured")]
+    assert run.q("SELECT points_planned, points_measured, outcome::text FROM hqp_benchmark_runs") == [(2, 2, "done")]
+    assert run.q("SELECT DISTINCT src_rate, src_channels FROM hqp_dsp_samples") == [(44100, 2)]
+    assert fake.settings() == before
+    import hqp_library
+    ep = hqp_library.endpoint_by_address("127.0.0.1", fake.port)
+    ctx = hqp_load.context(ep, mode="SDM (DSD)", state={"matrix_profile": None, "convolution": False})
+    marks = hqp_load.headroom(ctx, rate_out=11289600, filter="poly-sinc-gauss-long", shaper="ASDM7EC",
+                              src_rate=44100, src_channels=2)
+    assert set(marks["shapers"]) == {"ASDM7EC", "ASDM7EC-super"}
+    assert _wait(lambda: mgr.held is None and isinstance(mgr.active, HqpBackend), 10)
+
+
+def test_an_entry_hqplayer_refuses_is_said_on_its_row_not_offered_again(run):
+    fake = run.fake
+    fake.unplayable.add(("sinc-L", 11289600))
+    bench.start(entry=bench.Entry("filter", "sinc-L", 44100, 2))
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["outcome"] == "done", bench.state()["note"]
+    assert run.q("SELECT filter, result::text FROM hqp_benchmark_points ORDER BY id") == [
+        ("poly-sinc-gauss-long", "measured"), ("sinc-L", "refused")]
+    import hqp_library
+    ep = hqp_library.endpoint_by_address("127.0.0.1", fake.port)
+    ctx = hqp_load.context(ep, mode="SDM (DSD)", state={"matrix_profile": None, "convolution": False})
+    marks = hqp_load.headroom(ctx, rate_out=11289600, filter="poly-sinc-gauss-long", shaper="ASDM7EC",
+                              src_rate=44100, src_channels=2)
+    assert "sinc-L" not in marks["filters"]
+    assert marks["refused"] == {"filters": {"sinc-L": "refused"}, "shapers": {}}
+    # measured since: the newest answer is a sample, the row has its mark
+    fake.unplayable.clear()
+    _wait(lambda: run.mgr.held is None and isinstance(run.mgr.active, HqpBackend), 10)
+    bench.start(entry=bench.Entry("filter", "sinc-L", 44100, 2))
+    assert _wait(lambda: not bench.running(), 60)
+    marks = hqp_load.headroom(ctx, rate_out=11289600, filter="poly-sinc-gauss-long", shaper="ASDM7EC",
+                              src_rate=44100, src_channels=2)
+    assert "sinc-L" in marks["filters"] and marks["refused"]["filters"] == {}
+
+
+def test_a_refusal_at_an_automatic_rate_is_read_at_the_rate_it_asked(run):
+    """At the automatic rate slot a point asks rate 0 and HQPlayer plays some
+    rate: the refusal is keyed by the slot's (0), the mark by what plays."""
+    fake = run.fake
+    fake.sel[2][0] = 0                                     # the owner's rate: auto
+    fake.unplayable.add(("sinc-L", 11289600))              # what auto plays here
+    bench.start(entry=bench.Entry("filter", "sinc-L", 44100, 2))
+    assert _wait(lambda: not bench.running(), 60)
+    assert run.q("SELECT rate_hz, filter, result::text FROM hqp_benchmark_points ORDER BY id")[-1] == \
+        (0, "sinc-L", "refused")
+    import hqp_library
+    ep = hqp_library.endpoint_by_address("127.0.0.1", fake.port)
+    ctx = hqp_load.context(ep, mode="SDM (DSD)", state={"matrix_profile": None, "convolution": False})
+    marks = hqp_load.headroom(ctx, rate_out=11289600, filter="poly-sinc-gauss-long", shaper="ASDM7EC",
+                              src_rate=44100, src_channels=2, asked_rate=0)
+    assert marks["refused"]["filters"] == {"sinc-L": "refused"}
+
+
+def test_measure_of_an_entry_hqplayer_no_longer_lists_puts_everything_back(run):
+    fake = run.fake
+    before = fake.settings()
+    bench.start(entry=bench.Entry("filter", "gone-since", 44100, 2))
+    assert _wait(lambda: not bench.running(), 30)
+    st = bench.state()
+    assert (st["outcome"], st["note"]) == ("failed", "HQPlayer does not list gone-since in this mode now")
+    assert run.q("SELECT count(*) FROM hqp_benchmark_points") == [(0,)]
+    assert fake.settings() == before
+
+
+def test_the_screen_says_where_one_entry_can_be_measured(run):
+    """`headroom.measurable`: the source the marks are read for is one a
+    run of one entry plays as its test signal; the route refuses any other."""
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    import hqp_library
+    from routers import hqplayer as hqp_router
+    ep = hqp_library.endpoint_by_address("127.0.0.1", run.fake.port)
+    st = {"mode": 2, "rate": 2, "filterNx": 0, "filter1x": 0, "shaper": 0}
+
+    def heard(rate, channels):
+        return SimpleNamespace(src_rate=rate, src_channels=channels, state=PlaybackState.PLAYING,
+                               active_mode="SDM (DSD)", active_rate=11289600,
+                               active_filter="poly-sinc-gauss-long", active_shaper="ASDM7EC")
+    assert hqp_router._headroom(ep, st, heard(44100, 2), {})["measurable"] is True
+    assert hqp_router._headroom(ep, st, heard(2822400, 2), {})["measurable"] is False
+    assert hqp_router._headroom(ep, st, heard(48000, 1), {})["measurable"] is False
+    for entry, mode in ((dict(kind="filter", name="sinc-L", src_rate=2822400, src_channels=2), None),
+                        (dict(kind="rate", name="x", src_rate=44100, src_channels=2), None),
+                        (dict(kind="filter", name="sinc-L", src_rate=44100, src_channels=2), "pcm")):
+        with pytest.raises(HTTPException) as e:
+            hqp_router.start_benchmark(hqp_router.BenchmarkRequest(mode=mode, entry=entry))
+        assert e.value.status_code == 400
+    assert not bench.running()
 
 
 def test_while_held_nothing_else_drives_the_output(run, monkeypatch):

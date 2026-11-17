@@ -963,6 +963,10 @@ class PlaybackManager:
         # HQPlayer 6's further readings (the Apod counter, the output's bits
         # and channels, its delay…): additive, each while HQPlayer gives it.
         new_data.update({k: s.extra[k] for k in STATUS_READINGS if s.extra.get(k) is not None})
+        # HQPlayer's active configuration profile by name (its own saved
+        # setups), while it names one: shown on its screen, never switched
+        if s.extra.get("configuration"):
+            new_data["configuration"] = s.extra["configuration"]
         # The HQPlayer output's own words (playback.hqp_backend): the build it
         # is in, a silence no build of ours explains, the outcome of a DSP
         # change that went through a build, where the play press resumes a

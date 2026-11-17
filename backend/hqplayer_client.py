@@ -1588,6 +1588,27 @@ class HQPlayerClient:
             return None
         return response.get("value", "")
 
+    def configuration_get(self, *, wait: Optional[float] = None) -> Optional[str]:
+        """The name of HQPlayer's active configuration profile (its own saved
+        setups, output device included) — "" for none; None when it did not
+        answer with one. Unauthenticated, as ConfigurationList is; switching
+        one (ConfigurationLoad) is not, and is never sent."""
+        response = self._execute_command("ConfigurationGet", wait=wait)
+        if response is None or self.last_error is not None or response.tag != "ConfigurationGet":
+            return None
+        return response.get("value")
+
+    def configuration_list(self, *, wait: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """HQPlayer's configuration profiles: `active`, the one in use ("" for
+        none; None when the answer names none), and `names`, in its order.
+        None when it did not give the list."""
+        response = self._execute_command("ConfigurationList", wait=wait)
+        if response is None or self.last_error is not None or response.tag != "ConfigurationList":
+            return None
+        return {"active": response.get("active"),
+                "names": [item.get("name") for item in response.findall("ConfigurationItem")
+                          if item.get("name")]}
+
     def matrix_set_profile(self, profile: str) -> bool:
         """
         Set active matrix profile by name.

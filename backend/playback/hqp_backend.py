@@ -1453,6 +1453,21 @@ class HqpBackend(PlayerBackend):
         # What HQPlayer says of itself is asked with the poller's first
         # answer when the attach could not ask it (a build)
         self._info_due = False
+        # HQPlayer's active configuration profile by name (None: none, or it
+        # answers neither ConfigurationGet nor ConfigurationList — HQPlayer 5,
+        # Embedded's older builds), asked after the poller's first answer
+        # after the attach and again after an event that may have changed it:
+        # HQPlayer back (a profile load restarts Embedded's daemon), and what
+        # its Status says it runs (`_active_seen`: mode, filter, shaper, rate)
+        # moving. A profile that changes none of those (only the output
+        # device) waits for the next such event. Only shown.
+        self._configuration: Optional[str] = None
+        self._configuration_due = True
+        self._active_seen: Optional[tuple] = None
+        # Whether its last read was answered: one that answered neither call
+        # is asked again only when HQPlayer comes back (another build may)
+        self._configuration_answers = True
+        self._configuration_silences = 0
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -1583,6 +1598,50 @@ class HqpBackend(PlayerBackend):
                 hqp_library.note_info(ep_id, self._info, here=not _stream_mode())
             except psycopg2.Error as e:
                 logger.warning("HQPlayer's GetInfo not recorded: %s", e)
+
+    def _ask_configuration(self, link) -> None:
+        """The active profile's name, on the poller's tick in a block of its
+        own: a Get HQPlayer leaves unanswered ends that block alone — never
+        the tick's own questions — and is no miss of HQPlayer's. Unanswered,
+        it is one busy just now (a start, a rate change: when what it runs
+        moves) — the name held stands, asked at the next event — or, twice
+        in a row, a build that ignores the call. Answered with neither name — refused, or a build
+        that does not know them — it is asked again only when HQPlayer comes
+        back. A build in progress or a detach leaves it due."""
+        try:
+            with link.asking(until=lambda: not self._running) as hqp:
+                name = self._read_configuration(hqp)
+                silent = name is None and hqp.timed_out
+        except (Building, Dropped):
+            return
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            logger.debug("HQPlayer's configuration profile not read: %s", e)
+            name, silent = None, False
+        self._configuration_due = False
+        if silent:
+            # Twice in a row, it is taken for a build that ignores the call:
+            # each ask would cost the tick the whole wait
+            self._configuration_silences += 1
+            if self._configuration_silences >= 2:
+                # what it named before may be gone: nothing is shown on a guess
+                self._configuration_answers = False
+                self._configuration = None
+            return
+        self._configuration_silences = 0
+        self._configuration_answers = name is not None
+        self._configuration = name or None
+
+    @staticmethod
+    def _read_configuration(hqp: HQPlayerClient) -> Optional[str]:
+        """The active configuration profile's name — "" for none —
+        ConfigurationGet's, else ConfigurationList's `active`; never the list
+        after a Get HQPlayer left unanswered, which would wait as long again.
+        None when HQPlayer answers neither."""
+        name = hqp.configuration_get(wait=QUESTION_WAIT_S)
+        if name is None and not hqp.timed_out:
+            listed = hqp.configuration_list(wait=QUESTION_WAIT_S)
+            name = listed["active"] if listed is not None else None
+        return name
 
     def _recover(self) -> None:
         """A benchmark run cut short left HQPlayer lowered and on its test
@@ -2549,6 +2608,15 @@ class HqpBackend(PlayerBackend):
                             self._serial_before_return = self._serial_seen
                             self._library_check()
                             self._rate_event("state", "lists")
+                            self._configuration_due = True
+                            self._configuration_silences = 0
+                        active = (status.active_mode, status.active_filter,
+                                  status.active_shaper, status.active_rate)
+                        if any(active) and active != self._active_seen:
+                            # What HQPlayer runs moved — a profile loaded in its
+                            # own window among the causes: asked after the block
+                            self._active_seen = active
+                            self._configuration_due |= self._configuration_answers
                         if came_back or self._info_due:
                             # Back — or picked while it built, its attach
                             # asking nothing: what it says of itself
@@ -2650,6 +2718,8 @@ class HqpBackend(PlayerBackend):
 
                 if not self._running:
                     break               # detached meanwhile: what it heard acts on nothing
+                if status is not None and status.state.known and self._configuration_due:
+                    self._ask_configuration(link)
                 if left_state is not None:
                     hqp_benchmark.note_left(self.endpoint_id, left_state, left_lists)
                     hqp_benchmark.note_point(self.endpoint_id, left_state, left_gen)
@@ -2677,13 +2747,13 @@ class HqpBackend(PlayerBackend):
                         self._serial_seen = status.track_serial
                     if self._other_refused is not None and (
                             (status.state == PlaybackState.PLAYING and status.position > 0)
-                            or (hqp_playlist is not None and hqp.last_error is None
+                            or (listed is not None
                                 and [t.get("uri") for t in hqp_playlist] != self._other_refused[3])):
                         # HQPlayer sounds an entry, or holds another playlist than the
                         # one its refusal was read on: that refusal is over (§6.1 P12)
                         self._other_refused = None
                     if (self._refusal_read is not None and status.state == PlaybackState.STOPPED
-                            and hqp_playlist is not None and hqp.last_error is None):
+                            and listed is not None):
                         self._read_refusal_again(status, [t.get("uri") for t in hqp_playlist])
                     self._judge_start(status, playing)
                     if self._reconverge_due and link.owed is None:
@@ -3821,6 +3891,8 @@ class HqpBackend(PlayerBackend):
             extra["source"] = "external"
         if taken:
             extra["taken"] = True
+        if self._configuration is not None:
+            extra["configuration"] = self._configuration
         if item is None or not _http_served(item):
             extra.update(artist=status.artist, album=status.album,
                          song=status.song)

@@ -48,7 +48,7 @@ _CMD_RE = re.compile(r'<(\w+)((?:\s+[\w:]+="[^"]*")*)\s*/>')
 # What only asks: answered after a build, it changes nothing
 _QUESTIONS = frozenset({"Status", "State", "GetInfo", "PlaylistGet", "VolumeRange", "GetModes",
                         "GetFilters", "GetShapers", "GetRates", "MatrixListProfiles",
-                        "MatrixGetProfile"})
+                        "MatrixGetProfile", "ConfigurationGet", "ConfigurationList"})
 _ATTR_RE = re.compile(r'([\w:]+)="([^"]*)"')
 # The lists the fake gives by default: f0…f79 and s0…s79, each at its index
 _NAMED_LISTS = {"GetFilters": ("FiltersItem", "f"), "GetShapers": ("ShapersItem", "s")}
@@ -144,6 +144,12 @@ class FakeHqp:
         # `swap_s` after the answer or the build's end (Desktop 6.3.1, the
         # lab trace of 2026-11-08: B-60)
         self.filter_names = None
+        # Its configuration profiles (Settings › Configurations), by name in
+        # its order, and the active one ("" for none) — ConfigurationList
+        # and ConfigurationGet; None: a build that knows neither, answering
+        # each with a bare OK as the fake answers any command it does not know
+        self.configurations = None
+        self.configuration = ""
         self.slots = {"nx": 0, "x1": 0, "running": 0}
         self.swap_s = 0.5
         self._swap = None
@@ -493,6 +499,12 @@ class FakeHqp:
             if cmd == "GetInfo":
                 return ('<GetInfo name="fake" product="Signalyst HQPlayer Fake" '
                         'version="6" platform="Linux" engine="6.2.3"/>')
+            if cmd == "ConfigurationGet" and self.configurations is not None:
+                return f'<ConfigurationGet value="{escape(self.configuration, {chr(34): "&quot;"})}"/>'
+            if cmd == "ConfigurationList" and self.configurations is not None:
+                return (f'<ConfigurationList active="{escape(self.configuration, {chr(34): "&quot;"})}">'
+                        + "".join(f'<ConfigurationItem name="{escape(n, {chr(34): "&quot;"})}"/>'
+                                  for n in self.configurations) + "</ConfigurationList>")
             if cmd == "PlaylistAdd" and any(part in attrs["uri"] for part in self.refuse):
                 return '<PlaylistAdd result="Error">Failed to open the file</PlaylistAdd>'
             if cmd == "PlaylistAdd":
@@ -1081,6 +1093,134 @@ def test_hqplayers_limiter_count_reaches_the_status(fake, listens):
         assert _wait(lambda: mgr._latest_status.get("limited") == 3)
     finally:
         b.shutdown()
+
+
+def _configuration_asks(fake) -> list:
+    with fake._lock:
+        return [c for c, _ in fake.commands if c.startswith("Configuration")]
+
+
+def test_hqplayers_active_configuration_profile_rides_the_status_read_at_events_alone(fake, listens):
+    """HQP-WORDS-S: the active profile's name, read at the attach and again
+    when HQPlayer comes back from a restart — a profile load restarts
+    Embedded's daemon — never on a tick of its own."""
+    fake.configurations, fake.configuration = ["Living room", "Headphones"], "Living room"
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        assert _wait(lambda: mgr._latest_status.get("configuration") == "Living room")
+        _polls(fake, 3)
+        assert _configuration_asks(fake) == ["ConfigurationGet"]
+        with fake._lock:
+            fake.configuration = "Headphones"
+        _polls(fake, 2)
+        assert mgr._latest_status["configuration"] == "Living room"    # no event, no question
+        fake.restart()
+        assert _wait(lambda: mgr._latest_status.get("configuration") == "Headphones")
+        assert _configuration_asks(fake) == ["ConfigurationGet"] * 2
+    finally:
+        b.shutdown()
+
+
+def test_what_hqplayer_runs_moving_asks_for_its_configuration_profile_again(fake, listens):
+    """A profile loaded in HQPlayer's own window moves what its Status says
+    it runs: asked once more — never while the Status says the same."""
+    fake.configurations, fake.configuration = ["A", "B"], "A"
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        assert _wait(lambda: mgr._latest_status.get("configuration") == "A")
+        _polls(fake, 3)
+        assert _configuration_asks(fake) == ["ConfigurationGet"]
+        with fake._lock:
+            fake.configuration = "B"
+            fake.active = {**fake.active, "filter": "sinc-M", "rate": 352800}
+        assert _wait(lambda: mgr._latest_status.get("configuration") == "B")
+        _polls(fake, 3)
+        assert _configuration_asks(fake) == ["ConfigurationGet"] * 2
+    finally:
+        b.shutdown()
+
+
+@pytest.mark.parametrize("answer", ["refused", "unknown"])
+def test_an_hqplayer_that_names_no_configuration_profile_shows_none_and_is_asked_once(fake, listens, answer):
+    """Refused, or answered as a command it does not know (the fake's bare
+    OK): Get, then the list's `active`, once — no status key, nothing asked
+    again without an event."""
+    if answer == "refused":
+        for cmd in ("ConfigurationGet", "ConfigurationList"):
+            fake.replies[cmd] = f'<{cmd} result="Error"/>'
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        assert _wait(lambda: _configuration_asks(fake) == ["ConfigurationGet", "ConfigurationList"])
+        with fake._lock:
+            fake.active = {**fake.active, "filter": "sinc-M"}       # an event: still not asked again
+        _polls(fake, 3)
+        assert "configuration" not in mgr._latest_status
+        assert _configuration_asks(fake) == ["ConfigurationGet", "ConfigurationList"]
+        fake.restart()                                              # back: another build may answer
+        assert _wait(lambda: len(_configuration_asks(fake)) == 4)
+    finally:
+        b.shutdown()
+
+
+def test_the_configuration_list_names_the_active_profile_where_get_names_none(fake, listens):
+    fake.configurations, fake.configuration = ["Desk"], "Desk"
+    fake.replies["ConfigurationGet"] = '<ConfigurationGet result="Error"/>'
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        assert _wait(lambda: mgr._latest_status.get("configuration") == "Desk")
+    finally:
+        b.shutdown()
+
+
+def test_a_configuration_get_left_unanswered_asks_no_list_after_it(fake, listens, monkeypatch):
+    """A Get HQPlayer leaves unanswered ends its own block alone: no miss, no
+    return read into the next tick; the name held stands (HQPlayer busy at a
+    start), asked at the next event — and after a second silence in a row,
+    not until HQPlayer comes back (a build that ignores the call)."""
+    monkeypatch.setattr(hb, "QUESTION_WAIT_S", 0.3)
+    fake.configurations, fake.configuration = ["Desk"], "Desk"
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        assert _wait(lambda: mgr._latest_status.get("configuration") == "Desk")
+        fake.service["ConfigurationGet"] = 1.0
+        with fake._lock:
+            fake.active = {**fake.active, "filter": "sinc-M"}
+        assert _wait(lambda: _configuration_asks(fake) == ["ConfigurationGet"] * 2)
+        _polls(fake, 4)
+        assert _configuration_asks(fake) == ["ConfigurationGet"] * 2       # no list after a silence
+        assert mgr._latest_status.get("configuration") == "Desk"            # the name held stands
+        assert b._failures == 0 and mgr._latest_status.get("state") != "disconnected"
+        with fake._lock:
+            assert [c for c, _ in fake.commands].count("GetInfo") == 1       # no return read
+            fake.active = {**fake.active, "filter": "sinc-L"}
+        assert _wait(lambda: _configuration_asks(fake) == ["ConfigurationGet"] * 3)
+        with fake._lock:
+            fake.active = {**fake.active, "filter": "sinc-S"}
+        _polls(fake, 4)
+        assert _configuration_asks(fake) == ["ConfigurationGet"] * 3        # twice silent: left alone
+        assert "configuration" not in mgr._latest_status                    # and nothing on a guess
+    finally:
+        b.shutdown()
+
+
+def test_the_client_reads_the_configuration_profiles_as_hqplayer_words_them(fake, client):
+    fake.configurations, fake.configuration = ['Room "A"', "Desk"], 'Room "A"'
+    assert client.configuration_get() == 'Room "A"'
+    assert client.configuration_list() == {"active": 'Room "A"', "names": ['Room "A"', "Desk"]}
+    fake.replies["ConfigurationGet"] = '<ConfigurationGet result="Error">not authenticated</ConfigurationGet>'
+    assert client.configuration_get() is None and client.refusal() == "not authenticated"
+    fake.replies["ConfigurationList"] = '<Stop result="OK"/>'          # another command's answer
+    assert client.configuration_list() is None
 
 
 def test_the_published_near_full_scale_table_reaches_the_status_for_the_meters_arc(fake, listens, monkeypatch,
