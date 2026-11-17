@@ -183,6 +183,12 @@ POINT_S = 14.0
 # about speed and stop nothing: HQPlayer refuses the AHM modulators from 64×
 # to 512× and runs them at 1024×.
 LADDER_START = {"sdm": 256, "pcm": 8}
+# The source rates a run of one entry plays as a test signal (one file each,
+# made once): the PCM rates of the 44.1k, 48k and 32k families up to PCM's
+# top as HQPlayer's screen names rates (hqp_atlas.rate_name) — above it a
+# source is DSD.
+ENTRY_RATES = frozenset({8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200,
+                         96000, 176400, 192000, 352800, 384000, 705600, 768000})
 # A dropped connection is tried again at once, then after these pauses.
 _RECONNECT_PAUSES = (1.0, 2.0, 4.0, 8.0)
 _DB_EPS = 0.05                    # volumes read back within this are the same
@@ -408,14 +414,10 @@ def running_filter(names: Dict[int, str], nx: int, x1: int, src_rate: int) -> st
     return names.get(running_slot(nx, x1 if x1 >= 0 else None, src_rate), "")
 
 
-def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: List[dict],
-               current: Dict[str, int], srcs: Dict[str, dict], covered: set,
-               keeps_up: Dict[tuple, bool], rng: random.Random) -> Plan:
-    """The points of one run (see the module docstring): the owner's own
-    setting first and last; between them the ladders' starts with every
-    point of one rate, shuffled, then each step up the ladders and down
-    those whose start already does not keep up, each shuffled — less every
-    key covered and every rung a neighbour already answers for."""
+def _pointer(filters: List[dict], shapers: List[dict], rates: List[dict],
+             srcs: Dict[str, dict]) -> Callable[..., Point]:
+    """What makes a run's points over HQPlayer's lists: a point by the
+    indices it sends, keyed and labelled by the names HQPlayer runs."""
     fname = {f["index"]: f["name"] for f in filters}
     sname = {s["index"]: s["name"] for s in shapers}
     hz = {r["index"]: r["rate"] for r in rates}
@@ -428,6 +430,19 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
         rate_txt = rate_name(rate_hz) if rate_hz else "auto rate"
         label = f"{running} · {sname.get(shaper, '')} · {rate_txt} · {rate_name(s['rate'])} source"
         return Point(rate, rate_hz, nx, x1, shaper, src, label, key, own)
+    return point
+
+
+def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: List[dict],
+               current: Dict[str, int], srcs: Dict[str, dict], covered: set,
+               keeps_up: Dict[tuple, bool], rng: random.Random) -> Plan:
+    """The points of one run (see the module docstring): the owner's own
+    setting first and last; between them the ladders' starts with every
+    point of one rate, shuffled, then each step up the ladders and down
+    those whose start already does not keep up, each shuffled — less every
+    key covered and every rung a neighbour already answers for."""
+    hz = {r["index"]: r["rate"] for r in rates}
+    point = _pointer(filters, shapers, rates, srcs)
 
     cur_rate, nx, x1, cur_shaper = (current["rate"], current["filterNx"],
                                     current["filter1x"], current["shaper"])
@@ -506,6 +521,51 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
         points += batch
     return Plan(points=[*points, own], rungs=rungs, known=dict(keeps_up),
                 covered=frozenset(covered), sweep=frozenset(p.key for p in sweep))
+
+
+@dataclass(frozen=True)
+class Entry:
+    """One picker entry measured alone — "Measure" on a row the screen marks
+    "Not measured on this computer": a filter or a shaper (a dither, a
+    modulator) by name, at the owner's setting otherwise, for the source its
+    mark is read at (routers.hqplayer._headroom)."""
+    kind: str                 # 'filter' | 'shaper'
+    name: str
+    src_rate: int
+    src_channels: int
+
+
+def measurable(src_rate: int, src_channels: int) -> bool:
+    """A source a run of one entry plays as itself: PCM stereo, what the test
+    signals are (ensure_signal). A DSD source a full run measures on the
+    owner's own DSD file (sources)."""
+    return src_channels == 2 and src_rate in ENTRY_RATES
+
+
+def entry_grid(entry: Entry, *, filters: List[dict], shapers: List[dict], rates: List[dict],
+               current: Dict[str, int], covered: set, keeps_up: Dict[tuple, bool]) -> Plan:
+    """The points of a run of one entry: the owner's setting first — every
+    run's control, what a refusal or a start that never comes is judged
+    against (_points) — then the entry at the owner's setting otherwise, a
+    filter in both slots: the one key its row's mark reads, at the owner's
+    rate on the source the mark is read for. No ladder (the rate at which it
+    keeps up is the full run's question, not the row's) and no drift check
+    (a run of two points has no time to drift). Asked even when covered: the
+    owner asked for it. Raises _Abort when HQPlayer does not list the entry
+    in the mode it is in."""
+    rows = filters if entry.kind == "filter" else shapers
+    index = next((r["index"] for r in rows if r["name"] == entry.name), None)
+    if index is None:
+        raise _Abort(f"HQPlayer does not list {entry.name} in this mode now")
+    point = _pointer(filters, shapers, rates,
+                     {"signal": {"rate": entry.src_rate, "channels": entry.src_channels}})
+    rate, nx, x1, shaper = (current["rate"], current["filterNx"], current["filter1x"],
+                            current["shaper"])
+    own = point(rate, nx, x1, shaper, "signal", own=True)
+    one = (point(rate, index, index, shaper, "signal") if entry.kind == "filter"
+           else point(rate, nx, x1, index, "signal"))
+    return Plan(points=[own] if one.key == own.key else [own, one], rungs={},
+                known=dict(keeps_up), covered=frozenset(covered))
 
 
 def _ladder_start(kind: str, rungs: List[Point], src_rate: int) -> int:
@@ -931,8 +991,10 @@ def summary(endpoint: Optional[dict]) -> Dict[str, Any]:
     return out
 
 
-def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[str, Any]:
-    """Start a run of `mode` ('pcm' | 'sdm'; None = the mode HQPlayer is in).
+def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False,
+          entry: Optional[Entry] = None) -> Dict[str, Any]:
+    """Start a run of `mode` ('pcm' | 'sdm'; None = the mode HQPlayer is in),
+    or of one `entry` alone in the mode HQPlayer is in (entry_grid).
     Raises BenchmarkRefused with the reason when it cannot start now."""
     from playback.manager import manager
     if running():
@@ -971,7 +1033,7 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
     # again once HQPlayer answers.
     unsaid = recover(ep["id"], link, gave=b.gave, quiet=True)
     try:
-        return _start_run(ep, link, b, mode, fixed_volume_ok, unsaid)
+        return _start_run(ep, link, b, mode, fixed_volume_ok, unsaid, entry)
     except BenchmarkRefused:
         if unsaid:
             _notify()       # the mark the run would have judged at once: no run follows
@@ -979,7 +1041,7 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
 
 
 def _start_run(ep: dict, link, b, mode: Optional[str], fixed_volume_ok: bool,
-               unsaid: bool) -> Dict[str, Any]:
+               unsaid: bool, entry: Optional[Entry] = None) -> Dict[str, Any]:
     """start() once a run cut short is put back: what HQPlayer answers is the
     precondition, and the run's thread starts — `unsaid`: the put-back left
     a mark for it to judge, said at its end (_run). A run of "the mode
@@ -1030,7 +1092,7 @@ def _start_run(ep: dict, link, b, mode: Optional[str], fixed_volume_ok: bool,
         _state.update(running=True, cancel_requested=False, endpoint_id=ep["id"], mode=kind,
                       point=0, total=0, point_label="Preparing…", eta_s=None,
                       started_at=time.time(), outcome=None, note=None)
-        _thread = threading.Thread(target=_run, args=(ep, kind, b.gave, mode, unsaid),
+        _thread = threading.Thread(target=_run, args=(ep, kind, b.gave, mode, unsaid, entry),
                                    daemon=True, name="hqp-benchmark")
         _thread.start()
     return state()
@@ -1078,7 +1140,7 @@ def _why(e: Exception) -> str:
 
 
 def _run(ep: dict, kind: str, gave: Callable[[str], bool], asked: Optional[str],
-         unsaid: bool) -> None:
+         unsaid: bool, entry: Optional[Entry] = None) -> None:
     """The job's thread. Whatever ends it is recorded where the owner reads
     it (state(), and the run row once there is one); the job is closed
     before the output goes back — the attach that takes it back then finds
@@ -1088,7 +1150,7 @@ def _run(ep: dict, kind: str, gave: Callable[[str], bool], asked: Optional[str],
     try:
         with manager.hold("benchmark", LABEL):
             try:
-                outcome, note = _measure(ep, kind, gave, asked)
+                outcome, note = _measure(ep, kind, gave, asked, entry)
             except (_Abort, _Lost) as e:
                 outcome, note = "failed", str(e)
             except Exception as e:      # the job's boundary: recorded, never lost
@@ -1117,7 +1179,7 @@ def _finish(outcome: str, note: Optional[str]) -> None:
 
 
 def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
-             asked: Optional[str]) -> Tuple[str, Optional[str]]:
+             asked: Optional[str], entry: Optional[Entry] = None) -> Tuple[str, Optional[str]]:
     """The run proper, inside the hold: put back what a run cut short before
     it still owes (`gave` tells an entry the node gave HQPlayer), read what
     is to be put back, open the run row, measure, and put everything back
@@ -1162,9 +1224,16 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
                 own = {"mode": mode_index, "rate": st["rate"], "filterNx": st["filterNx"],
                        "filter1x": st["filter1x"], "shaper": st["shaper"]}
                 _note_own(run_id, own)
-            srcs = sources(kind, ep.get("hqp_engine"))
-            grid = plan(ep, kind=kind, mode_name=mode_name, state=st, filters=filters,
-                        shapers=shapers, rates=rates, srcs=srcs)
+            if entry is None:
+                srcs = sources(kind, ep.get("hqp_engine"))
+                grid = plan(ep, kind=kind, mode_name=mode_name, state=st, filters=filters,
+                            shapers=shapers, rates=rates, srcs=srcs)
+            else:
+                srcs = {"signal": {"rate": entry.src_rate, "channels": entry.src_channels}}
+                ctx = hqp_load.context(ep, mode=mode_name, state=st)
+                grid = entry_grid(entry, filters=filters, shapers=shapers, rates=rates,
+                                  current=st, covered=hqp_load.covered(ctx),
+                                  keeps_up=hqp_load.keeps_up(ctx))
             _progress(point=0, total=grid.asks(), point_label="Preparing the test signals…",
                       eta_s=None)
             used = {p.source for p in grid.points}

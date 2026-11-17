@@ -166,6 +166,29 @@ no internet access ("not authenticated and no internet access").
   - `track_gain` - the adaptive gain HQPlayer applies to the track
     (`<metadata gain>`, dB): −9.68 on a loud master with adaptive gain on, 0
     with it off; with the volume, what stands ahead of the limiter
+- `configuration_get()` / `configuration_list()` - HQPlayer's configuration
+  profiles (its own saved setups, output device included): the active one's
+  name (`<ConfigurationGet value>`), and the list with `active`
+  (`<ConfigurationList active><ConfigurationItem name/>…`). Unauthenticated;
+  switching one (`ConfigurationLoad`) needs an authenticated session and is
+  never sent. Since 2026-11-17 the HQPlayer output reads the active name
+  after the poller's first answer following the attach, and again after an
+  event that may have changed it — HQPlayer back after a restart (a profile
+  load restarts Embedded's daemon), or what its Status says it runs
+  (`active_mode`, `active_filter`, `active_shaper`, `active_rate`) moving; a
+  profile that changes none of those (the output device alone) waits for
+  the next such event. Get first, the list's `active` when Get gave none
+  (never after a Get left unanswered), in a block of questions of its own:
+  a silence there is no miss of HQPlayer's and ends none of the tick's
+  questions; an ask left unanswered keeps the name held until the next event
+  (HQPlayer busy at a start), and after a second silence in a row since it
+  last came back the HQPlayer is taken for a build that ignores the call and
+  no name is shown. One that answers with
+  neither name (5.x, Embedded's older builds, a refusal) or ignores the call
+  is asked again only when it comes back. The name rides the player status
+  as `configuration` while HQPlayer names one, and the HQPlayer screen shows
+  it as the row "Profile · {name}" under the connection, kept in place; no
+  row while HQPlayer names none.
 - `get_info()` - Get HQPlayer info
   - Product name
   - Version
@@ -1609,6 +1632,11 @@ listens and analysis follow it (`_update_track_uuid`).
 The scan itself starts in HQPlayer's web interface (or by a Digest-
 authenticated `POST /library` — an unauthenticated POST is dropped without a
 401; leave "Perform analysis" off, it costs ~1.5 min per album on a Pi 5).
+A sync reads only what HQPlayer's scan put in its library, and a running
+HQPlayer that rescans triggers no sync, so since 2026-11-17 the Library block
+of an imported library says one line under its chips: "Added music? Scan in
+HQPlayer's web interface first, then Sync library." — for a Desktop on
+another computer, which has no web interface, "Scan in HQPlayer first".
 
 ### Diagnostics — why didn't it play? (2026-10-02)
 
@@ -2087,7 +2115,27 @@ cooling — so Sautium measures it instead of predicting it
   ended (a run a trial-mode Embedded cut short at the half hour included),
   at the speed that point itself showed, never the key's p10 that later
   listens move. A key measured again without a dropout no longer counts.
-  Nothing is blocked; an entry never measured is unmarked.
+  Nothing is blocked; an entry never measured has no mark and, since
+  2026-11-17, the muted line "Not measured on this computer" on its row of
+  the filter and modulator sheets (a PCM dither's plain picker says
+  nothing) — said only where the marks are read for a known source and
+  setting (`headroom.setting`). A key a benchmark asked for that HQPlayer
+  refused or never got going here (its newest answer, `headroom.refused`)
+  says "HQPlayer refuses it at this setting" or "HQPlayer never got it going
+  on this computer" instead, with nothing to run (a point is keyed by the
+  rate it asked — 0 at the automatic rate slot — a mark by the rate that
+  plays; both are read). Where a run can play the
+  source as a test signal — PCM stereo at a rate of the 44.1k, 48k or 32k
+  families up to 768 kHz, `headroom.measurable` — and a run could start, the
+  line ends in **Measure**:
+  the benchmark for that entry alone (`POST /api/hqplayer/benchmark` with
+  `{"entry": {"kind": "filter"|"shaper", "name", "src_rate",
+  "src_channels"}}`, the source the state's `headroom.source` named; in the
+  mode HQPlayer is in). Its points (`hqp_benchmark.entry_grid`): the owner's
+  own setting — every run's control — then the entry with the rest of the
+  owner's setting, at the owner's rate, the one key the row's mark reads; no
+  ladder, no drift check, asked even when an earlier answer covers it. The
+  hold, the lowered volume, the put-back and the ledger are every run's.
 - **The benchmark** (`POST /api/hqplayer/benchmark`, `GET` for its state and
   the results, `…/cancel`): one mode — the one HQPlayer is in; the other only
   when asked (`{"mode": "pcm"}`) — and only the points nothing covers yet

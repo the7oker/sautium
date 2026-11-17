@@ -9122,6 +9122,27 @@
     el.hidden = !text;
   }
 
+  // HQPlayer's active configuration profile (its own saved setups), as the
+  // status names it (playback.hqp_backend, read at the attach and after
+  // HQPlayer's own changes): shown only — switching one takes an
+  // authenticated client. No row for an HQPlayer that names none; kept
+  // current in place, never a re-render.
+  function hqpProfileRow(status) {
+    const name = (status && status.configuration) || '';
+    return `<div class="hqp-row" data-hqp-profile${name ? '' : ' hidden'}>
+        <span class="hqp-row-label">Profile</span>
+        <span class="hqp-row-value">${escapeHtml(name)}</span>
+      </div>`;
+  }
+  function updateHqpProfile(status) {
+    const row = document.querySelector('[data-hqp-profile]');
+    if (!row || !status || status.state === 'disconnected') return;
+    const name = status.configuration || '';
+    const value = row.querySelector('.hqp-row-value');
+    if (value.textContent !== name) value.textContent = name;
+    row.hidden = !name;
+  }
+
   // The Library row follows a running sync over the library wake channel
   // (the one Settings › Library uses): the progress lands in the hint, the
   // end restores the row — in place, never a re-render of the DSP screen.
@@ -9150,6 +9171,12 @@
   const _hqpLibHint = (synced) => synced
     ? 'Variants of your albums here; re-checked whenever the output attaches.'
     : 'Its albums become variants of yours: the copy plays natively there and streams elsewhere.';
+  // A sync reads what HQPlayer's library holds, and HQPlayer adds a new file
+  // to it only at its own scan — on an Embedded box from its web interface;
+  // a Desktop on another computer has none, its scan is in its window.
+  const _hqpLibScanHint = (embedded) => embedded
+    ? "Added music? Scan in HQPlayer's web interface first, then Sync library."
+    : 'Added music? Scan in HQPlayer first, then Sync library.';
   const HQP_SYNC_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
         stroke-linejoin="round" aria-hidden="true">
@@ -9589,28 +9616,33 @@
       </section>`;
   }
 
-  async function runHqpBenchmark(s, mode) {
+  // `entry`: one picker entry measured alone ({kind, name, src_rate,
+  // src_channels} — the source its mark is read for), in the mode HQPlayer
+  // is in: the owner's own setting, then that entry with the rest of it.
+  async function runHqpBenchmark(s, mode, entry = null) {
     const b = s.benchmark || {};
-    const est = !mode && b.estimate;
+    const est = !mode && !entry && b.estimate;
     const what = mode ? `its ${mode.toUpperCase()} settings — HQPlayer switches to ${mode.toUpperCase()} and back`
       : `the ${est ? est.points + ' ' : ''}${escapeHtml(est ? est.mode : '')} settings not measured here yet`;
-    const lines = [
-      `Sautium stops playback and plays test noise through ${escapeProfileHtml(s.label || 'HQPlayer')}${
-        b.volume_control ? ' at its lowest volume' : ''}${est ? ' for ' + fmtAbout(est.seconds) : ''}, through ${what}.`,
-      'The DAC may click its relays when the rate changes. Your queue comes back when it is done.',
-    ];
+    const through = `Sautium stops playback and plays test noise through ${escapeProfileHtml(s.label || 'HQPlayer')}${
+      b.volume_control ? ' at its lowest volume' : ''}`;
+    const lines = entry
+      ? [`${through}: your own setting, then ${escapeHtml(entry.name)} with the rest of it.`,
+         'Your queue comes back when it is done.']
+      : [`${through}${est ? ' for ' + fmtAbout(est.seconds) : ''}, through ${what}.`,
+         'The DAC may click its relays when the rate changes. Your queue comes back when it is done.'];
     if (!b.volume_control) lines.push('<b>HQPlayer cannot turn the noise down below your level on this output — turn your amplifier down first.</b>');
     if (!b.cuda) lines.push('CUDA offload is not known for this HQPlayer: what is measured now is kept apart from runs after you set it.');
     const ok = await window.confirmDestructive({
-      title: 'Run the benchmark?', message: lines.join('<br><br>'),
-      confirmText: 'Run', confirmKind: 'primary',
+      title: entry ? `Measure ${entry.name}?` : 'Run the benchmark?', message: lines.join('<br><br>'),
+      confirmText: entry ? 'Measure' : 'Run', confirmKind: 'primary',
     });
     if (!ok) return;
     let r, out;
     try {
       r = await fetch('/api/hqplayer/benchmark', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ mode: mode || null, fixed_volume_ok: !b.volume_control }),
+        body: JSON.stringify({ mode: mode || null, entry, fixed_volume_ok: !b.volume_control }),
       });
       out = await r.json();
     } catch (err) {
@@ -10126,12 +10158,14 @@
           <p class="hqp-row-hint is-left" data-hqp-lib-hint>${escapeProfileHtml(
             libRunning ? (libCancelling ? 'Finishing the current file…' : libProgress) : _hqpLibHint(lib.synced))}</p>
           ${!libRunning && libProgress ? `<p class="hqp-row-hint is-left" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(libProgress)}</p>` : ''}
+          ${lib.synced && !libRunning ? `<p class="hqp-row-hint is-left" data-hqp-lib-scan>${escapeHtml(_hqpLibScanHint(s.embedded))}</p>` : ''}
         </section>` : '';
 
       body.innerHTML = `
         <section class="hqp-section">
           <div class="hqp-section-label">Connection</div>
           ${connBlock}
+          ${hqpProfileRow(s.connected && window.currentStatus)}
           <p class="hqp-row-hint is-left" data-hqp-build-note${buildNote ? '' : ' hidden'}>${escapeHtml(buildNote)}</p>
           ${missingNote ? `<p class="hqp-row-hint is-left">${escapeHtml(missingNote)}</p>` : ''}
         </section>
@@ -10365,6 +10399,12 @@
   // an identical group of three or more are joined by a rule under the
   // group's head, drawn once above each run of them the search leaves
   // together.
+  // A row without a mark that a benchmark asked for all the same
+  // (hqp_load.headroom's `refused`): Measure would end alike
+  const HQP_UNMEASURED = {
+    refused: 'HQPlayer refuses it at this setting',
+    unstarted: 'HQPlayer never got it going on this computer',
+  };
   function openHqpSheet(state, kind, onPick) {
     const filter = kind === 'filter';
     const sheet = document.createElement('div');
@@ -10391,7 +10431,19 @@
     const favs = new Set(filter ? state.favorite_filters || [] : []);
     const st = state.state || {};
     const currentIdx = (filter ? st.filterNx : st.shaper) ?? -1;
-    const measured = (state.headroom && state.headroom[filter ? 'filters' : 'shapers']) || {};
+    const hr = state.headroom || {};
+    const measured = hr[filter ? 'filters' : 'shapers'] || {};
+    // Asked here and refused, or never got going: measured, with no speed
+    const refused = (hr.refused || {})[filter ? 'filters' : 'shapers'] || {};
+    // A row's mark is read for one source and setting (hr.setting): known,
+    // a row without one is not measured here — said, not guessed; "Measure"
+    // runs the benchmark for that entry alone, where a run can play the
+    // source the marks are read for (hr.measurable), none runs now and one
+    // could start (no_estimate: unregistered, a list missing, [source] mode).
+    const marksKnown = !!hr.setting;
+    const bench = state.benchmark || {};
+    const canMeasure = marksKnown && !!hr.measurable && !!state.connected
+      && !(bench.job && bench.job.running) && !bench.no_estimate;
     const head = (state.atlas && state.atlas[filter ? 'filters' : 'modulators']) || [];
     const family = filter ? filterFamily : modulatorFamily;
     const search = sheet.querySelector('.hqp-sheet-search');
@@ -10402,8 +10454,11 @@
       const current = r.index === currentIdx;
       const f = r.facts;
       const info = !!(f && f.card);
+      const unmeasured = marksKnown && !measured[r.name];
+      const why = HQP_UNMEASURED[refused[r.name]] || 'Not measured on this computer';
       return `
-        <div class="hqp-sheet-row${current ? ' is-current' : ''}${bracketed ? ' is-bracketed' : ''}" data-idx="${r.index}"
+        <div class="hqp-sheet-row${current ? ' is-current' : ''}${bracketed ? ' is-bracketed' : ''}${
+          unmeasured ? ' is-unmeasured' : ''}" data-idx="${r.index}"
              data-side="${(info ? 1 : 0) + (filter ? 1 : 0)}">
           <button class="hqp-sheet-row-name" type="button" data-pick="${r.index}">
             <span class="hqp-sheet-row-head">
@@ -10413,6 +10468,10 @@
             </span>
             ${hqpFactsHtml(f)}
           </button>
+          ${unmeasured ? `<div class="hqp-sheet-unmeasured">
+            <span>${why}</span>${canMeasure && !refused[r.name]
+              ? `<button class="hqp-chip-btn" type="button" data-measure="${escapeHtml(r.name)}">Measure</button>` : ''}
+          </div>` : ''}
           <div class="hqp-sheet-side">
             ${info ? `<button class="hqp-sheet-info" type="button" data-info="${escapeHtml(r.name)}"
                               aria-label="Details: ${escapeHtml(r.name)}">${SVG_INFO}</button>` : ''}
@@ -10467,6 +10526,13 @@
           const f = entries.find(x => x.index === idx);
           close();
           if (f) onPick(f);
+        });
+      });
+      body.querySelectorAll('[data-measure]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          close();
+          runHqpBenchmark(state, null, { kind: filter ? 'filter' : 'shaper', name: btn.dataset.measure,
+                                         src_rate: hr.source.rate, src_channels: hr.source.channels });
         });
       });
       body.querySelectorAll('[data-info]').forEach(btn => {
@@ -16981,6 +17047,7 @@
       updatePlayingHighlight();
       updateHqpDspReadout(d);
       updateHqpLimited(d);
+      updateHqpProfile(d);
     });
     document.addEventListener('np-detail', e => {
       mp.setCover(e.detail);

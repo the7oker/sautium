@@ -4787,6 +4787,24 @@ a.am-kind { text-decoration: none; }
   align-items: center;
   padding-right: calc(4 * var(--px));
 }
+/* A row never measured on this computer (hqp_load's marks): a muted line
+   under its facts, outside the pick button, with "Measure" at its end —
+   the benchmark for that entry alone. */
+.hqp-sheet-row.is-unmeasured .hqp-sheet-row-name { padding-bottom: calc(4 * var(--px)); }
+.hqp-sheet-unmeasured {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(8 * var(--px));
+  min-height: calc(28 * var(--px));
+  padding: 0 calc(16 * var(--px)) calc(10 * var(--px));
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.hqp-sheet-unmeasured .hqp-chip-btn { flex: none; }
 .hqp-sheet-info {
   width: calc(44 * var(--px));
   height: calc(44 * var(--px));

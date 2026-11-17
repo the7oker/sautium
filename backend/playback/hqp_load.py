@@ -377,7 +377,7 @@ _CLASS = "CASE WHEN speed_p10 < %(no)s THEN 'no' WHEN speed_p10 < %(ok)s THEN 't
 
 
 def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
-             src_rate: int, src_channels: int) -> Dict[str, Any]:
+             src_rate: int, src_channels: int, asked_rate: Optional[int] = None) -> Dict[str, Any]:
     """How each entry of the three pickers runs here, next to the current
     setting: every filter at the current shaper and rate, every shaper at
     the current filter and rate, every rate at the current filter and shaper
@@ -404,6 +404,33 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
             out["shapers"][r["shaper"]] = entry
         if r["filter"] == filter and r["shaper"] == shaper:
             out["rates"][str(r["rate_out"])] = entry
+    # What a benchmark ASKED at a picker entry's key and HQPlayer refused or
+    # never got going here — its newest answer there within the retention, a
+    # sample of the key aside: no speed, so no mark, yet measured all the
+    # same ("refused" | "unstarted"); a row says so instead of offering a run
+    # that ends alike. A point is keyed by the rate it asked — the owner's
+    # rate slot, 0 at an automatic one (`asked_rate`) — a mark by the rate
+    # that plays.
+    asked = db_query(f"""
+        SELECT filter, shaper, result FROM (
+            SELECT DISTINCT ON (p.filter, p.shaper) p.filter, p.shaper, p.result::text AS result
+              FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
+             WHERE {_RUN_KEY} AND p.result <> 'failed'
+               AND p.rate_hz IN (%(rate_out)s, %(asked)s) AND p.src_rate = %(src_rate)s
+               AND p.src_channels = %(src_channels)s
+               AND (p.shaper = %(shaper)s OR p.filter = %(filter)s)
+               AND p.at >= now() - make_interval(days => %(days)s)
+             ORDER BY p.filter, p.shaper, p.at DESC, p.id DESC) newest
+         WHERE result IN ('refused', 'unstarted')
+    """, {**ctx, "rate_out": rate_out, "filter": filter, "shaper": shaper,
+          "src_rate": src_rate, "src_channels": src_channels, "days": RETENTION_DAYS,
+          "asked": rate_out if asked_rate is None else asked_rate})
+    out["refused"] = {"filters": {}, "shapers": {}}
+    for r in asked:
+        if r["shaper"] == shaper:
+            out["refused"]["filters"][r["filter"]] = r["result"]
+        if r["filter"] == filter:
+            out["refused"]["shapers"][r["shaper"]] = r["result"]
     return out
 
 
