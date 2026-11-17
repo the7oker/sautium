@@ -249,3 +249,27 @@ def test_the_delta_lands_on_a_node_that_ran_the_earlier_files(scratch_dsn, libra
     finally:
         conn.rollback()
         conn.close()
+
+
+def test_the_cli_genre_reaches_a_copy_at_the_hqplayer_as_its_year_does(
+        node, library, scratch_dsn):
+    track_filter = pytest.importorskip("track_filter")
+    conn = psycopg2.connect(scratch_dsn)
+    conn.autocommit = True
+    genre = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO genres (id, name) VALUES (%s, 'Gate Jazz')", (genre,))
+        cur.execute("INSERT INTO album_genres (album_id, genre_id, source) "
+                    "VALUES (%s, %s, 'filetag')", (library["albums"]["Dsd"], genre))
+    conn.close()
+    _, sessions = node
+    with sessions() as db:
+        by_genre = {str(t) for t in track_filter.get_filtered_track_ids(db, genre="gate jazz")}
+        by_year = {str(t) for t in track_filter.get_filtered_track_ids(db, year_from=1980)}
+    assert by_genre == by_year == {library["tracks"][n] for n in ("Echo", "Foxtrot")}
+
+
+def test_a_tier_that_is_none_is_named_as_such():
+    import sql_queries
+    with pytest.raises(ValueError, match="lossy, lossless, hi-res"):
+        sql_queries.quality_params("Lossless")

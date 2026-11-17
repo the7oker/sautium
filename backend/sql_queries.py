@@ -118,6 +118,8 @@ QUALITY_TIERS = ("lossy", "lossless", "hi-res")
 def quality_params(tier: str) -> dict:
     """A tier's choice as the gate's two lists: some copy is one of
     `quality_in`, and no copy is one of `quality_above`."""
+    if tier not in QUALITY_TIERS:
+        raise ValueError(f"quality is one of {', '.join(QUALITY_TIERS)}, not {tier!r}")
     lo = QUALITY_TIERS.index(tier)
     hi = 0 if tier == "lossy" else len(QUALITY_TIERS) - 1
     return {"quality_in": list(QUALITY_TIERS[lo:hi + 1]),

@@ -102,11 +102,11 @@ def get_filtered_track_ids(
     # row multiplication across the track's media files / genre sources.
     if genre:
         where_clauses.append("""EXISTS (
-            SELECT 1 FROM media_files mf_g
-            JOIN album_variants av_g ON av_g.id = mf_g.album_variant_id
+            SELECT 1 FROM owned_files f_g
+            JOIN album_variants av_g ON av_g.id = f_g.album_variant_id
             JOIN album_genres ag ON ag.album_id = av_g.album_id
             JOIN genres g ON g.id = ag.genre_id
-            WHERE mf_g.track_id = t.id AND g.name ILIKE :genre)""")
+            WHERE f_g.track_id = t.id AND g.name ILIKE :genre)""")
         params["genre"] = f"%{genre}%"
 
     # Path filter: on media_files.file_path
