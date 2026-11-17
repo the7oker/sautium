@@ -225,6 +225,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
         hqp_library.note_info(ep["id"], info, here=not _stream_mode())
         ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
     response["headroom"] = _headroom(ep, state, status, lists)
+    response["ab"] = _ab_block(ep, state, response["headroom"], lists)
     response["benchmark"] = _benchmark_block(ep, state, lists, volume_range)
     response["volume_range"] = volume_range
     # Said by the server, in the words the volume route and the assistant use.
@@ -390,6 +391,23 @@ def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) ->
                                 src_rate=src[0], src_channels=src[1], asked_rate=asked),
             "setting": {"rate_out": rate_out, "filter": filt, "shaper": shaper},
             "measurable": measurable(*src)}
+
+
+def _ab_block(ep: Optional[dict], state: Optional[dict], headroom: Dict[str, Any],
+              lists: dict) -> Optional[Dict[str, Any]]:
+    """Comparing by ear on this screen (AB-1): the context the track gives —
+    the mode, the slot its source runs, a conversion across rate families —
+    and the person's picks there ("your pick · N", §14.5), from the source
+    and the output rate the headroom marks are read at. None without them."""
+    from playback import hqp_ab
+    src = (headroom.get("source") or {}).get("rate")
+    rate_out = (headroom.get("setting") or {}).get("rate_out")
+    kind = mode_kind(_mode_of(state, lists["modes"])) if state and lists.get("modes") else None
+    if not ep or not src or not rate_out or kind is None:
+        return None
+    ctx = hqp_ab.context_of(kind, state["filterNx"], state["filter1x"], src, rate_out)
+    return {"context": {**ctx, "words": hqp_ab.context_words(ctx)},
+            "picks": hqp_ab.picks(ep["id"], ep.get("hqp_engine") or "", ctx)}
 
 
 def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
@@ -767,3 +785,81 @@ def update_favorite_filter(req: FavoriteRequest) -> Dict[str, Any]:
         favs.remove(name)
     _save_favorites(favs)
     return {"ok": True, "favorite_filters": favs}
+
+
+# -- comparing filters by ear (AB-1) -------------------------------------------------------
+
+class AbOpen(BaseModel):
+    form: Literal["chain", "pair"] = "chain"
+    second: Optional[str] = None          # the pair's other filter: the card's or the block's
+    fixed_volume_ok: bool = False         # W5 read: the warm-up's bursts at their volume
+
+
+class AbAsk(BaseModel):
+    name: Literal["learn", "passage", "form", "begin", "answer", "decide", "stop"]
+    from_s: Optional[float] = None
+    length_s: Optional[float] = Field(default=None, gt=0, le=60.0)   # the sitting clamps it to the view's `lengths`
+    form: Optional[Literal["chain", "pair"]] = None
+    second: Optional[str] = None
+    answer: Optional[Literal["better", "worse", "same", "1", "2"]] = None
+    make: Optional[bool] = None
+
+
+def _ab_refused(e: Exception) -> HTTPException:
+    return HTTPException(status_code=409, detail={"message": str(e), "code": getattr(e, "code", None)})
+
+
+@router.get("/ab")
+def get_ab() -> Dict[str, Any]:
+    """The comparison's sheet: its phase and all it shows — read whole at
+    each change the player status announces (`hold.progress.seq`)."""
+    from playback import hqp_ab
+    return hqp_ab.view()
+
+
+@router.post("/ab")
+def open_ab(req: AbOpen) -> Dict[str, Any]:
+    """A door's tap: the sitting starts with its warm-up; 409 with the
+    reason (and a `code` where the sheet offers a way on) when it cannot."""
+    from playback import hqp_ab
+    try:
+        return hqp_ab.open_sitting(req.form, req.second, fixed_volume_ok=req.fixed_volume_ok)
+    except hqp_ab.Refused as e:
+        raise _ab_refused(e)
+
+
+@router.post("/ab/ask")
+def ask_ab(req: AbAsk) -> Dict[str, Any]:
+    """A tap on the sheet: the sitting's thread takes it when it waits for
+    one of its kind (an answer once the fragment's tail is out)."""
+    from playback import hqp_ab
+    args = req.model_dump(exclude_none=True)
+    name = args.pop("name")
+    need = {"passage": ("from_s", "length_s"), "form": ("form",), "answer": ("answer",),
+            "decide": ("make",)}.get(name, ())
+    if any(k not in args for k in need):
+        raise HTTPException(status_code=400, detail=f"{name} needs {', '.join(need)}")
+    try:
+        return hqp_ab.command(name, **args)
+    except hqp_ab.Refused as e:
+        raise _ab_refused(e)
+
+
+@router.post("/ab/close")
+def close_ab() -> Dict[str, Any]:
+    """The sheet closed: a sitting still going stops and is put back."""
+    from playback import hqp_ab
+    return hqp_ab.close()
+
+
+@router.post("/ab/adopt")
+def adopt_ab() -> Dict[str, Any]:
+    """The pair's "Make it my filter": the other one into the context's slot."""
+    from playback import hqp_ab
+    try:
+        out = hqp_ab.adopt()
+    except hqp_ab.Refused as e:
+        raise _ab_refused(e)
+    except (OutputHeld, Building, Dropped, NotAnswering) as e:
+        raise _busy(e)
+    return {"change": out, "ab": hqp_ab.view()}

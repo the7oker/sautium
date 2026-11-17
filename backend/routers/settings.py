@@ -2178,6 +2178,8 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
         # Another HQPlayer chosen: a run cut short on the one before owes
         # its put-back no more
         hqp_benchmark.left_by_person(before.host, before.port, "another HQPlayer was chosen")
+        from playback import hqp_ab
+        hqp_ab.left_by_person(before.host, before.port)
 
 
 @router.put("/hqplayer")

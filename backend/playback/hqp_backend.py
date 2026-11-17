@@ -58,6 +58,7 @@ from playback import hqp_meter
 from playback import queue as queue_mod
 from playback.base import (Capabilities, OutputRefused, PlaybackStatus, PlayerBackend,
                            ReorderPlan, new_id)
+from playback import hqp_ab
 from playback import hqp_benchmark
 from playback.hqp_benchmark import _building
 from playback.hqp_link import (NOT_ANSWERING, QUESTION_WAIT_S, UNFINISHED, Building, Dropped,
@@ -163,6 +164,7 @@ class _DspChange:
                 # The person's change: a run cut short here owes its put-back
                 # no more — written where it happens, not only on the link
                 hqp_benchmark.left_by_person(link.host, link.port, "a DSP change came first")
+                hqp_ab.left_by_person(link.host, link.port)
                 hqp = link.client
                 self.spot = self._spot_of(hqp.get_status())
                 try:
@@ -1657,6 +1659,10 @@ class HqpBackend(PlayerBackend):
                                   again=self._recover_later)
         except (OSError, RuntimeError, psycopg2.Error) as e:
             logger.warning("benchmark recovery failed: %s", e)
+        try:
+            hqp_ab.recover(self.endpoint_id, self._link)
+        except psycopg2.Error as e:
+            logger.warning("comparison recovery failed: %s", e)
 
     def _recover_later(self) -> None:
         self._recover_due = True
@@ -1744,6 +1750,7 @@ class HqpBackend(PlayerBackend):
         # person switched, so no later answer or restart puts it back
         hqp_benchmark.left_by_person(self._link.host, self._link.port,
                                      "the output was switched away")
+        hqp_ab.left_by_person(self._link.host, self._link.port)
         return told
 
     def _reads_any(self, status, given: _Layout) -> bool:

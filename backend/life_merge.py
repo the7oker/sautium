@@ -59,6 +59,9 @@ LIFE_TABLES = (
     "friend_requests", "chat_sessions", "chat_messages",
     "gear_brands", "gear_models", "user_gear", "gear_pair_notes", "user_profile",
     "p2p_identities", "p2p_node_bans", "p2p_witness", "user_settings",
+    # Comparisons by ear (AB-1), and the HQPlayers they were made on — read
+    # to map a sitting to this node's row of the same HQPlayer, never merged
+    "hqp_endpoints", "hqp_ab_sittings", "hqp_ab_duels",
 )
 
 # Preferences of the person, never of the machine: no hosts, ports, paths,
@@ -615,6 +618,51 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
             refused + "AND s.subject <> ALL({own}::text[]) "
             "AND (s.signature IS NOT NULL OR {same})").format(
             own=sql.Literal([k.lower() for k in own_keys]), same=sql.Literal(same_key)))
+
+        # --- comparisons by ear (AB-1): the person's sittings and their duels,
+        # by the HQPlayer they were made on — this node's row of it, the one
+        # that reports the same name and product about itself, else the one
+        # under the same label — and when each began. A sitting still going,
+        # or one whose HQPlayer has no row here, is not merged; a merged one
+        # owes this HQPlayer no put-back.
+        progress("merging", what="comparisons")
+        run("""CREATE TEMP TABLE _ab_map ON COMMIT DROP AS
+               SELECT s.id AS old_id,
+                      (SELECT e.id FROM hqp_endpoints e
+                        WHERE (se.hqp_name IS NOT NULL AND e.hqp_name = se.hqp_name
+                               AND e.product IS NOT DISTINCT FROM se.product)
+                           OR e.name = se.name
+                        ORDER BY (se.hqp_name IS NOT NULL AND e.hqp_name = se.hqp_name) DESC, e.id
+                        LIMIT 1) AS endpoint_id
+                 FROM _S_.hqp_ab_sittings s
+                 JOIN _S_.hqp_endpoints se ON se.id = s.hqp_endpoint_id
+                WHERE s.ended IS NOT NULL""")
+        waiting["comparisons"] = run("SELECT 1 FROM _ab_map WHERE endpoint_id IS NULL")
+        merged["comparisons"] = run("""
+            INSERT INTO hqp_ab_sittings (hqp_endpoint_id, engine, mode, slot, fractional, form,
+                                         track_id, from_s, length_s, lead_s, silence_s, tolerance_s,
+                                         slipped, learn_plays, before_filter_nx, before_filter_1x,
+                                         before_volume, muted_to, champion, picked, started_at,
+                                         ended_at, ended, owed)
+            SELECT m.endpoint_id, s.engine, s.mode, s.slot, s.fractional, s.form,
+                   (SELECT t.id FROM tracks t WHERE t.id = s.track_id), s.from_s, s.length_s,
+                   s.lead_s, s.silence_s, s.tolerance_s, s.slipped, s.learn_plays,
+                   s.before_filter_nx, s.before_filter_1x, s.before_volume, s.muted_to,
+                   s.champion, s.picked, s.started_at, s.ended_at, s.ended, FALSE
+              FROM _S_.hqp_ab_sittings s JOIN _ab_map m ON m.old_id = s.id
+             WHERE m.endpoint_id IS NOT NULL
+            ON CONFLICT (hqp_endpoint_id, started_at) DO NOTHING""")
+        merged["duels"] = run("""
+            INSERT INTO hqp_ab_duels (sitting_id, n, first_name, second_name, answer, axis,
+                                      check_step, counted, swapped, answered_at)
+            SELECT n.id, d.n, d.first_name, d.second_name, d.answer, d.axis, d.check_step,
+                   d.counted, d.swapped, d.answered_at
+              FROM _S_.hqp_ab_duels d
+              JOIN _S_.hqp_ab_sittings s ON s.id = d.sitting_id
+              JOIN _ab_map m ON m.old_id = s.id
+              JOIN hqp_ab_sittings n ON n.hqp_endpoint_id = m.endpoint_id
+                                    AND n.started_at = s.started_at
+            ON CONFLICT DO NOTHING""")
 
         # --- preferences: the allowlist, missing keys only.
         merged["settings"] = run("""

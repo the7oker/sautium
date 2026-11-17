@@ -460,7 +460,8 @@ Format:
 [SAUTIUM_BLOCKS][
   {{"kind": "artist", "items": [{{"artist_id": "<uuid>"}}, ...]}},
   {{"kind": "album",  "items": [{{"album_id":  "<uuid>"}}, ...]}},
-  {{"kind": "tracks", "items": [{{"track_id": "<uuid>"}}, ...]}}
+  {{"kind": "tracks", "items": [{{"track_id": "<uuid>"}}, ...]}},
+  {{"kind": "hqp_ab", "items": [{{"filter": "<HQPlayer's filter name>"}}]}}
 ][/SAUTIUM_BLOCKS]
 
 Rules for the block list:
@@ -483,6 +484,9 @@ Rules for the block list:
   the MusicBrainz catalog is not installed), you may name it in prose — never in blocks. The
   entities in the blocks must be the SAME ones you discussed.
 - Keep each block compact: at most ~10 items per block. Quality over quantity.
+- `hqp_ab` is a button that compares the named filter with the user's own by ear, blind, on
+  the track playing: add it, with ONE filter name exactly as HQPlayer lists it, when you suggest
+  comparing a filter with the one the user listens to (after hqplayer_ab_pair, for instance).
 - The frontend hydrates each entity's name, year and cover from the IDs you provide,
   so do not duplicate that data inside the marker.
 - If your answer does not reference any concrete library entities (e.g. a generic

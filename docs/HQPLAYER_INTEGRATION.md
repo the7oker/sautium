@@ -1130,6 +1130,67 @@ wish undid is spent as the session opens, never read as the stream's end
 (since 2026-10-13). While the socket is open
 no DSP sample is written (`hqp_load`): metering costs HQPlayer work.
 
+### Comparing by ear (AB-1, 2026-11-17)
+
+`playback/hqp_ab.py` (the engine) and `playback/hqp_ab_search.py` (who is
+compared, in what order, when it stops), behind `/api/hqplayer/ab*` and a
+sheet over the HQPlayer screen ("Compare by ear"). The owner's design is
+ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
+
+- **Two forms.** *Find my filter*: the person's filter (the slot the track's source
+  runs) against one candidate a step — Better / No difference / Worse —
+  the champion replayed after "worse" as a focus check, six steps a
+  sitting; candidates are probed contrast first on three axes the atlas
+  measures (the phase type, the −3 dB point over Nyquist, the ringing in
+  source samples), a bracket per axis narrowed by the answers and resumed
+  from the log at the next sitting; it waits for the atlas. *Two filters,
+  blind*: their filter against one they choose from what this computer keeps
+  up with, "1 / 2" in blocks of two rounds (each side first once a block),
+  stopped by two "no difference", a clear pick (a flat Beta prior,
+  P > 95 %) or ten rounds. Filters only, in PCM and in SDM mode; never PCM
+  against DSD; never a pair at two output rates.
+- **The fragment** is a FLAC cut of the track's own file — the passage the
+  person chose on the sheet, 20 ms fades, after a lead of digital silence
+  (`transcode.flac_fragment_path_for_file`) — handed to HQPlayer through
+  the media proxy. Owned PCM files here only: a track at the HQPlayer's own
+  library, a stream or a DSD file is refused in words.
+- **The start is a resume.** The lab run of 2026-11-17 on Legion's HQPlayer
+  (engine 6.3.3, through the capture stand) found Play's own start
+  unstable — Play to the sound at the output moved by up to 0.94 s in PCM
+  (once 3.77 s) and 1.4 s in SDM, its median with the filter — and a resume
+  from a pause stable (69 ms of spread in PCM, 154 ms in SDM). So each
+  fragment is played into its lead, paused at the meter's first frame of it
+  (all-zero: nothing is heard), and resumed so its sound leaves the output
+  the sitting's silence after the sound before it, or after the person's
+  tap. The meter's onset is a frame's own time (`hqp_meter`'s run `onset`:
+  the read's arrival less the hops after it) plus Status's `output_delay`
+  for the filter — to σ 12–23 ms in PCM, ~0.1 s in SDM.
+- **The warm-up** — at the bottom of HQPlayer's volume range, read back,
+  before the sheet — plays every filter the sitting may play once and
+  measures its delay, its start, its resume's way to the output, its
+  pause's position and how long after its sound its end shows (HQPlayer
+  sends all-zero frames through its output delay after an entry's end, and
+  sinc-M's ran 2 s longer in PCM). The silence is one value a sitting: the
+  slowest end, start and resume plus 0.5 s; the lead the latest pause plus
+  0.3 s, never under 1 s. Every silence played is checked from the same
+  events (0.15 s in PCM, 0.3 s in SDM); a step that missed is played again
+  with the silence grown, never stored as an answer.
+- **The hold.** A sitting holds the output as the benchmark does
+  (`PlaybackManager.hold`, label "Comparing filters"): nothing else drives
+  HQPlayer, no surface names the filter, no listen is recorded. It drives
+  HQPlayer on a connection of its own and taps HQPlayer's meter
+  (`hqp_meter.tap`). A swap writes the context's slot only (1x or Nx), at
+  once. At the end the champion (the chain) or their filter (the pair) and
+  their volume are put back; a sitting the process died in is put back at
+  HQPlayer's next attach (`hqp_ab.recover`); a DSP change from elsewhere or
+  another controller playing ends it as left, nothing put back.
+- **What is kept**: `hqp_ab_sittings` and `hqp_ab_duels`, the person's own
+  record under the track's context (mode, slot, a conversion across rate
+  families) — in the node backup and its life-data merge, never in the
+  sync, carry, the share export, the seed or a support bundle; "Forget
+  this library" removes its sittings. The filter picker shows "your pick ·
+  N" from them, in the current track's context only, never re-sorting.
+
 ## Usage
 
 ### Basic Connection
