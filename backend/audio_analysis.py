@@ -141,11 +141,16 @@ def decode_as_read(row, local_path: str, decode):
     decode (check_whole). Optimistic: nothing waits, the race cannot be
     saved."""
     before = _stat_now(local_path)
+    if before is None:
+        return None             # unreadable now: a failed decode, no refusal to keep
     recorded = recorded_stat(row)
-    if recorded is not None and before is not None and before != recorded:
+    if recorded is not None and before != recorded:
         raise ChangedUnderDecode(f"{local_path} changed since its last read")
     audio = decode()
-    if _stat_now(local_path) != before:
+    after = _stat_now(local_path)
+    if after is None:
+        return None             # a mount's hiccup is no change of the file
+    if after != before:
         raise ChangedUnderDecode(f"{local_path} changed while it was decoded")
     return audio
 
@@ -171,10 +176,13 @@ def refuse(db: Session, row, reason: Exception) -> None:
 
 
 def still_as_read(db: Session, row) -> bool:
-    """Whether the file's row is still the version the pass decoded, held so
-    until the save commits: a re-read waits for it, or came first and the
-    save is not made (the re-read's version is pending again)."""
-    return db.execute(sa_text(f"SELECT 1 FROM media_files WHERE {_AS_READ} FOR SHARE"),
+    """Whether the file's row is still the version the pass decoded, asked
+    right before the save: a re-read that came first is the catalogue's
+    version, pending again, and the save is not made. One that lands between
+    this and the batch's commit unlinks the file's sources (scanner.
+    reread_metadata), so the record saved under them is pending again too:
+    no lock is held through the batch's work."""
+    return db.execute(sa_text(f"SELECT 1 FROM media_files WHERE {_AS_READ}"),
                       _as_read_params(row)).first() is not None
 
 

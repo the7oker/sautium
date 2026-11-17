@@ -127,7 +127,11 @@ class _Inotify:
         self.paths: Dict[int, str] = {}
         self.writing: Set[str] = set()
         self._lock = threading.Lock()
-        self.add_tree(root)
+        try:
+            self.add_tree(root)
+        except OSError:
+            self.close()                # the watches placed so far go with the fd
+            raise
 
     def _add(self, path: str) -> None:
         wd = self._libc.inotify_add_watch(self.fd, os.fsencode(path), self.MASK)
@@ -135,6 +139,9 @@ class _Inotify:
             err = ctypes.get_errno()
             if err in (2, 20):          # gone, or no longer a folder, since the listing
                 return
+            if err == 13:               # a folder the node may not read (lost+found):
+                logger.info(f"Library watch: {path} is not readable, so not watched")
+                return                  # the walk names it unread, as it does today
             raise OSError(err, os.strerror(err), path)
         self.paths[wd] = path
 
@@ -179,6 +186,8 @@ class _Inotify:
         if mask & self.IN_Q_OVERFLOW:
             logger.warning("Library watch: the kernel's event queue overflowed — the whole "
                            "library is scanned")
+            with self._lock:
+                self.writing.clear()    # their closes may be among the events lost
             self.on_dirty(self.root, True)
             return
         folder = self.paths.get(wd)
@@ -188,7 +197,11 @@ class _Inotify:
         if folder is None:
             return
         if mask & self.IN_UNMOUNT:
-            self.on_lost("unmounted")
+            if folder == self.root:
+                self.on_lost("unmounted")
+            else:                       # a mount inside the library went: judged whole
+                self._drop_under(folder)
+                self.on_dirty(folder, True)
             return
         if mask & (self.IN_DELETE_SELF | self.IN_MOVE_SELF) and folder == self.root:
             self.on_lost("the music folder went away")
@@ -212,11 +225,22 @@ class _Inotify:
         if not _watched(name):
             return
         with self._lock:
-            if mask & (self.IN_CREATE | self.IN_MODIFY):
+            if mask & self.IN_MODIFY or (mask & self.IN_CREATE and not self._whole(path)):
                 self.writing.add(path)
                 return
             self.writing.discard(path)
         self.on_dirty(folder, False)
+
+    @staticmethod
+    def _whole(path: str) -> bool:
+        """A file created whole: a hard link to one (Lidarr's import, `cp -l`)
+        or a symlink — no write and no close follow its IN_CREATE."""
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return False
+        import stat as stat_mod
+        return stat_mod.S_ISLNK(st.st_mode) or st.st_nlink > 1
 
     def being_written(self) -> Set[str]:
         with self._lock:
@@ -391,7 +415,7 @@ def state() -> Dict[str, Optional[str]]:
     """The watch as the node knows it: watching, no_events (and why),
     unreachable, not_set."""
     with _lock:
-        return dict(_state)
+        return {"state": _state["state"], "why": _state["why"]}
 
 
 def being_written() -> Set[str]:
@@ -420,25 +444,35 @@ def start(request: Callable) -> None:
     with _lock:
         if _source is not None:
             return
-        if not root or not os.path.isdir(root):
+        if not root:
             _state.update(state=NOT_SET, why=None)
             return
-    if library_unreachable(wake=False):
-        with _lock:
-            _state.update(state=UNREACHABLE, why=None)
-        return
-    root = os.path.abspath(root)
+        if not os.path.isdir(root):         # a drive not plugged in: armed when it is
+            _state.update(state=UNREACHABLE, why="the music folder is not there")
+            return
+        if _state.get("arming"):
+            return
+        _state["arming"] = True
     try:
-        why = mount_kind(root)
-    except OSError as e:
-        why = f"its mount could not be read ({e})"
-    if why is not None:
+        if library_unreachable(wake=False):
+            with _lock:
+                _state.update(state=UNREACHABLE, why=None)
+            return
+        root = os.path.abspath(root)
+        try:
+            why = mount_kind(root)
+        except OSError as e:
+            why = f"its mount could not be read ({e})"
+        if why is not None:
+            with _lock:
+                _state.update(state=NO_EVENTS, why=why)
+            logger.info(f"Library watch: not armed — the music folder's mount is {why}, which "
+                        "delivers no events for other programs' writes; 'Scan for new' finds new music")
+            return
+        _arm(root)
+    finally:
         with _lock:
-            _state.update(state=NO_EVENTS, why=why)
-        logger.info(f"Library watch: not armed — the music folder's mount is {why}, which "
-                    "delivers no events for other programs' writes; 'Scan for new' finds new music")
-        return
-    _arm(root)
+            _state.pop("arming", None)
 
 
 def _arm(root: str) -> None:
@@ -449,8 +483,14 @@ def _arm(root: str) -> None:
         if not rel.startswith(".."):
             _request({rel: recursive}, explicit=False)
 
+    holder = []
+
+    def on_lost(why: str, as_state: str = UNREACHABLE) -> None:
+        _lost(why, as_state, holder[0] if holder else None)
+
     try:
-        source = _SOURCE(root, on_dirty, _lost)
+        source = _SOURCE(root, on_dirty, on_lost)
+        holder.append(source)
     except OSError as e:
         with _lock:
             _state.update(state=NO_EVENTS, why=f"the watch could not be placed ({e})")
@@ -471,17 +511,20 @@ def _run(source) -> None:
         source.run()
     except Exception as e:
         logger.error(f"Library watch failed: {e}", exc_info=True)
-        _lost(f"the watch failed ({e})")
+        _lost(f"the watch failed ({e})", UNREACHABLE, source)
     finally:
         source.close()
 
 
-def _lost(why: str, as_state: str = UNREACHABLE) -> None:
+def _lost(why: str, as_state: str = UNREACHABLE, source=None) -> None:
     """The watch went (the drive unplugged, the folder removed): disarmed,
     nothing removed — a scan is no part of it. It is armed again when the
-    folder answers (folder_back). Past the watch limit it is no_events."""
+    folder answers (folder_back). Past the watch limit it is no_events. A
+    late word from a source already replaced changes nothing."""
     global _source
     with _lock:
+        if source is not None and source is not _source:
+            return
         source, _source = _source, None
         _state.update(state=as_state, why=why)
     if source is not None:

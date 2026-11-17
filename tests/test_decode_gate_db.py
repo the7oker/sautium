@@ -85,9 +85,8 @@ def _short_decode_of(monkeypatch, name):
 
 
 def test_a_short_decode_saves_nothing_and_waits_for_the_file_s_next_read(cur, prints, models,
-                                                                          monkeypatch):
-    track = _track(cur)
-    mf = _file(cur, track, "/music/a.flac")
+                                                                          monkeypatch, tmp_path):
+    _path, track, mf = _real_file(cur, tmp_path, "a.flac")
     prints["/music/a.flac"] = FP
     _short_decode_of(monkeypatch, "a.flac")
 
@@ -106,9 +105,8 @@ def test_a_short_decode_saves_nothing_and_waits_for_the_file_s_next_read(cur, pr
     assert _queued(track) == {"embeddings": True, "features": True, "instruments": True}
 
 
-def test_the_instrument_pass_refuses_a_short_decode_alike(cur, prints, models, monkeypatch):
-    track = _track(cur)
-    mf = _file(cur, track, "/music/a.flac")
+def test_the_instrument_pass_refuses_a_short_decode_alike(cur, prints, models, monkeypatch, tmp_path):
+    _path, track, mf = _real_file(cur, tmp_path, "a.flac")
     prints["/music/a.flac"] = FP
     models.sonic([uuid.UUID(track)])
 
@@ -176,4 +174,23 @@ def test_a_read_between_the_decode_and_the_save_wins(cur, prints, models, monkey
     stats = models.sonic([uuid.UUID(track)])
     assert (stats["refused"], stats["success"]) == (1, 0)
     assert _records(cur, track) == {}
+    assert not _refused(cur, mf)
+
+
+def test_a_stat_that_fails_is_a_failed_decode_not_a_refusal(cur, prints, models, monkeypatch, tmp_path):
+    """A mount's hiccup under the decode is no change of the file: nothing
+    is marked, and the next pass tries again (review round 1, M5)."""
+    path, track, mf = _real_file(cur, tmp_path)
+    prints["/music/b.flac"] = FP
+    calls = []
+    real = audio_analysis.stat_of
+
+    def flaky(p):
+        calls.append(p)
+        if len(calls) == 2:
+            raise OSError(5, "Input/output error")
+        return real(p)
+    monkeypatch.setattr(audio_analysis, "stat_of", flaky)
+    stats = models.sonic([uuid.UUID(track)])
+    assert (stats["refused"], stats["success"], stats["failed"]) == (0, 0, 1)
     assert not _refused(cur, mf)

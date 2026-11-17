@@ -751,7 +751,7 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                     SELECT 1 FROM track_artists ta
                     JOIN owned_files mf ON mf.track_id = ta.track_id
                     WHERE ta.artist_id = ar.id AND ta.role = 'primary'
-                      AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
+                      AND (ar.last_mb_sync IS NULL OR mf.content_at > ar.last_mb_sync))
                 UNION ALL
                 SELECT n.name_key
                 FROM pending_scrobble_artists n

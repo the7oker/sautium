@@ -166,3 +166,22 @@ def test_an_overflow_scans_the_whole_library(library, monkeypatch, cur):
         assert asked == [{"": True}]
     finally:
         library_watch.stop()
+
+
+def test_a_hard_link_is_imported_and_an_overflow_forgets_the_files_in_writing(
+        cur, library, template, watching, main_module, tmp_path):
+    """A hard link (an import by link, `cp -l`) raises IN_CREATE and nothing
+    after it: whole, its folder is scanned; an overflow forgets the files
+    believed still written — their closes may be among the events lost
+    (review round 1, H2)."""
+    import os
+    _clean(cur)
+    src = _flac(template, tmp_path / "dl" / "01.flac", "T1", "Aurora", "LP")
+    dst = library / "A" / "LP" / "01.flac"
+    dst.parent.mkdir(parents=True)
+    assert _settled(main_module, lambda: True)
+    os.link(src, dst)
+    assert _settled(main_module, lambda: len(_rows(cur)) == 1)
+    library_watch._source.writing.add(str(library / "x.flac"))
+    library_watch._source._event(-1, library_watch._Inotify.IN_Q_OVERFLOW, "")
+    assert library_watch.being_written() == set()

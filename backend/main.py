@@ -1693,7 +1693,9 @@ def resume_scans() -> None:
 
 def _scan_loop() -> None:
     """The scan queue's worker: a round per pending request until none is
-    left, the canon after the last round of a burst."""
+    left, the canon after the last round of a burst. The worker leaves only
+    under _scan_lock, in the same step that clears `running`: a request made
+    while it decides is either taken or starts a worker of its own."""
     global _scan_pending
     from datetime import datetime, timezone
     from playback import hqp_benchmark
@@ -1707,18 +1709,18 @@ def _scan_loop() -> None:
                 req = _scan_pending
                 if req is not None and hqp_benchmark.measures_here():
                     req = None          # waits for the benchmark's end (resume_scans)
-                else:
+                elif req is not None:
                     _scan_pending = None
+                if req is None and not imported:
+                    state["running"] = False
+                    break
             if req is None:
-                if imported and not state["cancel_requested"]:
+                if not state["cancel_requested"]:
                     from canon import post_import
                     post_import.run(state, state["result"] or {}, burst_started,
                                     take_arriving=take_arriving)
-                    imported = take_arriving = False
-                    with _scan_lock:
-                        if _scan_pending is not None and not hqp_benchmark.measures_here():
-                            continue
-                break
+                imported = take_arriving = False
+                continue
             state["cancel_requested"] = False
             result = _scan_round(req, burst_started)
             # The canon follows a round that changed the catalogue, and every
@@ -1735,9 +1737,10 @@ def _scan_loop() -> None:
         logger.error(f"Scan worker failed: {e}", exc_info=True)
         state["progress"] = f"Scan failed: {str(e)[:200]}"
         state["result"] = {"error": str(e)}
-    finally:
         with _scan_lock:
             state["running"] = False
+        resume_scans()          # what came in during the failed round
+    finally:
         notify_library_subscribers()
         _announce_done()
 
@@ -1780,7 +1783,8 @@ def _scan_round(req: Dict[str, Any], since) -> Optional[Dict[str, Any]]:
         result = scanner.scan_and_import(
             skip_existing=not req["reread"],
             scopes=None if whole else sorted(scopes.items()),
-            leave=library_watch.being_written(),
+            # a person's or the start's walk reads every file it meets
+            leave=frozenset() if req["explicit"] else library_watch.being_written(),
             progress_cb=progress_cb, cancel_check=cancel_check,
         )
 

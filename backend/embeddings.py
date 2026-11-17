@@ -781,10 +781,10 @@ class AudioEmbeddingGenerator:
         made, failed, not_unit = [], False, False
         try:
             with db.begin_nested():
+                computed = self._compute_segments(audio) if embed else None
                 if not still_as_read(db, row):
                     return "refused", [], False
                 if embed:
-                    computed = self._compute_segments(audio)
                     if computed is None:
                         failed = True
                         logger.error(f"Failed embedding for track {row.track_id}")

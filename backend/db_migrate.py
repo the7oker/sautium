@@ -28,10 +28,11 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      floor existed (2026-09-18). The listen-times step (`listen_times_utc_v1`)
      moves the starts a launcher's tracker wrote as naive local time back to
      the instant they meant (play_stats.repaired_start, 2026-09-24). The
-     variant-credit step (`variant_raw_artist_v1`, 2026-11-17, LIBRARY-WATCH)
-     writes each copy's album credit as the folder rule makes it of its rows'
-     tags (scanner.backfill_variant_credits), for copies made before it was
-     kept: the rule finds a folder's copy by it. The
+     variant-group step (`variant_raw_group_v1`, 2026-11-17, LIBRARY-WATCH)
+     writes each copy's raw title (unwritten before 2026-09-28) and album
+     credit as the folder rule makes them of its rows' tags
+     (scanner.backfill_variant_groups), for copies made before they were
+     kept: the rule finds a folder's copy by them. The
      scrobble step (`scrobble_title_key_v1`) reopens every waiting
      imported-scrobble name once, the day titles came to be compared by a
      folded key (accents, typography, a store's annotation — 2026-09-24).
@@ -718,12 +719,12 @@ def apply_pending() -> dict:
             out["slice_records_cut"] = _cut_slice_records(conn)
             _mark(conn, "slice_records_cut_v1")
 
-        if not _marked(conn, "variant_raw_artist_v1"):
-            from scanner import backfill_variant_credits
+        if not _marked(conn, "variant_raw_group_v1"):
+            from scanner import backfill_variant_groups
             with conn.cursor() as cur:
-                out["variant_credits"] = backfill_variant_credits(cur)
+                out["variant_groups"] = backfill_variant_groups(cur)
             conn.commit()
-            _mark(conn, "variant_raw_artist_v1")
+            _mark(conn, "variant_raw_group_v1")
 
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):

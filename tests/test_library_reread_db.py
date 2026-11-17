@@ -261,3 +261,64 @@ def test_a_cue_sheet_edited_with_the_image_untouched_is_read_again(cur, library,
     rows = _rows(cur)
     assert [r[0] for r in rows] == ids and sorted(r[2] for r in rows) == ["Open", "Two"]
     assert img.exists()
+
+
+def test_a_copy_from_before_its_group_was_kept_is_filled_not_moved(cur, library, template):
+    """A copy scanned before raw_title existed (2026-09-28), its album since
+    re-keyed by the canon: its group is backfilled, and its first re-read by
+    this release moves nothing back to the raw key (review round 1, H1)."""
+    _clean(cur)
+    for i in (1, 2):
+        _flac(template, library / "A" / "X (Remastered)" / f"{i:02d}.flac", f"T{i}", "Aurora",
+              "X (Remastered)", track=i)
+    _scan()
+    moved = _canon_rename(cur, _rows(cur)[0][5], "X")
+    cur.execute("UPDATE album_variants SET raw_title = NULL, raw_artist = NULL")
+    cur.execute("UPDATE media_files SET stat_mtime_ns = NULL")     # read before this release
+    assert scanner.backfill_variant_groups(cur) == 1
+    cur.execute("SELECT raw_title, raw_artist FROM album_variants")
+    assert cur.fetchone() == ("X (Remastered)", "Aurora")
+    cur.execute("UPDATE album_variants SET raw_title = NULL")       # and were it left unfilled
+    _scan()
+    assert {r[5] for r in _rows(cur)} == {moved} and _albums(cur) == (1, 1)
+
+
+def test_a_deluxe_edition_beside_the_album_is_not_taken_for_its_disc(cur, library, template):
+    _clean(cur)
+    _flac(template, library / "A" / "Album" / "01.flac", "A1", "Aurora", "Album", track=1, disc=1)
+    _scan()
+    moved = _canon_rename(cur, _rows(cur)[0][5], "Album [2009]")
+    for d in (1, 2):
+        _flac(template, library / "A" / "Album (Deluxe Edition)" / f"{d}-01.flac", f"D{d}", "Aurora",
+              "Album (Deluxe Edition)", track=1, disc=d)
+    _scan()
+    albums = {r[4].rsplit("/", 1)[-1]: r[5] for r in _rows(cur)}
+    assert albums["Album"] == moved and albums["Album (Deluxe Edition)"] != moved
+
+
+def test_a_compilation_copied_file_by_file_keeps_no_first_artist_credit(cur, library, template):
+    _clean(cur)
+    for i, artist in ((1, "Aurora"), (2, "Björk"), (3, "Caribou")):
+        _flac(template, library / "Mixes" / "Summer" / f"{i:02d}.flac", f"T{i}", artist, "Summer",
+              track=i)
+        _scan()
+    cur.execute("""SELECT ar.name FROM album_artists aa JOIN artists ar ON ar.id = aa.artist_id
+                    WHERE aa.album_id = %s AND aa.role = 'primary'""",
+                (str(album_uuid("Summer", "Various Artists")),))
+    assert cur.fetchall() == [("Various Artists",)]
+
+
+def test_a_read_again_drops_what_was_registered_of_the_file_mid_copy(cur, library, template):
+    """A source the passes registered while the file was being copied (its
+    print of the part there) holds no record once the decode was refused:
+    the file's re-read, its stat moved, drops it (review round 1, M6)."""
+    _clean(cur)
+    f = _flac(template, library / "A" / "LP" / "01.flac", "T1", "Aurora", "LP")
+    _scan()
+    cur.execute("""INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds, imported,
+                                                 media_file_id, is_lossless, bit_depth)
+                   SELECT track_id, 'AQAAA', 3, false, id, true, 16 FROM media_files""")
+    _tag(f, comment="the copy finished")
+    _scan()
+    cur.execute("SELECT count(*) FROM analysis_sources")
+    assert cur.fetchone() == (0,)

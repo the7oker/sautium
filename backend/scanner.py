@@ -389,10 +389,14 @@ class _Albums:
         parent = dir_path.rstrip("/").rpartition("/")[0]
         self._held.pop("sib:" + parent, None)
 
-    def resolve(self, dir_path: str, title: str, credit: str, disc: Optional[int],
+    def resolve(self, dir_path: str, title: str, credit: str, discs: Set[int],
                 exclude_variant: Optional[int] = None) -> Tuple[str, bool]:
         """(album id, minted): the album of a copy this folder or a sibling
-        disc folder holds for the group, else the one the tags mint."""
+        disc folder holds for the group, else the one the tags mint. A
+        sibling is a disc of the same album when a folder name says so, or
+        when this folder's discs — `discs`, the files at hand, with every
+        copy the folder already holds — share none with it: another edition
+        beside it (one disc against a deluxe two) is no disc of it."""
         key = group_key(title, credit)
         self._variants_in([dir_path])
         here = [v for v in self._held[dir_path]
@@ -400,12 +404,14 @@ class _Albums:
                 and group_key(v.raw_title, v.raw_artist) == key]
         if here:
             return max(here, key=lambda v: (v.files, -v.id)).album_id, False
-        disc = disc or 1
+        folder_discs = set(discs or {1})
+        for v in self._held[dir_path]:
+            folder_discs.update(v.discs or [])
         for v in sorted(self._siblings(dir_path), key=lambda v: -v.files):
             if (v.id != exclude_variant and v.raw_artist is not None
                     and group_key(v.raw_title, v.raw_artist) == key
                     and (dir_disc(dir_path) or dir_disc(v.directory_path)
-                         or disc not in (v.discs or []))):
+                         or folder_discs.isdisjoint(v.discs or []))):
                 return v.album_id, False
         return str(album_uuid(title, credit)), True
 
@@ -463,6 +469,10 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     # singles, mixes); the moves it asks of rows already held are the
     # caller's (LibraryScanner.scan_and_import → move_albums).
     dir_albums, _existing = _classify_dirs(entries, sink)
+    batch_discs: Dict[str, Set[int]] = defaultdict(set)
+    for dir_path, md in entries:
+        ov = dir_albums.get(md.get("file_path"), (None, None, None, None))[3]
+        batch_discs[dir_path].add(ov if ov is not None else (md.get("disc_number") or 1))
 
     with get_db_context() as db:
         albums = _Albums(db, sink)
@@ -532,7 +542,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                         album = variant.album
                     else:
                         al_id, minted = albums.resolve(dir_path, album_title, album_artist_name,
-                                                       disc_number)
+                                                       batch_discs[dir_path])
                         album = db.query(Album).filter(Album.id == al_id).first()
                         if not album:
                             album = Album(
@@ -784,7 +794,7 @@ _REREAD_ROWS_SQL = text("""
     SELECT mf.id, mf.track_id::text AS track_id, mf.album_variant_id, mf.file_path,
            mf.cue_start_seconds, mf.raw_track_name, mf.raw_artist, mf.raw_album_artist,
            mf.raw_album, mf.raw_genre, mf.duration_seconds, mf.sample_rate, mf.bit_depth,
-           av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
+           mf.stat_mtime_ns, av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
       FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
      WHERE mf.file_path = ANY(CAST(:paths AS text[]))
 """)
@@ -802,7 +812,9 @@ _REREAD_SQL = text("""
         disc_number = :disc_number, track_total = :track_total, disc_total = :disc_total,
         isrc = :isrc, raw_track_name = :raw_track_name, raw_artist = :raw_artist,
         raw_album_artist = :raw_album_artist, raw_album = :raw_album, raw_year = :raw_year,
-        raw_genre = :raw_genre, decode_refused = false, cover_processed_at = NULL
+        raw_genre = :raw_genre, decode_refused = false, cover_processed_at = NULL,
+        -- the canon reads it again: a number, a total or a name may have moved
+        content_at = CASE WHEN stat_mtime_ns IS NULL THEN content_at ELSE now() END
      WHERE id = :id
 """)
 
@@ -858,6 +870,21 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         "raw_track_name": md.get("title"), "raw_artist": md.get("artist"),
                         "raw_album_artist": md.get("album_artist"), "raw_album": md.get("album"),
                         "raw_year": md.get("date"), "raw_genre": md.get("genre")})
+                    if row.stat_mtime_ns is not None:
+                        # The file changed since its last read: what was registered
+                        # of it (a fingerprint taken while it was being copied, an
+                        # analysis of its old bytes) no longer names it. A source
+                        # holding no record goes; one holding records is unlinked,
+                        # and the fingerprint relinks it if the material is the same.
+                        db.execute(text("""
+                            DELETE FROM analysis_sources s WHERE s.media_file_id = :id
+                               AND NOT EXISTS (SELECT 1 FROM embeddings x WHERE x.analysis_source_id = s.id)
+                               AND NOT EXISTS (SELECT 1 FROM audio_features x WHERE x.analysis_source_id = s.id)
+                               AND NOT EXISTS (SELECT 1 FROM track_instruments x WHERE x.analysis_source_id = s.id)
+                               AND NOT EXISTS (SELECT 1 FROM analysis_sources m WHERE m.material_of = s.id)"""),
+                                   {"id": row.id})
+                        db.execute(text("UPDATE analysis_sources SET media_file_id = NULL "
+                                        "WHERE media_file_id = :id"), {"id": row.id})
                     old_dur = float(row.duration_seconds) if row.duration_seconds is not None else None
                     new_dur = md.get("duration_seconds")
                     if ((old_dur is None) != (new_dur is None)
@@ -876,14 +903,21 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
                                    {"id": row.id})
                         stats["moved"] = stats.get("moved", 0) + (new_track != row.track_id)
-                    if (row.v_artist is None and group_key(row.v_title, credit) == group_key(title, credit)):
-                        db.execute(text("UPDATE album_variants SET raw_artist = :c WHERE id = :v "
-                                        "AND raw_artist IS NULL"), {"c": credit, "v": row.album_variant_id})
+                    if row.v_title is None or row.v_artist is None:
+                        # a copy from before its group was kept: filled, never
+                        # moved — the canon may have re-keyed its album since
+                        db.execute(text("""UPDATE album_variants
+                                              SET raw_title = COALESCE(raw_title, :t),
+                                                  raw_artist = COALESCE(raw_artist, :c)
+                                            WHERE id = :v"""),
+                                   {"t": title, "c": credit, "v": row.album_variant_id})
                     elif group_key(row.v_title, row.v_artist) != group_key(title, credit):
                         moves.setdefault(row.album_variant_id, []).append((row.id, title, credit, disc))
                     if (row.raw_genre or None) != (md.get("genre") or None):
                         touched_albums.add(row.album_id)
                 stats["reread"] += 1
+                if stats["reread"] % 100 == 0:
+                    db.commit()         # the rows read so far: their locks go
             except Exception as e:
                 logger.error(f"Error reading {md['file_path']} again: {e}", exc_info=True)
                 stats["errors"] += 1
@@ -915,11 +949,11 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
             held = set(db.execute(text(f"SELECT id FROM {table} WHERE album_variant_id = :v"),
                                   {"v": vid}).scalars())
             groups = {group_key(t, c) for _f, t, c, _d in files}
-            _f0, title, credit, disc = files[0]
+            _f0, title, credit, _disc = files[0]
             with db.begin_nested():
                 if held <= {f for f, *_ in files} and len(groups) == 1:
-                    target, minted = albums.resolve(v.directory_path, title, credit, disc,
-                                                    exclude_variant=vid)
+                    target, minted = albums.resolve(v.directory_path, title, credit,
+                                                    {d or 1 for *_x, d in files}, exclude_variant=vid)
                     if minted:
                         _ensure_album(db, target, title, credit)
                     if target != v.album_id:
@@ -928,6 +962,10 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                                 OR EXISTS (SELECT 1 FROM album_tracks WHERE album_id = :a)"""),
                             {"a": v.album_id, "v": vid}).scalar()
                         if alone:
+                            # the old album's credits are its raw tags' (or the
+                            # canon's of them): the target keeps its own
+                            db.execute(text("DELETE FROM album_artists WHERE album_id = :a"),
+                                       {"a": v.album_id})
                             _update_album_uuid(db, v.album_id, target)
                         else:
                             _merge_album_variants(db, target, variant_ids=[vid])
@@ -947,7 +985,8 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                                 "e": sink.hqp_endpoint_id})
                 else:
                     for fid, t, c, d in files:
-                        target, minted = albums.resolve(v.directory_path, t, c, d, exclude_variant=vid)
+                        target, minted = albums.resolve(v.directory_path, t, c,
+                                                        {d or 1 for *_x, d in files}, exclude_variant=vid)
                         if minted:
                             _ensure_album(db, target, t, c)
                         dest = db.execute(text("""
@@ -985,14 +1024,16 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
     return moved
 
 
-def backfill_variant_credits(cur) -> int:
-    """The album credit every copy was minted under (album_variants.
-    raw_artist), for copies made before it was kept: what the folder rule
-    makes of each folder's rows by their stored tags — the classification an
-    import runs — the most common credit among a copy's files. Without it a
-    copy the canon has moved since would not be found by its group, and the
-    next file of its folder would mint a second album beside it. Idempotent:
-    only copies with no credit are written. Returns how many."""
+def backfill_variant_groups(cur) -> int:
+    """The raw group every copy was minted under — its title
+    (album_variants.raw_title, not written before 2026-09-28) and its album
+    credit (raw_artist, new) — for copies made before they were kept: what
+    the folder rule makes of each folder's rows by their stored tags (the
+    classification an import runs), the most common among a copy's files.
+    Without it a copy the canon has moved since would not be found by its
+    group, and the next file of its folder would mint a second album beside
+    it — or its first re-read would move it back to the raw key. Idempotent:
+    only a missing title or credit is written. Returns how many copies."""
     out = 0
     for table, path_col, cue in (("media_files", "file_path", "f.cue_start_seconds"),
                                  ("hqp_library_files", "hqp_path", "NULL::float")):
@@ -1000,12 +1041,12 @@ def backfill_variant_credits(cur) -> int:
             SELECT av.id, av.directory_path, f.{path_col}, f.raw_album, f.disc_number,
                    f.track_number, f.raw_album_artist, f.raw_artist, f.raw_track_name, {cue}
               FROM album_variants av JOIN {table} f ON f.album_variant_id = av.id
-             WHERE av.raw_artist IS NULL
+             WHERE av.raw_artist IS NULL OR av.raw_title IS NULL
              ORDER BY av.directory_path""")
         by_dir: Dict[str, list] = defaultdict(list)
         for row in cur.fetchall():
             by_dir[row[1]].append(row)
-        credits: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        groups: Dict[int, Dict[Tuple[str, str], int]] = defaultdict(lambda: defaultdict(int))
         for d, rows in by_dir.items():
             plain = [r for r in rows if r[9] is None]
             files = [{"album": r[3], "disc": r[4], "track": r[5], "artist_key": r[6] or r[7],
@@ -1014,15 +1055,17 @@ def backfill_variant_credits(cur) -> int:
             assignment = assign_dir_albums(folder, files) if files else None
             for r in rows:
                 if r[9] is None and assignment is not None:
-                    credit = assignment[r[2]][1]
+                    title, credit = assignment[r[2]][:2]
                 else:
-                    credit = _own_assignment(r[3], r[8], r[6], r[7])[1]
-                if credit:
-                    credits[r[0]][credit] += 1
-        for vid, counted in credits.items():
-            credit = sorted(counted.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
-            cur.execute("UPDATE album_variants SET raw_artist = %s WHERE id = %s AND raw_artist IS NULL",
-                        (credit, vid))
+                    title, credit = _own_assignment(r[3], r[8], r[6], r[7])
+                if title and credit:
+                    groups[r[0]][(title, credit)] += 1
+        for vid, counted in groups.items():
+            title, credit = sorted(counted.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            cur.execute("""UPDATE album_variants SET raw_title = COALESCE(raw_title, %s),
+                                                     raw_artist = COALESCE(raw_artist, %s)
+                            WHERE id = %s AND (raw_title IS NULL OR raw_artist IS NULL)""",
+                        (title, credit, vid))
             out += cur.rowcount
     return out
 
@@ -1700,7 +1743,8 @@ class LibraryScanner:
                       FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                      WHERE mf.id = ANY(:ids)"""), {"ids": list(existing)}):
                     title, credit = existing[r.id]
-                    if group_key(r.raw_title, r.raw_artist) != group_key(title, credit):
+                    if (r.raw_title is not None and r.raw_artist is not None
+                            and group_key(r.raw_title, r.raw_artist) != group_key(title, credit)):
                         moves.setdefault(r.album_variant_id, []).append(
                             (r.id, title, credit, r.disc_number))
         if moves:
