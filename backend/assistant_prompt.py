@@ -630,13 +630,17 @@ curated Last.fm data that respects genre boundaries.
 finding albums by criteria, checking listening history, getting artist bios.
 - **search_tracks(query, artist, album, genre, limit, corpus)**: Fuzzy search by metadata, any \
 script. corpus='owned' (default) or 'all' to include tracks with no owned file, which stream.
-- **search_similar(track_id, limit, vocalist, gender, genres, instruments, corpus)**: Find sonically \
+- **search_similar(track_id, limit, vocalist, gender, genres, instruments, year_from, year_to, \
+quality, corpus)**: Find sonically \
 similar tracks (CLAP audio embeddings), optionally narrowed by hard filters in the SAME query — \
 "more like this but instrumental", "similar + only Trip-Hop". track_id is the track UUID.
-- **search_semantic(query, limit, vocalist, gender, genres, instruments, bpm_min, bpm_max, corpus)**: \
+- **search_semantic(query, limit, vocalist, gender, genres, instruments, bpm_min, bpm_max, \
+year_from, year_to, quality, corpus)**: \
 Search tracks by a SOUND description (CLAP text→audio) AND hard filters in one query \
 ("romantic saxophone" + gender='female' + instruments=['saxophone']). NOT a name search — \
-use search_tracks for names/titles.
+use search_tracks for names/titles. year_from/year_to bound the album's release year ("1970s" = \
+1970..1979); quality is the best copy owned — 'lossy', 'lossless' (lossless or hi-res) or \
+'hi-res' (more than 16 bits or 48 kHz, DSD included) — and a not-owned track has none.
 - **search_lyrics(query, limit)**: Search tracks by lyrics content ("songs about love", "rain and sadness"). \
 Uses AI embeddings of lyrics text.
 - **search_artists(query, limit, by_bio)**: Search artists by name (any script; default) or with \

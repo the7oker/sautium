@@ -112,6 +112,7 @@ def _search(target: str, **params) -> list[dict]:
 
 def _h_search_similar(track_id: str, limit: int = 15, vocalist: str = "",
                       gender: str = "", genres: list = None, instruments: list = None,
+                      year_from: int = None, year_to: int = None, quality: str = "",
                       corpus: str = "owned") -> str:
     try:
         seed = aq.valid_uuids([track_id])
@@ -131,7 +132,9 @@ def _h_search_similar(track_id: str, limit: int = 15, vocalist: str = "",
             return (f"{src['artist']} - {src['title']} has no audio analysis yet, "
                     "so nothing can be matched against it. Use search_semantic instead.")
         rows = _search("track", seed_track_id=seed[0], limit=limit, vocalist=vocalist,
-                       gender=gender, genres=genres, instruments=instruments, corpus=corpus)
+                       gender=gender, genres=genres, instruments=instruments,
+                       year_from=year_from, year_to=year_to, quality=quality or None,
+                       corpus=corpus)
         return aq.format_track_list(
             rows, f"Tracks similar to: {src['artist']} - {src['title']} ({len(rows)} results):")
     except Exception as e:
@@ -141,11 +144,13 @@ def _h_search_similar(track_id: str, limit: int = 15, vocalist: str = "",
 def _h_search_semantic(query: str, limit: int = 15, vocalist: str = "", gender: str = "",
                        genres: list = None, instruments: list = None,
                        bpm_min: float = None, bpm_max: float = None,
+                       year_from: int = None, year_to: int = None, quality: str = "",
                        corpus: str = "owned") -> str:
     try:
         rows = _search("track", sound=query, limit=limit, vocalist=vocalist, gender=gender,
                        genres=genres, instruments=instruments, bpm_min=bpm_min,
-                       bpm_max=bpm_max, corpus=corpus)
+                       bpm_max=bpm_max, year_from=year_from, year_to=year_to,
+                       quality=quality or None, corpus=corpus)
         return aq.format_track_list(
             rows, f"Semantic search for '{query}' ({len(rows)} results):")
     except Exception as e:
@@ -636,6 +641,9 @@ def register_all():
             ToolParam("gender", "string", "'male', 'female' or 'mixed'", required=False, default="", enum=["male", "female", "mixed"]),
             ToolParam("genres", "array", "Genre names to require (OR within the list)", required=False, items_type="string"),
             ToolParam("instruments", "array", "Broad instrument names to require", required=False, items_type="string"),
+            ToolParam("year_from", "integer", "Earliest album release year", required=False),
+            ToolParam("year_to", "integer", "Latest album release year", required=False),
+            ToolParam("quality", "string", "The best copy owned: 'lossy', 'lossless' (lossless or hi-res) or 'hi-res'; a not-owned track has none", required=False, default="", enum=["lossy", "lossless", "hi-res"]),
             ToolParam("corpus", "string", "'owned' (default) or 'all' (adds not-owned tracks, which stream)", required=False, default="owned", enum=["owned", "all"]),
         ],
         handler=_h_search_similar,
@@ -654,6 +662,9 @@ def register_all():
             ToolParam("instruments", "array", "Broad instrument names to require", required=False, items_type="string"),
             ToolParam("bpm_min", "number", "Lower BPM bound", required=False),
             ToolParam("bpm_max", "number", "Upper BPM bound", required=False),
+            ToolParam("year_from", "integer", "Earliest album release year", required=False),
+            ToolParam("year_to", "integer", "Latest album release year", required=False),
+            ToolParam("quality", "string", "The best copy owned: 'lossy', 'lossless' (lossless or hi-res) or 'hi-res'; a not-owned track has none", required=False, default="", enum=["lossy", "lossless", "hi-res"]),
             ToolParam("corpus", "string", "'owned' (default) or 'all' (adds not-owned tracks, which stream)", required=False, default="owned", enum=["owned", "all"]),
         ],
         handler=_h_search_semantic,

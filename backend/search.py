@@ -45,7 +45,7 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
     """
     Build SQL WHERE clauses and params from filter dict.
 
-    Supported keys: artist, album, genre, is_lossless, year_from, year_to,
+    Supported keys: artist, album, genre, is_lossless,
                     bpm_min, bpm_max, key, mode, instrument, vocalist, gender, danceable, energy_min.
     Returns (sql_fragment, params_dict).
     """
@@ -67,22 +67,6 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
     if filters.get("is_lossless") is not None:
         clauses.append("mf.is_lossless = :f_lossless")
         params["f_lossless"] = filters["is_lossless"]
-
-    # Legacy quality_source filter → map to is_lossless
-    if filters.get("quality_source"):
-        qs = filters["quality_source"]
-        if qs in ("CD", "Vinyl", "Hi-Res"):
-            clauses.append("mf.is_lossless = true")
-        elif qs == "MP3":
-            clauses.append("mf.is_lossless = false")
-
-    if filters.get("year_from"):
-        clauses.append("al.release_year >= :f_year_from")
-        params["f_year_from"] = filters["year_from"]
-
-    if filters.get("year_to"):
-        clauses.append("al.release_year <= :f_year_to")
-        params["f_year_to"] = filters["year_to"]
 
     # Audio feature filters (require af alias in query)
     if filters.get("bpm_min"):

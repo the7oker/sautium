@@ -3660,6 +3660,11 @@
       chips: [['any','Any'], ['yes','Yes'], ['no','No']] },
     { key: 'energy',    label: 'Energy',
       chips: [['any','Any'], ['low','Low'], ['mid','Mid'], ['high','High']] },
+    // The best copy owned (sql_queries.QUALITY_GATE): Lossless = lossless or
+    // better; a track you do not own has no tier, so any chip but Any keeps
+    // the results to your copies.
+    { key: 'quality',   label: 'Quality',
+      chips: [['any','Any'], ['lossy','Lossy'], ['lossless','Lossless'], ['hi-res','Hi-Res']] },
   ];
 
   // Broad instrument chips. Each label is a category that 1.5c-b will
@@ -3684,9 +3689,10 @@
       scope: 'names',    // search-in mode for the text box, NOT a filter:
                          // names (lexical, default) | bio | sound | lyrics
       bpm_min: null, bpm_max: null,
+      year_from: null, year_to: null,
       key: '',
       mode: 'any', vocalist: 'any', gender: 'any',
-      danceable: 'any', energy: 'any',
+      danceable: 'any', energy: 'any', quality: 'any',
       instruments: [],   // multi-select
       genres: [],        // multi-select: genre names (top chips + typeahead adds)
       artists: [],       // multi-select: artist UUIDs (typeahead adds)
@@ -3729,12 +3735,14 @@
   function hasActiveFilters(f) {
     if (!f) return false;
     if (f.bpm_min != null || f.bpm_max != null) return true;
+    if (f.year_from != null || f.year_to != null) return true;
     if (f.key) return true;
     if (f.mode && f.mode !== 'any') return true;
     if (f.vocalist && f.vocalist !== 'any') return true;
     if (f.gender && f.gender !== 'any') return true;
     if (f.danceable && f.danceable !== 'any') return true;
     if (f.energy && f.energy !== 'any') return true;
+    if (f.quality && f.quality !== 'any') return true;
     if (f.instruments && f.instruments.length) return true;
     if (f.genres && f.genres.length) return true;
     if (f.artists && f.artists.length) return true;
@@ -3750,12 +3758,15 @@
     if (!f) return;
     if (f.bpm_min != null) params.set('bpm_min', f.bpm_min);
     if (f.bpm_max != null) params.set('bpm_max', f.bpm_max);
+    if (f.year_from != null) params.set('year_from', f.year_from);
+    if (f.year_to != null) params.set('year_to', f.year_to);
     if (f.key) params.set('key', f.key);
     if (f.mode && f.mode !== 'any') params.set('mode', f.mode);
     if (f.vocalist && f.vocalist !== 'any') params.set('vocalist', f.vocalist);
     if (f.gender && f.gender !== 'any') params.set('gender', f.gender);
     if (f.danceable && f.danceable !== 'any') params.set('danceable', f.danceable);
     if (f.energy && f.energy !== 'any') params.set('energy', f.energy);
+    if (f.quality && f.quality !== 'any') params.set('quality', f.quality);
     (f.instruments || []).forEach(v => params.append('instruments', v));
     (f.genres || []).forEach(v => params.append('genres', v));
     (f.artists || []).forEach(v => params.append('artists', v));
@@ -3828,6 +3839,19 @@
                    class="bpm-field" id="discoveryFilterBpmMax"
                    placeholder="240">
             <span class="bpm-unit">bpm</span>
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <span class="filter-label">Year</span>
+          <div class="bpm-inputs">
+            <input type="number" inputmode="numeric" min="1900" max="2100"
+                   class="bpm-field" id="discoveryFilterYearFrom"
+                   placeholder="From">
+            <span class="bpm-dash">—</span>
+            <input type="number" inputmode="numeric" min="1900" max="2100"
+                   class="bpm-field" id="discoveryFilterYearTo"
+                   placeholder="To">
           </div>
         </div>
 
@@ -4069,6 +4093,17 @@
       const v = e.target.value.trim();
       screen._filters.bpm_max = v ? Number(v) : null;
     });
+    // Years are whole: a typed 1975.5 binds 1975, the API takes integers.
+    const yearFrom = panel.querySelector('#discoveryFilterYearFrom');
+    const yearTo = panel.querySelector('#discoveryFilterYearTo');
+    if (yearFrom) yearFrom.addEventListener('input', e => {
+      const v = e.target.value.trim();
+      screen._filters.year_from = v ? Math.trunc(Number(v)) : null;
+    });
+    if (yearTo) yearTo.addEventListener('input', e => {
+      const v = e.target.value.trim();
+      screen._filters.year_to = v ? Math.trunc(Number(v)) : null;
+    });
 
     // Reset returns every chip / input to its default.
     const resetBtn = panel.querySelector('#discoveryFilterReset');
@@ -4086,6 +4121,8 @@
       if (seedName) seedName.textContent = '';
       if (bpmMin) bpmMin.value = '';
       if (bpmMax) bpmMax.value = '';
+      if (yearFrom) yearFrom.value = '';
+      if (yearTo) yearTo.value = '';
       updateSearchScopeUi(screen);
     });
 

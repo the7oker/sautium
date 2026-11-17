@@ -28,7 +28,8 @@ from typing import Any, Callable, Optional
 
 import track_similarity
 import zero_shot
-from sql_queries import best_rip_order, owned_rank
+from sql_queries import (QUALITY_GATE, YEAR_GATE, best_rip_order, owned_rank,
+                         quality_params, year_params)
 from uuid_utils import artist_uuid
 
 _VA_ID = str(artist_uuid("Various Artists"))
@@ -321,12 +322,15 @@ TOOLS: dict[str, Tool] = {
                "(zs.score >= :danceable_min AND zs.label_id IN "
                f"(SELECT zl.id FROM zero_shot_labels zl WHERE zl.key = '{zero_shot.DANCEABLE}'))",
                is_gate=True),)),
+    # The track's best copy (sql_queries.QUALITY_GATE): it reads owned_files
+    # itself, so a phantom passes no tier under any corpus.
+    "quality": Tool("quality", sources=(
+        Source("quality", "tracks", QUALITY_GATE, is_gate=True),)),
     # Album-level.
     "genre": Tool("genre", sources=(
         Source("genre", "genres", "g.name = ANY(:genre)", is_gate=True),)),
     "year": Tool("year", sources=(
-        Source("year", "albums", "al.release_year BETWEEN :year_from AND :year_to",
-               is_gate=True),)),
+        Source("year", "albums", YEAR_GATE, is_gate=True),)),
     # Current-track context ("Similar to now playing"): the two-tier audio↔audio
     # score (_SEED_SCORE — same formula/weights as radio and the Now Playing
     # shelf, see track_similarity.py). Characteristic ⇒ rolls up: similar
@@ -1084,6 +1088,10 @@ def _bind_params(tools, active: dict) -> dict:
             p[tool.key] = v
         elif tool.key == "bpm":
             p["bpm_min"], p["bpm_max"] = v   # (min, max)
+        elif tool.key == "year":
+            p.update(year_params(*v))        # (from, to), either end open
+        elif tool.key == "quality":
+            p.update(quality_params(v))
         elif tool.key == "genre":
             p["genre"] = list(v) if isinstance(v, (list, tuple)) else [v]
         elif tool.key == "moods":

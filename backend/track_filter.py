@@ -6,7 +6,8 @@ Provides:
 - track_filter_options: Click decorator adding filter options to commands
 - describe_filters(): Human-readable description of active filters
 
-Uses the canonical schema: tracks → media_files → album_variants → albums.
+Uses the canonical schema: tracks → owned_files → album_variants → albums,
+and media_files for what is a file's own (path, track number, format).
 Returns track IDs (UUIDs) since batch operations (embeddings, analysis) work on tracks.
 """
 
@@ -16,6 +17,9 @@ from typing import Dict, List, Optional
 import click
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from sql_queries import (QUALITY_GATE, QUALITY_TIERS, YEAR_GATE, quality_params,
+                         year_params)
 
 
 def get_filtered_track_ids(
@@ -30,6 +34,7 @@ def get_filtered_track_ids(
     lossless: Optional[bool] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
+    quality: Optional[str] = None,
 ) -> Optional[List]:
     """
     Return track IDs matching the given filters.
@@ -38,13 +43,14 @@ def get_filtered_track_ids(
     Returns List (possibly empty) if any filter is active.
 
     All string filters use ILIKE for case-insensitive partial matching.
-    JOINs are added only when needed by the active filters.
+    JOINs are added only when needed by the active filters. The year and
+    quality gates are Discovery's own (sql_queries), so both give one set.
     """
     # Check if any filter is active
     has_filter = any([
         artist, album, genre, path, tag,
         track_number is not None, lossless is not None,
-        year_from is not None, year_to is not None,
+        year_from is not None, year_to is not None, quality,
     ])
 
     if not has_filter:
@@ -61,16 +67,20 @@ def get_filtered_track_ids(
         where_clauses.append("a.name ILIKE :artist")
         params["artist"] = f"%{artist}%"
 
-    # Album/year/lossless filters: need media_files + album_variants + albums
+    # The album and its year are the track's, reached through any copy it has
+    # (owned_files: here or at the HQPlayer), as Discovery reaches them; the
+    # per-file filters read the file here, the same file when both are set.
     need_album_join = any([album, year_from is not None, year_to is not None])
-    need_mf_join = any([path, track_number is not None, lossless is not None]) or need_album_join
-
-    if need_mf_join:
-        joins.append("JOIN media_files mf ON mf.track_id = t.id")
+    need_mf_join = any([path, track_number is not None, lossless is not None])
 
     if need_album_join:
-        joins.append("JOIN album_variants av ON mf.album_variant_id = av.id")
+        joins.append("JOIN owned_files f ON f.track_id = t.id")
+        joins.append("JOIN album_variants av ON f.album_variant_id = av.id")
         joins.append("JOIN albums al ON av.album_id = al.id")
+
+    if need_mf_join:
+        joins.append("JOIN media_files mf ON mf.track_id = t.id"
+                     + (" AND mf.album_variant_id = av.id" if need_album_join else ""))
 
     if album:
         where_clauses.append("al.title ILIKE :album")
@@ -80,23 +90,23 @@ def get_filtered_track_ids(
         where_clauses.append("mf.is_lossless = :lossless")
         params["lossless"] = lossless
 
-    if year_from is not None:
-        where_clauses.append("al.release_year >= :year_from")
-        params["year_from"] = year_from
+    if year_from is not None or year_to is not None:
+        where_clauses.append(YEAR_GATE)
+        params.update(year_params(year_from, year_to))
 
-    if year_to is not None:
-        where_clauses.append("al.release_year <= :year_to")
-        params["year_to"] = year_to
+    if quality:
+        where_clauses.append(QUALITY_GATE)
+        params.update(quality_params(quality))
 
     # Genre filter: album-grain genre via the track's album. EXISTS avoids
     # row multiplication across the track's media files / genre sources.
     if genre:
         where_clauses.append("""EXISTS (
-            SELECT 1 FROM media_files mf_g
-            JOIN album_variants av_g ON av_g.id = mf_g.album_variant_id
+            SELECT 1 FROM owned_files f_g
+            JOIN album_variants av_g ON av_g.id = f_g.album_variant_id
             JOIN album_genres ag ON ag.album_id = av_g.album_id
             JOIN genres g ON g.id = ag.genre_id
-            WHERE mf_g.track_id = t.id AND g.name ILIKE :genre)""")
+            WHERE f_g.track_id = t.id AND g.name ILIKE :genre)""")
         params["genre"] = f"%{genre}%"
 
     # Path filter: on media_files.file_path
@@ -163,12 +173,19 @@ def describe_filters(**kwargs) -> str:
         parts.append(f"year>={kwargs['year_from']}")
     if kwargs.get("year_to") is not None:
         parts.append(f"year<={kwargs['year_to']}")
+    if kwargs.get("quality"):
+        parts.append(f"quality={kwargs['quality']}")
 
     return ", ".join(parts)
 
 
+FILTER_KEYS = ("artist", "album", "genre", "path", "tag", "track_number", "lossless",
+               "year_from", "year_to", "quality")
+
+
 def track_filter_options(func):
-    """Click decorator that adds track filter options to a command."""
+    """Click decorator that adds track filter options to a command and hands
+    them to it as one `filters` dict, get_filtered_track_ids' keywords."""
     @click.option("--artist", "filter_artist", type=str, default=None,
                   help="Filter by artist name (partial match)")
     @click.option("--album", "filter_album", type=str, default=None,
@@ -183,7 +200,15 @@ def track_filter_options(func):
                   help="Filter by track number (e.g. 1 for first tracks)")
     @click.option("--lossless/--lossy", "filter_lossless", default=None,
                   help="Filter by lossless/lossy format")
+    @click.option("--year-from", "filter_year_from", type=int, default=None,
+                  help="Earliest album release year")
+    @click.option("--year-to", "filter_year_to", type=int, default=None,
+                  help="Latest album release year")
+    @click.option("--quality", "filter_quality", type=click.Choice(QUALITY_TIERS),
+                  default=None,
+                  help="The track's best copy: lossy, lossless (or better), hi-res")
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        kwargs["filters"] = {k: kwargs.pop(f"filter_{k}") for k in FILTER_KEYS}
         return func(*args, **kwargs)
     return wrapper

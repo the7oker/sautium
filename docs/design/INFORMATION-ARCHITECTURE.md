@@ -473,11 +473,14 @@ Mobile-first vertical layout, minimal by default:
 - Vocalist / Gender
 - Danceable / Energy (of the Danceable chips only "Yes" filters; "No" is
   accepted and ignored — whether it should filter is undecided, 2026-09-29)
+- Year range (the album's release year, either end open) and Quality
+  (Any · Lossy · Lossless · Hi-Res: the best copy owned, here or at the
+  HQPlayer; Lossless means lossless or better, a track you do not own has
+  no tier) — both shipped 2026-11-17 (SEARCH-GATES). A year range alone
+  answers at the album's grain, as a genre does: Albums and Artists, no
+  Tracks block until a track-level filter or a query joins it.
 - Instruments (multi-select from AudioSet labels)
 - Genre and Artist typeaheads
-
-A quality tier filter (Lossy / Lossless / Hi-Res) was designed and is not
-built.
 
 When search runs or filters apply, the shuffle mosaic is replaced
 by results. Clearing search restores the mosaic.
@@ -863,7 +866,7 @@ or is a thin query over existing data.
 |-------|------------|-----------|
 | Search input | existing `/search/tracks`, `/search/artists`, `/search/albums`, `/search/genres` | unified `/search?q=&type=` if simpler |
 | Mode chips | switches which existing endpoint is called | — |
-| Advanced filters | existing `/search/features` (extend to multi-instrument + AND/OR + quality tier) **(endpoint extension)** | saved filter presets |
+| Advanced filters | `/api/discovery/search` (the engine: multi-instrument, genre and artist typeaheads, year range, quality tier — the last two since 2026-11-17) | saved filter presets |
 | Shuffle mosaic | random sample from `albums` (filter to lossless? or all) | bias to under-played, diverse genres |
 
 ### Now Playing (mini + expanded)

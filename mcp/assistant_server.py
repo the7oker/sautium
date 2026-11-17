@@ -414,6 +414,9 @@ def search_similar(
     gender: str = "",
     genres: list[str] = [],
     instruments: list[str] = [],
+    year_from: int | None = None,
+    year_to: int | None = None,
+    quality: str = "",
     corpus: str = "owned",
 ) -> str:
     """Find tracks similar in sound to a given track (CLAP audio embeddings),
@@ -429,6 +432,11 @@ def search_similar(
         gender: 'male' | 'female' | 'mixed' (optional)
         genres: Genre names to require, OR within the list (optional)
         instruments: Broad instrument names to require (optional)
+        year_from: Earliest album release year (optional)
+        year_to: Latest album release year (optional)
+        quality: 'lossy' | 'lossless' (lossless or hi-res) | 'hi-res' — the
+            best copy owned, here or at the HQPlayer; a not-owned track has
+            none, so this keeps to owned tracks (optional)
         corpus: 'owned' (default, files on disk) | 'all' (adds not-owned tracks,
             which play by streaming)
     """
@@ -452,7 +460,8 @@ def search_similar(
 
         rows = _discovery("track", seed_track_id=track_row["tid"], limit=limit,
                           vocalist=vocalist, gender=gender, genres=genres,
-                          instruments=instruments, corpus=corpus)
+                          instruments=instruments, year_from=year_from,
+                          year_to=year_to, quality=quality or None, corpus=corpus)
         header = f"Tracks similar to: {track_row['artist']} - {track_row['title']}"
         return _format_track_list(rows, f"{header} ({len(rows)} results):")
     except Exception as e:
@@ -469,6 +478,9 @@ def search_semantic(
     instruments: list[str] = [],
     bpm_min: float | None = None,
     bpm_max: float | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    quality: str = "",
     corpus: str = "owned",
 ) -> str:
     """Search tracks by a SOUND description (CLAP text→audio), optionally with
@@ -490,12 +502,18 @@ def search_semantic(
         instruments: Broad instrument names ("saxophone", "piano") (optional)
         bpm_min: Lower BPM bound (optional)
         bpm_max: Upper BPM bound (optional)
+        year_from: Earliest album release year (optional)
+        year_to: Latest album release year (optional)
+        quality: 'lossy' | 'lossless' (lossless or hi-res) | 'hi-res' — the
+            best copy owned, here or at the HQPlayer; a not-owned track has
+            none, so this keeps to owned tracks (optional)
         corpus: 'owned' (default, playable files) | 'all' (adds phantom discography)
     """
     try:
         rows = _discovery("track", sound=query, limit=limit, vocalist=vocalist,
                           gender=gender, genres=genres, instruments=instruments,
-                          bpm_min=bpm_min, bpm_max=bpm_max, corpus=corpus)
+                          bpm_min=bpm_min, bpm_max=bpm_max, year_from=year_from,
+                          year_to=year_to, quality=quality or None, corpus=corpus)
         return _format_track_list(rows, f"Semantic search for '{query}' ({len(rows)} results):")
     except httpx.ConnectError:
         return (
