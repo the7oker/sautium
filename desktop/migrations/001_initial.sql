@@ -2250,7 +2250,7 @@ CREATE TABLE IF NOT EXISTS p2p_messages (
     sent_at TIMESTAMPTZ,
     -- An outgoing message to the master handed to its Worker mailbox
     -- (Ф16): kept for it, not yet proven at the master — `delivered` stays
-    -- the one proof (chat_client._mailbox_deposit; 063, 2026-11-17, B-92).
+    -- the one proof (chat_client._mailbox_deposit; 064, 2026-11-17, B-92).
     parked_at TIMESTAMPTZ
 );
 

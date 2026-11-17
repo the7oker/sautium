@@ -1,4 +1,4 @@
--- 063 — an outgoing message's state beside `delivered` (2026-11-17, B-92):
+-- 064 — an outgoing message's state beside `delivered` (2026-11-17, B-92):
 -- parked_at, when a message to the master was handed to its Worker mailbox
 -- (kept for it, not yet proven at the master), and the notice a state change
 -- sends the chat on screen. The same DDL as 001_initial.sql's, for nodes that
