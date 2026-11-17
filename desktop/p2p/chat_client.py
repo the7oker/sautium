@@ -71,8 +71,9 @@ NUDGE_RETRY_S = 600
 # may send before this node lets it go (and asks it again in an hour), in
 # lines (an event is two: its line and the blank one that ends it). A real
 # relay sends a keepalive per 15 s and a frame per message forwarded to us —
-# a few a minute, a burst of a chat.
-RELAY_FRAMES_PER_WINDOW = 120
+# a few a minute, a backlog drained after a friend's absence. Refusals bound
+# the abuse a relay can do with real frames (it cannot forge a stored one).
+RELAY_FRAMES_PER_WINDOW = 600
 RELAY_REFUSALS_PER_WINDOW = 5          # deliveries that did not open, or came again
 RELAY_WINDOW_S = 60
 
@@ -1290,7 +1291,7 @@ class ChatClient:
         backoff = 5.0
         relay_denied_until = 0.0
         while self.running:
-            addr = None
+            addr, connected = None, False
             try:
                 ident = self._identity()
                 if not ident:
@@ -1355,6 +1356,7 @@ class ChatClient:
                             return
                         if resp.status != 200:
                             raise ConnectionError(f"wake subscribe: HTTP {resp.status}")
+                        connected = True
                         logger.info("Relay wake stream connected (%s:%s)%s", ip, port,
                                     "" if is_master else " [peer relay]")
                         if relay_row:
@@ -1398,7 +1400,10 @@ class ChatClient:
                 raise
             except Exception as e:
                 logger.debug("Relay wake stream (%s…): %s", relay_pubkey[:8], e)
-                if is_master and addr is not None:
+                if is_master and addr is not None and not connected:
+                    # Only a connect that failed (a pin, a refusal, no answer)
+                    # sends this address behind the others; a stream that ran
+                    # and dropped does not.
                     self._master_failed[addr] = time.time() + 600
             if not self.running:
                 break
@@ -1436,7 +1441,10 @@ class ChatClient:
 
     async def _push_master_outbox(self, master: dict, ip: str, port: int) -> None:
         """What is still on its way to the master, the messages kept in its
-        mailbox included, pushed directly to it at (ip, port) — it is up."""
+        mailbox included, pushed directly to it at (ip, port) — it is up.
+        Beside an immediate push to it a message may go twice (and, both
+        failing, be deposited twice): the Worker and the master dedup by
+        uuid."""
         leftover = await self._pending_for(master["id"], with_kept=True)
         if leftover:
             await self._push_pending_messages(master["id"], master["public_key_hex"],

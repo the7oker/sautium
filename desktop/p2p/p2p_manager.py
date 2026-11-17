@@ -391,7 +391,8 @@ class P2PManager:
                 # renew_ports() retries a full open when nothing is mapped,
                 # so a router that appears later still gets picked up.
                 self._upnp_renewal_task = asyncio.create_task(
-                    self._upnp.keep_mapped(self._http_port, self._dht_service.set_announce_port)
+                    self._upnp.keep_mapped(
+                        self._http_port, lambda ext: ext and self._dht_service.set_announce_port(ext))
                 )
 
             # Cheap local CGNAT tells gate the very first announces — an

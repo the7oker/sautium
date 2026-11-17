@@ -332,9 +332,9 @@ async def _map_peer_port() -> None:
         return
     await _peer_ready.wait()
 
-    def mapped(ext: int) -> None:
+    def mapped(ext: Optional[int]) -> None:
         if _dht_service is not None:
-            _dht_service.set_announce_port(ext)
+            _dht_service.set_announce_port(ext or _peer_port())
         from p2p_chat import chat_client
         client = chat_client()
         if client is not None:

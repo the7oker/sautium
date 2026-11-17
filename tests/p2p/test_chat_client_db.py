@@ -455,3 +455,32 @@ def test_a_mapping_of_the_peer_port_asks_the_verdict_again(monkeypatch):
         await main._map_peer_port()
     asyncio.run(scene())
     assert ports == [28801, 28802] and rechecks == [1, 1]
+
+
+def test_the_masters_stream_leaves_an_address_that_failed_to_connect_for_the_next(master):
+    client = cc.ChatClient(SimpleNamespace(), identity=lambda: _ident(ME), announce_port=lambda: 1)
+    client.running = True
+    bad, good = ("10.9.8.7", 8801), ("198.51.100.4", 8801)
+    held = {}
+
+    async def setting(key):
+        return None
+
+    async def contact():
+        return {"id": 1, "public_key_hex": MASTER.pub, "invite_code": master}
+
+    async def peers(friend, refresh=False, untargeted=True):
+        assert untargeted is False
+        return [bad, good]
+
+    async def subscribe(pubkey, resolve, is_master):
+        held["resolve"] = resolve
+    client.setting, client.master_contact, client.find_friend_peers = setting, contact, peers
+    client._relay_subscription_loop = subscribe
+    asyncio.run(client._master_wake_loop())
+    resolve = held["resolve"]
+    assert asyncio.run(resolve())[1] == bad               # the proven head first
+    client._master_failed[bad] = time.time() + 600        # it failed the pin
+    assert asyncio.run(resolve())[1] == good
+    client._master_failed[good] = time.time() + 900       # both failed: the least lately
+    assert asyncio.run(resolve())[1] == bad

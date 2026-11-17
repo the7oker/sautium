@@ -109,17 +109,13 @@ class LANDiscovery:
     @property
     def peers(self) -> list[Tuple[str, int]]:
         """Return list of (ip, sync_port) for live LAN peers."""
+        self._prune()
+        return list(self._peers)
+
+    def _prune(self) -> None:
         now = time.time()
-        alive = []
-        expired = []
-        for key, info in self._peers.items():
-            if now - info["last_seen"] < PEER_EXPIRY:
-                alive.append(key)
-            else:
-                expired.append(key)
-        for key in expired:
+        for key in [k for k, info in self._peers.items() if now - info["last_seen"] >= PEER_EXPIRY]:
             del self._peers[key]
-        return alive
 
     def get_peer_info(self, ip: str, port: int) -> Optional[dict]:
         """Get metadata for a specific LAN peer."""
@@ -303,7 +299,10 @@ class LANDiscovery:
 
                 sender_ip = addr[0]
                 parsed = self._parse_beacon(data, sender_ip)
-                if parsed and len(self._peers) >= MAX_PEERS and (parsed[0], parsed[1]) not in self._peers:
+                if parsed and len(self._peers) >= MAX_PEERS:
+                    self._prune()
+                if (parsed and parsed[1] is not None and len(self._peers) >= MAX_PEERS
+                        and (parsed[0], parsed[1]) not in self._peers):
                     parsed = None              # a full table takes no new address
                 if parsed:
                     ip, port, info = parsed

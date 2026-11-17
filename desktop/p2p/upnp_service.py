@@ -104,6 +104,7 @@ class UPnPService:
         """
         self._ports = ports or []
         self._gate = gate
+        self._gate_misses = 0
         self._upnp = None
         self._mapped: list[Tuple[int, int]] = []  # (external, internal)
         self._external_ip: Optional[str] = None
@@ -192,11 +193,15 @@ class UPnPService:
         least one mapping is active."""
         if not HAS_UPNP:
             return False
-        if self._gate is not None and self._mapped and not self._gate():
-            logger.warning("UPnP: %s no longer answers as the peer surface — mapping removed",
-                           self._ports)
-            self.close_ports()
-            return False
+        if self._gate is not None and self._mapped:
+            # Two renewals in a row: one probe the node's own busy loop was
+            # slow to answer is no reason to drop the mapping for a lease.
+            self._gate_misses = 0 if self._gate() else self._gate_misses + 1
+            if self._gate_misses >= 2:
+                logger.warning("UPnP: %s no longer answers as the peer surface — mapping removed",
+                               self._ports)
+                self.close_ports()
+                return False
         if not self._upnp or not self._mapped:
             return self.open_ports() is not None
         try:
@@ -219,20 +224,20 @@ class UPnPService:
         (outbound still works, so it just looks like 'the friend is
         offline'). renew_ports() also recovers a rebooted router via full
         re-discover; an external port that changed goes to `on_external`
-        (the DHT's announce port, which the 15-min re-announce publishes)."""
+        (the DHT's announce port, which the 15-min re-announce publishes) —
+        None when the mapping is gone."""
         interval = LEASE_DURATION * 0.75
         loop = asyncio.get_running_loop()
         last = self.get_external_port(internal_port)
         while True:
             await asyncio.sleep(interval)
             try:
-                if await loop.run_in_executor(None, self.renew_ports):
-                    ext_port = self.get_external_port(internal_port)
-                    if ext_port and ext_port != last:
-                        on_external(ext_port)
-                    last = ext_port
-                else:
+                if not await loop.run_in_executor(None, self.renew_ports):
                     logger.info("UPnP: no active mapping after renewal attempt")
+                ext_port = self.get_external_port(internal_port)
+                if ext_port != last:
+                    on_external(ext_port)
+                last = ext_port
             except Exception as e:
                 logger.warning(f"UPnP renewal loop error: {e}")
 
