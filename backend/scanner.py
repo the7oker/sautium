@@ -8,6 +8,7 @@ and physical entities (AlbumVariant, MediaFile) per file on disk.
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -32,7 +33,8 @@ from models import (
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
-from album_identity import assign_dir_albums
+import file_stat
+from album_identity import assign_dir_albums, dir_disc, group_key
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
 from provenance import ANALYSIS_KINDS, relink_returned_files
 import cue_sheet
@@ -249,46 +251,59 @@ class FileSink:
 LOCAL_FILES = FileSink()
 
 
+def _own_assignment(album: Optional[str], title: Optional[str], album_artist: Optional[str],
+                    artist: Optional[str]) -> Tuple[str, str]:
+    """A file's album as its own tags name it: the album tag, else the title
+    (a single); the album artist, else the track artist."""
+    return (album or title), (album_artist or artist)
+
+
 def _classify_dirs(entries, sink: FileSink):
-    """Resolve how each directory's files map to albums (album_identity.
-    assign_dir_albums). ``entries`` = ``(dir_path, metadata)`` pairs, the
-    directory in DB form (the variant key).
+    """How each directory's files map to albums (album_identity.
+    assign_dir_albums), over the WHOLE folder: this batch's files and the
+    rows its folders already hold. ``entries`` = ``(dir_path, metadata)``
+    pairs, the directory in DB form (the variant key).
 
-    Returns ``{dir_path: {file_path: (album_title, album_artist, track_override,
-    disc_override)}}`` for directories that need reshaping — box sets and singles
-    collections (one album per release group) and mixes / loose per-track dumps
-    (one folder album). A plain single-album directory is absent, so the import
-    loop keeps each file's own tags. A ``None`` track/disc override means "keep
-    the file's own value".
+    Returns ``(batch, existing)``:
+    - ``batch``: ``{file_path: (album_title, album_artist, track_override,
+      disc_override)}`` for this batch's files — a box set or singles
+      collection is one album per release group, a mix or a loose per-track
+      dump one folder album; a plain single album is each file's own tags.
+      A ``None`` track/disc override keeps the file's own value;
+    - ``existing``: ``{file id: (album_title, album_artist)}`` for the rows of
+      the same folders that are not in the batch — what the folder now makes
+      of them. A folder's shape can change as its files arrive (a compilation
+      whose first file alone read as its artist's album), so the scan moves a
+      row whose assignment changed (LIBRARY-WATCH-DESIGN §3.4 b).
 
-    Classification unions this batch with the directory's existing rows in the
-    sink's file table, so an incremental scan that sees only part of a folder
-    still classifies the whole folder; only this batch's files are returned
-    (existing rows are already imported).
-    """
+    Cue slices take their sheet's album and are left out: the sheet is the
+    album authority for its image, and the renumber-fold is keyed by path."""
     by_dir = defaultdict(list)
+    batch: Dict[str, Tuple] = {}
     for dir_path, md in entries:
-        # Cue slices are excluded: the sheet is the album authority for its
-        # folder, and the renumber-fold below is keyed by file path — N
-        # virtual entries sharing one image path would collapse onto one
-        # track number.
+        title, credit = _own_assignment(md.get("album"), md.get("title"),
+                                        md.get("album_artist"), md.get("artist"))
+        batch[md.get("file_path")] = (title, credit, None, None)
         if md.get("cue_start_seconds") is not None:
             continue
         by_dir[dir_path].append(md)
-    existing = defaultdict(list)
+    existing_rows = defaultdict(list)
     if by_dir:
-        path_col = "file_path" if sink.location == "local" else "hqp_path"
+        local = sink.location == "local"
+        path_col = "file_path" if local else "hqp_path"
+        cue_filter = "AND f.cue_start_seconds IS NULL" if local else ""
         for r in db_query(f"""
-            SELECT av.directory_path AS d, f.raw_album, f.disc_number, f.track_number,
-                   f.raw_album_artist, f.raw_artist, f.{path_col} AS file_path
+            SELECT f.id, av.directory_path AS d, f.raw_album, f.disc_number, f.track_number,
+                   f.raw_album_artist, f.raw_artist, f.raw_track_name, f.{path_col} AS file_path
             FROM album_variants av JOIN {sink.files_table} f ON f.album_variant_id = av.id
             WHERE av.directory_path = ANY(%(d)s)
-              AND av.hqp_endpoint_id IS NOT DISTINCT FROM %(e)s
+              AND av.hqp_endpoint_id IS NOT DISTINCT FROM %(e)s {cue_filter}
         """, {"d": list(by_dir), "e": sink.hqp_endpoint_id}):
-            existing[r["d"]].append(r)
-    dir_albums = {}
+            existing_rows[r["d"]].append(r)
+    existing: Dict[int, Tuple[str, str]] = {}
     for hd, mds in by_dir.items():
         batch_paths = {md.get("file_path") for md in mds}
+        others = [e for e in existing_rows[hd] if e["file_path"] not in batch_paths]
         files = [{"album": md.get("album"), "disc": md.get("disc_number"),
                   "track": md.get("track_number"),
                   "artist_key": md.get("album_artist") or md.get("artist"),
@@ -296,13 +311,114 @@ def _classify_dirs(entries, sink: FileSink):
         files += [{"album": e["raw_album"], "disc": e["disc_number"],
                    "track": e["track_number"],
                    "artist_key": e["raw_album_artist"] or e["raw_artist"],
-                   "path": e["file_path"]} for e in existing[hd]]
+                   "path": e["file_path"]} for e in others]
         folder = os.path.basename(hd.replace("\\", "/").rstrip("/"))
         assignment = assign_dir_albums(folder, files)
-        if assignment is None:
-            continue
-        dir_albums[hd] = {p: a for p, a in assignment.items() if p in batch_paths}
-    return dir_albums
+        for e in others:
+            if assignment is None:
+                existing[e["id"]] = _own_assignment(e["raw_album"], e["raw_track_name"],
+                                                    e["raw_album_artist"], e["raw_artist"])
+            else:
+                existing[e["id"]] = assignment[e["file_path"]][:2]
+        if assignment is not None:
+            for p in batch_paths:
+                batch[p] = assignment[p]
+    return batch, existing
+
+
+class _Albums:
+    """Which album a file's assignment (title, credit) belongs to — the
+    folder rule (LIBRARY-WATCH-DESIGN §3.4 a, §15.1). The folder, not the
+    file, is the unit of album identity: a file joins the copy its folder
+    already holds for its raw group (album_identity.group_key), wherever the
+    canon has moved that copy's album since (an edition renamed or split, a
+    twin folded); a file of a disc folder joins the album a sibling disc
+    folder under the same parent holds for its group — a folder name of a
+    disc's shape, or a disc number the sibling does not hold. Only when
+    neither holds one is the album minted from the tags. Without it, a canon
+    move of an album's first files sent the later ones to a new album row in
+    the same folder, and the edition rules never folded the two halves."""
+
+    def __init__(self, db: Session, sink: FileSink):
+        self.db, self.sink = db, sink
+        self._held: Dict[str, list] = {}
+
+    def _variants_in(self, dirs: List[str]) -> None:
+        want = [d for d in dirs if d not in self._held]
+        if not want:
+            return
+        for d in want:
+            self._held[d] = []
+        rows = self.db.execute(text(f"""
+            SELECT av.id, av.album_id::text AS album_id, av.directory_path, av.raw_title,
+                   av.raw_artist, count(f.id) AS files,
+                   array_remove(array_agg(DISTINCT COALESCE(f.disc_number, 1)), NULL) AS discs
+              FROM album_variants av LEFT JOIN {self.sink.files_table} f ON f.album_variant_id = av.id
+             WHERE av.directory_path = ANY(:d)
+               AND av.hqp_endpoint_id IS NOT DISTINCT FROM :e
+             GROUP BY av.id"""), {"d": want, "e": self.sink.hqp_endpoint_id}).fetchall()
+        for r in rows:
+            self._held[r.directory_path].append(r)
+
+    def _siblings(self, dir_path: str) -> List:
+        parent = dir_path.rstrip("/").rpartition("/")[0]
+        if not parent:
+            return []
+        key = "sib:" + parent
+        if key not in self._held:
+            rows = self.db.execute(text(f"""
+                SELECT av.id, av.album_id::text AS album_id, av.directory_path, av.raw_title,
+                       av.raw_artist, count(f.id) AS files,
+                       array_remove(array_agg(DISTINCT COALESCE(f.disc_number, 1)), NULL) AS discs
+                  FROM album_variants av LEFT JOIN {self.sink.files_table} f ON f.album_variant_id = av.id
+                 WHERE starts_with(av.directory_path, :p)
+                   AND av.hqp_endpoint_id IS NOT DISTINCT FROM :e
+                 GROUP BY av.id"""), {"p": parent + "/", "e": self.sink.hqp_endpoint_id}).fetchall()
+            self._held[key] = [r for r in rows if "/" not in r.directory_path[len(parent) + 1:]]
+        return [r for r in self._held[key] if r.directory_path != dir_path]
+
+    def forget(self, dir_path: str) -> None:
+        """What the folder holds changed (a copy made or moved): read again."""
+        self._held.pop(dir_path, None)
+        parent = dir_path.rstrip("/").rpartition("/")[0]
+        self._held.pop("sib:" + parent, None)
+
+    def resolve(self, dir_path: str, title: str, credit: str, disc: Optional[int],
+                exclude_variant: Optional[int] = None) -> Tuple[str, bool]:
+        """(album id, minted): the album of a copy this folder or a sibling
+        disc folder holds for the group, else the one the tags mint."""
+        key = group_key(title, credit)
+        self._variants_in([dir_path])
+        here = [v for v in self._held[dir_path]
+                if v.id != exclude_variant and v.raw_artist is not None
+                and group_key(v.raw_title, v.raw_artist) == key]
+        if here:
+            return max(here, key=lambda v: (v.files, -v.id)).album_id, False
+        disc = disc or 1
+        for v in sorted(self._siblings(dir_path), key=lambda v: -v.files):
+            if (v.id != exclude_variant and v.raw_artist is not None
+                    and group_key(v.raw_title, v.raw_artist) == key
+                    and (dir_disc(dir_path) or dir_disc(v.directory_path)
+                         or disc not in (v.discs or []))):
+                return v.album_id, False
+        return str(album_uuid(title, credit)), True
+
+
+def _ensure_album(db: Session, album_id: str, title: str, credit: str,
+                  md: Optional[Dict[str, Any]] = None) -> None:
+    """The album row a minted id names, with the credit it was minted under."""
+    from canon.identity import _ensure_artist
+    from transliterate import latinize
+    db.execute(text("""
+        INSERT INTO albums (id, title, title_latin, release_year, label, catalog_number)
+        VALUES (:id, :t, :tl, :y, :l, :c) ON CONFLICT (id) DO NOTHING"""),
+        {"id": album_id, "t": title, "tl": latinize(title),
+         "y": (md or {}).get("release_year"), "l": (md or {}).get("label"),
+         "c": (md or {}).get("catalog_number")})
+    artist = str(_ensure_artist(db, credit))
+    db.execute(text("""INSERT INTO album_artists (album_id, artist_id, role)
+                       VALUES (:a, :r, 'primary') ON CONFLICT DO NOTHING"""),
+               {"a": album_id, "r": artist})
 
 
 def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink,
@@ -316,8 +432,6 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     every 100 files; counts into ``stats`` (added, errors, unique_tracks).
     cancel_check stops after the current file, keeping what was committed.
     """
-    from normalize_genres import parse_genre_string, normalize_genre_name
-
     for key in ("added", "errors", "unique_tracks"):
         stats.setdefault(key, 0)
 
@@ -339,11 +453,13 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     assoc_aa: set = set()   # (album_id, artist_id, role)
     seen_track_ids = set()
     local_albums: Dict[Any, bool] = {}   # album_id -> has a local variant (HQP sink only)
-    # Folder→albums pre-pass: resolve box-set / singles / mix directories
-    # once (album_identity.assign_dir_albums).
-    dir_albums = _classify_dirs(entries, sink)
+    # The folder → albums pre-pass over each whole folder (box sets,
+    # singles, mixes); the moves it asks of rows already held are the
+    # caller's (LibraryScanner.scan_and_import → move_albums).
+    dir_albums, _existing = _classify_dirs(entries, sink)
 
     with get_db_context() as db:
+        albums = _Albums(db, sink)
         for dir_path, metadata in tqdm(entries, desc="Importing", unit="file"):
             if cancel_check and cancel_check():
                 logger.info("Import cancelled by user")
@@ -362,25 +478,19 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                 # still groups as one album (Album has no artist_id — both
                 # credits coexist via track_artists/album_artists).
                 track_artist_name = metadata.get("artist") or metadata.get("album_artist")
-                album_artist_name = metadata.get("album_artist") or metadata.get("artist")
                 if not track_artist_name:
                     logger.warning(f"Missing artist for {file_path}, skipping")
                     stats["errors"] += 1
                     continue
-                album_title = metadata.get("album")
-                if not album_title:
-                    album_title = metadata["title"]
-                    logger.info(f"No album tag, using title as album: {album_title}")
-                # Box set / singles / mix folder → album identity comes from
-                # the directory pre-pass (per-group title + credit). The
-                # per-track artist (track_artist_name) is untouched, so track
-                # identity stands. Cue slices bypass it — the sheet is the
-                # album authority (they are excluded from _classify_dirs too).
-                asg = None
-                if metadata.get("cue_start_seconds") is None:
-                    asg = dir_albums.get(dir_path, {}).get(file_path)
-                if asg:
-                    album_title, album_artist_name = asg[0], asg[1]
+                if not metadata.get("album"):
+                    logger.info(f"No album tag, using title as album: {metadata['title']}")
+                # The folder's assignment (box set / singles / mix folder →
+                # per-group title + credit). The per-track artist is untouched,
+                # so track identity stands. Cue slices keep their sheet's.
+                album_title, album_artist_name, track_override, disc_override = \
+                    dir_albums[file_path]
+                disc_number = (disc_override if disc_override is not None
+                               else metadata.get("disc_number", 1))
                 # Collect cache entries created inside the savepoint;
                 # only commit them to the long-lived caches after the
                 # savepoint succeeds (rollback safety).
@@ -398,19 +508,6 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             db.add(artist)
                             db.flush()
                         pending_cache.append(("artist", a_uid, artist))
-                    # ── Artist (album credit — e.g. 'Various Artists' on comps) ──
-                    aa_uid = artist_uuid(album_artist_name)
-                    if aa_uid == a_uid:
-                        album_artist = artist
-                    elif aa_uid in caches["artist"]:
-                        album_artist = caches["artist"][aa_uid]
-                    else:
-                        album_artist = db.query(Artist).filter(Artist.id == aa_uid).first()
-                        if not album_artist:
-                            album_artist = Artist(id=aa_uid, name=album_artist_name)
-                            db.add(album_artist)
-                            db.flush()
-                        pending_cache.append(("artist", aa_uid, album_artist))
                     # ── Track ──
                     t_uid = track_uuid(metadata["title"], track_artist_name)
                     if t_uid in caches["track"]:
@@ -422,15 +519,18 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             db.add(track)
                             db.flush()
                         pending_cache.append(("track", t_uid, track))
-                    # ── Album ──
-                    al_uid = album_uuid(album_title, album_artist_name)
-                    if al_uid in caches["album"]:
-                        album = caches["album"][al_uid]
+                    # ── Album: the folder rule, else minted from the tags ──
+                    vkey = (dir_path, group_key(album_title, album_artist_name))
+                    if vkey in caches["variant"]:
+                        variant = caches["variant"][vkey]
+                        album = variant.album
                     else:
-                        album = db.query(Album).filter(Album.id == al_uid).first()
+                        al_id, minted = albums.resolve(dir_path, album_title, album_artist_name,
+                                                       disc_number)
+                        album = db.query(Album).filter(Album.id == al_id).first()
                         if not album:
                             album = Album(
-                                id=al_uid,
+                                id=al_id,
                                 title=album_title,
                                 release_year=metadata.get("release_year"),
                                 label=metadata.get("label"),
@@ -438,14 +538,34 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             )
                             db.add(album)
                             db.flush()
-                        pending_cache.append(("album", al_uid, album))
-                    # ── Album variant (one physical edition per (dir, album)
-                    # at the sink's location — a box set is several albums in
-                    # one folder) ──
-                    vkey = (dir_path, str(album.id))
-                    if vkey in caches["variant"]:
-                        variant = caches["variant"][vkey]
-                    else:
+                        if minted:
+                            # The credit the id was minted from. A copy that
+                            # joined an album keeps that album's credits: the
+                            # canon may have renamed them.
+                            aa_uid = artist_uuid(album_artist_name)
+                            if aa_uid == a_uid:
+                                album_artist = artist
+                            elif aa_uid in caches["artist"]:
+                                album_artist = caches["artist"][aa_uid]
+                            else:
+                                album_artist = db.query(Artist).filter(Artist.id == aa_uid).first()
+                                if not album_artist:
+                                    album_artist = Artist(id=aa_uid, name=album_artist_name)
+                                    db.add(album_artist)
+                                    db.flush()
+                                pending_cache.append(("artist", aa_uid, album_artist))
+                            aa_key = (album.id, album_artist.id, "primary")
+                            if aa_key not in assoc_aa:
+                                if not db.query(AlbumArtist).filter(
+                                        AlbumArtist.album_id == album.id,
+                                        AlbumArtist.artist_id == album_artist.id,
+                                        AlbumArtist.role == "primary").first():
+                                    db.add(AlbumArtist(album_id=album.id,
+                                                       artist_id=album_artist.id, role="primary"))
+                                assoc_aa.add(aa_key)
+                        # ── Album variant: one physical copy per (dir, album)
+                        # at the sink's location — a box set is several albums
+                        # in one folder ──
                         variant = db.query(AlbumVariant).filter(
                             AlbumVariant.directory_path == dir_path,
                             AlbumVariant.album_id == album.id,
@@ -456,6 +576,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                                 album_id=album.id,
                                 directory_path=dir_path,
                                 raw_title=album_title,
+                                raw_artist=album_artist_name,
                                 sample_rate=metadata.get("sample_rate"),
                                 bit_depth=metadata.get("bit_depth"),
                                 is_lossless=metadata.get("is_lossless", True),
@@ -464,6 +585,9 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             )
                             db.add(variant)
                             db.flush()
+                            albums.forget(dir_path)
+                        elif variant.raw_artist is None:
+                            variant.raw_artist = album_artist_name
                         pending_cache.append(("variant", vkey, variant))
                     # A file read here makes its copy present: the walk's own
                     # look (_mark_present) knows only the rows it had before.
@@ -484,21 +608,6 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                                 role="primary",
                             ))
                         assoc_ta.add(ta_key)
-                    # ── Album-Artist association (album credit) ──
-                    aa_key = (album.id, album_artist.id, "primary")
-                    if aa_key not in assoc_aa:
-                        existing_aa = db.query(AlbumArtist).filter(
-                            AlbumArtist.album_id == album.id,
-                            AlbumArtist.artist_id == album_artist.id,
-                            AlbumArtist.role == "primary",
-                        ).first()
-                        if not existing_aa:
-                            db.add(AlbumArtist(
-                                album_id=album.id,
-                                artist_id=album_artist.id,
-                                role="primary",
-                            ))
-                        assoc_aa.add(aa_key)
                     # ── Album-Genre associations (album grain) ──
                     # A copy at the HQPlayer of an album whose files are here
                     # adds no genre information: its tags are the same tags,
@@ -512,35 +621,17 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                         if local_albums[album.id]:
                             genre_name = None
                     if genre_name and genre_name.strip():
-                        file_genre_ids: set = set()
-                        for gn in parse_genre_string(genre_name):
-                            gn = normalize_genre_name(gn)
-                            g_uid = genre_uuid(gn)
-                            if g_uid in caches["genre"]:
-                                genre = caches["genre"][g_uid]
-                            else:
-                                genre = db.query(Genre).filter(Genre.id == g_uid).first()
-                                if not genre:
-                                    genre = Genre(id=g_uid, name=gn)
-                                    db.add(genre)
-                                    db.flush()
-                                pending_cache.append(("genre", g_uid, genre))
-                            # One +1 per genre per file (a tag may normalize
-                            # two parts to the same genre).
-                            if genre.id in file_genre_ids:
-                                continue
-                            file_genre_ids.add(genre.id)
+                        for g in _genres_of(genre_name, caches, pending_cache, db):
                             db.execute(_ALBUM_GENRE_UPSERT, {
                                 "album_id": album.id,
-                                "genre_id": genre.id,
+                                "genre_id": g.id,
                             })
                     # ── File row ──
-                    track_number = (asg[2] if asg and asg[2] is not None
+                    track_number = (track_override if track_override is not None
                                     else metadata.get("track_number"))
-                    disc_number = (asg[3] if asg and asg[3] is not None
-                                   else metadata.get("disc_number", 1))
                     if sink.location == "local":
-                        db.add(MediaFile(
+                        st = metadata.get("stat")
+                        row = MediaFile(
                             track_id=track.id,
                             album_variant_id=variant.id,
                             file_path=metadata["file_path"],
@@ -548,6 +639,9 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             is_lossless=metadata.get("is_lossless", True),
                             file_size_bytes=metadata.get("file_size_bytes"),
                             file_modified_at=metadata.get("file_modified_at"),
+                            stat_mtime_ns=st.mtime_ns if st else None,
+                            stat_ctime_ns=st.ctime_ns if st else None,
+                            cue_stat=metadata.get("cue_stat"),
                             sample_rate=metadata.get("sample_rate"),
                             bit_depth=metadata.get("bit_depth"),
                             bitrate=metadata.get("bitrate"),
@@ -557,6 +651,8 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             cue_end_seconds=metadata.get("cue_end_seconds"),
                             track_number=track_number,
                             disc_number=disc_number,
+                            track_total=metadata.get("track_total"),
+                            disc_total=metadata.get("disc_total"),
                             isrc=metadata.get("isrc"),
                             # Original tags — ground truth for re-normalization / correction
                             raw_track_name=metadata.get("title"),
@@ -564,7 +660,11 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             raw_album_artist=metadata.get("album_artist"),
                             raw_album=metadata.get("album"),
                             raw_year=metadata.get("date"),
-                        ))
+                            raw_genre=metadata.get("genre"),
+                        )
+                        if metadata.get("arrived_at") is not None:
+                            row.arrived_at = metadata["arrived_at"]
+                        db.add(row)
                         db.flush()
                         elect_analysis_source(db, track.id)
                     else:
@@ -612,6 +712,349 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
         db.commit()
 
 
+def _genres_of(genre_tag: str, caches, pending_cache, db: Session) -> List[Genre]:
+    """The distinct genres a file's genre tag names (one +1 per genre per
+    file: a tag may normalize two parts to the same genre)."""
+    from normalize_genres import parse_genre_string, normalize_genre_name
+    out: Dict[Any, Genre] = {}
+    for gn in parse_genre_string(genre_tag):
+        gn = normalize_genre_name(gn)
+        g_uid = genre_uuid(gn)
+        genre = caches["genre"].get(g_uid)
+        if genre is None:
+            genre = db.query(Genre).filter(Genre.id == g_uid).first()
+            if not genre:
+                genre = Genre(id=g_uid, name=gn)
+                db.add(genre)
+                db.flush()
+            pending_cache.append(("genre", g_uid, genre))
+        out[genre.id] = genre
+    return list(out.values())
+
+
+def derive_filetag_genres(db: Session, album_ids) -> None:
+    """An album's filetag genre counts as its local files' genre tags make
+    them — one per genre per file, derived, never incremented in place (the
+    local_play_stats pattern): a file read again with another genre moves
+    its album's counts, a file moved to another album moves them between the
+    two. An album some of whose files were never read by a release that
+    keeps the tag (raw_genre) keeps the counts its imports added: its first
+    read by such a release, which every such row gets once, derives them."""
+    caches: Dict[str, dict] = {"genre": {}}
+    for album in {str(a) for a in album_ids}:
+        rows = db.execute(text("""
+            SELECT mf.raw_genre, mf.stat_mtime_ns FROM media_files mf
+              JOIN album_variants av ON av.id = mf.album_variant_id
+             WHERE av.album_id = :a"""), {"a": album}).fetchall()
+        if not rows or any(r.stat_mtime_ns is None for r in rows):
+            continue
+        counts: Dict[Any, int] = defaultdict(int)
+        for r in rows:
+            if r.raw_genre and r.raw_genre.strip():
+                for g in _genres_of(r.raw_genre, caches, [], db):
+                    counts[g.id] += 1
+        db.execute(text("DELETE FROM album_genres WHERE album_id = :a AND source = 'filetag'"),
+                   {"a": album})
+        for genre_id, n in counts.items():
+            db.execute(text("""INSERT INTO album_genres (album_id, genre_id, source, count)
+                               VALUES (:a, :g, 'filetag', :n)"""),
+                       {"a": album, "g": str(genre_id), "n": n})
+
+
+_HELD_SQL = text("""
+    WITH w(path, size, mtime, ctime) AS (
+        SELECT * FROM unnest(CAST(:paths AS text[]), CAST(:sizes AS bigint[]),
+                             CAST(:mtimes AS bigint[]), CAST(:ctimes AS bigint[])))
+    SELECT w.path, array_agg(mf.cue_start_seconds) AS starts,
+           bool_or(mf.stat_mtime_ns IS NULL OR mf.file_size_bytes IS DISTINCT FROM w.size
+                   OR mf.stat_mtime_ns <> w.mtime OR mf.stat_ctime_ns IS DISTINCT FROM w.ctime)
+               AS changed,
+           min(mf.cue_stat) AS cue_stat        -- one sheet stat for all of an image's slices
+      FROM w JOIN media_files mf ON mf.file_path = w.path
+     GROUP BY w.path
+""")
+
+_REREAD_ROWS_SQL = text("""
+    SELECT mf.id, mf.track_id::text AS track_id, mf.album_variant_id, mf.file_path,
+           mf.cue_start_seconds, mf.raw_track_name, mf.raw_artist, mf.raw_album_artist,
+           mf.raw_album, mf.raw_genre, mf.duration_seconds, mf.sample_rate, mf.bit_depth,
+           av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
+      FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+     WHERE mf.file_path = ANY(CAST(:paths AS text[]))
+""")
+
+_REREAD_SQL = text("""
+    UPDATE media_files SET
+        file_format = :file_format, is_lossless = :is_lossless,
+        file_size_bytes = :file_size_bytes, file_modified_at = :file_modified_at,
+        arrived_at = CASE WHEN stat_mtime_ns IS NULL AND CAST(:arrived_at AS timestamptz) IS NOT NULL
+                          THEN CAST(:arrived_at AS timestamptz) ELSE arrived_at END,
+        stat_mtime_ns = :stat_mtime_ns, stat_ctime_ns = :stat_ctime_ns, cue_stat = :cue_stat,
+        sample_rate = :sample_rate, bit_depth = :bit_depth, bitrate = :bitrate,
+        channels = :channels, duration_seconds = :duration_seconds,
+        cue_end_seconds = :cue_end_seconds, track_number = :track_number,
+        disc_number = :disc_number, track_total = :track_total, disc_total = :disc_total,
+        isrc = :isrc, raw_track_name = :raw_track_name, raw_artist = :raw_artist,
+        raw_album_artist = :raw_album_artist, raw_album = :raw_album, raw_year = :raw_year,
+        raw_genre = :raw_genre, decode_refused = false, cover_processed_at = NULL
+     WHERE id = :id
+""")
+
+# A file replaced at its path by other material (another rip, a re-encode)
+# declares another length or format: the analysis made from the old bytes
+# no longer describes it — unlinked, the track is pending and is analysed
+# again or relinked by its fingerprint. The same length and format is a
+# re-tag, and the analysis stays.
+_MATERIAL_LENGTH_TOLERANCE = 0.5
+
+
+def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments: Dict[str, Tuple],
+                    stats: Dict[str, int], moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]],
+                    touched_albums: Set[str]) -> None:
+    """Rows read again in place — `media_files.id` kept: listens, sessions,
+    the queue and the analysis link name it (LIBRARY-WATCH-DESIGN §6.2).
+    ``entries`` = ``(dir_path, metadata, row)``. A changed title or artist
+    moves the file to the track the tags name (canon.identity.
+    rehome_file_track); a changed album or credit is recorded in ``moves``
+    ({variant id: [(file id, title, credit, disc)]}) for move_albums, which
+    moves a copy whole when all its files go. Identity is compared raw
+    against raw — the key the tags mint now against the one the row's stored
+    tags minted — so whatever the canon renamed since is no change."""
+    from canon.identity import rehome_file_track
+    stats.setdefault("reread", 0)
+    with get_db_context() as db:
+        for dir_path, md, row in entries:
+            if not md.get("title") or not (md.get("artist") or md.get("album_artist")):
+                logger.warning(f"Missing title or artist for {md['file_path']}, its row kept as it was")
+                stats["errors"] += 1
+                continue
+            title, credit, track_ov, disc_ov = assignments[md["file_path"]]
+            disc = disc_ov if disc_ov is not None else md.get("disc_number", 1)
+            st = md.get("stat")
+            try:
+                with db.begin_nested():
+                    db.execute(_REREAD_SQL, {
+                        "id": row.id, "file_format": md.get("file_format", "FLAC"),
+                        "is_lossless": md.get("is_lossless", True),
+                        "file_size_bytes": md.get("file_size_bytes"),
+                        "file_modified_at": md.get("file_modified_at"),
+                        "arrived_at": md.get("arrived_at"),
+                        "stat_mtime_ns": st.mtime_ns if st else None,
+                        "stat_ctime_ns": st.ctime_ns if st else None,
+                        "cue_stat": md.get("cue_stat"),
+                        "sample_rate": md.get("sample_rate"), "bit_depth": md.get("bit_depth"),
+                        "bitrate": md.get("bitrate"), "channels": md.get("channels"),
+                        "duration_seconds": md.get("duration_seconds"),
+                        "cue_end_seconds": md.get("cue_end_seconds"),
+                        "track_number": track_ov if track_ov is not None else md.get("track_number"),
+                        "disc_number": disc, "track_total": md.get("track_total"),
+                        "disc_total": md.get("disc_total"), "isrc": md.get("isrc"),
+                        "raw_track_name": md.get("title"), "raw_artist": md.get("artist"),
+                        "raw_album_artist": md.get("album_artist"), "raw_album": md.get("album"),
+                        "raw_year": md.get("date"), "raw_genre": md.get("genre")})
+                    old_dur = float(row.duration_seconds) if row.duration_seconds is not None else None
+                    new_dur = md.get("duration_seconds")
+                    if ((old_dur is None) != (new_dur is None)
+                            or (old_dur is not None and abs(old_dur - float(new_dur)) > _MATERIAL_LENGTH_TOLERANCE)
+                            or row.sample_rate != md.get("sample_rate")
+                            or row.bit_depth != md.get("bit_depth")):
+                        db.execute(text("UPDATE analysis_sources SET media_file_id = NULL "
+                                        "WHERE media_file_id = :id"), {"id": row.id})
+                        elect_analysis_source(db, row.track_id)
+                    track_artist = md.get("artist") or md.get("album_artist")
+                    old_key = (track_uuid(row.raw_track_name, row.raw_artist or row.raw_album_artist)
+                               if row.raw_track_name else None)
+                    if old_key != track_uuid(md["title"], track_artist):
+                        new_track = rehome_file_track(db, row.id, row.track_id, md["title"],
+                                                      track_artist)
+                        db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
+                                   {"id": row.id})
+                        stats["moved"] = stats.get("moved", 0) + (new_track != row.track_id)
+                    if (row.v_artist is None and group_key(row.v_title, credit) == group_key(title, credit)):
+                        db.execute(text("UPDATE album_variants SET raw_artist = :c WHERE id = :v "
+                                        "AND raw_artist IS NULL"), {"c": credit, "v": row.album_variant_id})
+                    elif group_key(row.v_title, row.v_artist) != group_key(title, credit):
+                        moves.setdefault(row.album_variant_id, []).append((row.id, title, credit, disc))
+                    if (row.raw_genre or None) != (md.get("genre") or None):
+                        touched_albums.add(row.album_id)
+                stats["reread"] += 1
+            except Exception as e:
+                logger.error(f"Error reading {md['file_path']} again: {e}", exc_info=True)
+                stats["errors"] += 1
+        db.commit()
+
+
+def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sink: FileSink,
+                touched_albums: Set[str]) -> int:
+    """Rows whose folder now assigns them another album (a tag changed, or
+    the folder's shape did) move to the album of their new group, by the
+    folder rule (_Albums.resolve). A copy all of whose files move to one
+    group moves whole (_merge_album_variants), and an album left with no
+    other copy follows it (_update_album_uuid: sessions' album origins,
+    descriptions, genres and its seal with it) — so a title fixed in all an
+    album's files renames the album rather than leaving an empty one. A copy
+    or an album left holding nothing goes, as the CUE supersede drops what
+    it leaves: nothing the owner sees is removed — the files are there under
+    their new album. Returns how many files moved."""
+    from canon.identity import _merge_album_variants, _update_album_uuid
+    table = sink.files_table
+    moved = 0
+    with get_db_context() as db:
+        albums = _Albums(db, sink)
+        for vid, files in moves.items():
+            v = db.execute(text("SELECT id, album_id::text AS album_id, directory_path "
+                                "FROM album_variants WHERE id = :v"), {"v": vid}).first()
+            if v is None:
+                continue
+            held = set(db.execute(text(f"SELECT id FROM {table} WHERE album_variant_id = :v"),
+                                  {"v": vid}).scalars())
+            groups = {group_key(t, c) for _f, t, c, _d in files}
+            _f0, title, credit, disc = files[0]
+            with db.begin_nested():
+                if held <= {f for f, *_ in files} and len(groups) == 1:
+                    target, minted = albums.resolve(v.directory_path, title, credit, disc,
+                                                    exclude_variant=vid)
+                    if minted:
+                        _ensure_album(db, target, title, credit)
+                    if target != v.album_id:
+                        alone = not db.execute(text("""
+                            SELECT EXISTS (SELECT 1 FROM album_variants WHERE album_id = :a AND id <> :v)
+                                OR EXISTS (SELECT 1 FROM album_tracks WHERE album_id = :a)"""),
+                            {"a": v.album_id, "v": vid}).scalar()
+                        if alone:
+                            _update_album_uuid(db, v.album_id, target)
+                        else:
+                            _merge_album_variants(db, target, variant_ids=[vid])
+                        if minted:
+                            # minted from (title, credit): its credit is that one, not
+                            # the one the merge brought along from the old album
+                            from canon.identity import _ensure_artist
+                            db.execute(text("""DELETE FROM album_artists
+                                                WHERE album_id = :a AND role = 'primary'
+                                                  AND artist_id <> :r"""),
+                                       {"a": target, "r": str(_ensure_artist(db, credit))})
+                        touched_albums.update({v.album_id, target})
+                    db.execute(text("""UPDATE album_variants SET raw_title = :t, raw_artist = :c
+                                        WHERE album_id = :a AND directory_path = :d
+                                          AND hqp_endpoint_id IS NOT DISTINCT FROM :e"""),
+                               {"t": title, "c": credit, "a": target, "d": v.directory_path,
+                                "e": sink.hqp_endpoint_id})
+                else:
+                    for fid, t, c, d in files:
+                        target, minted = albums.resolve(v.directory_path, t, c, d, exclude_variant=vid)
+                        if minted:
+                            _ensure_album(db, target, t, c)
+                        dest = db.execute(text("""
+                            SELECT id FROM album_variants
+                             WHERE directory_path = :d AND album_id = :a
+                               AND hqp_endpoint_id IS NOT DISTINCT FROM :e"""),
+                            {"d": v.directory_path, "a": target, "e": sink.hqp_endpoint_id}).scalar()
+                        if dest is None:
+                            dest = db.execute(text("""
+                                INSERT INTO album_variants (album_id, directory_path, raw_title, raw_artist,
+                                                            location, hqp_endpoint_id, sample_rate,
+                                                            bit_depth, is_lossless)
+                                SELECT :a, :d, :t, :c, location, hqp_endpoint_id, sample_rate,
+                                       bit_depth, is_lossless
+                                  FROM album_variants WHERE id = :v RETURNING id"""),
+                                {"a": target, "d": v.directory_path, "t": t, "c": c, "v": vid}).scalar()
+                            albums.forget(v.directory_path)
+                        db.execute(text(f"UPDATE {table} SET album_variant_id = :dest WHERE id = :f"),
+                                   {"dest": dest, "f": fid})
+                        touched_albums.update({v.album_id, target})
+                    db.execute(text("""DELETE FROM album_variants av WHERE av.id = :v
+                                         AND NOT EXISTS (SELECT 1 FROM media_files WHERE album_variant_id = :v)
+                                         AND NOT EXISTS (SELECT 1 FROM hqp_library_files
+                                                          WHERE album_variant_id = :v)"""), {"v": vid})
+                    db.execute(text("""DELETE FROM albums a WHERE a.id = :a
+                                         AND NOT EXISTS (SELECT 1 FROM album_variants WHERE album_id = :a)
+                                         AND NOT EXISTS (SELECT 1 FROM album_tracks WHERE album_id = :a)"""),
+                               {"a": v.album_id})
+                if table == "media_files":
+                    db.execute(text("UPDATE media_files SET content_at = now() WHERE id = ANY(:f)"),
+                               {"f": [f for f, *_ in files]})
+            albums.forget(v.directory_path)
+            moved += len(files)
+        db.commit()
+    return moved
+
+
+def backfill_variant_credits(cur) -> int:
+    """The album credit every copy was minted under (album_variants.
+    raw_artist), for copies made before it was kept: what the folder rule
+    makes of each folder's rows by their stored tags — the classification an
+    import runs — the most common credit among a copy's files. Without it a
+    copy the canon has moved since would not be found by its group, and the
+    next file of its folder would mint a second album beside it. Idempotent:
+    only copies with no credit are written. Returns how many."""
+    out = 0
+    for table, path_col, cue in (("media_files", "file_path", "f.cue_start_seconds"),
+                                 ("hqp_library_files", "hqp_path", "NULL::float")):
+        cur.execute(f"""
+            SELECT av.id, av.directory_path, f.{path_col}, f.raw_album, f.disc_number,
+                   f.track_number, f.raw_album_artist, f.raw_artist, f.raw_track_name, {cue}
+              FROM album_variants av JOIN {table} f ON f.album_variant_id = av.id
+             WHERE av.raw_artist IS NULL
+             ORDER BY av.directory_path""")
+        by_dir: Dict[str, list] = defaultdict(list)
+        for row in cur.fetchall():
+            by_dir[row[1]].append(row)
+        credits: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for d, rows in by_dir.items():
+            plain = [r for r in rows if r[9] is None]
+            files = [{"album": r[3], "disc": r[4], "track": r[5], "artist_key": r[6] or r[7],
+                      "path": r[2]} for r in plain]
+            folder = os.path.basename(d.replace("\\", "/").rstrip("/"))
+            assignment = assign_dir_albums(folder, files) if files else None
+            for r in rows:
+                if r[9] is None and assignment is not None:
+                    credit = assignment[r[2]][1]
+                else:
+                    credit = _own_assignment(r[3], r[8], r[6], r[7])[1]
+                if credit:
+                    credits[r[0]][credit] += 1
+        for vid, counted in credits.items():
+            credit = sorted(counted.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            cur.execute("UPDATE album_variants SET raw_artist = %s WHERE id = %s AND raw_artist IS NULL",
+                        (credit, vid))
+            out += cur.rowcount
+    return out
+
+
+def _int_or_none(value) -> Optional[int]:
+    try:
+        n = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _declared_totals(audio, get_tag) -> Tuple[Optional[int], Optional[int]]:
+    """The track and disc totals the file's own tags declare — "n/N" in the
+    number tags (Vorbis, ID3 TRCK/TPOS, MP4 trkn/disk), or TRACKTOTAL /
+    TOTALTRACKS and DISCTOTAL / TOTALDISCS. None where nothing declares one:
+    an album whose files declare nothing is complete as soon as it is read
+    (few tracks is no incomplete album)."""
+    def total_of(vorbis_key, id3_key, mp4_key, *total_keys):
+        for key in total_keys:
+            n = _int_or_none(get_tag(key))
+            if n:
+                return n
+        number = get_tag(vorbis_key, id3_key)
+        if number and "/" in str(number):
+            return _int_or_none(str(number).split("/", 1)[1])
+        if audio.tags is not None:
+            try:
+                pair = audio.tags.get(mp4_key)
+            except (ValueError, KeyError):
+                pair = None
+            if pair and isinstance(pair[0], tuple) and len(pair[0]) > 1:
+                return _int_or_none(pair[0][1])
+        return None
+    return (total_of("tracknumber", "TRCK", "trkn", "tracktotal", "totaltracks"),
+            total_of("discnumber", "TPOS", "disk", "disctotal", "totaldiscs"))
+
+
 class LibraryScanner:
     """Scanner for music library audio files."""
 
@@ -627,6 +1070,8 @@ class LibraryScanner:
         # read, for the prune that closes a scan run (see scan_and_import).
         self.last_disk_paths: Optional[Set[str]] = None
         self.last_unread: List[str] = []
+        # The scopes whose folder was gone at the last walk (find_audio_files).
+        self.last_gone: List[str] = []
 
     @staticmethod
     def extract_metadata(file_path: Path) -> Optional[Dict[str, Any]]:
@@ -637,13 +1082,17 @@ class LibraryScanner:
             Dictionary with extracted metadata or None if failed.
         """
         try:
+            # The stat before the read: a write during the read moves the
+            # file's stat away from the one recorded, so the next comparison
+            # reads it again — taken after, it could name a version the tags
+            # were not read from (LIBRARY-WATCH-DESIGN §6.1).
+            stat = file_stat.stat_of(str(file_path))
+            birth_ns = file_stat.birth_ns(str(file_path))
             audio = mutagen.File(file_path)
             if audio is None:
                 logger.warning(f"Unsupported format: {file_path}")
                 return None
 
-            # Extract basic tags
-            file_stat = file_path.stat()
             file_format = file_path.suffix.lstrip('.').upper()
 
             # Audio properties — not all formats expose all fields
@@ -690,9 +1139,14 @@ class LibraryScanner:
             metadata = {
                 # File information — translate to native OS path for DB storage
                 "file_path": settings.translate_to_host_path(str(file_path.absolute())),
-                "file_size_bytes": file_stat.st_size,
+                "file_size_bytes": stat.size,
+                "stat": stat,
+                # when the file came onto this disk; None where the disk keeps
+                # no birth (a 9p or drvfs bind): the first read stands in
+                "arrived_at": (datetime.fromtimestamp(birth_ns / 1e9, tz=timezone.utc)
+                               if birth_ns is not None else None),
                 "file_format": file_format,
-                "file_modified_at": datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc),
+                "file_modified_at": datetime.fromtimestamp(stat.mtime_ns / 1e9, tz=timezone.utc),
                 "is_lossless": check_lossless(file_format),
 
                 # Audio properties
@@ -717,6 +1171,8 @@ class LibraryScanner:
                 "catalog_number": get_tag("catalognumber"),
                 "isrc": get_tag("isrc", "TSRC"),
             }
+
+            metadata["track_total"], metadata["disc_total"] = _declared_totals(audio, get_tag)
 
             # Parse track number (handle "1/12" format and vinyl "A1"/"B02")
             if metadata["track_number"]:
@@ -766,6 +1222,9 @@ class LibraryScanner:
         limit: Optional[int] = None,
         subpath: Optional[str] = None,
         cancel_check: Optional[callable] = None,
+        scopes: Optional[Sequence[Tuple[str, bool]]] = None,
+        stats: Optional[Dict[str, "file_stat.FileStat"]] = None,
+        gone: Optional[List[str]] = None,
     ) -> Tuple[List[Path], List[Path], List[str]]:
         """
         Recursively find all audio files (and cue sheets) in library.
@@ -779,6 +1238,14 @@ class LibraryScanner:
                           checking per folder lets a Cancel tap take
                           effect immediately instead of waiting until
                           extraction phase.
+            scopes: (folder relative to the library, recursive) pairs to
+                    walk instead of `subpath` — the folders a watcher
+                    found changed; a folder not recursive is listed alone.
+            stats: filled with each audio file's and cue sheet's stat by
+                   its walk path (file_stat: from the listing on POSIX, the
+                   one handle Windows needs for the change time).
+            gone: filled with the scopes whose folder no longer exists —
+                  every file the catalogue holds under it is missing.
 
         Returns:
             (audio file Paths, .cue file Paths, folders that could not be
@@ -788,18 +1255,29 @@ class LibraryScanner:
             in silence: nothing beneath it is in the lists, and a prune must
             not read it as deleted.
         """
-        if subpath:
-            scan_path = self.library_path / subpath
-            if not scan_path.exists():
-                raise ValueError(f"Subpath does not exist: {scan_path}")
-            logger.info(f"Searching for audio files in {scan_path} (subpath: {subpath})")
-        else:
-            scan_path = self.library_path
-            logger.info(f"Searching for audio files in {scan_path}")
+        if scopes is None:
+            if subpath:
+                scan_path = self.library_path / subpath
+                if not scan_path.exists():
+                    raise ValueError(f"Subpath does not exist: {scan_path}")
+                logger.info(f"Searching for audio files in {scan_path} (subpath: {subpath})")
+            else:
+                logger.info(f"Searching for audio files in {self.library_path}")
+            scopes = [(subpath or "", True)]
 
         audio_files: List[Path] = []
         cue_files: List[Path] = []
         unread: List[str] = []
+
+        def stat_entry(entry) -> bool:
+            if stats is None:
+                return True
+            try:
+                stats[entry.path] = (file_stat.stat_of(entry.path) if sys.platform == "win32"
+                                     else file_stat.from_posix(entry.stat()))
+            except FileNotFoundError:
+                return False        # gone between the listing and its stat
+            return True
 
         # A scandir walk of its own: Path.rglob drops a folder it may not list
         # without a word, and os.walk files a folder whose type it could not
@@ -807,12 +1285,19 @@ class LibraryScanner:
         # the directory listing, so a regular file costs no stat; a symlink is
         # followed to its file (rglob's is_file did the same) but never into
         # a folder. Absolute from the root, as every path the prune compares.
-        folders = [str(scan_path.absolute())]
+        folders = []
+        for rel, recursive in scopes:
+            root = (self.library_path / rel) if rel else self.library_path
+            if rel and not root.is_dir():
+                if gone is not None:
+                    gone.append(rel)
+                continue
+            folders.append((str(root.absolute()), recursive))
         while folders:
             if cancel_check and cancel_check():
                 logger.info("Discovery cancelled by user")
                 break
-            folder = folders.pop()
+            folder, recursive = folders.pop()
             here_audio: List[Path] = []
             here_cues: List[Path] = []
             subfolders: List[str] = []
@@ -824,9 +1309,11 @@ class LibraryScanner:
                         elif entry.is_file():    # not a FIFO, a socket, a dangling link
                             suffix = os.path.splitext(entry.name)[1].lower()
                             if suffix in AUDIO_EXTENSIONS:
-                                here_audio.append(Path(entry.path))
+                                if stat_entry(entry):
+                                    here_audio.append(Path(entry.path))
                             elif suffix == ".cue":
-                                here_cues.append(Path(entry.path))
+                                if stat_entry(entry):
+                                    here_cues.append(Path(entry.path))
             except OSError as err:
                 # A folder known in part is left out whole, with all beneath
                 # it: the cue it could not see would turn its image into one
@@ -837,7 +1324,8 @@ class LibraryScanner:
                 continue
             audio_files.extend(here_audio)
             cue_files.extend(here_cues)
-            folders.extend(subfolders)
+            if recursive:
+                folders.extend((f, True) for f in subfolders)
             if limit and len(audio_files) >= limit:
                 del audio_files[limit:]
                 break
@@ -925,6 +1413,8 @@ class LibraryScanner:
         subpath: Optional[str] = None,
         progress_cb: Optional[callable] = None,
         cancel_check: Optional[callable] = None,
+        scopes: Optional[Sequence[Tuple[str, bool]]] = None,
+        leave: Set[str] = frozenset(),
     ) -> Dict[str, int]:
         """
         Scan library and import metadata to database.
@@ -936,22 +1426,35 @@ class LibraryScanner:
         Disk reads stay roughly sequential (OS scheduler + small header
         reads), so this is safe for both SSD and HDD.
 
+        A file the catalogue holds is read again when its stat (size,
+        mtime, ctime — file_stat) differs from the one its last read
+        recorded, or its cue sheet's does: a re-tagged file reaches the
+        catalogue, and a file read while it was still being written is read
+        once more when it is done (LIBRARY-WATCH-DESIGN §6). The row is
+        updated in place.
+
         Args:
             limit: Maximum number of files to scan (for testing).
-            skip_existing: Skip files already in database.
+            skip_existing: Skip files whose stat did not move; False reads
+                           every file again.
             subpath: Optional subdirectory within library to scan.
             progress_cb: Callback(msg, stats) for progress reporting.
             cancel_check: Callback() -> bool, returns True if cancel requested.
+            scopes: (folder, recursive) pairs to walk instead of `subpath`.
+            leave: walk paths a watcher knows a writer still holds: their
+                   close brings them back.
 
         Returns:
-            Dictionary with statistics (processed, added, skipped, errors).
+            Dictionary with statistics (processed, added, skipped, reread,
+            errors).
         """
-        from normalize_genres import parse_genre_string, normalize_genre_name
-
         stats = {
             "processed": 0,
             "added": 0,
             "skipped": 0,
+            "reread": 0,
+            "moved": 0,
+            "held": 0,
             "errors": 0,
             "unique_tracks": 0,
             "superseded": 0,
@@ -970,67 +1473,82 @@ class LibraryScanner:
         # ── Discover files ──────────────────────────────────────────
         if progress_cb:
             progress_cb("Discovering files...", stats)
+        disk_stats: Dict[str, file_stat.FileStat] = {}
+        gone: List[str] = []
         audio_files, cue_files, unread = self.find_audio_files(
-            limit=limit, subpath=subpath, cancel_check=cancel_check)
+            limit=limit, subpath=subpath, cancel_check=cancel_check, scopes=scopes,
+            stats=disk_stats, gone=gone)
         stats["unread"] = len(unread)
         self.last_unread = unread
+        self.last_gone = gone
         if _cancelled():
             logger.info("Scan cancelled during discovery")
             return stats
 
+        # The prune that closes a scan run reconciles this very tree. Hand it
+        # this walk, with the paths it could not read — the prune keeps what
+        # lies under them. A limited scan truncates the list, so it never
+        # becomes a prune input — everything outside the limit would read as
+        # deleted.
+        walked = {settings.translate_to_host_path(str(fp.absolute())): fp for fp in audio_files}
+        self.last_disk_paths = None if limit else set(walked)
         if not audio_files:
             logger.warning("No audio files found")
             return stats
-
-        # The prune that closes a scan run reconciles this very tree, and the
-        # walk costs ~6 min on the reference library over drvfs. Hand it this
-        # one, with the paths it could not read — the prune keeps what lies
-        # under them. A limited scan truncates the list, so it never becomes a prune
-        # input — everything outside the limit would read as deleted.
-        walked = {settings.translate_to_host_path(str(fp.absolute())) for fp in audio_files}
-        self.last_disk_paths = None if limit else walked
         # A copy that was away is present again as soon as any walk sees one
         # of its files — a limited or partial one too: seeing is proof.
-        stats["back"] = _mark_present(walked)
+        stats["back"] = _mark_present(set(walked))
 
         total_files = len(audio_files)
 
         # str(walk path) -> CueSheet for every image a usable cue governs.
         cue_map = cue_sheet.build_cue_map(cue_files, AUDIO_EXTENSIONS)
 
-        # ── Filter already-imported files ───────────────────────────
-        # A path's DB state is its SET of cue_start_seconds values ({None} for
-        # a plain whole-file row). A file is up to date only when that set
-        # matches what this scan would write — so a new/edited/deleted cue
-        # re-processes its image, and untouched files skip as before. Loaded
-        # regardless of skip_existing: cue reconciliation needs it too.
-        db_starts: Dict[str, set] = {}
-        with get_db_context() as db:
-            for path, start in db.query(
-                    MediaFile.file_path, MediaFile.cue_start_seconds).all():
-                db_starts.setdefault(path, set()).add(start)
-        logger.info(f"Found {len(db_starts)} existing media file paths in database")
+        def sheet_stat(fp: Path) -> Optional[List[int]]:
+            sheet = cue_map.get(str(fp))
+            st = disk_stats.get(str(sheet.cue_path)) if sheet is not None else None
+            return list(st) if st is not None else None
+
+        # ── What the catalogue holds of the walked files ────────────
+        # Per path: its rows' cue starts (a plain file's is {None}), whether
+        # any row's stat differs from the walk's, and the sheet stat its
+        # slices recorded. One statement; a path it does not return is new.
+        hosts = list(walked)
+        held: Dict[str, Any] = {}
+        if hosts:
+            with get_db_context() as db:
+                for r in db.execute(_HELD_SQL, {
+                        "paths": hosts,
+                        "sizes": [disk_stats[str(walked[h])].size for h in hosts],
+                        "mtimes": [disk_stats[str(walked[h])].mtime_ns for h in hosts],
+                        "ctimes": [disk_stats[str(walked[h])].ctime_ns for h in hosts]}):
+                    held[r.path] = r
+        logger.info(f"Found {len(held)} of the walk's {len(hosts)} files in the database")
 
         files_to_process: List[Path] = []
-        for fp in audio_files:
-            host_path = settings.translate_to_host_path(str(fp.absolute()))
+        for host, fp in walked.items():
             sheet = cue_map.get(str(fp))
-            want = ({t.start_seconds for t in sheet.tracks} if sheet is not None
-                    else {None})
-            if skip_existing and db_starts.get(host_path) == want:
+            want = ({t.start_seconds for t in sheet.tracks} if sheet is not None else {None})
+            h = held.get(host)
+            if (h is not None and skip_existing and set(h.starts) == want and not h.changed
+                    and (sheet is None or list(h.cue_stat or []) == (sheet_stat(fp) or []))):
                 stats["skipped"] += 1
+            elif str(fp) in leave or file_stat.writer_holds(str(fp)):
+                # a writer holds it: its close notifies again, and this
+                # stat would be the copy's middle
+                stats["held"] += 1
             else:
                 files_to_process.append(fp)
 
-        stats["processed"] = stats["skipped"]
+        stats["processed"] = stats["skipped"] + stats["held"]
 
         if not files_to_process:
             stats["processed"] = total_files
             _report(f"All {total_files} files already in database")
-            logger.info("No new files to process")
+            logger.info("No new or changed files to process")
             return stats
 
-        _report(f"Found {total_files} files, {len(files_to_process)} new")
+        _report(f"Found {total_files} files, {len(files_to_process)} new or changed")
 
         # ── Phase 1: extract metadata in parallel ───────────────────
         metadata_results: List[Tuple[Path, Dict[str, Any]]] = []
@@ -1092,20 +1610,23 @@ class LibraryScanner:
         for fp, md in metadata_results:
             sheet = cue_map.get(str(fp))
             host_path = md["file_path"]
+            had = set(held[host_path].starts) if host_path in held else set()
             if sheet is None:
                 expanded.append((fp, md))
-                if any(s is not None for s in db_starts.get(host_path, ())):
+                if had - {None}:
                     recon_plans[host_path] = {None}
                 continue
             starts = {t.start_seconds for t in sheet.tracks}
+            stat = sheet_stat(fp)
             for tr in sheet.tracks:
-                expanded.append((fp, cue_sheet.synthesize_metadata(
-                    md, sheet, tr, md.get("duration_seconds"))))
-            if db_starts.get(host_path, set()) - starts:
+                slice_md = cue_sheet.synthesize_metadata(md, sheet, tr, md.get("duration_seconds"))
+                slice_md["cue_stat"] = stat
+                expanded.append((fp, slice_md))
+            if had - starts:
                 recon_plans[host_path] = starts
         metadata_results = expanded
 
-        # ── Phase 2: import to database (single-threaded, cached) ───
+        # ── Phase 2: the database ───────────────────────────────────
         # If cancel was pressed during Phase 1, we still import whatever
         # metadata we managed to extract — cancel means "stop extracting",
         # not "discard collected data". A second cancel during Phase 2
@@ -1140,8 +1661,48 @@ class LibraryScanner:
                 logger.info(f"Cue reconciliation: removed {stats['superseded']} "
                             f"superseded media_files rows across {len(recon_plans)} paths")
 
-        import_metadata(entries, sink=LOCAL_FILES, stats=stats, progress_cb=progress_cb,
+        # Each entry: a row the catalogue holds at its (path, cue start) is
+        # read again in place; one it does not is imported. The folder's
+        # assignment covers both, and the rows of the same folders that are
+        # neither (§3.4 b).
+        held_rows: Dict[Tuple[str, Any], Any] = {}
+        reread_paths = [md["file_path"] for _d, md in entries if md["file_path"] in held]
+        if reread_paths:
+            with get_db_context() as db:
+                for r in db.execute(_REREAD_ROWS_SQL, {"paths": list(set(reread_paths))}):
+                    held_rows[(r.file_path, r.cue_start_seconds)] = r
+        assignments, existing = _classify_dirs(entries, LOCAL_FILES)
+        rereads, new_entries = [], []
+        for dir_path, md in entries:
+            row = held_rows.get((md["file_path"], md.get("cue_start_seconds")))
+            if row is None:
+                new_entries.append((dir_path, md))
+            else:
+                rereads.append((dir_path, md, row))
+        moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]] = {}
+        touched_albums: Set[str] = set()
+        if rereads:
+            reread_metadata(rereads, assignments, stats, moves, touched_albums)
+        import_metadata(new_entries, sink=LOCAL_FILES, stats=stats, progress_cb=progress_cb,
                         cancel_check=None if cancelled_in_phase1 else cancel_check)
+        # The rows of the same folders whose folder now makes another album
+        # of them: the shape changed as files arrived or were re-tagged.
+        if existing:
+            with get_db_context() as db:
+                for r in db.execute(text("""
+                    SELECT mf.id, mf.album_variant_id, mf.disc_number, av.raw_title, av.raw_artist
+                      FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                     WHERE mf.id = ANY(:ids)"""), {"ids": list(existing)}):
+                    title, credit = existing[r.id]
+                    if group_key(r.raw_title, r.raw_artist) != group_key(title, credit):
+                        moves.setdefault(r.album_variant_id, []).append(
+                            (r.id, title, credit, r.disc_number))
+        if moves:
+            stats["moved"] += move_albums(moves, LOCAL_FILES, touched_albums)
+        if touched_albums:
+            with get_db_context() as db:
+                derive_filetag_genres(db, touched_albums)
+                db.commit()
         # A slot queued on a file of a copy that is away moves to a copy of
         # its track as soon as one is here: the queue's rebind looks again.
         if stats["added"]:

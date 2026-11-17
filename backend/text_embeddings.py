@@ -98,7 +98,7 @@ class TextEmbeddingGenerator:
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
                 WHERE mf.track_id = t.id
-                ORDER BY (mf.location = 'local') DESC, mf.created_at
+                ORDER BY (mf.location = 'local') DESC, mf.arrived_at
                 LIMIT 1
             ) mf_rep ON true
             -- Aggregated genres (album-grain, via the representative album)
@@ -228,7 +228,7 @@ class TextEmbeddingGenerator:
         where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
         if order_by_date:
-            order_clause = "ORDER BY MAX(mf.created_at) DESC NULLS LAST"
+            order_clause = "ORDER BY MAX(mf.arrived_at) DESC NULLS LAST"
         else:
             order_clause = "ORDER BY mf.track_id"
 

@@ -16,7 +16,7 @@ Recommendations are CLAP-similarity-driven from recent listening
 phantom albums — a node can live entirely on streamed phantoms. The
 ranking is rebuilt when the listening history changes, not per visit
 (see _Ranking). Cold start (no listened track with CLAP analysis to seed
-from) leads with the seed-pick rotation, then newest-by-file_modified_at.
+from) leads with the seed-pick rotation, then newest-by-arrival.
 """
 
 import logging
@@ -242,10 +242,11 @@ def get_new_in_library(
                 status_code=400, detail=f"invalid before timestamp: {exc}"
             )
 
-    # album_variants.file_modified_at is denormalised from media_files via
-    # FOR EACH STATEMENT triggers, so GROUP BY here scans ~3.7k variants
-    # against an index on (file_modified_at DESC) instead of 30k+ media_files
-    # rows. Cursor comparison uses (newest_added, album_id) as a composite
+    # album_variants.arrived_at (when a copy came into the library: its
+    # files' birth on this disk, else their first read — never the mtime a
+    # copy keeps from its source) is denormalised from media_files via FOR
+    # EACH STATEMENT triggers, so GROUP BY here scans ~3.7k variants against
+    # an index on (arrived_at DESC) instead of 30k+ media_files rows. Cursor comparison uses (newest_added, album_id) as a composite
     # key so ties on identical timestamps still paginate without dupes.
     rows = db_query("""
         WITH album_keys AS (
@@ -253,8 +254,8 @@ def get_new_in_library(
                    al.title,
                    al.release_year AS year,
                    al.cover_url,
-                   COALESCE(MAX(av.file_modified_at) FILTER (WHERE av.location = 'local'),
-                            MAX(av.file_modified_at)) AS newest_added,
+                   COALESCE(MAX(av.arrived_at) FILTER (WHERE av.location = 'local'),
+                            MAX(av.arrived_at)) AS newest_added,
                    -- where the album's files are: a copy that only the
                    -- HQPlayer's library holds wears a badge on its tile
                    CASE WHEN bool_or(av.location = 'local') THEN 'local' ELSE 'hqplayer' END AS location
@@ -334,7 +335,7 @@ def get_recommendations(
 ) -> dict[str, list[dict[str, Any]]]:
     """The stored ranking's first `limit` albums, the shortfall filled with
     unplayed seed picks, then random owned albums. A cold start leads with
-    the seed-pick rotation, then newest-by-file_modified_at.
+    the seed-pick rotation, then newest-by-arrival.
 
     The tiles are read now, not stored with the ranking: names and covers
     stay current, and an album that left the catalog since the rebuild
@@ -909,7 +910,7 @@ def _cold_start_albums(limit: int, exclude: set[str] = frozenset()) -> list[dict
         f"""
         WITH album_keys AS (
             SELECT al.id AS album_id,
-                   MAX(av.file_modified_at) AS newest_added
+                   MAX(av.arrived_at) AS newest_added
             FROM albums al
             JOIN album_variants av ON av.album_id = al.id
             WHERE al.id::text != ALL(%(exclude)s::text[])

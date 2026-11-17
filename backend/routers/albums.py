@@ -481,7 +481,7 @@ def get_album(
                av.bit_depth,
                av.is_lossless,
                av.directory_path,
-               av.file_modified_at,
+               av.arrived_at,
                (SELECT mf.id FROM media_files mf
                 WHERE mf.album_variant_id = av.id
                 ORDER BY mf.disc_number, mf.track_number

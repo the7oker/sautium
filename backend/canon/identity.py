@@ -364,6 +364,83 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
     return new_str
 
 
+def _move_file_analysis(db: Session, media_file_id: int, old: str, new: str) -> None:
+    """The analysis made from one file's material moves with the file to
+    the track its tags now name — the material is the file's, and the
+    chromaprint is the only content address. Only onto a track that holds
+    no analysis source yet (a track just minted for the file): a track that
+    has its own analysis keeps it, and the moved file is then a copy of it
+    for the rule to elect. The moved records' seals are shed: every payload
+    binds the track uuid; sign_audio makes them again."""
+    if db.execute(text("SELECT 1 FROM analysis_sources WHERE track_id = :new LIMIT 1"),
+                  {"new": new}).first():
+        return
+    sources = list(db.execute(text(
+        "SELECT id FROM analysis_sources WHERE media_file_id = :mf AND track_id = :old"),
+        {"mf": media_file_id, "old": old}).scalars())
+    if not sources:
+        return
+    p = {"old": old, "new": new, "ids": sources}
+    # A member whose root stays behind becomes a root of its own; one whose
+    # root moves keeps pointing at it.
+    db.execute(text("""UPDATE analysis_sources s SET material_of = NULL
+                        WHERE s.id = ANY(:ids) AND s.material_of IS NOT NULL
+                          AND s.material_of <> ALL(:ids)"""), p)
+    db.execute(text("""UPDATE analysis_sources SET material_of = NULL
+                        WHERE track_id = :old AND material_of = ANY(:ids)"""), p)
+    for kind in ANALYSIS_KINDS:
+        db.execute(text(f"UPDATE {kind} SET track_id = :new "
+                        "WHERE track_id = :old AND analysis_source_id = ANY(:ids)"), p)
+    db.execute(text("UPDATE analysis_sources SET track_id = :new WHERE id = ANY(:ids)"), p)
+    _shed_track_seals(db, new)
+
+
+def rehome_file_track(db: Session, media_file_id: int, old_track: str, title: str,
+                      artist_name: str) -> str:
+    """A file read again whose tags now name another track (a title or an
+    artist fixed in a tag editor): the track a fresh import would place it
+    on. When it was its track's last file the track follows it —
+    _update_track_uuid renames it, or merges it into a track of the new
+    identity that exists (a phantom slot, another rip): listens, sessions,
+    lyrics and analysis with it. When the track keeps other files (another
+    rip, the HQPlayer's copy) only this file moves, with the analysis made
+    from its material (_move_file_analysis); the listens stay — a listen is
+    of the track. Either way the track's primary credit is the tags' artist.
+    Returns the track the file is on."""
+    from transliterate import latinize
+    new = str(track_uuid(title, artist_name))
+    if new == old_track:
+        return new
+    artist = str(_ensure_artist(db, artist_name))
+    keeps_others = db.execute(text("""
+        SELECT EXISTS (SELECT 1 FROM media_files WHERE track_id = :t AND id <> :mf)
+            OR EXISTS (SELECT 1 FROM hqp_library_files WHERE track_id = :t)"""),
+        {"t": old_track, "mf": media_file_id}).scalar()
+    existed = db.execute(text("SELECT 1 FROM tracks WHERE id = :id"), {"id": new}).first()
+    if not existed:
+        if keeps_others:
+            db.execute(text("INSERT INTO tracks (id, title, title_latin) VALUES (:id, :t, :tl)"),
+                       {"id": new, "t": title, "tl": latinize(title)})
+        else:
+            _update_track_uuid(db, old_track, new)
+            db.execute(text("UPDATE tracks SET title = :t, title_latin = :tl WHERE id = :id"),
+                       {"id": new, "t": title, "tl": latinize(title)})
+    elif not keeps_others:
+        _update_track_uuid(db, old_track, new)
+    if keeps_others:
+        db.execute(text("UPDATE media_files SET is_analysis_source = false, track_id = :new "
+                        "WHERE id = :mf"), {"new": new, "mf": media_file_id})
+        _move_file_analysis(db, media_file_id, old_track, new)
+        elect_analysis_source(db, old_track)
+    db.execute(text("""DELETE FROM track_artists
+                        WHERE track_id = :t AND role = 'primary' AND artist_id <> :a"""),
+               {"t": new, "a": artist})
+    db.execute(text("""INSERT INTO track_artists (track_id, artist_id, role)
+                       VALUES (:t, :a, 'primary') ON CONFLICT DO NOTHING"""), {"t": new, "a": artist})
+    elect_analysis_source(db, new)
+    return new
+
+
 def _merge_album_variants(db: Session, new_album_id: str, *,
                           from_album: str = None, variant_ids: List[int] = None,
                           edition: str = None) -> None:

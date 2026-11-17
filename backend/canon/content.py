@@ -28,6 +28,7 @@ from sqlalchemy import text as _sql
 
 import mb_backend as mb
 from database import SessionLocal
+from album_identity import dir_disc as _dir_disc
 from db_pool import db_execute, db_query, db_query_one, get_conn
 from discography import release_match_key, title_residual
 import mb_answers
@@ -946,13 +947,6 @@ def _title_key(title: str) -> str:
 # A per-disc folder name — "CD2 - Green", "Disc 2", "LP4", "CD-1", "Side B" —
 # names the disc where the files' tags do not (a local rip's disc_number
 # stays 1 when only the folder says CD3).
-_DIR_DISC_RE = re.compile(r"^(?:cd|disc|disk|lp|side)\s*[-_.]?\s*(\d+|[a-d])(?![\w])", re.IGNORECASE)
-
-
-def _dir_disc(directory_path: str):
-    last = (directory_path or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    m = _DIR_DISC_RE.match(last.strip())
-    return m.group(1).lower() if m else None
 
 
 # Two files of one track read from two copies: the same slot, or the same
@@ -2214,7 +2208,7 @@ def promote_name_exact() -> dict:
 def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=()) -> dict:
     """Incremental canon stage — the post-scan / post-import entry point. For every OWNED
     artist whose content is newer than its last canon (the `artists.last_mb_sync` watermark
-    vs `owned_files.created_at` — a file here or one the HQPlayer holds): resolve + materialize (apply_artist) + scoped rename/edition-
+    vs `owned_files.content_at` — a file here or one the HQPlayer holds, its import or a read that moved it): resolve + materialize (apply_artist) + scoped rename/edition-
     collapse, then merge any MBID collisions surfaced across the batch.
 
     MB-OPTIONAL — a NO-OP without the local dump (sync/enrich proceed on tier-3 deterministic
@@ -2239,7 +2233,7 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=()) -
     # A woken artist is taken whatever its watermark: the answers it waited on
     # just came, whoever queued them (a pass, a CLI run, a crash before the
     # unstamp).
-    watermark = "(ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync)"
+    watermark = "(ar.last_mb_sync IS NULL OR mf.content_at > ar.last_mb_sync)"
     due = ("ar.id::text = ANY(%(ids)s)" if artist_ids is not None
            else f"({watermark} OR ar.id::text = ANY(%(ids)s))")
     pending = db_query(f"""
