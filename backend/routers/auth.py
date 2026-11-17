@@ -170,6 +170,10 @@ async def create_account(boxed: BoxedRequest) -> dict:
     except Exception as e:
         logger.error(f"account creation failed: {e}")
         raise HTTPException(status_code=500, detail="could not create account")
+    # The node has an account from now on: its chat client starts (the
+    # Support contact, the handshakes, the outbox), with no restart.
+    import p2p_chat
+    p2p_chat.soon(p2p_chat.start_client())
     return reply({"token": device_auth.current_token(_secret()),
                   "invite_code": info.get("invite_code"),
                   "username": info.get("username"),

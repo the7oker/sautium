@@ -18,9 +18,7 @@ No network and no database: the stores are stand-ins."""
 
 import asyncio
 import importlib
-import sys
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,7 +26,6 @@ import pytest
 from desktop.p2p import lb_slice_cycle, mb_slice_cycle, sync_walk
 from desktop.p2p.sync_walk import DeadAddresses, SyncWalk
 
-BACKEND = Path(__file__).resolve().parents[2] / "backend"
 
 
 class _Identity:
@@ -323,17 +320,8 @@ def test_a_node_whose_sharing_is_off_is_no_slice_source(family):
 
 # ------------------------------------------------------------- the DHT tail
 
-def _dht_module(which: str):
-    if which == "backend":
-        if str(BACKEND) not in sys.path:
-            sys.path.insert(0, str(BACKEND))
-        return importlib.import_module("dht_service")
-    return importlib.import_module("desktop.p2p.dht_service")
-
-
-@pytest.mark.parametrize("which", ["launcher", "backend"])
-def test_the_rare_artist_tail_is_held_while_sharing_is_off(which, monkeypatch):
-    module = _dht_module(which)
+def test_the_rare_artist_tail_is_held_while_sharing_is_off(monkeypatch):
+    module = importlib.import_module("desktop.p2p.dht_service")
     if not module.HAS_LIBTORRENT:
         pytest.skip("libtorrent is not installed here")
     monkeypatch.setattr(module, "MIN_ANNOUNCE_SPACING", 0.0)

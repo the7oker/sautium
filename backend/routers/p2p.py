@@ -92,16 +92,15 @@ def _on_chat_notify(notifies: list) -> None:
     """sautium_chat: every chat stream re-fetches. An 'out' insert — the
     trg_p2p_messages_notify payload msg:{friend_id}:{direction} — is a reply
     for that friend: their relay wake stream is pinged so they pull
-    immediately."""
-    out_friend_ids = set()
-    for note in notifies:
-        parts = (note.payload or "").split(":")
-        if len(parts) == 3 and parts[0] == "msg" and parts[2] == "out":
-            try:
-                out_friend_ids.add(int(parts[1]))
-            except ValueError:
-                pass
+    immediately, and this node's chat client pushes it at once (the one
+    LISTEN for both: the client takes the notes from here)."""
+    from desktop.p2p.chat_client import replied_friends
+    from p2p_chat import chat_client
     _wake_chat_sse_clients()
+    client = chat_client()
+    if client is not None:
+        client.chat_notes(notifies)
+    out_friend_ids = replied_friends(notifies)
     if out_friend_ids:
         from routers.peer_chat import ping_wake_by_friend_id
         for fid in out_friend_ids:

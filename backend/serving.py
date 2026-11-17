@@ -244,9 +244,16 @@ class Server(uvicorn.Server):
     the event streams before uvicorn waits for the open connections, so the
     wait is for requests that end."""
 
-    def __init__(self, config: uvicorn.Config, what: str = "the backend") -> None:
+    def __init__(self, config: uvicorn.Config, what: str = "the backend",
+                 ready: Optional[asyncio.Event] = None) -> None:
         super().__init__(config)
         self.what = what
+        self.ready = ready
+
+    async def startup(self, sockets=None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started and self.ready is not None:
+            self.ready.set()          # listening: what waits on the surface goes on
 
     def handle_exit(self, sig, frame) -> None:
         if self.should_exit:

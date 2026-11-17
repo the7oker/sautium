@@ -5,8 +5,13 @@ Opens external ports on the router so this node is reachable from
 the internet.  Uses miniupnpc (optional dependency).
 """
 
+import asyncio
+import http.client
+import json
 import logging
-from typing import Optional, Tuple
+import ssl
+import urllib.request
+from typing import Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,24 @@ def add_mapping(u, external: int, internal: int, protocol: str = "TCP",
             description or f"Sautium ({internal})", "", lease))
     except Exception:
         return False
+
+
+def answers_as_peer_surface(port: int) -> bool:
+    """Whether the local port answers /health over TLS saying `sautium-peer`
+    — the peer surface, and nothing else is (the Web UI says `sautium-webui`,
+    over plain HTTP; the media proxy and the DLNA event port are plain HTTP
+    too). The one gate before any TCP mapping, the CLI's and a node's own:
+    only the peer surface may face the internet. A probe that fails is a no."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE      # telling surfaces apart, not trusting one
+    try:
+        with urllib.request.urlopen(f"https://127.0.0.1:{port}/health",
+                                    context=ctx, timeout=3) as resp:
+            health = json.loads(resp.read(65536))
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    return isinstance(health, dict) and health.get("type") == "sautium-peer"
 
 
 def list_mappings(u, limit: int = 200) -> list[dict]:
@@ -175,6 +198,29 @@ class UPnPService:
             self._upnp = None
             self._external_ip = None
             return self.open_ports() is not None
+
+    async def keep_mapped(self, internal_port: int, on_external: Callable[[int], None]) -> None:
+        """Re-map before the 1-hour lease expires (at 75% of LEASE_DURATION)
+        — both runtimes' renewal. Lease renewal is a timer-based protocol
+        requirement, not state polling: without it the router silently drops
+        the mapping after an hour and the node loses internet reachability
+        (outbound still works, so it just looks like 'the friend is
+        offline'). renew_ports() also recovers a rebooted router via full
+        re-discover; the external port as it is then goes to `on_external`
+        (the DHT's announce port, which the 15-min re-announce publishes)."""
+        interval = LEASE_DURATION * 0.75
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                if await loop.run_in_executor(None, self.renew_ports):
+                    ext_port = self.get_external_port(internal_port)
+                    if ext_port:
+                        on_external(ext_port)
+                else:
+                    logger.info("UPnP: no active mapping after renewal attempt")
+            except Exception as e:
+                logger.warning(f"UPnP renewal loop error: {e}")
 
     def close_ports(self):
         """Remove all UPnP port mappings."""

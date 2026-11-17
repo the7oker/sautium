@@ -391,7 +391,7 @@ class P2PManager:
                 # renew_ports() retries a full open when nothing is mapped,
                 # so a router that appears later still gets picked up.
                 self._upnp_renewal_task = asyncio.create_task(
-                    self._upnp_renewal_loop()
+                    self._upnp.keep_mapped(self._http_port, self._dht_service.set_announce_port)
                 )
 
             # Cheap local CGNAT tells gate the very first announces — an
@@ -600,33 +600,6 @@ class P2PManager:
                     sock.close()
                 except OSError:
                     pass
-
-    async def _upnp_renewal_loop(self):
-        """Re-map before the 1-hour UPnP lease expires (at 75% of
-        LEASE_DURATION). Lease renewal is a timer-based protocol
-        requirement, not state polling: without it the router silently
-        drops the mapping after an hour and the node loses internet
-        reachability until relaunch (outbound still works, so it just
-        looks like 'the friend is offline'). renew_ports() also recovers
-        a rebooted router via full re-discover; a changed external port
-        is pushed into the DHT announce state, which the 15-min periodic
-        re-announce then publishes."""
-        from desktop.p2p.upnp_service import LEASE_DURATION
-        interval = LEASE_DURATION * 0.75
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                ok = await asyncio.get_event_loop().run_in_executor(
-                    None, self._upnp.renew_ports
-                )
-                if ok:
-                    ext_port = self._upnp.get_external_port(self._http_port)
-                    if ext_port:
-                        self._dht_service.set_announce_port(ext_port)
-                else:
-                    logger.info("UPnP: no active mapping after renewal attempt")
-            except Exception as e:
-                logger.warning(f"UPnP renewal loop error: {e}")
 
     async def _cleanup(self):
         """Clean shutdown of all services."""

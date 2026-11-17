@@ -74,6 +74,19 @@ app = FastAPI(
 # the rest are a few hundred bytes.
 
 
+def _note_inbound(addr: Optional[str]) -> None:
+    """A request from an internet vantage is proof this node is reachable
+    (the launcher's sync_server._note_inbound): the chat client's verdict
+    takes it. On a docker bridge every source is the gateway, never such a
+    vantage; behind a trusted front the address is the real peer's."""
+    from desktop.p2p.addrs import is_internet_vantage
+    if addr and is_internet_vantage(addr):
+        from p2p_chat import chat_client
+        client = chat_client()
+        if client is not None:
+            client.note_inbound_reachable()
+
+
 class PeerAuthMiddleware:
     """Wire format v1 on the Docker peer surface (mirror of the launcher's
     sync_server._authenticate_peer, same shared desktop/p2p/peer_auth.py):
@@ -103,6 +116,7 @@ class PeerAuthMiddleware:
         timer = contact_log.RequestTimer()
         client = scope.get("client")
         addr = client[0] if client else None
+        _note_inbound(addr)
         raw_target = request_target(scope)
         headers = _CIHeaders(scope["headers"])
         outcome = {"status": 500, "bytes_out": 0}

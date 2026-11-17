@@ -75,12 +75,19 @@ def sharing_enabled() -> bool:
     return val
 
 
+# Told when the switch moves (main.py: a host-networked node's LAN beacon,
+# which names this node on the LAN only while it shares).
+sharing_hooks: list = []
+
+
 def sharing_changed() -> None:
     """The owner moved the switch (routers/settings.put_sync_prefs): serving,
     and what /health says of it, follow at once — not at the cache's expiry."""
     global _sharing_cache, _sharing_generation
     _sharing_generation += 1
     _sharing_cache = (0.0, True)
+    for hook in sharing_hooks:
+        hook()
 
 
 def _require_sharing() -> None:
