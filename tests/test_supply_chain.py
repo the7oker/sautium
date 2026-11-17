@@ -458,6 +458,10 @@ def test_the_arm64_compose_files_are_the_release_file_but_for_what_their_host_ne
     file, short only of what their image or host has none of: CUDA, the
     Codex CLI and, on Linux, the sessions' own folder."""
     env, mounts, ports, flags = _backend("docker-compose.yml")
+    # The Windows host's file publishes with no address (its portproxy holds
+    # 0.0.0.0, e82fa9e3); every other file publishes the same ports on IPv4
+    lan_only = {"8800:8000", "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}", "8831:8831"}
+    ports = {"0.0.0.0:" + p if p in lan_only else p for p in ports}
     cuda_and_codex = {"CUDA_VISIBLE_DEVICES", "PYTORCH_CUDA_ALLOC_CONF", "CODEX_CLI_ENABLED"}
     # The Linux file runs the backend on the host's network (its own ports,
     # its own port for the Web UI, nothing published) and mounts the host
