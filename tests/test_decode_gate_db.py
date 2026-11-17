@@ -197,3 +197,19 @@ def test_a_stat_that_fails_is_a_failed_decode_not_a_refusal(cur, prints, models,
     stats = models.sonic([uuid.UUID(track)])
     assert (stats["refused"], stats["success"], stats["failed"]) == (0, 0, 1)
     assert not _refused(cur, mf)
+
+
+def test_the_instrument_pass_drops_the_print_it_registered_of_a_refused_file(
+        cur, prints, models, monkeypatch, tmp_path):
+    """Its registrations, made before the decode, are of a file the refusal
+    says is not as read (review round 3, M1)."""
+    _path, track, mf = _real_file(cur, tmp_path, "a.flac")
+    prints["/music/a.flac"] = FP
+
+    def short(*a, **kw):
+        raise audio_analysis.ShortDecode("cut short")
+    monkeypatch.setattr(audio_analysis, "load_full_track_48k", short)
+    stats = models.instruments([uuid.UUID(track)])
+    assert stats["refused"] == 1
+    cur.execute("SELECT count(*) FROM analysis_sources WHERE media_file_id = %s", (mf,))
+    assert cur.fetchone() == (0,)

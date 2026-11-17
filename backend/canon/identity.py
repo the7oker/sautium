@@ -431,6 +431,11 @@ def rehome_file_track(db: Session, media_file_id: int, old_track: str, title: st
         db.execute(text("UPDATE media_files SET is_analysis_source = false, track_id = :new "
                         "WHERE id = :mf"), {"new": new, "mf": media_file_id})
         _move_file_analysis(db, media_file_id, old_track, new)
+        # what stayed (the new track holds its own analysis): the old track's,
+        # no longer of a file of its — pending, and relinked by its print
+        db.execute(text("UPDATE analysis_sources SET media_file_id = NULL "
+                        "WHERE media_file_id = :mf AND track_id = :old"),
+                   {"mf": media_file_id, "old": old_track})
         elect_analysis_source(db, old_track)
     db.execute(text("""DELETE FROM track_artists
                         WHERE track_id = :t AND role = 'primary' AND artist_id <> :a"""),

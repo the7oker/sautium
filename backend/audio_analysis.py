@@ -683,7 +683,7 @@ class AudioAnalyzer:
                             stats["too_long"] += 1
                             continue
                         if isinstance(audio, Exception):
-                            refuse(db, row, audio)
+                            refuse(db, row, audio, src_id)
                             stats["refused"] += 1
                             continue
                         if audio is None:

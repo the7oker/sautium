@@ -369,3 +369,38 @@ def test_a_change_of_ctime_alone_keeps_the_analysis_linked(cur, library, templat
     _scan()
     cur.execute("SELECT content_at > '2026-01-02' FROM media_files")
     assert cur.fetchone() == (True,)
+
+
+def test_a_copy_moved_onto_a_track_with_its_own_analysis_leaves_its_old_link(cur, library, template):
+    """The track the tags now name holds its own analysis, so the file's
+    stays with the old track — unlinked from a file no longer its own, and
+    relinked by its print (review round 3, outside the diff)."""
+    _clean(cur)
+    _flac(template, library / "A" / "LP" / "01.flac", "Song", "Aurora", "LP")
+    b = _flac(template, library / "A" / "Best Of" / "07.flac", "Song", "Aurora", "Best Of")
+    _flac(template, library / "A" / "Live" / "01.flac", "Song (Live)", "Aurora", "Live")
+    _scan()
+    cur.execute("""INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds, imported,
+                                                 media_file_id, is_lossless, bit_depth)
+                   SELECT track_id, 'AQAAA', 3, false, id, true, 16 FROM media_files
+                    WHERE file_path LIKE '%%/Best Of/%%' OR file_path LIKE '%%/Live/%%'""")
+    _tag(b, keep_mtime=True, title="Song (Live)")
+    _scan()
+    cur.execute("""SELECT t.title, s.media_file_id IS NULL FROM analysis_sources s
+                     JOIN tracks t ON t.id = s.track_id ORDER BY 1""")
+    assert cur.fetchall() == [("Song", True), ("Song (Live)", False)]
+
+
+def test_a_rip_replaced_in_place_with_the_same_tags_is_read_again_by_the_canon(cur, library, template):
+    """Other bytes under the same tags (another rip, another length): the
+    canon matches recordings by length, so the watermark moves (review
+    round 3)."""
+    _clean(cur)
+    f = _flac(template, library / "A" / "LP" / "01.flac", "T1", "Aurora", "LP")
+    _scan()
+    cur.execute("UPDATE media_files SET content_at = '2026-01-01'")
+    st = os.stat(f)
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    assert _scan()["reread"] == 1
+    cur.execute("SELECT content_at > '2026-01-02' FROM media_files")
+    assert cur.fetchone() == (True,)

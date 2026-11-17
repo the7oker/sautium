@@ -185,3 +185,24 @@ def test_a_hard_link_is_imported_and_an_overflow_forgets_the_files_in_writing(
     library_watch._source.writing.add(str(library / "x.flac"))
     library_watch._source._event(-1, library_watch._Inotify.IN_Q_OVERFLOW, "")
     assert library_watch.being_written() == set()
+
+
+def test_a_music_folder_missing_at_the_start_of_an_empty_catalogue_is_armed_by_the_first_scan(
+        cur, library, template, monkeypatch, main_module, tmp_path):
+    """No look can say the folder is back while the catalogue is empty: the
+    start records nothing that flips (no notice, no re-arm loop), and the
+    first scan that finds music arms the watch (review round 3, M3)."""
+    from config import settings
+    _clean(cur)
+    later = tmp_path / "later"
+    monkeypatch.setattr(settings, "music_library_path", str(later))
+    monkeypatch.setattr(library_watch, "mount_kind", lambda root: None)
+    library_watch.start(lambda scopes, **kw: None)
+    try:
+        assert library_watch.state()["state"] == library_watch.UNREACHABLE
+        assert scanner._folder_unreachable is False
+        _flac(template, later / "A" / "LP" / "01.flac", "T1", "Aurora", "LP")
+        scanner.LibraryScanner().scan_and_import()
+        assert _wait_until(lambda: library_watch.state()["state"] == library_watch.WATCHING, timeout=20)
+    finally:
+        library_watch.stop()

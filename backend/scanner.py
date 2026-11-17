@@ -816,7 +816,11 @@ _REREAD_SQL = text("""
         -- the canon reads the file again when what it decides on moved: a
         -- name, a number, a total (the right-hand columns are the old row's)
         content_at = CASE WHEN stat_mtime_ns IS NOT NULL AND (
-                raw_track_name IS DISTINCT FROM CAST(:raw_track_name AS text)
+                -- the bytes (a rip replaced in place: the length the canon
+                -- matches recordings by), or a name, a number, a total
+                stat_mtime_ns IS DISTINCT FROM CAST(:stat_mtime_ns AS bigint)
+             OR file_size_bytes IS DISTINCT FROM CAST(:file_size_bytes AS bigint)
+             OR raw_track_name IS DISTINCT FROM CAST(:raw_track_name AS text)
              OR raw_artist IS DISTINCT FROM CAST(:raw_artist AS text)
              OR raw_album_artist IS DISTINCT FROM CAST(:raw_album_artist AS text)
              OR raw_album IS DISTINCT FROM CAST(:raw_album AS text)
@@ -1550,6 +1554,12 @@ class LibraryScanner:
         stats["unread"] = len(unread)
         self.last_unread = unread
         self.last_gone = gone
+        if audio_files or cue_files:
+            # music found in the folder: a watch waiting for it is armed — the
+            # look cannot say so while the catalogue is empty (a first scan)
+            import library_watch
+            threading.Thread(target=library_watch.folder_back, daemon=True,
+                             name="library-watch-rearm").start()
         if _cancelled():
             logger.info("Scan cancelled during discovery")
             return stats
