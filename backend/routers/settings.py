@@ -27,6 +27,7 @@ import claude_code
 import codex_cli
 import device_auth
 import gear_research_worker
+import library_watch
 from config import settings as app_settings
 from database import get_db_context
 from db_pool import Listener, db_execute, db_query, db_query_one, get_conn
@@ -655,6 +656,10 @@ async def _library_state() -> Dict[str, Any]:
         "scan":               scan,
         "enrich":             enrich,
         "away":               {"albums": int(away["albums"]), "copies": int(away["copies"])},
+        # whether the folder watcher is armed (library_watch.state): watching,
+        # no_events with why, unreachable, not_set — no line in the Library
+        # block shows it (the owner, 2026-11-17); support and the tests read it
+        "watch":              library_watch.state(),
         # its estimate is synchronous DB work: off the event loop
         "instruments":        (await asyncio.to_thread(_instruments_state)
                                if stats.get("analysis_available") else None),

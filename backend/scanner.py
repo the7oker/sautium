@@ -132,12 +132,18 @@ def _record(unreachable: bool, ticket: int, wake: bool) -> None:
         if ticket < _recorded:
             return
         _recorded = ticket
+        back = _folder_unreachable and not unreachable
         _folder_unreachable = unreachable
         wake = wake and unreachable != _shown
         if wake:
             _shown = unreachable
     if wake:
         db_execute("NOTIFY sautium_notices")
+    if back:
+        # The folder answers again: a watch it lost is placed again
+        import library_watch
+        threading.Thread(target=library_watch.folder_back, daemon=True,
+                         name="library-watch-rearm").start()
 
 
 def folder_seen(unreachable: bool) -> None:
@@ -1775,22 +1781,6 @@ class LibraryScanner:
         return stats
 
 
-def scan_library(limit: Optional[int] = None, skip_existing: bool = True, subpath: Optional[str] = None) -> Dict[str, int]:
-    """
-    Convenience function to scan library.
-
-    Args:
-        limit: Maximum number of files to scan.
-        skip_existing: Skip files already in database.
-        subpath: Optional subdirectory within library to scan.
-
-    Returns:
-        Statistics dictionary.
-    """
-    scanner = LibraryScanner()
-    return scanner.scan_and_import(limit=limit, skip_existing=skip_existing, subpath=subpath)
-
-
 def prune_counts(stats: Dict[str, Any]) -> Dict[str, int]:
     """What a plan asks about, from a prune's stats: the files that go
     (`files`, a copy found again elsewhere counted apart as `copies`), what
@@ -1920,6 +1910,51 @@ def _set_aside(missing_ids: List[int], seen: Set[str], stats: Dict[str, Any]) ->
     if newly:
         logger.info(f"Rescan set {len(newly)} cop(ies) aside as away: none of their files was found")
     return [i for i in missing_ids if i not in kept]
+
+
+def set_aside_missing(scopes: Optional[Sequence[Tuple[str, bool]]], walked: Set[str],
+                      unread: Sequence[str], gone: Sequence[str]) -> int:
+    """After a walk that asks no question ("Scan for new", a watcher's
+    folders): a copy none of whose files it found in the folders it walked
+    is away — the Rescan's own rule (_set_aside), reversible, nothing
+    removed and nothing asked; the Rescan's question and the Away row stay
+    the only removals. A folder walked alone judges only its own files; a
+    folder that is gone judges everything under it; what lies under a
+    folder the walk could not read keeps its state. Returns how many copies
+    were set aside."""
+    if library_unreachable():
+        return 0
+    root = settings.library_db_root()
+    unverified = {settings.translate_to_host_path(p) for p in unread}
+
+    def judged(path: str) -> bool:
+        folder = path.rpartition("/")[0]
+        while folder:
+            if folder in unverified:
+                return False
+            folder = folder.rpartition("/")[0]
+        if scopes is None:
+            return True
+        for rel, recursive in scopes:
+            base = f"{root}/{rel}" if rel else root
+            if (recursive or rel in gone) and path.startswith(base + "/"):
+                return True
+            if path.rpartition("/")[0] == base:
+                return True
+        return False
+
+    with get_db_context() as db:
+        if scopes is None:
+            rows = db.execute(text("SELECT id, file_path FROM media_files")).fetchall()
+        else:
+            prefixes = [(f"{root}/{rel}" if rel else root) + "/" for rel, _r in scopes]
+            rows = db.execute(text("""SELECT id, file_path FROM media_files
+                                       WHERE file_path ^@ ANY(CAST(:p AS text[]))"""),
+                              {"p": prefixes}).fetchall()
+    missing = [r.id for r in rows if r.file_path not in walked and judged(r.file_path)]
+    stats = _prune_stats()
+    _set_aside(missing, walked, stats)
+    return stats["away"]
 
 
 def plan_prune(
