@@ -819,20 +819,22 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
     of conversation in one batch — reads as the conversation actually
     happened. Sorting by id told you when THIS node heard about a message,
     which is not what a thread is."""
+    from desktop.p2p import chat_wire
     limit = min(limit, 500)
     rows = _db_query("""
         SELECT id, direction, content, timestamp, delivered, read,
                message_uuid,
                -- an outgoing message's state (B-92): delivered is the proof;
-               -- kept = handed to the master's Worker mailbox; waiting = here
+               -- kept = handed to the master's Worker mailbox, within the
+               -- time it keeps mail; waiting = here
                CASE WHEN direction = 'in' THEN NULL
                     WHEN delivered THEN 'delivered'
-                    WHEN parked_at IS NOT NULL THEN 'kept'
+                    WHEN parked_at > now() - make_interval(secs => %s) THEN 'kept'
                     ELSE 'waiting' END AS state
         FROM p2p_messages
         WHERE friend_id = %s
         ORDER BY timestamp DESC, id DESC LIMIT %s
-    """, (friend_id, limit))
+    """, (chat_wire.MAILBOX_TTL_S, friend_id, limit))
     rows.reverse()
     for row in rows:
         if row.get("timestamp"):

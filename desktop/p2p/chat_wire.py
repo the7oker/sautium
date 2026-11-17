@@ -204,6 +204,10 @@ def export_page(rows: list, seal, after: Optional[tuple] = None
 RELAY_HEADER = "X-Sautium-Relay"       # "off": a friend's relay that is not relaying
 FORWARD_ACK_TIMEOUT = 10               # a relay holds a forward this long for the receipt
 VOUCHER_TTL = 24 * 3600
+# How long the master's Worker mailbox keeps a message it took (worker/
+# verify.js MAIL_TTL_MS): a message kept there longer than this is gone, so
+# it is no longer "kept" and is deposited again (B-92).
+MAILBOX_TTL_S = 30 * 24 * 3600
 
 
 def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:

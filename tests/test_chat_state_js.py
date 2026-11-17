@@ -109,15 +109,16 @@ def test_the_api_names_each_outgoing_messages_state_and_supports_kept_mail(scrat
                                   ('bo', 'pending:bo#AAAA-BBBB-CCCE', 'bo#AAAA-BBBB-CCCE', 'manual', NULL)
                            RETURNING id""", (master, "cd" * 32))
             support = cur.fetchone()[0]
-            for content, delivered, parked in (("a", True, True), ("b", False, True), ("c", False, False)):
+            for content, delivered, parked in (("a", True, "0"), ("b", False, "0"), ("c", False, None),
+                                               ("e", False, "31 days")):       # past the mailbox's keep
                 cur.execute("""INSERT INTO p2p_messages (friend_id, direction, content, delivered, parked_at)
-                               VALUES (%s, 'out', %s, %s, CASE WHEN %s THEN now() END)""",
+                               VALUES (%s, 'out', %s, %s, now() - %s::interval)""",
                             (support, content, delivered, parked))
             cur.execute("INSERT INTO p2p_messages (friend_id, direction, content) VALUES (%s, 'in', 'd')",
                         (support,))
         msgs = asyncio.run(p2p.get_messages(support))
         assert [(m["content"], m["state"]) for m in msgs] == [
-            ("a", "delivered"), ("b", "kept"), ("c", "waiting"), ("d", None)]
+            ("a", "delivered"), ("b", "kept"), ("c", "waiting"), ("e", "waiting"), ("d", None)]
         rows = asyncio.run(p2p.list_friends())
         flags = {r["username"]: r["mailbox"] for r in rows["pinned"] + rows["items"]}
         assert flags == {"Sautium": True, "ada": False, "bo": False}

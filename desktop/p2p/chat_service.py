@@ -558,13 +558,15 @@ class ChatService:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT m.id, m.friend_id, m.content, m.timestamp,
-                           m.message_uuid, m.parked_at, f.public_key_hex, f.invite_code
+                    SELECT m.id, m.friend_id, m.content, m.timestamp, m.message_uuid,
+                           CASE WHEN m.parked_at > now() - make_interval(secs => %s)
+                                THEN m.parked_at END AS parked_at,
+                           f.public_key_hex, f.invite_code
                     FROM p2p_messages m
                     JOIN friends f ON f.id = m.friend_id
                     WHERE m.direction = 'out' AND m.delivered = FALSE
                     ORDER BY m.timestamp
-                """)
+                """, (chat_wire.MAILBOX_TTL_S,))
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
@@ -585,13 +587,14 @@ class ChatService:
     def mark_parked(self, message_id: int):
         """An outgoing message to the master handed to its Worker mailbox:
         kept for it, not delivered — `delivered` waits for a proof (a direct
-        push answered, a history pull that shows it)."""
+        push answered, a history pull that shows it). A message deposited
+        again after the mailbox's keep ran out takes the new time."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
                     UPDATE p2p_messages SET parked_at = now()
-                    WHERE id = %s AND direction = 'out' AND NOT delivered AND parked_at IS NULL
+                    WHERE id = %s AND direction = 'out' AND NOT delivered
                 """, (message_id,))
         finally:
             self._return_db(conn)

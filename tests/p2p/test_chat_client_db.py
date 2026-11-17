@@ -325,3 +325,17 @@ def test_an_internet_vantage_proves_reachability_and_the_bridge_gateway_does_not
     assert noted == []
     p2p_app._note_inbound("8.8.4.4")                 # a global address (TEST-NET is not one)
     assert noted == [1]
+
+
+def test_a_message_kept_past_the_mailboxs_keep_is_waiting_again(conn, scratch_dsn):
+    fid = _friend_of(conn, scratch_dsn, ME, FRIEND)
+    store = ChatService(scratch_dsn, ME.key.private_bytes_raw(), ME.pub)
+    store.prepare_outgoing(fid, "kept a while")
+    with conn.cursor() as cur:
+        cur.execute("UPDATE p2p_messages SET parked_at = now() - %s * interval '1 second'",
+                    (chat_wire.MAILBOX_TTL_S + 60,))
+    (row,) = store.get_pending_messages()
+    assert row["parked_at"] is None                  # gone from the mailbox: deposited again
+    store.mark_parked(row["id"])
+    (row,) = store.get_pending_messages()
+    assert row["parked_at"] is not None              # kept again, from now
