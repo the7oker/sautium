@@ -325,11 +325,11 @@ def test_the_docker_handshake_resolves_a_bound_contact_for_its_key_alone(monkeyp
 
 
 def test_the_initiator_takes_only_the_key_its_contact_is_bound_to():
-    from desktop.p2p.p2p_manager import P2PManager
+    from desktop.p2p.chat_client import accepted_pubkey
     fingerprint = chat_wire.key_fingerprint(FRIEND.pub)
     answer = lambda who: {"public_key_hex": who.pub}
-    assert P2PManager._accepted_pubkey(answer(FRIEND), FRIEND.invite, fingerprint=fingerprint) == FRIEND.pub
-    assert P2PManager._accepted_pubkey(answer(COLLIDER), COLLIDER.invite, fingerprint=fingerprint) is None
+    assert accepted_pubkey(answer(FRIEND), FRIEND.invite, fingerprint=fingerprint) == FRIEND.pub
+    assert accepted_pubkey(answer(COLLIDER), COLLIDER.invite, fingerprint=fingerprint) is None
 
 
 # --- the nudge ---------------------------------------------------------------------------
@@ -441,8 +441,19 @@ def test_nudges_at_once_share_their_invites_three_pickups():
 def _manager():
     from desktop.p2p.p2p_manager import P2PManager
     m = P2PManager.__new__(P2PManager)
-    m._pickup_lock, m._pickup_waiting, m._nudged_at = asyncio.Lock(), None, {}
+    m._pickup_lock, m._pickup_waiting = asyncio.Lock(), None
     return m
+
+
+def _client(store, who=None):
+    """The chat client (desktop/p2p/chat_client.py) over a fake store,
+    speaking as `who` (no certificate)."""
+    from desktop.p2p.chat_client import ChatClient, ClientIdentity
+    ident = who and ClientIdentity(public_key_hex=who.pub, username=who.name, invite_code=who.invite,
+                                   sign=lambda m: who.key.sign(m).signature, cert_bundle=lambda: None)
+    client = ChatClient(store, identity=lambda: ident, announce_port=lambda: 1)
+    client.running = True
+    return client
 
 
 def test_the_launchers_pickup_asks_nothing_for_a_key_with_no_certificate(monkeypatch):
@@ -524,9 +535,8 @@ def test_a_refused_handshakes_nudge_and_what_each_answer_makes_of_it(status, out
     spents, resolved = [], []
 
     async def run():
-        m = _manager()
-        m._chat_service = SimpleNamespace(nudged=lambda fid: spents.append(fid))
-        m._resolve_soon = lambda: resolved.append(1)
+        m = _client(SimpleNamespace(nudged=lambda fid: spents.append(fid)))
+        m.resolve_soon = lambda: resolved.append(1)
 
         async def answer(ip, port, invite, body, session):
             return status
@@ -537,13 +547,12 @@ def test_a_refused_handshakes_nudge_and_what_each_answer_makes_of_it(status, out
 
 
 def test_a_busy_nudge_waits_its_interval_and_one_pass_reaches_every_address():
-    from desktop.p2p import p2p_manager as pm
+    from desktop.p2p import chat_client as pm
     sent = []
 
     async def run():
-        m = _manager()
-        m._chat_service = SimpleNamespace(nudged=lambda fid: None)
-        m._resolve_soon = lambda: None
+        m = _client(SimpleNamespace(nudged=lambda fid: None))
+        m.resolve_soon = lambda: None
 
         async def answer(ip, port, invite, body, session):
             sent.append((ip, body["invite_id"]))
@@ -582,8 +591,7 @@ def _resolver(monkeypatch, nudge_answers):
     `nudge_answers` ({ip: status of its nudge}), each refusing the handshake;
     → (manager, the requests it made, the contacts it spent)."""
     import aiohttp
-    from desktop import node_identity
-    from desktop.p2p import birth_cert, p2p_manager as pm
+    from desktop.p2p import chat_client as pm
     requests, spent = [], []
     acceptor = _who("ada", "88" * 32)
 
@@ -607,25 +615,18 @@ def _resolver(monkeypatch, nudge_answers):
     monkeypatch.setattr(aiohttp, "TCPConnector", lambda **k: None)
     monkeypatch.setattr(pm, "pinned_ssl_context", lambda: object())
     monkeypatch.setattr(pm, "pinned_pubkey", lambda ctx: FRIEND.pub)       # each channel: the inviter's key
-    monkeypatch.setattr(node_identity, "get_account_info", lambda: {
-        "public_key_hex": acceptor.pub, "username": acceptor.name, "invite_code": acceptor.invite})
-    monkeypatch.setattr(node_identity, "sign_message", lambda m: acceptor.key.sign(m).signature)
-    monkeypatch.setattr(birth_cert, "load_certificate", lambda: None)
-    monkeypatch.setattr(birth_cert, "load_proof", lambda: None)
-    m = _manager()
     friend = {**_armed(), "public_key_hex": f"pending:{FRIEND.invite}", "invite_code": FRIEND.invite,
               "username": FRIEND.name, "source": "manual"}
-    m._chat_service = SimpleNamespace(get_friends=lambda: [friend], nudged=lambda fid: spent.append(fid),
-                                      remove_friend=lambda fid: None)
-    m._proof_wait_invites = set()
-    m._resolve_soon = lambda: None
+    m = _client(SimpleNamespace(get_friends=lambda: [friend], nudged=lambda fid: spent.append(fid),
+                                remove_friend=lambda fid: None), acceptor)
+    m.resolve_soon = lambda: None
 
     async def nothing():
         return None
 
     async def peers(f):
         return [(ip, 24001) for ip in nudge_answers]
-    m._deliver_rotation_notices, m._find_friend_peers = nothing, peers
+    m._deliver_rotation_notices, m.find_friend_peers = nothing, peers
     return m, requests, spent
 
 
@@ -648,12 +649,12 @@ def test_a_resolver_pass_whose_nudge_no_address_could_take_spends_it_at_its_end(
 
 
 def test_a_contact_nudges_only_its_inviters_own_key_and_only_once_armed():
-    from desktop.p2p.p2p_manager import P2PManager
+    from desktop.p2p.chat_client import nudge_invite
     fingerprint, inviteid = chat_wire.key_fingerprint(FRIEND.pub), str(uuid.UUID(int=3))
     armed = {"accepted_invite_id": inviteid, "key_fingerprint": fingerprint, "join_token_id": None}
-    assert P2PManager._nudge_invite(armed, FRIEND.pub) == inviteid
-    assert P2PManager._nudge_invite(armed, COLLIDER.pub) is None      # a stranger at its address hears nothing
-    assert P2PManager._nudge_invite(armed, None) is None
-    assert P2PManager._nudge_invite({**armed, "accepted_invite_id": None}, FRIEND.pub) is None
-    assert P2PManager._nudge_invite({**armed, "key_fingerprint": None}, FRIEND.pub) is None
-    assert P2PManager._nudge_invite({**armed, "join_token_id": str(uuid.uuid4())}, FRIEND.pub) is None
+    assert nudge_invite(armed, FRIEND.pub) == inviteid
+    assert nudge_invite(armed, COLLIDER.pub) is None      # a stranger at its address hears nothing
+    assert nudge_invite(armed, None) is None
+    assert nudge_invite({**armed, "accepted_invite_id": None}, FRIEND.pub) is None
+    assert nudge_invite({**armed, "key_fingerprint": None}, FRIEND.pub) is None
+    assert nudge_invite({**armed, "join_token_id": str(uuid.uuid4())}, FRIEND.pub) is None

@@ -38,8 +38,9 @@ Announces and lookups of the tail draw on ONE budget, the traversal lane
 (an announce adds one write at its end), so one initiation at a time at the
 measured-safe spacing, whoever asks, split fairly between the two.
 
-MIRRORS backend/dht_service.py (the launcher build cannot import backend
-modules) — the announce/lookup key formats are the wire contract.
+One class for both runtimes: the launcher's P2PManager and the Docker
+backend (backend/main.py) each run it — the backend's trimmed copy, which
+had no lookup_user and no reachability gate, was retired 2026-11-17 (B-91).
 """
 
 import asyncio
@@ -56,7 +57,10 @@ try:
     HAS_LIBTORRENT = True
 except ImportError:
     HAS_LIBTORRENT = False
-    logger.warning("libtorrent not installed — DHT disabled")
+    # Only a fact here — whether it matters is the caller's: a launcher-mode
+    # backend (P2P_SYNC_PORT=0) has no libtorrent by design, the launcher's
+    # own process runs the DHT; the launcher says "LAN only" at its start.
+    logger.debug("libtorrent not importable in this interpreter")
 
 
 # Prefix for artist infohash computation
@@ -109,7 +113,7 @@ DHT_BOOTSTRAP_TIMEOUT = 30
 # ~19 s but every reply arrives in its first seconds (measured 2026-08-24:
 # three holders at 0.4, 0.4 and 1.4 s), so the tail of the traversal only
 # costs latency — on an empty key it is pure dead time, which is what the
-# sync walk's rare-artist step used to burn. Matches backend/dht_service.py.
+# sync walk's rare-artist step used to burn.
 GET_PEERS_TIMEOUT = 15
 
 # Peer cache TTL (seconds)

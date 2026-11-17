@@ -7632,6 +7632,25 @@
   // window in routers/p2p.py) — the client renders the flag and never
   // re-derives it, so the Friends list and the Sync screen agree.
 
+  // The line of a contact that is not online — the friend row's and the
+  // chat header's. Support's tells what becomes of what is written to it
+  // (row.mailbox, the server's word: B-92).
+  function offlineLabel(friend) {
+    const base = friend.last_seen ? `last seen ${lastSeenLabel(friend.last_seen)}` : 'offline';
+    return friend.mailbox ? `${base} · messages are kept` : base;
+  }
+
+  // The chat header's status line: the friend row's words.
+  function paintChatStatus(statusEl, friend) {
+    if (friend.is_online) {
+      statusEl.innerHTML = `<span class="status-dot"></span>online`;
+      statusEl.style.color = 'var(--color-positive)';
+    } else {
+      statusEl.textContent = offlineLabel(friend);
+      statusEl.style.color = 'var(--color-text-muted)';
+    }
+  }
+
   // Paginated friends fetch: {pinned, items, next_cursor, total}.
   async function fetchFriendsPage(cursor, q, limit) {
     const params = new URLSearchParams();
@@ -7671,9 +7690,7 @@
     const name = friend.display_name || friend.username || friend.invite_code || '?';
     const status = friend.is_online
       ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
-      : friend.last_seen
-        ? `<div class="friend-status">last seen ${escapeHtml(lastSeenLabel(friend.last_seen))}</div>`
-        : `<div class="friend-status">offline</div>`;
+      : `<div class="friend-status">${escapeHtml(offlineLabel(friend))}</div>`;
     const ph = avatarPlaceholder(name);
     const unread = Number(friend.unread_count) || 0;
     const badge = unread > 0
@@ -8509,12 +8526,21 @@
     return `${d.toLocaleDateString().toUpperCase()} · ${hh}:${mm}`;
   }
 
+  // An outgoing message's state as the server names it (row.state, B-92),
+  // shown only where it says something: under every message still waiting
+  // here or kept for Support, and `Delivered` under the newest delivered one.
+  const MESSAGE_STATE_LINE = {waiting: 'Not sent yet', kept: 'Kept for Support'};
+
   function renderThreadHTML(messages) {
     if (!messages || messages.length === 0) {
       return `<div class="thread-empty">No messages yet — say hi.</div>`;
     }
     const out = [];
     let lastTs = null;
+    let newestDelivered = null;
+    for (const m of messages) {
+      if (m.state === 'delivered') newestDelivered = m;
+    }
     for (const m of messages) {
       const ts = m.timestamp ? new Date(m.timestamp) : null;
       // Insert a date stamp on first message and whenever the gap
@@ -8528,6 +8554,8 @@
       out.push(`<div class="msg-row ${side}">
         <div class="bubble ${side}">${escapeHtml(m.content || '')}</div>
       </div>`);
+      const line = m === newestDelivered ? 'Delivered' : MESSAGE_STATE_LINE[m.state];
+      if (line) out.push(`<div class="msg-state">${line}</div>`);
     }
     return out.join('');
   }
@@ -8626,17 +8654,7 @@
       const ph = avatarPlaceholder(dn);
       avatarEl.style.background = ph.bg;
       avatarEl.textContent = ph.initials;
-      if (friend.is_online) {
-        statusEl.innerHTML = `<span class="status-dot"></span>online`;
-        statusEl.style.color = 'var(--color-positive)';
-      } else if (friend.last_seen) {
-        statusEl.textContent =
-          'last seen ' + lastSeenLabel(friend.last_seen);
-        statusEl.style.color = 'var(--color-text-muted)';
-      } else {
-        statusEl.textContent = 'offline';
-        statusEl.style.color = 'var(--color-text-muted)';
-      }
+      paintChatStatus(statusEl, friend);
       // Rights: a friendship joined via THEIR invite token carries a
       // grant; without can_message in it the issuer's node rejects our
       // messages — disable the composer instead of letting sends 403.
@@ -13760,7 +13778,7 @@
     { id: 240, label: 'Every 4 hours' },
   ];
   // The node itself is always announced; this sizes the extra per-artist
-  // keys published for the RAREST owned artists (see backend/dht_service.py).
+  // keys published for the RAREST owned artists (see desktop/p2p/dht_service.py).
   // 150 = half the DHT traversal lane: a pass refreshes every key inside
   // one entry lifetime with the rare-artist search beside it; 300 takes the
   // whole lane and the oldest keys lapse while a search runs.

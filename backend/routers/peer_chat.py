@@ -34,6 +34,8 @@ from p2p_chat import MAX_ENCRYPTED_CHARS, get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity, verify_invite_code, witness_recorder
 from serving import EventStream
 from desktop.p2p import chat_wire, wire
+from desktop.p2p.chat_wire import (FORWARD_ACK_TIMEOUT, RELAY_HEADER, delivery_payload,
+                                 voucher_payload)
 from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
@@ -50,26 +52,16 @@ PROBE_COOLDOWN = 60            # seconds per pubkey
 # may answer (a few hundred bytes) — mirrors desktop/p2p/sync_server.py.
 PROBE_TIMEOUT = 3.0
 PROBE_HEALTH_CAP = 256 * 1024
-# Forwarding: how long a sender's request waits for the recipient's signed
-# receipt and how many forwards one sender may have in flight. The envelope
+# Forwarding: how many forwards one sender may have in flight (how long one
+# waits for the recipient's signed receipt is chat_wire.FORWARD_ACK_TIMEOUT). The envelope
 # queue per stream (wake_registry.QUEUE_MAX) is the ONLY resource a relay
 # spends per client — it stores nothing.
-FORWARD_ACK_TIMEOUT = 10
 FORWARD_INFLIGHT_PER_SENDER = 10
 # Peer-relay caps (Phase D) — mirror desktop/p2p/sync_server.py, where the
 # adaptive-cap rationale lives.
 RELAY_CAP_BASE = 20
 RELAY_CAP_MAX = 100
 RELAY_CAP_STEP = 20
-VOUCHER_TTL = 24 * 3600
-
-
-def voucher_payload(client_pubkey: str, relay_pubkey: str, until: int) -> str:
-    """Canonical relay-voucher string the CLIENT signs — mirrored in
-    desktop/p2p/sync_server.py. The relay pubkey inside the payload means a
-    voucher issued to one relay cannot be presented by another."""
-    return (f"sautium-relay-voucher:v1:{client_pubkey.lower()}"
-            f":{relay_pubkey.lower()}:{int(until)}")
 
 
 def _err(message: str, status: int) -> JSONResponse:
@@ -146,9 +138,6 @@ def _find_friend_for_handshake(invite_code: str, pubkey: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 _wake = WakeRegistry()
-# On a wake stream's answer: "off" — a voucher came, and this node does not
-# relay (mirror of desktop/p2p/sync_server).
-RELAY_HEADER = "X-Sautium-Relay"
 
 
 def close_relay_clients() -> None:
@@ -515,7 +504,13 @@ def mailbox_import(m: dict) -> None:
     checks as /message above, minus the transport: friendship right, size,
     handle_incoming (dedup by message_uuid, decrypt, store → the insert
     trigger wakes the UI). A refused message is dropped, not retried: the
-    mailbox is a parking lot for the direct path, not a second protocol."""
+    mailbox is a parking lot for the direct path, not a second protocol.
+
+    A message stored fresh pings its sender's own streams here (B-92): the
+    sender pulls history, as on any frame from the master, and its row kept
+    in the mailbox becomes delivered at once. The ping writes nothing and
+    carries nothing; it goes only to the key that signed the deposit. A
+    sender offline now learns at its next connect (the connect-time pull)."""
     svc = get_peer_chat()
     if svc is None:
         raise RuntimeError("chat not available")          # skips the ack → served again later
@@ -535,6 +530,8 @@ def mailbox_import(m: dict) -> None:
                                  message_uuid=m.get("message_uuid") or None)
     if result is None:
         logger.info("mailbox: message %s from %s rejected", (m.get("message_uuid") or "")[:8], sender_pubkey[:8])
+    elif not result.get("duplicate"):
+        ping_wake(sender_pubkey)
 
 
 @chat_router.post("/key-rotation")
@@ -916,13 +913,6 @@ async def probe_connect(request: Request):
 # forge it, and a relay that fabricates an envelope gets no receipt because
 # the forgery will not decrypt.
 # ---------------------------------------------------------------------------
-
-def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
-    """Canonical receipt string — mirrored in desktop/p2p/sync_server.py and
-    signed/verified by the two endpoints below. No timestamp: a receipt is a
-    permanent fact the sender must be able to re-verify from what it has."""
-    return f"sautium-delivery:v1:{message_uuid}:{ciphertext_sha256}"
-
 
 _pending_acks: dict = {}       # message_uuid -> (recipient_pubkey, sender_pubkey, Future)
 _ack_lock = threading.Lock()

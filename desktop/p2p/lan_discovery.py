@@ -32,6 +32,7 @@ import secrets
 import socket
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, Optional, Tuple
 
 from desktop.p2p.addrs import fmt_addr
@@ -39,6 +40,18 @@ from desktop.p2p.addrs import fmt_addr
 logger = logging.getLogger(__name__)
 
 LAN_DISCOVERY_PORT = 19002
+# The sibling ports one beacon may name (a host's Docker backend and the
+# like: a handful). A beacon is an unauthenticated datagram; each new address
+# costs a warm-up probe.
+MAX_SIBLINGS = 8
+# This service's own threads — the receive on one of its own, the sends and
+# the warm-up probes on the others — never the process's default executor,
+# which the backend's requests and listeners share (a beacon naming dead
+# addresses held them). A warm-up is a courtesy: one at a time — the other
+# thread is the sends' — a new peer met meanwhile is not warmed, and the table
+# holds at most MAX_PEERS addresses.
+_THREADS = 2
+MAX_PEERS = 256
 BEACON_INTERVAL = 30          # seconds between broadcasts
 PEER_EXPIRY = BEACON_INTERVAL * 4  # remove peer after 4 missed beacons
 PROTOCOL_VERSION = 1
@@ -71,6 +84,9 @@ class LANDiscovery:
         # {(ip, sync_port): {"node_id": ..., "artists": ..., "invite_code": ..., "last_seen": ...}}
         self._peers: Dict[Tuple[str, int], dict] = {}
         self._running = False
+        self._pool = ThreadPoolExecutor(max_workers=_THREADS, thread_name_prefix="lan-discovery")
+        self._recv = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lan-receive")
+        self._warming = 0
         self._sock: Optional[socket.socket] = None
         # Whether the owner shares (set_beaconing) — off until told — and
         # the wake that sends a changed beacon at once.
@@ -93,17 +109,13 @@ class LANDiscovery:
     @property
     def peers(self) -> list[Tuple[str, int]]:
         """Return list of (ip, sync_port) for live LAN peers."""
+        self._prune()
+        return list(self._peers)
+
+    def _prune(self) -> None:
         now = time.time()
-        alive = []
-        expired = []
-        for key, info in self._peers.items():
-            if now - info["last_seen"] < PEER_EXPIRY:
-                alive.append(key)
-            else:
-                expired.append(key)
-        for key in expired:
+        for key in [k for k, info in self._peers.items() if now - info["last_seen"] >= PEER_EXPIRY]:
             del self._peers[key]
-        return alive
 
     def get_peer_info(self, ip: str, port: int) -> Optional[dict]:
         """Get metadata for a specific LAN peer."""
@@ -138,7 +150,7 @@ class LANDiscovery:
             return None
 
         nodes = [p for p in (msg.get("nodes") or [])
-                 if isinstance(p, int) and 0 < p < 65536]
+                 if isinstance(p, int) and 0 < p < 65536][:MAX_SIBLINGS]
         sync_port = msg.get("sync_port")
         if not isinstance(sync_port, int):
             if not nodes:
@@ -158,6 +170,8 @@ class LANDiscovery:
 
         self._running = True
         loop = asyncio.get_event_loop()
+        self._pool = ThreadPoolExecutor(max_workers=_THREADS, thread_name_prefix="lan-discovery")
+        self._recv = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lan-receive")
 
         # Create UDP socket for both sending and receiving
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -200,6 +214,8 @@ class LANDiscovery:
         if self._sock:
             self._sock.close()
             self._sock = None
+        self._pool.shutdown(wait=False, cancel_futures=True)
+        self._recv.shutdown(wait=False, cancel_futures=True)
 
         logger.info("LAN discovery stopped")
 
@@ -223,7 +239,7 @@ class LANDiscovery:
                     for addr in targets:
                         try:
                             await loop.run_in_executor(
-                                None,
+                                self._pool,
                                 lambda a=addr: self._sock.sendto(
                                     beacon, (a, self.discovery_port)
                                 ),
@@ -276,13 +292,18 @@ class LANDiscovery:
         while self._running:
             try:
                 data, addr = await loop.run_in_executor(
-                    None, lambda: self._receive_with_timeout()
+                    self._recv, lambda: self._receive_with_timeout()
                 )
                 if data is None:
                     continue
 
                 sender_ip = addr[0]
                 parsed = self._parse_beacon(data, sender_ip)
+                if parsed and len(self._peers) >= MAX_PEERS:
+                    self._prune()
+                if (parsed and parsed[1] is not None and len(self._peers) >= MAX_PEERS
+                        and (parsed[0], parsed[1]) not in self._peers):
+                    parsed = None              # a full table takes no new address
                 if parsed:
                     ip, port, info = parsed
                     key = (ip, port)
@@ -306,7 +327,8 @@ class LANDiscovery:
                     # reachable at the sender's address, invisible otherwise.
                     for extra in info.get("nodes", ()):
                         sib = (ip, extra)
-                        if sib == (ip, port):
+                        if sib == (ip, port) or (sib not in self._peers
+                                                 and len(self._peers) >= MAX_PEERS):
                             continue
                         sib_new = sib not in self._peers
                         self._peers[sib] = {
@@ -347,7 +369,10 @@ class LANDiscovery:
     async def _warmup_peer(
         self, loop: asyncio.AbstractEventLoop, ip: str, port: int
     ):
-        """Do a background health check to warm up TLS/ARP/routing state."""
+        """Do a background health check to warm up TLS/ARP/routing state —
+        none while another is (a courtesy, never a queue)."""
+        if self._warming >= _THREADS - 1:
+            return
         import ssl
         import urllib.request
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -363,11 +388,14 @@ class LANDiscovery:
             except Exception:
                 pass
 
+        self._warming += 1
         try:
-            await loop.run_in_executor(None, _probe)
+            await loop.run_in_executor(self._pool, _probe)
             logger.debug(f"LAN peer warmup done: {ip}:{port}")
         except Exception:
             pass
+        finally:
+            self._warming -= 1
 
     async def _localhost_probe_loop(self):
         """Probe docker_ports on localhost for Docker backends.

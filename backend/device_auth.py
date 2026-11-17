@@ -489,6 +489,8 @@ def _after_rotation(pubkey: str) -> None:
     p2p_identity.forget_cached()
     p2p_router.forget_identity()
     p2p_chat.forget_service()
+    # The chat client is built on the old key: it starts again on the new.
+    p2p_chat.soon(p2p_chat.restart_client())
     _record_signing_key(pubkey)
     # The Worker's invite code → mailbox mapping named the old code.
     db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")

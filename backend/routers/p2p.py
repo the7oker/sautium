@@ -92,16 +92,15 @@ def _on_chat_notify(notifies: list) -> None:
     """sautium_chat: every chat stream re-fetches. An 'out' insert — the
     trg_p2p_messages_notify payload msg:{friend_id}:{direction} — is a reply
     for that friend: their relay wake stream is pinged so they pull
-    immediately."""
-    out_friend_ids = set()
-    for note in notifies:
-        parts = (note.payload or "").split(":")
-        if len(parts) == 3 and parts[0] == "msg" and parts[2] == "out":
-            try:
-                out_friend_ids.add(int(parts[1]))
-            except ValueError:
-                pass
+    immediately, and this node's chat client pushes it at once (the one
+    LISTEN for both: the client takes the notes from here)."""
+    from desktop.p2p.chat_client import replied_friends
+    from p2p_chat import chat_client
     _wake_chat_sse_clients()
+    client = chat_client()
+    if client is not None:
+        client.chat_notes(notifies)
+    out_friend_ids = replied_friends(notifies)
     if out_friend_ids:
         from routers.peer_chat import ping_wake_by_friend_id
         for fid in out_friend_ids:
@@ -345,9 +344,24 @@ _FRIENDS_SELECT = f"""
 
 
 def _friend_row_out(row: dict) -> dict:
+    """A friend row as the client renders it. `mailbox`: Support (the
+    resolved master contact) is offline and what is written to it is kept in
+    its Worker mailbox (B-92) — its row and the chat header say so. Only
+    where this node deposits at all: P2P on, and a certificate the Worker
+    issued (it takes mail from no other key); a `pending:` Support contact
+    has nothing kept for it yet. Accepted gaps: on a launcher-mode backend
+    the P2P switch read is the backend's, not whether the launcher's P2P
+    runs; and a deposit the mailbox refused (full, a cap) leaves this line
+    while that bubble says "Not sent yet"."""
+    import master_node
+    from p2p_identity import served_certificate
     for k in ("added_at", "last_seen", "last_activity_at"):
         if row.get(k):
             row[k] = row[k].isoformat()
+    if "public_key_hex" in row:
+        row["mailbox"] = (row["public_key_hex"] == master_node.MASTER_PUBKEY_HEX
+                          and not row.get("is_online") and settings.p2p_enabled
+                          and served_certificate(settings) is not None)
     return row
 
 
@@ -812,14 +826,22 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
     of conversation in one batch — reads as the conversation actually
     happened. Sorting by id told you when THIS node heard about a message,
     which is not what a thread is."""
+    from desktop.p2p import chat_wire
     limit = min(limit, 500)
     rows = _db_query("""
         SELECT id, direction, content, timestamp, delivered, read,
-               message_uuid
+               message_uuid,
+               -- an outgoing message's state (B-92): delivered is the proof;
+               -- kept = handed to the master's Worker mailbox, within the
+               -- time it keeps mail; waiting = here
+               CASE WHEN direction = 'in' THEN NULL
+                    WHEN delivered THEN 'delivered'
+                    WHEN parked_at > now() - make_interval(secs => %s) THEN 'kept'
+                    ELSE 'waiting' END AS state
         FROM p2p_messages
         WHERE friend_id = %s
         ORDER BY timestamp DESC, id DESC LIMIT %s
-    """, (friend_id, limit))
+    """, (chat_wire.MAILBOX_TTL_S, friend_id, limit))
     rows.reverse()
     for row in rows:
         if row.get("timestamp"):

@@ -1,17 +1,19 @@
-"""Peer-chat service for the Docker peer surface — the master node's half
-of the chat protocol.
+"""Peer-chat service for the Docker peer surface — the server half of the
+chat protocol.
 
 A trimmed mirror of desktop/p2p/chat_service.ChatService against the shared
 PostgreSQL: friend upsert, NaCl Box encrypt/decrypt, incoming-message
-handling and history export. Deliberately NOT mirrored: outgoing delivery
-loops, pending resolution, history import — this node is a PASSIVE peer.
-Guests push messages inbound and pull replies with the existing history
-sync; the relay wake stream tells them when to pull. Most guests sit
-behind NAT where an outbound push could never land anyway.
+handling and history export — the peer surface's store. The CLIENT half
+(outgoing delivery, pending resolution, history import, the wake streams it
+holds, reachability) is not mirrored: since 2026-11-17 (B-91) this node runs
+the launcher's own, desktop/p2p/chat_client.py, on the launcher's
+ChatService (`start_client` below) — except on the master, which runs none,
+and in launcher mode, where the launcher's client owns the database.
 
 Keep in step with desktop/p2p/chat_service.py for the mirrored parts.
 """
 
+import asyncio
 import logging
 import uuid as uuid_mod
 from datetime import datetime, timezone
@@ -375,14 +377,10 @@ def forget_service() -> None:
     _service = None
 
 
-def get_peer_chat() -> Optional[PeerChatService]:
-    """Lazy singleton bound to the account identity; None when the node has
-    no account (chat endpoints then answer 503)."""
-    global _service
-    if _service is not None:
-        return _service
+def _keys():
+    """(identity, seed, the retired seeds) of the node's account, or None."""
     from config import settings
-    from p2p_identity import load_signing_key, resolve_identity
+    from p2p_identity import identity_dir, load_signing_key, resolve_identity
 
     identity = resolve_identity(settings)
     key = load_signing_key(settings)
@@ -395,8 +393,115 @@ def get_peer_chat() -> Optional[PeerChatService]:
         encryption_algorithm=serialization.NoEncryption(),
     )
     from desktop.node_identity import load_previous_seeds
-    from p2p_identity import identity_dir
     d = identity_dir(settings)
-    previous = load_previous_seeds(d) if d else []
-    _service = PeerChatService(seed, identity["public_key_hex"], tuple(previous))
+    return identity, seed, tuple(load_previous_seeds(d) if d else [])
+
+
+def get_peer_chat() -> Optional[PeerChatService]:
+    """Lazy singleton bound to the account identity; None when the node has
+    no account (chat endpoints then answer 503)."""
+    global _service
+    if _service is not None:
+        return _service
+    keys = _keys()
+    if keys is None:
+        return None
+    identity, seed, previous = keys
+    _service = PeerChatService(seed, identity["public_key_hex"], previous)
     return _service
+
+
+# ---------------------------------------------------------------------------
+# The client half on this node (desktop/p2p/chat_client.py, the launcher's
+# own): contacts, outbox, history, the wake streams it holds, reachability.
+# ---------------------------------------------------------------------------
+
+_client = None
+# What the lifespan hands the client (main.py): the DHT, the LAN tier and the
+# UPnP tells of a host-networked node, the port the probe dials back, the
+# verdict's consumers.
+_client_deps: dict = {}
+_client_lock = asyncio.Lock()
+
+
+def client_identity():
+    """The node's account as the chat client speaks it, or None."""
+    from config import settings
+    from desktop.p2p.chat_client import ClientIdentity
+    from p2p_identity import identity_dir, load_signing_key, peer_identity, resolve_identity
+    ident = resolve_identity(settings)
+    key = load_signing_key(settings)
+    peer = peer_identity(settings)
+    if not ident or key is None or peer is None:
+        return None
+    return ClientIdentity(public_key_hex=ident["public_key_hex"], username=ident["username"],
+                          invite_code=ident["invite_code"], sign=key.sign,
+                          cert_bundle=peer.cert_bundle, identity_dir=identity_dir(settings))
+
+
+def chat_client():
+    """The running client, or None."""
+    return _client
+
+
+def configure_client(**deps) -> None:
+    """The lifespan's dependencies; the DHT may come after the client."""
+    _client_deps.update(deps)
+    if _client is not None and "dht" in deps:
+        _client.dht = deps["dht"]
+
+
+async def start_client():
+    """Build and start the client — at the lifespan's start and the moment
+    an account exists (routers/auth.create_account). Only where this backend
+    owns the peer surface: in launcher mode (P2P_SYNC_PORT=0) the launcher's
+    client owns this database, and one database has one deliverer. Never on
+    the master (chat_client.master_runs_none)."""
+    global _client
+    from config import settings
+    from desktop.p2p.chat_client import ChatClient, master_runs_none
+    from desktop.p2p.chat_service import ChatService
+    async with _client_lock:
+        if _client is not None or not (settings.p2p_enabled and settings.p2p_sync_port):
+            return _client
+        keys = await asyncio.to_thread(_keys)
+        if keys is None or master_runs_none(keys[0]["public_key_hex"]):
+            return None
+        identity, seed, previous = keys
+        client = ChatClient(ChatService(settings.database_url, seed, identity["public_key_hex"],
+                                        previous),
+                            identity=client_identity, **_client_deps)
+        await client.start()
+        _client = client
+        lan = _client_deps.get("lan")
+        if lan is not None:
+            # A beacon names this node by its account, which may have come
+            # after the beacon was built (an account made without a restart)
+            lan.node_id, lan.invite_code = identity["node_id"], identity["invite_code"]
+        logger.info("chat client started")
+        return client
+
+
+async def stop_client() -> None:
+    global _client
+    async with _client_lock:
+        client, _client = _client, None
+        if client is not None:
+            await client.stop()
+
+
+async def restart_client() -> None:
+    """After a key rotation: everything the client holds is on the old key."""
+    await stop_client()
+    await start_client()
+
+
+_soon: set = set()
+
+
+def soon(coro) -> None:
+    """start_client() / restart_client() from a request's handler, held
+    until it ends."""
+    task = asyncio.get_running_loop().create_task(coro)
+    _soon.add(task)
+    task.add_done_callback(_soon.discard)

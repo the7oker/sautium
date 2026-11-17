@@ -211,9 +211,9 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 - [UI] Changing the name or password is a new key; the retired one signs the notice friends re-key on — `POST /api/auth/change-identity`; `desktop/node_identity.py: rotate_identity`
 - [auto] Identity certificate from the Worker, by proof of work or by email; the proof is mined in the background — `desktop/p2p/birth_cert.py: request_certificate`; `desktop/p2p/identity_pow.py: pow_mine`
 - [UI] Email verification, optional — `POST /api/p2p/email/send-code`, `/verify-code`
-- [auto] Peers are found on the BitTorrent DHT, on the LAN (launcher only) and through the Worker's directory — `desktop/p2p/dht_service.py: DHTService`; `desktop/p2p/lan_discovery.py`; `desktop/p2p/node_hints.py`
-- [auto][CLI] The router maps the peer port by UPnP; PCP only from the command line — `desktop/p2p/upnp_service.py`; `desktop/portmap.py` (`map --pcp`)
-- [auto] A node nobody can reach holds wake streams to relays; any reachable node can be a relay — `desktop/p2p/p2p_manager.py: _peer_relay_manager`; `GET /api/relay/wake-stream`
+- [auto] Peers are found on the BitTorrent DHT, on the LAN (the launcher, and a Docker node on the host's network) and through the Worker's directory — `desktop/p2p/dht_service.py: DHTService`; `desktop/p2p/lan_discovery.py`; `desktop/p2p/node_hints.py`
+- [auto][CLI] The router maps the peer port by UPnP (the launcher, and a Docker node on the host's network); PCP only from the command line — `desktop/p2p/upnp_service.py`; `desktop/portmap.py` (`map --pcp`)
+- [auto] A node nobody can reach holds wake streams to relays; any reachable node can be a relay — `desktop/p2p/chat_client.py: _peer_relay_manager` (both runtimes); `GET /api/relay/wake-stream`
 - [auto] Sync pulls sealed analysis: CLAP segment bundles, audio features and instruments; the track vector is derived locally — `desktop/sync_client.py: CATEGORIES`, `_import_segments`
 - [auto] Carry pushes analysis nobody asked for yet, track ↔ recording bindings with it — `desktop/p2p/sync_walk.py: _push_to_carrier`; `desktop/p2p/sync_queries.py: CARRY_CATEGORIES`
 - [auto] A peer's holdings arrive as a Bloom filter — `desktop/p2p/bloom.py`; `GET /api/sync/holdings`

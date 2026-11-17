@@ -3953,6 +3953,16 @@ a.am-kind { text-decoration: none; }
 .msg-row { display: flex; }
 .msg-row.me { justify-content: flex-end; }
 .msg-row.them { justify-content: flex-start; }
+/* An outgoing message's state (B-92): the timestamp's face, muted, under
+   the bubble on its side. */
+.msg-state {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  margin: calc(3 * var(--px)) calc(4 * var(--px)) 0;
+}
 .bubble {
   max-width: 78%;
   padding: calc(9 * var(--px)) calc(13 * var(--px));

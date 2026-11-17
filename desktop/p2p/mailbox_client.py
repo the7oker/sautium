@@ -10,8 +10,10 @@ ordinary chat wire payload — NaCl Box ciphertext to the master's chat key,
 the Worker never sees plaintext — at `POST /mailbox`, signed with its own
 key (`mailbox:v1:{to}:{message_uuid}:{timestamp}:{sha256(encrypted)}`)
 and gated by a birth certificate issued there (no free keys) plus per-IP,
-per-sender and global caps. Acceptance is delivery from the sender's side
-(handed to the mailbox, like mail to an MTA); the master dedups by
+per-sender and global caps. Acceptance is "kept", not delivery (since
+2026-11-17, B-92): the sender marks its row parked, and delivered only on a
+proof — the master pings the sender's stream after its drain stores the
+message, and the sender's history pull shows it; the master dedups by
 `message_uuid` exactly as it does on the direct path.
 
 The master drains on an EVENT, not a timer: it holds an outbound WebSocket

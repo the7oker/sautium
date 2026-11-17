@@ -6,6 +6,7 @@
 // usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--scenario NAME] [--armed]
 //                                [--owed-timeout MS]
 //        node worker_harness.mjs <authority_seed_hex> <email_pepper> --serve [--stamp-brake N]
+//                                [--master-seed HEX]
 // Without --serve: runs one scenario (default: contract) and prints one JSON
 // object on stdout; --armed runs it with the stamp budget armed, as a refusal
 // (shipped shadow). With --serve: answers HTTP on 127.0.0.1 (a free port) with
@@ -15,6 +16,8 @@
 // through (default: no limit; the scenario's 8 would turn the ninth stamp of a
 // test into a 429), GET /__harness/calls answers how many /timestamp
 // requests reached the Worker, and GET /__harness/mails the mails it sent.
+// --master-seed makes the test's master key the Worker's MASTER_PUBKEY (a
+// test that drains the master's mailbox signs as it); otherwise a fresh one.
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -32,6 +35,7 @@ const brakeAt = harnessArgs.indexOf("--stamp-brake");
 const stampBrake = brakeAt >= 0 ? Number(harnessArgs[brakeAt + 1]) : Infinity;
 const armed = harnessArgs.includes("--armed");
 const owedTimeoutAt = harnessArgs.indexOf("--owed-timeout");
+const masterSeedAt = harnessArgs.indexOf("--master-seed");
 const here = dirname(fileURLToPath(import.meta.url));
 const workerPath = resolve(here, "../../worker/verify.js");
 
@@ -64,7 +68,7 @@ const authority = await keyFromSeed(authoritySeedHex);
 
 // Swap the pinned authority and master for test keys (and shrink the
 // per-sender mailbox cap so the harness can hit it), then import the module.
-const master = await newKey();
+const master = masterSeedAt >= 0 ? await keyFromSeed(harnessArgs[masterSeedAt + 1]) : await newKey();
 const src = readFileSync(workerPath, "utf-8");
 let swapped = src.replace(
   /const TRUSTED_AUTHORITIES = \[\n  "[0-9a-f]{64}",\n\];/,

@@ -38,7 +38,7 @@ ENVELOPE_VERSION = 3
 # (`next`) and whether the thread goes on (`more`). The exporter marks the
 # outgoing messages a page carries delivered, so a page a requester refused
 # would be lost: it stays well under the requester's bound
-# (p2p_manager.PEER_ANSWER_CAP). One pull reads at most
+# (chat_client.PEER_ANSWER_CAP). One pull reads at most
 # HISTORY_PAGES_PER_PULL pages; the next one goes on from its cursor.
 HISTORY_EXPORT_MAX = 2000
 HISTORY_EXPORT_BYTES = 4 * 1024 * 1024
@@ -197,6 +197,33 @@ def export_page(rows: list, seal, after: Optional[tuple] = None
         n = min(len(rows), HISTORY_EXPORT_MAX)
     cursor = f"{last[0].isoformat()}|{last[1]}" if last is not None else None
     return page, out_ids, cursor, n < len(rows)
+
+
+# The relay protocol (relay forwarding, Phase D): what a relay and its
+# clients — the chat client on either runtime — must spell alike.
+RELAY_HEADER = "X-Sautium-Relay"       # "off": a friend's relay that is not relaying
+FORWARD_ACK_TIMEOUT = 10               # a relay holds a forward this long for the receipt
+VOUCHER_TTL = 24 * 3600
+# How long the master's Worker mailbox keeps a message it took (worker/
+# verify.js MAIL_TTL_MS): a message kept there longer than this is gone, so
+# it is no longer "kept" and is deposited again (B-92).
+MAILBOX_TTL_S = 30 * 24 * 3600
+
+
+def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
+    """Canonical delivery-receipt string: the recipient signs it, the relay
+    and the sender verify it. No timestamp: a receipt is a permanent fact
+    the sender must be able to re-verify from what it already has."""
+    return f"sautium-delivery:v1:{message_uuid}:{ciphertext_sha256}"
+
+
+def voucher_payload(client_pubkey: str, relay_pubkey: str, until: int) -> str:
+    """Canonical relay-voucher string the CLIENT signs. The relay pubkey
+    inside the payload means a voucher issued to one relay cannot be
+    presented by another; `until` bounds how long the authority lives
+    without re-issue."""
+    return (f"sautium-relay-voucher:v1:{client_pubkey.lower()}"
+            f":{relay_pubkey.lower()}:{int(until)}")
 
 
 def sent_time(ts_iso: str) -> datetime:

@@ -23,17 +23,13 @@ mapping is never the LAN beacon's port.
 """
 
 import argparse
-import http.client
-import json
 import socket
-import ssl
 import sys
 import time
-import urllib.request
 
 from desktop.p2p.lan_discovery import LAN_DISCOVERY_PORT
 from desktop.p2p.upnp_service import (
-    HAS_UPNP, LEASE_DURATION, add_mapping, discover_igd, list_mappings,
+    HAS_UPNP, LEASE_DURATION, add_mapping, answers_as_peer_surface, discover_igd, list_mappings,
 )
 
 # Refresh at 75% of the lease — the same margin the launcher's renewal uses.
@@ -53,22 +49,6 @@ def _igd_or_exit():
         sys.exit("No UPnP router found. Check that UPnP is enabled on the "
                  "router, and that this machine is on the same network.")
     return u
-
-
-def _answers_as_peer_surface(port: int) -> bool:
-    """Whether the local port answers /health over TLS saying `sautium-peer`
-    — the peer surface, and nothing else is (the Web UI says `sautium-webui`,
-    over plain HTTP). A probe that fails is a no."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE      # telling surfaces apart, not trusting one
-    try:
-        with urllib.request.urlopen(f"https://127.0.0.1:{port}/health",
-                                    context=ctx, timeout=3) as resp:
-            health = json.loads(resp.read(65536))
-    except (OSError, ValueError, http.client.HTTPException):
-        return False
-    return isinstance(health, dict) and health.get("type") == "sautium-peer"
 
 
 def _port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
@@ -107,7 +87,7 @@ def cmd_map(args) -> None:
     external = args.external or port
     proto = "UDP" if args.udp else "TCP"
 
-    if proto == "TCP" and not _answers_as_peer_surface(port):
+    if proto == "TCP" and not answers_as_peer_surface(port):
         sys.exit(
             f"Refusing to map {port}: it does not answer as the peer surface "
             f"(HTTPS /health saying sautium-peer). Only the peer surface may "

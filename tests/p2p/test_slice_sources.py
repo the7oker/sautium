@@ -1,10 +1,9 @@
 """The slice-source finder (desktop/p2p/slice_sources.py) both slice cycles
-share — the tiers, the fallback, the kept set — and the one DHT interface
-both runtimes hand it. No network, no DB: the walk's connect, the DHT, the
+share — the tiers, the fallback, the kept set. The DHT is one class on
+both runtimes (desktop/p2p/dht_service.py). No network, no DB: the walk's connect, the DHT, the
 LAN table and the two hint services are stand-ins."""
 
 import asyncio
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -272,21 +271,3 @@ def test_manual_and_lan_peers_ignore_the_dead_address_record(hints):
     net.dead.failed("https://192.0.2.20:22000")
     asyncio.run(_finder(net, lan=lan, manual=["https://192.0.2.20:22000"]).find())
     assert net.probed == ["https://192.0.2.20:22000", "https://192.0.2.10:22000"]
-
-
-def test_both_runtimes_dht_take_the_same_calls():
-    """The walk and the finder are handed either runtime's DHTService. A
-    method both copies define takes the same arguments: `want_all` reached
-    only the launcher's lookup_capability on 2026-09-24, and on Docker the
-    finder's DHT tier raised TypeError on every run, logged at debug."""
-    import backend.dht_service as docker
-    from desktop.p2p import dht_service as launcher
-
-    def public(cls):
-        return {name for name, _ in inspect.getmembers(cls, inspect.isfunction)
-                if not name.startswith("_")}
-    shared = public(docker.DHTService) & public(launcher.DHTService)
-    assert "lookup_capability" in shared
-    for name in sorted(shared):
-        assert (inspect.signature(getattr(docker.DHTService, name))
-                == inspect.signature(getattr(launcher.DHTService, name))), name

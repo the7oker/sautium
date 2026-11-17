@@ -210,7 +210,7 @@ async def _wake(server, query, headers=None, answer=None):
 
 def test_a_strangers_relay_slot_needs_the_switch_and_a_verified_identity(monkeypatch):
     from desktop.p2p import peer_auth
-    from desktop.p2p.sync_server import voucher_payload
+    from desktop.p2p.chat_wire import voucher_payload
 
     server = SyncServer("postgresql://unused",
                         account_info={"public_key_hex": HOST.pub, "username": HOST.name,
@@ -303,27 +303,37 @@ def test_a_history_page_is_bounded_and_says_where_the_next_one_starts(monkeypatc
     assert chat_wire.history_cursor("not a cursor") is None
 
 
+def _client(store):
+    """A chat client (desktop/p2p/chat_client.py) over a fake store, as HOST."""
+    from desktop.p2p.chat_client import ChatClient, ClientIdentity
+    ident = ClientIdentity(public_key_hex=HOST.pub, username=HOST.name, invite_code=HOST.invite,
+                           sign=HOST.key.sign, cert_bundle=lambda: None)
+    client = ChatClient(store, identity=lambda: ident, announce_port=lambda: 1)
+    client.running = True
+    return client
+
+
 def test_a_pull_reads_page_by_page_and_the_next_goes_on_from_there(monkeypatch):
-    from desktop import node_identity
-    from desktop.p2p import p2p_manager
     pages = {None: ({"messages": [1, 2], "next": "c1", "more": True}),
              "c1": ({"messages": [3], "next": "c2", "more": True}),
              "c2": ({"messages": [4], "next": "c3", "more": False}),
              "c3": ({"messages": [], "next": None, "more": False})}
     asked = []
-    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
-    manager._chat_service, manager._on_message_cb = SimpleNamespace(), None
-    manager._history_after = {}
-    manager._note_peer_alive = lambda *a: None
+    manager = _client(SimpleNamespace())
 
-    async def page(url, pubkey, account, after):
+    async def alive(*a):
+        pass
+
+    async def page(url, pubkey, ident, after):
         asked.append(after)
         return pages[after]
 
+    async def imported(friend, pk, data):
+        return {"imported": len(data["messages"]), "skipped": 0, "delivered": 0}
+
+    manager._note_peer_alive = alive
     manager._history_page = page
-    manager._import_history_page = lambda friend, pk, data: {
-        "imported": len(data["messages"]), "skipped": 0, "delivered": 0}
-    monkeypatch.setattr(node_identity, "get_account_info", lambda: {"public_key_hex": HOST.pub})
+    manager._import_history_page = imported
     monkeypatch.setattr(chat_wire, "HISTORY_PAGES_PER_PULL", 2)
     friend = {"id": 7, "public_key_hex": FRIEND.pub, "username": "friend"}
     first = asyncio.run(manager._sync_chat_history(friend, [("198.51.100.5", 1)]))
@@ -337,13 +347,9 @@ def test_a_pull_reads_page_by_page_and_the_next_goes_on_from_there(monkeypatch):
 
 
 def test_a_stored_message_is_pushed_at_once_and_again_if_another_arrives(monkeypatch):
-    from desktop.p2p import p2p_manager
     pushed = []
-    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
-    manager._running = True
-    manager._pushing, manager._push_again, manager._push_tasks = set(), set(), set()
     pending = [{"friend_id": 7, "public_key_hex": FRIEND.pub, "invite_code": FRIEND.invite}]
-    manager._chat_service = SimpleNamespace(get_pending_messages=lambda: list(pending))
+    manager = _client(SimpleNamespace(get_pending_messages=lambda: list(pending)))
 
     async def peers(info, refresh=False):
         return [("198.51.100.5", 1)]
@@ -354,7 +360,7 @@ def test_a_stored_message_is_pushed_at_once_and_again_if_another_arrives(monkeyp
             manager._deliver_now({7})                       # another message meanwhile
             await asyncio.sleep(0)
 
-    manager._find_friend_peers, manager._push_pending_messages = peers, push
+    manager.find_friend_peers, manager._push_pending_messages = peers, push
 
     async def scene():
         manager._deliver_now({7})
@@ -368,7 +374,7 @@ def test_a_stored_message_is_pushed_at_once_and_again_if_another_arrives(monkeyp
 def test_the_docker_relay_slot_needs_the_switch_room_and_a_verified_identity(monkeypatch):
     from fastapi.testclient import TestClient
     from desktop.p2p import peer_auth
-    from desktop.p2p.sync_server import voucher_payload
+    from desktop.p2p.chat_wire import voucher_payload
     from routers import peer_chat, settings as settings_router
     app = _docker_app(monkeypatch, _Svc(), None)
     app.include_router(peer_chat.relay_router)
@@ -405,7 +411,7 @@ def test_the_docker_relay_slot_needs_the_switch_room_and_a_verified_identity(mon
 
 
 def test_with_the_relay_off_a_friends_voucher_announces_nothing(monkeypatch):
-    from desktop.p2p.sync_server import voucher_payload
+    from desktop.p2p.chat_wire import voucher_payload
     server = SyncServer("postgresql://unused",
                         account_info={"public_key_hex": HOST.pub, "username": HOST.name,
                                       "invite_code": HOST.invite})
@@ -450,12 +456,9 @@ def test_switching_the_relay_off_ends_the_slots_held():
 
 
 def test_the_pass_leaves_a_friend_a_push_is_under_way_for(monkeypatch):
-    from desktop.p2p import p2p_manager
-    manager = p2p_manager.P2PManager.__new__(p2p_manager.P2PManager)
-    manager._running, manager._pushing = True, {7}
-    manager._history_synced_friends = set()
     pending = [{"friend_id": 7, "public_key_hex": FRIEND.pub, "invite_code": FRIEND.invite}]
-    manager._chat_service = SimpleNamespace(get_pending_messages=lambda: list(pending))
+    manager = _client(SimpleNamespace(get_pending_messages=lambda: list(pending)))
+    manager._pushing = {7}
     pushed = []
 
     async def peers(info, refresh=False):
@@ -464,15 +467,15 @@ def test_the_pass_leaves_a_friend_a_push_is_under_way_for(monkeypatch):
     async def push(*a):
         pushed.append(a[0])
 
-    manager._find_friend_peers, manager._push_pending_messages = peers, push
+    manager.find_friend_peers, manager._push_pending_messages = peers, push
 
     async def scene():
-        manager._chat_notify = asyncio.Event()
-        manager._chat_notify.set()
-        task = asyncio.ensure_future(manager._sync_chat_histories())
+        manager._notify = asyncio.Event()
+        manager._notify.set()
+        task = asyncio.ensure_future(manager._pass_loop())
         await asyncio.sleep(0.05)
-        manager._running = False
-        manager._chat_notify.set()
+        manager.running = False
+        manager._notify.set()
         await asyncio.wait_for(task, 2)
 
     asyncio.run(scene())

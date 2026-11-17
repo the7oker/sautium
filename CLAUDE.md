@@ -517,7 +517,11 @@ See:
   `desktop.p2p.sync_walk` (the Docker node walks the network like a launcher
   since 2026-09-08 — before that it only served and accepted carry) and the
   MB slice cycle, `desktop.p2p.mb_slice_cycle` (since 2026-09-24 — before
-  that only the launcher asked for MB slices), instead of mirroring them.
+  that only the launcher asked for MB slices), the client half of chat,
+  `desktop.p2p.chat_client` (since 2026-11-17 — before that a Docker node
+  seeded no Support contact, made no handshake, delivered nothing and took
+  itself for reachable) and the DHT, `desktop.p2p.dht_service`, instead of
+  mirroring them.
   Anything the two surfaces must agree on *exactly* — the
   seal-verification gate, the carry SQL, the DHT announce query, the walk —
   lives there and is imported, not copied.
@@ -562,7 +566,10 @@ below bind with or without it.
    gone — tracking moved into the backend).
 2. **Never let UPnP forward backend ports to the internet.**
    `desktop/p2p/p2p_manager.py` currently maps `[http_port]` only
-   (P2P sync, which has its own auth). `docker_ports` from
+   (P2P sync, which has its own auth), and a host-networked Docker node
+   (the Pi, since 2026-11-17) maps the one port peers dial, only once it
+   answers as the peer surface (`main._map_peer_port`,
+   `upnp_service.answers_as_peer_surface`). `docker_ports` from
    `desktop/config_manager.py:58` is for *localhost-only LAN
    discovery probes*, never for UPnP. If you ever combine them,
    you must add app-level auth to the backend first.
@@ -604,9 +611,9 @@ below bind with or without it.
 4. **The peer surface is the only network surface that *is* safe to
    expose to the public internet** — the launcher's sync server
    (random port 20000–29999, UPnP-mapped) and the Docker peer app
-   (`backend/p2p_app.py`, port 8801, `python -m desktop.portmap map 8801`
-   or a manual forward; portmap maps only a port answering as the peer
-   surface).
+   (`backend/p2p_app.py`, port 8801 — mapped by the node itself on host
+   networking, else `python -m desktop.portmap map 8801` or a manual
+   forward; both map only a port answering as the peer surface).
    Self-signed TLS **pinned to the node key** (the cert carries the
    node's Ed25519 signature over its own TLS key — `peer_auth`
    binding extension; peer clients verify it on every handshake, so
@@ -794,6 +801,7 @@ toast takes no pointer events and never blocks the user (see
 | `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
 | `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place. Also the one "same listen" rule (`same_listen`, `LISTENS_LOCK_KEY`) and the repair of pre-2026-09-24 naive listen starts |
 | `backend/lastfm_history.py` + `backend/canon/scrobbles.py` | The Last.fm history import: the walk into the waiting room (single flight, resumable, event-triggered) and the canon that places waiting scrobbles on canonical tracks (stages A–E, one consumer thread woken by events; `python -m canon.scrobbles --eval / --report` measure it read-only) |
+| `desktop/p2p/chat_client.py` | The client half of chat, one implementation for the launcher's P2PManager and the Docker backend (`p2p_chat.start_client`): the friends' addresses, the Support contact and the handshakes, the outbox (direct push, relay forward with the recipient's receipt, the master's Worker mailbox — "kept", not delivered, until a proof), the history pull, the wake streams it holds, the reachability verdict; the master runs none, a launcher-mode backend builds none (one deliverer per database) |
 | `desktop/p2p/mb_slice_cycle.py` + `desktop/p2p/slice_sources.py` | The MB slice requester shared by the launcher's P2PManager and the Docker backend (one pool of every reason canon waits on, drawn at random in one form and asked at one pace — imported-scrobble names once their import session stops —, `mb.search_sources`, `mb_slice.status`) and the source finder both slice families share (every DHT holder; the directory and the master hint whenever no primary source is usable; the verified set kept between runs) |
 | `backend/track_similarity.py` | The ONE "similar tracks" scorer — recall by mean-KNN plus a kin arm, rank by segment chamfer minus a Last.fm tag bonus — behind radio, the Now Playing Similar shelf, `play-similar` and Discovery's seed (`_SEED_SCORE` imports its weights). Radio itself (the drifting batch fill, the refill observer on the status tick, `manager.radio_mode`) is `backend/routers/player.py` § "Radio mode"; the decisions are in PROGRESS.md § "Radio and track similarity" |
 | `backend/hqp_library.py` + `backend/playback/substitute.py` | An HQPlayer's own library as album variants (`<LibraryGet/>` → `scanner.import_metadata` with an HQPlayer `FileSink`; `hqp_endpoints` as the library's identity and the registry of chosen HQPlayers; a sync never removes rows) and what the ACTIVE output opens for each queue slot (`QueueItem.play`, re-read on an output switch: a rip here, that HQPlayer's copy, else a stream fetched lazily a lead window ahead of the playhead) |
