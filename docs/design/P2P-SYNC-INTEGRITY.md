@@ -1290,12 +1290,18 @@ the DO side; keepalives auto-answered) and receives "mail" on every
 store; drain = master-signed `GET /mailbox` pages of 200 → import
 through the same `handle_incoming` as the direct path (friend right,
 size cap, `message_uuid` dedup) → `DELETE /mailbox?upto=id` ack; a
-handler failure leaves the page unacked. Sender side (launcher
-`_mailbox_deposit`): only when the direct path found no route — the
-place `_relay_forward` used to give up for the master; acceptance is
-delivery (handed to the mailbox, like mail to an MTA). Shared code
-`desktop/p2p/mailbox_client.py`; the drain runs in the Docker backend
-when its identity IS the master. Verified live: deposit from a
+handler failure leaves the page unacked. Sender side (the chat client's
+`_mailbox_deposit`, `desktop/p2p/chat_client.py`, both runtimes since
+2026-11-17): only when the direct path found no route — the place
+`_relay_forward` used to give up for the master. Acceptance is "kept",
+not delivery (since 2026-11-17, B-92: until then a deposit counted as
+delivered): the row is parked (`p2p_messages.parked_at`) and becomes
+delivered on a proof — the master's drain pings the sender's stream after
+storing a message fresh, and the sender's pull shows it; a sender away
+then learns at its next connect, which also pushes what the drain missed.
+Past the mailbox's 30 days a kept message is waiting again and is
+deposited again. Shared code `desktop/p2p/mailbox_client.py`; the drain
+runs in the Docker backend when its identity IS the master. Verified live: deposit from a
 throwaway certified key → the master's socket woke and drained within
 seconds, the non-friend message was dropped by the friend-right check
 and acked. Not done: a launcher-side drain (no launcher is the master)

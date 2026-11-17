@@ -1,7 +1,8 @@
 # P2P Network — Sautium
 
 Design notes for the P2P layer. Describes **why** things are the way they are —
-implementation details live in the code (`desktop/p2p/`, `backend/dht_service.py`).
+implementation details live in the code (`desktop/p2p/` — the DHT, the walk, the slice
+cycles and the chat client run on both runtimes from there).
 
 ---
 
@@ -454,8 +455,9 @@ identities (since certificate v2, 2026-08-17, the certificate also pins the
 identity proof-of-work policy — `method`, `difficulty`, `params_version` —
 and the token gate demands the mined proof for `method: pow`, verified once
 per identity by `desktop/p2p/identity_registry.py` BEFORE the token use is
-burned; see P2P-SYNC-INTEGRITY.md § "Proof-of-work certificates"). `_ensure_master_contact` seeds it as a pending friend when P2P
-starts; the existing resolver (LAN → cache → DHT `lookup_user`) performs the
+burned; see P2P-SYNC-INTEGRITY.md § "Proof-of-work certificates"). The chat client
+(`desktop/p2p/chat_client.py`, the launcher's and — since 2026-11-17 — the Docker
+node's) seeds it as a pending friend when it starts; its resolver (LAN → cache → DHT `lookup_user`) performs the
 token handshake, stores the grant and pulls the welcome message through the
 ordinary history sync. Deleting the contact sets `p2p.master_removed` — the
 auto-add never resurrects it (re-adding the code by hand clears the flag).
@@ -787,8 +789,14 @@ first receipt answers the sender, and a later one finds no forward waiting (a
 404 the node ignores).
 
 Mirrors: `backend/routers/peer_chat.py` and `desktop/p2p/sync_server.py` — any
-reachable launcher becomes a relay with no protocol change; the stream
-registry both use is one module, `desktop/p2p/wake_registry.py`.
+reachable node becomes a relay with no protocol change; the stream
+registry both use is one module, `desktop/p2p/wake_registry.py`, and what both
+spell alike (the receipt and voucher statements, `FORWARD_ACK_TIMEOUT`) is in
+`chat_wire`. The CLIENT side — forward, receipt check, the wake streams a node
+holds, the relays it recruits while unreachable — is one module on both
+runtimes, `desktop/p2p/chat_client.py` (the Docker node's since 2026-11-17: until
+then it held no stream and delivered nothing, and its relay role assumed it was
+reachable; now the role follows its verdict, as a launcher's).
 
 **Deposit/collect (a mailbox) — CANCELLED.** The reasons, recorded 2026-08-02:
 (1) the master is the maintainer's laptop, not infrastructure, and a network
