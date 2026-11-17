@@ -141,9 +141,11 @@ def decode_as_read(row, local_path: str, decode):
     decode (check_whole). Optimistic: nothing waits, the race cannot be
     saved."""
     before = _stat_now(local_path)
-    if before is None:
-        return None             # unreadable now: a failed decode, no refusal to keep
     recorded = recorded_stat(row)
+    if before is None:
+        if recorded is not None:
+            return None         # unreadable now: a failed decode, no refusal to keep
+        return decode()         # a row read before stats were kept: the decode's own word
     if recorded is not None and before != recorded:
         raise ChangedUnderDecode(f"{local_path} changed since its last read")
     audio = decode()
@@ -165,13 +167,24 @@ def _as_read_params(row) -> Dict[str, Any]:
             "mtime": row.stat_mtime_ns, "ctime": row.stat_ctime_ns}
 
 
-def refuse(db: Session, row, reason: Exception) -> None:
+def refuse(db: Session, row, reason: Exception, source_id: Optional[int] = None) -> None:
     """A decode refused: the file waits, out of both passes' queues, until
     it is read again — every re-read clears the mark (scanner), nothing else
     does. Marked only on the row as the pass read it: a file re-read since
-    is another version, not this refusal's."""
+    is another version, not this refusal's. The source the pass registered
+    for it goes if it holds nothing: its print was taken of bytes the
+    refusal says are not the file's (a re-read in the same moment could not
+    see the registration, which had not committed)."""
     db.execute(sa_text(f"UPDATE media_files SET decode_refused = true WHERE {_AS_READ}"),
                _as_read_params(row))
+    if source_id is not None:
+        db.execute(sa_text("""
+            DELETE FROM analysis_sources s WHERE s.id = :s
+               AND NOT EXISTS (SELECT 1 FROM embeddings x WHERE x.analysis_source_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM audio_features x WHERE x.analysis_source_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM track_instruments x WHERE x.analysis_source_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM analysis_sources m WHERE m.material_of = s.id)"""),
+                   {"s": source_id})
     logger.error(f"No analysis made of track {row.track_id}: {reason}")
 
 

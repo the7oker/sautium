@@ -437,7 +437,7 @@ def start(request: Callable) -> None:
     the backend's start and again when the folder is back."""
     global _request, _WATCHED_SUFFIXES
     from config import settings
-    from scanner import AUDIO_EXTENSIONS, library_unreachable
+    from scanner import AUDIO_EXTENSIONS, folder_seen, library_unreachable
     _request = request
     _WATCHED_SUFFIXES = set(AUDIO_EXTENSIONS) | {".cue"}
     root = settings.music_library_path
@@ -447,12 +447,18 @@ def start(request: Callable) -> None:
         if not root:
             _state.update(state=NOT_SET, why=None)
             return
-        if not os.path.isdir(root):         # a drive not plugged in: armed when it is
+        missing = not os.path.isdir(root)
+        if missing:
             _state.update(state=UNREACHABLE, why="the music folder is not there")
+        elif _state.get("arming"):
             return
-        if _state.get("arming"):
-            return
-        _state["arming"] = True
+        else:
+            _state["arming"] = True
+    if missing:
+        # a drive not plugged in: recorded as the scanner's looks record it,
+        # so the first look that finds it there arms the watch (folder_back)
+        folder_seen(True)
+        return
     try:
         if library_unreachable(wake=False):
             with _lock:

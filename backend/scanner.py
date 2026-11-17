@@ -794,7 +794,7 @@ _REREAD_ROWS_SQL = text("""
     SELECT mf.id, mf.track_id::text AS track_id, mf.album_variant_id, mf.file_path,
            mf.cue_start_seconds, mf.raw_track_name, mf.raw_artist, mf.raw_album_artist,
            mf.raw_album, mf.raw_genre, mf.duration_seconds, mf.sample_rate, mf.bit_depth,
-           mf.stat_mtime_ns, av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
+           mf.stat_mtime_ns, mf.file_size_bytes, av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
       FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
      WHERE mf.file_path = ANY(CAST(:paths AS text[]))
 """)
@@ -813,8 +813,19 @@ _REREAD_SQL = text("""
         isrc = :isrc, raw_track_name = :raw_track_name, raw_artist = :raw_artist,
         raw_album_artist = :raw_album_artist, raw_album = :raw_album, raw_year = :raw_year,
         raw_genre = :raw_genre, decode_refused = false, cover_processed_at = NULL,
-        -- the canon reads it again: a number, a total or a name may have moved
-        content_at = CASE WHEN stat_mtime_ns IS NULL THEN content_at ELSE now() END
+        -- the canon reads the file again when what it decides on moved: a
+        -- name, a number, a total (the right-hand columns are the old row's)
+        content_at = CASE WHEN stat_mtime_ns IS NOT NULL AND (
+                raw_track_name IS DISTINCT FROM CAST(:raw_track_name AS text)
+             OR raw_artist IS DISTINCT FROM CAST(:raw_artist AS text)
+             OR raw_album_artist IS DISTINCT FROM CAST(:raw_album_artist AS text)
+             OR raw_album IS DISTINCT FROM CAST(:raw_album AS text)
+             OR raw_year IS DISTINCT FROM CAST(:raw_year AS text)
+             OR track_number IS DISTINCT FROM CAST(:track_number AS integer)
+             OR disc_number IS DISTINCT FROM CAST(:disc_number AS integer)
+             OR track_total IS DISTINCT FROM CAST(:track_total AS integer)
+             OR disc_total IS DISTINCT FROM CAST(:disc_total AS integer))
+            THEN now() ELSE content_at END
      WHERE id = :id
 """)
 
@@ -870,12 +881,27 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         "raw_track_name": md.get("title"), "raw_artist": md.get("artist"),
                         "raw_album_artist": md.get("album_artist"), "raw_album": md.get("album"),
                         "raw_year": md.get("date"), "raw_genre": md.get("genre")})
-                    if row.stat_mtime_ns is not None:
-                        # The file changed since its last read: what was registered
-                        # of it (a fingerprint taken while it was being copied, an
-                        # analysis of its old bytes) no longer names it. A source
-                        # holding no record goes; one holding records is unlinked,
-                        # and the fingerprint relinks it if the material is the same.
+                    track_artist = md.get("artist") or md.get("album_artist")
+                    old_key = (track_uuid(row.raw_track_name, row.raw_artist or row.raw_album_artist)
+                               if row.raw_track_name else None)
+                    track = row.track_id
+                    if old_key != track_uuid(md["title"], track_artist):
+                        # first: the analysis of the file's material moves with it
+                        track = rehome_file_track(db, row.id, row.track_id, md["title"],
+                                                  track_artist)
+                        db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
+                                   {"id": row.id})
+                        stats["moved"] = stats.get("moved", 0) + (track != row.track_id)
+                    if row.stat_mtime_ns is not None and (
+                            row.stat_mtime_ns != (st.mtime_ns if st else None)
+                            or row.file_size_bytes != md.get("file_size_bytes")):
+                        # The bytes changed since the last read (a ctime alone —
+                        # a chmod, a hard-link backup, an archive bit — is no
+                        # write): what was registered of the file (a print
+                        # taken mid-copy, an analysis of its old bytes) no
+                        # longer names it. A source holding no record goes;
+                        # one holding records is unlinked, and the fingerprint
+                        # relinks it if the material is the same.
                         db.execute(text("""
                             DELETE FROM analysis_sources s WHERE s.media_file_id = :id
                                AND NOT EXISTS (SELECT 1 FROM embeddings x WHERE x.analysis_source_id = s.id)
@@ -885,6 +911,7 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                                    {"id": row.id})
                         db.execute(text("UPDATE analysis_sources SET media_file_id = NULL "
                                         "WHERE media_file_id = :id"), {"id": row.id})
+                        elect_analysis_source(db, track)
                     old_dur = float(row.duration_seconds) if row.duration_seconds is not None else None
                     new_dur = md.get("duration_seconds")
                     if ((old_dur is None) != (new_dur is None)
@@ -893,16 +920,7 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                             or row.bit_depth != md.get("bit_depth")):
                         db.execute(text("UPDATE analysis_sources SET media_file_id = NULL "
                                         "WHERE media_file_id = :id"), {"id": row.id})
-                        elect_analysis_source(db, row.track_id)
-                    track_artist = md.get("artist") or md.get("album_artist")
-                    old_key = (track_uuid(row.raw_track_name, row.raw_artist or row.raw_album_artist)
-                               if row.raw_track_name else None)
-                    if old_key != track_uuid(md["title"], track_artist):
-                        new_track = rehome_file_track(db, row.id, row.track_id, md["title"],
-                                                      track_artist)
-                        db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
-                                   {"id": row.id})
-                        stats["moved"] = stats.get("moved", 0) + (new_track != row.track_id)
+                        elect_analysis_source(db, track)
                     if row.v_title is None or row.v_artist is None:
                         # a copy from before its group was kept: filled, never
                         # moved — the canon may have re-keyed its album since
@@ -1039,15 +1057,17 @@ def backfill_variant_groups(cur) -> int:
                                  ("hqp_library_files", "hqp_path", "NULL::float")):
         cur.execute(f"""
             SELECT av.id, av.directory_path, f.{path_col}, f.raw_album, f.disc_number,
-                   f.track_number, f.raw_album_artist, f.raw_artist, f.raw_track_name, {cue}
+                   f.track_number, f.raw_album_artist, f.raw_artist, f.raw_track_name, {cue},
+                   av.hqp_endpoint_id
               FROM album_variants av JOIN {table} f ON f.album_variant_id = av.id
              WHERE av.raw_artist IS NULL OR av.raw_title IS NULL
              ORDER BY av.directory_path""")
-        by_dir: Dict[str, list] = defaultdict(list)
+        # one folder of one library: two HQPlayers' alike layouts are two
+        by_dir: Dict[Tuple[str, Optional[int]], list] = defaultdict(list)
         for row in cur.fetchall():
-            by_dir[row[1]].append(row)
+            by_dir[(row[1], row[10])].append(row)
         groups: Dict[int, Dict[Tuple[str, str], int]] = defaultdict(lambda: defaultdict(int))
-        for d, rows in by_dir.items():
+        for (d, _endpoint), rows in by_dir.items():
             plain = [r for r in rows if r[9] is None]
             files = [{"album": r[3], "disc": r[4], "track": r[5], "artist_key": r[6] or r[7],
                       "path": r[2]} for r in plain]

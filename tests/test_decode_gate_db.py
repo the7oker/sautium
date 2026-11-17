@@ -94,6 +94,9 @@ def test_a_short_decode_saves_nothing_and_waits_for_the_file_s_next_read(cur, pr
     assert (stats["refused"], stats["success"]) == (1, 0)
     assert _records(cur, track) == {}
     assert _refused(cur, mf)
+    # the print it registered was of bytes that are not the file's (review 2, M-A)
+    cur.execute("SELECT count(*) FROM analysis_sources WHERE media_file_id = %s", (mf,))
+    assert cur.fetchone() == (0,)
     # out of both queues: no later pass decodes it again for nothing
     assert _queued(track) == {"embeddings": False, "features": False, "instruments": False}
     models.calls.clear()

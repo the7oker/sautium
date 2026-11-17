@@ -616,7 +616,7 @@ class AudioEmbeddingGenerator:
                     if audio is TrackTooLong:
                         too_long += 1
                     elif isinstance(audio, Exception):
-                        refused.append((item[0], audio))
+                        refused.append((item[0], audio, item[1]))
                     elif audio is not None:
                         loaded.append((item, audio, features))
                     else:
@@ -680,8 +680,8 @@ class AudioEmbeddingGenerator:
                     stats["processed"] += len(batch_slices[batch_idx])
                     stats["failed"] += batch_failed
                     stats["too_long"] += batch_too_long
-                    for refused_row, why in batch_refused:
-                        refuse(db, refused_row, why)
+                    for refused_row, why, source in batch_refused:
+                        refuse(db, refused_row, why, source)
                     stats["refused"] += len(batch_refused)
                     for outcome in outcomes:
                         stats[outcome] += 1

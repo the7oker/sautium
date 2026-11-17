@@ -322,3 +322,50 @@ def test_a_read_again_drops_what_was_registered_of_the_file_mid_copy(cur, librar
     _scan()
     cur.execute("SELECT count(*) FROM analysis_sources")
     assert cur.fetchone() == (0,)
+
+
+def test_a_retitled_copy_takes_the_analysis_of_its_material(cur, library, template):
+    """The file moves to its new track first, with the analysis made of it;
+    only then is the source unlinked for the changed bytes, on the track it
+    is now on (review round 2, H-A)."""
+    _clean(cur)
+    _flac(template, library / "A" / "LP" / "01.flac", "Song", "Aurora", "LP")
+    b = _flac(template, library / "A" / "Best Of" / "07.flac", "Song", "Aurora", "Best Of")
+    _scan()
+    cur.execute("""WITH s AS (
+                     INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds, imported,
+                                                   media_file_id, is_lossless, bit_depth)
+                     SELECT track_id, 'AQAAA', 3, false, id, true, 16 FROM media_files
+                      WHERE file_path LIKE %s RETURNING id, track_id)
+                   INSERT INTO audio_features (track_id, analysis_source_id) SELECT track_id, id FROM s""",
+                ("%Best Of%",))
+    _tag(b, title="Song (Live)")
+    _scan()
+    cur.execute("""SELECT t.title, s.media_file_id IS NULL FROM analysis_sources s
+                     JOIN tracks t ON t.id = s.track_id""")
+    assert cur.fetchall() == [("Song (Live)", True)]
+    cur.execute("SELECT t.title FROM audio_features af JOIN tracks t ON t.id = af.track_id")
+    assert cur.fetchall() == [("Song (Live)",)]
+
+
+def test_a_change_of_ctime_alone_keeps_the_analysis_linked(cur, library, template):
+    """A chmod, a hard-link backup, an archive bit: the file is read again,
+    its bytes are the same — its sources stay, and the canon has nothing new
+    to read (review round 2, M-B)."""
+    _clean(cur)
+    f = _flac(template, library / "A" / "LP" / "01.flac", "T1", "Aurora", "LP")
+    _scan()
+    cur.execute("""INSERT INTO analysis_sources (track_id, chromaprint, duration_seconds, imported,
+                                                 media_file_id, is_lossless, bit_depth)
+                   SELECT track_id, 'AQAAA', 3, false, id, true, 16 FROM media_files""")
+    cur.execute("UPDATE media_files SET content_at = '2026-01-01'")
+    os.chmod(f, 0o600)
+    assert _scan()["reread"] == 1
+    cur.execute("SELECT count(*) FROM analysis_sources WHERE media_file_id IS NOT NULL")
+    assert cur.fetchone() == (1,)
+    cur.execute("SELECT content_at::date::text FROM media_files")
+    assert cur.fetchone() == ("2026-01-01",)
+    _tag(f, tracknumber=5)
+    _scan()
+    cur.execute("SELECT content_at > '2026-01-02' FROM media_files")
+    assert cur.fetchone() == (True,)
