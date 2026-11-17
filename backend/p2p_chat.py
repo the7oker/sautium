@@ -473,6 +473,11 @@ async def start_client():
                             identity=client_identity, **_client_deps)
         await client.start()
         _client = client
+        lan = _client_deps.get("lan")
+        if lan is not None:
+            # A beacon names this node by its account, which may have come
+            # after the beacon was built (an account made without a restart)
+            lan.node_id, lan.invite_code = identity["node_id"], identity["invite_code"]
         logger.info("chat client started")
         return client
 

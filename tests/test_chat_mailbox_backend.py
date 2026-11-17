@@ -180,6 +180,10 @@ async def _until(check, seconds=15):
 def test_a_message_kept_while_support_is_away_is_delivered_when_its_drain_pings_the_sender(world):
     w = world
 
+    async def no_push(master, ip, port):
+        pass                                     # the pull alone must make it delivered
+    w.client._push_master_outbox = no_push
+
     async def scene():
         host, port = await asyncio.to_thread(w.master_up)
         sub = asyncio.create_task(w.client._relay_subscription_loop(

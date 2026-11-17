@@ -43,7 +43,11 @@ const SVG_CHAT = '';
 %(fns)s
 const out = {
   rows: %(friends)s.map(f => friendRowInner(f).match(/friend-status[^>]*>(.*?)<\/div>/)[1]),
-  header: %(friends)s.map(f => f.is_online ? 'online' : offlineLabel(f)),
+  header: %(friends)s.map(f => {
+    const el = {style: {}, set textContent(t) { this.text = t; }, set innerHTML(h) { this.text = h; }};
+    paintChatStatus(el, f);
+    return el.text.replace(/<[^>]*>/g, '');
+  }),
   thread: [...renderThreadHTML(%(messages)s).matchAll(/<div class="(bubble [a-z]+|msg-state)">([^<]*)</g)]
             .map(m => m[1] === 'msg-state' ? '  ' + m[2] : m[2]),
 };
@@ -70,7 +74,8 @@ MESSAGES = [
 def test_the_support_line_and_each_messages_state_are_what_the_server_says(monkeypatch):
     fns = "\n".join([
         "function lastSeenLabel(iso) { return iso ? '3h ago' : ''; }",
-        _function("offlineLabel(friend)"), _function("friendRowInner(friend)"),
+        _function("offlineLabel(friend)"), _function("paintChatStatus(statusEl, friend)"),
+        _function("friendRowInner(friend)"),
         _const("MESSAGE_STATE_LINE"), _function("renderThreadHTML(messages)")])
     driver = DRIVER % {"fns": fns, "friends": json.dumps(FRIENDS), "messages": json.dumps(MESSAGES)}
     proc = subprocess.run([NODE, "-e", driver], capture_output=True, text=True, timeout=30)

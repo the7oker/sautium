@@ -192,6 +192,11 @@ class UPnPService:
         least one mapping is active."""
         if not HAS_UPNP:
             return False
+        if self._gate is not None and self._mapped and not self._gate():
+            logger.warning("UPnP: %s no longer answers as the peer surface — mapping removed",
+                           self._ports)
+            self.close_ports()
+            return False
         if not self._upnp or not self._mapped:
             return self.open_ports() is not None
         try:
@@ -213,17 +218,19 @@ class UPnPService:
         the mapping after an hour and the node loses internet reachability
         (outbound still works, so it just looks like 'the friend is
         offline'). renew_ports() also recovers a rebooted router via full
-        re-discover; the external port as it is then goes to `on_external`
+        re-discover; an external port that changed goes to `on_external`
         (the DHT's announce port, which the 15-min re-announce publishes)."""
         interval = LEASE_DURATION * 0.75
         loop = asyncio.get_running_loop()
+        last = self.get_external_port(internal_port)
         while True:
             await asyncio.sleep(interval)
             try:
                 if await loop.run_in_executor(None, self.renew_ports):
                     ext_port = self.get_external_port(internal_port)
-                    if ext_port:
+                    if ext_port and ext_port != last:
                         on_external(ext_port)
+                    last = ext_port
                 else:
                     logger.info("UPnP: no active mapping after renewal attempt")
             except Exception as e:

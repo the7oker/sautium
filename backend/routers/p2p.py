@@ -349,7 +349,10 @@ def _friend_row_out(row: dict) -> dict:
     its Worker mailbox (B-92) — its row and the chat header say so. Only
     where this node deposits at all: P2P on, and a certificate the Worker
     issued (it takes mail from no other key); a `pending:` Support contact
-    has nothing kept for it yet."""
+    has nothing kept for it yet. Accepted gaps: on a launcher-mode backend
+    the P2P switch read is the backend's, not whether the launcher's P2P
+    runs; and a deposit the mailbox refused (full, a cap) leaves this line
+    while that bubble says "Not sent yet"."""
     import master_node
     from p2p_identity import served_certificate
     for k in ("added_at", "last_seen", "last_activity_at"):

@@ -7603,6 +7603,17 @@
     return friend.mailbox ? `${base} · messages are kept` : base;
   }
 
+  // The chat header's status line: the friend row's words.
+  function paintChatStatus(statusEl, friend) {
+    if (friend.is_online) {
+      statusEl.innerHTML = `<span class="status-dot"></span>online`;
+      statusEl.style.color = 'var(--color-positive)';
+    } else {
+      statusEl.textContent = offlineLabel(friend);
+      statusEl.style.color = 'var(--color-text-muted)';
+    }
+  }
+
   // Paginated friends fetch: {pinned, items, next_cursor, total}.
   async function fetchFriendsPage(cursor, q, limit) {
     const params = new URLSearchParams();
@@ -8606,13 +8617,7 @@
       const ph = avatarPlaceholder(dn);
       avatarEl.style.background = ph.bg;
       avatarEl.textContent = ph.initials;
-      if (friend.is_online) {
-        statusEl.innerHTML = `<span class="status-dot"></span>online`;
-        statusEl.style.color = 'var(--color-positive)';
-      } else {
-        statusEl.textContent = offlineLabel(friend);
-        statusEl.style.color = 'var(--color-text-muted)';
-      }
+      paintChatStatus(statusEl, friend);
       // Rights: a friendship joined via THEIR invite token carries a
       // grant; without can_message in it the issuer's node rejects our
       // messages — disable the composer instead of letting sends 403.

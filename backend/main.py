@@ -323,9 +323,10 @@ def _start_host_network() -> None:
 async def _map_peer_port() -> None:
     """Map the peer port on the router once the peer surface listens (the
     service's gate: only while it answers as the peer surface, the portmap
-    CLI's own check), then keep the lease. A mapping is what the master's
-    probe would now see: the DHT announces the external port and the chat
-    client probes again; the verdict alone gates the announces."""
+    CLI's own check — asked again at every renewal), then keep the lease. A
+    mapping, the first or one whose external port changed, is what the
+    master's probe would now see: the DHT announces the external port and
+    the chat client probes again; the verdict alone gates the announces."""
     if not _upnp.is_available:
         logger.info("UPnP: miniupnpc not installed — the peer port is not mapped")
         return

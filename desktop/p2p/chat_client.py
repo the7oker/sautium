@@ -68,9 +68,11 @@ FORWARD_TIMEOUT = FORWARD_ACK_TIMEOUT + 10
 # answers are busy ones.
 NUDGE_RETRY_S = 600
 # A peer relay is a stranger that announced the capability: what its stream
-# may send before this node lets it go (and asks it again in an hour). A
-# real relay sends a frame per message forwarded to us — a few a minute.
-RELAY_FRAMES_PER_WINDOW = 30
+# may send before this node lets it go (and asks it again in an hour), in
+# lines (an event is two: its line and the blank one that ends it). A real
+# relay sends a keepalive per 15 s and a frame per message forwarded to us —
+# a few a minute, a burst of a chat.
+RELAY_FRAMES_PER_WINDOW = 120
 RELAY_REFUSALS_PER_WINDOW = 5          # deliveries that did not open, or came again
 RELAY_WINDOW_S = 60
 
@@ -308,7 +310,11 @@ class ChatClient:
         self.reachability = "unknown"
         # Kept messages the master refused on a direct push, said once each.
         self._refusals_said: set = set()
-        self._master_pick = 0          # the master's candidate a stream tries next
+        # The master's addresses that failed its stream lately: address ->
+        # until when a stream tries the others first.
+        self._master_failed: dict[tuple, float] = {}
+        # A peer relay's frames and refusals, kept across its reconnects.
+        self._relay_windows: dict[str, tuple] = {}
         self._recheck: Optional[asyncio.Event] = None
 
     # ------------------------------------------------------------------
@@ -457,7 +463,8 @@ class ChatClient:
         if pubkey and not pubkey.startswith("pending:"):
             await self._db(self.store.update_friend_last_seen, pubkey)
 
-    async def find_friend_peers(self, friend: dict, refresh: bool = False) -> list[tuple]:
+    async def find_friend_peers(self, friend: dict, refresh: bool = False,
+                                untargeted: bool = True) -> list[tuple]:
         """Candidate addresses for a friend — the SINGLE source every path
         uses (resolve, push, history pull, wake subscribe). Order: LAN by
         identity, then last-known-good cache, then DHT, then every other
@@ -546,8 +553,10 @@ class ChatClient:
 
         # 4. Every other live LAN peer. A handful of addresses, and the
         # reason a same-LAN or localhost-probed node stays reachable when
-        # its DHT address is an unhairpinnable public IP.
-        add(lan_others)
+        # its DHT address is an unhairpinnable public IP. Not for a caller
+        # that holds one address at a time (the master's stream).
+        if untargeted:
+            add(lan_others)
 
         return peers
 
@@ -1140,17 +1149,22 @@ class ChatClient:
             return
 
         async def resolve():
-            # Each attempt the next candidate: an address that answers
-            # under another key (a LAN host beaconing the master's public
-            # invite) fails the pin and must not hold the stream for good.
+            # The best candidate that has not failed the stream lately: an
+            # address that answers under another key (a LAN host beaconing
+            # the master's public invite) fails the pin and must not hold the
+            # stream for good; with every one failed, the least lately.
+            # Untargeted LAN peers are no candidates (other nodes, never
+            # this one: find_friend_peers' master tier says why).
             master_row = await self.master_contact()
             if not master_row or await self.setting("p2p.master_removed"):
                 return None
-            peers = await self.find_friend_peers(master_row)
+            peers = await self.find_friend_peers(master_row, untargeted=False)
             if not peers:
                 return None
-            self._master_pick += 1
-            return master_row, peers[(self._master_pick - 1) % len(peers)]
+            now = time.time()
+            fresh = [p for p in peers if self._master_failed.get(p, 0) <= now]
+            return master_row, (fresh[0] if fresh else
+                                min(peers, key=lambda p: self._master_failed.get(p, 0)))
 
         await self._relay_subscription_loop(master_node.MASTER_PUBKEY_HEX, resolve, is_master=True)
 
@@ -1276,6 +1290,7 @@ class ChatClient:
         backoff = 5.0
         relay_denied_until = 0.0
         while self.running:
+            addr = None
             try:
                 ident = self._identity()
                 if not ident:
@@ -1285,6 +1300,7 @@ class ChatClient:
                 if not resolved:
                     raise ConnectionError("no relay address")
                 relay_row, (ip, port) = resolved
+                addr = (ip, port)
                 own = ident.public_key_hex
                 ts = int(time.time())
                 sig = ident.sign(
@@ -1348,7 +1364,10 @@ class ChatClient:
                         if is_master and relay_row:
                             await self._master_stream_connected(relay_row, ip, port)
                         last_bump = time.time()
-                        frames, refusals = deque(), deque()
+                        # A peer relay's budget outlives its connections: a
+                        # relay that reconnects keeps what it spent.
+                        frames, refusals = self._relay_windows.setdefault(
+                            relay_pubkey, (deque(), deque()))
                         async for raw in resp.content:
                             if not self.running:
                                 break
@@ -1356,14 +1375,17 @@ class ChatClient:
                             # suspension: the loop serves others between them.
                             await asyncio.sleep(0)
                             line = raw.decode("utf-8", "replace").strip()
+                            outcome = None
                             if line.startswith("data:"):
                                 outcome = await self._handle_relay_frame(
                                     line[5:], relay_row, relay_pubkey, ip, port)
-                                if not is_master and self._over_budget(frames, refusals, outcome):
-                                    self._relay_refused_until[relay_pubkey] = time.time() + 3600
-                                    logger.warning("Peer relay %s… sent more than a relay does — "
-                                                   "released", relay_pubkey[:8])
-                                    return
+                            # Every line counts, keepalives and blank ones too.
+                            if not is_master and self._over_budget(frames, refusals, outcome):
+                                self._relay_refused_until[relay_pubkey] = time.time() + 3600
+                                self._relay_windows.pop(relay_pubkey, None)
+                                logger.warning("Peer relay %s… sent more than a relay does — "
+                                               "released", relay_pubkey[:8])
+                                return
                             elif relay_row and time.time() - last_bump >= 120:
                                 # Keepalives prove the relay is alive.
                                 # Throttled to the cadence the relay uses
@@ -1376,6 +1398,8 @@ class ChatClient:
                 raise
             except Exception as e:
                 logger.debug("Relay wake stream (%s…): %s", relay_pubkey[:8], e)
+                if is_master and addr is not None:
+                    self._master_failed[addr] = time.time() + 600
             if not self.running:
                 break
             await asyncio.sleep(backoff + random.uniform(0, backoff / 4))
@@ -1390,7 +1414,7 @@ class ChatClient:
         directly — a row the drain missed is delivered now, the master
         dedups by uuid. The runtime hears of it (the launcher's support
         diagnostics resume)."""
-        self._master_pick -= 1         # a reconnect tries this address first
+        self._master_failed.pop((ip, port), None)
         await self._sync_chat_history(master, [(ip, port)])
         await self._push_master_outbox(master, ip, port)
         if self._on_master_reachable:
