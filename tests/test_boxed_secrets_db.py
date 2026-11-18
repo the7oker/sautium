@@ -459,10 +459,13 @@ def test_a_vouched_patch_lands_only_on_the_terms_the_password_was_asked_for(node
     assert _tokens(node.dsn) == [("club", 1, [])]
 
 
-def test_an_interrupted_accept_heals_only_from_the_link_its_friend_joined_through(node):
-    """A friend who joined through a link without rights presents another
-    link's id and a grant naming rights of its own making: the heal gives
-    nothing; a grant this node signed for that guest gives its rights."""
+def test_a_re_accept_signs_only_the_snapshot_and_a_token_the_node_knows_the_friend_by(node):
+    """An established token friend presents another link's id, a grant
+    naming rights of its own making, or nothing of ours: the re-accept's
+    grant carries the rights snapshotted at the join — empty stays empty,
+    though the owner has widened the link it joined since — and the token
+    it joined through; a friend with no such token is known by a grant this
+    node signed for that same guest, not revoked here; else none is signed."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     import invite_tokens
     own = Ed25519PrivateKey.generate()
@@ -476,14 +479,21 @@ def test_an_interrupted_accept_heals_only_from_the_link_its_friend_joined_throug
                        VALUES ('guest', %s, 'guest#AAAA-BBBB-CCCC', 'token', %s) RETURNING id""",
                     (guest, plain["id"]))
         fid = cur.fetchone()[0]
+        # the link it joined through widened since, on the owner's password
+        cur.execute("INSERT INTO invite_token_rights (token_id, p2p_right) VALUES (%s, 'can_message')",
+                    (plain["id"],))
         forged = {"token_id": club["id"], "rights": ["can_message", "can_search"], "guest_pubkey": guest}
-        assert invite_tokens.heal_rights(c, fid, forged, own_pub, guest) == []
-        assert invite_tokens.heal_rights(c, fid, None, own_pub, guest) == []
-        cur.execute("UPDATE friends SET source_token_id = NULL WHERE id = %s", (fid,))
         signed = invite_tokens.sign_grant(own, club["id"], ["can_message"], guest, own_pub)
-        assert invite_tokens.heal_rights(c, fid, signed, own_pub, guest) == ["can_message"]
+        for grant in (forged, signed, None):
+            assert invite_tokens.reaccept_terms(c, fid, grant, own_pub, guest) == (plain["id"], [])
+        invite_tokens.snapshot_rights(c, fid, ["can_message"])
+        assert invite_tokens.reaccept_terms(c, fid, forged, own_pub, guest) == (plain["id"], ["can_message"])
+
+        cur.execute("UPDATE friends SET source_token_id = NULL WHERE id = %s", (fid,))
+        assert invite_tokens.reaccept_terms(c, fid, forged, own_pub, guest) == (None, ["can_message"])
+        assert invite_tokens.reaccept_terms(c, fid, signed, own_pub, guest) == (club["id"], ["can_message"])
         other = invite_tokens.sign_grant(own, club["id"], ["can_message"], "cd" * 32, own_pub)
-        assert invite_tokens.heal_rights(c, fid, other, own_pub, guest) == []
-        cur.execute("UPDATE friends SET source_token_id = %s WHERE id = %s", (club["id"], fid))
-        assert invite_tokens.heal_rights(c, fid, None, own_pub, guest) == ["can_message", "can_search"]
+        assert invite_tokens.reaccept_terms(c, fid, other, own_pub, guest)[0] is None
+        cur.execute("UPDATE invite_tokens SET revoked_at = NOW() WHERE id = %s", (club["id"],))
+        assert invite_tokens.reaccept_terms(c, fid, signed, own_pub, guest)[0] is None
         cur.execute("DELETE FROM friends WHERE id = %s", (fid,))

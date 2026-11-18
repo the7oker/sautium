@@ -151,25 +151,25 @@ def token_revoked(conn, token_id: str) -> Optional[bool]:
         return None if row is None else row[0]
 
 
-def heal_rights(conn, friend_id: int, grant: Optional[dict], issuer_pubkey_hex: str,
-                guest_pubkey_hex: str) -> list:
-    """What the retry of an interrupted accept restores to a friend with no
-    snapshot: the rights of the token that friend joined through, else those
-    of a grant this node signed for that same guest — never a token id or
-    rights the guest merely presents now, which would raise a link given
-    without rights to one with them (B-93: a link with rights is minted only
-    on the account's password)."""
+def reaccept_terms(conn, friend_id: int, grant: Optional[dict], issuer_pubkey_hex: str,
+                   guest_pubkey_hex: str) -> tuple:
+    """(token_id, rights) a re-accept of an established token friend signs
+    its grant with: the rights snapshotted when the friendship was made —
+    never healed from what the guest presents, and an empty snapshot stays
+    empty (the owner widens a link for future uses only, B-93) — and the
+    token that friend joined through, else that of a grant this node signed
+    for that same guest whose token is not revoked here; None when there is
+    neither (no grant is signed: a presented token id would let the guest
+    name a token revocation does not reach)."""
     with conn.cursor() as cur:
-        cur.execute("""SELECT r.p2p_right FROM friends f
-                         JOIN invite_token_rights r ON r.token_id = f.source_token_id
-                        WHERE f.id = %s""", (friend_id,))
-        joined = sorted(r[0] for r in cur.fetchall())
-    if joined:
-        return joined
-    if (grant and verify_grant(grant, issuer_pubkey_hex)
-            and str(grant.get("guest_pubkey", "")).lower() == guest_pubkey_hex.lower()):
-        return sorted(set(grant.get("rights", [])) & set(ALL_RIGHTS))
-    return []
+        cur.execute("SELECT source_token_id::text FROM friends WHERE id = %s", (friend_id,))
+        row = cur.fetchone()
+    token_id = row[0] if row else None
+    if (token_id is None and grant and verify_grant(grant, issuer_pubkey_hex)
+            and str(grant.get("guest_pubkey", "")).lower() == guest_pubkey_hex.lower()
+            and token_revoked(conn, grant["token_id"]) is not True):
+        token_id = grant["token_id"]
+    return token_id, friend_rights(conn, friend_id)
 
 
 def snapshot_rights(conn, friend_id: int, rights: list) -> None:

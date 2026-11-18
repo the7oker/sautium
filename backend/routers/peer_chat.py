@@ -389,21 +389,16 @@ def _handshake(body: dict):
                 and match["public_key_hex"] == peer_pubkey else None)
 
     # -- idempotent re-accept: friendship already established ---------------
+    # The grant is signed with the snapshot the accept made and a token id
+    # this node knows the friend by (invite_tokens.reaccept_terms), never
+    # with what the guest presents now.
     if resolved is not None and (token_id or grant_in):
-        tid = token_id or grant_in["token_id"]
         with get_conn() as conn:
-            rights = invite_tokens.friend_rights(conn, resolved["id"])
-            if not rights and resolved["source"] == "token":
-                # First accept was interrupted between add_friend and the
-                # snapshot — the guest's 15s retry loop lands here to heal
-                # it. The use was already burned: the rights are those of
-                # the token it joined through (invite_tokens.heal_rights).
-                rights = invite_tokens.heal_rights(conn, resolved["id"], grant_in,
-                                                   ident["public_key_hex"], peer_pubkey)
-                invite_tokens.snapshot_rights(conn, resolved["id"], rights)
+            tid, rights = invite_tokens.reaccept_terms(conn, resolved["id"], grant_in,
+                                                       ident["public_key_hex"], peer_pubkey)
         svc.update_friend_last_seen(peer_pubkey)
         _witness_handshake(body, peer_pubkey)
-        return _accepted(ident, _minted(ident, tid, rights, peer_pubkey))
+        return _accepted(ident, _minted(ident, tid, rights, peer_pubkey) if tid else None)
 
     if token_id:
         with get_conn() as conn:
