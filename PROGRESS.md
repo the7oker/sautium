@@ -169,6 +169,25 @@ implementation details live in the code, DB and git history.
   quality gate is an `EXISTS` over `owned_files` on the `track_id` indexes of
   both file tables, the year gate a range on `idx_albums_release_year`.
 
+- **A name is found by any whole word of it (2026-11-18, CREDITS-1 2a).**
+  Trigram similarity dilutes a short query in a long name: "bach" ~ "johann
+  sebastian bach" is 0.23, "mozart" ~ "wolfgang amadeus mozart" 0.29, both
+  under the 0.3 floor and neither a prefix — a classical owner's first
+  search found nothing. The names source has a third arm, pg_trgm's strict
+  word similarity (`<<%` at 0.6 on the same GIN index, `WORD_ARM_MIN`),
+  scored 0.8 × — under a prefix's 0.85 and an exact name's 1.0 — and zero
+  below its threshold, so a word fragment trigrams find keeps its own score.
+  Measured (T14, CREDITS-1-PROPOSAL in the private docs) on a library's
+  3 182 artist names and on those plus MusicBrainz's 2.67 M: the common
+  words ("the", "love", "orchestra", "john", "black") keep the fragment share
+  of their top 10 and top 50 — so the arm takes words of any length — while
+  surnames are found where they were not ("mozart" from nothing to rank 1 in
+  the library). What it admits beside whole words and typos (0.69–0.71) is a
+  surname with one letter more or less (0.63: "reichl" for "reich", "brahm"
+  for "brahms"), which a large phantom layer shows. The statement takes about
+  twice as long: on 2.67 M names the slowest query 0.45 s against 0.16 s, on
+  the library's 13 ms against 6.
+
 ### Audio analysis
 
 - **No catalog audio-features API**. The industry one closed to new apps on

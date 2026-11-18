@@ -900,7 +900,7 @@ or is a thin query over existing data.
 |-------|------------|-----------|
 | Cover hero | `media_files` cover, embedded or via `cover_id` | — |
 | Metadata row | `albums.release_year`, sum of `media_files.duration_seconds`, `media_files.is_lossless` + `bit_depth` for badge; a phantom album: `[demo]` always, the streamed mix (`/phantom-availability` `quality`) for the badge, its `excerpt` list for the row tags | — |
-| Genre chips | `track_genres` + `genres.name` aggregated, top 3 by occurrence count | — |
+| Genre chips | `album_genres` + `genres.name`, top 3 by count | — |
 | Tracklist | `tracks` ordered by `track_number` | — |
 | Play all / + Queue | existing transport calls in app.js | + queue history snapshot before replace |
 
@@ -908,7 +908,7 @@ or is a thin query over existing data.
 
 | Block | MVP source | Evolution |
 |-------|------------|-----------|
-| Hero banner | most-played album cover in this genre (from `local_play_stats` × `track_genres`); fallback to typography-only with gradient | + pre-curated stock per genre, or AI-generated cached |
+| Hero banner | most-played album cover in this genre (from `local_play_stats` × `album_genres`); fallback to typography-only with gradient | + pre-curated stock per genre, or AI-generated cached |
 | Description | `genres.description` if present, otherwise Last.fm `tag.getInfo` (cached) | + curated wiki-style content |
 | Top artists | local play count aggregated per artist within genre | + Last.fm `tag.getTopArtists` for global discovery |
 | Top albums | local plays aggregated per album within genre | + `tag.getTopAlbums` (LFM) |

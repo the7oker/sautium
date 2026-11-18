@@ -220,6 +220,20 @@ _SEED_KIN_PRED = """EXISTS (
     WHERE kta.track_id = e.track_id AND kta.role = 'primary')"""
 
 
+# The names search's whole-word arm: the strict word similarity a name's
+# word must reach (pg_trgm.strict_word_similarity_threshold, which `<<%` reads
+# — run_search sets it for its statement) and the weight its score takes.
+WORD_ARM_MIN = 0.6
+WORD_ARM_WEIGHT = 0.8
+
+
+def _word_arm(col: str) -> str:
+    """The arm's score: zero below the operator's own threshold, so a word
+    fragment another branch retrieved is not lifted by it either."""
+    return (f"CASE WHEN :ql <<% {col} "
+            f"THEN {WORD_ARM_WEIGHT} * strict_word_similarity(:ql, {col}) ELSE 0 END")
+
+
 TOOLS: dict[str, Tool] = {
     # SCOPED text search (2026-07-18): the old mega-tool blended lexical +
     # three vector channels on every keystroke — expensive (3 GPU encodes +
@@ -232,17 +246,29 @@ TOOLS: dict[str, Tool] = {
         # pg_trgm.similarity_threshold default 0.3 == these sources' floor) +
         # prefix LIKE — `similarity(col,q) >= x` can't use the index and
         # seq-scans 3M-row joins under corpus=all (proven: shm blowup).
+        # The whole-word arm (CREDITS-1, 2026-11-18): a surname inside a long
+        # full name falls under the trigram floor — the name's many trigrams
+        # dilute the few it shares with the query ("bach" ~ "johann sebastian
+        # bach" 0.23, "mozart" ~ "wolfgang amadeus mozart" 0.29). pg_trgm's
+        # strict word similarity scores whole words 1.0 and word fragments low
+        # ("offenbach" 0.25, "bachman" 0.44, "bacharach" 0.56); `<<%` admits
+        # it at WORD_ARM_MIN (the executor's SET LOCAL) on the same GIN index,
+        # and its score sits below a prefix's 0.85 and an exact name's 1.0.
         Source("artist_name", "artists",
                "GREATEST(similarity(a.name_latin,:ql), "
                "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END, "
+               f"{_word_arm('a.name_latin')}, "
                "similarity(a.name,:q))",     # original-script exact match too
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
-               retrieve="(a.name_latin % :ql OR a.name_latin LIKE :qlpfx OR a.name % :q)"),
+               retrieve="(a.name_latin % :ql OR a.name_latin LIKE :qlpfx "
+                        "OR :ql <<% a.name_latin OR a.name % :q)"),
         Source("artist_alias", "artist_name_aliases",   # 0b: CJK cutlet + human file-tag readings
                "GREATEST(similarity(ana.alias_latin,:ql), "
-               "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
+               "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END, "
+               f"{_word_arm('ana.alias_latin')})",
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
-               retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx)"),
+               retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx "
+                        "OR :ql <<% ana.alias_latin)"),
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
                "CASE WHEN al.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
