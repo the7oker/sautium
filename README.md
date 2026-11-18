@@ -484,7 +484,9 @@ sautium/
 │   └── p2p/                        # sync server, DHT, chat, NAT traversal
 ├── mcp/
 │   ├── assistant_server.py         # MCP server (47 tools for the agent CLI)
-│   └── support_server.py           # maintainer-side support desk tools
+│   ├── support_server.py           # support desk, reading tools (node text marked as data)
+│   ├── support_act_server.py       # support desk, acting tools — a server of their own
+│   └── support_desk.py             # what the two share: signed HTTP, node_text
 ├── worker/
 │   └── verify.js                   # Cloudflare Worker (email CA, invites, notary)
 ├── docs/
