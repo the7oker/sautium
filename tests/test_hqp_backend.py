@@ -659,6 +659,10 @@ def fake(monkeypatch):
     monkeypatch.setattr(hqp_library, "note_info", lambda *a, **k: None)
     monkeypatch.setattr(hqp_benchmark, "recover", lambda endpoint_id, link, **kw: None)
     monkeypatch.setattr(hqp_benchmark, "left_pending", lambda endpoint_id: False)
+    # ...and so is a comparison's (playback.hqp_ab; tests/test_hqp_ab drives both).
+    from playback import hqp_ab
+    monkeypatch.setattr(hqp_ab, "recover", lambda endpoint_id, link, **kw: None)
+    monkeypatch.setattr(hqp_ab, "left_by_person", lambda host, port: None)
     # ...and its endpoint row: this HQPlayer's library is endpoint 7 here.
     monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: {"id": 7, "name": "fake"})
     # The output switch re-reads every slot's copies from the database

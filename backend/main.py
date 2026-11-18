@@ -1192,10 +1192,12 @@ async def lifespan(app: FastAPI):
     # research call, the load meter; the listeners end at once
     # (db_pool.Listener). Run one after another, the listeners' joins alone
     # took five seconds of a Mac's stop (2026-10-25).
-    from playback import hqp_benchmark
+    from playback import hqp_ab, hqp_benchmark
     import notary
 
     def _stop_playback() -> None:
+        # One of the two holds the output at a time: the other returns at once
+        hqp_ab.shutdown(6.0)
         hqp_benchmark.shutdown(6.0)
         stop_status_poller()
 

@@ -127,7 +127,10 @@ AB_STEPS = (
     "happened, not which.",
     "4. Name the one you heard, or say you could not tell. Could not tell is an answer: then the CPU each takes on "
     "this HQPlayer decides (hqplayer_host_fit).",
-    "5. Repeat it a few times: one answer can be chance.")
+    "5. Repeat it a few times: one answer can be chance.",
+    "In Sautium, Compare by ear on the HQPlayer screen does all of this for the track playing: the user's "
+    "filter against one other, blind, the same silence before each — an hqp_ab block naming the other filter "
+    "opens it.")
 # The kind of name each axis of the file's pairs holds
 AXIS_KIND = {"phase": "filter", "apodizing": "filter", "length": "filter", "order": "modulator",
              "ec": "modulator", "adaptive": "modulator", "generation": "modulator", "tuning": "modulator",

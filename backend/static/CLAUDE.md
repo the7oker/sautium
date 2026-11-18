@@ -130,8 +130,9 @@ Rules:
 - **Tablet layers, bottom up:** mini-player 49, rail 50, More card 52,
   section window 55, then the task overlays a section opens — add-gear
   sheets 60, the three cards 100/110, the HQPlayer filter and modulator
-  picker 200, a name's detail card over it 210 (since 2026-10-17),
-  `<dialog>` in the top layer. Anything opened from inside a window
+  picker 200, a name's detail card over it 210 (since 2026-10-17), the
+  comparison by ear over both 220 (since 2026-11-17), `<dialog>` in the
+  top layer. Anything opened from inside a window
   sits at 60 or above; the ladder lives next to `.route-window` in
   `style.css`.
 - The compact rendering must not change when a wider mode is added:

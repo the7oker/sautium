@@ -710,7 +710,8 @@ def _hqp_library_state() -> Dict[str, Any]:
                (SELECT count(*) FROM album_variants av JOIN hqp_library_files f ON f.album_variant_id = av.id
                  WHERE av.hqp_endpoint_id = e.id) AS files,
                (SELECT count(DISTINCT av.album_id) FROM album_variants av WHERE av.hqp_endpoint_id = e.id) AS albums,
-               (SELECT count(*) FROM hqp_dsp_speed s WHERE s.hqp_endpoint_id = e.id) AS measured
+               (SELECT count(*) FROM hqp_dsp_speed s WHERE s.hqp_endpoint_id = e.id) AS measured,
+               (SELECT count(*) FROM hqp_ab_sittings a WHERE a.hqp_endpoint_id = e.id) AS compared
         FROM hqp_endpoints e
         ORDER BY (e.host = %(h)s AND e.port = %(p)s) DESC, e.id
     """, {"h": host, "p": port})
@@ -725,6 +726,8 @@ def _hqp_library_state() -> Dict[str, Any]:
                   # DSP settings measured on it (playback.hqp_load): they go
                   # with the row when it is forgotten
                   "measured": int(r["measured"] or 0),
+                  # the person's comparisons by ear on it (AB-1 Q15): they go too
+                  "compared": int(r["compared"] or 0),
                   "configured": bool(host and r["host"]
                                      and hqp_library.address_key(r["host"], r["port"]) == hqp_library.address_key(host, port))}
                  for r in rows]
@@ -750,10 +753,11 @@ def _hqp_library_state() -> Dict[str, Any]:
                      files=configured["files"] if configured else 0,
                      albums=configured["albums"] if configured else 0,
                      measured=configured["measured"] if configured else 0,
+                     compared=configured["compared"] if configured else 0,
                      synced=bool(configured and configured["synced"]))
     else:
         state.update(endpoint=None, name=None, label=None, product=None, own_library=None,
-                     last_synced_at=None, files=0, albums=0, measured=0, synced=False)
+                     last_synced_at=None, files=0, albums=0, measured=0, compared=0, synced=False)
     state["endpoints"] = endpoints
     return state
 
@@ -1225,7 +1229,7 @@ def _notices_state() -> Dict[str, Any]:
                       if not (it["key"] in _REPORTS and it["seen"])]}
 
 
-_REPORTS = ("hqplayer.run_restored", "auth.login_failures")
+_REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures")
 
 
 def _login_failures_notice() -> Optional[Dict[str, Any]]:
@@ -1364,6 +1368,14 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": "hqplayer.run_left", "kind": "warning",
                       "since": left["since"].isoformat(), "until": None,
                       "data": {"items": left["items"]}})
+    # A comparison's put-back HQPlayer refused twice alike, left to the
+    # owner (AB-1-DESIGN §17): a report, dropped once seen
+    from playback import hqp_ab
+    ab_refused = hqp_ab.refused_notice()
+    if ab_refused is not None:
+        items.append({"key": "hqplayer.ab_refused", "kind": "warning",
+                      "since": ab_refused["since"].isoformat(), "until": None,
+                      "data": ab_refused["data"]})
     # One put back after HQPlayer went away under it: a report, dropped once
     # seen (_notices_state)
     restored = hqp_benchmark.restored_notice()
@@ -2245,6 +2257,8 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
         # Another HQPlayer chosen: a run cut short on the one before owes
         # its put-back no more
         hqp_benchmark.left_by_person(before.host, before.port, "another HQPlayer was chosen")
+        from playback import hqp_ab
+        hqp_ab.left_by_person(before.host, before.port)
 
 
 @router.put("/hqplayer")
@@ -2873,6 +2887,11 @@ def forget_hqp_library(endpoint_id: int) -> Dict[str, Any]:
     if job["running"] and job["endpoint_id"] == endpoint_id:
         raise HTTPException(status_code=409, detail="The benchmark is measuring this HQPlayer — "
                                                     "cancel it first")
+    from playback import hqp_ab
+    sitting = hqp_ab.current()          # read once: a close between two reads leaves None
+    if sitting is not None and hqp_ab.running() and sitting.ep["id"] == endpoint_id:
+        raise HTTPException(status_code=409, detail="A comparison by ear is going on with this "
+                                                    "HQPlayer — stop it first")
     if not db_query_one("SELECT 1 AS ok FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id}):
         raise HTTPException(status_code=404, detail="No such HQPlayer library")
     driven = hqp_library.endpoint_by_address(app_settings.hqplayer_host, app_settings.hqplayer_port)

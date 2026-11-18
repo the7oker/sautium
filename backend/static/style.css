@@ -5003,6 +5003,413 @@ a.am-kind { text-decoration: none; }
   color: var(--color-amber);
 }
 
+/* ---- Compare by ear (AB-1): the comparison sheet and its doors.
+   Reference: docs/private/ab-1/compare-by-ear.html (the owner's,
+   2026-11-17). Layer 220: over the filter picker (200) and a name's card
+   (210), under the toasts (300). On the phone the sheet is the screen and
+   its card takes no part in layout; on the tablet the sheet is the scrim
+   and the card a centred window, like the picker's. ---- */
+.ab-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 220;
+  background: var(--color-foundation);
+  display: flex;
+  flex-direction: column;
+}
+.ab-sheet.is-closing { pointer-events: none; }
+.ab-card { display: contents; }
+.ab-bar {
+  display: grid;
+  grid-template-columns: calc(44 * var(--px)) 1fr calc(44 * var(--px));
+  align-items: center;
+  gap: calc(8 * var(--px));
+  padding: calc(8 * var(--px)) calc(10 * var(--px));
+  border-bottom: 1px solid var(--color-divider);
+  flex-shrink: 0;
+}
+.ab-bar .icon-btn {
+  width: calc(44 * var(--px));
+  height: calc(44 * var(--px));
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--color-text);
+  display: grid; place-items: center;
+  cursor: pointer;
+}
+.ab-bar-title {
+  margin: 0;
+  font-size: calc(15 * var(--px));
+  font-weight: 600;
+  text-align: center;
+}
+.ab-stop { justify-self: end; }
+.ab-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: calc(8 * var(--px)) 0 var(--space-5);
+}
+.ab-body.is-test { padding-top: var(--space-4); }
+.ab-pad {
+  display: grid;
+  gap: calc(14 * var(--px));
+  padding: 0 var(--space-4);
+}
+.ab-pad.is-top { padding-top: var(--space-5); }
+.ab-num { font-family: var(--font-mono); color: var(--color-blue); }
+.ab-track h3 { margin: 0; font-size: calc(15 * var(--px)); font-weight: 600; overflow-wrap: anywhere; }
+.ab-track p {
+  margin: calc(2 * var(--px)) 0 0;
+  font-size: var(--text-caption);
+  letter-spacing: 0.02em;
+  color: var(--color-text-dim);
+}
+.ab-scrub { display: grid; gap: var(--space-2); }
+.ab-scrub-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: calc(12 * var(--px));
+  color: var(--color-text-muted);
+}
+.ab-scrub-track {
+  position: relative;
+  height: calc(6 * var(--px));
+  background: var(--color-surface-lo);
+  border-radius: calc(3 * var(--px));
+}
+.ab-scrub-win {
+  position: absolute;
+  top: 0; bottom: 0;
+  min-width: calc(4 * var(--px));
+  background: var(--color-amber);
+  border-radius: calc(3 * var(--px));
+}
+.ab-scrub-now {
+  position: absolute;
+  top: calc(-3 * var(--px));
+  width: calc(2 * var(--px));
+  height: calc(12 * var(--px));
+  background: var(--color-text-dim);
+}
+.ab-scrub-range { width: 100%; margin: 0; accent-color: var(--color-amber); }
+.ab-chips { display: flex; flex-wrap: wrap; gap: calc(6 * var(--px)); }
+.hqp-chip-btn.is-on {
+  background: var(--color-amber-weak);
+  border-color: var(--color-amber);
+  color: var(--color-amber);
+}
+.ab-len-input {
+  width: calc(64 * var(--px));
+  height: calc(30 * var(--px));
+  padding: 0 calc(10 * var(--px));
+  background: var(--color-surface-lo);
+  border: 1px solid var(--color-amber);
+  border-radius: calc(16 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(12 * var(--px));
+  color: var(--color-blue);
+  outline: none;
+}
+.ab-learn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(10 * var(--px));
+  margin-top: var(--space-1);
+}
+.ab-learn-play {
+  padding: calc(10 * var(--px)) var(--space-4);
+  font-size: calc(13 * var(--px));
+  border-color: var(--color-amber);
+  color: var(--color-amber);
+}
+.ab-learn-play:disabled { border-color: var(--color-divider); }
+.ab-warn,
+.ab-ctx,
+.ab-small {
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
+}
+.ab-ctx, .ab-small { color: var(--color-text-muted); }
+.ab-warn strong { color: var(--color-text); font-weight: 500; }
+.ab-line {
+  margin: 0;
+  font-size: calc(13 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.ab-how { margin-top: var(--space-4); }
+.ab-opt {
+  display: grid;
+  grid-template-columns: calc(22 * var(--px)) 1fr;
+  gap: var(--space-2);
+  padding: var(--space-3) calc(14 * var(--px));
+  border-top: 1px solid var(--color-divider);
+  color: var(--color-text);
+  cursor: pointer;
+}
+.ab-how .hqp-section-label + .ab-opt { border-top: 0; }
+.ab-opt[aria-disabled="true"] { cursor: default; }
+.ab-opt[aria-disabled="true"] b { color: var(--color-text-dim); }
+.ab-radio {
+  width: calc(16 * var(--px));
+  height: calc(16 * var(--px));
+  margin-top: calc(2 * var(--px));
+  border: 1.5px solid var(--color-text-dim);
+  border-radius: 50%;
+  display: grid; place-items: center;
+  box-sizing: border-box;
+}
+.ab-opt.is-on .ab-radio { border-color: var(--color-amber); }
+.ab-opt.is-on .ab-radio::after {
+  content: "";
+  width: calc(8 * var(--px));
+  height: calc(8 * var(--px));
+  border-radius: 50%;
+  background: var(--color-amber);
+}
+.ab-opt b { font-size: calc(14 * var(--px)); font-weight: 500; }
+.ab-cap {
+  display: block;
+  margin-top: calc(2 * var(--px));
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
+  overflow-wrap: anywhere;
+}
+.ab-link {
+  padding: 0;
+  background: none;
+  border: 0;
+  font-family: inherit;
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+  text-decoration: underline;
+  text-underline-offset: calc(2 * var(--px));
+  cursor: pointer;
+}
+.ab-foot {
+  flex: none;
+  display: grid;
+  gap: calc(10 * var(--px));
+  padding: var(--space-3) var(--space-4) calc(18 * var(--px) + var(--safe-bottom));
+  border-top: 1px solid var(--color-divider);
+}
+.ab-foot .btn-primary { width: 100%; }
+.ab-foot-chip,
+.ab-close-chip { justify-content: center; }
+.ab-foot-chip { padding: var(--space-3); }
+.ab-close-chip { padding: calc(10 * var(--px)); }
+
+.ab-progress,
+.ab-frag {
+  height: calc(3 * var(--px));
+  background: var(--color-surface-lo);
+  border-radius: calc(2 * var(--px));
+  overflow: hidden;
+}
+.ab-progress > i,
+.ab-frag > i { display: block; height: 100%; width: 0; }
+.ab-progress > i { background: var(--color-blue); transition: width 0.25s linear; }
+.ab-frag > i { background: var(--color-text-muted); }
+.ab-frag.is-play > i { background: var(--color-amber); }
+@media (prefers-reduced-motion: reduce) { .ab-progress > i { transition: none; } }
+.ab-pairbars {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr;
+  gap: calc(6 * var(--px)) var(--space-2);
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--color-text-dim);
+}
+.ab-dots-pad { margin-bottom: calc(14 * var(--px)); }
+.ab-dots { display: flex; gap: calc(7 * var(--px)); }
+.ab-dots i {
+  width: calc(8 * var(--px));
+  height: calc(8 * var(--px));
+  border: 1.5px solid var(--color-text-dim);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+.ab-dots i.is-on { background: var(--color-text-muted); border-color: var(--color-text-muted); }
+.ab-dots i.is-now { border-color: var(--color-amber); }
+.ab-stage {
+  display: grid;
+  gap: calc(10 * var(--px));
+  margin: 0 var(--space-4);
+  padding: calc(18 * var(--px)) var(--space-4);
+  background: var(--color-surface);
+  border-radius: calc(10 * var(--px));
+}
+.ab-state {
+  min-height: calc(20 * var(--px));
+  font-size: calc(13 * var(--px));
+  color: var(--color-text-muted);
+}
+.ab-state strong { color: var(--color-text); font-weight: 500; }
+.ab-q { font-size: var(--text-body); line-height: 1.35; }
+.ab-answers {
+  display: grid;
+  grid-template-columns: 1fr 1.25fr 1fr;
+  gap: calc(6 * var(--px));
+}
+.ab-answers .hqp-chip-btn {
+  justify-content: center;
+  padding: var(--space-3) calc(6 * var(--px));
+  font-size: calc(13 * var(--px));
+  border-radius: calc(20 * var(--px));
+}
+.ab-after { margin-top: var(--space-3); gap: var(--space-2); }
+.ab-say {
+  margin: 0;
+  min-height: calc(18 * var(--px));
+  font-size: calc(12 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.ab-res-head { padding-top: var(--space-3); padding-bottom: var(--space-4); gap: 0; }
+.ab-res-head.is-break { padding-top: calc(40 * var(--px)); }
+.ab-res-head h3 {
+  margin: 0;
+  font-size: var(--text-heading);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: var(--lh-snug);
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.ab-res-head p {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-caption);
+  color: var(--color-text-dim);
+}
+.ab-res-head p.ab-line { font-size: calc(13 * var(--px)); color: var(--color-text-muted); }
+.ab-heard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--space-2) calc(10 * var(--px));
+  align-items: center;
+  padding: var(--space-3) calc(14 * var(--px));
+  border-top: 1px solid var(--color-divider);
+}
+.ab-heard-name { font-size: calc(13 * var(--px)); overflow-wrap: anywhere; }
+.ab-heard-sub {
+  display: block;
+  margin-top: calc(2 * var(--px));
+  font-size: var(--text-caption);
+  color: var(--color-text-dim);
+}
+/* A status tag in the neutral recipe (np-q-badge.is-neutral's): the
+   chain's answers, "playing", "tight", "your pick · N" — the person's own
+   record, never a verdict. The chain's pick and the pair's lead in amber. */
+.ab-badge {
+  display: inline-block;
+  padding: calc(3 * var(--px)) calc(7 * var(--px));
+  border: 1px solid var(--color-divider);
+  border-radius: calc(3 * var(--px));
+  background: rgba(237, 226, 212, 0.02);
+  font-family: var(--font-mono);
+  font-size: calc(10 * var(--px));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: var(--lh-mono);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+.ab-badge.is-pick { color: var(--color-amber); border-color: rgba(232, 176, 111, 0.45); }
+.ab-badge.is-row,
+.ab-pick-name .ab-badge { margin-left: calc(6 * var(--px)); vertical-align: calc(1 * var(--px)); }
+.ab-spd {
+  font-family: var(--font-mono);
+  font-size: calc(12 * var(--px));
+  font-variant-numeric: tabular-nums;
+  color: var(--color-blue);
+  text-align: right;
+}
+.ab-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(14, 10, 8, 0.6);
+}
+.ab-sheet2 {
+  width: 100%;
+  display: grid;
+  gap: var(--space-3);
+  padding: calc(18 * var(--px)) var(--space-4) calc(22 * var(--px) + var(--safe-bottom));
+  background: var(--color-surface);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow: var(--shadow-4);
+}
+.ab-sheet2.is-list { max-height: 78%; overflow-y: auto; overscroll-behavior: contain; }
+.ab-sheet2 h4 { margin: 0; font-size: calc(15 * var(--px)); font-weight: 600; }
+.ab-sheet2 > p:not(.ab-small) {
+  margin: 0;
+  font-size: calc(13 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.ab-two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+.ab-two .hqp-chip-btn {
+  justify-content: center;
+  padding: var(--space-3) calc(6 * var(--px));
+  font-size: calc(13 * var(--px));
+  border-radius: var(--radius-md);
+}
+.ab-two .hqp-chip-btn.is-make {
+  background: var(--color-amber);
+  border-color: var(--color-amber);
+  color: var(--color-foundation);
+  font-weight: 600;
+}
+.ab-reasons {
+  display: grid;
+  gap: calc(10 * var(--px));
+  font-size: calc(12 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.ab-reasons b { color: var(--color-text); font-weight: 500; overflow-wrap: anywhere; }
+.ab-pick-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: calc(11 * var(--px)) calc(2 * var(--px));
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--color-divider);
+  font-family: inherit;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+.ab-pick-name { font-size: calc(13 * var(--px)); overflow-wrap: anywhere; }
+.ab-pick-row.is-on .ab-pick-name { color: var(--color-amber); }
+
+/* The doors: the HQPlayer screen's row under the favourites, a pair's
+   button in a name's card, the assistant's block. */
+.hqp-row-tap.ab-door { grid-template-columns: 1fr auto; }
+.ab-door-text { font-size: calc(14 * var(--px)); color: var(--color-text); }
+.ab-door-sub {
+  display: block;
+  margin-top: calc(2 * var(--px));
+  font-size: var(--text-caption);
+  color: var(--color-text-dim);
+}
+.ab-card-btn { margin: 0 0 calc(10 * var(--px)); }
+.ai-block-hqp_ab { padding: 0 calc(20 * var(--px)); }
+
 /* ---- Peak meter: the Meter chip on the Volume row and its sheet (the
    filter picker's .hqp-sheet frame). Reference:
    docs/design/reference/hqp-meter/. The faces are SVG: their geometry,
@@ -6475,7 +6882,7 @@ html { -webkit-tap-highlight-color: transparent; }
        .q-row, .q-drag, .ai-chat-row, .np-artist, .np-album, .np-sim-row,
        .track-row, .track-add, .see-more, .f-chip, .friend-row, .token-row,
        .artist-tile, .album-tile,
-       .form-row.is-clickable, .add-gear-result) {
+       .form-row.is-clickable, .add-gear-result, .ab-opt) {
   filter: var(--own-filter, none);
   transition: filter var(--dur-base) var(--ease-standard);
   user-select: none;
@@ -7325,7 +7732,8 @@ html { -webkit-tap-highlight-color: transparent; }
    card 52 (over the chrome, as drawn), the window 55, then every task
    overlay a section opens — add-gear sheets 60, the three cards 100/110,
    the HQPlayer filter and modulator picker 200, a name's detail card over
-   it 210, dialogs in the top layer. Anything opened from inside a window
+   it 210, the comparison by ear 220, dialogs in the top layer. Anything
+   opened from inside a window
    sits at 60 or above. */
 .route-window {
   position: fixed;
@@ -7620,6 +8028,27 @@ html { -webkit-tap-highlight-color: transparent; }
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-4);
   }
+  /* The comparison sheet: the picker's centred card, its overlays inside it. */
+  .ab-sheet {
+    background: rgba(14, 10, 8, 0.55);
+    align-items: center;
+    justify-content: center;
+    padding: calc(24 * var(--px));
+  }
+  .ab-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: var(--window-w);
+    max-width: 100%;
+    height: calc(720 * var(--px));
+    max-height: 100%;
+    background: var(--color-foundation);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-4);
+    overflow: hidden;
+  }
+  .ab-foot, .ab-sheet2 { padding-bottom: calc(18 * var(--px)); }
 }
 
 /* Landscape tablet: the album's cover column stays put on the left while

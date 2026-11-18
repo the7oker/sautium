@@ -452,7 +452,7 @@ def test_ab_pair_offers_the_approved_pairs_with_their_size_and_the_steps(tmp_pat
         "  Measured where both play: 1x · 44.1k → 705.6k.",
         "  HQPlayer describes demo-gauss-x as Any and demo-gauss-xa as 2^x up.",
         "  Not measured: the window. From the manual (§9.9)."]
-    assert text[-6:] == list(hqp_assistant.AB_STEPS)
+    assert text[-len(hqp_assistant.AB_STEPS):] == list(hqp_assistant.AB_STEPS)
     near = _say("ab_pair", _read(_dated(tmp_path)), axis="apodizing", near="demo-poly-lp")
     assert "None of them holds demo-poly-lp." in near
     sdm = _say("ab_pair", _read(_dated(tmp_path), "sdm"), axis="order").split("\n")
