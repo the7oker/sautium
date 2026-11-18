@@ -177,16 +177,16 @@ implementation details live in the code, DB and git history.
   word similarity (`<<%` at 0.6 on the same GIN index, `WORD_ARM_MIN`),
   scored 0.8 × — under a prefix's 0.85 and an exact name's 1.0 — and zero
   below its threshold, so a word fragment trigrams find keeps its own score.
-  Measured (T14, CREDITS-1-PROPOSAL in the private docs) on a library's
-  3 182 artist names and on those plus MusicBrainz's 2.67 M: the common
-  words ("the", "love", "orchestra", "john", "black") keep the fragment share
-  of their top 10 and top 50 — so the arm takes words of any length — while
-  surnames are found where they were not ("mozart" from nothing to rank 1 in
-  the library). What it admits beside whole words and typos (0.69–0.71) is a
-  surname with one letter more or less (0.63: "reichl" for "reich", "brahm"
-  for "brahms"), which a large phantom layer shows. The statement takes about
-  twice as long: on 2.67 M names the slowest query 0.45 s against 0.16 s, on
-  the library's 13 ms against 6.
+  Measured through the engine (T14, CREDITS-1-DESIGN §12.3 in the private docs):
+  with a library's 3 197 names owned and a node-sized phantom layer (289 k
+  MusicBrainz names) under `corpus=all`, "mozart", "handel", "brahms" and
+  "ravel" now rank an owned whole-word name in the first three, where before
+  it was not in the first fifty; an owned "Johann Sebastian Bach" ranks 33,
+  behind every phantom name that merely starts with "bach" at the prefix's
+  0.85 — ownership only breaks ties. Words of any length are taken: the
+  fragment share of "the", "love" and "orchestra" in the first 30 does not
+  rise. The arm costs up to 33 ms on that layer (45 → 78 ms for "the") and
+  up to 0.3 s on all of MusicBrainz's 2.68 M names.
 
 ### Audio analysis
 
