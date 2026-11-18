@@ -11,12 +11,19 @@ rides plain HTTP, and the box is what keeps a LAN sniffer from reading the
 exchange. `GET /handshake` mints the server half of one exchange; the
 credential request that quotes it consumes it (device_auth "Credential
 channel").
+
+`boxed(Model)` and `step_up` are shared beyond these doors: every route
+elsewhere that takes a secret typed in the Web UI (an AI key, a sign-in's
+code, the email's code) or a change a device token alone does not make (the
+email, an invite token with rights, the AI key, an agent's sign-in) takes
+its body through `boxed`, and the latter the password through `step_up`
+(CLAUDE.md Security Posture rule 8).
 """
 
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 import device_auth
@@ -60,7 +67,9 @@ class BoxedRequest(BaseModel):
     eph: str = Field(max_length=64)
     client: str = Field(max_length=64)
     nonce: str = Field(max_length=64)
-    box: str = Field(max_length=4096)
+    # An invite link's welcome message (2000 characters, Cyrillic two bytes
+    # each) rides one too
+    box: str = Field(max_length=16384)
 
 
 def _open(req: BoxedRequest, model):
@@ -80,6 +89,63 @@ def _open(req: BoxedRequest, model):
         # The refusal rides in the clear: it names the field, never what was in it
         raise HTTPException(status_code=422, detail=e.errors(include_url=False, include_input=False,
                                                              include_context=False))
+
+
+_ENVELOPE = frozenset(BoxedRequest.model_fields)
+
+
+def boxed(model):
+    """The dependency of every route whose body rides the box (`model` is the
+    payload's shape): the envelope opened (_open) and the reply sealer, as
+    `(payload, reply)`. A body that is not an envelope is refused before it
+    is read as anything — the 400 marked `unboxed` names no field of it:
+    FastAPI's own 422 for a body of the wrong shape echoes the body back,
+    which for a plain API key is the key."""
+    async def opened(request: Request):
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or set(body) != _ENVELOPE:
+            raise HTTPException(status_code=400,
+                                detail="This is accepted only through the credential box — reload the page",
+                                headers={"X-Sautium-Auth-Error": "unboxed"})
+        try:
+            envelope = BoxedRequest.model_validate(body)
+        except ValidationError:
+            raise HTTPException(status_code=400, detail="malformed envelope")
+        return _open(envelope, model)
+    return Depends(opened)
+
+
+class StepUp(BaseModel):
+    """What a payload carries for a change a device token alone does not
+    make (device_auth.step_up): the account's password, or on an anonymous
+    account the pairing code its host shows now."""
+    password: str = Field(default="", max_length=256)
+    pin: str = Field(default="", max_length=32)
+
+
+HOST_CODE_NEEDED = ("This node has no password: open this page from the computer that runs "
+                    "Sautium, or scan its QR code, and do it within a few minutes")
+
+
+async def step_up(req: StepUp) -> None:
+    """The person's own word, or the refusal that says what was missing: a
+    403 marked `step-up` (the page asks again), 429 while the door waits out
+    its delay, 503 when the node cannot derive now."""
+    try:
+        await device_auth.step_up(req.password, req.pin)
+    except device_auth.Busy:
+        raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
+    except device_auth.Shut as e:
+        raise _shut(e)
+    except device_auth.WrongPassword:
+        raise HTTPException(status_code=403, detail="That is not this account's password",
+                            headers={"X-Sautium-Auth-Error": "step-up"})
+    except device_auth.WrongPin:
+        raise HTTPException(status_code=403, detail=HOST_CODE_NEEDED,
+                            headers={"X-Sautium-Auth-Error": "step-up"})
 
 
 @router.get("/handshake")
@@ -132,7 +198,7 @@ class CreateAccountRequest(BaseModel):
 
 
 @router.post("/create-account")
-async def create_account(boxed: BoxedRequest) -> dict:
+async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
     """First-run setup for a node with no identity — the Docker case, where
     there is no launcher to show a pairing code and no password to know.
 
@@ -149,7 +215,7 @@ async def create_account(boxed: BoxedRequest) -> dict:
     brings that identity back from its nickname and password; a pair that
     makes another is a 409 marked `another-identity`, and is made only with
     `new_identity`, which the page sends after saying what it costs."""
-    req, reply = _open(boxed, CreateAccountRequest)
+    req, reply = opened
     try:
         # The check lives inside create_account, under its lock — testing it
         # out here as well would only re-open the race it exists to close.
@@ -182,16 +248,16 @@ async def create_account(boxed: BoxedRequest) -> dict:
 
 def _shut(e: "device_auth.Shut") -> HTTPException:
     return HTTPException(status_code=429, detail="too many wrong passwords",
-                         headers={"Retry-After": str(e.seconds)})
+                         headers={"Retry-After": str(e.seconds), "X-Sautium-Auth-Error": "shut"})
 
 
 @router.post("/login")
-async def login(boxed: BoxedRequest) -> dict:
+async def login(opened=boxed(LoginRequest)) -> dict:
     """Exchange the account password for a device token, through the
     password door: shut by wrong passwords it answers 429 before anything is
     derived; each wrong one is counted and told to the owner
     (device_auth.password_tried)."""
-    req, reply = _open(boxed, LoginRequest)
+    req, reply = opened
     try:
         ok = await device_auth.password_tried(req.password)
     except device_auth.Shut as e:
@@ -204,18 +270,18 @@ async def login(boxed: BoxedRequest) -> dict:
 
 
 @router.post("/pair")
-async def pair(boxed: BoxedRequest) -> dict:
+async def pair(opened=boxed(PairRequest)) -> dict:
     """Exchange a host-displayed PIN for a device token. A code pairs until it
     expires (device_auth.redeem_pin); a wrong one costs one of
     MAX_PIN_ATTEMPTS."""
-    req, reply = _open(boxed, PairRequest)
+    req, reply = opened
     if not await device_auth.redeem_pin(req.code):
         raise HTTPException(status_code=401, detail="invalid or expired code")
     return reply({"token": device_auth.current_token(_secret())})
 
 
 @router.post("/change-identity")
-async def change_identity(boxed: BoxedRequest) -> dict:
+async def change_identity(opened=boxed(ChangeIdentityRequest)) -> dict:
     """A new name and/or password. The name and the password are both KDF
     inputs, so either change IS a new key: on a launcher friends are told by
     a notice the old key signed (its P2P manager; a Docker node sends none),
@@ -232,7 +298,7 @@ async def change_identity(boxed: BoxedRequest) -> dict:
     (Docker) keeps a password: minted, it would leave no way in for a new
     browser. Boxed all the same — the passwords go in and the new token
     comes out."""
-    req, reply = _open(boxed, ChangeIdentityRequest)
+    req, reply = opened
     username = req.username.strip()
     if not username:
         raise HTTPException(status_code=422, detail="Nickname required")
@@ -257,6 +323,7 @@ async def change_identity(boxed: BoxedRequest) -> dict:
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     from config import settings
+    from routers.p2p import EMAIL_FLOW_SECONDS
     return reply({
         "token": device_auth.current_token(_secret()),
         "username": info["username"],
@@ -264,6 +331,10 @@ async def change_identity(boxed: BoxedRequest) -> dict:
         "public_key_hex": info["public_key_hex"],
         "anonymous": info["anonymous"],
         "email_needs_verification": bool(info.get("email")),
+        # The current password or the host's code was given just now: the
+        # address's code is sent on it (routers/p2p, the email flow's grant)
+        "email_grant": (device_auth.grant("email", EMAIL_FLOW_SECONDS)
+                        if info.get("email") else None),
         # The launcher restarts its P2P manager on the NOTIFY; a Docker
         # node serves its peer surface from this process, bound to the key
         # it started with.
@@ -276,12 +347,12 @@ class EmptyPayload(BaseModel):
 
 
 @router.post("/logout-all")
-async def logout_all(boxed: BoxedRequest) -> dict:
+async def logout_all(opened=boxed(EmptyPayload)) -> dict:
     """Invalidate every device token, including the caller's — then hand the
     caller a fresh one so the browser that pressed the button stays signed in.
     Requires a valid signature, so only an already-authenticated client (or
     the host) can trigger it. The fresh token rides back in the box."""
-    _, reply = _open(boxed, EmptyPayload)
+    _, reply = opened
     device_auth.bump_epoch()
     return reply({"token": device_auth.current_token(_secret())})
 

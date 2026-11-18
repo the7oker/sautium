@@ -145,7 +145,7 @@ const fs = require('node:fs'), vm = require('node:vm');
 const [naclPath, shaPath, authPath, origin, setup] = process.argv.slice(-5);
 const cfg = JSON.parse(setup);
 const store = Object.assign({}, cfg.store || {});
-const asked = [], sent = {};
+const asked = [], sent = {}, how = {};
 const ctx = {
   window: { addEventListener() {}, dispatchEvent() {} },
   localStorage: {
@@ -181,6 +181,9 @@ ctx.window.fetch = async (input, init) => {
   }
   const queue = (cfg.replies || {})[path];
   if (!queue) return new Response('{}');
+  const sentHeaders = new Headers((init && init.headers) || {});
+  (how[path] = how[path] || []).push({ method: (init && init.method) || 'GET',
+                                       signed: sentHeaders.has('X-Sautium-Sig') });
   const env = JSON.parse(init.body);
   const client = Uint8Array.from(Buffer.from(env.client, 'base64'));
   const opened = nacl.box.open(Uint8Array.from(Buffer.from(env.box, 'base64')),
@@ -207,7 +210,7 @@ ctx.fetch = ctx.window.fetch;      // the page's global is its window
   } catch (e) {
     thrown = e.constructor.name + ': ' + e.message;
   }
-  process.stdout.write(JSON.stringify({ result, thrown, asked, sent, store, node: hex(identity.publicKey) }));
+  process.stdout.write(JSON.stringify({ result, thrown, asked, sent, how, store, node: hex(identity.publicKey) }));
 })();
 """
 
@@ -571,6 +574,37 @@ def test_a_page_opened_from_the_host_carries_its_code_into_an_identity_change():
     out = _page("return await window.Sautium.auth.changeIdentity('named', 'a password now', '')",
                 store=dict(_SIGNED_IN), replies={"/api/auth/change-identity": [[200]]})
     assert out["sent"]["/api/auth/change-identity"][0]["pin"] == ""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_boxed_request_of_the_app_is_sealed_signed_and_carries_the_persons_word():
+    """Sautium.auth.boxed (B-93): the payload sealed, through the signing
+    wrapper, with its method; the password and the host's code folded in only
+    when the sheet asks; a refused word said as such."""
+    call = ("return await window.Sautium.auth.boxed('/api/settings/ai/key', {api_key: 'k'}, "
+            "{method: 'PUT', password: 'pw'})")
+    out = _page(call, hash="#pair=ABCD-EFGH",
+                replies={"/api/auth/pair": [[200]], "/api/settings/ai/key": [[200]]})
+    assert out["thrown"] is None and out["result"]["ok"] is True
+    assert out["sent"]["/api/settings/ai/key"] == [{"api_key": "k", "password": "pw", "pin": "ABCD-EFGH"}]
+    assert out["how"]["/api/settings/ai/key"] == [{"method": "PUT", "signed": True}]
+    out = _page("return await window.Sautium.auth.boxed('/api/p2p/tokens', {rights: []})",
+                store=dict(_SIGNED_IN), replies={"/api/p2p/tokens": [[200]]})
+    assert out["sent"]["/api/p2p/tokens"] == [{"rights": []}]
+    assert out["how"]["/api/p2p/tokens"] == [{"method": "POST", "signed": True}]
+    out = _page(call, store=dict(_SIGNED_IN),
+                replies={"/api/settings/ai/key": [[403, {"X-Sautium-Auth-Error": "step-up"}]]})
+    assert out["result"] == {"ok": False, "status": 403, "stepUp": True, "error": "x"}
+    out = _page(call, store=dict(_SIGNED_IN), replies={"/api/settings/ai/key": [[400, {"X-Sautium-Auth-Error": "channel"}],
+                                                                                [200]]})
+    assert out["result"]["ok"] is True and len(out["sent"]["/api/settings/ai/key"]) == 2
+    # A 429 is the password door's only when it says so; the Worker's brake on
+    # codes is said in its own words
+    out = _page(call, store=dict(_SIGNED_IN), replies={"/api/settings/ai/key": [[429, {"Retry-After": "30"}]]})
+    assert out["result"]["error"] == "x"
+    out = _page(call, store=dict(_SIGNED_IN), replies={"/api/settings/ai/key": [
+        [429, {"Retry-After": "30", "X-Sautium-Auth-Error": "shut"}]]})
+    assert out["result"]["error"] == "Too many wrong passwords — the next try is taken in 30 s."
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
