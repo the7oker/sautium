@@ -1228,7 +1228,7 @@ def _notices_state() -> Dict[str, Any]:
                       if not (it["key"] in _REPORTS and it["seen"])]}
 
 
-_REPORTS = ("hqplayer.run_restored", "auth.login_failures")
+_REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures")
 
 
 def _login_failures_notice() -> Optional[Dict[str, Any]]:
@@ -1367,6 +1367,14 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": "hqplayer.run_left", "kind": "warning",
                       "since": left["since"].isoformat(), "until": None,
                       "data": {"items": left["items"]}})
+    # A comparison's put-back HQPlayer refused twice alike, left to the
+    # owner (AB-1-DESIGN §17): a report, dropped once seen
+    from playback import hqp_ab
+    ab_refused = hqp_ab.refused_notice()
+    if ab_refused is not None:
+        items.append({"key": "hqplayer.ab_refused", "kind": "warning",
+                      "since": ab_refused["since"].isoformat(), "until": None,
+                      "data": ab_refused["data"]})
     # One put back after HQPlayer went away under it: a report, dropped once
     # seen (_notices_state)
     restored = hqp_benchmark.restored_notice()

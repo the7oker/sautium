@@ -169,6 +169,9 @@ class Played:
 
 _lock = threading.Lock()
 _sitting: Optional["Sitting"] = None
+# A put-back HQPlayer answered and did not take, by sitting row: what it
+# refused last — the same refusal twice closes the row (_refused_again)
+_refusals: Dict[int, Tuple[str, Any]] = {}
 
 
 def current() -> Optional["Sitting"]:
@@ -324,6 +327,7 @@ class Sitting:
         self.step_view: Optional[Dict[str, Any]] = None
         self.set_now: Optional[str] = None
         self.sending: Optional[str] = None
+        self.refused: Optional[Tuple[str, Any]] = None
         self.link = None
         self._halt = threading.Event()
         self._tokens: Tuple[str, ...] = ()
@@ -531,6 +535,8 @@ class Sitting:
                                 put = self._put_back()
                             except _Left as e:
                                 ended, note = "left", str(e)
+                        if not put and self.refused is not None and self.row is not None:
+                            _refused_again(self.row, self.refused)      # the first of two
                         self._close_row(ended, put, own)
                     finally:
                         self.link = None
@@ -1188,8 +1194,10 @@ class Sitting:
             if (st["filterNx"], st["filter1x"]) != (nx, x1):
                 link("set_filter", nx, x1 if x1 is not None and x1 >= 0 else None)
             st = link("get_state")
-            return (st is not None and (st["filterNx"], st["filter1x"]) == (nx, x1)
-                    and not (lowered and abs(st["volume"] - self.volume) > _DB_EPS))
+            if st is None:
+                return False
+            self.refused = _refusal(st, (nx, x1), want, self.volume if lowered else None)
+            return self.refused is None
         try:
             return _again(once)
         except (_Lost, OSError) as e:
@@ -1530,8 +1538,15 @@ def _recover(row: dict, link, again: Callable[[], None], foreign: Callable[[Any]
                 nx = x1 = None
             # Closed only once HQPlayer reads as put back
             after = c.get_state()
-            if (after is None or (nx is not None and (after["filterNx"], after["filter1x"]) != (nx, x1))
-                    or (lowered and abs(after["volume"] - float(row["before_volume"])) > _DB_EPS)):
+            if after is None:
+                again()
+                return
+            refused = _refusal(after, (nx, x1) if nx is not None else None, names.get(want),
+                               float(row["before_volume"]) if lowered else None)
+            if refused is not None:
+                if _refused_again(row["id"], refused):
+                    _close_refused(row, refused)
+                    return
                 logger.warning("Comparison %s not put back yet: HQPlayer did not take it", row["id"])
                 again()
                 return
@@ -1544,6 +1559,60 @@ def _recover(row: dict, link, again: Callable[[], None], foreign: Callable[[Any]
                         owed = FALSE
                   WHERE id = %(id)s AND {_OWED}""", {"id": row["id"]})
     logger.info("Comparison %s, cut short, put back", row["id"])
+
+
+def _refusal(st: dict, slots: Optional[Tuple[int, int]], name: Optional[str],
+             volume: Optional[float]) -> Optional[Tuple[str, Any]]:
+    """What HQPlayer, as `st` reads after a put-back, did not take: the
+    filter (`slots` to hold, by `name`), else the volume — or None."""
+    if slots is not None and (st["filterNx"], st["filter1x"]) != slots:
+        return ("filter", name)
+    if volume is not None and abs(st["volume"] - volume) > _DB_EPS:
+        return ("volume", volume)
+    return None
+
+
+def _refused_again(row_id: int, refused: Tuple[str, Any]) -> bool:
+    """Note a refusal of this row's put-back; True when it is the same as
+    the one before — the second (AB-1-DESIGN §17): no third is sent."""
+    with _lock:
+        again = _refusals.get(row_id) == refused
+        _refusals[row_id] = refused
+        return again
+
+
+def _close_refused(row: dict, refused: Tuple[str, Any]) -> None:
+    """Refused twice alike: the row is closed as left — nothing owed, the
+    person sets it in HQPlayer — and said once (refused_notice)."""
+    kind, what = refused
+    db_execute(f"""UPDATE hqp_ab_sittings
+                    SET ended = coalesce(ended, 'left'), ended_at = coalesce(ended_at, now()),
+                        owed = FALSE, refused_at = now(),
+                        refused_filter = %(f)s, refused_volume = %(v)s
+                  WHERE id = %(id)s AND {_OWED}""",
+               {"id": row["id"], "f": what if kind == "filter" else None,
+                "v": what if kind == "volume" else None})
+    with _lock:
+        _refusals.pop(row["id"], None)
+    db_execute("NOTIFY sautium_notices")
+    logger.warning("Comparison %s: HQPlayer refused its put-back twice (%s %s) — left to the owner",
+                   row["id"], kind, what)
+
+
+def refused_notice() -> Optional[dict]:
+    """The newest put-back HQPlayer refused twice: a report (the notices
+    channel drops it once seen) naming what to set in HQPlayer and where."""
+    row = db_query_one("""
+        SELECT s.refused_at, s.refused_filter, s.refused_volume, s.mode::text AS mode,
+               s.slot::text AS slot, e.name AS hqplayer
+          FROM hqp_ab_sittings s JOIN hqp_endpoints e ON e.id = s.hqp_endpoint_id
+         WHERE s.refused_at IS NOT NULL ORDER BY s.refused_at DESC LIMIT 1""")
+    if row is None:
+        return None
+    return {"since": row["refused_at"],
+            "data": {"filter": row["refused_filter"],
+                     "volume": None if row["refused_volume"] is None else float(row["refused_volume"]),
+                     "mode": row["mode"], "slot": row["slot"], "hqplayer": row["hqplayer"]}}
 
 
 def _close_left(row_id: int) -> None:

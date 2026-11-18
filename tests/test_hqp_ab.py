@@ -92,6 +92,8 @@ class TimedHqp(FakeHqp):
         self.entry = None              # (uri, lead, total) of the cut it holds
         self.cuts = {}                 # proxy token → (lead, length)
         self.sets = []                 # (time, nx, x1) of each SetFilter
+        self.refuse = set()            # filters SetFilter refuses in the 1x slot
+        self.refused = []              # the names of each SetFilter it refused
         self.adds = []                 # times of each cut's PlaylistAdd
         self.stream0 = None            # when the meter's stream of the entry began
         try:
@@ -208,6 +210,10 @@ class TimedHqp(FakeHqp):
                         f'filter="{sl["x1"]}" filter1x="{sl["x1"]}" filterNx="{sl["nx"]}" shaper="0" '
                         f'volume="{self.volume}" convolution="0" adaptive="0" invert="0" matrix_profile=""/>')
             if cmd == "SetFilter":
+                x1 = int(attrs.get("value1x", self.slots["x1"]))
+                if self.FILTERS[x1] in self.refuse:
+                    self.refused.append(self.FILTERS[x1])
+                    return '<SetFilter result="Error">Filter not available in this mode</SetFilter>'
                 self.slots["nx"] = int(attrs["value"])
                 self.slots["x1"] = int(attrs.get("value1x", self.slots["x1"]))
                 self.sets.append((now, self.slots["nx"], self.slots["x1"]))
@@ -743,6 +749,36 @@ def test_a_sitting_the_process_died_in_is_put_back_at_the_next_answer(ab):
     hqp_ab.recover(ab.endpoint_id, hl.selected())
     assert _wait(lambda: ab.q("SELECT ended::text FROM hqp_ab_sittings")[0][0] == "failed", 10)
     assert fake.FILTERS[fake.slots["x1"]] == "hires" and fake.volume == -10.0
+
+
+def test_a_put_back_hqplayer_refuses_twice_is_left_to_the_person_and_said_once(ab):
+    # AB-1-DESIGN §17: the same refusal twice closes the row as left — no
+    # third SetFilter, nothing owed — and one report names what to set
+    from routers import settings as settings_router
+    fake = ab.fake
+    with ab.conn.cursor() as cur:
+        cur.execute("""INSERT INTO hqp_ab_sittings (hqp_endpoint_id, engine, mode, slot, fractional, form,
+                                                    from_s, length_s, tolerance_s, before_filter_nx,
+                                                    before_filter_1x, champion)
+                       VALUES (%s, '6.3.3', 'pcm', '1x', FALSE, 'chain', 0, 10, 0.15, 'xla', 'xla',
+                               'hires')""", (ab.endpoint_id,))
+    fake.slots["x1"] = TimedHqp.FILTERS.index("ringy")
+    fake.refuse = {"hires"}
+    tries = []
+
+    def again():                    # the poller's next answer
+        tries.append(time.time())
+        hqp_ab.recover(ab.endpoint_id, hl.selected(), again=again)
+    hqp_ab.recover(ab.endpoint_id, hl.selected(), again=again)
+    assert _wait(lambda: ab.q("SELECT ended::text, owed, refused_filter FROM hqp_ab_sittings")
+                 == [("left", False, "hires")], 10)
+    hqp_ab.recover(ab.endpoint_id, hl.selected(), again=again)     # nothing owed: nothing sent
+    time.sleep(0.5)
+    assert fake.refused == ["hires", "hires"] and len(tries) == 1
+    assert fake.FILTERS[fake.slots["x1"]] == "ringy"
+    notice = hqp_ab.refused_notice()
+    assert notice["data"]["filter"] == "hires" and notice["data"]["mode"] == "pcm"
+    assert "hqplayer.ab_refused" in settings_router._REPORTS      # gone once seen: said once
 
 
 def test_a_dsp_change_from_elsewhere_ends_it_as_left_and_nothing_is_put_back(ab):

@@ -12978,6 +12978,19 @@
       ? 'HQPlayer may still hold the run\'s test settings — check them, and its volume, before you play.'
       : hqpLeftLine(n.data.items),
   });
+  // A comparison by ear whose put-back HQPlayer refused twice alike
+  // (playback/hqp_ab.py, AB-1-DESIGN §17): left to the person, who sets it in
+  // HQPlayer — a report, gone once seen. Drafted words (level C, §7.3's sitting).
+  NOTICE_COPY['hqplayer.ab_refused'] = n => {
+    const d = n.data || {};
+    const where = `${escapeHtml(String(d.mode || '').toUpperCase())} ${escapeHtml(d.slot || '')}`;
+    return {
+      title: 'Comparing filters: not put back',
+      text: d.filter
+        ? `HQPlayer would not take ${escapeHtml(d.filter)} back for ${where}. Set it in HQPlayer yourself.`
+        : `HQPlayer would not take its volume back to <span class="num">${escapeHtml(String(Math.round(d.volume * 10) / 10))}</span> dB. Set it in HQPlayer yourself.`,
+    };
+  };
   // A benchmark run HQPlayer went away under — it closed, reset or refused
   // the connection — put back whole when it answered again
   // (playback/hqp_benchmark.py): a report, gone once seen. The run's date

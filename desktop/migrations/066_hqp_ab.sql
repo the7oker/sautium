@@ -60,7 +60,13 @@ CREATE TABLE IF NOT EXISTS hqp_ab_sittings (
     started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     ended_at TIMESTAMPTZ,
     ended hqp_ab_end,                       -- NULL with no sitting going: the process died in it
-    owed BOOLEAN NOT NULL DEFAULT FALSE     -- ended, its put-back not taken by HQPlayer yet
+    owed BOOLEAN NOT NULL DEFAULT FALSE,    -- ended, its put-back not taken by HQPlayer yet
+    -- A put-back HQPlayer refused twice alike: closed as left, said once
+    -- (the notice hqplayer.ab_refused) — the filter, or the volume, it would
+    -- not take back
+    refused_filter TEXT,
+    refused_volume NUMERIC(6,2),
+    refused_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_ab_sittings_context
     ON hqp_ab_sittings(hqp_endpoint_id, engine, mode, slot, fractional);
