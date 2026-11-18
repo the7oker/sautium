@@ -9989,7 +9989,7 @@
       // A building HQPlayer answers nothing, and one lent to the benchmark is
       // asked nothing: what it said last stands, the build beside it.
       if (s.building && lastState) s = { ...lastState, building: s.building };
-      else if (s.held && lastState) s = { ...lastState, benchmark: s.benchmark || lastState.benchmark };
+      else if (s.held && lastState) s = { ...lastState, benchmark: s.benchmark || lastState.benchmark, held: s.held };
       lastState = s;
       renderBody(body, s);
     }
@@ -10013,10 +10013,10 @@
         : '';
       const shaperName = shaperNameFromIndex(st.shaper, s.shapers);
       const matrixActive = st.matrix_profile || '';
-      // How each entry runs here (hqpHeadroomMark); while a benchmark holds
-      // HQPlayer every knob waits for it.
+      // How each entry runs here (hqpHeadroomMark); while a benchmark or a
+      // comparison holds HQPlayer every knob waits for it.
       const hr = s.headroom || {};
-      const held = !!(s.benchmark && s.benchmark.job && s.benchmark.job.running);
+      const held = !!s.held || !!(s.benchmark && s.benchmark.job && s.benchmark.job.running);
       // HQPlayer building a setting answers nothing until it is done: its
       // controls wait — a command would be refused — and one line says why.
       // An Embedded box answers through its builds: only said, nothing waits.
@@ -10454,7 +10454,10 @@
 
       // ...opened as the person's own tap on its row opens it; a control
       // that waits (a build, a list HQPlayer did not give) opens nothing
-      const opener = pickerWanted && body.querySelector(HQP_PICKER_OPENERS[pickerWanted]);
+      // With the two filter rows apart, the one of the slot the track plays in
+      const opener = pickerWanted && ((pickerWanted === 'filter' && playingSlot
+        && body.querySelector(`${HQP_PICKER_OPENERS.filter}[data-slot="${playingSlot}"]`))
+        || body.querySelector(HQP_PICKER_OPENERS[pickerWanted]));
       if (opener && !opener.disabled) opener.click();
     }
 
@@ -10827,6 +10830,9 @@
 
   function abApply(ab, v) {
     if (v.phase === 'idle') { abRemove(ab); return; }       // closed from another tab
+    // Another sitting than this sheet's (begun since, on another device):
+    // this one is over — the sheet goes and stops nothing of the new one
+    if (ab.view && v.key !== ab.view.key) { abRemove(ab); return; }
     if (ab.view && v.seq < ab.view.seq) return;
     if (ab.view && v.seq > ab.view.seq) ab.line = '';
     ab.view = v;
@@ -10995,7 +11001,7 @@
         <div class="ab-body"><div class="ab-pad is-top">
           <div class="ab-state">${count}</div>
           <div class="ab-progress"><i data-ab-width="${w.of ? w.done / w.of : 0}"></i></div>
-          <p class="ab-warn">${v.mute ? 'HQPlayer is turned all the way down while it measures.' : escapeHtml(AB_W5)}</p>
+          <p class="ab-warn">${v.fixed ? escapeHtml(AB_W5) : 'HQPlayer is turned all the way down while it measures.'}</p>
           ${ab.everReady ? '' : '<p class="ab-warn">Then you choose the passage and hear it before the test.</p>'}
           ${abSay(ab)}
           <div><button class="hqp-chip-btn" type="button" data-ab="cancel">Cancel</button></div>
@@ -11214,7 +11220,7 @@
   // A tap on the sheet, sent to the sitting; `local` is what it shows at once
   async function abAsk(ab, body, local) {
     if (local) { Object.assign(ab.local, local); abPaint(ab); }
-    const res = await abFetch('/ask', body);
+    const res = await abFetch('/ask', { ...body, sitting: ab.view && ab.view.key });
     if (abSheet !== ab) return;
     if (res.ok) { abApply(ab, res.view); return; }
     if (local) Object.keys(local).forEach(k => delete ab.local[k]);
@@ -11344,7 +11350,7 @@
     ab.closing = true;
     ab.el.classList.add('is-closing');
     if (ab.view) {
-      const res = await abFetch('/close', {});
+      const res = await abFetch('/close', { sitting: ab.view.key });
       if (!res.ok) console.warn('The comparison did not close:', res.message);
     }
     abRemove(ab);

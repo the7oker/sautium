@@ -27,8 +27,8 @@ and keeps the person's answers.
 - **The silence P** is the same before every fragment of a sitting. The
   warm-up (muted: HQPlayer's volume at the bottom of its range, read back)
   plays each filter the sitting may play once and measures (search.Timing)
-  its output delay `d`, from the end of the fragment before to its pause
-  landing `h`, the meter's position when its pause landed `p`, from its
+  its output delay `d`, from the end of the fragment before to its first
+  frame `start`, the meter's position when its pause landed `p`, from its
   resume to its sound at the output beyond the lead that pause left `r`
   (each fragment's resume is timed from its own `p`: a pause landing late
   moves the resume, never the sound), and how long after its last sound
@@ -74,6 +74,7 @@ import logging
 import random
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -175,8 +176,12 @@ def current() -> Optional["Sitting"]:
 
 
 def running() -> bool:
+    """A sitting going: over once it has ended — before its hold's release,
+    as the benchmark's job is closed before its output goes back, so the
+    attach that takes the output back puts back a row the sitting still
+    owes (recover)."""
     s = _sitting
-    return s is not None and s.thread is not None and s.thread.is_alive()
+    return s is not None and s.thread is not None and s.thread.is_alive() and s.ended is None
 
 
 # -- the context of the track playing ------------------------------------------------
@@ -239,13 +244,15 @@ def open_sitting(form: str, second: Optional[str] = None, *,
     return s.view()
 
 
-def command(name: str, **args) -> Dict[str, Any]:
-    """A tap on the sheet, handed to the sitting's thread."""
+def command(name: str, sitting: Optional[str] = None, **args) -> Dict[str, Any]:
+    """A tap on the sheet, handed to the sitting's thread — `sitting` the
+    key of the one the sheet shows: a sheet left from one before (another
+    device's) acts on no later one."""
     s = _sitting
-    if s is None:
+    if s is None or (sitting is not None and sitting != s.key):
         raise Refused("No comparison is going on")
     if name == "close":
-        return close()
+        return close(sitting)
     if name == "answer" and args.get("answer") not in (("1", "2", "same") if s.form == "pair"
                                                       else ("better", "worse", "same")):
         raise Refused("That answer is not one of this form's")
@@ -254,11 +261,13 @@ def command(name: str, **args) -> Dict[str, Any]:
     return s.view()
 
 
-def close() -> Dict[str, Any]:
+def close(sitting: Optional[str] = None) -> Dict[str, Any]:
     """The sheet closed: a sitting still going stops (put back), and its
-    result is let go."""
+    result is let go — only the one the sheet showed (`sitting`, its key)."""
     global _sitting
     s = _sitting
+    if s is not None and sitting is not None and sitting != s.key:
+        return {"phase": "idle"}
     if s is not None and running():
         s.ask("stop", {})
         s.thread.join(30)
@@ -286,6 +295,8 @@ def shutdown(timeout: float) -> None:
 class Sitting:
     def __init__(self) -> None:
         self.thread: Optional[threading.Thread] = None
+        self.key = uuid.uuid4().hex
+        self.was_playing = False
         self._cv = threading.Condition()
         self._asks: deque = deque()
         self._stopping = False
@@ -357,6 +368,12 @@ class Sitting:
         s.ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
         if s.ep is None:
             raise Refused("This HQPlayer is not registered yet — try again once it has played")
+        # What it reads now may be the last sitting's candidate, lowered: that
+        # is put back first, never taken for the person's own
+        if owed(s.ep["id"]) is not None:
+            recover(s.ep["id"], link)
+            raise Refused("Sautium is still putting HQPlayer back from the last comparison — "
+                          "compare again in a moment")
         s.engine = s.ep.get("hqp_engine") or info.get("engine") or ""
         s.track = _track(manager)
         s.was_at = min(max(float(manager.latest_status.get("position") or 0.0), 0.0),
@@ -372,6 +389,7 @@ class Sitting:
         if kind is None:
             raise Refused("HQPlayer's mode follows the source — choose PCM or SDM to compare")
         playing = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
+        s.was_playing = playing
         rate_out = (status.active_rate if playing and status.active_rate
                     else next((r["rate"] for r in rates if r["index"] == st["rate"]), 0))
         if not rate_out:
@@ -491,7 +509,7 @@ class Sitting:
                     if self._halting:
                         ended, note = "failed", "the app stopped"
                     elif self._stopping:
-                        ended = "stopped"
+                        ended, note = "stopped", self.note       # "left waiting" (IDLE_S)
                         self._stopped_result()
                     else:
                         ended, note = "failed", str(e) or type(e).__name__
@@ -501,8 +519,14 @@ class Sitting:
                 finally:
                     try:
                         hqp_meter.meter.untap(self)
-                        put = ended != "left" and self._put_back()
-                        self._close_row(ended, put)
+                        own = ended
+                        put = False
+                        if ended != "left":
+                            try:
+                                put = self._put_back()
+                            except _Left as e:
+                                ended, note = "left", str(e)
+                        self._close_row(ended, put, own)
                     finally:
                         self.link = None
                         link.close()
@@ -515,7 +539,10 @@ class Sitting:
         """Stop during the test shows what was answered so far, as the end of
         a sitting does (the step owed its answer is not counted)."""
         if self.chain is not None:
+            deciding = self.chain.deciding
             self.chain.stop()
+            if deciding is not None:
+                self._duel_swapped(deciding)        # the cost sheet left open: declined (§5.2)
             self.result, self.phase = self._chain_result(self.chain), "result"
         elif self.pair is not None and self.pair.duels:
             self.pair.stop()
@@ -685,7 +712,7 @@ class Sitting:
         self._publish()
         if self.mute is not None:
             self._volume(self.mute)
-        done = False
+        done = left = False
         try:
             ended = time.time()
             for i, name in enumerate(names):
@@ -694,9 +721,9 @@ class Sitting:
                         played = self._fragment(name, None, warm=True, since=ended)
                         break
                     except _WarmLate as e:
-                        ended = time.time()
                         self.warm_lead = max(self.warm_lead + 0.5, e.p + search.LEAD_ABOVE_S)
                         self._cut()
+                        ended = time.time()     # the recut is no part of the next try's start
                 else:
                     if name == self.yours:
                         raise Refused("HQPlayer starts your filter too late here to compare it")
@@ -707,12 +734,14 @@ class Sitting:
                 self.warmed = (i + 1, len(names))
                 self._publish()
             done = True
+        except _Left:
+            left = True             # what plays is another controller's: never stopped
+            raise
         finally:
-            if not done:
+            if not done and not left:
                 # Cut short: what still plays stops before the volume comes back
                 self.link("stop")
-            if self.mute is not None:
-                self._volume(self.volume)
+            self._unmute()
             self.phase = phase if phase != "warming" else "ready"
         own = self.timings[self.yours].rate
         for name in names:
@@ -745,6 +774,15 @@ class Sitting:
         self.silence_s = max(self.silence_s or 0.0,
                              search.silence(list(self.timings.values()), self.lead_s))
         self._note_row(lead_s=self.lead_s, silence_s=self.silence_s)
+
+    def _unmute(self) -> None:
+        """Their volume back — only while it still reads the warm-up's: one
+        changed since is someone's own."""
+        if self.mute is None:
+            return
+        st = self.link("get_state")
+        if st is not None and abs(st["volume"] - self.mute) <= _DB_EPS:
+            self._volume(self.volume)
 
     def _volume(self, value: float) -> None:
         link = self.link
@@ -789,7 +827,7 @@ class Sitting:
             # late moves the resume, never the sound
             resume = anchor + self.silence_s - (lead - p + timing.r)
             if landed > resume:
-                self._slipped(name, h=h, late=landed - resume)
+                self._slipped(name, start=h - p, late=landed - resume)
             if p > lead - search.LEAD_SLIP_S:
                 self._slipped(name, p=p)
             self._sleep_until(resume, label)
@@ -812,7 +850,7 @@ class Sitting:
         last, ended = self._end()
         end_out = last + d
         self.sounding = None
-        t = search.Timing(d=d, h=h, r=out_onset - resumed - (lead - p), p=p,
+        t = search.Timing(d=d, start=h - p, r=out_onset - resumed - (lead - p), p=p,
                           tail=max(ended - end_out, 0.0), rate=rate)
         return Played(out_onset, end_out, ended, t)
 
@@ -821,7 +859,7 @@ class Sitting:
         self._end()
         self.sounding = None
 
-    def _slipped(self, name: str, *, h: float = 0.0, p: float = 0.0, r: Optional[float] = None,
+    def _slipped(self, name: str, *, start: float = 0.0, p: float = 0.0, r: Optional[float] = None,
                  late: float = 0.0) -> None:
         """A silence missed: stopped, waited out, and what was seen taken in —
         a pause that landed `late` after its resume was due grows P by that
@@ -832,7 +870,7 @@ class Sitting:
         self._stop_out()
         old = self.timings[name]
         self.timings[name] = search.Timing(
-            d=old.d, h=max(old.h, h), p=max(old.p, p),
+            d=old.d, start=max(old.start, start), p=max(old.p, p),
             r=old.r if r is None else r, tail=old.tail, rate=old.rate)
         if late:
             self.silence_s += late + 0.1
@@ -883,8 +921,11 @@ class Sitting:
         not the sitting's playing is another controller's."""
         from hqplayer_client import PlaybackState
         deadline = time.monotonic() + END_S
+        # What the person heard sends frames through its tail: no read yet
+        # after the tap is the meter not delivering, not quiet
+        heard = theirs and self.was_playing
         while True:
-            quiet = self._quiet(1.0)
+            quiet = self._quiet(1.0, heard=heard)
             status = self.link("get_status")
             if quiet and status is not None and status.state == PlaybackState.STOPPED:
                 with self._cv:
@@ -898,14 +939,19 @@ class Sitting:
             if quiet:
                 self._pause(STATUS_TICK_S)
 
-    def _quiet(self, most: float) -> bool:
+    def _quiet(self, most: float, heard: bool = False) -> bool:
         """Whether the meter has been quiet for QUIET_S, waited for at most
-        `most` seconds."""
+        `most` seconds — `heard`: only after it delivered a read."""
         until = time.time() + most
         with self._cv:
             while True:
                 if self._stopping:
                     raise _Stopped()
+                if heard and not self._reads:
+                    if time.time() >= until:
+                        return False
+                    self._cv.wait(until - time.time())
+                    continue
                 last_read = self._reads[-1][0] if self._reads else 0.0
                 quiet_at = last_read + QUIET_S
                 now = time.time()
@@ -922,8 +968,13 @@ class Sitting:
 
     def _frames_until(self, t: float) -> float:
         """The meter's position when the pause landed: the frames shown by
-        then, a hop each."""
-        return sum(len(s) * hop for at, hop, s in self._reads if at <= t)
+        then, a hop each — and the time since the last read, up to a read's
+        length: frames come in bursts, the stream moved on between them."""
+        shown = [(at, hop, s) for at, hop, s in self._reads if at <= t]
+        if not shown:
+            return 0.0
+        at, hop, s = shown[-1]
+        return sum(len(s) * hop for _, hop, s in shown) + min(t - at, len(s) * hop)
 
     def _sounded_before(self, t: float) -> bool:
         with self._cv:
@@ -1061,6 +1112,7 @@ class Sitting:
                               "answerable": False}
             self._publish()
             self._step(list(order), anchor, ["1", "2"])
+            self.say = None             # a slip's line ends with the step it replayed
             self._open("answer")
             self.step_view["answerable"] = True
             self._publish()
@@ -1085,26 +1137,39 @@ class Sitting:
 
     def _put_back(self) -> bool:
         """The champion (the chain) or their filter (the pair) in its slot,
-        and their volume — stopped first. Run again when the connection was
-        replaced under it (a Stop drops the read it woke). False when
-        HQPlayer did not take it: the row owes it (recover)."""
+        and their volume — stopped first. Only over the sitting's own marks
+        (§2.4): another controller playing, or slots it did not set, raise
+        _Left and nothing is sent; the volume only while it reads the
+        warm-up's. Run again when the connection was replaced under it (a
+        Stop drops the read it woke). False when HQPlayer did not take it:
+        the row owes it (recover)."""
+        from hqplayer_client import PlaybackState
         from playback.hqp_benchmark import _again, _Lost
         link = self.link
         want = self.chain.champion if self.chain is not None else self.yours
         nx, x1 = self._slots(want)
+        # Slots the sitting may have set: any filter it warmed (a SetFilter
+        # whose answer was lost included), or the person's own before it
+        own = {self._slots(n) for n in self.timings} | {(self.before_nx, self.before_x1), (nx, x1)}
 
         def once() -> bool:
-            link("stop")
-            st = link("get_state")
-            if st is None:
+            st, status = link("get_state"), link("get_status")
+            if st is None or status is None:
                 return False
-            if self.mute is not None and abs(st["volume"] - self.volume) > _DB_EPS:
+            if (status.state != PlaybackState.STOPPED and status.uri
+                    and not any(t in status.uri for t in self._tokens)):
+                raise _Left("another controller is playing through HQPlayer")
+            if (st["filterNx"], st["filter1x"]) not in own:
+                raise _Left("a DSP change came from elsewhere")
+            link("stop")
+            lowered = self.mute is not None and abs(st["volume"] - self.mute) <= _DB_EPS
+            if lowered:
                 link("set_volume", self.volume)
             if (st["filterNx"], st["filter1x"]) != (nx, x1):
                 link("set_filter", nx, x1 if x1 is not None and x1 >= 0 else None)
             st = link("get_state")
             return (st is not None and (st["filterNx"], st["filter1x"]) == (nx, x1)
-                    and (self.mute is None or abs(st["volume"] - self.volume) <= _DB_EPS))
+                    and not (lowered and abs(st["volume"] - self.volume) > _DB_EPS))
         try:
             return _again(once)
         except (_Lost, OSError) as e:
@@ -1138,13 +1203,16 @@ class Sitting:
         sets = ", ".join(f"{k} = {self._COLUMNS[k] % ('%(' + k + ')s')}" for k in cols)
         db_execute(f"UPDATE hqp_ab_sittings SET {sets} WHERE id = %(id)s", {**cols, "id": self.row})
 
-    def _close_row(self, ended: str, put: bool) -> None:
+    def _close_row(self, ended: str, put: bool, own: Optional[str] = None) -> None:
+        """`own` how the sitting itself ended, when its put-back then found
+        HQPlayer left to someone (`ended` left): its pick stands."""
         if self.row is None:
             return
+        own = own or ended
         picked = None
-        if self.chain is not None and ended in ("done", "stopped") and self.chain.duels:
+        if self.chain is not None and own in ("done", "stopped") and self.chain.duels:
             picked = self.chain.champion
-        elif self.pair is not None and ended == "done":
+        elif self.pair is not None and own == "done":
             picked = self.pair.winner()
         # Not put back: the row owes it (recover) — the answers stand
         db_execute("""
@@ -1197,7 +1265,7 @@ class Sitting:
         change the player status announces (its hold's `seq`)."""
         speeds = {f.name: f.speed for f in self.all_filters}
         out: Dict[str, Any] = {
-            "phase": self.phase, "seq": self.seq, "form": self.form,
+            "phase": self.phase, "seq": self.seq, "key": self.key, "form": self.form,
             "track": {k: self.track[k] for k in ("title", "artist", "length")},
             "passage": {"from_s": round(self.from_s, 3), "length_s": self.length_s,
                         "was_s": round(self.was_at, 3)},
@@ -1222,6 +1290,7 @@ class Sitting:
             "step": self.step_view, "sounding": self.sounding, "say": self.say,
             "result": self.result, "ended": self.ended, "note": self.note,
             "mute": self.mute is not None,
+            "fixed": self.vr is None or not self.vr["enabled"],
         }
         return out
 
@@ -1413,9 +1482,11 @@ def _recover(row: dict, link, again: Callable[[], None]) -> None:
             c = link.client
             st, filters = c.get_state(), c.get_filters()
             if st is None or filters is None:
+                again()
                 return
-            if (row["muted_to"] is not None and row["before_volume"] is not None
-                    and abs(st["volume"] - float(row["muted_to"])) <= _DB_EPS):
+            lowered = (row["muted_to"] is not None and row["before_volume"] is not None
+                       and abs(st["volume"] - float(row["muted_to"])) <= _DB_EPS)
+            if lowered:
                 c.set_volume(float(row["before_volume"]))
             index = {f["name"]: f["index"] for f in filters}
             names = {i: n for n, i in index.items()}
@@ -1428,6 +1499,15 @@ def _recover(row: dict, link, again: Callable[[], None]) -> None:
                 nx, x1 = ((st["filterNx"], want) if row["slot"] == "1x" else (want, st["filter1x"]))
                 if (st["filterNx"], st["filter1x"]) != (nx, x1):
                     c.set_filter(nx, x1 if x1 is not None and x1 >= 0 else None)
+            else:
+                nx = x1 = None
+            # Closed only once HQPlayer reads as put back
+            after = c.get_state()
+            if (after is None or (nx is not None and (after["filterNx"], after["filter1x"]) != (nx, x1))
+                    or (lowered and abs(after["volume"] - float(row["before_volume"])) > _DB_EPS)):
+                logger.warning("Comparison %s not put back yet: HQPlayer did not take it", row["id"])
+                again()
+                return
     except Exception as e:      # the thread's boundary: tried again at HQPlayer's next answer
         logger.warning("Comparison %s not put back yet: %s", row["id"], e)
         again()

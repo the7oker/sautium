@@ -621,8 +621,9 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
 
         # --- comparisons by ear (AB-1): the person's sittings and their duels,
         # by the HQPlayer they were made on — this node's row of it, the one
-        # that reports the same name and product about itself, else the one
-        # under the same label — and when each began. A sitting still going,
+        # that reports the same name and product about itself, else — where
+        # either side never heard HQPlayer name itself — the one under the same
+        # label (two that name themselves apart are two boxes) — and when each began. A sitting still going,
         # or one whose HQPlayer has no row here, is not merged; a merged one
         # owes this HQPlayer no put-back.
         progress("merging", what="comparisons")
@@ -631,7 +632,7 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
                       (SELECT e.id FROM hqp_endpoints e
                         WHERE (se.hqp_name IS NOT NULL AND e.hqp_name = se.hqp_name
                                AND e.product IS NOT DISTINCT FROM se.product)
-                           OR e.name = se.name
+                           OR (e.name = se.name AND (se.hqp_name IS NULL OR e.hqp_name IS NULL))
                         ORDER BY (se.hqp_name IS NOT NULL AND e.hqp_name = se.hqp_name) DESC, e.id
                         LIMIT 1) AS endpoint_id
                  FROM _S_.hqp_ab_sittings s

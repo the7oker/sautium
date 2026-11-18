@@ -803,6 +803,11 @@ class AbAsk(BaseModel):
     second: Optional[str] = None
     answer: Optional[Literal["better", "worse", "same", "1", "2"]] = None
     make: Optional[bool] = None
+    sitting: Optional[str] = Field(default=None, max_length=64)    # the view's `key`: the sheet's own
+
+
+class AbClose(BaseModel):
+    sitting: Optional[str] = Field(default=None, max_length=64)
 
 
 def _ab_refused(e: Exception) -> HTTPException:
@@ -846,10 +851,11 @@ def ask_ab(req: AbAsk) -> Dict[str, Any]:
 
 
 @router.post("/ab/close")
-def close_ab() -> Dict[str, Any]:
-    """The sheet closed: a sitting still going stops and is put back."""
+def close_ab(req: AbClose) -> Dict[str, Any]:
+    """The sheet closed: the sitting it showed, still going, stops and is
+    put back — a later one (another device's) is left alone."""
     from playback import hqp_ab
-    return hqp_ab.close()
+    return hqp_ab.close(req.sitting)
 
 
 @router.post("/ab/adopt")

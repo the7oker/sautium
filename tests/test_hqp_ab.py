@@ -550,6 +550,37 @@ def test_a_build_slower_than_its_warm_up_is_played_again_with_the_silence_grown(
     assert ab.q("SELECT count(*) FROM hqp_ab_duels")[0][0] == 3
 
 
+def test_a_pause_landing_late_moves_the_resume_and_never_the_sound(ab, monkeypatch):
+    """The sitting's thread woken late on a fragment's first frame: its pause
+    lands further into the lead, and its resume is timed from there."""
+    real = hqp_ab.Sitting._wait
+    late = []
+
+    def woken_late(self, pred, limit, what):
+        got = real(self, pred, limit, what)
+        if what == "frame of the passage" and self.phase == "testing" and len(late) < 2:
+            late.append(what)
+            time.sleep(0.15)        # the lead played on further
+        return got
+    monkeypatch.setattr(hqp_ab.Sitting, "_wait", woken_late)
+    monkeypatch.setattr(S, "MARGIN_S", 0.4)     # the late wake well inside it: no slip
+    hqp_ab.open_sitting("pair", "ext2")
+    p = ab.wait_phase("ready")["silence_s"]
+    t0 = time.time()
+    ab.begin()
+    for a in ("1", "2"):
+        if ab.phase() != "testing":
+            break
+        ab.answer(a)
+    hqp_ab.command("stop")
+    ab.wait_phase("result", "ended")
+    gaps = _silences(ab, t0)
+    said = f"P {p}: " + ", ".join(f"{g:.3f}" for g in gaps)
+    assert len(late) == 2 and hqp_ab.view()["slipped"] == 0, said
+    # timed from the warm-up's pause, each late one would be 0.15 s short
+    assert all(abs(g - p) <= 0.08 for g in gaps), said
+
+
 def test_a_slow_build_falls_inside_the_silence_and_the_pair_hears_it_equal(ab):
     """§9 test 1's slow side: a filter that takes 1.2 s from Play to its
     first frame (an SDM build's place) against one that takes 0.05 s — the
@@ -725,6 +756,57 @@ def test_a_dsp_change_from_elsewhere_ends_it_as_left_and_nothing_is_put_back(ab)
     assert _wait(lambda: ab.mgr.held is None, 20)
     assert fake.FILTERS[fake.slots["x1"]] == "mp"
     assert ab.q("SELECT ended::text, owed FROM hqp_ab_sittings") == [("left", False)]
+
+
+def test_a_window_change_while_it_waits_is_left_and_its_stop_sends_nothing(ab, monkeypatch):
+    # §2.4: the filter or the volume changed in HQPlayer's window while the
+    # sheet waits — the Stop that ends the sitting writes nothing over it
+    from playback import hqp_benchmark
+    fake = ab.fake
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    fake.slots["x1"] = TimedHqp.FILTERS.index("mp")
+    fake.volume = -20.0
+    sent, real = [], hqp_benchmark._Link.__call__
+
+    def told(self, name, *a, **k):          # the sitting's own connection, not the backend's attach
+        sent.append(name)
+        return real(self, name, *a, **k)
+    monkeypatch.setattr(hqp_benchmark._Link, "__call__", told)
+    hqp_ab.command("stop")
+    ab.wait_phase("ended")
+    assert hqp_ab.view()["ended"] == "left"
+    assert _wait(lambda: ab.mgr.held is None, 20)
+    assert [n for n in sent if n in ("stop", "set_filter", "set_volume")] == [], sent
+    assert fake.FILTERS[fake.slots["x1"]] == "mp" and fake.volume == -20.0
+    assert ab.q("SELECT ended::text, owed FROM hqp_ab_sittings") == [("left", False)]
+
+
+def test_a_sheet_left_from_another_sitting_stops_nothing_of_a_new_one(ab):
+    hqp_ab.open_sitting("pair", "ext2")
+    v = ab.wait_phase("ready")
+    with pytest.raises(hqp_ab.Refused):
+        hqp_ab.command("stop", sitting="a sitting before")
+    assert hqp_ab.close("a sitting before") == {"phase": "idle"}
+    assert hqp_ab.view()["phase"] == "ready"
+    hqp_ab.command("stop", sitting=v["key"])
+    ab.wait_phase("ended")
+
+
+def test_a_sitting_still_owed_is_put_back_before_another_reads_yours(ab):
+    fake = ab.fake
+    with ab.conn.cursor() as cur:
+        cur.execute("""INSERT INTO hqp_ab_sittings (hqp_endpoint_id, engine, mode, slot, fractional, form,
+                                                    from_s, length_s, tolerance_s, before_filter_nx,
+                                                    before_filter_1x, before_volume, muted_to, champion)
+                       VALUES (%s, '6.3.3', 'pcm', '1x', FALSE, 'chain', 0, 10, 0.15, 'xla', 'xla',
+                               -10, -60, 'hires')""", (ab.endpoint_id,))
+    fake.slots["x1"] = TimedHqp.FILTERS.index("ringy")       # the last sitting's candidate, lowered
+    fake.volume = -60.0
+    with pytest.raises(hqp_ab.Refused, match="still putting HQPlayer back"):
+        hqp_ab.open_sitting("pair", "ext2")
+    assert _wait(lambda: ab.q("SELECT ended::text FROM hqp_ab_sittings")[0][0] == "failed", 10)
+    assert fake.FILTERS[fake.slots["x1"]] == "hires" and fake.volume == -10.0
 
 
 def test_a_person_s_dsp_change_closes_a_sitting_cut_short_as_left(ab):
