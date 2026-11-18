@@ -265,9 +265,12 @@ def test_the_lead_covers_the_latest_pause_and_never_under_a_second():
 def test_the_silence_waits_for_the_slowest_end_start_and_resume():
     t = [S.Timing(d=1.0, h=0.1, r=2.0, p=0.1, tail=0.4, rate=705600),
          S.Timing(d=3.2, h=0.2, r=4.3, p=0.1, tail=2.6, rate=705600)]
-    assert S.silence(t, 1.0, 1.0) == pytest.approx(2.6 + 4.5 + 0.5)
-    # a longer lead lengthens every resume's way to the output
-    assert S.silence(t, 1.0, 1.5) == pytest.approx(2.6 + 5.0 + 0.5)
+    # the slowest end, then the slowest start to a first frame, the lead, the resume's way
+    assert S.silence(t, 1.0) == pytest.approx(2.6 + (0.2 - 0.1 + 1.0 + 4.3) + 0.5)
+    assert S.silence(t, 1.5) == pytest.approx(2.6 + (0.2 - 0.1 + 1.5 + 4.3) + 0.5)
+    # a pause landing later (h and p by as much) asks for no longer silence
+    late = [S.Timing(d=3.2, h=0.5, r=4.3, p=0.4, tail=2.6, rate=705600)]
+    assert S.silence(late, 1.0) == pytest.approx(S.silence(t[1:], 1.0))
 
 
 # -- the assistant's door (§7.1, §14.3) ----------------------------------------------------------

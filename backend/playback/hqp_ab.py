@@ -28,8 +28,10 @@ and keeps the person's answers.
   warm-up (muted: HQPlayer's volume at the bottom of its range, read back)
   plays each filter the sitting may play once and measures (search.Timing)
   its output delay `d`, from the end of the fragment before to its pause
-  landing `h`, from its resume to its sound at the output `r`, the meter's
-  position when its pause landed `p`, and how long after its last sound
+  landing `h`, the meter's position when its pause landed `p`, from its
+  resume to its sound at the output beyond the lead that pause left `r`
+  (each fragment's resume is timed from its own `p`: a pause landing late
+  moves the resume, never the sound), and how long after its last sound
   left the output its end showed (`tail`). The lead is the latest pause
   seen plus 0.3 s, never under 1 s (§16): no frame of music passes the
   meter before the resume. P is the slowest end, start and resume plus
@@ -741,7 +743,7 @@ class Sitting:
             self.lead_s = lead
             self._cut()
         self.silence_s = max(self.silence_s or 0.0,
-                             search.silence(list(self.timings.values()), search.LEAD_MIN_S, self.lead_s))
+                             search.silence(list(self.timings.values()), self.lead_s))
         self._note_row(lead_s=self.lead_s, silence_s=self.silence_s)
 
     def _volume(self, value: float) -> None:
@@ -783,7 +785,9 @@ class Sitting:
             resume = time.time()
         else:
             d, rate = timing.d, timing.rate
-            resume = anchor + self.silence_s - (timing.r + lead - search.LEAD_MIN_S)
+            # the lead this pause left, not the warm-up's: a pause landing
+            # late moves the resume, never the sound
+            resume = anchor + self.silence_s - (lead - p + timing.r)
             if landed > resume:
                 self._slipped(name, h=h, late=landed - resume)
             if p > lead - search.LEAD_SLIP_S:
@@ -804,12 +808,11 @@ class Sitting:
             self._publish()
             realised = out_onset - anchor
             if abs(realised - self.silence_s) > self.tolerance:
-                self._slipped(name, r=out_onset - resumed)
+                self._slipped(name, r=out_onset - resumed - (lead - p))
         last, ended = self._end()
         end_out = last + d
         self.sounding = None
-        # `r` on the minimum lead: the silence's arithmetic adds the lead played over it
-        t = search.Timing(d=d, h=h, r=out_onset - resumed - (lead - search.LEAD_MIN_S), p=p,
+        t = search.Timing(d=d, h=h, r=out_onset - resumed - (lead - p), p=p,
                           tail=max(ended - end_out, 0.0), rate=rate)
         return Played(out_onset, end_out, ended, t)
 
@@ -830,7 +833,7 @@ class Sitting:
         old = self.timings[name]
         self.timings[name] = search.Timing(
             d=old.d, h=max(old.h, h), p=max(old.p, p),
-            r=old.r if r is None else r - (self.lead_s - search.LEAD_MIN_S), tail=old.tail, rate=old.rate)
+            r=old.r if r is None else r, tail=old.tail, rate=old.rate)
         if late:
             self.silence_s += late + 0.1
         self.slipped += 1

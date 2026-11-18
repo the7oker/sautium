@@ -581,11 +581,12 @@ class Pair:
 @dataclass
 class Timing:
     """A filter's warm-up (§15.1, §16): `d` its output delay; `h` from the
-    end of the fragment before to its pause landing; `r` from its resume to
-    its sound at the output; `p` the meter's position when its pause
-    landed; `tail` how long after its last sound left the output its
-    fragment's end showed (Status stopped and the meter quiet); the output
-    rate it plays at."""
+    end of the fragment before to its pause landing; `p` the meter's
+    position when its pause landed; `r` from its resume to its sound at the
+    output beyond the lead its pause left (`lead − p`) — so a pause landing
+    later, the lead played further, moves the resume and not the sound;
+    `tail` how long after its last sound left the output its fragment's end
+    showed (Status stopped and the meter quiet); the output rate it plays at."""
     d: float
     h: float
     r: float
@@ -598,11 +599,10 @@ def lead(timings: Iterable[Timing]) -> float:
     return max([LEAD_MIN_S] + [t.p + LEAD_ABOVE_S for t in timings])
 
 
-def silence(timings: Sequence[Timing], warmed_lead: float, lead_s: float) -> float:
+def silence(timings: Sequence[Timing], lead_s: float) -> float:
     """P: the silence before every fragment. The resume of the filter that
     waits longest is never asked for before its pause has landed — after
-    the slowest end of a fragment before it, its own start, and its resume's
-    way to the output — plus MARGIN_S. `r` was measured on a lead of
-    `warmed_lead`; a longer lead adds to the way from the resume."""
-    grow = lead_s - warmed_lead
-    return (max(t.tail for t in timings) + max(t.h + t.r + grow for t in timings) + MARGIN_S)
+    the slowest end of a fragment before it, its own start to its first
+    frame (`h − p`), the lead of `lead_s` and its resume's way to the
+    output — plus MARGIN_S."""
+    return (max(t.tail for t in timings) + max(t.h - t.p + lead_s + t.r for t in timings) + MARGIN_S)
