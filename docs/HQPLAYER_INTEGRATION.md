@@ -11,7 +11,7 @@ DSP options (filters, shapers, modes, rates) dynamically at runtime, so the same
 drives any of them with no version switch. What differs between an HQPlayer on this
 machine and one on another box is how a track reaches it — see "Where HQPlayer runs".
 
-**Status**: ✅ Working - Basic implementation complete
+**Status**: in daily use as one of the node's outputs — § "Shipped since the first iteration"
 
 ## Architecture
 
@@ -197,7 +197,7 @@ no internet access ("not authenticated and no internet access").
 
 ### In the client, not exposed
 Methods `hqplayer_client.py` implements and nothing calls — no route, no
-assistant tool, no control in the Web UI (as of 2026-09-29):
+assistant tool, no control in the Web UI (as of 2026-11-18):
 - `forward()` / `backward()` - Fast forward, rewind
 - `volume_mute()` - Toggle mute — a toggle whose state neither `<State/>` nor
   `<Status/>` reports, which is why nothing trusts it with the owner's ears
@@ -1316,7 +1316,7 @@ its slot's stream ends at such a takeover — a URI the renderer moved to after 
 began, other than its track's or its transport's as the wait began, read in an event or
 asked of it at the stream's landing: what it held before the person's word is none, and a
 take-back asked while another app played on it outlasts that app's own next track. A
-controller past UPnP may leave no URI of its own to read: the KANN under Roon's RAAT says
+controller past UPnP may leave no URI of its own to read: a DLNA renderer under Roon's RAAT says
 our URI paused at its second (ROON-COEX, 2026-11-02), and the node keeps the renderer's
 word — paused, its Play resuming our track — said as the renderer's when the node sent no
 Pause ("Paused on ‹renderer›", since 2026-11-09): its own remote, or another app; a toast
@@ -1581,11 +1581,11 @@ its other connections.
 The library belongs to one HQPlayer, so its one block is at the bottom of
 that HQPlayer's screen (the gear on the selected picker row; since
 2026-09-28, before that a section of Settings › Library): what this node
-holds of it, then chips — Import / Sync, Rescan, Forget this library,
-Cancel while a job runs with its progress in the hint (the library wake
+holds of it, then chips — Import library before the first import, then
+Sync library, Rescan, Forget this library; Cancel while a job runs with its progress in the hint (the library wake
 channel, in place). Used rarely, so it sits last; found anyway, because
 the guidance trail (`hqp_library`: More tab → the HQPlayer drawer row → the
-Import chip, with the puck) lights while the HQPlayer chosen as the output
+Import library chip, with the puck) lights while the HQPlayer chosen as the output
 runs on another machine and its library was never imported, and retires
 once the block was shown, per address. A library of an HQPlayer that is not
 the output is forgotten from its picker row (`×`) and syncs once that
@@ -2446,7 +2446,7 @@ drawer.
 
 ## Known Limitations
 
-### Not Implemented Yet
+### Not supported by the client (as of 2026-11-18)
 - 🔒 **Authentication** - Advanced security features (ECDH + Ed25519)
 - 🔒 **Encrypted Commands** - ChaCha20Poly1305 encryption for file paths
 - 💾 **Playlist Load/Save** - Saved playlists management

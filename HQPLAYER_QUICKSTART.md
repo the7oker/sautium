@@ -58,8 +58,9 @@ How files reach it follows from its address: by path on this machine,
 streamed from the media proxy anywhere else.
 
 `HQPLAYER_HOST` / `HQPLAYER_PORT` in `.env` are only the address a node
-starts from before anything was picked (the compose files default to
-`host.docker.internal:4321`); a pick in the Web UI is stored in the
+starts from before anything was picked (three compose files default to
+`host.docker.internal:4321`; `docker-compose.pi.yml`, on the host's network,
+to `127.0.0.1:4321`); a pick in the Web UI is stored in the
 database and wins. `HQPLAYER_ENABLED` does not make HQPlayer the output —
 the pick does.
 

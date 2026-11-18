@@ -23,7 +23,7 @@ hqp.set_mode(2)  # DSD
 #### 2. **Filters** (PCM and SDM/DSD)
 ```python
 filters = hqp.get_filters()
-# Result: 77 filters
+# Result: as many as HQPlayer lists — on 6.2.3, 67 in PCM mode, 77 in SDM mode
 
 # Examples:
 # PCM: poly-sinc-ext2, poly-sinc-gauss-xla, sinc-L, sinc-M, etc.
@@ -41,7 +41,7 @@ hqp.set_filter(10, 8)  # PCM: upsampling filter + 1x filter
 - **sinc** — sinc-function filters (L, M, S variants)
 - **closed-form** — closed-form filters
 
-**Total:** 77 filters
+**Total:** read at runtime — 67 (PCM mode) / 77 (SDM mode) on HQPlayer 6.2.3
 
 ---
 
@@ -64,7 +64,7 @@ hqp.set_shaping(15)  # ASDM7EC-super 512+fs
 - **ASDM7** series — 7th order (higher quality)
 - Variants: EC (error correction), ul (ultra-light), super, light
 
-**Total:** 36 noise shapers
+**Total:** read at runtime — 36 modulators in SDM mode on HQPlayer 6.2.3
 
 ---
 
@@ -232,8 +232,8 @@ state.
 
 ✅ **Full control over HQPlayer's DSP settings:**
 - ✅ 3 output modes (source, PCM, DSD)
-- ✅ 77 filters (IIR, FIR, poly-sinc, sinc, closed-form)
-- ✅ 36 noise shapers (DSD5, ASDM5, ASDM7 series)
+- ✅ every filter HQPlayer lists (77 in SDM mode on 6.2.3: IIR, FIR, poly-sinc, sinc, closed-form)
+- ✅ every modulator it lists (36 on 6.2.3: DSD5, ASDM5, ASDM7 series)
 - ✅ 20 sample rates (up to DSD2048 / 90.3168 MHz)
 - ✅ Convolution toggle and generated EQ presets (through the assistant),
   matrix profiles (Web UI and assistant)
