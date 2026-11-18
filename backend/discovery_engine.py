@@ -221,12 +221,15 @@ _SEED_KIN_PRED = """EXISTS (
 
 
 # The names search's whole-word arm: the strict word similarity a name's
-# word must reach and the weight its score takes. The score compares with
+# word must reach and the weight its score takes — a prefix's 0.85, so a
+# whole word and a prefix tie and ownership breaks the tie (at 0.8 an owned
+# "Johann Sebastian Bach" ranked 33rd behind phantom names that start with
+# "bach"; CREDITS-1 Q13). The score compares with
 # WORD_ARM_MIN itself; `<<%` in the retrieve reads the session's
 # pg_trgm.strict_word_similarity_threshold, which run_search sets to the same
 # value — an executor that does not only retrieves more rows to score 0.
 WORD_ARM_MIN = 0.6
-WORD_ARM_WEIGHT = 0.8
+WORD_ARM_WEIGHT = 0.85
 
 
 def _word_arm(col: str) -> str:
@@ -255,7 +258,7 @@ TOOLS: dict[str, Tool] = {
         # strict word similarity scores whole words 1.0 and word fragments low
         # ("offenbach" 0.25, "bachman" 0.44, "bacharach" 0.56); `<<%` admits
         # it at WORD_ARM_MIN on the same GIN index,
-        # and its score sits below a prefix's 0.85 and an exact name's 1.0.
+        # and its score equals a prefix's 0.85, below an exact name's 1.0.
         Source("artist_name", "artists",
                "GREATEST(similarity(a.name_latin,:ql), "
                "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END, "

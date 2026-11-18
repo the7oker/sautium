@@ -1,4 +1,4 @@
--- 066 — CREDITS-1 step 2a (2026-11-18): the same DDL as 001_initial.sql's
+-- 067 — CREDITS-1 step 2a (2026-11-18): the same DDL as 001_initial.sql's
 -- blocks, for nodes that ran the earlier files. Idempotent: a no-op on the
 -- schema 001 just created.
 --

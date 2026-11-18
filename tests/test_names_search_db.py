@@ -5,9 +5,10 @@ surfaces call — on a real database.
 A surname inside a long full name falls under the trigram floor: "bach" ~
 "johann sebastian bach" is 0.23, "mozart" ~ "wolfgang amadeus mozart" 0.29,
 and neither is a prefix. The arm finds a whole word of a name (pg_trgm's
-strict word similarity at WORD_ARM_MIN), scored below a prefix and an exact
-name, and lifts no word fragment: what trigrams found before keeps its score.
-Skipped without a cluster."""
+strict word similarity at WORD_ARM_MIN), scored as a prefix is (Q13: so
+what the person owns wins the tie with a phantom name that starts with the
+word), below an exact name, and lifts no word fragment: what trigrams found
+before keeps its score. Skipped without a cluster."""
 
 import sys
 import uuid
@@ -31,6 +32,8 @@ ARTISTS = (
 )
 # An artist named in another script, found by a reading of it (0b's aliases)
 ALIASED = ("Иоганн Себастьян Бах", "johann sebastian bach")
+# Not owned: a phantom (a similar stub, no track) whose name starts with the word
+PHANTOM = "Bachata Kings"
 
 
 def _norm(raw: float) -> float:
@@ -63,6 +66,9 @@ def library(scratch_dsn):
                     (track, variant, f"/lib/r/{n}.flac", n))
     cur.execute("INSERT INTO artist_name_aliases (artist_id, alias_latin) VALUES (%s, %s)",
                 (ids[ALIASED[0]], ALIASED[1]))
+    ids[PHANTOM] = str(uuid.uuid4())
+    cur.execute("INSERT INTO artists (id, name, name_latin) VALUES (%s, %s, %s)",
+                (ids[PHANTOM], PHANTOM, latinize(PHANTOM)))
     conn.close()
     return ids
 
@@ -88,17 +94,24 @@ def search(scratch_dsn, library):
 def test_a_surname_finds_the_full_name(search, corpus):
     hits = search("Bach", corpus)
     for name in ("Johann Sebastian Bach", "Carl Philipp Emanuel Bach"):
-        assert hits[name] == _norm(0.8)
-    assert search("Mozart", corpus)["Wolfgang Amadeus Mozart"] == _norm(0.8)
-    assert search("glass", corpus)["Philip Glass"] == _norm(0.8)
-    assert search("Reich", corpus)["Steve Reich"] == _norm(0.8)
+        assert hits[name] == _norm(0.85)
+    assert search("Mozart", corpus)["Wolfgang Amadeus Mozart"] == _norm(0.85)
+    assert search("glass", corpus)["Philip Glass"] == _norm(0.85)
+    assert search("Reich", corpus)["Steve Reich"] == _norm(0.85)
 
 
-def test_an_exact_name_and_a_prefix_rank_above_a_whole_word(search):
+def test_a_whole_word_ties_a_prefix_under_an_exact_name(search):
     hits = search("bach")
     assert hits["Bach"] == 1.0
-    assert hits["Bachman-Turner Overdrive"] == _norm(0.85)
-    assert hits["Bach"] > hits["Bachman-Turner Overdrive"] > hits["Johann Sebastian Bach"]
+    assert hits["Bachman-Turner Overdrive"] == hits["Johann Sebastian Bach"] == _norm(0.85)
+
+
+def test_an_owned_whole_word_ranks_above_a_phantom_prefix(search):
+    # Q13: at 0.8 every phantom name starting with "bach" outranked the owned
+    # Bach; at a prefix's weight the tie goes to what the person owns
+    ranked = list(search("bach"))
+    assert ranked.index("Johann Sebastian Bach") < ranked.index(PHANTOM)
+    assert ranked.index("Carl Philipp Emanuel Bach") < ranked.index(PHANTOM)
 
 
 def test_a_word_fragment_is_not_lifted(search, scratch_dsn):
@@ -118,7 +131,7 @@ def test_a_word_fragment_is_not_lifted(search, scratch_dsn):
         arm = _word_arm("n").replace("%", "%%").replace(":ql", "%(ql)s")
         cur.execute(f"SELECT n, {arm} FROM (VALUES ('burt bacharach'), "
                     "('johann sebastian bach')) v(n)", {"ql": "bach"})
-        assert dict(cur.fetchall()) == pytest.approx({"burt bacharach": 0, "johann sebastian bach": 0.8})
+        assert dict(cur.fetchall()) == pytest.approx({"burt bacharach": 0, "johann sebastian bach": 0.85})
     conn.close()
 
 
@@ -129,10 +142,10 @@ def test_a_typo_of_a_whole_word_takes_the_arms_score(search, scratch_dsn):
                     "similarity('shostakovitch', 'dmitri shostakovich')")
         word, trigram = cur.fetchone()
     conn.close()
-    assert word > 0.6 and 0.8 * word > trigram      # the arm decides its score
-    assert search("shostakovitch")["Dmitri Shostakovich"] == pytest.approx(_norm(0.8 * word),
+    assert word > 0.6 and 0.85 * word > trigram     # the arm decides its score
+    assert search("shostakovitch")["Dmitri Shostakovich"] == pytest.approx(_norm(0.85 * word),
                                                                            abs=1e-4)
 
 
 def test_an_alias_reading_finds_by_a_whole_word(search):
-    assert search("bach")[ALIASED[0]] == _norm(0.8)
+    assert search("bach")[ALIASED[0]] == _norm(0.85)

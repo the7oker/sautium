@@ -175,17 +175,21 @@ implementation details live in the code, DB and git history.
   under the 0.3 floor and neither a prefix — a classical owner's first
   search found nothing. The names source has a third arm, pg_trgm's strict
   word similarity (`<<%` at 0.6 on the same GIN index, `WORD_ARM_MIN`),
-  scored 0.8 × — under a prefix's 0.85 and an exact name's 1.0 — and zero
+  scored 0.85 ×, as a prefix is — under an exact name's 1.0 — and zero
   below its threshold, so a word fragment trigrams find keeps its own score.
-  Measured through the engine (T14, CREDITS-1-DESIGN §12.3 in the private docs):
-  with a library's 3 197 names owned and a node-sized phantom layer (289 k
-  MusicBrainz names) under `corpus=all`, "mozart", "handel", "brahms" and
-  "ravel" now rank an owned whole-word name in the first three, where before
-  it was not in the first fifty; an owned "Johann Sebastian Bach" ranks 33,
-  behind every phantom name that merely starts with "bach" at the prefix's
-  0.85 — ownership only breaks ties. Words of any length are taken: the
-  fragment share of "the", "love" and "orchestra" in the first 30 does not
-  rise. The arm costs up to 33 ms on that layer (45 → 78 ms for "the") and
+  The weight is what the measurement decided (T14 through the engine,
+  CREDITS-1-DESIGN §12.3–§12.4 in the private docs): with a library's 3 197
+  names owned and a node-sized phantom layer (289 k MusicBrainz names) under
+  `corpus=all`, at 0.8 an owned "Johann Sebastian Bach" ranked 33rd, past
+  Discovery's first 30, behind every phantom name that merely starts with
+  "bach" at a prefix's 0.85 — ownership only breaks ties, so the whole word
+  had to tie the prefix. At 0.85 it ranks 3rd; "mozart", "handel", "reich",
+  "part" and "elgar" rank an owned whole-word name first, and before the arm
+  all of them but "reich" had it outside the first fifty. Words of any length are
+  taken: the fragment share of "the", "love" and "orchestra" in the first 30
+  does not rise. The threshold stays 0.6: a one-letter near surname passes
+  ("reichl" 0.63 for "reich"), as do the typos a person types (0.69–0.71).
+  The arm costs up to 33 ms on that layer (45 → 78 ms for "the") and
   up to 0.3 s on all of MusicBrainz's 2.68 M names.
 
 ### Audio analysis
