@@ -261,22 +261,46 @@ def test_each_block_draws_its_own_tag():
     assert len(tags) == 20
 
 
-def test_no_character_that_hides_or_passes_for_a_bracket_survives_and_each_reads_back():
-    """Every code point of the classes the helper names: none is in a
-    block as itself, and each comes back whole."""
+# Known invisibles and lookalike brackets, listed by hand rather than by
+# the helper's own rule: soft hyphen, grapheme joiner, Arabic letter mark,
+# Hangul fillers, Khmer inherent vowels, Mongolian selectors and vowel
+# separator, zero-width space/non-joiner/joiner, LRM/RLM, the bidi
+# embeddings, overrides and isolates, word joiner, invisible operators,
+# the separators, Braille blank, variation selectors, BOM, interlinear
+# annotation, Khitan filler, shorthand format controls, musical format
+# controls, tag characters, supplementary selectors; the brackets
+_KNOWN = [0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D,
+          0x180E, 0x180F, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x202A, 0x202E, 0x2028,
+          0x2029, 0x2060, 0x2062, 0x2064, 0x2066, 0x2069, 0x2800, 0x3164, 0xFE00, 0xFE0F,
+          0xFEFF, 0xFFA0, 0xFFF9, 0xFFFB, 0x16FE4, 0x1BCA0, 0x1BCA3, 0x1D173, 0x1D17A,
+          0xE0001, 0xE0041, 0xE007F, 0xE0100, 0xE01EF,
+          0x27E6, 0x27E7, 0x27EA, 0x27EB, 0x3010, 0x3011, 0x3016, 0x3017, 0x3018, 0x3019,
+          0x301A, 0x301B, 0x298B, 0x2990, 0x2045, 0x2046, 0xFF3B, 0xFF3D, 0xFF5F, 0xFF60,
+          0xFE47, 0xFE48, 0x2E28, 0x2E29]
+
+
+def test_no_known_invisible_or_lookalike_bracket_survives():
+    text = "".join(map(chr, _KNOWN))
+    body = desk.escape(text)
+    assert not set(text) & set(body)
+    assert _unescape(body) == text
+
+
+def test_no_character_of_the_hiding_classes_survives_and_each_reads_back():
+    """Every code point of the classes that hide text, unassigned and
+    private ones included: none is in a block as itself, each comes back
+    whole — and prose, emoji, quotation marks and ASCII brackets stay."""
     hidden = [c for c in map(chr, range(0x110000))
               if c not in "\n\t" and (
                   unicodedata.category(c) in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}
-                  or 0xFE00 <= ord(c) <= 0xFE0F or 0xE0100 <= ord(c) <= 0xE01EF
-                  or c in "͏ᅟᅠㅤﾠ"
-                  or c in "⟦⟧\u27ea\u27eb\u3010\u3011\u301a\u301b\uff3b\uff3d\u2e28\u2e29")]
-    assert len(hidden) > 900_000                    # unassigned and private ones included
+                  or (ord(c) > 0x7F and unicodedata.category(c) in {"Ps", "Pe"}))]
+    assert len(hidden) > 900_000
     text = "".join(hidden)
     body = desk.escape(text)
     assert not set(hidden) & set(body)
     assert _unescape(body) == text
-    assert desk.escape("plain text, текст é \U0001f3b5\n\t") == (
-        "plain text, текст é \U0001f3b5\n\t")
+    prose = "plain [text] (x), \u0442\u0435\u043a\u0441\u0442 \u00ab\u201c\u201d\u00bb \u00e9 \U0001f3b5\n\t"
+    assert desk.escape(prose) == prose
 
 
 def test_a_value_that_is_no_string_is_its_json_in_one_block():
@@ -343,7 +367,8 @@ def test_the_structure_stays_plain_beside_the_blocks(master):
 
 
 def test_the_threads_hold_every_page_of_friends(master):
-    assert [t["pubkey"] for t in json.loads(read.support_threads())] == [KEY16, OTHER[:16]]
+    assert [t["pubkey"] for t in json.loads(read.support_threads())] == [KEY, OTHER]
+    assert [t["pubkey"] for t in json.loads(read.support_threads(limit=1))] == [KEY]
 
 
 # -- the acting tools ------------------------------------------------------------
@@ -354,6 +379,7 @@ def test_the_acting_tools_carry_a_nodes_text_only_inside_a_block(master):
     assert (reply["queued_for"], reply["message_uuid"]) == (
         KEY16, "c0000000-0000-0000-0000-000000000003")
     assert json.loads(calls[-1][2]) == {"content": "Hello from the desk"}
+    assert calls[-2][1] == f"/api/support/friend?key={KEY16}"    # by the key alone
     seen = _canaries_in(json.dumps(reply), "support_reply")
     seen |= _canaries_in(act.support_issue_warrant(KEY16, scopes=["system"]), "support_issue_warrant")
     assert json.loads(calls[-1][2])["node"] == KEY16

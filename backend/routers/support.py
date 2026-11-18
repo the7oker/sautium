@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -55,20 +56,32 @@ def _require_master() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
-def _resolve_node(node: str) -> str:
-    """A username or a pubkey prefix → the node's pubkey; 404 unknown,
-    409 ambiguous."""
+_HEX = re.compile(r"[0-9a-f]{1,64}")
+
+
+def _resolve_node(node: str, *, by_key: bool = False) -> str:
+    """A username or a key prefix → the node's pubkey; 404 unknown, 409
+    ambiguous. `by_key`: a key prefix of 16 hex at least alone, which no
+    username can stand in for — a username is the node's own choice, and
+    one shaped as another node's key would block or take its place."""
     node = node.strip()
     if not node:
         raise HTTPException(status_code=400, detail="node is required")
+    prefix = node.lower()
+    is_key = bool(_HEX.fullmatch(prefix))
+    if by_key and not (is_key and len(prefix) >= 16):
+        raise HTTPException(status_code=400, detail="name the node by its key, 16 hex at least")
+    # A prefix only as hex, so the desk's input holds no LIKE wildcard
     rows = db_query("""
         SELECT pubkey FROM (
             SELECT public_key_hex AS pubkey FROM friends
-             WHERE username = %(n)s OR public_key_hex LIKE %(p)s
+             WHERE (NOT %(by_key)s AND username = %(n)s)
+                OR (%(is_key)s AND public_key_hex LIKE %(p)s)
             UNION
-            SELECT node_pubkey FROM support_reports WHERE node_pubkey LIKE %(p)s
+            SELECT node_pubkey FROM support_reports
+             WHERE %(is_key)s AND node_pubkey LIKE %(p)s
         ) x LIMIT 2
-    """, {"n": node, "p": node.lower() + "%"})
+    """, {"n": node, "p": prefix + "%", "is_key": is_key, "by_key": by_key})
     # The detail never echoes `node`: the desk may have copied it from a
     # node's own name
     if not rows:
@@ -201,11 +214,14 @@ def support_reports(node: str = "", kind: str = "", since: str = "",
 
 
 @router.get("/friend")
-def support_friend(node: str) -> Dict[str, Any]:
-    """The friend row of the one node `node` names (_resolve_node, over
-    every friend and reporter): the desk's chat tools address it by id."""
+def support_friend(node: str = "", key: str = "") -> Dict[str, Any]:
+    """The friend row of the one node `node` (a username or a key prefix)
+    or `key` (a key prefix alone, for the desk's acting tools) names, over
+    every friend and reporter: the desk's chat tools address it by id."""
     _require_master()
-    pubkey = _resolve_node(node)
+    if bool(node) == bool(key):
+        raise HTTPException(status_code=400, detail="give node or key")
+    pubkey = _resolve_node(key or node, by_key=bool(key))
     row = db_query_one("SELECT id, username FROM friends WHERE public_key_hex = %s", (pubkey,))
     if row is None:
         raise HTTPException(status_code=404, detail="that node is no friend of the master")
@@ -227,7 +243,7 @@ class WarrantRequest(BaseModel):
 @router.post("/warrants")
 def issue_warrant(req: WarrantRequest) -> Dict[str, Any]:
     _require_master()
-    pubkey = _resolve_node(req.node)
+    pubkey = _resolve_node(req.node, by_key=True)
     since = None
     if req.since:
         try:

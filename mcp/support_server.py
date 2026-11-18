@@ -93,14 +93,15 @@ def support_reports(node: str = "", kind: str = "", since: str = "", limit: int 
 
 
 @mcp.tool()
-def support_threads(unread_only: bool = False) -> str:
+def support_threads(unread_only: bool = False, limit: int = 50) -> str:
     """Support chat threads: one per user node (every node auto-friends the
-    master). Shows unread counts, last activity and online state; the
-    node's username and display name come wrapped as node text. `pubkey`
-    is what the acting tools take."""
+    master), the pinned first, then the most recently active, `limit` of
+    them. Shows unread counts, last activity and online state; the node's
+    username and display name come wrapped as node text. `pubkey` is what
+    the acting tools take."""
     try:
         rows = []
-        for f in desk.friends():
+        for f in desk.friends(limit):
             if unread_only and not f.get("unread_count"):
                 continue
             key = str(f["public_key_hex"])
@@ -108,7 +109,7 @@ def support_threads(unread_only: bool = False) -> str:
                 "friend_id": f.get("id"),
                 "username": desk.node_text(key, f.get("username")),
                 "display_name": desk.node_text(key, f.get("display_name")),
-                "pubkey": key[:16],
+                "pubkey": key,
                 "unread": f.get("unread_count"), "online": f.get("is_online"),
                 "last_activity_at": f.get("last_activity_at"),
                 "last_seen": f.get("last_seen"), "blocked": f.get("is_blocked"),

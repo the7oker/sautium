@@ -39,23 +39,26 @@ HOST_DATA = os.path.join(_REPO_ROOT, "data")
 # -- A node's text ------------------------------------------------------------
 
 OPEN, CLOSE = "\u27e6", "\u27e7"
-# Brackets a reader takes for the delimiters' own
-_LOOKALIKES = frozenset("\u27e6\u27e7\u27ea\u27eb\u3010\u3011\u301a\u301b"
-                        "\uff3b\uff3d\u2e28\u2e29")
 # What shows as nothing, or as something it is not: controls, format
 # characters (bidi, zero-width, the tag characters), surrogates, private
-# and unassigned code points, the line and paragraph separators; beside
-# them the variation selectors, the Hangul fillers and the combining
-# grapheme joiner, which are letters and marks to Unicode
+# and unassigned code points, the line and paragraph separators, and every
+# bracket outside ASCII, which a reader can take for the delimiters'; beside
+# them the default-ignorable code points that are letters and marks to
+# Unicode (variation selectors, fillers, the grapheme joiner) and the
+# Braille blank
 _HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
-_HIDDEN_RANGES = ((0x034F, 0x034F), (0x115F, 0x1160), (0x3164, 0x3164), (0xFE00, 0xFE0F),
-                  (0xFFA0, 0xFFA0), (0xE0100, 0xE01EF))
+_BRACKETS = frozenset({"Ps", "Pe"})     # quotation marks stay: « » carry Ukrainian prose
+_HIDDEN_RANGES = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+                  (0x2060, 0x206F), (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F),
+                  (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x16FE4, 0x16FE4), (0x1BCA0, 0x1BCA3),
+                  (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
 _KEY_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 
 def _escaped(c: str) -> bool:
     o = ord(c)
-    return (c in _LOOKALIKES or unicodedata.category(c) in _HIDDEN_CATEGORIES
+    category = unicodedata.category(c)
+    return (category in _HIDDEN_CATEGORIES or (o > 0x7F and category in _BRACKETS)
             or any(lo <= o <= hi for lo, hi in _HIDDEN_RANGES))
 
 
@@ -197,21 +200,25 @@ def dump(obj) -> str:
     return json.dumps(obj, indent=1, ensure_ascii=False, default=str)
 
 
-def friends() -> list:
-    """Every friend of the master, the pinned first, page by page."""
-    data = backend_get("/api/p2p/friends", {"limit": 200})
+FRIENDS_PAGE = 200      # the most /api/p2p/friends gives at once
+
+
+def friends(limit: int) -> list:
+    """The master's friends, the pinned first and then the most recently
+    active, `limit` of them at most, page by page."""
+    data = backend_get("/api/p2p/friends", {"limit": FRIENDS_PAGE})
     rows = list(data["pinned"]) + list(data["items"])
-    while data["next_cursor"]:
-        data = backend_get("/api/p2p/friends", {"limit": 200, "cursor": data["next_cursor"]})
+    while data["next_cursor"] and len(rows) < limit:
+        data = backend_get("/api/p2p/friends", {"limit": FRIENDS_PAGE, "cursor": data["next_cursor"]})
         rows += data["items"]
-    return rows
+    return rows[:limit]
 
 
-def friend(node: str) -> dict:
-    """`{friend_id, pubkey, username}` of the one friend `node` names — a
-    username or a key prefix, resolved by the master over all its friends:
-    unknown and ambiguous are refused there."""
-    return backend_get("/api/support/friend", {"node": node})
+def friend(node: str = "", key: str = "") -> dict:
+    """`{friend_id, pubkey, username}` of the one friend `node` (a username
+    or a key prefix) or `key` (a key prefix alone) names, resolved by the
+    master over all its friends: unknown and ambiguous are refused there."""
+    return backend_get("/api/support/friend", {"node": node, "key": key})
 
 
 _KEY_PREFIX_RE = re.compile(r"[0-9a-fA-F]{16,64}")

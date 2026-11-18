@@ -45,7 +45,7 @@ def support_reply(node: str, text: str) -> str:
     username. Delivery is the normal chat path (direct, relay or the
     node's next history pull)."""
     try:
-        friend = desk.friend(desk.node_key(node))
+        friend = desk.friend(key=desk.node_key(node))
         res = desk.backend_post(f"/api/p2p/friends/{friend['friend_id']}/send", {"content": text})
         return desk.dump({"queued_for": friend["pubkey"][:16],
                           "username": desk.node_text(friend["pubkey"], friend["username"]),

@@ -26,6 +26,8 @@ import support_server as read  # noqa: E402
 from tests.test_support_desk_mcp import HOSTILE, _block, _strings  # noqa: E402
 
 A, B, C = "ab" * 32, "cd" * 32, "ef" * 32
+D = "12" * 32       # a username shaped as B's key
+BUNDLE = "b0000000-0000-0000-0000-000000000001"
 
 
 @pytest.fixture
@@ -47,8 +49,8 @@ def master(scratch_dsn, monkeypatch):
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     cur = conn.cursor()
-    cur.execute("TRUNCATE friends, support_reports CASCADE")
-    for key, name in ((A, "alice"), (B, "bob"), (C, "bob")):
+    cur.execute("TRUNCATE friends, support_reports, support_warrants, support_bundles CASCADE")
+    for key, name in ((A, "alice"), (B, "bob"), (C, "bob"), (D, B[:16])):
         cur.execute("""INSERT INTO friends (username, public_key_hex, invite_code, display_name, last_seen)
                        VALUES (%s, %s, %s, %s, now()) RETURNING id""",
                     (name if key != A else canary("friends.username", key, True), key,
@@ -56,6 +58,8 @@ def master(scratch_dsn, monkeypatch):
         fid = cur.fetchone()[0]
         cur.execute("INSERT INTO p2p_messages (friend_id, direction, content) VALUES (%s, 'in', %s)",
                     (fid, canary("messages.content", key)))
+        if key == D:
+            continue
         events = [("node.started", {"build": canary("started.build", key), "os": canary("started.os", key),
                                     "agents": {"claude": canary("started.agents", key)},
                                     "hardware": {"profile": canary("started.profile", key)}}),
@@ -64,6 +68,13 @@ def master(scratch_dsn, monkeypatch):
         for kind, detail in events:
             cur.execute("INSERT INTO support_reports (node_pubkey, kind, ts, detail) "
                         "VALUES (%s, %s, now(), %s::jsonb)", (key, kind, json.dumps(detail)))
+    cur.execute("""INSERT INTO support_warrants (id, node_pubkey, scopes, note, expires_at, bundle_id)
+                   VALUES ('a0000000-0000-0000-0000-000000000001', %s, '{system}', 'asked by the desk',
+                           now() + interval '1 day', %s)""", (A, BUNDLE))
+    cur.execute("""INSERT INTO support_bundles (id, warrant_id, node_pubkey, size_bytes, sha256, ciphertext,
+                                                opened_at, extract_path)
+                   VALUES (%s, 'a0000000-0000-0000-0000-000000000001', %s, 3, %s, '\\x000102', now(),
+                           %s)""", (BUNDLE, A, "00" * 32, f"/app/data/support/{A[:16]}/{BUNDLE}"))
     conn.close()
 
     app = FastAPI()
@@ -84,7 +95,7 @@ def test_what_nodes_wrote_reaches_the_desk_only_inside_their_own_blocks(master):
     planted = master
     seen = set()
     for out in (read.support_nodes(), read.support_reports(limit=500), read.support_threads(),
-                read.support_messages(A[:16])):
+                read.support_messages(A[:16]), read.support_warrants(), read.support_bundles()):
         assert not out.startswith("Error"), out
         for value in _strings(json.loads(out)):
             if "CANARY-" not in value:
@@ -97,10 +108,47 @@ def test_what_nodes_wrote_reaches_the_desk_only_inside_their_own_blocks(master):
     assert seen == expected
 
 
+def test_the_desks_lists_of_the_masters_keys_are_the_routes_own(master):
+    """Each tool's structure keys against what the real route returns: a
+    column a route adds is the node's until it is named, and a key named
+    that the route no longer returns is a list gone stale."""
+    nodes = desk.backend_get("/api/support/nodes")[0]
+    assert set(nodes) == read.NODE_KEYS | {"username", "display_name", "started", "unresolved_signins"}
+    report = desk.backend_get("/api/support/reports")[0]
+    assert set(report) == read.REPORT_KEYS | {"detail"}
+    message = desk.backend_get(f"/api/p2p/friends/{desk.friend(A[:16])['friend_id']}/messages")[0]
+    assert set(message) == read.MESSAGE_KEYS | {"content"}
+    assert set(desk.backend_get("/api/support/warrants")[0]) == read.WARRANT_KEYS
+    assert set(desk.backend_get("/api/support/bundles")[0]) == read.BUNDLE_KEYS
+
+
+def test_the_threads_follow_the_masters_own_pages(master, monkeypatch):
+    monkeypatch.setattr(desk, "FRIENDS_PAGE", 2)
+    assert {t["pubkey"] for t in json.loads(read.support_threads())} == {A, B, C, D}
+    assert len(json.loads(read.support_threads(limit=3))) == 3
+
+
 def test_the_friend_lookup_resolves_over_every_friend_and_refuses_a_shared_name(master):
-    assert desk.friend(B[:16])["pubkey"] == B
+    assert desk.friend(C[:16])["pubkey"] == C
     assert desk.friend("abababab")["pubkey"] == A
     with pytest.raises(RuntimeError, match="more than one node matches"):
         desk.friend("bob")
     with pytest.raises(RuntimeError, match="no node matches"):
         desk.friend("0123456789abcdef")
+    for wildcard in ("a_", "%", "ab%"):
+        with pytest.raises(RuntimeError, match="no node matches"):
+            desk.friend(wildcard)
+
+
+def test_a_key_is_never_stood_in_for_by_a_username_shaped_as_it(master):
+    """D's username is B's key prefix: by name the two are one match too
+    many, by key B alone — and the master's warrant route takes a key only."""
+    with pytest.raises(RuntimeError, match="more than one node matches"):
+        desk.friend(B[:16])
+    assert desk.friend(key=B[:16])["pubkey"] == B
+    assert desk.friend(key=D[:16])["pubkey"] == D
+    for name in ("bob", B[:15]):
+        with pytest.raises(RuntimeError, match="name the node by its key"):
+            desk.friend(key=name)
+        with pytest.raises(RuntimeError, match="name the node by its key"):
+            desk.backend_post("/api/support/warrants", {"node": name})
