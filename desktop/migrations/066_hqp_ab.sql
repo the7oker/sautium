@@ -1,6 +1,5 @@
 -- Comparing filters by ear (AB-1, 2026-11-17): the sittings and their duels.
--- Mirrors the 001 baseline. 065, not 064: B-92 holds 064 on the branch that
--- carries it.
+-- Mirrors the 001 baseline. 066: B-92 holds 064, LIBRARY-WATCH 065.
 
 -- Comparing filters by ear (AB-1, 2026-11-17): the person's own record of
 -- what they picked — on this node, in the node backup (life data), never in
