@@ -36,15 +36,25 @@ the OS then reports "battery, discharging" with the cable in. Valerii's
 Mac showed exactly that — the old gate would have paused such machines
 forever, docked or not.
 
+One worker per identity folder, whatever runs it: the worker holds an
+exclusive lock on `identity_worker.lock` beside the proof for its whole run,
+and a second one over the same folder — in another process (a launcher stand
+whose backend was given a peer port: on 2026-08-19 two miners over one folder
+each mined a proof and raced for the file) or in the same one — finds it
+held and stands down, publishing nothing. The OS drops the lock with the
+process that held it, so a crash leaves none behind.
+
 Depends only on identity_pow (argon2-cffi).
 """
 
+import errno
 import json
 import logging
 import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -55,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 PROOF_VERSION = 1
 PROOF_FILENAME = "identity_proof.json"
+LOCK_FILENAME = "identity_worker.lock"
 MEM_GUARD_KIB = 2560 * 1024          # 2 GiB working set + headroom
 PAUSE_SECONDS = 30.0
 
@@ -153,6 +164,38 @@ def _lower_thread_priority() -> None:
         logger.debug("thread priority unchanged: %s", e)
 
 
+_HELD = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, errno.EDEADLK}
+
+
+@contextmanager
+def worker_lock(folder: Path):
+    """The identity folder's worker lock: yields True while this worker holds
+    it, False when another worker does. A file system that takes no lock at
+    all (a bind mount without lock support) yields True with a warning: the
+    process rule (who owns the worker) still stands there, the folder's own
+    guard does not."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    fd = os.open(folder / LOCK_FILENAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno in _HELD:
+                yield False
+                return
+            logger.warning("identity folder %s takes no lock (%s): one worker per folder is "
+                           "not enforced here", folder, e)
+        yield True
+    finally:
+        os.close(fd)
+
+
 def ensure_identity_proof(
     cert: dict,
     proof_path: Path,
@@ -171,7 +214,21 @@ def ensure_identity_proof(
     `on_state(state)` receives every state change plus one update per
     mining attempt — the caller publishes it (user_settings + NOTIFY).
     `hold()` is an external pause reason (the load meter's "playback"),
-    checked by the same per-attempt gate as memory."""
+    checked by the same per-attempt gate as memory. Another worker holding
+    the folder's lock (worker_lock): returns None at once, having published
+    nothing — the holder publishes."""
+    with worker_lock(Path(proof_path).parent) as held:
+        if not held:
+            logger.info("identity proof: another worker holds %s — this one stands down",
+                        Path(proof_path).parent)
+            return None
+        return _ensure(cert, proof_path, stop=stop, on_state=on_state, params=params,
+                       mem_available_kib=mem_available_kib, mem_guard_kib=mem_guard_kib,
+                       hold=hold, pause_seconds=pause_seconds)
+
+
+def _ensure(cert, proof_path, *, stop, on_state, params, mem_available_kib, mem_guard_kib,
+            hold, pause_seconds) -> Optional[dict]:
     _lower_thread_priority()
     started = _now_iso()
     state = {"method": cert["method"], "difficulty": cert["difficulty"],

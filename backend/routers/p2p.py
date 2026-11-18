@@ -1145,23 +1145,112 @@ async def _worker_check_email(identity: dict) -> Optional[dict]:
     return result
 
 
-async def identity_proof_task(stop: threading.Event) -> None:
-    """Startup task: make sure this node holds its identity certificate and,
-    for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
-    same policy the launcher runs). Progress is published to
-    user_settings['p2p.identity'] + NOTIFY sautium_identity for the Web UI.
-    A node whose email is verified but whose certificate predates v2 gets
-    the method:email certificate from /check-email here — no work needed."""
+# -- The identity worker -------------------------------------------------------
+#
+# One per node, in the process that serves the node's peer surface
+# (settings.serves_peer_surface): a launcher-mode backend leaves it to the
+# launcher's P2P manager, as it leaves the chat client. Started at the
+# lifespan's start for a node with an account and the moment an account
+# exists (routers/auth.create_account); restarted when the identity changes
+# (device_auth._after_rotation) or its certificate does (_certificate_changed).
+# Behind it, the identity folder's own lock (identity_proof.worker_lock): one
+# worker per folder, across processes.
+
+class _Worker:
+    def __init__(self):
+        self.stop = threading.Event()        # the mining thread's, between attempts
+        self.stopped = asyncio.Event()       # the task's own waits
+        self.task: Optional[asyncio.Task] = None
+
+
+_worker: Optional[_Worker] = None
+_worker_lock = asyncio.Lock()
+
+
+async def start_identity_worker() -> None:
+    """The worker for this node's identity, unless one ran or runs for it
+    already: a worker done (ready) stays done until a restart."""
+    async with _worker_lock:
+        await _start_worker()
+
+
+async def stop_identity_worker() -> None:
+    """Stop the worker and wait for it: its thread returns between two
+    attempts (one Argon2 call at most), and nothing of it publishes after."""
+    async with _worker_lock:
+        await _stop_worker()
+
+
+async def restart_identity_worker() -> None:
+    """For an identity or a certificate that changed under the worker: the
+    old one stopped and waited for first — it holds the folder's lock, and a
+    proof it saved or a state it published after the new one's would be the
+    old identity's."""
+    async with _worker_lock:
+        await _stop_worker()
+        await _start_worker()
+
+
+async def _start_worker() -> None:
+    global _worker
+    if _worker is not None:
+        return
+    if not settings.serves_peer_surface:
+        if settings.p2p_enabled:
+            logger.info("identity worker: the launcher's process runs it (this backend serves "
+                        "no peer surface)")
+        return
+    if _get_identity() is None:
+        return
+    worker = _Worker()
+
+    async def run():
+        try:
+            await identity_proof_task(worker.stop, worker.stopped)
+        except Exception:
+            logger.exception("identity worker failed")
+    worker.task = asyncio.create_task(run())
+    _worker = worker
+
+
+async def _stop_worker() -> None:
+    global _worker
+    worker, _worker = _worker, None
+    if worker is None:
+        return
+    worker.stop.set()
+    worker.stopped.set()
+    await worker.task
+
+
+def _publish_identity_state(state: dict) -> None:
+    """A worker's state to the Web UI (user_settings['p2p.identity'] + NOTIFY
+    sautium_identity); a `ready` one also wakes the chat client, whose
+    handshakes parked on our missing certificate or proof go out now — the
+    launcher's worker sends the same wake (p2p_manager)."""
+    try:
+        from routers.settings import _write
+        _write("p2p.identity", state)
+        _db_execute("NOTIFY sautium_identity")
+    except Exception as e:
+        logger.debug(f"identity state publish failed: {e}")
+    if state.get("status") == "ready":
+        import p2p_chat
+        client = p2p_chat.chat_client()
+        if client is not None:
+            client.resolve_soon()
+
+
+async def identity_proof_task(stop: threading.Event, stopped: asyncio.Event) -> None:
+    """The worker's body: make sure this node holds its identity certificate
+    and, for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
+    same policy the launcher runs), publishing every state
+    (_publish_identity_state). A node whose email is verified but whose
+    certificate predates v2 gets the method:email certificate from
+    /check-email here — no work needed. `stop` ends the mining thread,
+    `stopped` the waits of this task."""
     from desktop.p2p import identity_proof
     import p2p_identity
-
-    def publish(state: dict) -> None:
-        try:
-            from routers.settings import _write
-            _write("p2p.identity", state)
-            _db_execute("NOTIFY sautium_identity")
-        except Exception as e:
-            logger.debug(f"identity state publish failed: {e}")
 
     backoff = 300
     while not stop.is_set():
@@ -1175,7 +1264,11 @@ async def identity_proof_task(stop: threading.Event) -> None:
             # Worker unreachable / not configured: retry with backoff — the
             # certificate is a network fact, nothing local can replace it.
             logger.warning(f"identity certificate unavailable — retry in {backoff}s")
-            await asyncio.sleep(backoff)
+            try:
+                await asyncio.wait_for(stopped.wait(), backoff)
+                return
+            except asyncio.TimeoutError:
+                pass
             backoff = min(backoff * 2, 3600)
             continue
         if cert["method"] != "email":
@@ -1191,9 +1284,21 @@ async def identity_proof_task(stop: threading.Event) -> None:
         from desktop.p2p import load_meter
         meter = load_meter.current()
         await asyncio.to_thread(identity_proof.ensure_identity_proof, cert, path,
-                                stop=stop, on_state=publish,
+                                stop=stop, on_state=_publish_identity_state,
                                 hold=meter.mining_hold if meter else (lambda: None))
         return
+
+
+def _certificate_changed() -> None:
+    """This node's certificate changed under its worker — an email verified
+    here (verify-code) or found verified on another device of the same key
+    (email_status's /check-email): the worker starts again on it, and an
+    `email` certificate is `ready` at once — the publish and the wake every
+    state takes. A launcher's own worker is told by NOTIFY
+    sautium_identity_cert (p2p_manager); this backend owns none there."""
+    import p2p_chat
+    p2p_chat.soon(restart_identity_worker())
+    _db_execute("NOTIFY sautium_identity_cert")
 
 
 @router.get("/email/status")
@@ -1214,7 +1319,11 @@ async def email_status() -> Dict[str, Any]:
     if row and row.get("email_verified"):
         return {"email": email, "verified": True}
 
+    import p2p_identity
+    held = p2p_identity.load_certificate(settings)
     result = await _worker_check_email(identity)
+    if result and result.get("birth_cert") and result["birth_cert"] != held:
+        _certificate_changed()
     verified = bool(result and result.get("verified"))
     if verified:
         _db_execute(
@@ -1286,14 +1395,14 @@ async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
     if not result or result.get("status") != "registered":
         return {"verified": False, "error": "Invalid or expired code"}
 
-    if result.get("birth_cert"):
-        import p2p_identity
-        p2p_identity.save_certificate(settings, result["birth_cert"])
-
     # Persist so future /email/status checks return verified without a
     # Worker round-trip. Email-change and password-change flows (when
     # they land) must clear this flag.
     _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    if result.get("birth_cert") and result["birth_cert"] != cert:
+        import p2p_identity
+        if p2p_identity.save_certificate(settings, result["birth_cert"]):
+            _certificate_changed()
     return {"verified": True, "email": email}
 
 

@@ -657,6 +657,21 @@ class P2PManager:
             daemon=True, name="identity-proof")
         self._proof_thread.start()
 
+    def _restart_identity_proof_worker(self) -> None:
+        """The certificate changed under the worker (the Web UI's email
+        verification, served by the backend — NOTIFY sautium_identity_cert):
+        the old worker ends between two attempts, and the new one reads the
+        stored certificate — an `email` one is `ready` at once, and its
+        publish wakes the parked handshakes."""
+        from desktop.p2p.birth_cert import load_certificate
+        if self._proof_thread is not None:
+            self._proof_stop.set()
+            self._proof_thread.join()
+            self._proof_thread = None
+        cert = load_certificate()
+        if cert is not None:
+            self._start_identity_proof_worker(cert)
+
     def stop(self):
         """Stop all P2P services.
 
@@ -1039,6 +1054,7 @@ class P2PManager:
                     cur.execute("LISTEN sautium_diag")
                     cur.execute("LISTEN sautium_diag_consent")
                     cur.execute("LISTEN sautium_identity_rotated")
+                    cur.execute("LISTEN sautium_identity_cert")
                     cur.execute("LISTEN sautium_relay_off")
                 # A decision made while this connection was not listening
                 # woke nobody: the worker looks once on every (re)connect
@@ -1074,6 +1090,9 @@ class P2PManager:
                     if ("sautium_identity_rotated" in channels
                             and self._on_identity_rotated_cb):
                         self._on_identity_rotated_cb()
+                    if "sautium_identity_cert" in channels:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self._restart_identity_proof_worker)
             except Exception as e:
                 logger.debug(f"DB LISTEN error: {e}")
                 await asyncio.sleep(5)
