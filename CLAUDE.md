@@ -388,8 +388,11 @@ See:
   commit. Never re-process data that already exists unless `--force`.
 - **Per-track processing**, not batch-by-batch — gives resumability and
   error isolation. A failure on one track must not stop the run.
-- **Each step checks its own precondition.** `enrich_bios` runs only if
-  the artist has no bio, `classify_vocalist` runs only after bios exist, etc.
+- **Each step checks its own precondition.** The bio step
+  (`background_enrichment._step_missing_artists`) picks only artists with
+  no Last.fm bio and no recent "not found"; the gender and vocalist
+  classifiers (`LastFMClient._update_artist_gender`,
+  `_update_artist_is_vocalist`) run only on a bio just stored, etc.
 - **Explicit per-step stats.** Return a dict of `{step: count}` and log
   totals at the end — the caller is usually the launcher UI or a CLI
   progress callback.
@@ -572,7 +575,7 @@ below bind with or without it.
    (the Pi, since 2026-11-17) maps the one port peers dial, only once it
    answers as the peer surface (`main._map_peer_port`,
    `upnp_service.answers_as_peer_surface`). `docker_ports` from
-   `desktop/config_manager.py:58` is for *localhost-only LAN
+   `desktop/config_manager.py` (`DEFAULT_CONFIG["p2p"]`) is for *localhost-only LAN
    discovery probes*, never for UPnP. If you ever combine them,
    you must add app-level auth to the backend first.
 3. **Plain-HTTP media surfaces (8830, 8831) are LAN-only by design.**
@@ -715,8 +718,8 @@ Revisit this section then.
    `streaming/deezer_preview.py`); **YouTube** as the demo channel
    (`streaming/demo.py`). Credit each one in `THIRD_PARTY_NOTICES.md` — a
    lawful call to a public API is attribution, not exposure. Data literals
-   stay as they are (`origin='deezer'`, provider ids, enum values,
-   `PROVIDER_NAMES`) — never rename stored values.
+   stay as they are (`origin='deezer'`, provider ids, enum values) — never
+   rename stored values.
 
    What must stay out of the tree is a **capability, not a name**: credentials
    for someone's paid account, stream decryption, or bulk retrieval of a
@@ -734,7 +737,8 @@ Revisit this section then.
    `.gitleaks.toml` must be clean before every push.
 4. **No vendored third-party material.** Manuals, artwork, photos and SDK
    sources are linked, not committed; design references use the placeholders
-   in `placeholders/`. A new dependency gets a line in
+   in `docs/design/reference/claude-design-bundle/project/placeholders/`.
+   A new dependency gets a line in
    `THIRD_PARTY_NOTICES.md`; no GPL Python library without asking Valerii.
 5. **Commit trailers.** `Co-Authored-By` is fine; `Claude-Session:` is
    stripped by the commit-msg hook (`scripts/git-hooks/commit-msg`, enabled

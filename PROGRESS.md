@@ -2324,10 +2324,9 @@ The short version of the hard-learned lessons:
   - so the script now stops unless origin's tag is a signed release on the
     built commit;
   - nothing at or below 0.1.1 is ever a release (`updater.FLOOR`).
-- **The transition.** Launchers on the previous code follow `origin/main`
-  and reach this code that way. From then on they take signed tags only, and
-  until the first signed tag exists they are offered nothing. The first
-  signed release follows the push that ships this code on the same day.
+- **The transition.** Launchers on the previous code followed `origin/main`
+  and reached this code that way; from then on they take signed tags only.
+  The first signed release, `v0.2.0`, was tagged on 2026-11-15.
 
 ### The updater mirrored origin/main (2026-09-12 – 2026-11-12)
 
@@ -3015,10 +3014,12 @@ artist's `/music/…` page and the genre's `/tag/…` page.
   the existing `metadata from MusicBrainz` end-cap, sharing its divider.
 - **Credit what was stored, not what might exist.** No artist has Last.fm
   tags or similar-artist edges without a bio row, so every page showing
-  Last.fm prose, chips or similars carries the credit. 46 of 3 899 artists
-  (1.2 %) have Last.fm `track_stats` but no bio yet — featured artists the
-  engagement-gated `enrich_bios` has not reached. They show no credit until
-  it does, which is self-healing and beats a second, hand-rolled URL source.
+  Last.fm prose, chips or similars carries the credit. On 2026-09-20, 46 of
+  3 899 artists (1.2 %) had Last.fm `track_stats` but no bio yet — featured
+  artists the engagement-gated bio step
+  (`background_enrichment._step_missing_artists`) had not reached. They
+  show no credit until it does, which is self-healing and beats a second,
+  hand-rolled URL source.
   (Since 2026-09-20 the numbers on those pages are ListenBrainz's, and the
   credit line names both sources — see the next section.)
 - **The connected account links to its Last.fm page.** Clause 2.7 names the
