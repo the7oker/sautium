@@ -139,16 +139,6 @@ def token_requires_cert(conn, token_id: str) -> Optional[bool]:
     return None if not row else bool(row[0])
 
 
-def token_rights(conn, token_id: str) -> list:
-    """Current rights of a token WITHOUT burning a use — the retry path of
-    an interrupted accept heals the snapshot from here (the use was already
-    burned by the interrupted attempt)."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT p2p_right FROM invite_token_rights"
-                    " WHERE token_id = %s", (token_id,))
-        return sorted(r[0] for r in cur.fetchall())
-
-
 def token_revoked(conn, token_id: str) -> Optional[bool]:
     """None = no such token locally (fresh device), else its revoked state.
     The grant-recovery path honors a same-device revocation record but
@@ -158,6 +148,27 @@ def token_revoked(conn, token_id: str) -> Optional[bool]:
                     " WHERE id = %s", (token_id,))
         row = cur.fetchone()
         return None if row is None else row[0]
+
+
+def heal_rights(conn, friend_id: int, grant: Optional[dict], issuer_pubkey_hex: str,
+                guest_pubkey_hex: str) -> list:
+    """What the retry of an interrupted accept restores to a friend with no
+    snapshot: the rights of the token that friend joined through, else those
+    of a grant this node signed for that same guest — never a token id or
+    rights the guest merely presents now, which would raise a link given
+    without rights to one with them (B-93: a link with rights is minted only
+    on the account's password)."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT r.p2p_right FROM friends f
+                         JOIN invite_token_rights r ON r.token_id = f.source_token_id
+                        WHERE f.id = %s""", (friend_id,))
+        joined = sorted(r[0] for r in cur.fetchall())
+    if joined:
+        return joined
+    if (grant and verify_grant(grant, issuer_pubkey_hex)
+            and str(grant.get("guest_pubkey", "")).lower() == guest_pubkey_hex.lower()):
+        return sorted(set(grant.get("rights", [])) & set(ALL_RIGHTS))
+    return []
 
 
 def snapshot_rights(conn, friend_id: int, rights: list) -> None:

@@ -8129,17 +8129,14 @@
       onceInFlight(e.target, async () => {
       showHint('Adding…', false);
       try {
-        const resp = await fetch('/api/p2p/friends/add', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({invite_code: code}),
-        });
+        // A link or a mailed invite carries another node's bearer token:
+        // the string rides the box (routers/p2p.add_friend)
+        const resp = await window.Sautium.auth.boxed('/api/p2p/friends/add', {invite_code: code});
         if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}));
-          showHint(err.detail || 'Could not add friend.', true);
+          showHint(resp.status === 422 ? 'That is not an invite code.' : (resp.error || 'Could not add friend.'), true);
           return;
         }
-        const data = await resp.json().catch(() => ({}));
+        const data = resp.data;
         input.value = '';
         if (data.invite) showHint(inviteOutcomeHint(data), false);
         else showHint('Friend added.', true);
@@ -8345,11 +8342,10 @@
   }
 
   // A link with rights is spent later by whoever holds it: minting one, or
-  // widening one (a right added, more uses), takes the account's password
-  // (routers/p2p._widens decides; this only says when to ask).
+  // widening any link (a right added, more uses), takes the account's
+  // password (routers/p2p._widens decides; this only says when to ask).
   function _tokenWidens(token, rights, maxUses) {
-    if (!rights.length) return false;
-    if (!token) return true;
+    if (!token) return rights.length > 0;
     const more = maxUses != null && token.max_uses != null && maxUses > token.max_uses;
     return rights.some(r => !token.rights.includes(r)) || more;
   }
@@ -12772,8 +12768,10 @@
     'open this page from there, or scan its QR code, and do it within a few minutes.';
   const STEP_UP_HOST_MISSING = 'Open this page from the computer that runs Sautium, or scan its QR code, then try again.';
   async function stepUpField() {
+    // Without the status the field is shown: a node whose host vouches
+    // instead answers with the words that say so
     let st = null;
-    try { st = await window.Sautium.auth.status(); } catch (_) {}
+    try { st = await window.Sautium.auth.status(); } catch (err) { console.warn('auth status:', err); }
     const hostVouches = !!st && st.password_login === false && st.pin_door === true;
     return {
       hostVouches,
@@ -12808,7 +12806,12 @@
     const field = await stepUpField();
     if (field.hostVouches) {
       const word = field.read(document);
-      const res = word.error ? { ok: false, error: word.error } : await act(word.password);
+      let res;
+      try {
+        res = word.error ? { ok: false, error: word.error } : await act(word.password);
+      } catch (err) {
+        res = { ok: false, error: 'Could not reach the node — try again.' };
+      }
       if (res.ok) return res;
       await notifyDialog({ title, message: escapeProfileHtml(res.error), kind: 'error' });
       return null;
@@ -16808,15 +16811,23 @@
     } catch (_) {}
     const sg = st && st.signin;
     if (sg && sg.running && sg.code_ready) {
+      // A read that failed leaves the code to the next render (the stream
+      // wakes it); only a sign-in this page holds no grant for is elsewhere
       if ((!_codexCode || _codexCode.started_at !== sg.started_at) && _signinGrants.codex) {
         try {
           const res = await window.Sautium.auth.boxed('/api/settings/ai/codex/signin/code',
                                                       { grant: _signinGrants.codex });
           if (res.ok && res.data.code) _codexCode = { started_at: sg.started_at, code: res.data.code };
-        } catch (_) {}
+          // Another page's start replaced this page's grant
+          else if (res.status === 403) _codexCode = { started_at: sg.started_at, code: null };
+          else if (!res.ok) console.warn('the device code could not be read:', res.error);
+        } catch (err) {
+          console.warn('the device code could not be read:', err);
+        }
       }
-      if (_codexCode && _codexCode.started_at === sg.started_at) sg.code = _codexCode.code;
-      else sg.code_elsewhere = true;
+      const held = _codexCode && _codexCode.started_at === sg.started_at;
+      if (held && _codexCode.code) sg.code = _codexCode.code;
+      else if (held || !_signinGrants.codex) sg.code_elsewhere = true;
     }
     return st;
   }
@@ -16973,8 +16984,13 @@
       const input = root.querySelector('#ccSigninCode');
       const code = input ? input.value.trim() : '';
       if (!code) { if (input) input.focus(); return; }
-      const res = await window.Sautium.auth.boxed('/api/settings/ai/claude/signin/code',
-                                                  { code, grant: _signinGrants.claude || '' });
+      let res;
+      try {
+        res = await window.Sautium.auth.boxed('/api/settings/ai/claude/signin/code',
+                                              { code, grant: _signinGrants.claude || '' });
+      } catch (err) {
+        res = { ok: false, error: 'Could not reach the node — try again.' };
+      }
       if (!res.ok) { await _ccError('Claude Code sign-in failed', null, res.error); return; }
       render();
     });

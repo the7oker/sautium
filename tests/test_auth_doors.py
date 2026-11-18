@@ -598,6 +598,13 @@ def test_a_boxed_request_of_the_app_is_sealed_signed_and_carries_the_persons_wor
     out = _page(call, store=dict(_SIGNED_IN), replies={"/api/settings/ai/key": [[400, {"X-Sautium-Auth-Error": "channel"}],
                                                                                 [200]]})
     assert out["result"]["ok"] is True and len(out["sent"]["/api/settings/ai/key"]) == 2
+    # A 429 is the password door's only when it says so; the Worker's brake on
+    # codes is said in its own words
+    out = _page(call, store=dict(_SIGNED_IN), replies={"/api/settings/ai/key": [[429, {"Retry-After": "30"}]]})
+    assert out["result"]["error"] == "x"
+    out = _page(call, store=dict(_SIGNED_IN), replies={"/api/settings/ai/key": [
+        [429, {"Retry-After": "30", "X-Sautium-Auth-Error": "shut"}]]})
+    assert out["result"]["error"] == "Too many wrong passwords — the next try is taken in 30 s."
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

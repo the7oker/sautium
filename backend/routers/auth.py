@@ -67,7 +67,9 @@ class BoxedRequest(BaseModel):
     eph: str = Field(max_length=64)
     client: str = Field(max_length=64)
     nonce: str = Field(max_length=64)
-    box: str = Field(max_length=4096)
+    # An invite link's welcome message (2000 characters, Cyrillic two bytes
+    # each) rides one too
+    box: str = Field(max_length=16384)
 
 
 def _open(req: BoxedRequest, model):
@@ -246,7 +248,7 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
 
 def _shut(e: "device_auth.Shut") -> HTTPException:
     return HTTPException(status_code=429, detail="too many wrong passwords",
-                         headers={"Retry-After": str(e.seconds)})
+                         headers={"Retry-After": str(e.seconds), "X-Sautium-Auth-Error": "shut"})
 
 
 @router.post("/login")

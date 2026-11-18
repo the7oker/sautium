@@ -71,7 +71,8 @@ is never resolved and only the node's own addresses pass the unsigned
 whitelist (DNS rebinding); no credential crosses the network in the clear —
 the token never travels, and the exchange that earns it is boxed, as is,
 since 2026-11-18, every other secret typed in the Web UI (an AI provider's
-key, a sign-in's code, the email's code); the changes that act outside the
+key, a sign-in's code, the email's code, a friend's invite link pasted to
+add them); the changes that act outside the
 node and outlast "Sign out everywhere" (the account email, an invite link
 with rights, the AI key, an agent's sign-in) take the account's password
 through the same box; the peer

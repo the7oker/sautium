@@ -680,11 +680,14 @@ below bind with or without it.
    sign-in (a different one raises the known-hosts dialog). Since
    2026-11-18 (B-93) every other secret typed in the Web UI rides the
    same box — the AI provider's key, a sign-in's pasted code, the
-   email's code; the Codex device code comes back only sealed — through
+   email's code, a friend's invite link pasted to add them (it carries
+   that node's bearer token); the Codex device code comes back only
+   sealed — through
    one helper each side (`routers/auth.boxed`, `Sautium.auth.boxed`),
    and the route refuses the plain body; the changes that act outside
    the node and outlast "Sign out everywhere" — the account email, an
-   invite link with rights, the AI key, an agent's sign-in — take the
+   invite link with rights or any widening of a link, the AI key, an
+   agent's sign-in — take the
    account's password through it (on an anonymous launcher account the
    host's pairing code), `routers/auth.step_up`. Signing
    itself never needed the transport — the token never travels. Do

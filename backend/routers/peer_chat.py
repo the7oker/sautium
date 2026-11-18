@@ -396,9 +396,10 @@ def _handshake(body: dict):
             if not rights and resolved["source"] == "token":
                 # First accept was interrupted between add_friend and the
                 # snapshot — the guest's 15s retry loop lands here to heal
-                # it. The use was already burned, so read rights directly.
-                rights = (invite_tokens.token_rights(conn, token_id)
-                          if token_id else grant_in.get("rights", []))
+                # it. The use was already burned: the rights are those of
+                # the token it joined through (invite_tokens.heal_rights).
+                rights = invite_tokens.heal_rights(conn, resolved["id"], grant_in,
+                                                   ident["public_key_hex"], peer_pubkey)
                 invite_tokens.snapshot_rights(conn, resolved["id"], rights)
         svc.update_friend_last_seen(peer_pubkey)
         _witness_handshake(body, peer_pubkey)

@@ -484,7 +484,10 @@
       if (r.ok) return { ok: true, data: r.data };
       return { ok: false, status: r.status,
                stepUp: r.status === 403 && r.resp.headers.get("X-Sautium-Auth-Error") === "step-up",
-               error: r.status === 503 ? BUSY : r.status === 429 ? shut(r)
+               // A 429 of the password door says so; another (the Worker's
+               // brake on codes) is said in its own words
+               error: r.status === 503 ? BUSY
+                 : r.status === 429 && r.resp.headers.get("X-Sautium-Auth-Error") === "shut" ? shut(r)
                  : await errorDetail(r, `HTTP ${r.status}`) };
     },
   };

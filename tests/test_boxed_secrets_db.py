@@ -236,6 +236,7 @@ def test_an_account_without_a_password_vouches_by_its_hosts_code(node, monkeypat
     ("POST", "/api/settings/ai/codex/signin/code"), ("PUT", "/api/p2p/account/email"),
     ("POST", "/api/p2p/email/send-code"), ("POST", "/api/p2p/email/verify-code"),
     ("POST", "/api/p2p/tokens"), ("PATCH", "/api/p2p/tokens/00000000-0000-0000-0000-000000000000"),
+    ("POST", "/api/p2p/friends/add"),
 ])
 def test_every_boxed_route_refuses_the_plain_body_before_reading_it(node, method, path):
     r = node.client.request(method, path, json={"code": CLAUDE_CODE, "api_key": API_KEY, "password": PASSWORD})
@@ -397,7 +398,7 @@ def test_a_token_without_rights_is_a_friends_add_and_takes_the_token_alone(node)
     assert _tokens(node.dsn) == [("plain", None, [])]
 
 
-def test_a_patch_asks_the_password_only_where_it_widens_a_token_with_rights(node):
+def test_a_patch_asks_the_password_only_where_it_widens_a_link(node):
     r, minted = _send(node.client, "POST", "/api/p2p/tokens", {"label": "club", "rights": ["can_message"],
                                                                "max_uses": 2, "expires_at": "2030-01-01T00:00:00Z",
                                                                "password": PASSWORD})
@@ -414,15 +415,75 @@ def test_a_patch_asks_the_password_only_where_it_widens_a_token_with_rights(node
     assert r.status_code == 200 and _tokens(node.dsn) == [("vinyl club", 5, ["can_message"])]
 
 
-def test_whether_a_patch_widens_is_decided_again_under_the_rows_lock(node, monkeypatch):
-    """A patch read the token before a right was added to it (an edit that
-    landed in between): the edit's own decision, made with the row locked,
-    asks the password and changes nothing."""
+def test_a_link_without_rights_is_not_widened_on_the_token_alone(node):
+    """Its reach widened now would ride into the rights its owner adds
+    later on his password: more uses and a later expiry ask it too."""
+    r, minted = _send(node.client, "POST", "/api/p2p/tokens", {"label": "plain", "rights": [], "max_uses": 1,
+                                                               "expires_at": "2030-01-01T00:00:00Z"})
+    for widening in ({"max_uses": 50}, {"expires_at": ""}, {"rights": [], "expires_at": "2031-01-01T00:00:00Z"}):
+        r, _ = _send(node.client, "PATCH", f"/api/p2p/tokens/{minted['id']}", widening)
+        assert r.status_code == 403, widening
+    assert _tokens(node.dsn) == [("plain", 1, [])]
+
+
+def test_an_unvouched_patch_is_judged_again_under_the_rows_lock(node, monkeypatch):
+    """A patch read the token after a right it now adds was already there
+    (a stale read): judged again with the row locked, it asks the password
+    and changes nothing."""
     r, minted = _send(node.client, "POST", "/api/p2p/tokens", {"label": "plain", "rights": [], "max_uses": 1})
-    with psycopg2.connect(node.dsn) as c, c.cursor() as cur:
-        cur.execute("INSERT INTO invite_token_rights (token_id, p2p_right) VALUES (%s, 'can_message')",
-                    (minted["id"],))
-    monkeypatch.setattr(p2p, "_db_query_one", lambda sql, args: {"max_uses": 1, "rights": [], "extends": False})
-    r, _ = _send(node.client, "PATCH", f"/api/p2p/tokens/{minted['id']}", {"max_uses": 50})
+    monkeypatch.setattr(p2p, "_db_query_one", lambda sql, args: {
+        "max_uses": 1, "expires_at": None, "rights": ["can_message"], "extends": False})
+    r, _ = _send(node.client, "PATCH", f"/api/p2p/tokens/{minted['id']}", {"rights": ["can_message"]})
     assert r.status_code == 403 and r.headers["x-sautium-auth-error"] == "step-up"
-    assert _tokens(node.dsn) == [("plain", 1, ["can_message"])]
+    assert _tokens(node.dsn) == [("plain", 1, [])]
+
+
+def test_a_vouched_patch_lands_only_on_the_terms_the_password_was_asked_for(node, monkeypatch):
+    """Another edit lands while the password is derived (its rights taken
+    away and its expiry cleared): the vouched patch finds other terms under
+    the lock, changes nothing and says so."""
+    r, minted = _send(node.client, "POST", "/api/p2p/tokens", {"label": "club", "rights": ["can_message"],
+                                                               "max_uses": 1, "expires_at": "2030-01-01T00:00:00Z",
+                                                               "password": PASSWORD})
+    real_step_up = p2p.step_up
+
+    async def meanwhile(req):
+        await real_step_up(req)
+        with psycopg2.connect(node.dsn) as c, c.cursor() as cur:
+            cur.execute("DELETE FROM invite_token_rights WHERE token_id = %s", (minted["id"],))
+            cur.execute("UPDATE invite_tokens SET expires_at = NULL WHERE id = %s", (minted["id"],))
+    monkeypatch.setattr(p2p, "step_up", meanwhile)
+    r, _ = _send(node.client, "PATCH", f"/api/p2p/tokens/{minted['id']}",
+                 {"rights": ["can_message"], "max_uses": 5, "password": PASSWORD})
+    assert r.status_code == 409
+    assert _tokens(node.dsn) == [("club", 1, [])]
+
+
+def test_an_interrupted_accept_heals_only_from_the_link_its_friend_joined_through(node):
+    """A friend who joined through a link without rights presents another
+    link's id and a grant naming rights of its own making: the heal gives
+    nothing; a grant this node signed for that guest gives its rights."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    import invite_tokens
+    own = Ed25519PrivateKey.generate()
+    own_pub = own.public_key().public_bytes_raw().hex()
+    guest = "ab" * 32
+    _, plain = _send(node.client, "POST", "/api/p2p/tokens", {"label": "plain", "rights": []})
+    _, club = _send(node.client, "POST", "/api/p2p/tokens", {"label": "club", "rights": ["can_message", "can_search"],
+                                                             "password": PASSWORD})
+    with psycopg2.connect(node.dsn) as c, c.cursor() as cur:
+        cur.execute("""INSERT INTO friends (username, public_key_hex, invite_code, source, source_token_id)
+                       VALUES ('guest', %s, 'guest#AAAA-BBBB-CCCC', 'token', %s) RETURNING id""",
+                    (guest, plain["id"]))
+        fid = cur.fetchone()[0]
+        forged = {"token_id": club["id"], "rights": ["can_message", "can_search"], "guest_pubkey": guest}
+        assert invite_tokens.heal_rights(c, fid, forged, own_pub, guest) == []
+        assert invite_tokens.heal_rights(c, fid, None, own_pub, guest) == []
+        cur.execute("UPDATE friends SET source_token_id = NULL WHERE id = %s", (fid,))
+        signed = invite_tokens.sign_grant(own, club["id"], ["can_message"], guest, own_pub)
+        assert invite_tokens.heal_rights(c, fid, signed, own_pub, guest) == ["can_message"]
+        other = invite_tokens.sign_grant(own, club["id"], ["can_message"], "cd" * 32, own_pub)
+        assert invite_tokens.heal_rights(c, fid, other, own_pub, guest) == []
+        cur.execute("UPDATE friends SET source_token_id = %s WHERE id = %s", (club["id"], fid))
+        assert invite_tokens.heal_rights(c, fid, None, own_pub, guest) == ["can_message", "can_search"]
+        cur.execute("DELETE FROM friends WHERE id = %s", (fid,))

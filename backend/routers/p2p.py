@@ -445,7 +445,15 @@ async def list_friends(cursor: str = "", limit: int = 50,
 
 
 @router.post("/friends/add")
-async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
+async def add_friend(opened=boxed(AddFriendRequest)) -> Dict[str, Any]:
+    """The pasted share string rides the credential box: an invite link or a
+    mailed invite carries another node's bearer token, which a LAN reader
+    could spend first; the answer comes back sealed (add_share_string)."""
+    req, reply = opened
+    return reply(await add_share_string(req.invite_code))
+
+
+async def add_share_string(string: str) -> Dict[str, Any]:
     """Add a friend by share string (chat_wire.parse_share): a code, short
     or long, an invite link (`…#<token-uuid>`) or a mailed invite
     (`…#i-<token>`).
@@ -467,7 +475,7 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
     from desktop.p2p import chat_wire
 
     try:
-        share = chat_wire.parse_share(req.invite_code)
+        share = chat_wire.parse_share(string)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid invite code")
     return await _add_share(share, tell=True)
@@ -756,13 +764,16 @@ async def list_tokens() -> List[Dict[str, Any]]:
 
 
 # A token with rights is spent later by whoever holds its link, and outlasts
-# "Sign out everywhere": minting one, or widening what one grants, takes the
-# account's password (routers/auth.step_up). One without rights is a
-# friend's add, which stays on the device token; narrowing is never asked.
+# "Sign out everywhere": minting one, or widening any link — a right added,
+# more uses, a later expiry or none — takes the account's password
+# (routers/auth.step_up): a link widened without rights now would carry the
+# reach nobody approved into the rights its owner adds later. Minting a link
+# without rights is a friend's add, which stays on the device token;
+# narrowing is never asked.
 _TOKEN_TERMS = """
-    SELECT t.max_uses,
+    SELECT t.max_uses, t.expires_at,
            ARRAY(SELECT p2p_right::text FROM invite_token_rights
-                 WHERE token_id = t.id) AS rights,
+                 WHERE token_id = t.id ORDER BY 1) AS rights,
            (%(expires)s IS NOT NULL AND t.expires_at IS NOT NULL
             AND (NULLIF(%(expires)s, '') IS NULL
                  OR NULLIF(%(expires)s, '')::timestamptz > t.expires_at)) AS extends
@@ -771,12 +782,10 @@ _TOKEN_TERMS = """
 
 
 def _widens(terms: Dict[str, Any], req: "TokenPatch", rights: Optional[List[str]]) -> bool:
-    """Whether the patch leaves a token with rights that reaches further than
-    before: a right added, more uses, a later expiry or none."""
+    """Whether the patch leaves the token reaching further than before: a
+    right added, more uses, a later expiry or none."""
     before = set(terms["rights"])
     after = before if rights is None else set(rights)
-    if not after:
-        return False
     more_uses = (req.max_uses is not None and terms["max_uses"] is not None
                  and req.max_uses > terms["max_uses"])
     return bool(after - before) or more_uses or bool(terms["extends"])
@@ -822,10 +831,11 @@ async def create_token(opened=boxed(TokenCreate)) -> Dict[str, Any]:
 @router.patch("/tokens/{token_id}")
 async def patch_token(token_id: str, opened=boxed(TokenPatch)) -> Dict[str, Any]:
     """Edits affect FUTURE uses only — existing friendships keep their
-    rights snapshot. A patch that widens what a token with rights grants
-    (_widens) takes the account's password; whether it does is decided
-    again under the row's lock, with the edit, so an edit that landed during
-    the derivation cannot turn this one into a widening nobody vouched for."""
+    rights snapshot. A patch that widens the token (_widens) takes the
+    account's password, and lands only on the token as it was when the
+    password was asked for: under the row's lock, with the edit, a vouched
+    patch finds the terms it was judged on (another edit during the
+    derivation is a 409, asked again), an unvouched one is judged again."""
     import psycopg2.extras
     from db_pool import transaction
     req, reply = opened
@@ -834,7 +844,7 @@ async def patch_token(token_id: str, opened=boxed(TokenPatch)) -> Dict[str, Any]
     terms = _db_query_one(_TOKEN_TERMS, terms_args)
     if not terms:
         raise HTTPException(status_code=404, detail="Token not found")
-    vouched = _widens(terms, req, rights)
+    judged, vouched = terms, _widens(terms, req, rights)
     if vouched:
         await step_up(req)
     sets, params = [], []
@@ -855,6 +865,9 @@ async def patch_token(token_id: str, opened=boxed(TokenPatch)) -> Dict[str, Any]
         terms = cur.fetchone()
         if not terms:
             raise HTTPException(status_code=404, detail="Token not found")
+        if vouched and terms != judged:
+            raise HTTPException(status_code=409,
+                                detail="This link changed meanwhile: open it again and save")
         if not vouched and _widens(terms, req, rights):
             raise HTTPException(status_code=403,
                                 detail="This link changed meanwhile, and the change now widens it: "
