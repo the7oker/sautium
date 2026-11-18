@@ -234,6 +234,17 @@ See:
   its next start (`db_migrate`, marker `identity_rule_v{N}`,
   `canon.migrations.renormalize_identities`); the seals bind the uuids and
   get re-signed.
+- **A composer is a credit, never an artist role** (since 2026-11-18,
+  CREDITS-1): `track_credits` (`track_credit_role`, `composer` alone so far;
+  `source` `tag` | `mb` — what the file says is the floor, MusicBrainz's work
+  relations the authority). No reader of `track_artists` sees one, so no
+  engagement gate and no per-artist fan-out does. `artist_id` is `ON DELETE
+  RESTRICT`: every sweep and merge of artists names the table (the scanner's
+  prune, the HQPlayer forget, the phantom discard, the un-split GC, the artist
+  merges) or fails. A track merge is not guarded so: `track_id` cascades, so
+  `_update_track_uuid`, the one track merge, copies the credits itself. On
+  2026-11-18 nothing writes the table yet: the composer read is CREDITS-1's
+  step 2b.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.
 - **Genre is album-grain** (`album_genres`, since 2026-06-17): the filetag

@@ -28,6 +28,16 @@ implementation details live in the code, DB and git history.
   `album_descriptions`, `lb_recording`), not JSONB blobs. Allows per-source re-fetch and
   provenance tracking. First iteration used JSONB in `external_metadata`, that
   was scrapped because PostgreSQL functions on JSONB get unreadable fast.
+- **A composer is a credit, not an artist (2026-11-18, CREDITS-1).** Of 191
+  sites reading or writing `track_artists`, 61 would change with a
+  `composer` role, 25 of them the engagement gate and its fan-out (similars,
+  slice pools, the announce tail, the rare search), which read every role on
+  purpose so that a featured artist engages. So a composer lives in a table
+  of its own, `track_credits`, with its own role enum and a `source` (tag or
+  MusicBrainz): the gate stays in the schema, not in every reader's memory.
+  `artist_id` RESTRICTs rather than cascades — every `DELETE FROM artists`
+  is a sweep or a merge written against `track_artists`, and one that forgot
+  the new table now fails in its test instead of losing a credit quietly.
 - **Canonical UUID v5 for shareable entities**. Artist/Album/Track/Genre/Tag/
   EmbeddingModel all use `uuid5(NAMESPACE, "entity:{normalize(...)}")` so the
   same data on different nodes collapses to the same ID. Namespace is
@@ -158,6 +168,29 @@ implementation details live in the code, DB and git history.
   alone it answers albums and artists, as a genre does. Both run in SQL: the
   quality gate is an `EXISTS` over `owned_files` on the `track_id` indexes of
   both file tables, the year gate a range on `idx_albums_release_year`.
+
+- **A name is found by any whole word of it (2026-11-18, CREDITS-1 2a).**
+  Trigram similarity dilutes a short query in a long name: "bach" ~ "johann
+  sebastian bach" is 0.23, "mozart" ~ "wolfgang amadeus mozart" 0.29, both
+  under the 0.3 floor and neither a prefix — a classical owner's first
+  search found nothing. The names source has a third arm, pg_trgm's strict
+  word similarity (`<<%` at 0.6 on the same GIN index, `WORD_ARM_MIN`),
+  scored 0.85 ×, as a prefix is — under an exact name's 1.0 — and zero
+  below its threshold, so a word fragment trigrams find keeps its own score.
+  The weight is what the measurement decided (T14 through the engine,
+  CREDITS-1-DESIGN §12.3–§12.4 in the private docs): with a library's 3 197
+  names owned and a node-sized phantom layer (289 k MusicBrainz names) under
+  `corpus=all`, at 0.8 an owned "Johann Sebastian Bach" ranked 33rd, past
+  Discovery's first 30, behind every phantom name that merely starts with
+  "bach" at a prefix's 0.85 — ownership only breaks ties, so the whole word
+  had to tie the prefix. At 0.85 it ranks 3rd; "mozart", "handel", "reich",
+  "part" and "elgar" rank an owned whole-word name first, and before the arm
+  all of them but "reich" had it outside the first fifty. Words of any length are
+  taken: the fragment share of "the", "love" and "orchestra" in the first 30
+  does not rise. The threshold stays 0.6: a one-letter near surname passes
+  ("reichl" 0.63 for "reich"), as do the typos a person types (0.69–0.71).
+  The arm costs up to 33 ms on that layer (45 → 78 ms for "the") and
+  up to 0.3 s on all of MusicBrainz's 2.68 M names.
 
 ### Audio analysis
 

@@ -19,7 +19,7 @@ from provenance import MATERIAL_RANK_SQL
 from canon.identity import (
     _SEAL_NULL, _clean_artist_name, _filter_parts, _ensure_artist,
     _update_track_uuid, _update_album_uuid, _merge_album_variants,
-    delete_orphan_tracks, recanonicalize_artist,
+    delete_orphan_tracks, recanonicalize_artist, repoint_track_credits,
 )
 from canon.split import detect_compound_type, normalize_compound_artist
 
@@ -107,6 +107,7 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
                 db.execute(text(
                     "DELETE FROM album_artists WHERE artist_id = :old"
                 ), {"old": artist_id})
+                repoint_track_credits(db, artist_id, target_id)
                 # Delete the dirty artist (CASCADE handles remaining FK refs)
                 db.execute(text(
                     "DELETE FROM artists WHERE id = :id"
@@ -345,6 +346,7 @@ def unsplit_pass2_compounds(db: Session, dry_run: bool = False) -> Dict:
             SELECT (SELECT count(*) FROM track_artists WHERE artist_id = :m)
                  + (SELECT count(*) FROM album_artists WHERE artist_id = :m)
                  + (SELECT count(*) FROM artist_members WHERE member_artist_id = :m)
+                 + (SELECT count(*) FROM track_credits WHERE artist_id = :m)
         """), {"m": mid}).scalar()
         if leftover == 0:
             db.execute(text("DELETE FROM artists WHERE id = :m"), {"m": mid})
@@ -528,6 +530,7 @@ def _renormalize_artists(db: Session, dry_run: bool) -> Dict:
                      WHERE ta.artist_id = :a AND lh.completed),
                    (SELECT count(*) FROM artist_mbids WHERE artist_id = :a),
                    (SELECT count(*) FROM track_artists WHERE artist_id = :a),
+                   (SELECT count(*) FROM track_credits WHERE artist_id = :a),
                    -extract(epoch FROM (SELECT created_at FROM artists WHERE id = :a))
         """), {"a": aid}).fetchone())
 
@@ -744,7 +747,7 @@ def _renormalize_tracks(db: Session, dry_run: bool) -> Dict:
     """The bulk. Every track's new uuid goes into a temp map (COPY, a few
     million rows in seconds); collision groups merge through
     _update_track_uuid one by one; everything else is renamed in batched
-    UPDATEs whose ON UPDATE CASCADE carries the fifteen child tables."""
+    UPDATEs whose ON UPDATE CASCADE carries the child tables."""
     import io
     import psycopg2
     from config import settings
