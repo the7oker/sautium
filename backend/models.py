@@ -481,6 +481,8 @@ class AlbumVariant(Base):
     bit_depth = Column(Integer)
     is_lossless = Column(Boolean, default=True)
     absent_since = Column(DateTime(timezone=True))   # a local copy away (001_initial.sql)
+    arrived_at = Column(DateTime(timezone=True))     # its files' earliest arrival (triggers)
+    raw_artist = Column(Text)  # the album credit the scan minted it under, beside raw_title (the folder rule)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -553,6 +555,8 @@ class MediaFile(Base):
     # Track position within album variant
     track_number = Column(Integer)
     disc_number = Column(Integer, default=1)
+    track_total = Column(Integer)   # the totals the file's tags declare
+    disc_total = Column(Integer)
 
     # CUE image slice: a rip stored as one audio image + .cue imports as N
     # virtual rows sharing one file_path. [start, end) seconds within the
@@ -576,11 +580,24 @@ class MediaFile(Base):
     raw_album_artist = Column(Text)
     raw_album = Column(Text)
     raw_year = Column(Text)
+    raw_genre = Column(Text)   # the genre tag as read; album_genres' filetag counts derive from it
     recording_mbid = Column(UUID(as_uuid=False))  # materialized MB recording for THIS file's performance
 
     # Cover art (resolved by background worker)
     cover_id = Column(UUID(as_uuid=True), ForeignKey("covers.id", ondelete="SET NULL"))
     cover_processed_at = Column(DateTime(timezone=True))  # NULL = pending
+
+    # The stat at the last read (file_stat.FileStat); NULL = read before it was kept
+    stat_mtime_ns = Column(BigInteger)
+    stat_ctime_ns = Column(BigInteger)
+    # The analysis passes refused the decode; cleared by the next read
+    decode_refused = Column(Boolean, nullable=False, default=False, server_default="false")
+    # A CUE slice: the sheet's (size, mtime ns, ctime ns) at its last read
+    cue_stat = Column(ARRAY(BigInteger))
+    # When the file came into the library (its birth on this disk, else its first read)
+    arrived_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # When its content last changed what the canon reads (the canon's watermark)
+    content_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())

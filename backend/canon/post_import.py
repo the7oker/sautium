@@ -15,10 +15,17 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 
-def run(state: Dict[str, Any], result: Dict[str, Any], since: datetime) -> None:
+def run(state: Dict[str, Any], result: Dict[str, Any], since: datetime,
+        take_arriving: bool = True) -> None:
     """`state` is the worker's live state (progress, cancel_requested),
     `result` its result dict (receives `mb_canon`), `since` the run's start
-    — the AI tier looks only at files imported after it."""
+    — the AI tier looks only at files imported after it.
+
+    `take_arriving` False is a scan a folder watcher started: an album
+    still arriving by its own files' words (canon.content.arriving_albums)
+    is left to a later pass, and the AI tier — which judges whole albums —
+    waits for an explicit scan or the start, which takes every file the
+    deferred runs imported (`canon.ai_pending_since`)."""
     from routers.settings import mb_load_active, notify_library_subscribers, start_aicanon_job
 
     state["progress"] = "Normalizing artists..."
@@ -54,23 +61,24 @@ def run(state: Dict[str, Any], result: Dict[str, Any], since: datetime) -> None:
             canon_stats: Dict[str, Any] = {}
             with algo_canon() as _ok:   # priority over AI; holds the dump lock
                 if _ok:
-                    canon_stats = canonicalize_pending()
+                    canon_stats = canonicalize_pending(take_arriving=take_arriving)
                     # Catch the NULL-rg owned-album residue the main matcher
                     # rejects on its bidirectional size gate — first by
                     # edition-stripped name, then the content-only studio
                     # uniques the name pass can't reach (cross-script /
                     # reworded titles). Free, algorithmic, event-driven.
                     from canon.content import distill_album_residue, distill_album_coverage
-                    bound = distill_album_residue().get("bound", 0)
-                    bound += distill_album_coverage().get("bound", 0)
+                    bound = distill_album_residue(take_arriving=take_arriving).get("bound", 0)
+                    bound += distill_album_coverage(take_arriving=take_arriving).get("bound", 0)
                     if bound:
                         canon_stats["album_residue_bound"] = bound
             if canon_stats.get("artists") or canon_stats.get("album_residue_bound"):
                 result["mb_canon"] = canon_stats
                 logger.info(f"Post-import MB canon: {canon_stats}")
             # AI judgment tier on what the deterministic canon left — scoped
-            # to THIS run's new files, async + gated.
-            if start_aicanon_job(since=since):
+            # to the new files since the last run that took them, async + gated.
+            ai_since = _ai_since(since, take_arriving)
+            if ai_since is not None and start_aicanon_job(since=ai_since):
                 logger.info("Post-import: AI canonization started (new files)")
         except Exception as e:
             logger.error(f"Post-import MB canonicalization failed: {e}")
@@ -84,6 +92,28 @@ def run(state: Dict[str, Any], result: Dict[str, Any], since: datetime) -> None:
         notary.wake("scan", full=True)
         from canon import scrobbles
         scrobbles.wake()
+
+
+def _ai_since(since: datetime, take_arriving: bool):
+    """The AI tier's `since`: a watcher's run keeps the earliest start of the
+    runs it defers (user_settings `canon.ai_pending_since`) and starts
+    nothing; a run that takes arriving albums starts from that earliest
+    start, so no file a deferred run imported escapes the tier."""
+    import json
+    from db_pool import db_execute, db_query_one
+    row = db_query_one("SELECT value FROM user_settings WHERE key = 'canon.ai_pending_since'")
+    pending = datetime.fromisoformat(row["value"]) if row else None
+    if not take_arriving:
+        if pending is None or since < pending:
+            db_execute("""INSERT INTO user_settings (key, value) VALUES ('canon.ai_pending_since', %s::jsonb)
+                          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+                                                          updated_at = CURRENT_TIMESTAMP""",
+                       (json.dumps(since.isoformat()),))
+        return None
+    if pending is not None:
+        db_execute("DELETE FROM user_settings WHERE key = 'canon.ai_pending_since'")
+        return min(pending, since)
+    return since
 
 
 def relink(state: Dict[str, Any], result: Dict[str, Any]) -> None:

@@ -81,12 +81,13 @@ INSTRUMENTS_ROWS_SQL = """
     SELECT mf.track_id, mf.id AS media_file_id, mf.file_path, mf.bit_depth,
            mf.sample_rate, mf.is_lossless, mf.duration_seconds,
            mf.cue_start_seconds, mf.cue_end_seconds, mf.file_modified_at,
+           mf.file_size_bytes, mf.stat_mtime_ns, mf.stat_ctime_ns,
            ti.id IS NULL AS gap
       FROM media_files mf
       JOIN album_variants av ON av.id = mf.album_variant_id
       LEFT JOIN track_instruments ti ON ti.track_id = mf.track_id
       LEFT JOIN analysis_sources asrc ON asrc.id = ti.analysis_source_id
-     WHERE mf.is_analysis_source AND av.absent_since IS NULL
+     WHERE mf.is_analysis_source AND av.absent_since IS NULL AND NOT mf.decode_refused
        AND (mf.duration_seconds IS NULL OR mf.duration_seconds >= :min_seconds)
 """
 

@@ -300,17 +300,41 @@ def test_scan_start_refuses_an_unreachable_folder_and_wakes_the_notices(
     assert heard(timeout=0.5) == []               # a second tap wakes nobody again
 
 
-def test_the_cli_and_the_legacy_endpoint_refuse_as_well(cur, library, main_module, heard):
+@pytest.fixture
+def backend_here(main_module, monkeypatch):
+    """cli.py's requests to the running backend, answered by this process's
+    endpoints: the CLI scans through the one queue, never beside it."""
+    import click
+    import cli
     from fastapi import HTTPException
+    from urllib.parse import parse_qs, urlsplit
+
+    def answer(method, path_and_query):
+        u = urlsplit(path_and_query)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        try:
+            if u.path == "/scan/start":
+                return asyncio.run(main_module.scan_start(
+                    skip_existing=q.get("skip_existing", "true") == "true",
+                    subpath=q.get("subpath"), prune=q.get("prune") == "true"))
+            if u.path == "/scan/status":
+                return asyncio.run(main_module.scan_status())
+            if u.path == "/scan/prune":
+                return asyncio.run(main_module.scan_prune(plan_id=q["plan_id"],
+                                                          remove=q["remove"] == "true"))
+        except HTTPException as e:
+            raise click.ClickException(e.detail)
+        raise AssertionError(path_and_query)
+    monkeypatch.setattr(cli, "_backend", answer)
+    return cli
+
+
+def test_the_cli_is_refused_as_the_queue_is(cur, library, backend_here, heard):
+    from click.testing import CliRunner
     _owned_file(cur)
-
-    with pytest.raises(scanner.LibraryUnreachable):
-        scanner.scan_library()                    # what cli.py scan runs
-    with pytest.raises(HTTPException) as refused:
-        asyncio.run(main_module.scan_library_endpoint())
-
-    assert refused.value.status_code == 409
-    assert heard() == ["sautium_notices"]         # the first look's news; the second's is not
+    refused = CliRunner().invoke(backend_here.cli, ["scan"])
+    assert refused.exit_code == 1 and scanner.UNREACHABLE in refused.output, refused.output
+    assert heard() == ["sautium_notices"]         # the look's news
 
 
 def _empty_the_folder_during_the_walk(monkeypatch, library):
@@ -336,12 +360,11 @@ def test_an_empty_walk_records_no_scan(cur, library, main_module, heard, monkeyp
     if case == "gone during the walk":
         _empty_the_folder_during_the_walk(monkeypatch, library)
     ran = []
-    monkeypatch.setattr(post_import, "run", lambda *a: ran.append("post_import"))
+    monkeypatch.setattr(post_import, "run", lambda *a, **kw: ran.append("post_import"))
     monkeypatch.setattr(scanner, "plan_prune", lambda **kw: ran.append("prune"))
-    main_module._scan_state.update(running=True, cancel_requested=False,
-                                   progress="Starting scan...", stats=None, result=None)
 
-    main_module._scan_worker(None, True, None, True)
+    main_module.request_scan(prune=True)
+    main_module._scan_thread.join()
 
     assert main_module._scan_state["running"] is False
     assert main_module._scan_state["progress"] == progress
@@ -463,7 +486,7 @@ def test_a_folder_with_an_entry_it_cannot_type_is_left_out_whole(library, monkey
     assert (audio, cues, unread) == ([], [], [str(album)])
 
 
-def _post_import(state, result, since):
+def _post_import(state, result, since, **kw):
     """The post-import pass as far as these tests need it, in its order:
     pass-1 artist normalization (the canon that re-keys a returned file's
     raw-tag track), then the re-link. The MB tiers, the AI job, the notary
@@ -479,9 +502,8 @@ def _post_import(state, result, since):
 def _scan(main_module, monkeypatch, prune, post=_post_import):
     from canon import post_import
     monkeypatch.setattr(post_import, "run", post)
-    main_module._scan_state.update(running=True, cancel_requested=False,
-                                   progress="Starting scan...", stats=None, result=None)
-    main_module._scan_worker(None, True, None, prune)
+    main_module.request_scan(prune=prune)
+    main_module._scan_thread.join()
     return main_module._scan_state
 
 
@@ -642,20 +664,25 @@ def test_a_yes_judges_a_file_as_the_plan_did(cur, library, main_module, monkeypa
     assert cur.fetchone()[0] == 0
 
 
-def test_a_new_scan_replaces_the_plan(cur, library, main_module, monkeypatch):
+def test_a_scan_that_asks_nothing_keeps_the_question_and_a_rescan_replaces_it(
+        cur, library, main_module, monkeypatch):
+    """A watcher's scan or "Scan for new" leaves the Rescan's question as it
+    is — its yes judges the files again — and only a new Rescan asks anew."""
     from fastapi import HTTPException
     from canon import post_import
     _a_file_missing_beside(cur, library)
     state = _rescan(main_module, monkeypatch)
-    stale = state["prune_plan"]["id"]
-    monkeypatch.setattr(post_import, "run", lambda *a: None)
+    first = state["prune_plan"]["id"]
+    monkeypatch.setattr(post_import, "run", lambda *a, **kw: None)
 
     asyncio.run(main_module.scan_start())         # "Scan for new"
     assert _wait_until(lambda: not state["running"], timeout=60)
+    assert state["prune_plan"]["id"] == first
 
-    assert state["prune_plan"] is None
+    _rescan(main_module, monkeypatch)
+    assert state["prune_plan"]["id"] != first
     with pytest.raises(HTTPException) as refused:
-        asyncio.run(main_module.scan_prune(plan_id=stale, remove=True))
+        asyncio.run(main_module.scan_prune(plan_id=first, remove=True))
     assert refused.value.status_code == 410
     assert _files(cur) == ["A/01.flac", "A/02.flac"]
 
@@ -699,12 +726,12 @@ def test_a_plan_for_a_subfolder_judges_only_that_subfolder(cur, library):
     assert _away(cur) == ["Gone"]
 
 
-def test_the_cli_asks_before_it_removes(cur, library, monkeypatch):
+def test_the_cli_asks_before_it_removes(cur, library, backend_here, monkeypatch):
     from click.testing import CliRunner
-    import cli
+    from canon import post_import
+    cli = backend_here
+    monkeypatch.setattr(post_import, "run", lambda *a, **kw: None)
     _a_file_missing_beside(cur, library)
-    monkeypatch.setattr(cli, "scan_library", lambda **kw: {
-        "processed": 1, "added": 0, "skipped": 1, "errors": 0, "unread": 0})
 
     no = CliRunner().invoke(cli.cli, ["scan", "--prune"], input="n\n")
     assert "Nothing removed" in no.output, no.output
@@ -1029,7 +1056,7 @@ def test_a_returned_file_the_canon_re_keys_gets_its_analysis_back(
     from canon.identity import recanonicalize_artist
     from database import get_db_context
 
-    def canon_then_relink(state, result, since):
+    def canon_then_relink(state, result, since, **kw):
         with get_db_context() as db:
             raw = db.execute(text("SELECT id FROM artists WHERE name = 'Bjork'")).scalar()
             if raw:

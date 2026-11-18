@@ -79,14 +79,21 @@ def flac(tmp_path):
     return str(path)
 
 
-@pytest.mark.parametrize("duration", [95, None, 10, 400])
+@pytest.mark.parametrize("duration", [95, None, 10, 95.9])
 def test_the_decode_read_into_one_array_is_ffmpegs_output(flac, duration):
-    """Known, unknown, too short (the array grows) or too long (it is cut)."""
+    """Known, unknown, too short (the array grows) or a little long (it is
+    cut; far longer than the file is a decode short of its declared length,
+    refused: test_decode_gate_db)."""
     out = subprocess.run(["ffmpeg", "-v", "error", "-i", flac, "-ac", "1", "-ar", "48000",
                           "-f", "f32le", "pipe:1"], capture_output=True, check=True).stdout
     expected = np.frombuffer(out, dtype=np.float32)
     assert np.array_equal(audio_analysis.load_full_track_48k(flac, duration_seconds=duration),
                           expected)
+
+
+def test_a_length_the_decode_does_not_reach_is_refused(flac):
+    with pytest.raises(audio_analysis.ShortDecode):
+        audio_analysis.load_full_track_48k(flac, duration_seconds=400)
 
 
 def test_a_file_ffmpeg_cannot_read_raises_with_its_words(tmp_path):

@@ -95,11 +95,11 @@ def _name_corresponds(library_name: str, mb_name: str) -> bool:
 
 def _residue(limit, since=None):
     """Uncanonized owned artists, biggest first. `since` (a timestamp) scopes to
-    artists with a NEW media file after it — the post-scan trigger uses it so only
+    artists with a NEW media file after it (or one a read moved to them) — the post-scan trigger uses it so only
     freshly-imported artists are re-resolved, not the whole residue every scan."""
     lim = "LIMIT %(l)s" if limit else ""
     new_only = ("""AND EXISTS (SELECT 1 FROM track_artists tn JOIN media_files mn ON mn.track_id=tn.track_id
-                               WHERE tn.artist_id=a.id AND mn.created_at > %(since)s)""" if since else "")
+                               WHERE tn.artist_id=a.id AND mn.content_at > %(since)s)""" if since else "")
     params = {}
     if limit:
         params["l"] = limit

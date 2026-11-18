@@ -28,6 +28,7 @@ switch (enrichment.instruments). Each decodes a track once.
 """
 
 import logging
+import os
 import subprocess
 import tempfile
 import threading
@@ -43,6 +44,7 @@ from tqdm import tqdm
 import provenance
 from config import settings
 from database import get_db_context
+from file_stat import FileStat, stat_of
 from ensemble_instruments import INSTRUMENTS_ANALYSIS_VERSION
 from models import AudioFeature, TrackInstruments
 from record_sig import FEATURE_ORDER
@@ -77,6 +79,124 @@ DECODE_TIMEOUT_SECONDS = 300
 class TrackTooLong(Exception):
     """A decode passed the longest track the pass admitted
     (analysis_pace.longest_track_seconds): its file says less than it holds."""
+
+
+class ShortDecode(Exception):
+    """A decode that ended short of the length the file's own header
+    declares: a file caught mid-copy declares its whole length, reads every
+    tag and decodes what is there with exit code 0 (LIBRARY-WATCH M6), a
+    truncated file the same. An analysis of it would be sealed under the
+    material declaration of the whole, so nothing is made of it."""
+
+
+class ChangedUnderDecode(Exception):
+    """The file's stat moved while it was decoded, or differs from the one
+    its row recorded at its last read: the bytes decoded may be no version
+    of the file the catalogue holds. Its change brings the re-read."""
+
+
+# The formats whose header declares the length exactly (STREAMINFO, the
+# WavPack/APE/TTA headers, DSF/DFF's sample counts, a WAV/AIFF data chunk,
+# an Ogg stream's last granule, MP4's media header). An MP3 is left out: its
+# length is mutagen's estimate unless a Xing/VBRI/LAME header carries it,
+# which the scan does not record.
+EXACT_LENGTH_FORMATS = {".flac", ".ape", ".wv", ".tta", ".dsf", ".dff", ".wav", ".aiff",
+                        ".ogg", ".m4a"}
+# A damaged frame the decoder drops mid-file, or an AAC encoder's priming,
+# is a fraction of a second; a copy caught mid-way is the rest of the track.
+DECLARED_LENGTH_TOLERANCE_S = 1.0
+
+
+def check_whole(audio_seconds: float, local_path: str, duration_seconds: Optional[float]) -> None:
+    """ShortDecode when a format that declares its length exactly decoded
+    short of it."""
+    if (duration_seconds
+            and os.path.splitext(local_path)[1].lower() in EXACT_LENGTH_FORMATS
+            and audio_seconds < float(duration_seconds) - DECLARED_LENGTH_TOLERANCE_S):
+        raise ShortDecode(f"{local_path} decodes to {audio_seconds:.1f} s of the "
+                          f"{float(duration_seconds):.1f} s its header declares")
+
+
+def recorded_stat(row) -> Optional[FileStat]:
+    """The stat a pass's queue row says the file had at its last read; None
+    for a row read before the stat was recorded."""
+    if row.stat_mtime_ns is None:
+        return None
+    return FileStat(row.file_size_bytes, row.stat_mtime_ns, row.stat_ctime_ns)
+
+
+def _stat_now(local_path: str) -> Optional[FileStat]:
+    try:
+        return stat_of(local_path)
+    except OSError:
+        return None     # the decode that follows fails on its own
+
+
+def decode_as_read(row, local_path: str, decode):
+    """`decode()` of a queued file, held to the version its row describes:
+    ChangedUnderDecode when the file differs from its last read's stat
+    before the decode, or moved while it ran — the decode may then be of no
+    version the catalogue holds, and the change itself brings the re-read
+    (scanner: a stat that moved is read again). ShortDecode comes from the
+    decode (check_whole). Optimistic: nothing waits, the race cannot be
+    saved."""
+    before = _stat_now(local_path)
+    recorded = recorded_stat(row)
+    if before is None:
+        if recorded is not None:
+            return None         # unreadable now: a failed decode, no refusal to keep
+        return decode()         # a row read before stats were kept: the decode's own word
+    if recorded is not None and before != recorded:
+        raise ChangedUnderDecode(f"{local_path} changed since its last read")
+    audio = decode()
+    after = _stat_now(local_path)
+    if after is None:
+        return None             # a mount's hiccup is no change of the file
+    if after != before:
+        raise ChangedUnderDecode(f"{local_path} changed while it was decoded")
+    return audio
+
+
+_AS_READ = """id = :id AND file_size_bytes IS NOT DISTINCT FROM :size
+              AND stat_mtime_ns IS NOT DISTINCT FROM :mtime
+              AND stat_ctime_ns IS NOT DISTINCT FROM :ctime"""
+
+
+def _as_read_params(row) -> Dict[str, Any]:
+    return {"id": row.media_file_id, "size": row.file_size_bytes,
+            "mtime": row.stat_mtime_ns, "ctime": row.stat_ctime_ns}
+
+
+def refuse(db: Session, row, reason: Exception, source_id: Optional[int] = None) -> None:
+    """A decode refused: the file waits, out of both passes' queues, until
+    it is read again — every re-read clears the mark (scanner), nothing else
+    does. Marked only on the row as the pass read it: a file re-read since
+    is another version, not this refusal's. The source the pass registered
+    for it goes if it holds nothing: its print was taken of bytes the
+    refusal says are not the file's (a re-read in the same moment could not
+    see the registration, which had not committed)."""
+    db.execute(sa_text(f"UPDATE media_files SET decode_refused = true WHERE {_AS_READ}"),
+               _as_read_params(row))
+    if source_id is not None:
+        db.execute(sa_text("""
+            DELETE FROM analysis_sources s WHERE s.id = :s
+               AND NOT EXISTS (SELECT 1 FROM embeddings x WHERE x.analysis_source_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM audio_features x WHERE x.analysis_source_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM track_instruments x WHERE x.analysis_source_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM analysis_sources m WHERE m.material_of = s.id)"""),
+                   {"s": source_id})
+    logger.error(f"No analysis made of track {row.track_id}: {reason}")
+
+
+def still_as_read(db: Session, row) -> bool:
+    """Whether the file's row is still the version the pass decoded, asked
+    right before the save: a re-read that came first is the catalogue's
+    version, pending again, and the save is not made. One that lands between
+    this and the batch's commit unlinks the file's sources (scanner.
+    reread_metadata), so the record saved under them is pending again too:
+    no lock is held through the batch's work."""
+    return db.execute(sa_text(f"SELECT 1 FROM media_files WHERE {_AS_READ}"),
+                      _as_read_params(row)).first() is not None
 
 
 def load_full_track_48k(local_path: str, cue_start: Optional[float] = None,
@@ -154,6 +274,7 @@ def load_full_track_48k(local_path: str, cue_start: Optional[float] = None,
     audio = buf[:got // 4]
     if not len(audio):
         raise ValueError(f"ffmpeg produced no samples for {local_path}")
+    check_whole(len(audio) / DECODE_SR, local_path, duration_seconds)
     return audio
 
 
@@ -440,7 +561,8 @@ class AudioAnalyzer:
                 provenance.relink_returned_files(track_ids, cancel_check=cancel_flag)
             except Exception as e:
                 logger.error(f"Re-link before the pass failed: {e}", exc_info=True)
-        stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0, "too_long": 0}
+        stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0, "too_long": 0,
+                 "refused": 0}
         start_time = time.time()
         batch_size = 16
         from hardware_profile import resolve as _hw
@@ -560,6 +682,10 @@ class AudioAnalyzer:
                         if audio is TrackTooLong:
                             stats["too_long"] += 1
                             continue
+                        if isinstance(audio, Exception):
+                            refuse(db, row, audio, src_id)
+                            stats["refused"] += 1
+                            continue
                         if audio is None:
                             stats["failed"] += 1
                             continue
@@ -626,21 +752,27 @@ class AudioAnalyzer:
 
     def _decode(self, row, max_seconds: float):
         """The track's audio; TrackTooLong (the class) for one that decodes
-        past `max_seconds`, None for one that fails."""
+        past `max_seconds`, the refusal (ShortDecode, ChangedUnderDecode) for
+        one that is not the whole file as read, None for one that fails."""
+        local_path = settings.translate_to_local_path(row.file_path)
         try:
-            return load_full_track_48k(settings.translate_to_local_path(row.file_path),
-                                       row.cue_start_seconds, row.cue_end_seconds,
-                                       row.duration_seconds, max_seconds)
+            return decode_as_read(row, local_path, lambda: load_full_track_48k(
+                local_path, row.cue_start_seconds, row.cue_end_seconds,
+                row.duration_seconds, max_seconds))
         except TrackTooLong as e:
             logger.info(f"Instrument pass: {e} — left to the network")
             return TrackTooLong
+        except (ShortDecode, ChangedUnderDecode) as e:
+            return e
         except Exception as e:
             logger.error(f"Decode failed for {row.file_path}: {e}")
             return None
 
     def _tag_track(self, db: Session, row, src_id: int, audio: np.ndarray) -> str:
         """One decoded track tagged and saved under a savepoint of its own:
-        success, skipped (a better copy's record stands) or failed."""
+        success, skipped (a better copy's record stands), refused (the file
+        was read again since its decode: that version is pending) or
+        failed."""
         try:
             instruments = self.ensemble.tag_full_track(audio)
         except Exception as e:
@@ -648,6 +780,8 @@ class AudioAnalyzer:
             return "failed"
         try:
             with db.begin_nested():
+                if not still_as_read(db, row):
+                    return "refused"
                 saved = save_instruments(db, row.track_id, instruments, src_id)
         except Exception as e:
             logger.error(f"Failed to save instruments for {row.track_id}: {e}")

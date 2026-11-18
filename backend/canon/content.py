@@ -28,6 +28,7 @@ from sqlalchemy import text as _sql
 
 import mb_backend as mb
 from database import SessionLocal
+from album_identity import dir_disc as _dir_disc
 from db_pool import db_execute, db_query, db_query_one, get_conn
 from discography import release_match_key, title_residual
 import mb_answers
@@ -442,6 +443,53 @@ ORDER BY album_id, rg_mbid, owned_cov DESC
 """
 
 
+def arriving_albums(album_ids) -> set:
+    """The albums whose own files say they are still arriving: a copy —
+    with the sibling disc folders it spans (`Album/CD1`, `Album/CD2`) —
+    whose files declare positions that are not all here (a track total,
+    `n/N`, a disc total). The canon makes no decision about such an album
+    until the declared positions are here or an explicit scan takes it as
+    it is (canonicalize_pending's `take_arriving`): a partial album bound to
+    the same-titled single it fills half of, then folded into the owned
+    single as its twin, was permanent (LIBRARY-WATCH-DESIGN §3.5). Only the
+    album's own declaration of what is missing makes it wait — never a
+    count: a two-track album declaring 2/2, or nothing, is complete."""
+    from album_identity import dir_disc
+    ids = [str(a) for a in album_ids]
+    if not ids:
+        return set()
+    rows = db_query("""
+        SELECT av.album_id::text AS album, av.directory_path AS d, COALESCE(mf.disc_number, 1) AS disc,
+               mf.track_number AS track, mf.track_total, mf.disc_total
+          FROM album_variants av JOIN media_files mf ON mf.album_variant_id = av.id
+         WHERE av.album_id = ANY(%(ids)s::uuid[])
+           AND EXISTS (SELECT 1 FROM album_variants y JOIN media_files x ON x.album_variant_id = y.id
+                        WHERE y.album_id = av.album_id
+                          AND (x.track_total IS NOT NULL OR x.disc_total IS NOT NULL))
+    """, {"ids": ids})
+    copies: dict = {}
+    for r in rows:
+        d = r["d"].rstrip("/")
+        group = d.rpartition("/")[0] if dir_disc(d) else d
+        copies.setdefault((r["album"], group), []).append(r)
+    out = set()
+    for (album, _g), files in copies.items():
+        discs: dict = {}
+        for f in files:
+            discs.setdefault(f["disc"], []).append(f)
+        declared_discs = max((f["disc_total"] or 0) for f in files)
+        if declared_discs and len(set(discs) & set(range(1, declared_discs + 1))) < declared_discs:
+            out.add(album)
+            continue
+        for disc_files in discs.values():
+            total = max((f["track_total"] or 0) for f in disc_files)
+            present = {f["track"] for f in disc_files}
+            if total and len(present & set(range(1, total + 1))) < total:
+                out.add(album)
+                break
+    return out
+
+
 def _owned_counts(artist_id):
     # Count only THIS artist's tracks (ta2): a shared/mixed album directory
     # otherwise inflates the denominator and the coverage gates become
@@ -483,12 +531,17 @@ def _unrefuted(artist_id, mbids: list) -> list:
     return [m for m in mbids if m not in refuted]
 
 
-def resolve_artist(artist_id, name: str) -> dict:
+def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
     """Read-only cascaded recording-centric resolve. Materialises the candidate
     recordings once (TEMP _recs), then each cascade pass re-matches only the
-    unverified residue with looser parameters; the pass that verifies wins."""
+    unverified residue with looser parameters; the pass that verifies wins.
+    Without `take_arriving`, an album still arriving by its own files' words
+    (arriving_albums) is left out of the plan."""
     cands = _unrefuted(artist_id, _candidates(name))
     owned = _owned_counts(artist_id)
+    if not take_arriving:
+        for album in arriving_albums(owned):
+            owned.pop(album)
 
     resolved: dict = {}
     if cands and owned:
@@ -946,13 +999,6 @@ def _title_key(title: str) -> str:
 # A per-disc folder name — "CD2 - Green", "Disc 2", "LP4", "CD-1", "Side B" —
 # names the disc where the files' tags do not (a local rip's disc_number
 # stays 1 when only the folder says CD3).
-_DIR_DISC_RE = re.compile(r"^(?:cd|disc|disk|lp|side)\s*[-_.]?\s*(\d+|[a-d])(?![\w])", re.IGNORECASE)
-
-
-def _dir_disc(directory_path: str):
-    last = (directory_path or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    m = _DIR_DISC_RE.match(last.strip())
-    return m.group(1).lower() if m else None
 
 
 # Two files of one track read from two copies: the same slot, or the same
@@ -1495,7 +1541,8 @@ def _confirmed_edition(v: dict, release_mbid: str, group_mbid: str, asks) -> obj
     return {"name": rel.data["title"], "release_mbid": rel.mbid}
 
 
-def apply_editions(dry_run: bool = True, artist_ids: list = None, waiting: set = None) -> dict:
+def apply_editions(dry_run: bool = True, artist_ids: list = None, waiting: set = None,
+                   take_arriving: bool = True) -> dict:
     """APPLY increment 2b — resolve owned albums into editions.
 
     Supersedes the flat rename-to-RG: differing-tracklist variants wrongly
@@ -1523,6 +1570,9 @@ def apply_editions(dry_run: bool = True, artist_ids: list = None, waiting: set =
             sql += " AND aa.artist_id::text = ANY(:ids)"
             params["ids"] = [str(a) for a in artist_ids]
         album_ids = [r[0] for r in db.execute(_sql(sql), params).fetchall()]
+        if not take_arriving:
+            arriving = arriving_albums(album_ids)
+            album_ids = [a for a in album_ids if a not in arriving]
         for album_id in album_ids:
             try:
                 _split_album_editions(db, album_id, dry_run, st, rel_cache, waiting)
@@ -1537,7 +1587,7 @@ def apply_editions(dry_run: bool = True, artist_ids: list = None, waiting: set =
 
 
 def distill_album_residue(limit: int = None, dry_run: bool = True,
-                          name_min: float = _RG_RESIDUE_NAME_MIN) -> dict:
+                          name_min: float = _RG_RESIDUE_NAME_MIN, take_arriving: bool = True) -> dict:
     """Algorithmic catcher for the NULL-rg owned-album residue.
 
     The main matcher (resolve_artist→_RG_SQL) leaves ~855 owned albums unbound:
@@ -1573,6 +1623,9 @@ def distill_album_residue(limit: int = None, dry_run: bool = True,
             WHERE a.musicbrainz_id IS NULL
               AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id=a.id)
         """, {"a": aid})
+        if not take_arriving:
+            arriving = arriving_albums([r["id"] for r in resid])
+            resid = [r for r in resid if r["id"] not in arriving]
         if not mbids or not resid:
             continue
         st["artists"] += 1
@@ -1667,7 +1720,8 @@ def album_rg_candidates(artist_id, album_ids, mbids=None, max_per_album: int = 1
     return out
 
 
-def distill_album_coverage(limit: int = None, dry_run: bool = True) -> dict:
+def distill_album_coverage(limit: int = None, dry_run: bool = True,
+                           take_arriving: bool = True) -> dict:
     """Content-only residue pass: bind the NULL-rg owned album that maps UNAMBIGUOUSLY to
     one studio release-group by tracklist alone — no name match needed. distill_album_residue
     needs an edition-stripped NAME match; this catches the cross-script / reworded studio
@@ -1699,6 +1753,9 @@ def distill_album_coverage(limit: int = None, dry_run: bool = True) -> dict:
             WHERE a.musicbrainz_id IS NULL
               AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id=a.id)
         """, {"a": aid})]
+        if not take_arriving:
+            arriving = arriving_albums(albums)
+            albums = [a for a in albums if a not in arriving]
         cands = album_rg_candidates(aid, albums) if albums else {}
         picks = {}   # album_id -> top candidate
         for alb, cs in cands.items():
@@ -2211,10 +2268,11 @@ def promote_name_exact() -> dict:
             return {"promoted": cur.rowcount}
 
 
-def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=()) -> dict:
+def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=(),
+                         take_arriving: bool = True) -> dict:
     """Incremental canon stage — the post-scan / post-import entry point. For every OWNED
     artist whose content is newer than its last canon (the `artists.last_mb_sync` watermark
-    vs `owned_files.created_at` — a file here or one the HQPlayer holds): resolve + materialize (apply_artist) + scoped rename/edition-
+    vs `owned_files.content_at` — a file here or one the HQPlayer holds, its import or a read that moved it): resolve + materialize (apply_artist) + scoped rename/edition-
     collapse, then merge any MBID collisions surfaced across the batch.
 
     MB-OPTIONAL — a NO-OP without the local dump (sync/enrich proceed on tier-3 deterministic
@@ -2224,13 +2282,30 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=()) -
 
     `artist_ids` scopes the pass to those artists (the ones MusicBrainz's
     answers just woke); `woken` adds such artists to a whole pass. Every
-    other condition still holds."""
+    other condition still holds.
+
+    `take_arriving` False (a scan a folder watcher started) leaves the
+    albums still arriving by their own files' words to a later pass; True
+    (an explicit scan, the node's start) takes them as they are — with the
+    artists that hold them, whose watermark the earlier pass stamped."""
     if not mb.LOCAL_DUMP:
         mb.refresh()   # the dump may have been loaded since this process started
         if not mb.LOCAL_DUMP:
             return {"skipped": "no local MB dump", "artists": 0}
 
     va = _canonicalize_va()   # cheapest layer first — drops VA rows out of pending
+    if take_arriving and artist_ids is None:
+        waiting_albums = arriving_albums(r["id"] for r in db_query("""
+            SELECT DISTINCT av.album_id::text AS id FROM album_variants av
+              JOIN media_files mf ON mf.album_variant_id = av.id
+             WHERE mf.track_total IS NOT NULL OR mf.disc_total IS NOT NULL"""))
+        if waiting_albums:
+            woken = list(woken) + [r["a"] for r in db_query("""
+                SELECT DISTINCT ta.artist_id::text AS a FROM track_artists ta
+                  JOIN media_files mf ON mf.track_id = ta.track_id
+                  JOIN album_variants av ON av.id = mf.album_variant_id
+                 WHERE ta.role = 'primary' AND av.album_id = ANY(%(ids)s::uuid[])""",
+                {"ids": list(waiting_albums)})]
 
     # Track-owned, not album-owned: an artist whose only presence is a track or
     # two on someone else's compilation has no album_artists row at all, yet is
@@ -2239,7 +2314,7 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=()) -
     # A woken artist is taken whatever its watermark: the answers it waited on
     # just came, whoever queued them (a pass, a CLI run, a crash before the
     # unstamp).
-    watermark = "(ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync)"
+    watermark = "(ar.last_mb_sync IS NULL OR mf.content_at > ar.last_mb_sync)"
     due = ("ar.id::text = ANY(%(ids)s)" if artist_ids is not None
            else f"({watermark} OR ar.id::text = ANY(%(ids)s))")
     pending = db_query(f"""
@@ -2269,7 +2344,7 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=()) -
             continue
         seen.add(aid)
         try:
-            plan = resolve_artist(aid, aname)
+            plan = resolve_artist(aid, aname, take_arriving=take_arriving)
             members = _collab_members(aid, aname, plan)
             if members is confirm.WAIT:
                 waiting.add(aid)
@@ -2291,7 +2366,8 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=()) -
             st["errors"] += 1
             logger.error("canon failed for %r: %s", aname, e)
     if done:
-        apply_editions(dry_run=False, artist_ids=done, waiting=waiting)   # scoped edition split + RG rename
+        apply_editions(dry_run=False, artist_ids=done, waiting=waiting,   # scoped edition split + RG rename
+                       take_arriving=take_arriving)
         fold_credit_duplicates(dry_run=False, artist_ids=done)   # one track read from two copies
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
         # collision survivors (they simply re-canon next scan — idempotent, cheap)

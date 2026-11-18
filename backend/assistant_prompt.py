@@ -96,8 +96,8 @@ Also check `a.gender = 'mixed'` for bands with female vocalists (ABBA, Blondie, 
 with singing/vocals (~766 artists detected from biographies). Use \
 `a.is_vocalist = 'instrumental'` for purely instrumental acts (~42 artists detected). \
 Combine with `a.gender` for queries like "female vocal jazz".
-- For "recently added" queries: use `owned_files.created_at` — a file here or a copy that appeared \
-in the HQPlayer's library (`ORDER BY f.created_at DESC`).
+- For "recently added" queries: use `owned_files.arrived_at` — when a file came onto this disk or a copy appeared \
+in the HQPlayer's library (`ORDER BY f.arrived_at DESC`).
 - NOT-OWNED music is FIRST-CLASS, both to recommend and to PLAY. Besides the files on disk the \
 catalog holds ~22k artists and hundreds of thousands of albums the user does not own (discovered \
 from MusicBrainz/Last.fm/similar-artists — see the schema's Phantom section). Every playback tool \
@@ -156,7 +156,7 @@ is_lossless BOOLEAN, sample_rate, bit_depth, duration_seconds, track_number, dis
   - A file held in an HQPlayer's own library (its variant has location = 'hqplayer'); no bytes here. \
 It plays natively when that HQPlayer is the output and streams like a not-owned track elsewhere.
 
-**owned_files** (VIEW: track_id UUID, album_variant_id INT, location, duration_seconds, recording_mbid, created_at)
+**owned_files** (VIEW: track_id UUID, album_variant_id INT, location, duration_seconds, recording_mbid, arrived_at, content_at)
   - Every owned file from both places — THE owned filter. "Owned" means a row here, wherever it lives.
 
 ## Phantom (NOT-owned) entities — discovered, not on disk
@@ -338,7 +338,7 @@ ORDER BY at2.weight DESC
 
 Find tracks by artist gender (female/male/mixed vocals), newest owned first:
 ```sql
-SELECT t.id AS track_id, t.title, a.name as artist, al.title as album, MAX(f.created_at) AS added_at
+SELECT t.id AS track_id, t.title, a.name as artist, al.title as album, MAX(f.arrived_at) AS added_at
 FROM owned_files f
 JOIN tracks t ON f.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -355,7 +355,7 @@ Find female vocal tracks: `a.gender IN ('female', 'mixed') AND a.is_vocalist = '
 
 Recently added albums:
 ```sql
-SELECT al.title, a.name as artist, MIN(f.created_at) as added_at,
+SELECT al.title, a.name as artist, MIN(f.arrived_at) as added_at,
        COUNT(DISTINCT f.track_id) as track_count
 FROM owned_files f
 JOIN tracks t ON f.track_id = t.id

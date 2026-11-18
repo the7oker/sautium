@@ -53,6 +53,27 @@ _DVD_TAIL_RE = re.compile(
 )
 
 
+# A folder named as one disc of an album (CD1, Disc 2, LP 3, Side A): a
+# multi-disc album kept a folder a disc. The canon's edition folding and the
+# scanner's folder rule (a disc folder joins its siblings' album) both read it.
+_DIR_DISC_RE = re.compile(r"^(?:cd|disc|disk|lp|side)\s*[-_.]?\s*(\d+|[a-d])(?![\w])", re.IGNORECASE)
+
+
+def dir_disc(directory_path: str):
+    last = (directory_path or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    m = _DIR_DISC_RE.match(last.strip())
+    return m.group(1).lower() if m else None
+
+
+def group_key(album_title: Optional[str], album_credit: Optional[str]) -> Tuple[str, str]:
+    """A copy's raw group: the album key a folder's files are grouped by
+    (_album_key: disc and part markers folded) and the album credit's
+    identity. A file whose assignment has the key of a copy its folder — or,
+    for a disc folder, a sibling disc folder — already holds belongs to that
+    copy's album, wherever the canon has moved it since."""
+    return _album_key(album_title), normalize((album_credit or "").strip())
+
+
 def _album_key(title: Optional[str]) -> str:
     """Stricter sibling of ``release_match_key`` for deciding whether two files
     in one folder are the same album: also folds any disc/part marker (digit,

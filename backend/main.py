@@ -1156,9 +1156,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"dump auto-update check failed: {e}")
 
+    # New music appears by itself where the library's mount delivers events
+    # (library_watch): armed, it queues the whole library once — what changed
+    # while the node was down — and each folder that changes after.
+    import library_watch
+    await asyncio.to_thread(library_watch.start, request_scan)
+
     yield
 
     # Shutdown
+    library_watch.stop()
     # Every HQPlayer link first (playback.hqp_link): what waits on HQPlayer
     # — a build's held answer, background work waiting it out, a Stop an
     # output switch owed — gives up at once: a wait is woken and its own
@@ -1607,33 +1614,177 @@ def _prune_plan_counts(plan: Dict[str, Any]) -> Dict[str, Any]:
     return {"id": plan["id"], "kind": plan["kind"], **plan["counts"]}
 
 
-def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[str], prune: bool = False):
-    """Background worker for library scanning. A Rescan (`prune`) ends with a
-    plan of what it would remove, never with the removal: that waits for the
-    owner's yes (/scan/prune)."""
-    state = _scan_state
+# The one scan queue (LIBRARY-WATCH-DESIGN §4). Every scan — "Scan for new",
+# Rescan, the launcher's folder picker, the CLI, the folder watcher and the
+# start's walk — is a request merged into `_scan_pending`: the folders to
+# walk (relative to the library; "" is all of it) with whether each is
+# walked whole, a Rescan's prune, a read of every file again, and whether a
+# person (or the start) asked. One worker takes the whole request at a
+# round's start and scans until nothing is pending: a change during a scan
+# lands in the next round, so nothing is lost and nothing waits on a clock;
+# the canon after imports runs once the queue is drained. A request while a
+# job runs is queued, never refused.
+_scan_pending: Optional[Dict[str, Any]] = None
+_scan_thread: Optional[threading.Thread] = None
+
+
+# Past this many folders a request is the whole library: a walk of it costs
+# about what that many folder scans do, and the request stays small.
+SCOPE_BOUND = 1000
+
+
+def _merge_scopes(into: Dict[str, bool], scopes: Dict[str, bool]) -> None:
+    """Merge folder scopes into a request: a folder walked whole absorbs
+    every scope under it; one already under such a folder adds nothing."""
+    for rel, recursive in scopes.items():
+        rel = rel.replace("\\", "/").strip("/")
+        if any(rec and (r == "" or rel == r or rel.startswith(r + "/")) for r, rec in into.items()):
+            continue
+        if recursive:
+            for r in [r for r in into if rel == "" or r == rel or r.startswith(rel + "/")]:
+                del into[r]
+            into[rel] = True
+        else:
+            into.setdefault(rel, False)
+    if len(into) > SCOPE_BOUND:
+        into.clear()
+        into[""] = True
+
+
+def request_scan(scopes: Optional[Dict[str, bool]] = None, *, prune: bool = False,
+                 reread: bool = False, explicit: bool = True) -> bool:
+    """Queue a scan. `scopes` maps folders (relative to the library) to
+    whether each is walked whole; None is the whole library. `explicit` is a
+    person's or the start's: the canon then takes albums still arriving
+    (canon.content.arriving_albums). Returns True when it waits behind a
+    running job, which takes it when done."""
+    global _scan_pending, _scan_thread
+    with _scan_lock:
+        p = _scan_pending or {"scopes": {}, "prune": False, "reread": False, "explicit": False}
+        _merge_scopes(p["scopes"], scopes if scopes is not None else {"": True})
+        p["prune"] = p["prune"] or prune
+        if p["prune"] and len(p["scopes"]) > 1:
+            # a prune judges the tree its walk covered: one folder whole, or all
+            p["scopes"] = {"": True}
+        p["reread"] = p["reread"] or reread
+        p["explicit"] = p["explicit"] or explicit
+        _scan_pending = p
+        if _scan_state["running"]:
+            return True
+        _scan_state.update(running=True, cancel_requested=False,
+                           progress="Starting scan...", stats=None, result=None)
+        _scan_thread = threading.Thread(target=_scan_loop, daemon=True, name="scan-queue")
+        _scan_thread.start()
+    return False
+
+
+def resume_scans() -> None:
+    """A job that held the scan queue ended (a removal, a benchmark): what
+    waited in it runs now."""
+    global _scan_thread
+    with _scan_lock:
+        if _scan_pending is None or _scan_state["running"]:
+            return
+        _scan_state.update(running=True, cancel_requested=False,
+                           progress="Starting scan...", stats=None, result=None)
+        _scan_thread = threading.Thread(target=_scan_loop, daemon=True, name="scan-queue")
+        _scan_thread.start()
+
+
+def _scan_loop() -> None:
+    """The scan queue's worker: a round per pending request until none is
+    left, the canon after the last round of a burst. The worker leaves only
+    under _scan_lock, in the same step that clears `running`: a request made
+    while it decides is either taken or starts a worker of its own."""
+    global _scan_pending
     from datetime import datetime, timezone
-    _scan_started = datetime.now(timezone.utc)   # AI-canon `since`: only this scan's new files
-    plan = None
+    from playback import hqp_benchmark
+    from routers.settings import notify_library_subscribers
+    state = _scan_state
+    burst_started = datetime.now(timezone.utc)  # AI-canon `since`: only this burst's new files
+    imported = take_arriving = False
     try:
-        from scanner import LibraryScanner, LibraryUnreachable, refuse_if_unreachable
-        from routers.settings import notify_library_subscribers
+        while True:
+            with _scan_lock:
+                req = _scan_pending
+                if req is not None and hqp_benchmark.measures_here():
+                    req = None          # waits for the benchmark's end (resume_scans)
+                elif req is not None:
+                    _scan_pending = None
+                if req is None and not imported:
+                    state["running"] = False
+                    break
+            if req is None:
+                if not state["cancel_requested"]:
+                    from canon import post_import
+                    post_import.run(state, state["result"] or {}, burst_started,
+                                    take_arriving=take_arriving)
+                imported = take_arriving = False
+                continue
+            state["cancel_requested"] = False
+            result = _scan_round(req, burst_started)
+            # The canon follows a round that changed the catalogue, and every
+            # round a person (or the start) asked for, as a scan always ran it:
+            # its relink looks at the state, not at this round's files. A
+            # Rescan ran it itself, before its plan.
+            if result is not None and not req["prune"] and (
+                    result.get("added") or result.get("reread") or result.get("moved")
+                    or (req["explicit"] and result.get("processed"))):
+                imported = True
+            if result is not None:
+                take_arriving = take_arriving or req["explicit"]
+    except Exception as e:
+        logger.error(f"Scan worker failed: {e}", exc_info=True)
+        state["progress"] = f"Scan failed: {str(e)[:200]}"
+        state["result"] = {"error": str(e)}
+        with _scan_lock:
+            state["running"] = False
+        resume_scans()          # what came in during the failed round
+    finally:
+        notify_library_subscribers()
+        _announce_done()
 
-        def progress_cb(msg: str, stats: dict):
-            state["progress"] = msg
-            state["stats"] = dict(stats)
-            # Push a wake event to every connected Library SSE client.
-            # Throttled to scanner's existing checkpoint cadence (≈ one
-            # callback per 100-256 files / phase transition), not the
-            # per-row state["progress"] write.
-            notify_library_subscribers()
 
-        def cancel_check() -> bool:
-            return state["cancel_requested"]
+def _announce_done() -> None:
+    """The scan queue's job ended: what waits for it in another process
+    (cli.py scan) hears it."""
+    from db_pool import db_execute
+    db_execute("NOTIFY sautium_scan_done")
 
+
+def _scan_round(req: Dict[str, Any], since) -> Optional[Dict[str, Any]]:
+    """One round of the scan queue: the request's folders walked, read and
+    imported; a Rescan ends with a plan of what it would remove, never with
+    the removal — that waits for the owner's yes (/scan/prune). Returns the
+    round's result, None when it was refused."""
+    state = _scan_state
+    plan = None
+    replaces_plan = req["prune"]
+    from scanner import LibraryScanner, LibraryUnreachable, refuse_if_unreachable, set_aside_missing
+    from routers.settings import notify_library_subscribers
+
+    def progress_cb(msg: str, stats: dict):
+        state["progress"] = msg
+        state["stats"] = dict(stats)
+        # Push a wake event to every connected Library SSE client.
+        # Throttled to scanner's existing checkpoint cadence (≈ one
+        # callback per 100-256 files / phase transition), not the
+        # per-row state["progress"] write.
+        notify_library_subscribers()
+
+    def cancel_check() -> bool:
+        return state["cancel_requested"]
+
+    scopes = req["scopes"]
+    whole = scopes == {"": True}
+    try:
+        import library_watch
         scanner = LibraryScanner()
         result = scanner.scan_and_import(
-            limit=limit, skip_existing=skip_existing, subpath=subpath,
+            skip_existing=not req["reread"],
+            scopes=None if whole else sorted(scopes.items()),
+            # a person's or the start's walk reads every file it meets
+            leave=frozenset() if req["explicit"] else library_watch.being_written(),
             progress_cb=progress_cb, cancel_check=cancel_check,
         )
 
@@ -1643,24 +1794,26 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                        if result["unread"] else "")
         if state["cancel_requested"]:
             state["progress"] = "Scan cancelled"
-        elif not result["processed"]:
-            # An empty walk scanned nothing: no post-import pass, no prune and
-            # no "Last scan" stamp, which the Library screen would show as a
-            # scan that happened. Over a catalog that knows files it is the
-            # folder gone mid-run, refused like one gone before the walk.
+        elif not result["processed"] and whole:
+            # An empty walk scanned nothing: no prune and no "Last scan" stamp,
+            # which the Library screen would show as a scan that happened. Over
+            # a catalog that knows files it is the folder gone mid-run,
+            # refused like one gone before the walk.
             refuse_if_unreachable()
             state["progress"] = "No audio files found" + unread_note
         else:
-            from canon import post_import
-            post_import.run(state, result, _scan_started)
-
-            if prune and not state["cancel_requested"]:
+            if req["prune"] and not state["cancel_requested"]:
+                # The canon first: the plan counts what only the missing files
+                # hold, after the canon merged and re-keyed what it does
+                from canon import post_import
+                post_import.run(state, result, since, take_arriving=True)
+            if req["prune"] and not state["cancel_requested"]:
                 state["progress"] = "Looking for missing files..."
                 try:
                     from scanner import plan_prune
                     prune_stats = plan_prune(
                         progress_cb=lambda msg: state.update(progress=msg),
-                        subpath=subpath,
+                        subpath=None if whole else next(iter(scopes)),
                         cancel_check=lambda: state["cancel_requested"],
                         disk_paths=scanner.last_disk_paths,
                         unread=scanner.last_unread,
@@ -1674,9 +1827,16 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                 except Exception as e:
                     logger.error(f"Prune plan failed: {e}")
                     result["prune_error"] = str(e)
+            elif not state["cancel_requested"] and scanner.last_disk_paths is not None:
+                # A copy none of whose files this walk found is away, as at a
+                # Rescan — nothing removed, nothing asked (CLAUDE.md, the
+                # away row); the walk judges only the folders it walked.
+                result["away"] = set_aside_missing(
+                    None if whole else sorted(scopes.items()), scanner.last_disk_paths,
+                    scanner.last_unread, scanner.last_gone)
 
             kept = (result.get("prune") or {}).get("kept_unread")
-            away = (result.get("prune") or {}).get("away")
+            away = (result.get("prune") or {}).get("away") or result.get("away")
             state["progress"] = ("Scan complete" + unread_note
                                  + (f"; the prune keeps {kept} file(s) there" if kept else "")
                                  + (f" — {away} album cop(ies) set aside as away, their files "
@@ -1685,52 +1845,38 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                                     if plan else ""))
             # Persist the completion timestamp so the Library screen's
             # "Last scan" row reflects reality across backend restarts.
-            try:
-                from datetime import datetime, timezone
-                import json as _json
-                from db_pool import db_execute
-                db_execute(
-                    """
-                    INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)
-                    ON CONFLICT (key) DO UPDATE
-                        SET value = EXCLUDED.value,
-                            updated_at = CURRENT_TIMESTAMP
-                    """,
-                    ("library.last_scan_at",
-                     _json.dumps(datetime.now(timezone.utc).isoformat())),
-                )
-            except Exception as e:
-                logger.warning(f"Failed to persist last_scan_at: {e}")
+            from datetime import datetime, timezone
+            import json as _json
+            from db_pool import db_execute
+            db_execute(
+                """
+                INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)
+                ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value,
+                        updated_at = CURRENT_TIMESTAMP
+                """,
+                ("library.last_scan_at",
+                 _json.dumps(datetime.now(timezone.utc).isoformat())),
+            )
 
             # New files are new gaps. Kick the launcher's P2P sync now (it
             # LISTENs on this channel) instead of leaving them to the next
             # interval — peers fill for free what enrichment would otherwise
             # fetch from Last.fm. A Docker node has no listener: harmless.
             if result.get("added"):
-                try:
-                    from db_pool import db_execute
-                    db_execute("NOTIFY sautium_sync_request")
-                except Exception as e:
-                    logger.warning(f"Post-scan sync request failed: {e}")
+                db_execute("NOTIFY sautium_sync_request")
         state["result"] = result
-
+        return result
     except LibraryUnreachable as e:
         logger.warning(f"Scan refused: {e}")
         state["progress"] = f"Scan failed: {e}"
         state["result"] = {"error": str(e)}
-    except Exception as e:
-        logger.error(f"Scan worker failed: {e}", exc_info=True)
-        state["progress"] = f"Scan failed: {str(e)[:200]}"
-        state["result"] = {"error": str(e)}
+        return None
     finally:
-        with _scan_lock:
-            state["prune_plan"] = plan
-            state["running"] = False
-        try:
-            from routers.settings import notify_library_subscribers
-            notify_library_subscribers()
-        except Exception:
-            pass
+        if replaces_plan:
+            with _scan_lock:
+                state["prune_plan"] = plan
+        notify_library_subscribers()
 
 
 def _prune_worker(plan: Dict[str, Any]) -> None:
@@ -1773,16 +1919,18 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
             state["prune_plan"] = again
             state["running"] = False
         notify_library_subscribers()
+        _announce_done()
+        resume_scans()
 
 
 @app.post("/scan/start")
 async def scan_start(
-    limit: Optional[int] = None,
     skip_existing: bool = True,
     subpath: Optional[str] = None,
     prune: bool = False,
 ) -> Dict[str, Any]:
-    """Start library scan as a background task. Poll /scan/status for progress."""
+    """Queue a scan (request_scan): started at once, or after the job that
+    runs. Its progress is pushed on the Library stream; /scan/status reads it."""
     from playback import hqp_benchmark
     from scanner import LibraryUnreachable, refuse_if_unreachable
     if hqp_benchmark.measures_here():
@@ -1792,21 +1940,10 @@ async def scan_start(
         await asyncio.to_thread(refuse_if_unreachable)
     except LibraryUnreachable as e:
         raise HTTPException(status_code=409, detail=str(e))
-    with _scan_lock:
-        if _scan_state["running"]:
-            raise HTTPException(status_code=409, detail="Scan already running")
-        _scan_state.update(
-            running=True, cancel_requested=False,
-            progress="Starting scan...", stats=None, result=None, prune_plan=None,
-        )
-
-    t = threading.Thread(
-        target=_scan_worker,
-        args=(limit, skip_existing, subpath, prune),
-        daemon=True,
-    )
-    t.start()
-    return {"success": True, "message": "Scan started"}
+    queued = request_scan({(subpath or "").replace("\\", "/").strip("/"): True},
+                          prune=prune, reread=not skip_existing)
+    return {"success": True, "queued": queued,
+            "message": "Scan queued" if queued else "Scan started"}
 
 
 def _away_worker() -> None:
@@ -1834,6 +1971,8 @@ def _away_worker() -> None:
             state["prune_plan"] = plan
             state["running"] = False
         notify_library_subscribers()
+        _announce_done()
+        resume_scans()
 
 
 @app.post("/scan/away")
@@ -1866,6 +2005,10 @@ async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
     if remove and hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
     with _scan_lock:
+        if remove and _scan_state["running"]:
+            # the plan waits for the scan in flight; its yes is taken after
+            raise HTTPException(status_code=409, detail=(
+                "A scan is running — the question waits for it to end."))
         plan = _scan_state["prune_plan"]
         if plan is None or plan["id"] != plan_id:
             # 410: the question is gone for good — the page stops asking it
@@ -1905,30 +2048,6 @@ async def scan_status() -> Dict[str, Any]:
         "prune_plan": (_prune_plan_counts(_scan_state["prune_plan"])
                        if _scan_state["prune_plan"] else None),
     }
-
-
-# Legacy sync scan endpoint (for CLI / backward compat)
-@app.post("/scan")
-async def scan_library_endpoint(
-    limit: Optional[int] = None,
-    skip_existing: bool = True,
-    subpath: Optional[str] = None
-) -> Dict[str, Any]:
-    """Synchronous scan (for CLI/scripts). Use /scan/start for UI."""
-    from scanner import LibraryUnreachable, scan_library as do_scan
-
-    try:
-        logger.info(f"Starting library scan (limit={limit}, skip_existing={skip_existing}, subpath={subpath})")
-        stats = do_scan(limit=limit, skip_existing=skip_existing, subpath=subpath)
-        return {
-            "success": True,
-            "statistics": stats
-        }
-    except LibraryUnreachable as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except Exception as e:
-        logger.error(f"Scan failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/normalize-artists")

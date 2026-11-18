@@ -14,7 +14,6 @@ from config import settings, LOGGING_CONFIG
 from database import get_db_context, engine
 from api_cooldown import cooling_down
 from ensemble_instruments import present_instruments
-from scanner import LibraryUnreachable, scan_library
 from track_filter import get_filtered_track_ids, describe_filters, track_filter_options
 
 # Configure logging
@@ -52,97 +51,135 @@ def _resolve_filters(filter_kwargs: dict):
     return track_ids
 
 
+def _backend(method: str, path_and_query: str) -> dict:
+    """A request to this node's running backend, signed with its API secret
+    (auth_hmac): the scan is the backend's one queue (main.request_scan), so
+    the CLI asks it rather than scanning beside it. The port is the
+    backend's own (UVICORN_PORT, 8000 by default)."""
+    import hashlib
+    import json
+    import os
+    import secrets
+    import urllib.error
+    import urllib.request
+    from auth_hmac import secret_path, sign
+    secret = secret_path().read_text(encoding="ascii").strip().encode("ascii")
+    ts, nonce = str(int(time.time())), secrets.token_hex(16)
+    headers = {"X-Sautium-Ts": ts, "X-Sautium-Nonce": nonce,
+               "X-Sautium-Body-Sha256": hashlib.sha256(b"").hexdigest(),
+               "X-Sautium-Sig": sign(secret, method, path_and_query, ts, b"", nonce)}
+    url = f"http://127.0.0.1:{os.getenv('UVICORN_PORT', '8000')}{path_and_query}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method=method, headers=headers),
+                                    timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise click.ClickException(json.loads(e.read().decode("utf-8") or "{}").get("detail")
+                                   or f"the backend answered {e.code}")
+    except urllib.error.URLError as e:
+        raise click.ClickException(f"the backend is not running here ({e.reason}): "
+                                   "the scan is its job")
+
+
+def _scan_done(act) -> dict:
+    """`act()` (a request that starts or queues a job), then the scan
+    queue's end: heard as `sautium_scan_done`, listened to before the
+    request so an end that comes first is not missed. Returns the status."""
+    import select
+    from db_pool import get_conn
+    with get_conn() as conn:
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute("LISTEN sautium_scan_done")
+            act()
+            while True:
+                status = _backend("GET", "/scan/status")
+                if not status["running"]:
+                    return status
+                select.select([conn], [], [])
+                conn.poll()
+                conn.notifies.clear()
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("UNLISTEN sautium_scan_done")
+            conn.autocommit = False
+
+
 @cli.command()
-@click.option("--limit", "-l", type=int, default=None, help="Limit number of files to scan (for testing)")
-@click.option("--no-skip", is_flag=True, help="Don't skip existing files (re-scan all)")
+@click.option("--no-skip", is_flag=True, help="Read every file again, changed or not")
 @click.option("--path", "-p", type=str, default=None, help="Scan specific subdirectory (e.g., 'Electronic/Berlin School/Klaus Schulze')")
 @click.option("--prune", is_flag=True, help="Remove DB records for files that no longer exist on disk (asks first)")
 @click.option("--yes", is_flag=True, help="With --prune: remove without asking")
-def scan(limit, no_skip, path, prune, yes):
-    """Scan music library and import metadata to database."""
+def scan(no_skip, path, prune, yes):
+    """Scan the music library — through the running backend's one scan queue."""
+    import urllib.parse
     click.echo(f"🎵 Starting library scan...")
     click.echo(f"📁 Library path: {settings.music_library_path}")
-
     if path:
         click.echo(f"📂 Subdirectory: {path}")
-
-    if limit:
-        click.echo(f"⚠️  Limited to {limit} files (testing mode)")
-
     if no_skip:
-        click.echo(f"⚠️  Re-scanning all files (not skipping existing)")
-
-    try:
-        stats = scan_library(limit=limit, skip_existing=not no_skip, subpath=path)
-
-        click.echo("\n✅ Scan complete!")
-        click.echo(f"📊 Statistics:")
-        click.echo(f"   • Processed: {stats['processed']} files")
-        click.echo(f"   • Added: {stats['added']} tracks")
-        click.echo(f"   • Skipped: {stats['skipped']} tracks")
-        click.echo(f"   • Errors: {stats['errors']} files")
-        if stats['unread']:
-            click.echo(f"   • Unread folders: {stats['unread']} (named in the log)")
-
-        if stats['errors'] > 0:
-            click.echo(f"\n⚠️  Check logs for error details")
-
-    except LibraryUnreachable as e:
-        click.echo(f"\n❌ {e}", err=True)
+        click.echo(f"⚠️  Reading every file again")
+    query = urllib.parse.urlencode({"skip_existing": str(not no_skip).lower(),
+                                    "prune": str(prune).lower(),
+                                    **({"subpath": path} if path else {})})
+    started = {}
+    status = _scan_done(lambda: started.update(_backend("POST", f"/scan/start?{query}")))
+    if started.get("queued"):
+        click.echo("   (queued behind the scan that was running)")
+    stats = status.get("result") or {}
+    if stats.get("error"):
+        click.echo(f"\n❌ {stats['error']}", err=True)
         sys.exit(1)
-    except Exception as e:
-        click.echo(f"\n❌ Error: {e}", err=True)
-        logger.exception("Scan failed")
-        sys.exit(1)
+    click.echo("\n✅ Scan complete!")
+    click.echo(f"📊 Statistics:")
+    click.echo(f"   • Processed: {stats.get('processed', 0)} files")
+    click.echo(f"   • Added: {stats.get('added', 0)} tracks")
+    click.echo(f"   • Read again: {stats.get('reread', 0)} files")
+    click.echo(f"   • Skipped: {stats.get('skipped', 0)} tracks")
+    click.echo(f"   • Errors: {stats.get('errors', 0)} files")
+    if stats.get("unread"):
+        click.echo(f"   • Unread folders: {stats['unread']} (named in the log)")
+    if not prune:
+        return
 
-    if prune:
-        click.echo(f"\n🧹 Pruning missing files...")
-        try:
-            from scanner import plan_prune, prune_counts, prune_missing_files
-            # its progress says why when it skips (no files, a folder gone)
-            plan = plan_prune(subpath=path, progress_cb=lambda msg: click.echo(f"   {msg}"))
-            file_ids = plan.pop("file_ids")
-
-            click.echo(f"   • Checked: {plan['checked']} files")
-            if plan['kept_unread']:
-                click.echo(f"   • Kept: {plan['kept_unread']} files under folders that could not be read")
-            if plan['away']:
-                click.echo(f"   • Away: {plan['away']} album copies with none of their files found, "
-                           "kept until removed in the Library")
-            if not file_ids:
-                with get_db_context() as db:
-                    away = db.execute(text("SELECT count(*) FROM album_variants "
-                                           "WHERE absent_since IS NOT NULL")).scalar()
-                if plan['checked'] and not plan['kept_unread'] and not away:
-                    click.echo(f"   ✅ All files present on disk")
-                return
-            if plan['copies']:
-                click.echo(f"   • Found again elsewhere: {plan['copies']} album copies "
-                           f"({plan['copy_files']} files) whose old entries go")
-            click.echo(f"   • Missing: {plan['pruned'] - plan['copy_files']} files; removing them also deletes")
-            click.echo(f"     {plan['orphan_tracks']} tracks with no analysis and no listens,")
-            click.echo(f"     {plan['orphan_albums']} albums and {plan['orphan_artists']} artists "
-                       "that nothing else holds")
-            if not yes and not click.confirm("   Remove them?", default=False):
-                click.echo("   Nothing removed")
-                return
-            prune_stats = prune_missing_files(file_ids, prune_counts(plan))
-            if prune_stats.get("unreachable"):
-                click.echo("   The music folder is empty or not mounted; nothing removed")
-                return
-            if prune_stats.get("grew"):
-                click.echo("   The library changed since the plan; nothing removed — run it again")
-                return
-            click.echo(f"   • Pruned: {prune_stats['pruned']} missing files")
-            click.echo(f"   • Orphan tracks removed: {prune_stats['orphan_tracks']}")
-            click.echo(f"   • Orphan album variants removed: {prune_stats['orphan_variants']}")
-            click.echo(f"   • Orphan albums removed: {prune_stats['orphan_albums']}")
-            click.echo(f"   • Orphan artists removed: {prune_stats['orphan_artists']}")
-            if prune_stats['relinked']:
-                click.echo(f"   • Analysis re-linked: {prune_stats['relinked']} files")
-        except Exception as e:
-            click.echo(f"\n❌ Prune error: {e}", err=True)
-            logger.exception("Prune failed")
+    click.echo(f"\n🧹 Missing files")
+    plan = stats.get("prune") or {}
+    click.echo(f"   • Checked: {plan.get('checked', 0)} files")
+    if plan.get("kept_unread"):
+        click.echo(f"   • Kept: {plan['kept_unread']} files under folders that could not be read")
+    if plan.get("away"):
+        click.echo(f"   • Away: {plan['away']} album copies with none of their files found, "
+                   "kept until removed in the Library")
+    asked = status.get("prune_plan")
+    if not asked:
+        if plan.get("checked") and not plan.get("kept_unread") and not plan.get("away"):
+            click.echo(f"   ✅ All files present on disk")
+        return
+    if asked["copies"]:
+        click.echo(f"   • Found again elsewhere: {asked['copies']} album copies whose old entries go")
+    click.echo(f"   • Missing: {asked['files']} files; removing them also deletes")
+    click.echo(f"     {asked['tracks']} tracks with no analysis and no listens,")
+    click.echo(f"     {asked['albums']} albums and {asked['artists']} artists that nothing else holds")
+    if not yes and not click.confirm("   Remove them?", default=False):
+        _backend("POST", f"/scan/prune?plan_id={asked['id']}&remove=false")
+        click.echo("   Nothing removed")
+        return
+    status = _scan_done(lambda: _backend("POST", f"/scan/prune?plan_id={asked['id']}&remove=true"))
+    removed = (status.get("result") or {}).get("prune") or {}
+    if status.get("prune_plan"):
+        click.echo("   The library changed since the plan; nothing removed — run it again")
+        return
+    if not removed.get("pruned"):
+        click.echo(f"   {status.get('progress')}")
+        return
+    click.echo(f"   • Pruned: {removed['pruned']} missing files")
+    click.echo(f"   • Orphan tracks removed: {removed['orphan_tracks']}")
+    click.echo(f"   • Orphan album variants removed: {removed['orphan_variants']}")
+    click.echo(f"   • Orphan albums removed: {removed['orphan_albums']}")
+    click.echo(f"   • Orphan artists removed: {removed['orphan_artists']}")
+    if removed.get("relinked"):
+        click.echo(f"   • Analysis re-linked: {removed['relinked']} files")
 
 
 @cli.command("sonic-pass")

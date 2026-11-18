@@ -81,6 +81,7 @@ thresholds).
 """
 
 import logging
+import sys
 import random
 import threading
 import time
@@ -1176,6 +1177,11 @@ def _finish(outcome: str, note: Optional[str]) -> None:
     with _lock:
         _state.update(running=False, outcome=outcome, note=note, point_label="", eta_s=None)
     logger.info("HQPlayer benchmark %s%s", outcome, f": {note}" if note else "")
+    # A scan the library watcher queued while the run measured here waits for
+    # its end (it would skew the measurement)
+    main = sys.modules.get("main")
+    if main is not None:
+        main.resume_scans()
 
 
 def _measure(ep: dict, kind: str, gave: Callable[[str], bool],

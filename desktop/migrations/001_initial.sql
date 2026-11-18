@@ -563,11 +563,12 @@ CREATE TABLE IF NOT EXISTS album_variants (
     -- variants outrank the local ones (sql_queries.owned_rank).
     location variant_location NOT NULL DEFAULT 'local',
     hqp_endpoint_id INTEGER REFERENCES hqp_endpoints(id) ON DELETE CASCADE,
-    -- Denormalised MAX(media_files.file_modified_at) across this variant's
-    -- files. Maintained by FOR EACH STATEMENT triggers on media_files so the
+    -- When the copy came into the library: the earliest arrival of its files
+    -- (media_files.arrived_at, kept by FOR EACH STATEMENT triggers), so the
     -- Home "New in my collection" feed sorts by an indexed column instead of a
-    -- runtime GROUP BY across 30k media_files on every request.
-    file_modified_at TIMESTAMPTZ,
+    -- runtime GROUP BY across 30k media_files on every request. A copy at an
+    -- HQPlayer takes the moment the node first saw it (hqp_library.sync).
+    arrived_at TIMESTAMPTZ,
     -- A local copy whose files a Rescan found none of (a folder moved out, a
     -- drive or a nested mount gone): set at that Rescan, NULL again when any
     -- walk sees one of its files. Its media_files rows stay — the tracklist,
@@ -575,6 +576,11 @@ CREATE TABLE IF NOT EXISTS album_variants (
     -- its bytes while it is away. Only the owner's confirmed removal deletes
     -- it (ROOT-1, 2026-11-09).
     absent_since TIMESTAMPTZ,
+    -- The album credit the scan minted the copy under, beside raw_title: the
+    -- copy's raw group in its folder. A file whose tags assign it to that
+    -- group joins this copy wherever the canon has moved its album since
+    -- (scanner, the folder rule; LIBRARY-WATCH-DESIGN §3.4).
+    raw_artist TEXT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     -- The same directory string can name a local folder AND the folder an
@@ -724,6 +730,11 @@ CREATE TABLE IF NOT EXISTS media_files (
     duration_seconds NUMERIC(10, 2),
     track_number INTEGER,
     disc_number INTEGER DEFAULT 1,
+    -- The totals the file's own tags declare (TRACKTOTAL / "n/N", DISCTOTAL):
+    -- an album whose files declare positions that are not all here is
+    -- arriving by its own words, and the canon waits for it (LIBRARY-WATCH).
+    track_total INTEGER,
+    disc_total INTEGER,
     -- CUE image slice: a classic EAC/XLD rip (one audio image + .cue) imports as
     -- N virtual rows sharing one file_path. [start, end) in seconds within the
     -- image; NULL start = a regular whole-file row; NULL end = to EOF (the
@@ -741,9 +752,33 @@ CREATE TABLE IF NOT EXISTS media_files (
     raw_album_artist TEXT,
     raw_album TEXT,
     raw_year TEXT,
+    raw_genre TEXT,                                 -- the genre tag as read; album_genres' filetag counts derive from it
     recording_mbid UUID,                            -- materialized MB recording for THIS file (its concrete performance)
     cover_id UUID REFERENCES covers(id) ON DELETE SET NULL,
     cover_processed_at TIMESTAMPTZ,                  -- NULL = pending cover resolution
+    -- The file's stat at its last read (backend/file_stat.py: the change time
+    -- is POSIX ctime / NTFS ChangeTime, which a tag editor that restores the
+    -- mtime still moves). A scan reads a file again when its stat differs;
+    -- NULL = read before the stat was recorded, so read again once.
+    stat_mtime_ns BIGINT,
+    stat_ctime_ns BIGINT,
+    -- The analysis passes refused this file's decode (short of the length its
+    -- header declares, or changed under the decode): out of their queues until
+    -- the file is read again — every read clears it (LIBRARY-WATCH M6).
+    decode_refused BOOLEAN NOT NULL DEFAULT FALSE,
+    -- A CUE slice: the sheet's stat (size, mtime ns, ctime ns) at its last
+    -- read — a sheet edited with the image untouched is read again. NULL for
+    -- a plain file.
+    cue_stat BIGINT[],
+    -- When the file came into the library: its birth on this disk where the
+    -- file system keeps one (a copy keeps its source's mtime, its birth is the
+    -- copy's own), else the moment the scan first read it. Never the mtime.
+    -- Home's "New in my collection" orders by it (album_variants.arrived_at).
+    arrived_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- When the file's content last changed what the canon reads: its import,
+    -- and a read again that moved it to another track or album. The canon's
+    -- watermark (artists.last_mb_sync) is compared with it.
+    content_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_media_files_path_cue
@@ -1871,8 +1906,8 @@ CREATE INDEX IF NOT EXISTS idx_album_genres_genre_id ON album_genres(genre_id);
 
 -- Physical entity indexes
 CREATE INDEX IF NOT EXISTS idx_album_variants_album_id ON album_variants(album_id);
-CREATE INDEX IF NOT EXISTS idx_album_variants_file_modified_at_desc
-    ON album_variants(file_modified_at DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_album_variants_arrived_at_desc
+    ON album_variants(arrived_at DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS idx_media_files_track_id ON media_files(track_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_album_variant_id ON media_files(album_variant_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_play_count ON media_files(play_count);
@@ -1892,13 +1927,13 @@ CREATE INDEX IF NOT EXISTS idx_media_files_cover_pending ON media_files(id)
 -- The three quality columns serve the quality gate (sql_queries.QUALITY_GATE).
 CREATE OR REPLACE VIEW owned_files AS
     SELECT track_id, album_variant_id, 'local'::variant_location AS location,
-           duration_seconds, recording_mbid, created_at,
-           is_lossless, sample_rate, bit_depth
+           duration_seconds, recording_mbid, arrived_at,
+           is_lossless, sample_rate, bit_depth, content_at
     FROM media_files
     UNION ALL
     SELECT track_id, album_variant_id, 'hqplayer'::variant_location,
            duration_seconds, recording_mbid, first_seen_at,
-           is_lossless, sample_rate, bit_depth
+           is_lossless, sample_rate, bit_depth, first_seen_at
     FROM hqp_library_files;
 
 -- Cover art indexes
@@ -2003,45 +2038,45 @@ DO $$ BEGIN CREATE TRIGGER update_media_files_updated_at BEFORE UPDATE ON media_
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- Denormalise media_files.file_modified_at onto album_variants so the Home
--- "New in my collection" sort uses an index on album_variants instead of MAX() +
+-- Denormalise media_files.arrived_at onto album_variants so the Home
+-- "New in my collection" sort uses an index on album_variants instead of MIN() +
 -- GROUP BY across 30k media_files on every request. FOR EACH STATEMENT (not
 -- FOR EACH ROW) so a bulk import inserting hundreds of files triggers one
 -- recompute, not one per row. Postgres forbids combining REFERENCING ...
 -- TABLE with AFTER UPDATE OF <columns>, so the UPDATE trigger fires on any
 -- column change and filters affected variants inside the function — rows
--- where neither file_modified_at nor album_variant_id changed produce an
--- empty array and skip the UPDATE entirely.
-CREATE OR REPLACE FUNCTION refresh_av_file_modified_at(p_av_ids INTEGER[])
+-- where neither arrived_at nor album_variant_id changed produce an empty
+-- array and skip the UPDATE entirely.
+CREATE OR REPLACE FUNCTION refresh_av_arrived_at(p_av_ids INTEGER[])
 RETURNS VOID AS $$
 BEGIN
     UPDATE album_variants av
-    SET file_modified_at = (
-        SELECT MAX(mf.file_modified_at)
+    SET arrived_at = (
+        SELECT MIN(mf.arrived_at)
         FROM media_files mf
         WHERE mf.album_variant_id = av.id
     )
-    WHERE av.id = ANY(p_av_ids);
+    WHERE av.id = ANY(p_av_ids) AND av.location = 'local';
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION trg_mf_av_mtime_ins() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION trg_mf_av_arrival_ins() RETURNS TRIGGER AS $$
 BEGIN
-    PERFORM refresh_av_file_modified_at(
+    PERFORM refresh_av_arrived_at(
         ARRAY(SELECT DISTINCT album_variant_id FROM new_table)
     );
     RETURN NULL;
 END $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION trg_mf_av_mtime_upd() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION trg_mf_av_arrival_upd() RETURNS TRIGGER AS $$
 BEGIN
-    PERFORM refresh_av_file_modified_at(
+    PERFORM refresh_av_arrived_at(
         ARRAY(
             SELECT DISTINCT av_id FROM (
                 SELECT n.album_variant_id AS av_id
                 FROM new_table n
                 JOIN old_table o ON o.id = n.id
-                WHERE n.file_modified_at IS DISTINCT FROM o.file_modified_at
+                WHERE n.arrived_at IS DISTINCT FROM o.arrived_at
                    OR n.album_variant_id IS DISTINCT FROM o.album_variant_id
                 UNION
                 SELECT o.album_variant_id
@@ -2054,33 +2089,33 @@ BEGIN
     RETURN NULL;
 END $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION trg_mf_av_mtime_del() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION trg_mf_av_arrival_del() RETURNS TRIGGER AS $$
 BEGIN
-    PERFORM refresh_av_file_modified_at(
+    PERFORM refresh_av_arrived_at(
         ARRAY(SELECT DISTINCT album_variant_id FROM old_table)
     );
     RETURN NULL;
 END $$ LANGUAGE plpgsql;
 
 DO $$ BEGIN
-    CREATE TRIGGER trg_media_files_av_mtime_ins
+    CREATE TRIGGER trg_media_files_av_arrival_ins
     AFTER INSERT ON media_files
     REFERENCING NEW TABLE AS new_table
-    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_mtime_ins();
+    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_arrival_ins();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-    CREATE TRIGGER trg_media_files_av_mtime_upd
+    CREATE TRIGGER trg_media_files_av_arrival_upd
     AFTER UPDATE ON media_files
     REFERENCING NEW TABLE AS new_table OLD TABLE AS old_table
-    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_mtime_upd();
+    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_arrival_upd();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-    CREATE TRIGGER trg_media_files_av_mtime_del
+    CREATE TRIGGER trg_media_files_av_arrival_del
     AFTER DELETE ON media_files
     REFERENCING OLD TABLE AS old_table
-    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_mtime_del();
+    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_arrival_del();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- The Home Recommendations ranking is a function of the listening history

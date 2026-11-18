@@ -587,14 +587,14 @@ def sync(host: str, port: int, *, force: bool = False,
         import_metadata(new, sink=FileSink("hqplayer", ep["id"]), stats=stats,
                         progress_cb=progress_cb, cancel_check=cancel_check)
         # A copy that just arrived is new in the collection: the Home feed
-        # sorts variants by file_modified_at, which media_files' triggers keep
-        # for local rips and nothing keeps for a copy — the moment the node
-        # first saw it stands in.
+        # sorts variants by arrived_at, which media_files' triggers keep for
+        # local rips and nothing keeps for a copy — the moment the node first
+        # saw it is its arrival.
         db_execute("""
             UPDATE album_variants av
-               SET file_modified_at = (SELECT MIN(f.first_seen_at) FROM hqp_library_files f
+               SET arrived_at = (SELECT MIN(f.first_seen_at) FROM hqp_library_files f
                                        WHERE f.album_variant_id = av.id)
-             WHERE av.location = 'hqplayer' AND av.file_modified_at IS NULL
+             WHERE av.location = 'hqplayer' AND av.arrived_at IS NULL
                AND av.hqp_endpoint_id = %(e)s
         """, {"e": ep["id"]})
     if cancel_check and cancel_check():
