@@ -224,10 +224,12 @@ _SEED_KIN_PRED = """EXISTS (
 # word must reach and the weight its score takes — a prefix's 0.85, so a
 # whole word and a prefix tie and ownership breaks the tie (at 0.8 an owned
 # "Johann Sebastian Bach" ranked 33rd behind phantom names that start with
-# "bach"; CREDITS-1 Q13). The score compares with
-# WORD_ARM_MIN itself; `<<%` in the retrieve reads the session's
-# pg_trgm.strict_word_similarity_threshold, which run_search sets to the same
-# value — an executor that does not only retrieves more rows to score 0.
+# "bach"; CREDITS-1 Q13). The score and the retrieve both compare with
+# WORD_ARM_MIN themselves: `<<%` alone reads the session's
+# pg_trgm.strict_word_similarity_threshold (default 0.5), and a fragment it
+# let in scores 0 — which the dominance cut keeps when nothing scores more.
+# run_search sets the threshold to WORD_ARM_MIN only so that the GIN index
+# hands over no more rows than the predicate keeps.
 WORD_ARM_MIN = 0.6
 WORD_ARM_WEIGHT = 0.85
 
@@ -237,6 +239,12 @@ def _word_arm(col: str) -> str:
     branch retrieved is not lifted by it either."""
     return (f"CASE WHEN strict_word_similarity(:ql, {col}) >= {WORD_ARM_MIN} "
             f"THEN {WORD_ARM_WEIGHT} * strict_word_similarity(:ql, {col}) ELSE 0 END")
+
+
+def _word_retrieve(col: str) -> str:
+    """The arm's retrieve: `<<%` for the GIN index, the comparison for the
+    threshold whatever the session's setting."""
+    return f"(:ql <<% {col} AND strict_word_similarity(:ql, {col}) >= {WORD_ARM_MIN})"
 
 
 TOOLS: dict[str, Tool] = {
@@ -266,14 +274,14 @@ TOOLS: dict[str, Tool] = {
                "similarity(a.name,:q))",     # original-script exact match too
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(a.name_latin % :ql OR a.name_latin LIKE :qlpfx "
-                        "OR :ql <<% a.name_latin OR a.name % :q)"),
+                        f"OR {_word_retrieve('a.name_latin')} OR a.name % :q)"),
         Source("artist_alias", "artist_name_aliases",   # 0b: CJK cutlet + human file-tag readings
                "GREATEST(similarity(ana.alias_latin,:ql), "
                "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END, "
                f"{_word_arm('ana.alias_latin')})",
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx "
-                        "OR :ql <<% ana.alias_latin)"),
+                        f"OR {_word_retrieve('ana.alias_latin')})"),
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
                "CASE WHEN al.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",

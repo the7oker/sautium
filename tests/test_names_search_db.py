@@ -135,6 +135,23 @@ def test_a_word_fragment_is_not_lifted(search, scratch_dsn):
     conn.close()
 
 
+def test_the_arms_retrieve_holds_its_threshold_in_any_session(scratch_dsn):
+    # An executor without run_search's SET LOCAL reads pg_trgm's default 0.5,
+    # where `<<%` alone lets "bacharach" (0.56) in at a score of 0 — and the
+    # dominance cut keeps zeros when nothing scores more
+    from discovery_engine import _word_retrieve
+    conn = psycopg2.connect(scratch_dsn)
+    with conn, conn.cursor() as cur:
+        cur.execute("SELECT strict_word_similarity('a', 'a')")     # loads pg_trgm's settings
+        cur.execute("SHOW pg_trgm.strict_word_similarity_threshold")
+        assert float(cur.fetchone()[0]) < 0.56
+        pred = _word_retrieve("n").replace("%", "%%").replace(":ql", "%(ql)s")
+        cur.execute(f"SELECT n FROM (VALUES ('burt bacharach'), ('johann sebastian bach')) v(n) "
+                    f"WHERE {pred}", {"ql": "bach"})
+        assert [r[0] for r in cur.fetchall()] == ["johann sebastian bach"]
+    conn.close()
+
+
 def test_a_typo_of_a_whole_word_takes_the_arms_score(search, scratch_dsn):
     conn = psycopg2.connect(scratch_dsn)
     with conn, conn.cursor() as cur:
