@@ -33,7 +33,7 @@ similar_artists:
 ```
 
 **Purpose**: Many-to-many artist relationships with similarity scores
-**Sources**: Last.fm (73,171 rows). Minted neighbours become phantom artists —
+**Sources**: Last.fm (73,171 rows on 2026-09-18). Minted neighbours become phantom artists —
 see `docs/design/PHANTOM-DISCOVERY.md`
 **Use cases**:
 - "Find artists similar to X"
@@ -57,7 +57,7 @@ artist_tags:
 
 **Purpose**: Flexible tagging system for artists (can be extended to albums, tracks)
 **Tag types**: genres, moods, eras, styles, demographics
-**Sources**: Last.fm (285,188 rows over 23,548 tags); the `source` column
+**Sources**: Last.fm (285,188 rows over 23,548 tags on 2026-09-18); the `source` column
 leaves room for user tags
 **Use cases**:
 - "Find all artists tagged as 'psychedelic'"
@@ -71,7 +71,7 @@ leaves room for user tags
 ```sql
 artist_bios:
   artist_id → artists
-  source ('lastfm', 'musicbrainz', 'wikipedia')
+  source VARCHAR — only 'lastfm' is written
   summary (short, 1-2 paragraphs)
   content (full biography)
   url (source link)
@@ -79,7 +79,8 @@ artist_bios:
 ```
 
 **Purpose**: Artist biographical information with popularity stats
-**Sources**: Last.fm (36,843 rows); MusicBrainz, Wikipedia (future)
+**Sources**: Last.fm (36,843 rows on 2026-09-18), the only source written —
+others are under "Sources still open" below
 **Use cases**:
 - Display artist info in UI
 - Rank by popularity (listeners/playcount)
@@ -93,14 +94,14 @@ artist_bios:
 ```sql
 genre_descriptions:
   genre_id → genres
-  source ('lastfm', 'wikipedia')
+  source VARCHAR — only 'lastfm' is written
   summary (short description)
   content (full description with history)
   url (source link)
 ```
 
 **Purpose**: Detailed genre/style descriptions
-**Sources**: Last.fm (2,308 rows); Wikipedia (future)
+**Sources**: Last.fm (2,308 rows on 2026-09-18), the only source written
 **Use cases**:
 - Display genre info to users
 - Text embeddings for genre-based search
@@ -173,7 +174,7 @@ node backup but in no share file and in no sync category
    next pass a call
 ✅ The step that asked can read it back as its own precondition
 
-**Examples**: `lastfm.enrich_bios` marking an artist Last.fm has no bio for;
+**Examples**: `LastFMClient.enrich_artist` marking an artist Last.fm has no bio for;
 `lrclib` / `genius` marking a track neither service carries.
 
 ---

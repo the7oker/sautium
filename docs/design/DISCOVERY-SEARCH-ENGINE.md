@@ -123,9 +123,10 @@ level — typically `EXISTS`).
   `album_variants` (carries `cover_url`, `musicbrainz_id`).
 - **Signal presence is a row property, not a corpus property.** A phantom row
   *can* have a CLAP vector / lyrics / features — it gets them via streaming
-  auto-enrichment (incl. lyrics) and, in future, P2P. The engine JOINs on
+  auto-enrichment (incl. lyrics) and, since the 2026-08 network run, P2P sync
+  and carry. The engine JOINs on
   vector/feature **presence**, never on ownership. Today's signals happen to be
-  mostly on owned rows (+~515 preview-analyzed phantoms); that is a data
+  mostly on owned rows (+~515 preview-analyzed phantoms on 2026-07-01); that is a data
   snapshot, not a design boundary.
 - **Corpus is an explicit search control** (`owned`/`phantom`/`all`), not an
   engine decision. **Default `all`**; fall back to `owned` only if testing shows
@@ -273,7 +274,7 @@ the CTE-head/tails path performs.
 
 ## `composed-text-vector` decision (revive vs delete) — still open
 
-`text_embeddings` (36 955 rows, ~all owned tracks; BGE-M3 over
+`text_embeddings` (36 955 rows on 2026-07-01, ~all owned tracks; BGE-M3 over
 `title+artist+album+year+lossless+genres+top-10 artist tags`) is **built and
 HNSW-indexed but read by nothing** — only its builder references it. It is the
 **only per-track vector combining genres+tags+year**, so it can match *"German
@@ -292,7 +293,7 @@ relevance-source set** — delete only if bio + genre-desc prove to cover it.
 | **3** | **Entity targets `artist`/`album`** — cross-level promotion (EXISTS / aggregation). | ✅ targets shipped. **Open:** album/track title aliases (CJK multi-form + human file tags) — copy the `artist_name_aliases` pattern to `album_title_aliases` / `track_title_aliases` (separate FK-CASCADE tables, **not** a polymorphic `name_aliases` — poly loses the FK and canon rewrites album/track UUIDs — and **not** a `text[]` column — `gin_trgm_ops` needs a normalized/unnested table) |
 | **4** | **Corpus layers** — owned/phantom/all as a bridge choice, mixed ranking, owned attribute, stable tiebreak. | ✅ shipped (`corpus` defaults to `all` on the endpoint, `owned` on the assistant's catalog tools) |
 | **5** | **Absorb all clients** — `discovery.py` and the MCP search tools on the engine. | ✅ for Discovery and the assistant's search tools. **Open:** `search.py` still carries `_apply_filters` for the lyrics/text paths |
-| **6** | **UI** — genre and instrument dimensions, composite chip+text. | ✅ shipped. **Open:** no corpus control in the UI (the endpoint defaults to `all`); the `moods` and `year` tools are registered in the engine and reachable from neither the endpoint nor the UI |
+| **6** | **UI** — genre and instrument dimensions, composite chip+text. | ✅ shipped; the year range and the quality tier are bound in the endpoint and the UI since 2026-11-17. **Open:** no corpus control in the UI (the endpoint defaults to `all`); the `moods` tool is registered in the engine and reachable from neither the endpoint nor the UI |
 
 Also open: the `composed-text-vector` decision above — `text_embeddings` is
 still built and still read by nothing.
