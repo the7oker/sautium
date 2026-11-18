@@ -69,10 +69,12 @@ def _resolve_node(node: str) -> str:
             SELECT node_pubkey FROM support_reports WHERE node_pubkey LIKE %(p)s
         ) x LIMIT 2
     """, {"n": node, "p": node.lower() + "%"})
+    # The detail never echoes `node`: the desk may have copied it from a
+    # node's own name
     if not rows:
-        raise HTTPException(status_code=404, detail=f"no node matches {node!r}")
+        raise HTTPException(status_code=404, detail="no node matches")
     if len(rows) > 1:
-        raise HTTPException(status_code=409, detail=f"{node!r} matches more than one node")
+        raise HTTPException(status_code=409, detail="more than one node matches — use a longer key prefix")
     return rows[0]["pubkey"]
 
 
@@ -196,6 +198,18 @@ def support_reports(node: str = "", kind: str = "", since: str = "",
          ORDER BY ts DESC LIMIT %(limit)s
     """, params)
     return [_out(r) for r in rows]
+
+
+@router.get("/friend")
+def support_friend(node: str) -> Dict[str, Any]:
+    """The friend row of the one node `node` names (_resolve_node, over
+    every friend and reporter): the desk's chat tools address it by id."""
+    _require_master()
+    pubkey = _resolve_node(node)
+    row = db_query_one("SELECT id, username FROM friends WHERE public_key_hex = %s", (pubkey,))
+    if row is None:
+        raise HTTPException(status_code=404, detail="that node is no friend of the master")
+    return {"friend_id": row["id"], "pubkey": pubkey, "username": row["username"]}
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +341,7 @@ def _unpacked_tar(plain: bytes):
                     chunk = packed.read(1024 * 1024)
                 except (OSError, EOFError, zlib.error) as e:
                     # gzip's words quote the stream's own first bytes
+                    logger.warning("support: a bundle is no gzip stream: %.300r", str(e))
                     raise HTTPException(status_code=422,
                                         detail=f"bundle is no gzip stream ({type(e).__name__})") from e
                 if not chunk:
