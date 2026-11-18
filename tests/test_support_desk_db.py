@@ -126,6 +126,21 @@ def test_the_threads_follow_the_masters_own_pages(master, monkeypatch):
     monkeypatch.setattr(desk, "FRIENDS_PAGE", 2)
     assert {t["pubkey"] for t in json.loads(read.support_threads())} == {A, B, C, D}
     assert len(json.loads(read.support_threads(limit=3))) == 3
+    assert len(json.loads(read.support_threads(limit=-1))) == 1
+
+
+def test_the_unread_threads_are_found_past_the_limit(master, scratch_dsn, monkeypatch):
+    """Only C's message is unread, and C is the least recently active: the
+    filter walks the pages, it does not cut the most recent first."""
+    conn = psycopg2.connect(scratch_dsn)
+    conn.autocommit = True
+    conn.cursor().execute("""UPDATE p2p_messages m SET read = (f.public_key_hex <> %s)
+                               FROM friends f WHERE f.id = m.friend_id""", (C,))
+    conn.cursor().execute("UPDATE friends SET last_activity_at = now() - interval '1 day' "
+                          "WHERE public_key_hex = %s", (C,))
+    conn.close()
+    monkeypatch.setattr(desk, "FRIENDS_PAGE", 2)
+    assert [t["pubkey"] for t in json.loads(read.support_threads(unread_only=True, limit=1))] == [C]
 
 
 def test_the_friend_lookup_resolves_over_every_friend_and_refuses_a_shared_name(master):

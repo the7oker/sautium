@@ -1580,7 +1580,7 @@ is the one form a node's own text leaves the desk in: a `⟦node-text
 so that no bracket outside ASCII (the delimiters' own among them) and no
 character that hides or reorders text (controls, format and tag
 characters, separators, unassigned and the other default-ignorable code
-points) occurs in it as itself. Each tool names the keys the master itself makes
+points, the Braille blank) occurs in it as itself. Each tool names the keys the master itself makes
 or checks — ids, times, counts, scopes, an event kind of
 `diag_protocol.EVENT_KINDS` — and every other value of a row is the node's,
 a column a route adds later included. A node is resolved by the master

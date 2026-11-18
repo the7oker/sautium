@@ -203,14 +203,15 @@ def dump(obj) -> str:
 FRIENDS_PAGE = 200      # the most /api/p2p/friends gives at once
 
 
-def friends(limit: int) -> list:
-    """The master's friends, the pinned first and then the most recently
-    active, `limit` of them at most, page by page."""
+def friends(limit: int, keep=lambda f: True) -> list:
+    """The master's friends that `keep` takes, the pinned first and then
+    the most recently active, `limit` of them at most, page by page."""
+    limit = max(1, int(limit))
     data = backend_get("/api/p2p/friends", {"limit": FRIENDS_PAGE})
-    rows = list(data["pinned"]) + list(data["items"])
+    rows = [f for f in list(data["pinned"]) + list(data["items"]) if keep(f)]
     while data["next_cursor"] and len(rows) < limit:
         data = backend_get("/api/p2p/friends", {"limit": FRIENDS_PAGE, "cursor": data["next_cursor"]})
-        rows += data["items"]
+        rows += [f for f in data["items"] if keep(f)]
     return rows[:limit]
 
 

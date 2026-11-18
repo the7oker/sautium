@@ -101,9 +101,7 @@ def support_threads(unread_only: bool = False, limit: int = 50) -> str:
     the acting tools take."""
     try:
         rows = []
-        for f in desk.friends(limit):
-            if unread_only and not f.get("unread_count"):
-                continue
+        for f in desk.friends(limit, keep=lambda f: not unread_only or f.get("unread_count")):
             key = str(f["public_key_hex"])
             rows.append({
                 "friend_id": f.get("id"),
@@ -123,7 +121,8 @@ def support_threads(unread_only: bool = False, limit: int = 50) -> str:
 def support_messages(node: str, limit: int = 50) -> str:
     """The support chat with one node (oldest first): direction 'in' is the
     user, its content wrapped as node text; 'out' is the master. `node` =
-    username or pubkey prefix."""
+    username or pubkey prefix — the whole key (support_threads' `pubkey`)
+    is one no username can shadow."""
     try:
         friend = desk.friend(node)
         key = friend["pubkey"]
@@ -132,7 +131,7 @@ def support_messages(node: str, limit: int = 50) -> str:
                                     {"limit": limit}):
             ours = {"content"} if msg.get("direction") == "out" else set()
             msgs.append(desk.marked(msg, key, MESSAGE_KEYS | ours))
-        return desk.dump({"pubkey": key[:16], "friend": desk.node_text(key, friend["username"]),
+        return desk.dump({"pubkey": key, "friend": desk.node_text(key, friend["username"]),
                           "messages": msgs})
     except Exception as e:
         return f"Error: {e}"
