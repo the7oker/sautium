@@ -4275,7 +4275,9 @@ parked for a proof nothing mined (B-110).
   `msvcrt.locking`); a second one over the folder — another process, or this
   one — stands down having published nothing. The lock dies with its process.
   This, not a file's presence, is what keeps the Mac stand's two miners of
-  2026-08-19 impossible.
+  2026-08-19 (two processes on one machine) impossible. It binds one kernel's
+  processes: between a host and a container on a Docker Desktop bind mount the
+  process rule alone keeps them apart.
 - **The account, a new key and a new certificate are events.** The account's
   creation starts the worker, an identity change restarts it (the old thread
   ended first — it holds the lock, and a proof or a state it wrote after the

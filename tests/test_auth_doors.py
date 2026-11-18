@@ -289,6 +289,12 @@ def rotations(doors, tmp_path, monkeypatch):
                          "anonymous": anonymous}, "rotation": {}}
     monkeypatch.setattr(node_identity, "rotate_identity", rotate)
     monkeypatch.setattr(notary, "drain_witness", lambda: None)
+
+    async def nothing():
+        return None
+    # What the node starts again on the new key: tested in test_identity_worker
+    monkeypatch.setattr(p2p_chat, "restart_client", nothing)
+    monkeypatch.setattr(p2p_router, "restart_identity_worker", nothing)
     for module, name in ((p2p_identity, "forget_cached"), (p2p_router, "forget_identity"),
                          (p2p_chat, "forget_service"), (device_auth, "bump_epoch")):
         monkeypatch.setattr(module, name, lambda: None)

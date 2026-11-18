@@ -1238,9 +1238,13 @@ async def _stop_worker() -> None:
 
 def _certificate_stored() -> None:
     """A certificate this node did not hold was stored (_get_own_birth_cert):
-    a worker waiting out the Worker's absence goes on now, whoever asked."""
+    a worker waiting out the Worker's absence goes on now, whoever asked —
+    this backend's, or in launcher mode the launcher's, which started none
+    without a certificate (NOTIFY sautium_identity_cert, p2p_manager)."""
     if _identity_worker is not None:
         _identity_worker.certified.set()
+    if not settings.serves_peer_surface:
+        _db_execute("NOTIFY sautium_identity_cert")
 
 
 def _publish_identity_state(state: dict) -> None:

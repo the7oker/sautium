@@ -42,7 +42,11 @@ and a second one over the same folder — in another process (a launcher stand
 whose backend was given a peer port: on 2026-08-19 two miners over one folder
 each mined a proof and raced for the file) or in the same one — finds it
 held and stands down, publishing nothing. The OS drops the lock with the
-process that held it, so a crash leaves none behind.
+process that held it, so a crash leaves none behind. The lock binds the
+processes of one kernel: between a host and a container on a Docker
+Desktop bind mount it binds nothing, and the process rule alone (who serves
+the peer surface, routers/p2p) keeps a host's launcher and a container
+apart.
 
 Depends only on identity_pow (argon2-cffi).
 """

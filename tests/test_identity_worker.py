@@ -697,6 +697,29 @@ def test_a_parked_handshake_goes_out_at_the_workers_ready(node, parked, cert_fir
     assert _resolved(node, issuer)
 
 
+def test_a_certificate_a_launcher_mode_backend_stores_tells_the_launcher(node, scratch_dsn, monkeypatch):
+    """A launcher whose start found no certificate (the Worker unreachable)
+    started no miner: the certificate its backend stores later is its event."""
+    monkeypatch.setattr(settings, "p2p_sync_port", 0)
+    _account(node)
+    listen = psycopg2.connect(scratch_dsn)
+    listen.autocommit = True
+    try:
+        with listen.cursor() as cur:
+            cur.execute("LISTEN sautium_identity_cert")
+        assert asyncio.run(p2p_router._get_own_birth_cert())["method"] == "pow"
+        select.select([listen], [], [], 10)
+        listen.poll()
+        assert [n.channel for n in listen.notifies] == ["sautium_identity_cert"]
+        listen.notifies.clear()
+        asyncio.run(p2p_router._get_own_birth_cert())        # held already: no event
+        select.select([listen], [], [], 0.5)
+        listen.poll()
+        assert listen.notifies == []
+    finally:
+        listen.close()
+
+
 def test_a_launchers_worker_starts_again_on_a_certificate_the_backend_saved(monkeypatch):
     """NOTIFY sautium_identity_cert (verify-code, served by the launcher-mode
     backend): the launcher's worker for the old certificate ends, and one
