@@ -215,7 +215,11 @@ def test_a_busy_worker_is_busy_to_the_person_and_no_answer_to_a_background_call(
     monkeypatch.setattr(p2p, "_get_identity", lambda: {
         "invite_code": "alice#ABCD-EF01-2345", "public_key_hex": "ab" * 32,
         "email": "alice@example.org", "username": "alice"})
-    for route in (p2p.email_send_code(), p2p._worker_check_email(p2p._get_identity())):
+    import device_auth
+    monkeypatch.setattr(device_auth, "_grants", {})
+    send = p2p.email_send_code(opened=(p2p.SendCodeRequest(grant=device_auth.grant("email", 60)),
+                                       lambda answer: answer))
+    for route in (send, p2p._worker_check_email(p2p._get_identity())):
         with pytest.raises(HTTPException) as busy:
             asyncio.run(route)
         assert busy.value.status_code == 429

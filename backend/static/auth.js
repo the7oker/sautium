@@ -286,20 +286,20 @@
   // Resolves {ok:true, data, nodePubkey} or {ok:false, status, resp}. A box
   // the node could not open (`channel`: its handshake let go meanwhile — the
   // node keeps a bounded number) is sealed again once, to a fresh handshake.
-  async function boxedPost(path, payload, viaSigned, again = true) {
+  async function boxedPost(path, payload, viaSigned, again = true, method = "POST") {
     const hs = await handshake(path === "/api/auth/create-account");
     const kp = nacl.box.keyPair();
     const nonce = nacl.randomBytes(nacl.box.nonceLength);
     const sealed = nacl.box(enc.encode(JSON.stringify(payload)), nonce,
                             hs.eph, kp.secretKey);
     const r = await (viaSigned ? fetch : _origFetch)(path, {
-      method: "POST",
+      method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ eph: hs.ephB64, client: b64(kp.publicKey),
                              nonce: b64(nonce), box: b64(sealed) }),
     });
     if (again && r.status === 400 && r.headers.get("X-Sautium-Auth-Error") === "channel") {
-      return boxedPost(path, payload, viaSigned, false);
+      return boxedPost(path, payload, viaSigned, false, method);
     }
     if (!r.ok) return { ok: false, status: r.status, resp: r };
     const env = await r.json();
@@ -352,7 +352,9 @@
 
   async function errorDetail(r, fallback) {
     try {
-      return (await r.resp.json()).detail || fallback;
+      // A refused shape's detail is the list of its fields, not words
+      const detail = (await r.resp.json()).detail;
+      return typeof detail === "string" && detail ? detail : fallback;
     } catch {
       return fallback;
     }
@@ -456,6 +458,34 @@
       setToken(r.data.token);
       pinNode(r.data.public_key_hex);
       return { ok: true, ...r.data };
+    },
+    // A request of the app's own whose body rides the box, signed on top:
+    // every route that takes a secret typed here (an AI key, a sign-in's
+    // code, the email's code) or a change a device token alone does not make
+    // (routers/auth.boxed). `password`, when given (an empty one too), is
+    // the person's word for that change: the account's password, with the
+    // code the host opened this page with beside it for an account that has
+    // none (routers/auth.step_up). Resolves {ok:true, data} or
+    // {ok:false, status, error, stepUp} — `stepUp`: the password or the code
+    // was refused, and the sheet asks again.
+    async boxed(path, payload, { method = "POST", password } = {}) {
+      const body = password === undefined ? payload : { ...payload, password, pin: hostCode };
+      let r;
+      try {
+        r = await boxedPost(path, body, true, true, method);
+      } catch (e) {
+        if (e instanceof NodeUnset) return { ok: false, status: 0, stepUp: false, error: e.message };
+        if (e instanceof NodeChanged) {
+          return { ok: false, status: 0, stepUp: false,
+                   error: "The node answering is not the one this browser signed in to — reload the page." };
+        }
+        throw e;
+      }
+      if (r.ok) return { ok: true, data: r.data };
+      return { ok: false, status: r.status,
+               stepUp: r.status === 403 && r.resp.headers.get("X-Sautium-Auth-Error") === "step-up",
+               error: r.status === 503 ? BUSY : r.status === 429 ? shut(r)
+                 : await errorDetail(r, `HTTP ${r.status}`) };
     },
   };
 

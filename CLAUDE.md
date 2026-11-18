@@ -677,7 +677,16 @@ below bind with or without it.
    `device_auth.py` ("Credential channel") + `auth.js`: password or
    PIN in and the token out ride a NaCl box to a per-exchange key the
    node's identity signs, and the browser pins that identity on first
-   sign-in (a different one raises the known-hosts dialog). Signing
+   sign-in (a different one raises the known-hosts dialog). Since
+   2026-11-18 (B-93) every other secret typed in the Web UI rides the
+   same box — the AI provider's key, a sign-in's pasted code, the
+   email's code; the Codex device code comes back only sealed — through
+   one helper each side (`routers/auth.boxed`, `Sautium.auth.boxed`),
+   and the route refuses the plain body; the changes that act outside
+   the node and outlast "Sign out everywhere" — the account email, an
+   invite link with rights, the AI key, an agent's sign-in — take the
+   account's password through it (on an anonymous launcher account the
+   host's pairing code), `routers/auth.step_up`. Signing
    itself never needed the transport — the token never travels. Do
    not add a self-signed listener back "for security": it adds a
    warning and no protection the box does not give. TLS for the Web
@@ -787,7 +796,7 @@ toast takes no pointer events and never blocks the user (see
 | File | Purpose |
 |------|---------|
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
-| `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange rides — the Web UI has no TLS (rule 8) |
+| `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides; `step_up` (the password, or an anonymous account's host code) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8) |
 | `desktop/agent_login.py` | Headless CLI sign-in driver (`claude auth login`, `codex login [--device-auth]` over pipes) shared by the wizard and the backend's `/api/settings/ai/<agent>/signin` — no console, completion is an event |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
 | `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
