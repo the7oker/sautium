@@ -77,8 +77,7 @@ _dht_service: DHTService | None = None
 _dht_reannounce_task: asyncio.Task | None = None
 _dht_online_task: asyncio.Task | None = None
 _p2p_server_task: asyncio.Task | None = None
-_identity_task: asyncio.Task | None = None
-_identity_stop: threading.Event | None = None
+_mailbox_stop: threading.Event | None = None
 _mailbox_task: asyncio.Task | None = None
 _load_meter = None
 _playback_signal = None
@@ -779,24 +778,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"load meter unavailable: {e}")
 
-    # Identity certificate + proof: cache/fetch the certificate, mine the
-    # proof for a pow identity in the background (routers/p2p.identity_proof_task).
-    # ONE miner per deployment: in desktop mode (node_info.json present — the
-    # launcher process owns the identity, its own worker mines and publishes
-    # p2p.identity) this backend must not start a second one. Two miners over
-    # the same identity dir each mined their own proof and raced for the file
-    # (Mac stand, 2026-08-19: the registry held one nonce, the disk another).
-    global _identity_task, _identity_stop, _mailbox_task
-    _identity_stop = threading.Event()
+    # Identity certificate + proof (routers/p2p's identity worker): owned by
+    # the process that serves the peer surface — never a launcher-mode
+    # backend — and started here for a node that has an account; an account
+    # made later starts it then (routers/auth.create_account).
+    global _mailbox_stop, _mailbox_task
+    _mailbox_stop = threading.Event()
     if _p2p_identity:
-        from pathlib import Path as _Path
-        launcher_owned = bool(settings.p2p_identity_dir) and (
-            _Path(settings.p2p_identity_dir) / "node_info.json").exists()
-        if launcher_owned:
-            logger.info("identity proof: launcher owns the miner — backend task skipped")
-        else:
-            from routers.p2p import identity_proof_task
-            _identity_task = asyncio.create_task(identity_proof_task(_identity_stop))
+        from routers.p2p import start_identity_worker
+        await start_identity_worker()
 
     # The master's Worker mailbox (Ф16): messages parked while this node was
     # offline are drained on the wake socket — only the shipped master has one.
@@ -809,7 +799,7 @@ async def lifespan(app: FastAPI):
             _mailbox = mailbox_client.MasterMailbox(
                 MASTER_PUBKEY_HEX, load_signing_key(settings).sign, mailbox_import,
                 peer_port=settings.p2p_announce_port or settings.p2p_sync_port)
-            _mailbox_task = asyncio.create_task(_mailbox.run(lambda: not _identity_stop.is_set()))
+            _mailbox_task = asyncio.create_task(_mailbox.run(lambda: not _mailbox_stop.is_set()))
             logger.info("master mailbox: wake socket task started")
             # The support desk (routers/support, routers/peer_diag): parked
             # warrants go down a node's wake stream the moment it subscribes;
@@ -839,7 +829,7 @@ async def lifespan(app: FastAPI):
     # tiers, on the same triggers (NOTIFY sautium_sync_request, the
     # sync.auto_interval_min timer, first run at the first source).
     global _sync_walk, _sync_walk_tasks
-    if settings.p2p_enabled and settings.p2p_sync_port:
+    if settings.serves_peer_surface:
         from desktop.p2p import sync_walk
         _sync_walk = _build_sync_walk()
         _sync_walk.bind()
@@ -1024,7 +1014,7 @@ async def lifespan(app: FastAPI):
     # contact, the handshakes, the outbox, the history, the wake streams it
     # holds, the reachability verdict. Built only where this backend owns
     # the peer surface — one deliverer per database — and never on the master.
-    if settings.p2p_enabled and settings.p2p_sync_port:
+    if settings.serves_peer_surface:
         try:
             import p2p_chat
             p2p_chat.configure_client(
@@ -1212,14 +1202,10 @@ async def lifespan(app: FastAPI):
         stop_files_listener, stop_chat_listener, stop_sync_listener,
         stop_gear_state_listener, stop_mb_sources_listener, stop_recommendations_listener,
         notary.stop_witness_listener)]
-    if _identity_stop:
-        _identity_stop.set()
-    if _identity_task:
-        _identity_task.cancel()
-        try:
-            await _identity_task
-        except asyncio.CancelledError:
-            pass
+    if _mailbox_stop:
+        _mailbox_stop.set()
+    from routers.p2p import close_identity_worker
+    await close_identity_worker()
     if _mailbox_task:
         _mailbox_task.cancel()
         try:

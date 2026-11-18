@@ -217,6 +217,14 @@ class Settings(BaseSettings):
         return self._env_openai_api_key or self.codex_api_key
 
     @property
+    def serves_peer_surface(self) -> bool:
+        """Does this process serve its own peer surface — and so own the
+        node's network half: its chat client, its identity worker? In
+        launcher mode (P2P_SYNC_PORT=0) the launcher's process does, over the
+        same database and identity folder, and this backend runs neither."""
+        return bool(self.p2p_enabled and self.p2p_sync_port)
+
+    @property
     def database_url(self) -> str:
         """Construct PostgreSQL connection URL."""
         return (

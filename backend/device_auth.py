@@ -446,9 +446,10 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     code a page opened from the host carries (WrongPin; a wrong one costs
     one of MAX_PIN_ATTEMPTS, as at the pairing door).
 
-    Everything in this process that cached the old key is told; the P2P
+    Everything in this process that cached the old key is told, and its
+    chat client and identity worker start again on the new one; the P2P
     layer learns through NOTIFY (the launcher restarts its manager on it —
-    a Docker node restarts the backend, its peer surface is bound to the
+    a Docker node restarts the backend for its peer surface, bound to the
     key at start)."""
     d = _identity_dir()
     if d is None:
@@ -534,8 +535,10 @@ def _after_rotation(pubkey: str) -> None:
     p2p_identity.forget_cached()
     p2p_router.forget_identity()
     p2p_chat.forget_service()
-    # The chat client is built on the old key: it starts again on the new.
+    # The chat client and the identity worker are built on the old key: they
+    # start again on the new (the worker's old thread stopped first).
     p2p_chat.soon(p2p_chat.restart_client())
+    p2p_chat.soon(p2p_router.restart_identity_worker())
     _record_signing_key(pubkey)
     # The Worker's invite code → mailbox mapping named the old code.
     db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")

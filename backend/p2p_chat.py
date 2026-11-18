@@ -462,7 +462,7 @@ async def start_client():
     from desktop.p2p.chat_client import ChatClient, master_runs_none
     from desktop.p2p.chat_service import ChatService
     async with _client_lock:
-        if _client is not None or not (settings.p2p_enabled and settings.p2p_sync_port):
+        if _client is not None or not settings.serves_peer_surface:
             return _client
         keys = await asyncio.to_thread(_keys)
         if keys is None or master_runs_none(keys[0]["public_key_hex"]):
@@ -500,8 +500,9 @@ _soon: set = set()
 
 
 def soon(coro) -> None:
-    """start_client() / restart_client() from a request's handler, held
-    until it ends."""
+    """start_client() / restart_client() — and the identity worker's start
+    and restart (routers/p2p) — from a request's handler, held until it
+    ends."""
     task = asyncio.get_running_loop().create_task(coro)
     _soon.add(task)
     task.add_done_callback(_soon.discard)

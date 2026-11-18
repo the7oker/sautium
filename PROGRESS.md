@@ -4290,6 +4290,40 @@ catalogue: the scan compared paths only, Rescan included
   CreationTime, st_birthtime), else the first read — never the mtime.
   Through WSL's drvfs and Docker Desktop's 9p there is no birth time.
 
+### The identity worker belongs to the process, not to a file (2026-11-18)
+
+An account made in a Docker node's Web UI never got a proof: the backend
+skipped its miner when `node_info.json` sat in the identity folder ("the
+launcher owns the miner", 2026-08-19), and since the Web UI's setup that file
+is how every account lies on disk. The lab Pi's Support stayed offline; its
+handshakes went to the master with no certificate at all, ten times, then
+parked for a proof nothing mined (B-110).
+
+- **Who runs it is who serves the peer surface** (`settings.
+  serves_peer_surface`: P2P on and a peer port of its own) — the one
+  predicate the chat client's start reads too. A launcher-mode backend runs
+  neither; the launcher's P2P manager does.
+- **One worker per identity folder, by the OS.** The worker holds an
+  exclusive lock on `identity_worker.lock` for its whole run (flock,
+  `msvcrt.locking`); a second one over the folder — another process, or this
+  one — stands down having published nothing. The lock dies with its process.
+  This, not a file's presence, is what keeps the Mac stand's two miners of
+  2026-08-19 (two processes on one machine) impossible. It binds one kernel's
+  processes: between a host and a container on a Docker Desktop bind mount the
+  process rule alone keeps them apart.
+- **The account, a new key and a new certificate are events.** The account's
+  creation starts the worker, an identity change restarts it (the old thread
+  ended first — it holds the lock, and a proof or a state it wrote after the
+  new one's would be the old key's), an email verified here or on another
+  device of the key restarts it on the `email` certificate, which is `ready`
+  at once; `NOTIFY sautium_identity_cert` tells a launcher's own worker. The
+  worker's `ready` wakes the chat client.
+- **A handshake refused for what our own identity lacks waits for it to
+  change** — the certificate as well as the proof — instead of asking every
+  15 s for the same answer; and an issuer says an absent certificate is
+  *required*, not *invalid* (the Pi's log pointed at a bad certificate that
+  was never sent).
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build
