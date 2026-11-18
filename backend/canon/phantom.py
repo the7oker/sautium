@@ -284,6 +284,7 @@ def _bind_chosen(chosen: dict, ph_ids: list, stats: dict, dry_run: bool, discard
                     WHERE a.id = ANY(%s::uuid[])
                       AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
                       AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
+                      AND NOT EXISTS (SELECT 1 FROM track_credits tc WHERE tc.artist_id = a.id)
                 """, (ph_ids,))
                 stats["discarded"] = cur.rowcount
             cur.execute("UPDATE artists SET last_mb_sync = now() WHERE id = ANY(%s::uuid[])",

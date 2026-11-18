@@ -28,6 +28,16 @@ implementation details live in the code, DB and git history.
   `album_descriptions`, `lb_recording`), not JSONB blobs. Allows per-source re-fetch and
   provenance tracking. First iteration used JSONB in `external_metadata`, that
   was scrapped because PostgreSQL functions on JSONB get unreadable fast.
+- **A composer is a credit, not an artist (2026-11-18, CREDITS-1).** Of 191
+  sites reading or writing `track_artists`, 61 would change with a
+  `composer` role, 25 of them the engagement gate and its fan-out (similars,
+  slice pools, the announce tail, the rare search), which read every role on
+  purpose so that a featured artist engages. So a composer lives in a table
+  of its own, `track_credits`, with its own role enum and a `source` (tag or
+  MusicBrainz): the gate stays in the schema, not in every reader's memory.
+  `artist_id` RESTRICTs rather than cascades — every `DELETE FROM artists`
+  is a sweep or a merge written against `track_artists`, and one that forgot
+  the new table now fails in its test instead of losing a credit quietly.
 - **Canonical UUID v5 for shareable entities**. Artist/Album/Track/Genre/Tag/
   EmbeddingModel all use `uuid5(NAMESPACE, "entity:{normalize(...)}")` so the
   same data on different nodes collapses to the same ID. Namespace is

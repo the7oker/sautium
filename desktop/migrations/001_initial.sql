@@ -60,6 +60,16 @@ DO $$ BEGIN
     CREATE TYPE credit_role AS ENUM ('primary', 'featured', 'member');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- A track's credits beyond its performers (track_credits): its own enum, so
+-- no reader of track_artists — the engagement gate among them — sees one.
+DO $$ BEGIN
+    CREATE TYPE track_credit_role AS ENUM ('composer');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE track_credit_source AS ENUM ('tag', 'mb');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE musical_key AS ENUM ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -245,6 +255,22 @@ CREATE TABLE IF NOT EXISTS artist_members (
     member_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role credit_role NOT NULL DEFAULT 'member',
     PRIMARY KEY (compound_artist_id, member_artist_id)
+);
+
+-- Who wrote the music, apart from who performs it (CREDITS-1, 2026-11-18): a
+-- composer is a credit, never a track_artists role, so he engages nothing —
+-- no similars, no slice, no announce fans out from him. A tag's credit is
+-- what the file says (the floor); MusicBrainz's, from its work relations, is
+-- the authority where it exists, and the tag's row stays beside it.
+-- artist_id RESTRICTs: every DELETE FROM artists is a sweep or a merge, and
+-- one that forgets this table fails instead of taking a credit silently.
+CREATE TABLE IF NOT EXISTS track_credits (
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    role track_credit_role NOT NULL,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+    source track_credit_source NOT NULL,
+    position SMALLINT NOT NULL,   -- the order the source names them in
+    PRIMARY KEY (track_id, role, artist_id, source)
 );
 
 -- MB entities a name-derived Sautium artist maps to (1:N — the name-UUID
@@ -1900,6 +1926,7 @@ CREATE INDEX IF NOT EXISTS idx_tags_name_lower ON tags(name text_pattern_ops);
 -- Association indexes
 CREATE INDEX IF NOT EXISTS idx_track_artists_artist_id ON track_artists(artist_id);
 CREATE INDEX IF NOT EXISTS idx_album_artists_artist_id ON album_artists(artist_id);
+CREATE INDEX IF NOT EXISTS idx_track_credits_artist ON track_credits(artist_id, role);
 CREATE INDEX IF NOT EXISTS idx_album_artists_mbid ON album_artists(mbid) WHERE mbid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_media_files_recording_mbid ON media_files(recording_mbid) WHERE recording_mbid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_album_genres_genre_id ON album_genres(genre_id);
