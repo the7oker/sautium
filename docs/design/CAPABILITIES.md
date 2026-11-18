@@ -1,6 +1,7 @@
 # Sautium — Capabilities
 
-_2026-09-29 · derived from the code at commit `c5613ce` · regenerate by running
+_2026-09-29 · derived from the code at commit `c5613ce`, brought current by
+hand in the commits since (last 2026-11-18) · regenerate by running
 `CAPABILITIES-DOC-PROMPT.md` (private) against a newer commit._
 
 What Sautium does, what it deliberately does not do, and what is planned.
@@ -72,7 +73,7 @@ code disagree, the code is what this file records and § 14 names the doc.
 
 - [UI][AI] One search engine, four result blocks (artists, albums, tracks, genres) — `GET /api/discovery/search?target=`; `discovery_engine.py: TOOLS`
 - [UI] Scopes: names and titles (trigram, cross-script), artist bios, sound (text → audio), lyrics — `discovery_engine.py: TOOLS["text"]`, `["bio"]`, `["sound"]`, `["lyrics"]`
-- [UI] Filters: BPM range, key, mode, vocalist, gender, danceable, energy, instruments, genre, artist — `routers/discovery.py: discovery_search`, `_engine_filters`
+- [UI] Filters: BPM range, key, mode, vocalist, gender, danceable, energy, instruments, genre, artist, and since 2026-11-17 the release-year range and the quality tier — `routers/discovery.py: discovery_search`, `_engine_filters`; `sql_queries.YEAR_GATE`, `QUALITY_GATE`
 - [UI] "Similar to now playing" as a filter that composes with the others — `discovery_engine.py: TOOLS["seed"]`, `_SEED_SCORE`
 - [API][AI] Corpus `owned | phantom | all`; the Web UI never sends it, so its searches run on `all`, owned first at equal relevance — `discovery_engine.py: _corpus_clause`, `_TIE_BREAK`
 - [UI] Paging: artists and albums scroll along their row, tracks by "Show more", genres unpaged — `routers/discovery.py: discovery_search` (`limit`, `offset`)
@@ -287,7 +288,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 | Lyrics on Now Playing — the button is in the page, hidden and unwired | `static/index.html` ("Parked until the lyrics sheet is wired up") |
 | A level meter for the local and browser outputs | `docs/HQPLAYER_INTEGRATION.md` § Meters for the other outputs |
 | A desktop layout mode | `INFORMATION-ARCHITECTURE.md` § Layout modes (reserved, not designed) |
-| Moods and year as search filters — the engine has the tools, nothing reaches them | `DISCOVERY-SEARCH-ENGINE.md` § Phasing (open) |
+| Moods as a search filter — the engine has the tool, nothing reaches it (the year range reached the UI on 2026-11-17) | `DISCOVERY-SEARCH-ENGINE.md` § Phasing (open) |
 | A peer's audio chain and taste match on their profile | `INFORMATION-ARCHITECTURE.md` § Profile (Phase 2) |
 | Gear research shared between nodes | `INFORMATION-ARCHITECTURE.md` § Backend work required, item 12 |
 | The trust fabric: recompute ladder, flag reports, local standing, karma | `P2P-SYNC-INTEGRITY.md` (status header) |
@@ -311,7 +312,6 @@ any doc.
 | Saved and smart playlists | `smart.?playlist\|saved.?playlist`; `playlist` in `desktop/migrations` | 0; 0 — `/api/player/playlist` is the live queue |
 | Queue shuffle, Clear queue | `shuffle` | 71 hits, none in the queue or the player: the Discovery mosaic and unrelated code. Both were drawn in the 2026-04 blueprint |
 | Sleep timer | `sleep.?timer` | 0 |
-| Folder watching, scheduled or start-up scan | `watchdog\|inotify\|ReadDirectoryChanges\|watchfiles` | 25 hits, all process and stream timers; no caller of the scan but the routes, the launcher button and the CLI |
 | Tag editing | `\.save\(\)\|write_tags\|tag.?edit` | 0 — mutagen only reads |
 | CD ripping | `cdparanoia\|cd.?rip\|libcdio` | 0 (the matches are the words "CD rip") |
 | AirPlay, Chromecast, Bluetooth outputs | `airplay\|chromecast\|googlecast\|raop\|bluetooth` | 0 |
@@ -339,6 +339,5 @@ album's "+ Queue → Next", the announce port of the macOS compose file).
 | Doc | Says | Code | Open question |
 |---|---|---|---|
 | `docker-compose.mac.yml` against `README.md` § Quick Start | a Docker node on macOS is a full node | aligned with `docker-compose.yml` on 2026-11-09 (the peer and media ports, the identity, certificate and slice mounts, the WAL lines), checked by `tests/test_supply_chain.py`; not yet started on a Mac | start it on a Mac that can test it |
-| `docs/design/INFORMATION-ARCHITECTURE.md:291` | a peer's profile opens from the chat header or the friends list | the screen exists, nothing navigates to `#profile/<prefix>`, and its "Add as friend" button has no handler (`static/app-shell.js: renderProfileOther`) | wire it, describe it as not reachable yet, or remove the screen |
+| `docs/design/INFORMATION-ARCHITECTURE.md` § Screen inventory, row "Profile (viewing other)" | a peer's profile opens from the chat header or the friends list | the screen exists, nothing navigates to `#profile/<prefix>`, and its "Add as friend" button has no handler (`static/app-shell.js: renderProfileOther`) | wire it, describe it as not reachable yet, or remove the screen |
 | `docs/design/INFORMATION-ARCHITECTURE.md` § Discovery structure | Danceable as a filter | the "No" chip is accepted and ignored (`routers/discovery.py: _engine_filters`) | postponed 2026-09-29: whether the chip is needed at all is undecided |
-| `backend/test_playback_queue.py: test_payload_shapes` | the queue payload has ten fields | the payload carries `play` since 2026-09-28; the test sits outside `tests/` and the usual run does not reach it | update the expectation, or keep `play` out of the payload |

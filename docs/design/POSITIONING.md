@@ -71,10 +71,11 @@ Sautium is two halves that share one foundation.
 
 ### Outdoor — Low-intensity social
 
-- Find people with similar vectorized music interests (similarity of
-  listening/library, **not** a feed of posts).
-- Chat with them about music, explore their libraries.
-- Discover new music through other people's collections.
+- Chat with friends about music: invites, a friends list, end-to-end
+  chat — **not** a feed of posts.
+- Discover new music through the network: what other nodes analysed
+  reaches yours through the sync. Finding people by taste and browsing a
+  friend's library left the roadmap on 2026-09-21.
 - **No social feed.** The model is **contact-driven, not feed-driven**:
   "stay in touch", not "live in the app".
 
@@ -346,7 +347,7 @@ upgrade second, new features (like the instrument filter) third.
 8. **Bandcamp (mobile + desktop)** — audiophile-respectful community,
    purchase-driven, artist-forward. Reference for the creator-friendly
    side.
-9. **Tidal Desktop** — modern-streamer aesthetic. Borrow visual ideas
+9. **A lossless streamer's desktop app** — modern-streamer aesthetic. Borrow visual ideas
    for discovery surfaces; we are **not** a streamer in function.
 
 ### Inspiration for the mobile-remote feel
@@ -361,7 +362,7 @@ upgrade second, new features (like the instrument filter) third.
 
 - **The mainstream streaming home screen** — algorithm-feed overload,
   streaks, noise.
-- **YouTube Music** — chaotic hierarchy, weak metadata layout.
+- **A video platform's music app** — chaotic hierarchy, weak metadata layout.
 - **foobar2000** — functionally powerful, UI designed for 2005
   programmers.
 

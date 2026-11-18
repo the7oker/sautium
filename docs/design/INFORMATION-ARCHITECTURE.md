@@ -436,7 +436,7 @@ row.
 |---------|---------|--------|
 | **Favourite artists** | Artists with the most recent listening time: a completed listen weighs its duration × exp(−age / 90 days), age counted from the newest listen, two years at most (since 2026-09-24) — imported Last.fm listens included; seed-pick artists trail | Aggregated from listening history |
 | **Recommendations** | Albums, owned and streaming-library alike, nearest in CLAP space to the records listened to in the 60 days before the newest listen; never played first, then not played for 90 days. Every clock runs from the newest listen, so the shelf a listener left is the shelf they return to (2026-09-24). Rebuilt when the listening history changes (a `sautium_listens` NOTIFY, since 2026-09-26), not per visit; seed picks fill a cold start | CLAP embeddings + `listening_history` |
-| **New in my collection** *(hidden while the node owns nothing)* | Albums by their newest file here; an album held only in the HQPlayer's library is dated by its copy's first sighting and wears an HQPlayer badge (since 2026-09-27) — a copy of an album already on disk is not news | `album_variants.file_modified_at` |
+| **New in my collection** *(hidden while the node owns nothing)* | Albums by their newest file here; an album held only in the HQPlayer's library is dated by its copy's first sighting and wears an HQPlayer badge (since 2026-09-27) — a copy of an album already on disk is not news | `album_variants.arrived_at` (the files' birth on this disk, else their first read — never the mtime a copy keeps from its source; since 2026-11-18) |
 | **Listening history** *(hidden while empty)* | Queues this node played, newest first, consecutive replays collapsed; cards generated from imported Last.fm listens (sittings, album runs) | `listening_sessions` (`source` sautium / lastfm) |
 
 Each section row is horizontally scrollable; tap item navigates to
@@ -633,7 +633,7 @@ badge, and a research-pulled chip when cached (e.g. `R2R · $6000` plus
 **Lazy canonicalization**, not upfront seed:
 
 - User adds an item not in DB → placeholder entry created with state
-  `awaiting_research`.
+  `queued`.
 - Background research worker (AI-powered, WebSearch + WebFetch +
   Claude synthesis) fills in `research_summary`, the specs (`gear_specs`:
   one row per model × catalog attribute of `gear_spec_attributes`, each
@@ -658,9 +658,10 @@ Per gear item:
 
 | State | UI representation |
 |-------|-------------------|
-| `awaiting_research` | Silent muted "Awaiting research · queued" label. **No spinner as UI noise.** |
+| `queued` | Silent muted "Awaiting research · queued" label. **No spinner as UI noise.** |
 | `researching` | Subtle inline indicator. Item card remains useful. |
 | `cached` | Full content: prose summary (3-5 lines), structured specs grid (category-specific keys with **mono-blue** values), community sentiment block (large mono-blue score · sample size · key praise / criticism pills), "Updated 2 days ago" + Refresh button (with cooldown indicator). |
+| `failed` | "Research failed" with Retry research — a failed research never retries by itself; Retry is the owner's. |
 
 Refresh has a cooldown (e.g. 7 days per item) to throttle API budget.
 
@@ -857,7 +858,7 @@ or is a thin query over existing data.
 |-------|------------|-----------|
 | Favourite artists | `listening_history` completed listens by primary artist | recency weight shipped 2026-09-24: τ 90 days from the newest listen, two-year window |
 | Recommendations | multi-seed CLAP kNN from the records of the 60 days before the newest listen, never-played first, then forgotten for 90 days; the ranking is rebuilt on `NOTIFY sautium_listens` (since 2026-09-26), not per visit | + AI assistant contextual blends |
-| New in my collection | `album_variants.file_modified_at` (denormalised from `media_files`), the newest LOCAL file first; an album held only at the HQPlayer is dated by its copy and badged (since 2026-09-27) | + scanner-assigned "fresh" tag |
+| New in my collection | `album_variants.arrived_at` (denormalised from `media_files.arrived_at`; since 2026-11-18), the newest LOCAL copy first; an album held only at the HQPlayer is dated by its copy and badged (since 2026-09-27) | + scanner-assigned "fresh" tag |
 | Listening history | `listening_sessions` + `session_tracks`, GET `/api/home/listening-history`; imported cards from `playback.sessions.rebuild_imported_sessions` | + cross-device via the life merge |
 
 ### Discovery
@@ -902,7 +903,7 @@ or is a thin query over existing data.
 | Metadata row | `albums.release_year`, sum of `media_files.duration_seconds`, `media_files.is_lossless` + `bit_depth` for badge; a phantom album: `[demo]` always, the streamed mix (`/phantom-availability` `quality`) for the badge, its `excerpt` list for the row tags | — |
 | Genre chips | `track_genres` + `genres.name` aggregated, top 3 by occurrence count | — |
 | Tracklist | `tracks` ordered by `track_number` | — |
-| Play all / + Queue | existing transport calls in app.js | + queue history snapshot before replace |
+| Play all / + Queue | the transport calls in `player.js` | + queue history snapshot before replace |
 
 ### Genre
 
@@ -982,7 +983,7 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 
 | Block | MVP source | Evolution |
 |-------|------------|-----------|
-| Chat sessions | existing chat persistence in `app.js` | + named sessions, search history |
+| Chat sessions | chat persistence behind `/api/chat/*` (`routers/chat.py`), rendered by `app-shell.js` | + named sessions, search history |
 | Message stream | existing AI provider (Claude / OpenAI) | — |
 | Invisible context payload | not built: the request is `{message}` and the server adds what is playing (`chat._get_player_context`) | + `{screen, entity_type, entity_id, route_hash}`, recent listening, current queue summary |
 | Provider selector | existing | — |
@@ -1026,7 +1027,8 @@ and 13 stayed optional.
     `research_state = 'queued'`, performs WebSearch + WebFetch on
     audiophile sources, runs Claude synthesis, writes back specs +
     summary + sentiment. Triggered only when an AI-on user adds the
-    gear; no-AI users still consume cached results via P2P sync.
+    gear; no-AI users read what their own node has cached (sharing it
+    between nodes is item 12, not built).
 12. ⏳ **P2P sync extension** — `gear_models` joins the sync inventory;
     not built (the sync carries no gear category). The blueprint modelled
     it on artist bios, which left the wire on 2026-09-19. User-specific
