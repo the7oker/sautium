@@ -74,7 +74,7 @@ Sautium is two halves that share one foundation.
 - Find people with similar vectorized music interests (similarity of
   listening/library, **not** a feed of posts) — deferred
   (P2P_NETWORK.md § "Deferred").
-- Chat with them about music.
+- Chat with friends about music (invites, a friends list, end-to-end chat).
 - Discover new music through the network: what other nodes analysed
   reaches yours through the sync. Browsing a friend's library left the
   roadmap on 2026-09-21.
