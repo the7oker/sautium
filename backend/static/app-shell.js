@@ -12984,11 +12984,15 @@
   NOTICE_COPY['hqplayer.ab_refused'] = n => {
     const d = n.data || {};
     const where = `${escapeHtml(String(d.mode || '').toUpperCase())} ${escapeHtml(d.slot || '')}`;
+    const volume = d.volume == null ? ''
+      : `<span class="num">${escapeHtml(String(Math.round(d.volume * 10) / 10))}</span> dB`;
     return {
       title: 'Comparing filters: not put back',
-      text: d.filter
-        ? `HQPlayer would not take ${escapeHtml(d.filter)} back for ${where}. Set it in HQPlayer yourself.`
-        : `HQPlayer would not take its volume back to <span class="num">${escapeHtml(String(Math.round(d.volume * 10) / 10))}</span> dB. Set it in HQPlayer yourself.`,
+      text: d.filter && volume
+        ? `HQPlayer would not take ${escapeHtml(d.filter)} back for ${where}, nor its volume back to ${volume}. Set them in HQPlayer yourself.`
+        : d.filter
+          ? `HQPlayer would not take ${escapeHtml(d.filter)} back for ${where}. Set it in HQPlayer yourself.`
+          : `HQPlayer would not take its volume back to ${volume}. Set it in HQPlayer yourself.`,
     };
   };
   // A benchmark run HQPlayer went away under — it closed, reset or refused

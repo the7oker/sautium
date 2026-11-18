@@ -1181,9 +1181,12 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   HQPlayer on a connection of its own and taps HQPlayer's meter
   (`hqp_meter.tap`). A swap writes the context's slot only (1x or Nx), at
   once. At the end the champion (the chain) or their filter (the pair) and
-  their volume are put back; a sitting the process died in is put back at
-  HQPlayer's next attach (`hqp_ab.recover`); a DSP change from elsewhere or
-  another controller playing ends it as left, nothing put back.
+  their volume are put back; a sitting cut short (the process died, the
+  connection went) is put back at HQPlayer's next answer (`hqp_ab.recover`,
+  one put-back of a row at a time, whatever HQPlayer then plays); a DSP
+  change from elsewhere, or another controller playing while it sits, ends
+  it as left, nothing put back; a put-back HQPlayer refuses twice alike is
+  left to the person, the filter and the volume named in a notice.
 - **What is kept**: `hqp_ab_sittings` and `hqp_ab_duels`, the person's own
   record under the track's context (mode, slot, a conversion across rate
   families) — in the node backup and its life-data merge, never in the

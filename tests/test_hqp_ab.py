@@ -94,6 +94,7 @@ class TimedHqp(FakeHqp):
         self.sets = []                 # (time, nx, x1) of each SetFilter
         self.refuse = set()            # filters SetFilter refuses in the 1x slot
         self.refused = []              # the names of each SetFilter it refused
+        self.refuse_volume = False     # Volume refused (a fixed volume)
         self.adds = []                 # times of each cut's PlaylistAdd
         self.stream0 = None            # when the meter's stream of the entry began
         try:
@@ -226,6 +227,9 @@ class TimedHqp(FakeHqp):
             if cmd == "VolumeRange":
                 return self.volume_range
             if cmd == "Volume":
+                if self.refuse_volume:
+                    self.refused.append("volume")
+                    return '<Volume result="Error"/>'
                 self.volume = float(attrs["value"])
                 return '<Volume result="OK"/>'
             if cmd == "GetInfo":
@@ -753,32 +757,118 @@ def test_a_sitting_the_process_died_in_is_put_back_at_the_next_answer(ab):
 
 def test_a_put_back_hqplayer_refuses_twice_is_left_to_the_person_and_said_once(ab):
     # AB-1-DESIGN §17: the same refusal twice closes the row as left — no
-    # third SetFilter, nothing owed — and one report names what to set
+    # third SetFilter, nothing owed — and one report names what to set:
+    # the filter and the volume both, when HQPlayer took neither
     from routers import settings as settings_router
     fake = ab.fake
     with ab.conn.cursor() as cur:
         cur.execute("""INSERT INTO hqp_ab_sittings (hqp_endpoint_id, engine, mode, slot, fractional, form,
                                                     from_s, length_s, tolerance_s, before_filter_nx,
-                                                    before_filter_1x, champion)
+                                                    before_filter_1x, before_volume, muted_to, champion)
                        VALUES (%s, '6.3.3', 'pcm', '1x', FALSE, 'chain', 0, 10, 0.15, 'xla', 'xla',
-                               'hires')""", (ab.endpoint_id,))
+                               -10, -60, 'hires')""", (ab.endpoint_id,))
     fake.slots["x1"] = TimedHqp.FILTERS.index("ringy")
-    fake.refuse = {"hires"}
+    fake.volume = -60.0
+    fake.refuse, fake.refuse_volume = {"hires"}, True
     tries = []
 
     def again():                    # the poller's next answer
         tries.append(time.time())
         hqp_ab.recover(ab.endpoint_id, hl.selected(), again=again)
     hqp_ab.recover(ab.endpoint_id, hl.selected(), again=again)
-    assert _wait(lambda: ab.q("SELECT ended::text, owed, refused_filter FROM hqp_ab_sittings")
-                 == [("left", False, "hires")], 10)
+    assert _wait(lambda: ab.q("SELECT ended::text, owed, refused_filter, refused_volume FROM hqp_ab_sittings")
+                 == [("left", False, "hires", -10)], 10)
     hqp_ab.recover(ab.endpoint_id, hl.selected(), again=again)     # nothing owed: nothing sent
     time.sleep(0.5)
-    assert fake.refused == ["hires", "hires"] and len(tries) == 1
+    assert fake.refused == ["volume", "hires", "volume", "hires"] and len(tries) == 1
     assert fake.FILTERS[fake.slots["x1"]] == "ringy"
     notice = hqp_ab.refused_notice()
-    assert notice["data"]["filter"] == "hires" and notice["data"]["mode"] == "pcm"
+    assert notice["data"] == {"filter": "hires", "volume": -10.0, "mode": "pcm", "slot": "1x",
+                              "hqplayer": "fake"}
     assert "hqplayer.ab_refused" in settings_router._REPORTS      # gone once seen: said once
+
+
+def test_a_live_put_back_refused_then_refused_at_the_attach_is_left(ab):
+    # §17's own path: the sitting's put-back refused (the first), and the
+    # attach that takes the output back at the hold's release refused alike
+    # (the second) — the row, ended stopped, closes as left
+    fake = ab.fake
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    assert fake.FILTERS[fake.slots["x1"]] != "xla"          # a candidate in the slot
+    fake.refuse = {"xla"}
+    hqp_ab.command("stop")
+    ab.wait_phase("ended")
+    assert hqp_ab.view()["ended"] == "stopped"
+    assert _wait(lambda: ab.mgr.held is None, 20)
+    assert _wait(lambda: ab.q("SELECT ended::text, owed, refused_filter FROM hqp_ab_sittings")
+                 == [("left", False, "xla")], 10)
+    hqp_ab.recover(ab.endpoint_id, hl.selected())          # nothing owed: nothing sent
+    time.sleep(0.5)
+    assert fake.refused == ["xla", "xla"]
+
+
+def test_a_volume_refused_alike_is_the_same_within_a_reads_step():
+    # The live put-back holds HQPlayer's float, the row its NUMERIC(6,2)
+    hqp_ab._refusals.pop(-1, None)
+    assert not hqp_ab._refused_again(-1, (None, -10.004))
+    assert hqp_ab._refused_again(-1, (None, -10.0))
+    assert not hqp_ab._refused_again(-1, ("hires", -10.0))
+    hqp_ab._refusals.pop(-1, None)
+
+
+def test_a_put_back_paused_on_the_sittings_own_fragment_is_put_back(ab):
+    # The narrow pass's H1: the connection lost past the link's reconnects
+    # while HQPlayer paused on the fragment, and HQPlayer then answers PAUSED
+    # on it — the sitting's own entry, never another controller's: put back
+    fake = ab.fake
+    from streaming import service as streaming_service
+    proxy = streaming_service.get_proxy()
+    token = proxy.register_file("/tmp/ab-fragment.flac", "audio/flac")
+    uri = proxy.file_url(token)
+    with fake._lock:
+        fake.entry = (uri, 0.4, 0.9)
+        fake.seg.append((time.time(), "pause", 0.4, Params(), fake.entry))
+    with ab.conn.cursor() as cur:
+        cur.execute("""INSERT INTO hqp_ab_sittings (hqp_endpoint_id, engine, mode, slot, fractional, form,
+                                                    from_s, length_s, tolerance_s, before_filter_nx,
+                                                    before_filter_1x, before_volume, muted_to, champion,
+                                                    last_set, ended, ended_at, owed)
+                       VALUES (%s, '6.3.3', 'pcm', '1x', FALSE, 'chain', 0, 10, 0.15, 'xla', 'xla',
+                               -10, -60, 'hires', 'ringy', 'stopped', now(), TRUE)""", (ab.endpoint_id,))
+    fake.slots["x1"] = TimedHqp.FILTERS.index("ringy")       # the candidate, at the warm-up's level
+    fake.volume = -60.0
+    assert ab.mgr.active.reads_foreign(ab.mgr.active._link.client.get_status())
+    with pytest.raises(hqp_ab.Refused, match="still putting HQPlayer back"):
+        hqp_ab.open_sitting("pair", "ext2")
+    assert _wait(lambda: ab.q("SELECT ended::text, owed FROM hqp_ab_sittings") == [("stopped", False)], 10)
+    assert fake.FILTERS[fake.slots["x1"]] == "hires" and fake.volume == -10.0
+
+
+def test_two_put_backs_of_one_row_send_one_setfilter_never_a_third(ab):
+    # The narrow pass's M1: the live put-back refused (the first), then two
+    # recoveries that both read the row owed (the attach's, a door tap's) —
+    # the one sends the second and closes the row, the other, its row read
+    # before that close, sends nothing
+    fake = ab.fake
+    with ab.conn.cursor() as cur:
+        cur.execute("""INSERT INTO hqp_ab_sittings (hqp_endpoint_id, engine, mode, slot, fractional, form,
+                                                    from_s, length_s, tolerance_s, before_filter_nx,
+                                                    before_filter_1x, champion, last_set, ended, ended_at,
+                                                    owed)
+                       VALUES (%s, '6.3.3', 'pcm', '1x', FALSE, 'chain', 0, 10, 0.15, 'xla', 'xla',
+                               'hires', 'ringy', 'stopped', now(), TRUE)""", (ab.endpoint_id,))
+    fake.slots["x1"] = TimedHqp.FILTERS.index("ringy")
+    fake.refuse = {"hires"}
+    link = hl.selected()
+    stale = hqp_ab.owed(ab.endpoint_id)
+    hqp_ab._refusals[stale["id"]] = hqp_ab._refusal(          # the live put-back's
+        {"filterNx": 0, "filter1x": TimedHqp.FILTERS.index("ringy"), "volume": -10.0},
+        (0, TimedHqp.FILTERS.index("hires")), "hires", None)
+    for _ in range(2):
+        hqp_ab._recover(dict(stale), link, lambda: None)
+    assert fake.refused == ["hires"]
+    assert ab.q("SELECT ended::text, owed, refused_filter FROM hqp_ab_sittings") == [("left", False, "hires")]
 
 
 def test_a_dsp_change_from_elsewhere_ends_it_as_left_and_nothing_is_put_back(ab):
@@ -904,8 +994,9 @@ def test_a_stop_while_a_candidate_warms_puts_the_persons_filter_back(ab):
     yours = fake.FILTERS[fake.slots["x1"]]
     before = fake.volume
     hqp_ab.open_sitting("chain")
-    assert _wait(lambda: (hqp_ab.view().get("warm") or {}).get("done", 0) >= 2, 60), hqp_ab.view()
-    assert hqp_ab._sitting.set_now != yours         # a candidate in the slot, mid warm-up
+    # a candidate in the slot, warming: set, not yet measured
+    assert _wait(lambda: (s := hqp_ab._sitting) is not None and s.set_now not in (None, yours)
+                 and s.set_now not in s.timings, 60), hqp_ab.view()
     hqp_ab.command("stop")
     ab.wait_phase("ended")
     assert _wait(lambda: ab.mgr.held is None, 20)

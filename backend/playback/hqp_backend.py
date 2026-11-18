@@ -1660,8 +1660,7 @@ class HqpBackend(PlayerBackend):
         except (OSError, RuntimeError, psycopg2.Error) as e:
             logger.warning("benchmark recovery failed: %s", e)
         try:
-            hqp_ab.recover(self.endpoint_id, self._link, again=self._recover_later,
-                           foreign=self.reads_foreign)
+            hqp_ab.recover(self.endpoint_id, self._link, again=self._recover_later)
         except psycopg2.Error as e:
             logger.warning("comparison recovery failed: %s", e)
 
