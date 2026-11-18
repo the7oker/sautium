@@ -1199,8 +1199,9 @@ the peer's and its own before working, solves in a small thread pool
 and, on `402 gate_required`, pays once and retries. Verified live
 against the Docker surface at n = 0 (ok / replay / tampered / unsigned)
 and in-process against the aiohttp surface with an armed test instance
-(n = 4: ok / replay / garbage → gate_failed). Pool tasks (Ф11) and the
-price function (Ф12) plug into `_pool_tasks()` and `price`.
+(n = 4: ok / replay / garbage → gate_failed). Pool tasks (Ф11,
+`desktop/p2p/gate_pool.py`) and the price function (Ф12,
+`desktop/p2p/pricing.py`) shipped 2026-08-18 — § "Pricing formula v1".
 
 **Closed 2026-08-24 — peer TLS is pinned to the node key.** The gap
 was: peer TLS self-signed and unverified (`CERT_NONE` everywhere), so
