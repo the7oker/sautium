@@ -829,7 +829,7 @@ async def lifespan(app: FastAPI):
     # tiers, on the same triggers (NOTIFY sautium_sync_request, the
     # sync.auto_interval_min timer, first run at the first source).
     global _sync_walk, _sync_walk_tasks
-    if settings.p2p_enabled and settings.p2p_sync_port:
+    if settings.serves_peer_surface:
         from desktop.p2p import sync_walk
         _sync_walk = _build_sync_walk()
         _sync_walk.bind()
@@ -1014,7 +1014,7 @@ async def lifespan(app: FastAPI):
     # contact, the handshakes, the outbox, the history, the wake streams it
     # holds, the reachability verdict. Built only where this backend owns
     # the peer surface — one deliverer per database — and never on the master.
-    if settings.p2p_enabled and settings.p2p_sync_port:
+    if settings.serves_peer_surface:
         try:
             import p2p_chat
             p2p_chat.configure_client(

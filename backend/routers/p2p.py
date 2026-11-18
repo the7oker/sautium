@@ -287,7 +287,7 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
     # that is busy leaves the flag False: /email/status re-derives it on
     # the next Profile render, and the Verify row stays.
     try:
-        result = await _worker_check_email(_get_identity())
+        result = await _check_email_upgrade(_get_identity())
     except HTTPException as e:
         logger.warning(f"check-email after email change: {e.detail}")
         result = None
@@ -1098,6 +1098,7 @@ async def _get_own_birth_cert(refresh: bool = False) -> Optional[dict]:
         })
     if cert and cert.get("pubkey") == pubkey and verify_certificate(cert):
         p2p_identity.save_certificate(settings, cert)
+        _certificate_stored()
         return cert
     return None
 
@@ -1156,44 +1157,46 @@ async def _worker_check_email(identity: dict) -> Optional[dict]:
 # Behind it, the identity folder's own lock (identity_proof.worker_lock): one
 # worker per folder, across processes.
 
-class _Worker:
+class _IdentityWorker:
     def __init__(self):
         self.stop = threading.Event()        # the mining thread's, between attempts
-        self.stopped = asyncio.Event()       # the task's own waits
+        self.certified = asyncio.Event()     # a certificate stored while it waits for one
         self.task: Optional[asyncio.Task] = None
+        self.mining: Optional[asyncio.Future] = None
 
 
-_worker: Optional[_Worker] = None
-_worker_lock = asyncio.Lock()
+_identity_worker: Optional[_IdentityWorker] = None
+_identity_worker_lock = asyncio.Lock()
 
 
 async def start_identity_worker() -> None:
     """The worker for this node's identity, unless one ran or runs for it
     already: a worker done (ready) stays done until a restart."""
-    async with _worker_lock:
+    async with _identity_worker_lock:
         await _start_worker()
 
 
 async def stop_identity_worker() -> None:
-    """Stop the worker and wait for it: its thread returns between two
-    attempts (one Argon2 call at most), and nothing of it publishes after."""
-    async with _worker_lock:
+    """Stop the worker and wait for it. Its Worker requests are cancelled
+    (they publish nothing); its mining thread is waited for, and returns
+    between two attempts (one Argon2 call at most) — nothing of it publishes
+    or saves after."""
+    async with _identity_worker_lock:
         await _stop_worker()
 
 
 async def restart_identity_worker() -> None:
     """For an identity or a certificate that changed under the worker: the
-    old one stopped and waited for first — it holds the folder's lock, and a
-    proof it saved or a state it published after the new one's would be the
-    old identity's."""
-    async with _worker_lock:
+    old one stopped and waited for first — a proof it saved or a state it
+    published after the new one's would be the old identity's."""
+    async with _identity_worker_lock:
         await _stop_worker()
         await _start_worker()
 
 
 async def _start_worker() -> None:
-    global _worker
-    if _worker is not None:
+    global _identity_worker
+    if _identity_worker is not None:
         return
     if not settings.serves_peer_surface:
         if settings.p2p_enabled:
@@ -1202,25 +1205,38 @@ async def _start_worker() -> None:
         return
     if _get_identity() is None:
         return
-    worker = _Worker()
+    worker = _IdentityWorker()
 
     async def run():
         try:
-            await identity_proof_task(worker.stop, worker.stopped)
+            await identity_proof_task(worker)
         except Exception:
             logger.exception("identity worker failed")
     worker.task = asyncio.create_task(run())
-    _worker = worker
+    _identity_worker = worker
 
 
 async def _stop_worker() -> None:
-    global _worker
-    worker, _worker = _worker, None
+    global _identity_worker
+    worker, _identity_worker = _identity_worker, None
     if worker is None:
         return
     worker.stop.set()
-    worker.stopped.set()
-    await worker.task
+    worker.task.cancel()
+    await asyncio.gather(worker.task, return_exceptions=True)
+    if worker.mining is not None and not worker.mining.done():
+        # Cancelled, the task will not see how its thread ends: said here
+        try:
+            await worker.mining
+        except Exception:
+            logger.exception("identity proof mining failed")
+
+
+def _certificate_stored() -> None:
+    """A certificate this node did not hold was stored (_get_own_birth_cert):
+    a worker waiting out the Worker's absence goes on now, whoever asked."""
+    if _identity_worker is not None:
+        _identity_worker.certified.set()
 
 
 def _publish_identity_state(state: dict) -> None:
@@ -1233,7 +1249,7 @@ def _publish_identity_state(state: dict) -> None:
         _write("p2p.identity", state)
         _db_execute("NOTIFY sautium_identity")
     except Exception as e:
-        logger.debug(f"identity state publish failed: {e}")
+        logger.warning(f"identity state not published: {e}")
     if state.get("status") == "ready":
         import p2p_chat
         client = p2p_chat.chat_client()
@@ -1241,64 +1257,92 @@ def _publish_identity_state(state: dict) -> None:
             client.resolve_soon()
 
 
-async def identity_proof_task(stop: threading.Event, stopped: asyncio.Event) -> None:
-    """The worker's body: make sure this node holds its identity certificate
-    and, for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
-    same policy the launcher runs), publishing every state
-    (_publish_identity_state). A node whose email is verified but whose
-    certificate predates v2 gets the method:email certificate from
-    /check-email here — no work needed. `stop` ends the mining thread,
-    `stopped` the waits of this task."""
-    from desktop.p2p import identity_proof
-    import p2p_identity
-
-    backoff = 300
-    while not stop.is_set():
+async def _worker_certificate() -> tuple[Optional[dict], Optional[int]]:
+    """(the certificate, None), or (None, the wait the Worker asked for) when
+    it refused for volume (429): the worker's own Worker reads."""
+    try:
         cert = await _get_own_birth_cert()
         if cert is not None and cert["method"] == "pow":
             # Portable identity: the email upgrade may have happened on
             # another device holding the same key — one Worker read before
             # committing minutes of mining to a possibly superseded cert.
             cert = await _get_own_birth_cert(refresh=True) or cert
-        if cert is None:
-            # Worker unreachable / not configured: retry with backoff — the
-            # certificate is a network fact, nothing local can replace it.
-            logger.warning(f"identity certificate unavailable — retry in {backoff}s")
-            try:
-                await asyncio.wait_for(stopped.wait(), backoff)
-                return
-            except asyncio.TimeoutError:
-                pass
-            backoff = min(backoff * 2, 3600)
-            continue
-        if cert["method"] != "email":
+        if cert is not None and cert["method"] != "email":
             row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
             if row and row.get("email_verified"):
                 result = await _worker_check_email(_get_identity() or {})
                 if result and result.get("birth_cert"):
                     cert = result["birth_cert"]
+        return cert, None
+    except HTTPException as e:
+        if e.status_code != 429:
+            raise
+        retry = (e.headers or {}).get("Retry-After", "")
+        return None, int(retry) if retry.isdigit() else None
+
+
+async def identity_proof_task(worker: _IdentityWorker) -> None:
+    """The worker's body: make sure this node holds its identity certificate
+    and, for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
+    same policy the launcher runs), publishing every state
+    (_publish_identity_state). A node whose email is verified but whose
+    certificate predates v2 gets the method:email certificate from
+    /check-email here — no work needed."""
+    from desktop.p2p import identity_proof
+    import p2p_identity
+
+    backoff = 300
+    while True:
+        worker.certified.clear()
+        cert, wait = await _worker_certificate()
+        if cert is None:
+            # Worker unreachable, not configured or braking: the certificate
+            # is a network fact, nothing local can replace it — wait for the
+            # Worker's own word, the backoff, or a certificate a route stored
+            wait = max(wait or 0, backoff)
+            logger.warning(f"identity certificate unavailable — retry in {wait}s")
+            try:
+                await asyncio.wait_for(worker.certified.wait(), wait)
+            except asyncio.TimeoutError:
+                backoff = min(backoff * 2, 3600)
+            continue
         path = p2p_identity.proof_path(settings)
         if path is None:
             logger.warning("p2p_identity_dir unset — identity proof cannot be stored")
             return
         from desktop.p2p import load_meter
         meter = load_meter.current()
-        await asyncio.to_thread(identity_proof.ensure_identity_proof, cert, path,
-                                stop=stop, on_state=_publish_identity_state,
-                                hold=meter.mining_hold if meter else (lambda: None))
+        # Shielded: a stop cancels this task, never the thread — which it
+        # waits for instead (_stop_worker)
+        worker.mining = asyncio.ensure_future(asyncio.to_thread(
+            identity_proof.ensure_identity_proof, cert, path, stop=worker.stop,
+            on_state=_publish_identity_state,
+            hold=meter.mining_hold if meter else (lambda: None)))
+        await asyncio.shield(worker.mining)
         return
 
 
 def _certificate_changed() -> None:
     """This node's certificate changed under its worker — an email verified
     here (verify-code) or found verified on another device of the same key
-    (email_status's /check-email): the worker starts again on it, and an
-    `email` certificate is `ready` at once — the publish and the wake every
-    state takes. A launcher's own worker is told by NOTIFY
+    (/check-email, _check_email_upgrade): the worker starts again on it, and
+    an `email` certificate is `ready` at once — the publish and the wake
+    every state takes. A launcher's own worker is told by NOTIFY
     sautium_identity_cert (p2p_manager); this backend owns none there."""
     import p2p_chat
     p2p_chat.soon(restart_identity_worker())
     _db_execute("NOTIFY sautium_identity_cert")
+
+
+async def _check_email_upgrade(identity: dict) -> Optional[dict]:
+    """_worker_check_email for a route: a certificate it stored that this
+    node did not hold is the certificate's change."""
+    import p2p_identity
+    held = p2p_identity.load_certificate(settings)
+    result = await _worker_check_email(identity)
+    if result and result.get("birth_cert") and p2p_identity.load_certificate(settings) != held:
+        _certificate_changed()
+    return result
 
 
 @router.get("/email/status")
@@ -1319,11 +1363,7 @@ async def email_status() -> Dict[str, Any]:
     if row and row.get("email_verified"):
         return {"email": email, "verified": True}
 
-    import p2p_identity
-    held = p2p_identity.load_certificate(settings)
-    result = await _worker_check_email(identity)
-    if result and result.get("birth_cert") and result["birth_cert"] != held:
-        _certificate_changed()
+    result = await _check_email_upgrade(identity)
     verified = bool(result and result.get("verified"))
     if verified:
         _db_execute(
@@ -1395,14 +1435,17 @@ async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
     if not result or result.get("status") != "registered":
         return {"verified": False, "error": "Invalid or expired code"}
 
+    changed = False
+    if result.get("birth_cert") and result["birth_cert"] != cert:
+        import p2p_identity
+        changed = p2p_identity.save_certificate(settings, result["birth_cert"])
+
     # Persist so future /email/status checks return verified without a
     # Worker round-trip. Email-change and password-change flows (when
     # they land) must clear this flag.
     _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
-    if result.get("birth_cert") and result["birth_cert"] != cert:
-        import p2p_identity
-        if p2p_identity.save_certificate(settings, result["birth_cert"]):
-            _certificate_changed()
+    if changed:
+        _certificate_changed()
     return {"verified": True, "email": email}
 
 

@@ -50,6 +50,10 @@ class P2PManager:
         self._thread: Optional[threading.Thread] = None
         self._proof_thread: Optional[threading.Thread] = None
         self._proof_stop: Optional[threading.Event] = None
+        # Held by a restart of the worker and by stop(): a restart racing a
+        # stop starts nothing once the stop has begun
+        self._proof_lock = threading.Lock()
+        self._proof_stopping = False
         self._load_meter = None
         self._sync_server: Optional[SyncServer] = None
         self._dht_service: Optional[DHTService] = None
@@ -144,6 +148,7 @@ class P2PManager:
         self._load_meter.subscribe(_publish_load)
         self._load_meter.start()
 
+        self._proof_stopping = False
         if account_info:
             from desktop.p2p.birth_cert import ensure_certificate
             cert = ensure_certificate()
@@ -664,13 +669,16 @@ class P2PManager:
         stored certificate — an `email` one is `ready` at once, and its
         publish wakes the parked handshakes."""
         from desktop.p2p.birth_cert import load_certificate
-        if self._proof_thread is not None:
-            self._proof_stop.set()
-            self._proof_thread.join()
-            self._proof_thread = None
-        cert = load_certificate()
-        if cert is not None:
-            self._start_identity_proof_worker(cert)
+        with self._proof_lock:
+            if self._proof_stopping:
+                return
+            if self._proof_thread is not None:
+                self._proof_stop.set()
+                self._proof_thread.join()
+                self._proof_thread = None
+            cert = load_certificate()
+            if cert is not None:
+                self._start_identity_proof_worker(cert)
 
     def stop(self):
         """Stop all P2P services.
@@ -687,8 +695,10 @@ class P2PManager:
         logger.info("Stopping P2P manager...")
 
         # The proof worker exits between attempts (one ~2 GiB call at most).
-        if self._proof_stop is not None:
-            self._proof_stop.set()
+        with self._proof_lock:
+            self._proof_stopping = True
+            if self._proof_stop is not None:
+                self._proof_stop.set()
         if self._load_meter is not None:
             self._load_meter.stop()
 
@@ -722,7 +732,9 @@ class P2PManager:
                 )
 
         if self._proof_thread is not None:
-            self._proof_thread.join(timeout=10)
+            # Whole: it holds the identity folder's lock until it returns, and
+            # a manager started after this one would find its worker held off
+            self._proof_thread.join()
             self._proof_thread = None
 
         self._running = False

@@ -7,8 +7,8 @@ identity_pow.py). It is stored next to the certificate, travels with it
 (export/import), is presented beside it at first contact, and a peer checks
 it with one Argon2id call before caching the verdict for good.
 
-`ensure_identity_proof` is the shared policy for both surfaces (launcher
-thread, Docker startup task):
+`ensure_identity_proof` is the shared policy for both surfaces (the
+launcher's thread, the backend's identity worker — routers/p2p):
 
 - `method: email` needs no work — the state is `ready` at once;
 - a stored proof that binds to the certificate is re-verified ONCE (one
@@ -164,7 +164,11 @@ def _lower_thread_priority() -> None:
         logger.debug("thread priority unchanged: %s", e)
 
 
-_HELD = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, errno.EDEADLK}
+# What "another worker holds it" is on each platform: flock's EWOULDBLOCK;
+# msvcrt.locking's EACCES (EDEADLOCK once its own retries ran out). Any other
+# error is a file system that takes no lock.
+_HELD = ({errno.EACCES, errno.EDEADLK} if sys.platform == "win32"
+         else {errno.EAGAIN, errno.EWOULDBLOCK})
 
 
 @contextmanager
@@ -177,6 +181,7 @@ def worker_lock(folder: Path):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     fd = os.open(folder / LOCK_FILENAME, os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
     try:
         try:
             if sys.platform == "win32":
@@ -185,6 +190,7 @@ def worker_lock(folder: Path):
             else:
                 import fcntl
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
         except OSError as e:
             if e.errno in _HELD:
                 yield False
@@ -193,6 +199,12 @@ def worker_lock(folder: Path):
                            "not enforced here", folder, e)
         yield True
     finally:
+        if locked and sys.platform == "win32":
+            # Released by the close only "depending on available system
+            # resources" (msvcrt): a restart relocks at once
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         os.close(fd)
 
 

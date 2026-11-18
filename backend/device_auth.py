@@ -444,9 +444,10 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     code a page opened from the host carries (WrongPin; a wrong one costs
     one of MAX_PIN_ATTEMPTS, as at the pairing door).
 
-    Everything in this process that cached the old key is told; the P2P
+    Everything in this process that cached the old key is told, and its
+    chat client and identity worker start again on the new one; the P2P
     layer learns through NOTIFY (the launcher restarts its manager on it —
-    a Docker node restarts the backend, its peer surface is bound to the
+    a Docker node restarts the backend for its peer surface, bound to the
     key at start)."""
     d = _identity_dir()
     if d is None:
