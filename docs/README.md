@@ -20,6 +20,8 @@
   own life-data merge
 - **[design/GEAR-ADVISOR.md](design/GEAR-ADVISOR.md)** — system analysis and
   upgrade strategy for the audio chain
+- **[design/CAPABILITIES.md](design/CAPABILITIES.md)** — what Sautium does,
+  does not do by design, and plans, derived from the code at a stated commit
 - **[DATABASE_ARCHITECTURE.md](DATABASE_ARCHITECTURE.md)** — the Last.fm
   enrichment layer and the `external_metadata` fetch ledger
 
@@ -188,4 +190,4 @@ When adding information:
 **HQPlayer version tested:** Desktop 6 — the daily configuration as of
 2026-09-21; Desktop 5.16.3 (Engine 5.34.14) also tested; HQPlayer Embedded 6
 (engine 6.2.3) verified 2026-09-27 — same client
-**Last reviewed:** 2026-09-29
+**Last reviewed:** 2026-11-18
