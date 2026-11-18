@@ -66,16 +66,17 @@ it relies on is `desktop/release_verify.py` and `desktop/updater.py`.
   it, and nothing is purged.
 - **The floor.** `v0.1.0` and `v0.1.1` are lightweight and unsigned, made
   before releases were signed. Nothing at or below `0.1.1` is ever a release.
-  Until the first signed tag exists, a launcher running this code is offered
-  nothing.
 
-Launchers older than this code follow `origin/main`. They reach this code the
-old way, and from then on take signed tags only. That is why the first signed
-release follows the push that ships this code on the same day.
+The first signed release is `v0.2.0` (2026-11-15). Launchers older than it
+followed `origin/main`, reached this code that way, and from then on take
+signed tags only.
 
 A developer's working tree runs the same updater. If it carries commits of its
 own, no release descends from it, so it is never moved. A tracked file edited
-by hand stops the update as well. Docker nodes have no updater.
+by hand stops the update as well. A Docker node has no updater of its own:
+on Linux (`docker-compose.pi.yml`) the host agent (`scripts/host_agent.py`,
+since 2026-11-15) moves it to a signed release through the same chain walk
+(`updater.survey_fetched`).
 
 ## The keys
 

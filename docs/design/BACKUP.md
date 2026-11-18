@@ -57,13 +57,15 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 | **Album-grain enrichment** | `album_genres`, `album_descriptions` — outside the sync contour (albums never sync by UUID), but structural rows in a file, where albums do travel under their seal | yes | yes | — |
 | **Text vectors** (derived) | `text_embeddings`, `lyrics_embeddings`, `artist_bio_embeddings`, `genre_desc_embeddings` | yes | no — a BGE-M3 vector is a deterministic function of text the file already carries and of the local metadata composed around it; every node encodes its own in background enrichment, on every profile (`lite` on the CPU, smaller slices) | — |
 | **Local ledgers** | `external_metadata` (which source was asked for what and whether it answered — `not_found` included, so a step never re-asks), `covers` (fetched art) | yes | no — a record of this node's own fetches | — |
+| **MusicBrainz answers and slice provenance** (node-local, migrations 051–052, 2026-11-08) | `mbws_*` (the web service's answers kept by MBID, and the queue that asks), `slice_*` (which author's slice said what, the evidence, penalties and clashes) | yes (in the dump — the backup's `mb_*` exclusion does not match `mbws_*`) | no | no |
+| **Zero-shot values** (derived, since 2026-11-10, migration 054) | `zero_shot_labels`, `zero_shot_scores` — kept by triggers on `embedding_segments` against the release's label set | yes (in the dump) | no — never sealed, never travels; every node derives its own | no |
 | **Lyrics** | `track_lyrics` | yes | no — the one category that is verbatim copyrighted text; out of the sync protocol since 2026-07-11, every node fetches its own from the public sources | — |
 | **Life data** (personal) | `listening_history`, `demo_plays`, `listening_sessions`, `session_tracks`, `local_play_stats`, `friends`, `friend_rights`, `friend_grants`, `friend_grant_rights`, `invite_tokens`, `invite_token_rights`, `sent_invites`, `friend_requests`, `p2p_messages`, `chat_sessions`, `chat_messages`, `user_profile`, `user_gear`, `gear_pair_notes`, `pending_key_rotations`, `p2p_identities`, `p2p_node_bans`, `p2p_witness`, `support_*`, `diag_*` | yes, encrypted | no — no row; an exported analysis payload's `authors` map carries its authors' certificates, and a verified author's proof, read from `p2p_identities` and `p2p_witness` (P2P_NETWORK.md § "Segment bundle") | **yes, keyed dedup** for the tables § Phase 3 lists; `local_play_stats` is recomputed; `invite_token_rights`, `pending_key_rotations`, `support_*` and `diag_*` stay with the node that wrote them |
 | **HQPlayer DSP measurements** (node-local, since 2026-10-02, migrations 033–043) | `hqp_dsp_samples` (90 days of samples), `hqp_dsp_speed` (the rollup), `hqp_benchmark_runs`, `hqp_benchmark_points` (what each run asked and how it ended) | yes (in the dump) | no | no — keyed to this node's `hqp_endpoints` ids, which mean nothing on another node and have no reliable natural key (an Embedded box calls itself "HQPlayerEmbedded", its address moves); listening measures again within minutes, a benchmark fills the rest |
 | **Last.fm history import** (node-local, since 2026-09-24, migration 021) | `lastfm_import` (the walk's cursor), `pending_scrobbles`, `pending_scrobble_artists` (the waiting room of raw strings, kept only until placed) | yes (in the dump) | no | no — a placed scrobble merges as its `listening_history` row (`source = 'lastfm'`); the cursor and the waiting room stay with the node that walked |
 | **Gear catalogue** | `gear_brands`, `gear_models`, `gear_specs`, `gear_spec_attributes`, `gear_technologies`, `gear_model_technologies`, `gear_sentiment_terms`, `gear_measured_caveats`, `gear_registry_entries` | yes | no | the `gear_brands` / `gear_models` rows the owner's chain names come along with `user_gear`; research stays where it was done |
 | **Node settings** | `user_settings` | yes (in the dump) | no | allowlist only |
-| **Runtime, re-creatable** | `p2p_gate_pool`, `p2p_contact_events`, `p2p_action_costs`, `p2p_dht_state`, `p2p_nodes_seen`, `external_api_cooldown`, `_schema_migrations` (travels with the dump, see restore) | in the dump, harmless | no | no |
+| **Runtime, re-creatable** | `p2p_gate_pool`, `p2p_contact_events`, `p2p_action_costs`, `p2p_dht_state`, `p2p_nodes_seen`, `external_api_cooldown`, `analysis_pace`, `host_requests`, `_schema_migrations` (travels with the dump, see restore) | in the dump, harmless | no | no |
 | **Files** | identity dir: `info.json`, `birth_certificate.json`, `identity_proof.json`, `previous/` (rotation archive), `.api_secret` | yes, encrypted | no | — |
 | **Files, elsewhere** | `.env`, MCP config, launcher `config.json`, a provider plugin's `secrets.json` | **not here** — the maintainer's private repo / the user's own secret store | no | no |
 
@@ -205,9 +207,9 @@ not invent a format.
   plus a detached signature by the node key over its sha256, so a recipient
   knows who packed it — the records inside carry their own seals anyway.
   Not encrypted: it is the data the node serves openly.
-- **Import** = per category through `import_pushed`, then the post-import
-  classifiers (`_update_artist_gender`, `_update_artist_is_vocalist`) on
-  the touched rows — identical to a carry push. First-hand rows on the
+- **Import** = per category through `import_pushed` (as built, no
+  classifier runs: the artists' `gender` and `is_vocalist` ride in their
+  structural rows — see "Import = the gate" below). First-hand rows on the
   receiving node are never overwritten; the source label is
   `p2p:<sender pubkey>`. Size guard: refuse a file above the carry budget
   unless the user confirms.
@@ -290,7 +292,10 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   its own rows), envelopes through `SyncClient._import_items` (seal
   verification, first-hand precedence — a receiving node's own records
   are never overwritten). Provenance is what the seals say: `imported`
-  rows under the author's pubkey. Above the carry budget
+  rows under the author's pubkey. The artists' `gender` and `is_vocalist`
+  arrive as columns of their structural rows (`seed_export`), so the import
+  runs no classifier — the sketch's post-import classifiers were never
+  built. Above the carry budget
   (`sync.carry_limit`) only with `--yes` / the launcher's confirm.
 
 Acceptance run 2026-09-14: three artists exported from the Docker master
@@ -479,7 +484,7 @@ from the sketch above, each for a reason found while building:
   `mb_*` and `lb_*` layers (re-load the dumps or let slices fill them), machine-specific
   settings (`hqplayer.host` is `host.docker.internal` on Docker — re-pick
   the output), and file paths are the native ones the Docker node stored
-  (`E:/Music/...`), so the same machine finds its files at once and another
+  (`X:/Music/...`), so the same machine finds its files at once and another
   machine needs a rescan. The database is created with the dump's locale
   when the OS has it, else with the replaced database's (the launcher's
   ICU `und`), else the cluster default.
@@ -524,7 +529,7 @@ from the sketch above, each for a reason found while building:
   root (`python_env.ensure_project_pth`, every start) — which is also what
   makes the backend's own `desktop.*` imports explicit there instead of a
   side effect of `routers/sync.py`.
-- **The weekly task's contract** (sautium-private/scripts/backup.sh):
+- **The weekly task's contract** (the maintainer's own scheduled script):
   `docker exec sautium-backend python -m backup create --password-env
   P2P_PASSWORD`, the password from the container's environment, the file
   under `/app/data/backup` (bind mount `./data/backup`) with the `.sbk`
@@ -547,7 +552,7 @@ create|inspect|restore|selftest` in the container (`docker compose run
 --rm --no-deps backend python -m backup restore /app/data/backup/<file>
 [--db music_ai_test] [--replace] [--identity]`) or on the launcher's
 interpreter (`python312\python.exe -m backup …` from `backend/`).
-Tests: `tests/test_node_backup.py` (17 cases: KDF domain vector, round trip,
+Tests: `tests/test_node_backup.py` (KDF domain vector, round trip,
 manifest-first, wrong password, pinned KDF parameters, edited header,
 flipped byte, truncation at four points, reorder / duplicate / drop,
 trailing bytes, compatibility refusals, identity file selection, identity

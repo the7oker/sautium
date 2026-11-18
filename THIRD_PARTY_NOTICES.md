@@ -24,14 +24,29 @@ the user's machine, models are downloaded from Hugging Face on first use.
 | Deno 2.9.8 | deno.com, from github.com/denoland/deno | MIT | JavaScript runtime for yt-dlp's player-challenge solver |
 | Node.js | nodejs.org | MIT | runtime for the optional AI-agent CLIs |
 | yt-dlp, its own build (with yt-dlp-ejs) | github.com/yt-dlp/yt-dlp, stable releases, checked against its release key | Unlicense; the build bundles GPL-3.0-or-later code, which makes the build GPL-3.0-or-later | the built-in YouTube provider: downloaded by the node, run as a separate process |
-| PyTorch wheels | download.pytorch.org | BSD-3-Clause | installed by pip |
+| PyTorch wheels | download.pytorch.org | BSD-3-Clause; a CUDA build pulls NVIDIA's runtime libraries (the `nvidia-*` wheels) under NVIDIA's licence | installed by pip |
 
-Optional, user-installed, not redistributed: Claude Code CLI
-(`@anthropic-ai/claude-code`, Anthropic's commercial terms) and OpenAI Codex
-CLI (Apache-2.0) — the two selectable assistant agents.
+Optional, not redistributed: Claude Code CLI (`@anthropic-ai/claude-code`,
+Anthropic's commercial terms) and OpenAI Codex CLI (Apache-2.0) — the two
+selectable assistant agents, installed by the launcher when one is picked
+and, on Docker, by the image's own build from the pinned lockfiles in
+`backend/agents/` (the arm64 image: Claude Code only).
 
 Build tooling (not shipped): Inno Setup (Inno Setup License), rcedit (MIT,
 edits the resources of the copied `pythonw.exe`).
+
+## Docker images (built on the user's machine)
+
+`backend/Dockerfile` (and `Dockerfile.mac` for arm64) builds the backend's
+image from `nvidia/cuda` (the CUDA runtime image, NVIDIA's licence; `ubuntu`
+for arm64) with Ubuntu 22.04 packages — ffmpeg and Chromaprint's `fpcalc`
+(run as separate processes) and libsndfile (loaded by `soundfile`), each
+under its own licence —
+Python 3.11 from the deadsnakes PPA (PSF-2.0), `postgresql-client-18` from
+the PostgreSQL project's repository (PostgreSQL License), and Node.js and
+Deno at pinned versions, as above. The compose files run the database from
+`pgvector/pgvector:pg18` (PostgreSQL License). Nothing of it is distributed
+by Sautium: each image is built or pulled on the user's machine.
 
 ## Carried in the tree (Web UI)
 
@@ -85,10 +100,15 @@ argon2-cffi (MIT) · PyNaCl (Apache-2.0) · cryptography (Apache-2.0 OR BSD-3-Cl
 (BSD-3-Clause) · psutil (BSD-3-Clause) · click (BSD-3-Clause) · tqdm (MPL-2.0
 AND MIT) · numpy (BSD-3-Clause) · pandas (BSD-3-Clause) · scipy
 (BSD-3-Clause) · httpx (BSD-3-Clause) · zstandard (BSD-3-Clause) · requests (Apache-2.0) ·
+miniupnpc (BSD-3-Clause, the UPnP port mapping of a host-networked node) ·
 urllib3 (MIT) · certifi (MPL-2.0) · aiohttp
 (Apache-2.0 AND MIT) · Brotli (MIT) · python-json-logger (BSD-2-Clause) · pytest (MIT) ·
 pytest-asyncio (Apache-2.0) · anyascii (ISC) · pypinyin
-(MIT) · cutlet (MIT) · koroman (MIT).
+(MIT) · cutlet (MIT) · fugashi (MIT AND BSD-3-Clause, with MeCab) · koroman
+(MIT). Installed by the Docker image outside `requirements.txt`: libtorrent
+(BSD; the launcher's too, above) and, in the image only, unidic-lite (MIT; it
+carries the UniDic dictionary, used under the BSD-3-Clause of its three
+licences).
 
 mutagen is GPL-2.0-or-later. Sautium imports it for tag reading; it is
 installed by pip on the user's machine and is not redistributed with

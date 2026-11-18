@@ -15,7 +15,8 @@ reads FLAC tags as our scanner does (99.7 % identical on the reference
 library, 2026-09-27); mp3 tags it reads worse (ID3v1 truncation, encodings,
 folder names standing in), a known limit.
 
-A sync is explicit (Settings › Library, `python -m hqp_library`) or
+A sync is explicit (the HQPlayer screen's Library block, since 2026-09-28;
+`python -m hqp_library`) or
 event-driven: the HQPlayer output re-checks <LibraryGetHash/> when it
 attaches or reconnects. A sync never removes rows; forgetting files the
 library no longer lists is the explicit, confirmed rescan

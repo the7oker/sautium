@@ -38,7 +38,7 @@ itself, not the installer bytes.
 ## 3. The prompt
 
 Paste the block below into the agent. Replace `<tag-or-commit>` with the
-release tag you downloaded (for example `v0.1.0`) or `main`.
+release tag you downloaded (for example `v0.2.0`) or `main`.
 
 ````text
 You are auditing the source-available project Sautium
@@ -326,7 +326,9 @@ at https://github.com/the7oker/sautium/issues.
 
 ## 6. Maintenance
 
-Written 2026-09-21 against the tree of that date. The prompt names files and
+Written 2026-09-21 against the tree of that date, and extended since in the
+commits that changed what it names (among them the Content-Security-Policy
+2026-10-26 and signed releases 2026-11-12 and 2026-11-14). The prompt names files and
 symbols, never line numbers, so it survives edits inside a file; moving or
 renaming a file it names is a change to this page in the same commit (the
 documentation rule in `CLAUDE.md`). The claims in tasks D–F restate
@@ -334,5 +336,5 @@ documentation rule in `CLAUDE.md`). The claims in tasks D–F restate
 `docs/design/P2P-SYNC-INTEGRITY.md` (the sync gate) and `P2P_NETWORK.md`
 § "Support diagnostics"; when one of those changes, the claim here changes
 with it. The list in § 4 is what the maintainer expects the report to say
-about the tree of 2026-09-21 — re-derive it from a fresh run before each
+about the tree of 2026-09-21 with those additions — re-derive it from a fresh run before each
 release rather than editing it by hand.

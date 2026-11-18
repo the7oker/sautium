@@ -72,9 +72,12 @@ Sautium is two halves that share one foundation.
 ### Outdoor — Low-intensity social
 
 - Find people with similar vectorized music interests (similarity of
-  listening/library, **not** a feed of posts).
-- Chat with them about music, explore their libraries.
-- Discover new music through other people's collections.
+  listening/library, **not** a feed of posts) — deferred
+  (P2P_NETWORK.md § "Deferred").
+- Chat with friends about music (invites, a friends list, end-to-end chat).
+- Discover new music through the network: what other nodes analysed
+  reaches yours through the sync. Browsing a friend's library left the
+  roadmap on 2026-09-21.
 - **No social feed.** The model is **contact-driven, not feed-driven**:
   "stay in touch", not "live in the app".
 

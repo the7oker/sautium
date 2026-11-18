@@ -34,28 +34,35 @@ this file carries the mechanics.
 - **One runner, every node.** `desktop/db_init.apply_migrations` applies
   pending files in name order and records them in `_schema_migrations`.
   The launcher calls it at service start and after an update
-  (`updater.has_new_migrations` = an added `migrations/*.sql` in the
-  pulled range); the backend calls `backend/db_migrate.apply_pending()` in
+  (`updater.has_new_migrations` = an added `migrations/*.sql` between the
+  release it left and the one it moved to); the backend calls `backend/db_migrate.apply_pending()` in
   its lifespan before anything serves — Docker included, so the master no
   longer needs hand-applied DDL (it adopted 001 as its baseline on
-  2026-08-25; `adopt_baseline` does that for any pre-runner database). A
-  node only receives a delta once it is committed and pushed.
+  2026-08-25; `adopt_baseline` does that for any pre-runner database). An
+  installed node only receives a delta once a signed release carries it
+  (since 2026-11-12, `docs/RELEASING.md`).
 - **Data migrations are Python steps in `backend/db_migrate.py`**, keyed
   by marker rows in the same table (`identity_rule_v{N}`): the identity
   rule (`uuid_utils.IDENTITY_RULE`) is re-normalized at startup when the
   recorded rule is older than the code's. Bump the constant with every
   change to `normalize`/`normalize_key`; never change the rule without it.
-  The one-time steps carry markers of their own, each run once per node:
-  `play_stats_derived_v1` (`local_play_stats` re-derived from the history),
+  The one-time steps carry markers of their own, each run once per node —
+  among them `play_stats_derived_v1` (`local_play_stats` re-derived from the history),
   `sub_floor_analysis_v1` (own analysis of material under the floor dropped,
   2026-09-18), `listen_times_utc_v1` (naive listen starts moved to the
   instant they meant) and `scrobble_title_key_v1` (every waiting imported
   scrobble name reopened under the folded title key) — both 2026-09-24 —
-  and `seed_v{N}`, the seed bundle's version. The module docstring of
-  `db_migrate.py` is the ledger of what each one did.
+  `seed_v{N}`, the seed bundle's version, and since 2026-11-10
+  `analysis_records_v4` (the per-kind records' cutover) and
+  `zero_shot_labels_v1`. `apply_pending` in `db_migrate.py` lists every
+  marker in the order it runs them; the module docstring is the ledger of
+  what each one did.
 - **Trying DDL out** happens on the rehearsal database, not the live one:
-  restore the latest `data/backup/*.dump` into `music_ai_test`
-  (`pg_restore -L` without the `mb_*` / `lb_*` data), run the delta there, then
+  restore the latest backup into `music_ai_test` (`python -m backup restore
+  <file.sbk> --db music_ai_test --replace`, before the delta's file is in
+  `desktop/migrations/` — the restore applies every pending migration; the
+  dump holds the `mb_*` / `lb_*` tables without their data), run the delta
+  there, then
   commit it as `NNN_*.sql` and let the runner apply it (restart the
   backend).
 - **PostgreSQL ENUM type changes** require this exact sequence (a straight

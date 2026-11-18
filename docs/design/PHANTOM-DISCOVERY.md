@@ -14,7 +14,10 @@
 > as rows — the network ships MB slices, and each node mints its own phantom
 > albums and tracklists from them (see D6). What does travel is the analysis
 > hanging off those rows, through sync and carry.
-> **Remaining:** Stage C (text-similarity). The
+> Stage C (text-similarity, D7) needed nothing of its own: a phantom artist
+> with a Last.fm bio is embedded like any other (the bio only; tags are not)
+> (`enrichment_embeddings.ArtistBioEmbeddingGenerator`) and the Discovery
+> engine scores it through its `artist_bio` source (since 2026-07-01). The
 > "Phases" table and "Design decisions" below are the original plan, kept for
 > rationale; "Implementation status" records what actually landed.
 > **Origin:** proposed 2026-06-01 by Valerii.
@@ -293,7 +296,7 @@ score (`DISCOVERY-SEARCH-ENGINE.md` §4).
 |-------|-------|------|----------------|
 | **0** | Add derived `is_local` to artist/genre/similar API responses; render dimmed phantom tiles (no phantoms exist yet → no visual change, but the plumbing lands). | low | De-risks the renderer before data arrives. |
 | **1** | **New albums for *local* artists.** Fetch full discography (Deezer + MusicBrainz) for owned artists, diff vs `albums`, surface "missing albums" shelf. | low | Validates the album/track source on *known* artists; immediate value; no phantom rows yet. |
-| **2** | **Phantom similar artists (eager).** Relax `lastfm.py:348,519`; background-enrich phantom artist + bio + tags + similar links, bounded to 1 hop from local. | med | Core feature; bounded by D2. |
+| **2** | **Phantom similar artists (eager).** Relax the owned-only filters in `lastfm.py`; background-enrich phantom artist + bio + tags + similar links, bounded to 1 hop from local. | med | Core feature; bounded by D2. |
 | **3** | **Phantom albums/tracks (lazy).** On phantom-artist-screen open, fetch + cache discography. | med | Storage-safe via laziness. |
 | **4** | ~~**P2P propagation.** Relax sync inventory joins; `source='p2p:*'`; post-import handling.~~ **Superseded** by MB slices + carry — see D6. | med | Network effect; depends on phantom data existing. |
 | **5** | **Phantom semantic search.** BGE-M3 text embeddings for phantoms; wire into Discovery engine. | med | Depends on Discovery engine landing. |
@@ -491,14 +494,16 @@ asked by MBID (`backend/canon/confirm.py`, `backend/mb_answers.py`).
   enrichment through the existing global throttle/cooldown. **Log
   what was skipped** — silent truncation reads as "fully enriched"
   when it isn't.
-- **P2P data poisoning** — `source='p2p:<nodeid>'`, trust-but-verify;
-  never merge peer enrichment into first-party `source` rows.
+- **P2P data poisoning** — structure never travels as rows: each node
+  mints it from MB slices verified against their authors (D6), and
+  analysis arrives only under its author's seal through the import gate.
 - **Phantom leakage into local-only views** — audit any query that
   does *not* JOIN `track_artists`/`media_files`; those are the only
   places phantoms can wrongly appear (playback, stats, "your
   library" counts). Most existing queries are naturally safe.
-- **D4 quality/ToS** — lossy preview + reverse-engineered client;
-  scoped to a single-user appliance, flagged in UI, sequenced last.
+- **D4 quality/ToS** — the core channel is a demo: one full listen per
+  track, then a 30 s excerpt (since 2026-09-17); a full-length provider is
+  bring-your-own and out of tree. Preview quality is flagged in the UI.
 
 ## Out of scope
 

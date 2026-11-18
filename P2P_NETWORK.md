@@ -202,7 +202,9 @@ the Docker backend's lifespan alike — never copied. Until then a Docker node
 only served pulls and accepted carry, so the master's phantom layer received a
 peer's first-hand analysis only when that peer chose to carry it. Runtime
 differences are injected: the DHT
-service, LAN discovery (none in a container — it cannot hear the beacon),
+service, LAN discovery (none in a bridge-networked container — it cannot
+hear the beacon; a host-networked one, `docker-compose.pi.yml`, runs it as
+a launcher does since 2026-11-17),
 manual peers, the address skip list (the launcher subtracts itself by its
 UPnP external IP; every runtime also recognises its own address by the key
 `/health` returns), the sharing switch (off, since 2026-11-14, the walk asks
@@ -702,8 +704,9 @@ catalogue, so closing it is a carry-design change.
    packaging"), so no extension is ever bundled into an executable.
 4. ~~**DHT announce rate limits**~~ — ANSWERED (announce storm, 2026-07):
    25 announces/s produced timeout bursts near the END of the paced window and
-   for ~a minute past it. The current regime is 5 announces + a 1 s pause; a
-   ~300-key tail takes ~60 s out of the 15-minute cycle. Announce-on-behalf
+   for ~a minute past it. Since 2026-08-24 the tail drips one key at a time,
+   ≥3 s apart (`dht_service.MIN_ANNOUNCE_SPACING`): 300 initiations per
+   15-minute entry lifetime, half of them the tail's. Announce-on-behalf
    (phase D) adds at most the client cap — tens of keys — which fits that
    budget. Since 2026-09-07 the rate is a property of the traversal lane,
    shared by tail announces and rare-artist lookups (the lookups used to run
@@ -1563,9 +1566,11 @@ last change leaves after it. They land decrypted in `support_reports`, which is 
 problem count. Reachability is the trigger for retries: a master
 reconnect resumes staged uploads and unshipped reports — no timers.
 
-**Limits, on purpose.** Non-master Docker nodes have no wake client to
-the master, so they record `diag_events` but neither answer warrants nor
-report (v1 is for the launcher, where the users are). A node with the
+**Limits, on purpose.** A non-master Docker node records `diag_events`
+but neither answers warrants nor reports (v1 is for the launcher, where
+the users are): since 2026-11-17 it holds the master's wake stream
+(`desktop/p2p/chat_client.py`), registers no warrant handler and drops a
+warrant that arrives on it. A node with the
 toggle off is silent — no "declined" signal, because that would disclose
 the toggle; nor does a request the person has not decided on, or sent
 without a content scope, answer anything but its bundle (the manifest's

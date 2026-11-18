@@ -637,8 +637,9 @@ the rate itself ("Adaptive output rate" above).
   dither and noise shapers (10)**
 - **Sample rates**: what the current output offers (`GetRates`)
 
-The assistant itself works from its prompt and the lists it reads live from
-HQPlayer, not from this file.
+The assistant itself works from its prompt, the lists it reads live from
+HQPlayer and, since 2026-10-20, six tools over HQPlayer's own facts and the
+published atlas (`backend/hqp_assistant.py`) — not from this file.
 
 ---
 
@@ -655,7 +656,7 @@ HQPlayer, not from this file.
 
 ---
 
-**Last updated:** 2026-10-09
+**Last updated:** 2026-11-18
 **HQPlayer version:** the lists are engine 6.2.3's (HQPlayer Desktop 6.1.0);
 a running HQPlayer's own lists are read live
 **Status:** a reference for people; it ranks nothing
