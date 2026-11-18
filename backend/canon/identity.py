@@ -308,7 +308,11 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
             ON CONFLICT DO NOTHING"""), p)
         db.execute(text("""
             INSERT INTO track_credits (track_id, role, artist_id, source, position)
-            SELECT :new, role, artist_id, source, position FROM track_credits WHERE track_id = :old
+            SELECT :new, o.role, o.artist_id, o.source,
+                   o.position + COALESCE((SELECT max(x.position) + 1 FROM track_credits x
+                                           WHERE x.track_id = :new AND x.role = o.role
+                                             AND x.source = o.source), 0)
+            FROM track_credits o WHERE o.track_id = :old
             ON CONFLICT DO NOTHING"""), p)
         # One-per-(track, key) tables: move what the target lacks.
         db.execute(text("""

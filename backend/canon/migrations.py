@@ -747,7 +747,7 @@ def _renormalize_tracks(db: Session, dry_run: bool) -> Dict:
     """The bulk. Every track's new uuid goes into a temp map (COPY, a few
     million rows in seconds); collision groups merge through
     _update_track_uuid one by one; everything else is renamed in batched
-    UPDATEs whose ON UPDATE CASCADE carries the fifteen child tables."""
+    UPDATEs whose ON UPDATE CASCADE carries the child tables."""
     import io
     import psycopg2
     from config import settings

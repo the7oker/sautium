@@ -240,9 +240,11 @@ See:
   relations the authority). No reader of `track_artists` sees one, so no
   engagement gate and no per-artist fan-out does. `artist_id` is `ON DELETE
   RESTRICT`: every sweep and merge of artists names the table (the scanner's
-  prune, the HQPlayer forget, the phantom discard, the un-split GC, the track
-  and artist merges) or fails. On 2026-11-18 nothing writes it yet: the
-  composer read is CREDITS-1's step 2b.
+  prune, the HQPlayer forget, the phantom discard, the un-split GC, the artist
+  merges) or fails. A track merge is not guarded so: `track_id` cascades, so
+  `_update_track_uuid`, the one track merge, copies the credits itself. On
+  2026-11-18 nothing writes the table yet: the composer read is CREDITS-1's
+  step 2b.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.
 - **Genre is album-grain** (`album_genres`, since 2026-06-17): the filetag

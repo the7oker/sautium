@@ -221,16 +221,18 @@ _SEED_KIN_PRED = """EXISTS (
 
 
 # The names search's whole-word arm: the strict word similarity a name's
-# word must reach (pg_trgm.strict_word_similarity_threshold, which `<<%` reads
-# — run_search sets it for its statement) and the weight its score takes.
+# word must reach and the weight its score takes. The score compares with
+# WORD_ARM_MIN itself; `<<%` in the retrieve reads the session's
+# pg_trgm.strict_word_similarity_threshold, which run_search sets to the same
+# value — an executor that does not only retrieves more rows to score 0.
 WORD_ARM_MIN = 0.6
 WORD_ARM_WEIGHT = 0.8
 
 
 def _word_arm(col: str) -> str:
-    """The arm's score: zero below the operator's own threshold, so a word
-    fragment another branch retrieved is not lifted by it either."""
-    return (f"CASE WHEN :ql <<% {col} "
+    """The arm's score: zero below WORD_ARM_MIN, so a word fragment another
+    branch retrieved is not lifted by it either."""
+    return (f"CASE WHEN strict_word_similarity(:ql, {col}) >= {WORD_ARM_MIN} "
             f"THEN {WORD_ARM_WEIGHT} * strict_word_similarity(:ql, {col}) ELSE 0 END")
 
 
@@ -252,7 +254,7 @@ TOOLS: dict[str, Tool] = {
         # bach" 0.23, "mozart" ~ "wolfgang amadeus mozart" 0.29). pg_trgm's
         # strict word similarity scores whole words 1.0 and word fragments low
         # ("offenbach" 0.25, "bachman" 0.44, "bacharach" 0.56); `<<%` admits
-        # it at WORD_ARM_MIN (the executor's SET LOCAL) on the same GIN index,
+        # it at WORD_ARM_MIN on the same GIN index,
         # and its score sits below a prefix's 0.85 and an exact name's 1.0.
         Source("artist_name", "artists",
                "GREATEST(similarity(a.name_latin,:ql), "

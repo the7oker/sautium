@@ -108,14 +108,30 @@ def test_a_word_fragment_is_not_lifted(search, scratch_dsn):
     assert "Jacques Offenbach" not in hits and "Burt Bacharach" not in hits
     # "bacharach": its strict word similarity (0.56) is under the threshold,
     # so the arm scores it nothing where trigrams retrieve it
+    # — on the arm's own constant, not on the session's threshold: here it is
+    # pg_trgm's default 0.5, which "bacharach" passes
     conn = psycopg2.connect(scratch_dsn)
     with conn, conn.cursor() as cur:
-        cur.execute("SET LOCAL pg_trgm.strict_word_similarity_threshold = %s", (WORD_ARM_MIN,))
+        cur.execute("SELECT strict_word_similarity('a', 'a')")     # loads pg_trgm's settings
+        cur.execute("SHOW pg_trgm.strict_word_similarity_threshold")
+        assert float(cur.fetchone()[0]) < 0.56 < WORD_ARM_MIN
         arm = _word_arm("n").replace("%", "%%").replace(":ql", "%(ql)s")
         cur.execute(f"SELECT n, {arm} FROM (VALUES ('burt bacharach'), "
                     "('johann sebastian bach')) v(n)", {"ql": "bach"})
         assert dict(cur.fetchall()) == pytest.approx({"burt bacharach": 0, "johann sebastian bach": 0.8})
     conn.close()
+
+
+def test_a_typo_of_a_whole_word_takes_the_arms_score(search, scratch_dsn):
+    conn = psycopg2.connect(scratch_dsn)
+    with conn, conn.cursor() as cur:
+        cur.execute("SELECT strict_word_similarity('shostakovitch', 'dmitri shostakovich'), "
+                    "similarity('shostakovitch', 'dmitri shostakovich')")
+        word, trigram = cur.fetchone()
+    conn.close()
+    assert word > 0.6 and 0.8 * word > trigram      # the arm decides its score
+    assert search("shostakovitch")["Dmitri Shostakovich"] == pytest.approx(_norm(0.8 * word),
+                                                                           abs=1e-4)
 
 
 def test_an_alias_reading_finds_by_a_whole_word(search):

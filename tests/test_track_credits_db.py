@@ -225,8 +225,9 @@ def test_a_track_merge_carries_the_credits_to_the_survivor(db):
     with factory() as s:
         assert identity._update_track_uuid(s, old, new) == new
         s.commit()
-    # K was already the survivor's: one row, at the survivor's own position
-    assert _credits(cur) == {(new, k, "tag", 0), (new, c, "tag", 0)}
+    # K was already the survivor's: one row, at the survivor's own position;
+    # C comes after the survivor's own credits
+    assert _credits(cur) == {(new, k, "tag", 0), (new, c, "tag", 1)}
 
 
 def test_a_track_renamed_takes_its_credits_by_cascade(db):
@@ -299,6 +300,22 @@ def test_the_identity_renormalisation_carries_a_merged_artists_credits(db):
     assert stats["merged"] == 1
     assert _artists(cur, survivor, merged, final) == {final}
     assert _credits(cur) == {(credited, final, "tag", 0)}
+
+
+def test_the_renormalisation_keeps_the_credited_row_when_nothing_else_decides(db):
+    from canon import migrations
+    cur, factory = db
+    p = _artist(cur, "Performer P")
+    # Neither row has a file, an embedding, a listen, an MBID or a performing
+    # credit; the older would win on age alone, the credited one wins first.
+    _artist(cur, "Don't Stop Composer", id_=str(uuid.uuid4()),
+            created_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    credited = _artist(cur, "Dont Stop Composer", id_=str(uuid.uuid4()))
+    _credit(cur, _track(cur, "Credited", "Performer P", p), credited)
+    with factory() as s:
+        migrations._renormalize_artists(s, dry_run=False)
+    cur.execute("SELECT name FROM artists WHERE id = %s", (str(artist_uuid("Dont Stop Composer")),))
+    assert cur.fetchone() == ("Dont Stop Composer",)
 
 
 def test_a_compound_split_carries_the_credits(db):
