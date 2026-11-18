@@ -390,8 +390,8 @@ See:
   error isolation. A failure on one track must not stop the run.
 - **Each step checks its own precondition.** The bio step
   (`background_enrichment._step_missing_artists`) picks only artists with
-  no Last.fm bio and no recent "not found"; the gender and vocalist
-  classifiers (`LastFMClient._update_artist_gender`,
+  no Last.fm bio and no recent "not found" or error; the gender and vocalist
+  classifiers (`LastFmService._update_artist_gender`,
   `_update_artist_is_vocalist`) run only on a bio just stored, etc.
 - **Explicit per-step stats.** Return a dict of `{step: count}` and log
   totals at the end — the caller is usually the launcher UI or a CLI

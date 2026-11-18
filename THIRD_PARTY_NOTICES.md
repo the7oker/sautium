@@ -30,7 +30,7 @@ Optional, not redistributed: Claude Code CLI (`@anthropic-ai/claude-code`,
 Anthropic's commercial terms) and OpenAI Codex CLI (Apache-2.0) — the two
 selectable assistant agents, installed by the launcher when one is picked
 and, on Docker, by the image's own build from the pinned lockfiles in
-`backend/agents/`.
+`backend/agents/` (the arm64 image: Claude Code only).
 
 Build tooling (not shipped): Inno Setup (Inno Setup License), rcedit (MIT,
 edits the resources of the copied `pythonw.exe`).
@@ -39,8 +39,9 @@ edits the resources of the copied `pythonw.exe`).
 
 `backend/Dockerfile` (and `Dockerfile.mac` for arm64) builds the backend's
 image from `nvidia/cuda` (the CUDA runtime image, NVIDIA's licence; `ubuntu`
-for arm64) with Ubuntu 22.04 packages — ffmpeg, libsndfile, Chromaprint's
-`fpcalc`, each under its own licence and run as a separate process —
+for arm64) with Ubuntu 22.04 packages — ffmpeg and Chromaprint's `fpcalc`
+(run as separate processes) and libsndfile (loaded by `soundfile`), each
+under its own licence —
 Python 3.11 from the deadsnakes PPA (PSF-2.0), `postgresql-client-18` from
 the PostgreSQL project's repository (PostgreSQL License), and Node.js and
 Deno at pinned versions, as above. The compose files run the database from
@@ -104,9 +105,10 @@ urllib3 (MIT) · certifi (MPL-2.0) · aiohttp
 (Apache-2.0 AND MIT) · Brotli (MIT) · python-json-logger (BSD-2-Clause) · pytest (MIT) ·
 pytest-asyncio (Apache-2.0) · anyascii (ISC) · pypinyin
 (MIT) · cutlet (MIT) · fugashi (MIT AND BSD-3-Clause, with MeCab) · koroman
-(MIT). Installed in the Docker image only: libtorrent (BSD) and unidic-lite
-(MIT; it carries the UniDic dictionary, used under the BSD-3-Clause of its
-three licences).
+(MIT). Installed by the Docker image outside `requirements.txt`: libtorrent
+(BSD; the launcher's too, above) and, in the image only, unidic-lite (MIT; it
+carries the UniDic dictionary, used under the BSD-3-Clause of its three
+licences).
 
 mutagen is GPL-2.0-or-later. Sautium imports it for tag reading; it is
 installed by pip on the user's machine and is not redistributed with

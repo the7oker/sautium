@@ -15,7 +15,7 @@
 > albums and tracklists from them (see D6). What does travel is the analysis
 > hanging off those rows, through sync and carry.
 > Stage C (text-similarity, D7) needed nothing of its own: a phantom artist
-> with a Last.fm bio is embedded like any other
+> with a Last.fm bio is embedded like any other (the bio only; tags are not)
 > (`enrichment_embeddings.ArtistBioEmbeddingGenerator`) and the Discovery
 > engine scores it through its `artist_bio` source (since 2026-07-01). The
 > "Phases" table and "Design decisions" below are the original plan, kept for

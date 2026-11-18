@@ -11,7 +11,7 @@ DSP options (filters, shapers, modes, rates) dynamically at runtime, so the same
 drives any of them with no version switch. What differs between an HQPlayer on this
 machine and one on another box is how a track reaches it — see "Where HQPlayer runs".
 
-**Status**: in daily use as one of the node's outputs — § "Shipped since the first iteration"
+**Status** (2026-11-18): in daily use as one of the node's outputs — § "Shipped since the first iteration"
 
 ## Architecture
 

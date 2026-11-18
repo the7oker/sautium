@@ -287,7 +287,7 @@ wiring, not new machinery):
 | Phantom layer (similars / missing albums) | **owner's switch, on in all profiles** — `discovery.phantom_layer` (off = nothing new minted, existing rows stay); removal only by the explicit Settings action, never by tier | | |
 | Background enrichment | on | on | on — since 2026-09-05 the manual button is analysis-only, so the loop is the sole network path on every profile |
 | Player status loop | owned by the active output backend (§2.6) — no configured output, no loop | | |
-| torch threads (CPU and MPS; on CUDA torch's default on every tier) / I/O pool | max(2,cores−2) / min(16,cores) | max(2,cores−2) / min(8,cores) | max(2,cores/2) / min(4,cores) |
+| torch threads (CPU and MPS; on CUDA torch's default on every tier) / I/O pool | max(2,cores−2) / max(2,min(16,cores)) | max(2,cores−2) / max(2,min(8,cores)) | max(2,cores/2) / max(2,min(4,cores)) |
 | P2P sync + chat + DHT | **on in all profiles** — sync is the lite node's lifeline | | |
 
 The MB dump is **not** in the matrix: it is already an independent opt-in today

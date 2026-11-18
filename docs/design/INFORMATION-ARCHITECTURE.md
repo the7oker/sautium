@@ -903,7 +903,7 @@ or is a thin query over existing data.
 | Metadata row | `albums.release_year`, sum of `media_files.duration_seconds`, `media_files.is_lossless` + `bit_depth` for badge; a phantom album: `[demo]` always, the streamed mix (`/phantom-availability` `quality`) for the badge, its `excerpt` list for the row tags | — |
 | Genre chips | `track_genres` + `genres.name` aggregated, top 3 by occurrence count | — |
 | Tracklist | `tracks` ordered by `track_number` | — |
-| Play all / + Queue | the transport calls in `player.js` | + queue history snapshot before replace |
+| Play all / + Queue | the transport calls in `app-shell.js` (`/api/player/play-tracks`, `/api/player/queue-tracks`) | + queue history snapshot before replace |
 
 ### Genre
 

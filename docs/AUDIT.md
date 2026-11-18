@@ -327,8 +327,8 @@ at https://github.com/the7oker/sautium/issues.
 ## 6. Maintenance
 
 Written 2026-09-21 against the tree of that date, and extended since in the
-commits that changed what it names (the Content-Security-Policy 2026-10-26,
-signed releases 2026-11-12 and 2026-11-14). The prompt names files and
+commits that changed what it names (among them the Content-Security-Policy
+2026-10-26 and signed releases 2026-11-12 and 2026-11-14). The prompt names files and
 symbols, never line numbers, so it survives edits inside a file; moving or
 renaming a file it names is a change to this page in the same commit (the
 documentation rule in `CLAUDE.md`). The claims in tasks D–F restate

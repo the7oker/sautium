@@ -203,8 +203,8 @@ only served pulls and accepted carry, so the master's phantom layer received a
 peer's first-hand analysis only when that peer chose to carry it. Runtime
 differences are injected: the DHT
 service, LAN discovery (none in a bridge-networked container — it cannot
-hear the beacon; a host-networked one, `docker-compose.pi.yml` since
-2026-11-15, runs it as a launcher does),
+hear the beacon; a host-networked one, `docker-compose.pi.yml`, runs it as
+a launcher does since 2026-11-17),
 manual peers, the address skip list (the launcher subtracts itself by its
 UPnP external IP; every runtime also recognises its own address by the key
 `/health` returns), the sharing switch (off, since 2026-11-14, the walk asks

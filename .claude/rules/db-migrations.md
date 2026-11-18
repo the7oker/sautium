@@ -59,8 +59,10 @@ this file carries the mechanics.
   what each one did.
 - **Trying DDL out** happens on the rehearsal database, not the live one:
   restore the latest backup into `music_ai_test` (`python -m backup restore
-  <file.sbk> --db music_ai_test`; the dump holds the `mb_*` / `lb_*` tables
-  without their data), run the delta there, then
+  <file.sbk> --db music_ai_test --replace`, before the delta's file is in
+  `desktop/migrations/` — the restore applies every pending migration; the
+  dump holds the `mb_*` / `lb_*` tables without their data), run the delta
+  there, then
   commit it as `NNN_*.sql` and let the runner apply it (restart the
   backend).
 - **PostgreSQL ENUM type changes** require this exact sequence (a straight

@@ -174,7 +174,7 @@ node backup but in no share file and in no sync category
    next pass a call
 ✅ The step that asked can read it back as its own precondition
 
-**Examples**: `LastFMClient.enrich_artist` marking an artist Last.fm has no bio for;
+**Examples**: `LastFmService.enrich_artist` marking an artist Last.fm has no bio for;
 `lrclib` / `genius` marking a track neither service carries.
 
 ---

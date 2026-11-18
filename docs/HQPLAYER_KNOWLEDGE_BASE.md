@@ -29,7 +29,7 @@
 ### Supported formats
 - **PCM**: FLAC, WAV, AIFF, ALAC, MP3, AAC
 - **DSD**: DFF (DSDIFF), DSF
-- **Streaming**: streaming services (through partners)
+- **Streaming**: Tidal, Qobuz (through partners)
 
 ---
 
