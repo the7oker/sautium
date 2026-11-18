@@ -677,7 +677,19 @@ below bind with or without it.
    `device_auth.py` ("Credential channel") + `auth.js`: password or
    PIN in and the token out ride a NaCl box to a per-exchange key the
    node's identity signs, and the browser pins that identity on first
-   sign-in (a different one raises the known-hosts dialog). Signing
+   sign-in (a different one raises the known-hosts dialog). Since
+   2026-11-18 (B-93) every other secret typed in the Web UI rides the
+   same box — the AI provider's key, a sign-in's pasted code, the
+   email's code, a friend's invite link pasted to add them (it carries
+   that node's bearer token); the Codex device code comes back only
+   sealed — through
+   one helper each side (`routers/auth.boxed`, `Sautium.auth.boxed`),
+   and the route refuses the plain body; the changes that act outside
+   the node and outlast "Sign out everywhere" — the account email, an
+   invite link with rights or any widening of a link, the AI key, an
+   agent's sign-in — take the
+   account's password through it (on an anonymous launcher account the
+   host's pairing code), `routers/auth.step_up`. Signing
    itself never needed the transport — the token never travels. Do
    not add a self-signed listener back "for security": it adds a
    warning and no protection the box does not give. TLS for the Web
@@ -787,7 +799,7 @@ toast takes no pointer events and never blocks the user (see
 | File | Purpose |
 |------|---------|
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
-| `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange rides — the Web UI has no TLS (rule 8) |
+| `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides; `step_up` (the password, or an anonymous account's host code) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8) |
 | `desktop/agent_login.py` | Headless CLI sign-in driver (`claude auth login`, `codex login [--device-auth]` over pipes) shared by the wizard and the backend's `/api/settings/ai/<agent>/signin` — no console, completion is an event |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
 | `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
@@ -804,7 +816,7 @@ toast takes no pointer events and never blocks the user (see
 | `desktop/node_backup.py` | Node backup format v1 (`.sbk`: Argon2id KEK in its own salt domain, per-file data key, chunked XChaCha20-Poly1305 with the header as AAD, framed members) + `pg_dump`/`pg_restore` drivers, staged restore, identity write, selftest — shared by launcher and backend (`docs/design/BACKUP.md`) |
 | `backend/backup.py` | The node binding and the ONE "make a backup": `python -m backup create\|inspect\|restore\|selftest\|export\|import\|merge` on either interpreter (loads `<data_dir>/backend.env` under the launcher), password check via `device_auth.verify_password`, the playback signal as a PostgreSQL session advisory lock (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the job). The weekly task calls `create --password-env P2P_PASSWORD` — a contract. No Web UI |
 | `backend/share.py` | Share export/import (BACKUP.md Product B): gzip'd JSON lines with a signed trailer, streamed both ways; every sealed record the node holds under its author's seal, structural rows from the seed builders; import through `SyncClient._import_items` (the gate) after a verify pass, default (add phantoms) or `--existing-only` (create no artist/album/track) |
-| `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
+| `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, comparisons by ear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
 | `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place. Also the one "same listen" rule (`same_listen`, `LISTENS_LOCK_KEY`) and the repair of pre-2026-09-24 naive listen starts |
 | `backend/lastfm_history.py` + `backend/canon/scrobbles.py` | The Last.fm history import: the walk into the waiting room (single flight, resumable, event-triggered) and the canon that places waiting scrobbles on canonical tracks (stages A–E, one consumer thread woken by events; `python -m canon.scrobbles --eval / --report` measure it read-only) |
 | `desktop/p2p/chat_client.py` | The client half of chat, one implementation for the launcher's P2PManager and the Docker backend (`p2p_chat.start_client`): the friends' addresses, the Support contact and the handshakes, the outbox (direct push, relay forward with the recipient's receipt, the master's Worker mailbox — "kept", not delivered, until a proof), the history pull, the wake streams it holds, the reachability verdict; the master runs none, a launcher-mode backend builds none (one deliverer per database) |

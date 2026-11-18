@@ -1824,7 +1824,8 @@ def pair_items(atlas: Atlas, found: Found, p: Dict[str, Any], used: set) -> List
         _no_words("axis", p["axis"])
         return []
     i = p["members"].index(found.entry["name"])
-    items = [_line(_phrase(PAIR_LEAD, axis=axis, other=p["members"][1 - i]))]
+    # `other`: the member the line names, for the card's "Compare by ear"
+    items = [{**_line(_phrase(PAIR_LEAD, axis=axis, other=p["members"][1 - i])), "other": p["members"][1 - i]}]
     items += [_note(detail) for detail in pair_detail(p, i, used)]
     tail = pair_tail(atlas, p)
     return items + ([_note(tail)] if tail else [])

@@ -1668,7 +1668,8 @@ def test_an_hqplayer_back_from_a_restart_is_lent_before_the_next_play(run):
     bench.start()
     assert _wait(lambda: not bench.running(), 30)
     assert bench.state()["outcome"] == "done", bench.state()
-    assert run.mgr.held is None and run.mgr.active.healthy()
+    # the job closes before the output goes back (_run): the attach follows
+    assert _wait(lambda: run.mgr.held is None, 10) and run.mgr.active.healthy()
 
 
 def test_a_fixed_volume_needs_the_owners_word(run):

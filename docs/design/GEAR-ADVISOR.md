@@ -188,31 +188,32 @@ listening axes the praised traits hit.
 
 ## Experiment (2026-07-12) — reference output
 
-Manual end-to-end run of the whole pipeline on the maintainer's real rig
-(6 parallel research agents, source hierarchy enforced, no bot-protection
-bypass, pair engine as a script, report in Sautium DS):
-https://claude.ai/code/artifact/f16b32f7-75fa-4bb6-a8be-59209fd42ace
+A manual end-to-end run of the whole pipeline on one real headphone system
+(a streamer, a DAC, amplifiers, several headphones): six research agents in
+parallel, the source hierarchy enforced, no bot-protection bypass, the pair
+engine as a script, the report in the Sautium design system. The report is
+not published.
 
 Findings that define the quality bar:
 
-- **Blind test passed**: the engine independently reproduced the owner's
-  prior conclusion on Chord Qutest — measured top-class yet a *system
-  downgrade for this chain* (RCA-only vs balanced chain; Linux NAA → DoP256
-  ceiling; 768k feed bypasses the WTA stage the price pays for).
-- Deterministic layer caught non-obvious numbers: SRM-T8000 ≈113 dB ceiling
-  on SR-X9000; Susvara driver bottoming (114 dB) × library p90 DR 31.5 dB →
-  avg ≤82 dB; stock-pad Elite sub-bass ≈ HD650-class, hybrid pads fix it for
-  free.
-- Sentiment layer carried facts absent from any datasheet: spritzer's T8000
-  teardown verdict, HiFiMAN QC lottery, KANN Ultra low-Z clipping (ASR),
-  AM5LE measured 2.0 dB L/R mismatch (N=1).
-- Context flipped verdicts: the SBAF "HD650 dequalifies flagships" thesis is
-  measured-true in mids (0.93 vs 2.73 dB RMS vs Harman, same rig) and
-  measured-false below 40 Hz for this library's sub-bass genres.
-- 7 honest gaps documented; one (AM5LE impedance curve) was later closed via
-  VPN and the pair verdict recomputed — the lifecycle the worker must
-  eventually support (`re-research when a previously unreachable source
-  appears`).
+- **Blind test passed**: the engine independently reproduced a conclusion the
+  system's owner had reached before — a DAC measured top-class that was a
+  *system downgrade for this chain* (its inputs and outputs did not match the
+  rest of the chain, and the feed this chain gives it bypasses the stage its
+  price pays for).
+- The deterministic layer caught non-obvious numbers: an amplifier's output
+  ceiling on the headphone it drives; a driver's excursion limit against the
+  library's p90 dynamic range, which caps the usable average level; a stock
+  pad's sub-bass fixed for free by another pad.
+- The sentiment layer carried facts absent from any datasheet: a teardown
+  verdict, a maker's quality-control lottery, a player's clipping into low
+  impedance, a measured left/right mismatch (N=1).
+- Context flipped verdicts: a forum thesis that a reference headphone
+  disqualifies the flagships was measured true in the mids and measured false
+  below 40 Hz for this library's sub-bass genres.
+- Seven honest gaps were documented; one (an impedance curve) was closed later
+  and the pair verdict recomputed — the lifecycle the worker must eventually
+  support (`re-research when a previously unreachable source appears`).
 
 Method limits to encode in the worker: SBAF is snippet-only (bot protection
 respected), exact ASR SINAD figures live in dashboard images, some measurement
@@ -227,7 +228,7 @@ hosts are region-blocked, head-fi renders JS-only.
   banded deltas vs audibility; electronics: functional unlocks + threshold
   verdicts + camp split).
 - Upgrade path: budget slider → frontier cards.
-- The experiment report doubles as the visual reference for all of these.
+- The experiment's report was the visual reference for all of these.
 
 ## Roadmap
 

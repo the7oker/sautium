@@ -172,7 +172,7 @@ def test_an_invite_mailed_spent_picked_up_and_bound_on_both_sides(nodes):
     assert chat_wire.invite_id(chat_wire.parse_share(string).invite_token) == invite_id
 
     nodes.be(SASHA)
-    added = _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=string)))
+    added = _run(p2p.add_share_string(string))
     assert added["invite"] == "accepted" and added["invite_code"] == MASHA.code
     stub = _row(nodes.dsn, "SELECT public_key_hex, encode(key_fingerprint, 'hex'), accepted_invite_id::text"
                            " FROM friends WHERE invite_code = %s", MASHA.code)
@@ -190,7 +190,7 @@ def test_an_invite_mailed_spent_picked_up_and_bound_on_both_sides(nodes):
     # which tells the inviter by its username alone.
     nodes.be(PASHA)
     sent = len(_mails(nodes.url))
-    again = _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=string)))
+    again = _run(p2p.add_share_string(string))
     assert again["invite"] == "used"
     told = [m for m in _mails(nodes.url)[sent:] if m["to"] == ["masha@example.org"]]
     assert [m["subject"] for m in told] == ["pasha added your Sautium invite code"]
@@ -206,7 +206,7 @@ def _requested(picked, who) -> bool:
 def test_an_add_by_plain_code_waits_for_add_back_and_one_click_makes_the_contact(nodes, monkeypatch):
     nodes.be(SASHA)
     sent = len(_mails(nodes.url))
-    added = _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))
+    added = _run(p2p.add_share_string(MASHA.code))
     assert added["invite"] is None
     told = [m for m in _mails(nodes.url)[sent:] if m["to"] == ["masha@example.org"]]
     assert [m["subject"] for m in told] == ["sasha added your Sautium invite code"]
@@ -245,7 +245,7 @@ def test_an_add_by_plain_code_waits_for_add_back_and_one_click_makes_the_contact
     monkeypatch.setattr(p2p, "_tell_code_added", tell)
     nodes.be(SASHA)
     time.sleep(0.01)
-    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))
+    _run(p2p.add_share_string(MASHA.code))
     nodes.be(MASHA)
     assert _requested(_run(p2p.pending_accepts()), SASHA)
     [again] = [r for r in _run(p2p.list_friend_requests())["items"] if r["invite_code"] == SASHA.code]
@@ -254,7 +254,7 @@ def test_an_add_by_plain_code_waits_for_add_back_and_one_click_makes_the_contact
 
 def test_a_dismissed_request_stays_hidden_and_a_hand_add_of_its_code_answers_it(nodes, monkeypatch):
     nodes.be(PASHA)
-    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))
+    _run(p2p.add_share_string(MASHA.code))
     nodes.be(MASHA)
     assert _requested(_run(p2p.pending_accepts()), PASHA)
     [req] = [r for r in _run(p2p.list_friend_requests())["items"] if r["invite_code"] == PASHA.code]
@@ -265,7 +265,7 @@ def test_a_dismissed_request_stays_hidden_and_a_hand_add_of_its_code_answers_it(
                 PASHA.code) == (True,)
     # masha adds pasha's code by hand: the contact, and the request answered (her yes over the dismissal)
     _told(monkeypatch)
-    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=chat_wire.long_code("pasha", PASHA.pub))))
+    _run(p2p.add_share_string(chat_wire.long_code("pasha", PASHA.pub)))
     assert _row(nodes.dsn, "SELECT ignored_at, answered_at = requested_at FROM friend_requests"
                            " WHERE invite_code = %s", PASHA.code) == (None, True)
     assert _row(nodes.dsn, "SELECT public_key_hex FROM friends WHERE invite_code = %s", PASHA.code) == (
@@ -303,14 +303,14 @@ def test_an_invite_the_worker_refuses_this_node_for_or_never_answers_tells_nobod
         def now(cls, tz=None):
             return datetime.now(tz) - timedelta(hours=1)
     monkeypatch.setattr(p2p, "datetime", Late)
-    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=string)))["invite"] == "clock"
+    assert _run(p2p.add_share_string(string))["invite"] == "clock"
     monkeypatch.setattr(p2p, "datetime", datetime)
     monkeypatch.setattr(p2p, "VERIFY_WORKER_URL", "http://127.0.0.1:9")     # nobody answers there
-    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=string)))["invite"] == "unreachable"
+    assert _run(p2p.add_share_string(string))["invite"] == "unreachable"
     assert told == []
     # the same string, the Worker reachable and the clock right: accepted
     monkeypatch.setattr(p2p, "VERIFY_WORKER_URL", nodes.url)
-    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=string)))["invite"] == "accepted"
+    assert _run(p2p.add_share_string(string))["invite"] == "accepted"
     assert told == []
 
 
@@ -321,7 +321,7 @@ def test_the_masters_code_waits_for_the_masters_own_key_in_any_form(nodes):
     nodes.be(SASHA)
     name = MASTER_INVITE_CODE.split("#")[0]
     for form in (MASTER_INVITE_CODE, chat_wire.long_code(name, MASTER_PUBKEY_HEX), _another(name, MASTER_PUBKEY_HEX)):
-        _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=form)))
+        _run(p2p.add_share_string(form))
         assert _row(nodes.dsn, "SELECT encode(key_fingerprint, 'hex') FROM friends WHERE invite_code = %s",
                     MASTER_INVITE_CODE) == (chat_wire.key_fingerprint(MASTER_PUBKEY_HEX).lower(),), form
 
@@ -350,10 +350,10 @@ def test_an_invite_the_worker_does_not_know_is_an_add_by_code_and_a_node_not_bor
     async def born():
         return state.born
     monkeypatch.setattr(p2p, "_born", born)
-    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=unknown)))["invite"] == "unreachable"
+    assert _run(p2p.add_share_string(unknown))["invite"] == "unreachable"
     assert told == []                                       # a key not born asks nothing, tells nobody
     state.born = True
-    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=unknown)))["invite"] == "not_found"
+    assert _run(p2p.add_share_string(unknown))["invite"] == "not_found"
     assert told == [MASHA.code]
 
 
@@ -388,23 +388,23 @@ def test_an_invite_is_held_to_the_key_its_contact_already_waits_for(nodes):
     nodes.be(SASHA)
     # a long code under masha's short code that names another key: the contact waits for that one
     other = _another("masha", MASHA.pub)
-    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=other)))
+    _run(p2p.add_share_string(other))
     bound = _row(nodes.dsn, "SELECT key_fingerprint FROM friends WHERE invite_code = %s", MASHA.code)
     short = MASHA.code + "#i-" + string.rsplit("#i-", 1)[1]             # the invite, its code in the short form
-    assert _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=short)))["invite"] == "unreachable"
+    assert _run(p2p.add_share_string(short))["invite"] == "unreachable"
     assert _row(nodes.dsn, "SELECT key_fingerprint FROM friends WHERE invite_code = %s", MASHA.code) == bound
 
 
 def test_a_new_fingerprint_drops_the_nudge_of_the_one_before(nodes):
     nodes.be(SASHA)
-    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=chat_wire.long_code("masha", MASHA.pub))))
+    _run(p2p.add_share_string(chat_wire.long_code("masha", MASHA.pub)))
     with psycopg2.connect(nodes.dsn) as c, c.cursor() as cur:
         cur.execute("UPDATE friends SET accepted_invite_id = %s WHERE invite_code = %s",
                     (str(uuid.UUID(int=92)), MASHA.code))
-    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=MASHA.code)))             # no fingerprint: kept
+    _run(p2p.add_share_string(MASHA.code))             # no fingerprint: kept
     assert _row(nodes.dsn, "SELECT accepted_invite_id::text FROM friends WHERE invite_code = %s",
                 MASHA.code) == (str(uuid.UUID(int=92)),)
-    _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=_another("masha", MASHA.pub))))   # another key's: dropped
+    _run(p2p.add_share_string(_another("masha", MASHA.pub)))   # another key's: dropped
     assert _row(nodes.dsn, "SELECT accepted_invite_id FROM friends WHERE invite_code = %s", MASHA.code) == (None,)
 
 
@@ -412,5 +412,5 @@ def test_ones_own_invite_is_refused_before_any_request(nodes):
     from fastapi import HTTPException
     nodes.be(MASHA)
     with pytest.raises(HTTPException) as refused:
-        _run(p2p.add_friend(p2p.AddFriendRequest(invite_code=chat_wire.long_code("masha", MASHA.pub))))
+        _run(p2p.add_share_string(chat_wire.long_code("masha", MASHA.pub)))
     assert refused.value.status_code == 400

@@ -139,16 +139,6 @@ def token_requires_cert(conn, token_id: str) -> Optional[bool]:
     return None if not row else bool(row[0])
 
 
-def token_rights(conn, token_id: str) -> list:
-    """Current rights of a token WITHOUT burning a use — the retry path of
-    an interrupted accept heals the snapshot from here (the use was already
-    burned by the interrupted attempt)."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT p2p_right FROM invite_token_rights"
-                    " WHERE token_id = %s", (token_id,))
-        return sorted(r[0] for r in cur.fetchall())
-
-
 def token_revoked(conn, token_id: str) -> Optional[bool]:
     """None = no such token locally (fresh device), else its revoked state.
     The grant-recovery path honors a same-device revocation record but
@@ -158,6 +148,27 @@ def token_revoked(conn, token_id: str) -> Optional[bool]:
                     " WHERE id = %s", (token_id,))
         row = cur.fetchone()
         return None if row is None else row[0]
+
+
+def reaccept_terms(conn, friend_id: int, grant: Optional[dict], issuer_pubkey_hex: str,
+                   guest_pubkey_hex: str) -> tuple:
+    """(token_id, rights) a re-accept of an established token friend signs
+    its grant with: the rights snapshotted when the friendship was made —
+    never healed from what the guest presents, and an empty snapshot stays
+    empty (the owner widens a link for future uses only, B-93) — and the
+    token that friend joined through, else that of a grant this node signed
+    for that same guest whose token is not revoked here; None when there is
+    neither (no grant is signed: a presented token id would let the guest
+    name a token revocation does not reach)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT source_token_id::text FROM friends WHERE id = %s", (friend_id,))
+        row = cur.fetchone()
+    token_id = row[0] if row else None
+    if (token_id is None and grant and verify_grant(grant, issuer_pubkey_hex)
+            and str(grant.get("guest_pubkey", "")).lower() == guest_pubkey_hex.lower()
+            and token_revoked(conn, grant["token_id"]) is not True):
+        token_id = grant["token_id"]
+    return token_id, friend_rights(conn, friend_id)
 
 
 def snapshot_rights(conn, friend_id: int, rights: list) -> None:

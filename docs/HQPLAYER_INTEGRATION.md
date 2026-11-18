@@ -245,7 +245,7 @@ assistant tool, no control in the Web UI (as of 2026-11-18):
   /api/hqplayer/config` sends the same knobs in the same order through
   `hqp_backend.change_dsp`, which waits out each knob's build (below); it
   takes a filter and a shaper by name and sends the index HQPlayer's list
-  gives that name right before the Set* (since 2026-11-08, B-60: an index is
+  gives that name right before the Set* (since 2026-11-08: an index is
   a place in the current mode's list, and the list moves between modes and
   builds); a filter both slots already hold (State's `filterNx` and
   `filter1x`, as HQPlayer reports them) is taken as it stands, no SetFilter
@@ -630,7 +630,7 @@ comes after the control port answers again — so neither can end the wait.
   Now Playing keeps that track with its diagnosis, Play starts it, Next and
   Previous move from it; HQPlayer playing another entry of ours on a take no
   command of the node's made — the person's start in HQPlayer's own window —
-  spends it (since 2026-11-09, ROON-COEX §6.1 P8: Pause then Play restarted
+  spends it (since 2026-11-09, Roon coexistence: Pause then Play restarted
   the refused track), never a takeover's; on HQPlayer 6 the take that plays
   tells who made it, so a filter change of the node's at the spot before the
   person's start spends it all the same, and a Seek, Next or Previous that
@@ -648,7 +648,7 @@ comes after the control port answers again — so neither can end the wait.
   that slot and the second of the node's last own reading. So does a tick
   whose playlist holds an entry the node never gave HQPlayer, the take moved
   since, whatever HQPlayer plays or refuses of it (since 2026-11-09,
-  ROON-COEX F7: Roon's stream at a rate the output family refuses, its Play
+  Roon coexistence: Roon's stream at a rate the output family refuses, its Play
   sent again and again — nothing of it ever plays; before, no spot was
   left); where HQPlayer names no take (HQPlayer 5), only for a listen read
   while the playlist was the queue's mirror. A start of the node's still in
@@ -668,8 +668,8 @@ comes after the control port answers again — so neither can end the wait.
   the node's own Play ("Output events", below). A take-back that
   controller stops before it plays — Roon's own Stop, sent a set time after
   its Pause (5 s, recorded), landing on a start made meanwhile — is that
-  controller's stop, not HQPlayer's refusal (since 2026-11-10, ROON-COEX §6.2
-  P6; the words a draft): a Stop the node did not send while a start asked
+  controller's stop, not HQPlayer's refusal (since 2026-11-10, Roon coexistence;
+  the words a draft): a Stop the node did not send while a start asked
   for under another controller's hold goes — a Play pressed, a new queue
   played — that controller holding HQPlayer paused (its own Stop due) or
   HQPlayer having started it (its audio left: one playing answer at 0 s is
@@ -684,8 +684,8 @@ comes after the control port answers again — so neither can end the wait.
   log is read and the refusal it names is said in the node's words — "HQPlayer
   refused the other app's track", "No output rate for 96 kHz in its output
   family. Play takes HQPlayer back at …" — as a toast (since 2026-11-11; from
-  2026-11-09 to then a row of its own under Now Playing's meta row, ROON-COEX
-  §6.1 P7 and P12; the words a draft) whose Why? opens the
+  2026-11-09 to then a row of its own under Now Playing's meta row;
+  the words a draft) whose Why? opens the
   Why sheet with HQPlayer's own line: an attempt of its own (the Diagnostics
   list's "Another app's track"), never one of the node's plays. Each refused
   track of that app's gets its own, and so does one after a takeover whose
@@ -697,8 +697,8 @@ comes after the control port answers again — so neither can end the wait.
   its Play names nothing and the next take is read; a playlist is read for
   no more once a row names its refusal or a second read finds none (a cause
   the node has no words for: the other app's Play sent again costs two
-  reads, not one a second) (since 2026-11-10, ROON-COEX §6.1 P13). A known limit (since
-  2026-11-10, ROON-COEX F9): after the node takes HQPlayer back from a Roon
+  reads, not one a second) (since 2026-11-10). A known limit (since
+  2026-11-10): after the node takes HQPlayer back from a Roon
   that had stopped itself, Roon keeps its link, and its next Play Now sends no
   Stop — HQPlayer keeps playing the node's track, Roon's stream waiting behind
   it while Roon's screen names its own. The node cannot tell that from Roon's
@@ -711,7 +711,7 @@ comes after the control port answers again — so neither can end the wait.
   a takeover, read off the playlist at that tick, never an advance of the
   node's (below). Next and Previous there — and at any spot while another controller
   holds HQPlayer — start the slot beside it, from its start, as a tap there
-  (since 2026-11-09, ROON-COEX L11: a press that starts playback takes the
+  (since 2026-11-09: a press that starts playback takes the
   output back; at either end of the queue the spot stays); Pause and Stop
   while another controller plays through HQPlayer send it nothing, the spot
   standing, and a start that waited for its stream leaves its own. A listen
@@ -747,7 +747,7 @@ comes after the control port answers again — so neither can end the wait.
   HQPlayer — as the poller last read it, whatever the status says meanwhile
   (a take-back that waits for its stream says "loading") — or HQPlayer rests
   on its playlist with nothing of ours read (drifted to an entry the node
-  never gave: Roon's stream before its Play, since 2026-11-09 — or F7's
+  never gave: Roon's stream before its Play, since 2026-11-09 — or Roon's
   refused stream under the takeover's spot, Roon's Play sent again), an append (a
   filler's, the radio's, a person's), the radio's own clear and a new queue
   put together without playing it are the queue's alone: nothing goes into
@@ -846,7 +846,7 @@ comes after the control port answers again — so neither can end the wait.
     our own playlist is read too, and stays ours: one PlaylistGet — and so,
     since 2026-11-11, is the stopped tick of HQPlayer's own advance from an
     entry of ours (left out as explained until then): the entry it moved
-    onto may be one another controller put behind ours (ROON-COEX F9).
+    onto may be one another controller put behind ours (a Roon that keeps its link, above).
   - **The play press** on a playlist that is no mirror: Play on a pause of
     an entry of ours only resumes (the tail behind the entry read is
     repaired as above); Play from a stop, a tap, Next or Previous while it
@@ -1130,6 +1130,70 @@ wish undid is spent as the session opens, never read as the stream's end
 (since 2026-10-13). While the socket is open
 no DSP sample is written (`hqp_load`): metering costs HQPlayer work.
 
+### Comparing by ear (AB-1, 2026-11-17)
+
+`playback/hqp_ab.py` (the engine) and `playback/hqp_ab_search.py` (who is
+compared, in what order, when it stops), behind `/api/hqplayer/ab*` and a
+sheet over the HQPlayer screen ("Compare by ear"). The owner's design is
+ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
+
+- **Two forms.** *Find my filter*: the person's filter (the slot the track's source
+  runs) against one candidate a step — Better / No difference / Worse —
+  the champion replayed after "worse" as a focus check, six steps a
+  sitting; candidates are probed contrast first on three axes the atlas
+  measures (the phase type, the −3 dB point over Nyquist, the ringing in
+  source samples), a bracket per axis narrowed by the answers and resumed
+  from the log at the next sitting; it waits for the atlas. *Two filters,
+  blind*: their filter against one they choose from what this computer keeps
+  up with, "1 / 2" in blocks of two rounds (each side first once a block),
+  stopped by two "no difference", a clear pick (a flat Beta prior,
+  P > 95 %) or ten rounds. Filters only, in PCM and in SDM mode; never PCM
+  against DSD; never a pair at two output rates.
+- **The fragment** is a FLAC cut of the track's own file — the passage the
+  person chose on the sheet, 20 ms fades, after a lead of digital silence
+  (`transcode.flac_fragment_path_for_file`) — handed to HQPlayer through
+  the media proxy. Owned PCM files here only: a track at the HQPlayer's own
+  library, a stream or a DSD file is refused in words.
+- **The start is a resume.** The lab run of 2026-11-17 on Legion's HQPlayer
+  (engine 6.3.3, through the capture stand) found Play's own start
+  unstable — Play to the sound at the output moved by up to 0.94 s in PCM
+  (once 3.77 s) and 1.4 s in SDM, its median with the filter — and a resume
+  from a pause stable (69 ms of spread in PCM, 154 ms in SDM). So each
+  fragment is played into its lead, paused at the meter's first frame of it
+  (all-zero: nothing is heard), and resumed so its sound leaves the output
+  the sitting's silence after the sound before it, or after the person's
+  tap. The meter's onset is a frame's own time (`hqp_meter`'s run `onset`:
+  the read's arrival less the hops after it) plus Status's `output_delay`
+  for the filter — to σ 12–23 ms in PCM, ~0.1 s in SDM.
+- **The warm-up** — at the bottom of HQPlayer's volume range, read back,
+  before the sheet — plays every filter the sitting may play once and
+  measures its delay, its start, its resume's way to the output, its
+  pause's position and how long after its sound its end shows (HQPlayer
+  sends all-zero frames through its output delay after an entry's end, and
+  sinc-M's ran 2 s longer in PCM). The silence is one value a sitting: the
+  slowest end, start and resume plus 0.5 s; the lead the latest pause plus
+  0.3 s, never under 1 s. Every silence played is checked from the same
+  events (0.15 s in PCM, 0.3 s in SDM); a step that missed is played again
+  with the silence grown, never stored as an answer.
+- **The hold.** A sitting holds the output as the benchmark does
+  (`PlaybackManager.hold`, label "Comparing filters"): nothing else drives
+  HQPlayer, no surface names the filter, no listen is recorded. It drives
+  HQPlayer on a connection of its own and taps HQPlayer's meter
+  (`hqp_meter.tap`). A swap writes the context's slot only (1x or Nx), at
+  once. At the end the champion (the chain) or their filter (the pair) and
+  their volume are put back; a sitting cut short (the process died, the
+  connection went) is put back at HQPlayer's next answer (`hqp_ab.recover`,
+  one put-back of a row at a time, whatever HQPlayer then plays); a DSP
+  change from elsewhere, or another controller playing while it sits, ends
+  it as left, nothing put back; a put-back HQPlayer refuses twice alike is
+  left to the person, the filter and the volume named in a notice.
+- **What is kept**: `hqp_ab_sittings` and `hqp_ab_duels`, the person's own
+  record under the track's context (mode, slot, a conversion across rate
+  families) — in the node backup and its life-data merge, never in the
+  sync, carry, the share export, the seed or a support bundle; "Forget
+  this library" removes its sittings. The filter picker shows "your pick ·
+  N" from them, in the current track's context only, never re-sorting.
+
 ## Usage
 
 ### Basic Connection
@@ -1255,7 +1319,7 @@ DSP sample, the benchmark holds back, and the listen that was open ends there �
 unless another controller cut it: it leaves its spot, which the status names
 instead (the spot, above; on a DLNA renderer the same spot, which Play loads there
 and a Seek moves, since 2026-11-01), and the play tracker holds that listen as a
-pause holds it (`taken`, since 2026-11-09, ROON-COEX F6), none of the other
+pause holds it (`taken`, since 2026-11-09), none of the other
 controller's seconds counted, until the output plays an entry of ours again. Taken
 back at the spot, the same listen goes on: one history row, one scrobble at the
 usual line, no second now-playing. Another track started instead ends it at its
@@ -1317,7 +1381,7 @@ began, other than its track's or its transport's as the wait began, read in an e
 asked of it at the stream's landing: what it held before the person's word is none, and a
 take-back asked while another app played on it outlasts that app's own next track. A
 controller past UPnP may leave no URI of its own to read: a DLNA renderer under Roon's RAAT says
-our URI paused at its second (ROON-COEX, 2026-11-02), and the node keeps the renderer's
+our URI paused at its second (Roon coexistence, 2026-11-02), and the node keeps the renderer's
 word — paused, its Play resuming our track — said as the renderer's when the node sent no
 Pause ("Paused on ‹renderer›", since 2026-11-09): its own remote, or another app; a toast
 says so once on every open page (since 2026-11-11, "Output events" below). A takeover read
@@ -1325,20 +1389,18 @@ within the end's slack of our track (the last 3 s, what a Stop there reads as fi
 finds a track that counted as played: no listen is held and the spot is the slot after it,
 at 0, none at the queue's last slot (since 2026-11-11, as on HQPlayer). A URI of
 ours the renderer plays again by itself while another controller held it (its own controls
-resuming our media) is ours again (since 2026-11-09, ROON-COEX §6.1 P9): the external state
+resuming our media) is ours again (since 2026-11-09): the external state
 ends, the node's Pause and Stop reach it, the listen held at the takeover goes on from the
 takeover's second until the position poll reads the renderer's own — another slot's, the next
 it had armed, from that stream's start. The slot is the one its token names (the quality tier
 it was handed in and an Opus seek's `?ss=` aside) — every lookup of a slot by its URL goes by
 the token so, a queue edit after ours again included; a track queued twice is ours again at
 the takeover's own slot, else the nearest, the one after first (the next it had
-armed). A URI of ours an earlier attachment handed is ours too (since 2026-11-09, ROON-COEX
-§6.1 P11 and round 3's H6): one whose token names no queued track — a track since removed — is
+armed). A URI of ours an earlier attachment handed is ours too (since 2026-11-09): one whose token names no queued track — a track since removed — is
 ours at no slot: the external state ends, the node's Pause and Stop reach it, Now Playing names
 it by what the renderer reports of it with no slot, no listen of it is kept, its end advances
 nothing, and the next Play loads the queue's slot; Next and Previous count from that slot, as
-from a removal playing out — Next loads it, Previous the one before (since 2026-11-10,
-ROON-COEX §6.1 P13). A take-back of the person's under way — its load, or its wait for the slot's stream
+from a removal playing out — Next loads it, Previous the one before (since 2026-11-10). A take-back of the person's under way — its load, or its wait for the slot's stream
 — is the newer word: nothing is ours again meanwhile.
 
 **A restarted HQPlayer gets the queue back.** The status poller
@@ -1351,7 +1413,7 @@ reads the playlist at once and, when it differs from the queue, marks the
 mirror lost; HQPlayer, back and stopped, takes the queue afresh at once (the
 mirror's state, above), and the play press rebuilds whatever is left. A
 playlist read back so that holds an entry the node never gave HQPlayer is no
-restart (since 2026-11-09, ROON-COEX §6.1 P1): another controller's — Roon's
+restart (since 2026-11-09): another controller's — Roon's
 cycle went on while HQPlayer answered nothing past the client's timeout, a
 heavy engine's Stop — so the mirror drifts and nothing is sent, a mirror lost
 in the silence (an add owed, an edit's hand-over) too, its reconverge given up;
@@ -2012,7 +2074,7 @@ Another app that also controls the output — Roon on the same HQPlayer, or
 past UPnP on the same renderer — may take it, stop it, have its own track
 refused, or pause the renderer. The person learns it wherever they are in
 the Web UI, from a toast in the form of the output-unavailable one (the
-owner's decision at ROON-COEX's listening check; before, a line and a row on
+owner's decision at the Roon coexistence listening check, 2026-11-11; before, a line and a row on
 Now Playing alone, which he did not see). Now Playing keeps the state in one
 line, the action first.
 

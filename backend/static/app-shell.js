@@ -458,6 +458,13 @@
       wrap.innerHTML = renderAlbumRow(items);
     } else if (b.kind === 'tracks') {
       wrap.innerHTML = renderTrackList(items);
+    } else if (b.kind === 'hqp_ab') {
+      // One filter the assistant offers to compare with the person's own by
+      // ear: the comparison sheet, the pair filled (AB-1 §7.1)
+      const name = String(items[0].filter || '');
+      wrap.innerHTML = `<button class="hqp-chip-btn ab-ai-btn" type="button">Compare ${escapeHtml(name)} with yours by ear</button>`;
+      const btn = wrap.querySelector('button');
+      btn.addEventListener('click', () => onceInFlight(btn, () => openCompareByEar({ form: 'pair', second: name })));
     } else {
       return null;
     }
@@ -6710,10 +6717,13 @@
       await reportOutputUnavailable(detail);
       return false;
     }
-    // 409 while the benchmark has HQPlayer: the output is busy, not broken —
-    // the way out is the run's Cancel on the HQPlayer screen, not the picker.
+    // 409 while the benchmark or a comparison by ear has HQPlayer: the output
+    // is busy, not broken — the way out is on the HQPlayer screen (the run's
+    // Cancel, the comparison's Stop), not the picker.
     if (resp && resp.status === 409 && window.currentStatus && window.currentStatus.hold) {
-      notices.toast({ kind: 'info', key: 'player.held', title: 'HQPlayer is being measured',
+      const hold = window.currentStatus.hold;
+      notices.toast({ kind: 'info', key: 'player.held',
+                      title: hold.by === 'ab' ? escapeHtml(hold.label) : 'HQPlayer is being measured',
                       text: escapeProfileHtml(detail),
                       action: { label: 'HQPlayer', run: () => navigate('more/hqplayer') } });
       return false;
@@ -8129,17 +8139,14 @@
       onceInFlight(e.target, async () => {
       showHint('Adding…', false);
       try {
-        const resp = await fetch('/api/p2p/friends/add', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({invite_code: code}),
-        });
+        // A link or a mailed invite carries another node's bearer token:
+        // the string rides the box (routers/p2p.add_friend)
+        const resp = await window.Sautium.auth.boxed('/api/p2p/friends/add', {invite_code: code});
         if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}));
-          showHint(err.detail || 'Could not add friend.', true);
+          showHint(resp.status === 422 ? 'That is not an invite code.' : (resp.error || 'Could not add friend.'), true);
           return;
         }
-        const data = await resp.json().catch(() => ({}));
+        const data = resp.data;
         input.value = '';
         if (data.invite) showHint(inviteOutcomeHint(data), false);
         else showHint('Friend added.', true);
@@ -8344,8 +8351,17 @@
     });
   }
 
-  function openTokenEditor(token, onSaved) {
+  // A link with rights is spent later by whoever holds it: minting one, or
+  // widening any link (a right added, more uses), takes the account's
+  // password (routers/p2p._widens decides; this only says when to ask).
+  function _tokenWidens(token, rights, maxUses) {
+    if (!token) return rights.length > 0;
+    const more = maxUses != null && token.max_uses != null && maxUses > token.max_uses;
+    return rights.some(r => !token.rights.includes(r)) || more;
+  }
+  async function openTokenEditor(token, onSaved) {
     const isNew = !token;
+    const field = await stepUpField();
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
@@ -8391,6 +8407,7 @@
             <input class="add-gear-input" id="tkId" type="text" autocomplete="off"
                    spellcheck="false" placeholder="UUID from your old share string">
           </details>` : ''}
+          <div id="tkStepUp">${field.html}</div>
           <button class="profile-btn primary" data-confirm>${isNew ? 'Create' : 'Save'}</button>
           ${!isNew && !token.revoked_at
             ? '<button class="profile-btn destructive" data-revoke>Revoke link</button>' : ''}
@@ -8406,6 +8423,17 @@
     overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     const msg = overlay.querySelector('#tkMsgLine');
+    const stepUpRow = overlay.querySelector('#tkStepUp');
+    const asked = () => {
+      const rights = overlay.querySelector('#tkMsg').checked ? ['can_message'] : [];
+      const usesRaw = overlay.querySelector('#tkUses').value.trim();
+      return _tokenWidens(token, rights, usesRaw ? Number(usesRaw) : null);
+    };
+    // The server may still ask (an edit that landed meanwhile): it shows then
+    let mustAsk = false;
+    const showStepUp = () => { stepUpRow.hidden = !(mustAsk || asked()); };
+    showStepUp();
+    for (const id of ['#tkMsg', '#tkUses']) overlay.querySelector(id).addEventListener('input', showStepUp);
 
     overlay.querySelector('[data-confirm]').addEventListener('click', () => onceInFlight(overlay, async () => {
       const rights = [];
@@ -8427,19 +8455,27 @@
         const customId = (overlay.querySelector('#tkId') || {value: ''}).value.trim();
         if (customId) body.id = customId;
       }
+      let password;
+      if (!stepUpRow.hidden) {
+        const word = field.read(overlay);
+        if (word.error) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = word.error;
+          return;
+        }
+        password = word.password;
+      }
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = isNew ? 'Creating…' : 'Saving…';
       try {
-        const r = await fetch(
-          isNew ? '/api/p2p/tokens' : `/api/p2p/tokens/${token.id}`, {
-            method: isNew ? 'POST' : 'PATCH',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(body),
-          });
-        const data = await r.json().catch(() => ({}));
+        const r = await window.Sautium.auth.boxed(
+          isNew ? '/api/p2p/tokens' : `/api/p2p/tokens/${token.id}`, body,
+          { method: isNew ? 'POST' : 'PATCH', password });
+        const data = r.ok ? r.data : {};
         if (!r.ok) {
           msg.style.color = 'var(--color-negative)';
-          msg.textContent = data.detail || 'Failed.';
+          msg.textContent = r.error || 'Failed.';
+          if (r.stepUp) { mustAsk = true; showStepUp(); field.refused(overlay); }
           return;
         }
         if (onSaved) onSaved();
@@ -9443,7 +9479,10 @@
   // ones, in the sections the node words. Over the sheet, at layer 210: a
   // bottom sheet on the phone, a centred card on the tablet, like the
   // add-gear sheets.
-  async function openHqpCard(kind, name) {
+  // `yours`: the filter the person runs in the track's context — a pair of
+  // "Differs only in" that has it as one member offers the other to compare
+  // by ear (AB-1 §7.1). The pair's lead line names its other member (`other`).
+  async function openHqpCard(kind, name, { yours = null } = {}) {
     let card;
     let why = 'The node is not answering right now.';
     try {
@@ -9459,6 +9498,11 @@
       notices.toast({ kind: 'error', key: 'hqp.card', title: 'Details unavailable', text: escapeHtml(why) });
       return;
     }
+    const pairDoor = (it) => {
+      if (kind !== 'filter' || !yours || !it.other || (name !== yours && it.other !== yours)) return '';
+      const second = name === yours ? it.other : name;
+      return `<button class="hqp-chip-btn ab-card-btn" type="button" data-ab-second="${escapeHtml(second)}">Compare by ear</button>`;
+    };
     const overlay = document.createElement('div');
     overlay.className = 'hqp-card-overlay';
     overlay.innerHTML = `
@@ -9473,7 +9517,7 @@
           ${card.sections.map(s => `
             <section class="hqp-card-section">
               ${s.head ? `<h3 class="hqp-card-head">${escapeHtml(s.head)}</h3>` : ''}
-              ${hqpCardItems(s.items)}
+              ${hqpCardItems(s.items, pairDoor)}
             </section>`).join('')}
           ${card.link ? `<a class="hqp-card-link" href="${escapeHtml(card.link.href)}" rel="noreferrer">${
             escapeHtml(card.link.text)}</a>` : ''}
@@ -9485,19 +9529,22 @@
     // wish to open, it is not a wish to close.
     overlay.addEventListener('click', e => { if (e.target === overlay && e.detail < 2) close(); });
     overlay.querySelector('[data-close]').addEventListener('click', close);
+    overlay.querySelectorAll('[data-ab-second]').forEach(btn => btn.addEventListener('click', () => onceInFlight(
+      btn, () => openCompareByEar({ form: 'pair', second: btn.dataset.abSecond }))));
     overlay.querySelector('[data-close]').focus();
   }
 
-  function hqpCardItems(items) {
+  // `after(it)`: what follows an item's line (the card's pair door)
+  function hqpCardItems(items, after = () => '') {
     return items.map(it => {
       if ('term' in it) {
         return `<div class="hqp-card-term"><div class="hqp-card-t">${escapeHtml(it.term)}</div><div class="hqp-card-d">${
           hqpPhrase(it.def)}</div></div>`;
       }
-      if ('line' in it) return `<p class="hqp-card-line">${hqpPhrase(it.line)}</p>`;
+      if ('line' in it) return `<p class="hqp-card-line">${hqpPhrase(it.line)}</p>${after(it)}`;
       if ('note' in it) return `<p class="hqp-card-note">${hqpPhrase(it.note)}</p>`;
       if ('more' in it) {
-        return `<details class="hqp-card-more"><summary>${escapeHtml(it.more)}</summary>${hqpCardItems(it.items)}</details>`;
+        return `<details class="hqp-card-more"><summary>${escapeHtml(it.more)}</summary>${hqpCardItems(it.items, after)}</details>`;
       }
       const t = it.table;
       return `
@@ -9514,8 +9561,13 @@
 
   // What forgetting an HQPlayer also takes: the DSP load measured on it is
   // that box's, and goes with its row.
-  function hqpMeasuredGone(measured) {
-    return measured ? `, and with it the DSP load measured on it (${measured} setting${measured === 1 ? '' : 's'})` : '';
+  function hqpMeasuredGone(measured, compared) {
+    // What goes with its row: the DSP load measured on it, and the person's
+    // own comparisons by ear made on it (AB-1 Q15)
+    const what = [];
+    if (measured) what.push(`the DSP load measured on it (${measured} setting${measured === 1 ? '' : 's'})`);
+    if (compared) what.push(`your comparisons by ear made on it (${compared})`);
+    return what.length ? `, and with it ${what.join(' and ')}` : '';
   }
   const HQP_BENCH_OUTCOME = { done: 'finished', cancelled: 'was cancelled', failed: 'failed',
                               interrupted: 'was cut short' };
@@ -9879,7 +9931,7 @@
       const d = e.detail && e.detail.diagnosis;
       if (d && d.id !== shownDiagnosis) { shownDiagnosis = d.id; load(); }
       const hold = e.detail && e.detail.hold;
-      if (hold) {
+      if (hold && hold.by === 'benchmark') {
         const hint = screen.querySelector('[data-hqp-bench-hint]');
         if (hint) hint.textContent = hqpBenchProgress(hold);
       }
@@ -9963,7 +10015,7 @@
       // A building HQPlayer answers nothing, and one lent to the benchmark is
       // asked nothing: what it said last stands, the build beside it.
       if (s.building && lastState) s = { ...lastState, building: s.building };
-      else if (s.held && lastState) s = { ...lastState, benchmark: s.benchmark || lastState.benchmark };
+      else if (s.held && lastState) s = { ...lastState, benchmark: s.benchmark || lastState.benchmark, held: s.held };
       lastState = s;
       renderBody(body, s);
     }
@@ -9977,9 +10029,6 @@
       const rateName = rateNameFromState(st, s.rates);
       const activeFilter = hqpFilterSet(st, s.filters);
       const filterName = activeFilter ? activeFilter.name : '—';
-      // The Filter row's facts: none for a filter HQPlayer does not describe
-      // (HQPlayer 5) while the node holds no atlas
-      const activeFacts = activeFilter ? hqpFactsHtml(activeFilter.facts, { twin: false }) : '';
       // When the queue meets a rate HQPlayer cannot reach: the server's
       // phrases (hqp_rate_check), each under the row it names — the filter's
       // after its facts, the modulator's under its row
@@ -9990,10 +10039,10 @@
         : '';
       const shaperName = shaperNameFromIndex(st.shaper, s.shapers);
       const matrixActive = st.matrix_profile || '';
-      // How each entry runs here (hqpHeadroomMark); while a benchmark holds
-      // HQPlayer every knob waits for it.
+      // How each entry runs here (hqpHeadroomMark); while a benchmark or a
+      // comparison holds HQPlayer every knob waits for it.
       const hr = s.headroom || {};
-      const held = !!(s.benchmark && s.benchmark.job && s.benchmark.job.running);
+      const held = !!s.held || !!(s.benchmark && s.benchmark.job && s.benchmark.job.running);
       // HQPlayer building a setting answers nothing until it is done: its
       // controls wait — a command would be refused — and one line says why.
       // An Embedded box answers through its builds: only said, nothing waits.
@@ -10124,6 +10173,41 @@
       // the strip only waits, like the Filter row above it.
       const filtersMissing = missing.has('filters');
       const availableNames = new Set((s.filters || []).map(f => f.name));
+      // HQPlayer's two filter slots, 1x and Nx (§14.5 of AB-1): one row while
+      // they hold the same filter, two when they differ — the one the track
+      // runs marked "playing" — each opening the picker for its slot.
+      const filter1x = (s.filters || []).find(f => f.index === st.filter1x) || null;
+      const twoSlots = !!(activeFilter && filter1x) && st.filter1x !== st.filterNx;
+      const playingSlot = s.ab && s.ab.context ? s.ab.context.slot : null;
+      const filterRow = (slot, f, label) => {
+        const name = f ? f.name : '—';
+        // Its facts: none for a filter HQPlayer does not describe (HQPlayer 5)
+        // while the node holds no atlas
+        const facts = f ? hqpFactsHtml(f.facts, { twin: false }) : '';
+        const mark = slot ? hqpHeadroomMark((hr.filters || {})[name], { onlyShort: true }) : shortMark.filter;
+        return `
+          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter"${slot ? ` data-slot="${slot}"` : ''}${waits || filtersMissing ? ' disabled' : ''}>
+            <span class="hqp-row-label">${label} ${mark}${slot && slot === playingSlot ? '<span class="ab-badge is-row">playing</span>' : ''}</span>
+            <span class="hqp-row-value">${escapeHtml(name)}</span>
+            ${HQP_CHEVRON}
+          </button>
+          ${facts ? `<p class="hqp-row-hint hqp-row-facts">${facts}</p>` : ''}`;
+      };
+      const slotWord = isSdm ? 'SDM filter' : 'PCM filter';
+      const filterRows = twoSlots
+        ? filterRow('1x', filter1x, `${slotWord} · 1x`) + filterRow('nx', activeFilter, `${slotWord} · Nx`)
+        : filterRow(null, activeFilter, 'Active');
+      // The comparison's door (AB-1 §7.1): while HQPlayer is the output and
+      // no benchmark run has it — a sitting already going on is joined.
+      const otherHold = window.currentStatus && window.currentStatus.hold
+        && window.currentStatus.hold.by !== 'ab';
+      const outputType = ((window.currentStatus || {}).output || {}).type;
+      const abDoor = s.connected && outputType === 'hqplayer' && !otherHold && !held
+        ? `<button class="hqp-row hqp-row-tap ab-door" type="button" data-action="ab-open">
+             <span class="ab-door-text">Compare by ear<span class="ab-door-sub">Yours against others, without seeing names</span></span>
+             ${HQP_CHEVRON}
+           </button>`
+        : '';
       const hasUnavailableFav = !filtersMissing && favourites.some(name => !availableNames.has(name));
       const favouritesStrip = favourites.length
         ? `<div class="hqp-fav-strip">${favourites.map(name => {
@@ -10219,18 +10303,10 @@
 
         <section class="hqp-section">
           <div class="hqp-section-label">Filter</div>
-          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter"${waits || filtersMissing ? ' disabled' : ''}>
-            <span class="hqp-row-label">Active ${shortMark.filter}</span>
-            <span class="hqp-row-value">${escapeHtml(filterName)}</span>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="1.6"
-                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M9 6l6 6-6 6"/>
-            </svg>
-          </button>
-          ${activeFacts ? `<p class="hqp-row-hint hqp-row-facts">${activeFacts}</p>` : ''}
+          ${filterRows}
           ${rateLine('filter')}
           ${favouritesStrip}
+          ${abDoor}
           <div class="hqp-row">
             <label class="hqp-row-label" for="hqpShaper">${escapeHtml(shaperLabel)} ${shortMark.shaper}</label>
             ${knobTrigger('shaper', 'hqpShaper')}
@@ -10336,7 +10412,7 @@
         'forget-library': async () => {
           const ok = await window.confirmDestructive({
             title: `Forget the library of ${escapeProfileHtml(s.label || 'this HQPlayer')}?`,
-            message: 'Every album and track only its library put here goes' + hqpMeasuredGone(lib.measured)
+            message: 'Every album and track only its library put here goes' + hqpMeasuredGone(lib.measured, lib.compared)
               + '. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.',
             confirmText: 'Forget',
           });
@@ -10358,15 +10434,21 @@
       if (lib.own_library) guide.seen('hqp_library');
       guide.paint();
 
-      body.querySelector('[data-action="open-filter"]').addEventListener('click', (e) => {
+      body.querySelectorAll('[data-action="open-filter"]').forEach(row => row.addEventListener('click', (e) => {
         if (e.detail > 1) return;        // the second click of a double-click
         // A pick of the filter both slots hold sends no SetFilter: the DSP
-        // change finds it held (hqp_backend._DspChange._knob)
+        // change finds it held (hqp_backend._DspChange._knob). With the two
+        // slots apart a pick changes its row's slot, the other as it is.
+        const slot = row.dataset.slot || null;
         openHqpSheet(s, 'filter', (chosen) => serialized('hqp.config', async () => {
-          await postHqpConfig({filter: chosen.name, filter1x: chosen.name});
+          await postHqpConfig(slot === '1x' ? {filter: activeFilter.name, filter1x: chosen.name}
+            : slot === 'nx' ? {filter: chosen.name, filter1x: filter1x.name}
+            : {filter: chosen.name, filter1x: chosen.name});
           await load();
-        }));
-      });
+        }), { slot });
+      }));
+      const abDoorEl = body.querySelector('[data-action="ab-open"]');
+      if (abDoorEl) abDoorEl.addEventListener('click', () => onceInFlight(abDoorEl, () => openCompareByEar({ form: 'chain' })));
 
       const benchActions = {
         'bench-run': () => runHqpBenchmark(s, null),
@@ -10398,7 +10480,10 @@
 
       // ...opened as the person's own tap on its row opens it; a control
       // that waits (a build, a list HQPlayer did not give) opens nothing
-      const opener = pickerWanted && body.querySelector(HQP_PICKER_OPENERS[pickerWanted]);
+      // With the two filter rows apart, the one of the slot the track plays in
+      const opener = pickerWanted && ((pickerWanted === 'filter' && playingSlot
+        && body.querySelector(`${HQP_PICKER_OPENERS.filter}[data-slot="${playingSlot}"]`))
+        || body.querySelector(HQP_PICKER_OPENERS[pickerWanted]));
       if (opener && !opener.disabled) opener.click();
     }
 
@@ -10423,7 +10508,10 @@
     refused: 'HQPlayer refuses it at this setting',
     unstarted: 'HQPlayer never got it going on this computer',
   };
-  function openHqpSheet(state, kind, onPick) {
+  // With the two filter slots apart, `slot` ('1x' | 'nx') is the one the
+  // picker chooses for. "your pick · N" (AB-1 §14.5) counts the person's own
+  // picks in the track's context, so it rides the picker of that slot only.
+  function openHqpSheet(state, kind, onPick, { slot = null } = {}) {
     const filter = kind === 'filter';
     const sheet = document.createElement('div');
     sheet.className = 'hqp-sheet';
@@ -10448,7 +10536,7 @@
     const entries = (filter ? state.filters : state.shapers) || [];
     const favs = new Set(filter ? state.favorite_filters || [] : []);
     const st = state.state || {};
-    const currentIdx = (filter ? st.filterNx : st.shaper) ?? -1;
+    const currentIdx = (slot === '1x' ? st.filter1x : (filter ? st.filterNx : st.shaper)) ?? -1;
     const hr = state.headroom || {};
     const measured = hr[filter ? 'filters' : 'shapers'] || {};
     // Asked here and refused, or never got going: measured, with no speed
@@ -10462,6 +10550,11 @@
     const bench = state.benchmark || {};
     const canMeasure = marksKnown && !!hr.measurable && !!state.connected
       && !(bench.job && bench.job.running) && !bench.no_estimate;
+    const abCtx = state.ab && state.ab.context;
+    const picks = filter && abCtx && (!slot || slot === abCtx.slot) ? state.ab.picks || {} : {};
+    // The filter the person runs in the track's context: a name's card
+    // offers to compare its pairs with it by ear
+    const yours = filter ? abYours(state) : null;
     const head = (state.atlas && state.atlas[filter ? 'filters' : 'modulators']) || [];
     const family = filter ? filterFamily : modulatorFamily;
     const search = sheet.querySelector('.hqp-sheet-search');
@@ -10483,6 +10576,7 @@
               ${current ? '<span class="hqp-sheet-dot"></span>' : ''}
               <span class="hqp-sheet-row-title">${escapeHtml(r.name)}</span>
               ${hqpHeadroomMark(measured[r.name])}
+              ${picks[r.name] > 0 ? `<span class="ab-badge">your pick · ${picks[r.name]}</span>` : ''}
             </span>
             ${hqpFactsHtml(f)}
           </button>
@@ -10554,7 +10648,7 @@
         });
       });
       body.querySelectorAll('[data-info]').forEach(btn => {
-        btn.addEventListener('click', () => onceInFlight(btn, () => openHqpCard(kind, btn.dataset.info)));
+        btn.addEventListener('click', () => onceInFlight(btn, () => openHqpCard(kind, btn.dataset.info, { yours })));
       });
       body.querySelectorAll('[data-fav]').forEach(btn => {
         btn.addEventListener('click', async (e) => {
@@ -10596,6 +10690,703 @@
       body.scrollTop += current.getBoundingClientRect().top - body.getBoundingClientRect().top
         - (body.clientHeight - current.offsetHeight) / 2;
     }
+  }
+
+  /* ---- Compare by ear (AB-1): a blind comparison of HQPlayer filters ----
+     One sheet from three doors — the HQPlayer screen's Filter section, a
+     pair in a name's card, the assistant's `hqp_ab` block. The node runs the
+     sitting while it holds the output (playback/hqp_ab.py); the sheet draws
+     its view, read whole (GET /api/hqplayer/ab) when the player status's
+     hold says its seq moved and once more when the hold ends — no polling.
+     A fragment's bar is drawn by a frame loop from `sounding` (when the sound
+     leaves the output, for how long): it draws, it waits for nothing. What a
+     tap asked for shows at once (`local`) until the view says it landed.
+     Layer 220: over the filter picker (200) and a name's card (210), under
+     the toasts (300). Reference: docs/private/ab-1/compare-by-ear.html (the
+     owner's, 2026-11-17); words AB-1-DESIGN §7.3, §14.1–§14.3, §16. */
+  const AB_X = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  // The three axes a duel probes (hqp_ab_axis), in §14.4's words
+  const AB_AXIS = { phase: 'phase', cutoff: 'where it cuts', ringing: 'how long it rings' };
+  const AB_W5 = "HQPlayer's volume is fixed, so you will hear short bursts while it gets ready.";
+  // The passage's lengths: the chips, and the bounds the sitting keeps (hqp_ab.LENGTH_MIN_S/_MAX_S)
+  const AB_LENGTHS = [5, 10];
+  // The passage's bounds are the sitting's (view.lengths); these until it says
+  const abLengths = (v) => (v && v.lengths) || { min_s: 3, max_s: 30 };
+  let abSheet = null;
+
+  // The filter the person runs in the track's context (the slot it plays)
+  function abYours(state) {
+    const st = state.state || {};
+    const ctx = state.ab && state.ab.context;
+    const idx = ctx && ctx.slot === '1x' ? st.filter1x : st.filterNx;
+    const f = (state.filters || []).find(x => x.index === idx);
+    return f ? f.name : null;
+  }
+
+  const abNum = (text) => `<span class="ab-num">${escapeHtml(String(text))}</span>`;
+  const abSpeed = (v) => (v == null ? '' : `${Number(v).toFixed(1)}×`);
+  // A context's words ("PCM 1x · 44.1 kHz → 705.6 kHz") with its rates in mono
+  const abContext = (words) => escapeHtml(words || '')
+    .replace(/\b(\d+(?:\.\d+)? [kM]?Hz|DSD\d+)\b/g, '<span class="ab-num">$1</span>');
+
+  async function abFetch(path, body) {
+    let r, out;
+    try {
+      r = await fetch('/api/hqplayer/ab' + path, body === undefined ? { cache: 'no-store' } : {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+      });
+      out = await r.json().catch(() => ({}));
+    } catch (err) {
+      return { ok: false, message: 'The node is not answering right now.' };
+    }
+    if (r.ok) return { ok: true, view: out };
+    const d = out.detail;
+    return { ok: false, code: (d && d.code) || null,
+             message: (d && d.message) || (typeof d === 'string' ? d : `HTTP ${r.status}`) };
+  }
+
+  // A door's tap: the sitting starts — or, while one goes on (another tab, a
+  // page loaded again), this sheet joins it.
+  async function openCompareByEar(wish) {
+    if (abSheet) return;
+    const hold = window.currentStatus && window.currentStatus.hold;
+    let res = hold && hold.by === 'ab' ? await abFetch('') : null;
+    if (!res || (res.ok && res.view.phase === 'idle')) res = await abStart(wish, false);
+    if (!abSheet) abMount(wish, res);
+  }
+
+  async function abStart(wish, fixedOk) {
+    const body = (form) => ({ form, second: form === 'pair' ? wish.second || null : null,
+                              fixed_volume_ok: fixedOk });
+    let res = await abFetch('', body(wish.form));
+    let chainRefused = null;
+    // Find my filter waits for Sautium's measurements (W15): the sheet opens
+    // on the pair, the reason under Find my filter
+    if (!res.ok && res.code === 'chain' && wish.form === 'chain') {
+      chainRefused = res.message;
+      res = await abFetch('', body('pair'));
+    }
+    return { ...res, chainRefused };
+  }
+
+  function abMount(wish, res) {
+    const el = document.createElement('div');
+    el.className = 'ab-sheet';
+    el.innerHTML = '<div class="ab-card" role="dialog" aria-label="Compare by ear"></div>';
+    document.body.appendChild(el);
+    const ab = abSheet = {
+      el, card: el.firstElementChild, wish, view: null, refusal: null, chainRefused: null,
+      line: '', overlay: null, local: {}, editLen: false, everReady: false, screen: null,
+      stepKey: '', heard: [], sound: null, raf: 0, held: false, heldSeq: null,
+      toldLeft: false, closing: false, dragging: false, deferred: false,
+    };
+    ab.onStatus = (e) => abOnStatus(ab, e.detail);
+    document.addEventListener('np-update', ab.onStatus);
+    el.addEventListener('click', (e) => abClick(ab, e));
+    el.addEventListener('input', (e) => abInput(ab, e));
+    el.addEventListener('change', (e) => abChange(ab, e));
+    // The typed length let go unchanged: the chip comes back (a field a
+    // repaint takes out of the page is not let go)
+    el.addEventListener('focusout', (e) => {
+      if (ab.editLen && !ab.painting && e.target.matches('.ab-len-input')) {
+        ab.editLen = false;
+        abPaint(ab);
+      }
+    });
+    el.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.ab-opt')) { e.preventDefault(); e.target.click(); }
+    });
+    // A drag of the passage's start is not repainted under the finger: a view
+    // that lands meanwhile is drawn once the finger lifts
+    el.addEventListener('pointerdown', (e) => { if (e.target.matches('.ab-scrub-range')) ab.dragging = true; });
+    const lift = () => { if (!ab.dragging) return; ab.dragging = false; if (ab.deferred) abPaint(ab); };
+    el.addEventListener('pointerup', lift);
+    el.addEventListener('pointercancel', lift);
+    abTake(ab, res);
+  }
+
+  // An open's answer: the sitting's view, or why it did not start
+  function abTake(ab, res) {
+    ab.chainRefused = res.chainRefused || ab.chainRefused;
+    if (res.ok) { ab.refusal = null; abApply(ab, res.view); return; }
+    ab.refusal = { message: res.message, code: res.code };
+    abPaint(ab);
+  }
+
+  function abOnStatus(ab, st) {
+    const hold = st && st.hold;
+    if (hold && hold.by === 'ab') {
+      ab.held = true;
+      const seq = hold.progress ? hold.progress.seq : null;
+      if (seq !== ab.heldSeq) { ab.heldSeq = seq; abRefresh(ab); }
+    } else if (ab.held || (ab.view && ab.view.phase === 'warming')) {
+      // The hold is over — or never began (the backend announces a sitting
+      // that could not take the output with a status of no hold): the
+      // result, the break or the end is in the view
+      ab.held = false;
+      abRefresh(ab);
+    }
+  }
+
+  async function abRefresh(ab) {
+    const fresh = claimFresh('hqp.ab');
+    const res = await abFetch('');
+    if (!fresh() || abSheet !== ab) return;
+    if (res.ok) abApply(ab, res.view);
+    else console.warn('The comparison could not be read:', res.message);
+  }
+
+  // What a tap asked for stands until the view says it landed — or that the
+  // sitting moved past it
+  function abPrune(ab, v) {
+    const L = ab.local;
+    const choosing = v.phase === 'ready' || v.phase === 'learning';
+    for (const k of ['learn', 'begin', 'answered', 'decided', 'stop']) {
+      if (L[k] != null && v.seq > L[k]) delete L[k];
+    }
+    if (L.passage && (!choosing || (Math.abs(v.passage.from_s - L.passage.from_s) < 0.01
+                                    && Math.abs(v.passage.length_s - L.passage.length_s) < 0.01))) {
+      delete L.passage;
+    }
+    if (L.form && (!choosing || (v.form === L.form && (L.form !== 'pair' || v.second === L.second)))) {
+      delete L.form;
+      delete L.second;
+    }
+  }
+
+  function abApply(ab, v) {
+    if (v.phase === 'idle') { abRemove(ab); return; }       // closed from another tab
+    // Another sitting than this sheet's (begun since, on another device):
+    // this one is over — the sheet goes and stops nothing of the new one
+    if (ab.view && v.key !== ab.view.key) { abRemove(ab); return; }
+    if (ab.view && v.seq < ab.view.seq) return;
+    if (ab.view && v.seq > ab.view.seq) ab.line = '';
+    ab.view = v;
+    abPrune(ab, v);
+    if (v.phase === 'ready') ab.everReady = true;
+    if (v.phase === 'ended' && v.ended === 'stopped') { abClose(ab); return; }
+    if (v.ended === 'left' && !ab.toldLeft) {
+      ab.toldLeft = true;
+      notices.toast({ kind: 'info', key: 'hqp.ab', title: 'Comparing filters',
+                      text: 'The comparison ended: HQPlayer was changed or taken elsewhere.' });
+    }
+    abSound(ab, v);
+    abPaint(ab);
+  }
+
+  // The fragment sounding: when its sound leaves the output (`in_s` from
+  // now) and for how long; what this step (or this play of the passage) has
+  // sounded so far fills its bar
+  function abSound(ab, v) {
+    const key = `${v.phase}|${v.step ? v.step.kind + v.step.n : ''}|${v.learned}`;
+    if (key !== ab.stepKey) { ab.stepKey = key; ab.heard = []; ab.sound = null; }
+    const snd = v.sounding;
+    if (snd && snd.which) {
+      const id = `${snd.which}|${snd.in_s}|${snd.length_s}`;
+      if (!ab.sound || ab.sound.id !== id) {
+        const start = performance.now() + snd.in_s * 1000;
+        ab.sound = { id, which: snd.which, start, end: start + snd.length_s * 1000 };
+      }
+      if (!ab.heard.includes(snd.which)) ab.heard.push(snd.which);
+      return;
+    }
+    ab.sound = null;
+    // A slip plays the step again from its start
+    if (v.say && v.say.slip) ab.heard = [];
+  }
+
+  function abDraw(ab) {
+    const v = ab.view;
+    if (!v) return;
+    const now = performance.now();
+    const s = ab.sound;
+    const started = !!s && now >= s.start;
+    const of = (which) => (s && s.which === which
+      ? (started ? Math.min(1, (now - s.start) / (s.end - s.start)) : 0)
+      : ab.heard.includes(which) ? 1 : 0);
+    ab.card.querySelectorAll('[data-ab-frag]').forEach(bar => {
+      const label = bar.dataset.abFrag;      // '1' | '2', or '' for the one bar
+      const p = label ? of(label) : s ? of(s.which) : v.sounding ? 0 : ab.heard.length ? 1 : 0;
+      bar.firstElementChild.style.width = `${(p * 100).toFixed(2)}%`;
+      bar.classList.toggle('is-play', started && now < s.end && (!label || s.which === label));
+    });
+    const line = ab.card.querySelector('[data-ab-state]');
+    if (line) line.innerHTML = abStateLine(ab, started);
+  }
+
+  // Silence · N s → Yours → The next one → Your answer; in the pair (and
+  // while the passage is learned) silence → 1 → 2 → your answer
+  function abStateLine(ab, started) {
+    const v = ab.view, s = ab.sound;
+    const short = v.form === 'pair' || v.phase === 'learning';
+    const st = v.step;
+    if (v.phase === 'testing' && st && st.answerable && ab.local.answered == null) {
+      return short ? 'your answer' : '<strong>Your answer</strong>';
+    }
+    if (s && started) {
+      const word = { yours: st && st.kind === 'check' ? 'Yours again' : 'Yours', next: 'The next one' }[s.which];
+      return `<strong>${escapeHtml(word || s.which)}</strong>`;
+    }
+    if (short) return 'silence';
+    return v.silence_s != null ? `Silence · ${abNum(`${v.silence_s} s`)}` : 'Silence';
+  }
+
+  function abLoop(ab) {
+    cancelAnimationFrame(ab.raf);
+    const tick = () => {
+      abDraw(ab);
+      ab.raf = abSheet === ab && ab.sound && performance.now() < ab.sound.end ? requestAnimationFrame(tick) : 0;
+    };
+    tick();
+  }
+
+  function abScreenOf(ab) {
+    const v = ab.view;
+    if (!v) return ab.refusal.code === 'fixed_volume' ? 'fixed' : 'refused';
+    if (v.phase === 'warming') return 'warming';
+    if (v.phase === 'ready' || v.phase === 'learning') return 'open';
+    if (v.phase === 'testing') return v.form === 'pair' ? 'pair' : 'chain';
+    if (v.phase === 'result') return v.result && v.result.form === 'pair' ? 'pairResult' : 'chainResult';
+    if (v.phase === 'break') return 'brk';
+    return 'ended';
+  }
+
+  function abPaint(ab) {
+    if (ab.dragging) { ab.deferred = true; return; }
+    ab.deferred = false;
+    const screen = abScreenOf(ab);
+    if (screen !== 'open') { ab.overlay = null; ab.editLen = false; }
+    const prev = ab.card.querySelector('.ab-body');
+    const top = prev && ab.screen === screen ? prev.scrollTop : 0;
+    ab.screen = screen;
+    ab.painting = true;
+    ab.card.innerHTML = AB_SCREENS[screen](ab) + abOverlay(ab);
+    ab.painting = false;
+    const body = ab.card.querySelector('.ab-body');
+    if (body) body.scrollTop = top;
+    ab.card.querySelectorAll('[data-ab-left]').forEach(e => { e.style.left = `${e.dataset.abLeft * 100}%`; });
+    ab.card.querySelectorAll('[data-ab-width]').forEach(e => { e.style.width = `${e.dataset.abWidth * 100}%`; });
+    const len = ab.card.querySelector('.ab-len-input');
+    if (len) len.focus();
+    abLoop(ab);
+  }
+
+  function abBar(title, end = '') {
+    const start = end ? '<span></span>'
+      : `<button class="icon-btn" type="button" data-ab="close" aria-label="Close">${AB_X}</button>`;
+    return `<div class="ab-bar">${start}<h2 class="ab-bar-title">${title}</h2>${end || '<span></span>'}</div>`;
+  }
+  const AB_STOP = '<button class="hqp-chip-btn ab-stop" type="button" data-ab="stop">Stop</button>';
+
+  // The lines under a stage: the sitting's own (W9, W14, a filter left out)
+  // and a tap the node refused
+  function abSay(ab) {
+    const v = ab.view;
+    const said = v && v.say && v.say.line ? v.say.line : '';
+    return [said, ab.line].filter(Boolean).map(l => `<p class="ab-say">${escapeHtml(l)}</p>`).join('');
+  }
+
+  function abWarnings(v) {
+    return (v.long_silence ? '<p class="ab-warn">Long pauses make small differences harder to hear.</p>' : '')
+      + (v.sdm ? '<p class="ab-warn">Your DAC may click between fragments in DSD — the same for every filter.</p>' : '');
+  }
+
+  function abAnswers(ab, picks) {
+    const st = ab.view.step || {};
+    const cost = ab.view.say && ab.view.say.cost;
+    const can = st.answerable && ab.local.answered == null && !cost && ab.local.stop == null;
+    return `<div class="ab-answers">${picks.map(([answer, label]) => `<button class="hqp-chip-btn" type="button" data-ab="answer"
+      data-answer="${answer}"${can ? '' : ' disabled'}>${label}</button>`).join('')}</div>`;
+  }
+
+  function abReasons(list) {
+    return `<div class="ab-reasons">${list.map(r => `<div><b>${escapeHtml(r.name)}</b><br>${escapeHtml(r.why)}</div>`).join('')}</div>`;
+  }
+
+  function abHeardRow(name, badge, pick, speed, sub = '') {
+    return `<div class="ab-heard"><span class="ab-heard-name">${escapeHtml(name)}${sub}</span>
+      <span class="ab-badge${pick ? ' is-pick' : ''}">${escapeHtml(badge)}</span><span class="ab-spd">${abSpeed(speed)}</span></div>`;
+  }
+
+  const AB_SCREENS = {
+    fixed: (ab) => `${abBar('Compare by ear')}
+      <div class="ab-body"><div class="ab-pad is-top"><p class="ab-line">${escapeHtml(ab.refusal.message)}</p></div></div>
+      <div class="ab-foot"><button class="btn-primary" type="button" data-ab="go-on">Go on</button>
+        <button class="hqp-chip-btn ab-foot-chip" type="button" data-ab="close">Cancel</button></div>`,
+
+    refused: (ab) => `${abBar('Compare by ear')}
+      <div class="ab-body"><div class="ab-pad is-top"><p class="ab-line">${escapeHtml(ab.refusal.message)}</p></div></div>
+      <div class="ab-foot"><button class="btn-primary" type="button" data-ab="close">Done</button></div>`,
+
+    warming: (ab) => {
+      const v = ab.view, w = v.warm || {};
+      const count = w.of
+        ? `Getting ${abNum(w.of)} filters ready · ${abNum(w.done)} of ${abNum(w.of)}`
+        : 'Getting filters ready';
+      return `${abBar('Compare by ear')}
+        <div class="ab-body"><div class="ab-pad is-top">
+          <div class="ab-state">${count}</div>
+          <div class="ab-progress"><i data-ab-width="${w.of ? w.done / w.of : 0}"></i></div>
+          <p class="ab-warn">${v.fixed ? escapeHtml(AB_W5) : 'HQPlayer is turned all the way down while it measures.'}</p>
+          ${ab.everReady ? '' : '<p class="ab-warn">Then you choose the passage and hear it before the test.</p>'}
+          ${abSay(ab)}
+          <div><button class="hqp-chip-btn" type="button" data-ab="cancel">Cancel</button></div>
+        </div></div>`;
+    },
+
+    open: (ab) => {
+      const v = ab.view, L = ab.local;
+      const p = { ...v.passage, ...(L.passage || {}) };
+      const form = L.form || v.form;
+      const second = L.form ? L.second : v.second;
+      const pair = form === 'pair';
+      const learning = v.phase === 'learning' || L.learn != null;
+      const learned = L.passage || L.form ? 0 : v.learned;
+      const len = v.track.length;
+      const off = learning ? ' disabled' : '';
+      const lenChips = AB_LENGTHS.map(n => `<button class="hqp-chip-btn${p.length_s === n ? ' is-on' : ''}" type="button"
+        data-ab="len" data-len="${n}"${off}>${n} s</button>`).join('');
+      const custom = !AB_LENGTHS.includes(p.length_s);
+      const other = ab.editLen
+        ? `<input class="ab-len-input" type="number" inputmode="numeric" min="${abLengths(v).min_s}" max="${Math.floor(abLengths(v).max_s)}" step="1"
+             value="${Math.round(p.length_s)}" aria-label="The passage's length in seconds">`
+        : `<button class="hqp-chip-btn${custom ? ' is-on' : ''}" type="button" data-ab="len-other"${off}>${
+            custom ? `${Math.round(p.length_s)} s` : '… s'}</button>`;
+      const playLabel = learning ? 'Playing…' : learned ? '▶ Play again' : '▶ Play';
+      const learnLine = learning ? ''
+        : learned ? `Played ${abNum(learned)} ${learned === 1 ? 'time' : 'times'}`
+        : pair ? 'Plays both, 1 then 2, without names' : 'Plays it with your filter';
+      const bars = pair
+        ? `<div class="ab-pairbars"><span>1</span><div class="ab-frag" data-ab-frag="1"><i></i></div>
+             <span>2</span><div class="ab-frag" data-ab-frag="2"><i></i></div></div>`
+        : '<div class="ab-frag" data-ab-frag=""><i></i></div>';
+      const chain = v.chain;
+      const chainCap = ab.chainRefused ? escapeHtml(ab.chainRefused)
+        : `Yours against one other at a time${chain ? ` · ${abNum(chain.to_hear)} to hear${chain.left_out.length
+            ? ` · <button class="ab-link" type="button" data-ab-ov="reasons">${abNum(chain.left_out.length)} left out ›</button>` : ''}` : ''}`;
+      const pairCap = `Yours, ${escapeHtml(v.yours.name)}, against ${second
+        ? `${escapeHtml(second)} · <button class="ab-link" type="button" data-ab-ov="pick">Change ›</button>`
+        : '<button class="ab-link" type="button" data-ab-ov="pick">one you choose ›</button>'}`;
+      const opt = (f, title, cap, disabled) => `
+        <div class="ab-opt${form === f ? ' is-on' : ''}" role="radio" tabindex="${disabled ? -1 : 0}" aria-checked="${form === f}"
+             ${disabled ? 'aria-disabled="true" ' : ''}data-ab="form" data-form="${f}">
+          <span class="ab-radio"></span><span><b>${title}</b><span class="ab-cap">${cap}</span></span>
+        </div>`;
+      return `${abBar('Compare by ear')}
+        <div class="ab-body">
+          <div class="ab-pad">
+            <div class="ab-track"><h3>${escapeHtml(v.track.title)}</h3>
+              <p>${escapeHtml(v.track.artist)} · ${abNum(fmtDuration(len))}</p></div>
+            <div class="ab-scrub">
+              <div class="ab-scrub-head"><span>The passage</span>
+                <span>from <span class="ab-num" data-ab-from>${fmtDuration(p.from_s)}</span> to <span class="ab-num" data-ab-to>${
+                  fmtDuration(p.from_s + p.length_s)}</span></span></div>
+              <div class="ab-scrub-track"><i class="ab-scrub-win" data-ab-left="${p.from_s / len}" data-ab-width="${p.length_s / len}"></i>
+                <span class="ab-scrub-now" data-ab-left="${v.passage.was_s / len}" title="Where it was playing"></span></div>
+              <input class="ab-scrub-range" type="range" min="0" max="${Math.max(0, Math.floor(len - p.length_s))}" step="1"
+                     value="${Math.round(p.from_s)}" aria-label="Where the passage starts"${off}>
+              <div class="ab-chips">
+                <button class="hqp-chip-btn" type="button" data-ab="nudge" data-by="-5"${off}>−5 s</button>
+                <button class="hqp-chip-btn" type="button" data-ab="nudge" data-by="5"${off}>+5 s</button>
+                <button class="hqp-chip-btn" type="button" data-ab="here"${off}>Where it was playing</button>
+              </div>
+              <div class="ab-learn">
+                <button class="hqp-chip-btn ab-learn-play" type="button" data-ab="learn"${
+                  learning || (pair && !second) ? ' disabled' : ''}>${playLabel}</button>
+                <span class="ab-warn"${learning ? ' data-ab-state' : ''}>${learnLine}</span>
+              </div>
+              ${bars}
+              <p class="ab-warn">Learn the passage: play it as many times as you like before you start.</p>
+            </div>
+            <div class="ab-chips">${lenChips}${other}</div>
+          </div>
+          <section class="hqp-section ab-how">
+            <div class="hqp-section-label">How</div>
+            ${opt('chain', 'Find my filter', chainCap, !!ab.chainRefused)}
+            ${opt('pair', 'Two filters, blind', pairCap, false)}
+          </section>
+          <div class="ab-pad">
+            <p class="ab-ctx">${abContext(v.context.words)}</p>
+            <p class="ab-warn">Keep HQPlayer's window and your DAC's display out of sight.</p>
+            ${v.sdm ? '<p class="ab-warn">Your DAC may click between fragments in DSD — the same for every filter.</p>' : ''}
+            ${abSay(ab)}
+          </div>
+        </div>
+        <div class="ab-foot"><button class="btn-primary" type="button" data-ab="begin"${
+          learning || (pair && !second) || L.begin != null ? ' disabled' : ''}>Start the test</button></div>`;
+    },
+
+    chain: (ab) => {
+      const v = ab.view, st = v.step || {};
+      const dots = Array.from({ length: st.of || 0 }, (_, k) =>
+        `<i class="${k < st.n - 1 ? 'is-on' : k === st.n - 1 ? 'is-now' : ''}"></i>`).join('');
+      const q = st.kind === 'check' ? 'Yours again, against the one before:'
+        : st.kind === 'first' ? 'The next one, against yours:' : 'The next one, against what you just heard:';
+      return `${abBar('Find my filter', AB_STOP)}
+        <div class="ab-body is-test">
+          <div class="ab-pad ab-dots-pad"><div class="ab-dots" aria-label="Step ${st.n || 0} of ${st.of || 0}">${dots}</div></div>
+          <div class="ab-stage">
+            <div class="ab-state" data-ab-state></div>
+            <div class="ab-frag" data-ab-frag=""><i></i></div>
+            <div class="ab-q">${q}</div>
+            ${abAnswers(ab, [['better', 'Better'], ['same', 'No difference'], ['worse', 'Worse']])}
+          </div>
+          <div class="ab-pad ab-after">
+            ${abSay(ab)}
+            <p class="ab-warn">Silence before each: ${abNum(`${v.silence_s} s`)} · fragment ${abNum(`${v.passage.length_s} s`)}</p>
+            ${abWarnings(v)}
+          </div>
+        </div>`;
+    },
+
+    pair: (ab) => {
+      const v = ab.view, st = v.step || {};
+      return `${abBar('Two filters, blind', AB_STOP)}
+        <div class="ab-body is-test">
+          <div class="ab-stage">
+            <div class="ab-state">Round ${abNum(st.n || 1)} · 1 then 2 · <span data-ab-state></span></div>
+            <div class="ab-pairbars"><span>1</span><div class="ab-frag" data-ab-frag="1"><i></i></div>
+              <span>2</span><div class="ab-frag" data-ab-frag="2"><i></i></div></div>
+            <div class="ab-q">Which did you prefer?</div>
+            ${abAnswers(ab, [['1', '1'], ['same', 'No difference'], ['2', '2']])}
+          </div>
+          <div class="ab-pad ab-after">
+            ${abSay(ab)}
+            <p class="ab-warn">Each filter plays first in half the rounds. Up to ${abNum(st.of || 0)} rounds; it stops earlier when your answers settle.</p>
+            ${abWarnings(v)}
+          </div>
+        </div>`;
+    },
+
+    chainResult: (ab) => {
+      const r = ab.view.result;
+      const rows = r.heard.map(h => abHeardRow(h.name, h.tag, h.tag === 'picked', h.speed,
+        h.differed ? `<span class="ab-heard-sub">differed in ${escapeHtml(AB_AXIS[h.differed] || h.differed)}</span>` : '')).join('');
+      return `${abBar('Done')}
+        <div class="ab-body">
+          <div class="ab-pad ab-res-head"><h3>${escapeHtml(r.head)}</h3><p>${abContext(r.sub)}</p></div>
+          <section class="hqp-section"><div class="hqp-section-label">What you heard</div>${rows}</section>
+          <div class="ab-pad"><p class="ab-warn">Speeds are this computer's: how much faster than real time HQPlayer runs each here.</p>${abSay(ab)}</div>
+        </div>
+        <div class="ab-foot"><button class="btn-primary" type="button" data-ab="close">Done</button></div>`;
+    },
+
+    pairResult: (ab) => {
+      const v = ab.view, r = v.result;
+      const rows = r.rows.map(x => abHeardRow(x.name, `${x.picks} picked`, x.name === r.winner, x.speed)).join('');
+      const note = r.made ? `${escapeHtml(v.second)} is your filter now.`
+        : r.make ? 'Your filter stays as it was unless you make the other one yours.' : 'Yours stays.';
+      return `${abBar('Done')}
+        <div class="ab-body">
+          <div class="ab-pad ab-res-head"><h3>${escapeHtml(r.head)}</h3><p>${escapeHtml(r.verdict)}</p></div>
+          <section class="hqp-section"><div class="hqp-section-label">The two</div>${rows}</section>
+          <div class="ab-pad"><p class="ab-warn">${note}</p>${abSay(ab)}</div>
+        </div>
+        <div class="ab-foot">${r.make ? `<button class="btn-primary" type="button" data-ab="adopt">Make ${escapeHtml(v.second)} my filter</button>` : ''}
+          <button class="hqp-chip-btn ab-foot-chip" type="button" data-ab="close">Done</button></div>`;
+    },
+
+    brk: () => `${abBar('Find my filter')}
+      <div class="ab-body"><div class="ab-pad ab-res-head is-break">
+        <h3>Time for a break.</h3>
+        <p class="ab-line">The last answers are set aside, and your filter is back.</p>
+      </div></div>
+      <div class="ab-foot"><button class="btn-primary" type="button" data-ab="close">Done</button></div>`,
+
+    ended: (ab) => {
+      const v = ab.view;
+      const words = v.ended === 'left' ? 'The comparison ended: HQPlayer was changed or taken elsewhere.'
+        : v.ended === 'failed' ? `The comparison stopped${v.note ? `: ${v.note}` : '.'}`
+        : 'The comparison ended.';
+      return `${abBar('Compare by ear')}
+        <div class="ab-body"><div class="ab-pad is-top"><p class="ab-line">${escapeHtml(words)}</p></div></div>
+        <div class="ab-foot"><button class="btn-primary" type="button" data-ab="close">Done</button></div>`;
+    },
+  };
+
+  // The sheet's own overlays: who to compare yours with, what was left out,
+  // and the cost before a swap (C′, the chain's `say.cost`)
+  function abOverlay(ab) {
+    const v = ab.view;
+    const cost = v && ab.screen === 'chain' && v.say && v.say.cost;
+    if (cost && ab.local.decided == null) {
+      return `<div class="ab-overlay"><div class="ab-sheet2">
+        <h4>You picked the next one.</h4>
+        <p>It runs at ${abNum(abSpeed(cost.probe))} here; yours runs at ${abNum(abSpeed(cost.yours))}.${
+          cost.tight ? ' That is close to what this computer keeps up with.' : ''}</p>
+        <div class="ab-two"><button class="hqp-chip-btn is-make" type="button" data-ab="decide" data-make="1">Make it my filter</button>
+          <button class="hqp-chip-btn" type="button" data-ab="decide" data-make="0">Keep mine</button></div>
+      </div></div>`;
+    }
+    if (ab.overlay === 'pick') {
+      const second = ab.local.form ? ab.local.second : v.second;
+      const list = v.seconds.list;
+      const rows = list.map(f => `<button class="ab-pick-row${f.name === second ? ' is-on' : ''}" type="button" data-ab="second"
+          data-name="${escapeHtml(f.name)}"><span class="ab-pick-name">${escapeHtml(f.name)}${
+          f.tight ? '<span class="ab-badge">tight</span>' : ''}${
+          f.picks > 0 ? `<span class="ab-badge">your pick · ${f.picks}</span>` : ''}</span><span class="ab-spd">${abSpeed(f.speed)}</span></button>`).join('');
+      return `<div class="ab-overlay" data-ab-scrim><div class="ab-sheet2 is-list" role="dialog" aria-label="Against yours">
+        <h4>Against yours</h4>
+        <p class="ab-small">Filters this computer keeps up with, A–Z. The speed is how much faster than real time HQPlayer runs each here.</p>
+        <div class="ab-list">${rows || '<p class="ab-small">No other filter can be compared here.</p>'}</div>
+        ${v.seconds.left_out.length ? `<p class="ab-small">Left out:</p>${abReasons(v.seconds.left_out)}` : ''}
+        <button class="hqp-chip-btn ab-close-chip" type="button" data-ab="ov-close">Close</button>
+      </div></div>`;
+    }
+    if (ab.overlay === 'reasons') {
+      return `<div class="ab-overlay" data-ab-scrim><div class="ab-sheet2" role="dialog" aria-label="Left out of this sitting">
+        <h4>Left out of this sitting</h4>
+        ${abReasons((v.chain && v.chain.left_out) || [])}
+        <button class="hqp-chip-btn ab-close-chip" type="button" data-ab="ov-close">Close</button>
+      </div></div>`;
+    }
+    return '';
+  }
+
+  // A tap on the sheet, sent to the sitting; `local` is what it shows at once
+  async function abAsk(ab, body, local) {
+    if (local) { Object.assign(ab.local, local); abPaint(ab); }
+    const res = await abFetch('/ask', { ...body, sitting: ab.view && ab.view.key });
+    if (abSheet !== ab) return;
+    if (res.ok) { abApply(ab, res.view); return; }
+    if (local) Object.keys(local).forEach(k => delete ab.local[k]);
+    ab.line = res.message;
+    abPaint(ab);
+  }
+
+  function abPassage(ab, from_s, length_s) {
+    const len = ab.view.track.length;
+    const b = abLengths(ab.view);
+    length_s = Math.min(Math.max(length_s, b.min_s), b.max_s, len);
+    from_s = Math.min(Math.max(from_s, 0), Math.max(0, len - length_s));
+    abAsk(ab, { name: 'passage', from_s, length_s }, { passage: { from_s, length_s } });
+  }
+
+  function abNow(ab) {
+    return { ...ab.view.passage, ...(ab.local.passage || {}) };
+  }
+
+  function abClick(ab, e) {
+    if (ab.closing) return;
+    const t = e.target.closest('[data-ab], [data-ab-ov]');
+    if (!t) {
+      // The list's scrim closes it; the second tap of the double-tap that
+      // opened it repeats the wish to open
+      if (e.target.matches('[data-ab-scrim]') && e.detail < 2) { ab.overlay = null; abPaint(ab); }
+      return;
+    }
+    if (t.disabled || t.getAttribute('aria-disabled') === 'true') return;
+    if (t.dataset.abOv) {
+      if (e.detail > 1) return;
+      ab.overlay = t.dataset.abOv;
+      abPaint(ab);
+      return;
+    }
+    const seq = ab.view ? ab.view.seq : 0;
+    const p = ab.view ? abNow(ab) : null;
+    switch (t.dataset.ab) {
+      case 'close': onceInFlight(t, () => abClose(ab)); break;
+      case 'cancel': onceInFlight(t, async () => { await abAsk(ab, { name: 'stop' }); await abClose(ab); }); break;
+      case 'stop': abAsk(ab, { name: 'stop' }, { stop: seq }); break;
+      case 'go-on': onceInFlight(t, async () => abTake(ab, await abStart(ab.wish, true))); break;
+      case 'learn': abAsk(ab, { name: 'learn' }, { learn: seq }); break;
+      case 'begin': abAsk(ab, { name: 'begin' }, { begin: seq }); break;
+      case 'answer': abAsk(ab, { name: 'answer', answer: t.dataset.answer }, { answered: seq }); break;
+      case 'decide': abAsk(ab, { name: 'decide', make: t.dataset.make === '1' }, { decided: seq }); break;
+      case 'adopt': onceInFlight(t, () => abAdopt(ab)); break;
+      case 'nudge': abPassage(ab, p.from_s + Number(t.dataset.by), p.length_s); break;
+      case 'here': abPassage(ab, ab.view.passage.was_s, p.length_s); break;
+      case 'len': abPassage(ab, p.from_s, Number(t.dataset.len)); break;
+      case 'len-other': ab.editLen = true; abPaint(ab); break;
+      case 'ov-close': ab.overlay = null; abPaint(ab); break;
+      case 'form': {
+        const form = t.dataset.form;
+        const second = ab.local.form ? ab.local.second : ab.view.second;
+        if (form === (ab.local.form || ab.view.form)) break;
+        abAsk(ab, { name: 'form', form, ...(form === 'pair' && second ? { second } : {}) },
+              { form, second: form === 'pair' ? second : null });
+        break;
+      }
+      case 'second': {
+        ab.overlay = null;
+        const name = t.dataset.name;
+        abAsk(ab, { name: 'form', form: 'pair', second: name }, { form: 'pair', second: name });
+        break;
+      }
+    }
+  }
+
+  // The start's slider moves the window as it goes; the passage is sent once
+  // it is let go (`change`)
+  function abInput(ab, e) {
+    if (!e.target.matches('.ab-scrub-range')) return;
+    const from = Number(e.target.value);
+    const p = abNow(ab), len = ab.view.track.length;
+    const win = ab.card.querySelector('.ab-scrub-win');
+    if (win) win.style.left = `${from / len * 100}%`;
+    ab.card.querySelector('[data-ab-from]').textContent = fmtDuration(from);
+    ab.card.querySelector('[data-ab-to]').textContent = fmtDuration(from + p.length_s);
+  }
+
+  function abChange(ab, e) {
+    if (e.target.matches('.ab-scrub-range')) {
+      ab.dragging = false;
+      abPassage(ab, Number(e.target.value), abNow(ab).length_s);
+    } else if (e.target.matches('.ab-len-input')) {
+      ab.editLen = false;
+      const n = Math.round(Number(e.target.value));
+      if (Number.isFinite(n) && n > 0) abPassage(ab, abNow(ab).from_s, n);
+      else abPaint(ab);
+    }
+  }
+
+  // The pair's result: the other filter into the context's slot
+  async function abAdopt(ab) {
+    const name = ab.view.second;
+    let r, out;
+    try {
+      r = await fetch('/api/hqplayer/ab/adopt', { method: 'POST' });
+      out = await r.json().catch(() => ({}));
+    } catch (err) {
+      ab.line = 'The node is not answering right now.';
+      abPaint(ab);
+      return;
+    }
+    if (!r.ok) {
+      const d = out.detail;
+      ab.line = (d && d.message) || (typeof d === 'string' ? d : `HTTP ${r.status}`);
+      abPaint(ab);
+      return;
+    }
+    const failed = Object.values((out.change && out.change.failed) || {});
+    if (failed.length) {
+      ab.view = out.ab;
+      ab.line = failed.join(' · ');
+      abPaint(ab);
+      return;
+    }
+    notices.toast({ kind: 'success', key: 'hqp.ab', title: `${escapeHtml(name)} is your filter now.` });
+    await abClose(ab);
+  }
+
+  // Done, ✕, Cancel, or the sitting stopped: HQPlayer is put back (a sitting
+  // still going stops) and the sheet goes
+  async function abClose(ab) {
+    if (ab.closing) return;
+    ab.closing = true;
+    ab.el.classList.add('is-closing');
+    if (ab.view) {
+      const res = await abFetch('/close', { sitting: ab.view.key });
+      if (!res.ok) console.warn('The comparison did not close:', res.message);
+    }
+    abRemove(ab);
+  }
+
+  function abRemove(ab) {
+    cancelAnimationFrame(ab.raf);
+    document.removeEventListener('np-update', ab.onStatus);
+    ab.el.remove();
+    if (abSheet === ab) abSheet = null;
   }
 
   /* ---- Peak meter (HQPlayer screen, the Meter chip on the Volume row) ----
@@ -12213,6 +13004,23 @@
       ? 'HQPlayer may still hold the run\'s test settings — check them, and its volume, before you play.'
       : hqpLeftLine(n.data.items),
   });
+  // A comparison by ear whose put-back HQPlayer refused twice alike
+  // (playback/hqp_ab.py, AB-1-DESIGN §17): left to the person, who sets it in
+  // HQPlayer — a report, gone once seen. Drafted words (level C, §7.3's sitting).
+  NOTICE_COPY['hqplayer.ab_refused'] = n => {
+    const d = n.data || {};
+    const where = `${escapeHtml(String(d.mode || '').toUpperCase())} ${escapeHtml(d.slot || '')}`;
+    const volume = d.volume == null ? ''
+      : `<span class="num">${escapeHtml(String(Math.round(d.volume * 10) / 10))}</span> dB`;
+    return {
+      title: 'Comparing filters: not put back',
+      text: d.filter && volume
+        ? `HQPlayer would not take ${escapeHtml(d.filter)} back for ${where}, nor its volume back to ${volume}. Set them in HQPlayer yourself.`
+        : d.filter
+          ? `HQPlayer would not take ${escapeHtml(d.filter)} back for ${where}. Set it in HQPlayer yourself.`
+          : `HQPlayer would not take its volume back to ${volume}. Set it in HQPlayer yourself.`,
+    };
+  };
   // A benchmark run HQPlayer went away under — it closed, reset or refused
   // the connection — put back whole when it answered again
   // (playback/hqp_benchmark.py): a report, gone once seen. The run's date
@@ -12731,6 +13539,115 @@
     return `Listening statistics are on their way. ${noticeCopy(n).text}`;
   }
 
+  /* The person's word for a change a device token alone does not make — the
+     account email, an invite link with rights, the AI provider's key, an
+     agent's sign-in (routers/auth.step_up; auth.js Sautium.auth.boxed): the
+     account's password in one field on the sheet's submit — or, on an
+     account with no password, the code the computer that runs Sautium
+     opened this page with, which no field asks for. */
+  const STEP_UP_LABEL = 'Account password';
+  const STEP_UP_HOST_NOTE = 'This node has no password, so the computer that runs Sautium vouches for this: ' +
+    'open this page from there, or scan its QR code, and do it within a few minutes.';
+  const STEP_UP_HOST_MISSING = 'Open this page from the computer that runs Sautium, or scan its QR code, then try again.';
+  async function stepUpField() {
+    // Without the status the field is shown: a node whose host vouches
+    // instead answers with the words that say so
+    let st = null;
+    try { st = await window.Sautium.auth.status(); } catch (err) { console.warn('auth status:', err); }
+    const hostVouches = !!st && st.password_login === false && st.pin_door === true;
+    return {
+      hostVouches,
+      html: hostVouches ? `
+          <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">${STEP_UP_HOST_NOTE}</p>` : `
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${STEP_UP_LABEL}</span>
+            <input class="add-gear-input" data-step-up type="password" autocomplete="current-password">
+          </label>`,
+      // {password} to send, or {error}: what is missing, in words
+      read(root) {
+        if (hostVouches) {
+          return window.Sautium.auth.hasHostCode() ? { password: '' } : { error: STEP_UP_HOST_MISSING };
+        }
+        const input = root.querySelector('[data-step-up]');
+        return input && input.value ? { password: input.value } : { error: 'Enter the account password.' };
+      },
+      // A refused password goes; the field waits for the next
+      refused(root) {
+        const input = root.querySelector('[data-step-up]');
+        if (input) { input.value = ''; input.focus(); }
+      },
+    };
+  }
+
+  // An action with no sheet of its own (a sign-in's start, the code sent for
+  // an address set earlier) asks the password on one: `act(password)` is the
+  // boxed request (Sautium.auth.boxed's answer). Resolves its answer once it
+  // is ok, or null when the sheet is closed. An account its host vouches for
+  // opens no sheet: the code rides along, or the words say where it is.
+  async function askStepUp({ title, text, confirm }, act) {
+    const field = await stepUpField();
+    if (field.hostVouches) {
+      const word = field.read(document);
+      let res;
+      try {
+        res = word.error ? { ok: false, error: word.error } : await act(word.password);
+      } catch (err) {
+        res = { ok: false, error: 'Could not reach the node — try again.' };
+      }
+      if (res.ok) return res;
+      await notifyDialog({ title, message: escapeProfileHtml(res.error), kind: 'error' });
+      return null;
+    }
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'add-gear-overlay';
+      overlay.innerHTML = `
+        <div class="add-gear-sheet">
+          <div class="sheet-handle"></div>
+          <div class="add-gear-head">
+            <h2 class="add-gear-title">${escapeProfileHtml(title)}</h2>
+            <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+          </div>
+          <div class="add-gear-row">
+            <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">${text}</p>
+            ${field.html}
+            <button class="profile-btn primary" data-confirm>${escapeProfileHtml(confirm)}</button>
+            <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const msg = overlay.querySelector('[data-msg]');
+      const btn = overlay.querySelector('[data-confirm]');
+      const close = (value) => { overlay.remove(); resolve(value); };
+      overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
+      overlay.querySelector('[data-cancel]').addEventListener('click', () => close(null));
+      const input = overlay.querySelector('[data-step-up]');
+      setTimeout(() => input.focus(), 100);
+      const submit = async () => {
+        if (btn.disabled) return;
+        const word = field.read(overlay);
+        msg.style.color = 'var(--color-negative)';
+        if (word.error) { msg.textContent = word.error; return; }
+        btn.disabled = true;
+        msg.style.color = 'var(--color-text-muted)';
+        msg.textContent = 'Checking…';
+        let res;
+        try {
+          res = await act(word.password);
+        } catch (err) {
+          res = { ok: false, error: 'Could not reach the node — try again.' };
+        }
+        btn.disabled = false;
+        if (res.ok) { close(res); return; }
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = res.error;
+        if (res.stepUp) field.refused(overlay);
+      };
+      btn.addEventListener('click', submit);
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    });
+  }
+
   /* Email verification — two-step Worker-mediated flow.
      POST /api/p2p/email/send-code sends a 6-char code to the
      account's email; POST /api/p2p/email/verify-code redeems it
@@ -12738,37 +13655,40 @@
      email go out only from a verified address. */
   // One flow at a time: each call mails a code and the Worker keeps only
   // the latest hash per invite code, so a double-tap killed its own code.
+  // The address's own setting hands back a grant (`grant`), and the code
+  // is sent on it at once; a flow opened from the Verify row asks the
+  // password first. The send's answer carries the grant the code is
+  // verified with.
   let _emailVerifyFlow = null;
-  function openEmailVerifyFlow() {
+  function openEmailVerifyFlow(grant = '') {
     if (!_emailVerifyFlow) {
-      _emailVerifyFlow = _openEmailVerifyFlow().finally(() => { _emailVerifyFlow = null; });
+      _emailVerifyFlow = _openEmailVerifyFlow(grant).finally(() => { _emailVerifyFlow = null; });
     }
     return _emailVerifyFlow;
   }
 
-  async function _openEmailVerifyFlow() {
-    let sentTo = '';
+  async function _openEmailVerifyFlow(grant) {
+    const sendCode = (password) => window.Sautium.auth.boxed('/api/p2p/email/send-code', { grant },
+                                                              password === undefined ? {} : { password });
+    let sent;
     try {
-      const r = await fetch('/api/p2p/email/send-code', { method: 'POST' });
-      if (!r.ok) {
-        const txt = await _errorMessage(r);
-        await notifyDialog({
-          title: 'Could not send verification code',
-          message: escapeProfileHtml(txt),
-          kind: 'error',
-        });
-        return;
-      }
-      const data = await r.json();
-      sentTo = data.email || '';
+      sent = grant ? await sendCode()
+        : await askStepUp({ title: 'Verify email', confirm: 'Send the code',
+                            text: 'Sautium sends a 6-character code to the account email.' }, sendCode);
     } catch (err) {
+      sent = { ok: false, error: String(err) };
+    }
+    if (!sent) return;
+    if (!sent.ok) {
       await notifyDialog({
         title: 'Could not send verification code',
-        message: escapeProfileHtml(String(err)),
+        message: escapeProfileHtml(sent.error),
         kind: 'error',
       });
       return;
     }
+    const sentTo = sent.data.email || '';
+    const codeGrant = sent.data.grant;
 
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
@@ -12808,17 +13728,13 @@
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = 'Verifying…';
       try {
-        const r = await fetch('/api/p2p/email/verify-code', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code }),
-        });
+        const r = await window.Sautium.auth.boxed('/api/p2p/email/verify-code', { code, grant: codeGrant });
         if (!r.ok) {
           msg.style.color = 'var(--color-negative)';
-          msg.textContent = await r.text();
+          msg.textContent = r.error;
           return;
         }
-        const data = await r.json();
+        const data = r.data;
         if (data.verified) {
           msg.style.color = 'var(--color-positive)';
           msg.textContent = 'Verified.';
@@ -12837,6 +13753,7 @@
   }
 
   async function openSetEmailFlow(current = '') {
+    const field = await stepUpField();
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
@@ -12853,6 +13770,7 @@
             address here doesn't send any email yet.
           </p>
           <input class="add-gear-input" id="setEmailInput" type="email" placeholder="you@example.com" maxlength="320" autocomplete="email" value="${escapeProfileHtml(current)}">
+          ${field.html}
           <button class="profile-btn primary" data-confirm>Save</button>
           <div id="setEmailMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
         </div>
@@ -12873,20 +13791,24 @@
         msg.textContent = 'Enter a valid email address.';
         return;
       }
+      const word = field.read(overlay);
+      if (word.error) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = word.error;
+        return;
+      }
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = 'Saving…';
       try {
-        const r = await fetch('/api/p2p/account/email', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email }),
-        });
+        const r = await window.Sautium.auth.boxed('/api/p2p/account/email', { email },
+                                                  { method: 'PUT', password: word.password });
         if (!r.ok) {
           msg.style.color = 'var(--color-negative)';
-          msg.textContent = await r.text();
+          msg.textContent = r.error;
+          if (r.stepUp) field.refused(overlay);
           return;
         }
-        const saved = await r.json();
+        const saved = r.data;
         msg.style.color = 'var(--color-positive)';
         msg.textContent = saved.email_verified ? 'Saved — already verified.' : 'Saved — sending the code…';
         // A freshly entered address goes straight into verification: the
@@ -12896,7 +13818,7 @@
         // re-added), the same check the wizard makes. The screen re-renders
         // afterwards either way, so the row reflects the outcome.
         close();
-        if (!saved.email_verified) await openEmailVerifyFlow();
+        if (!saved.email_verified) await openEmailVerifyFlow(saved.grant);
         render();
       } catch (err) {
         msg.style.color = 'var(--color-negative)';
@@ -12904,7 +13826,9 @@
       }
     };
     overlay.querySelector('[data-confirm]').addEventListener('click', submit);
-    emailInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    for (const input of [emailInput, overlay.querySelector('[data-step-up]')].filter(Boolean)) {
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    }
   }
 
   // Name and password are both KDF inputs, so either change is a new key;
@@ -13020,7 +13944,7 @@
       }
       // The Worker knew the old invite code — the mailbox is verified again
       // from the new key, which is what records the succession.
-      if (result.email_needs_verification) await openEmailVerifyFlow();
+      if (result.email_needs_verification) await openEmailVerifyFlow(result.email_grant);
       render();
     };
     confirmBtn.addEventListener('click', submit);
@@ -13981,7 +14905,8 @@
   }
 
   /* API-key entry modal. Provider-aware helper link. */
-  function openApiKeyModal(provider, onSaved) {
+  async function openApiKeyModal(provider, onSaved) {
+    const field = await stepUpField();
     const isAnthropic = provider === 'anthropic';
     const placeholder = isAnthropic ? 'sk-ant-...' : 'sk-...';
     const helpLink = isAnthropic
@@ -14002,6 +14927,7 @@
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.45;">
             Get a key at ${helpLink}. Stored locally; sent only to ${escapeProfileHtml(isAnthropic ? 'Anthropic' : 'OpenAI')}.
           </p>
+          ${field.html}
           <div id="apiKeyMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
           <button class="btn btn-primary" data-save>Save</button>
         </div>
@@ -14023,17 +14949,21 @@
         msg.textContent = 'Paste a key first.';
         return;
       }
+      const word = field.read(overlay);
+      if (word.error) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = word.error;
+        return;
+      }
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = 'Saving…';
       try {
-        const r = await fetch('/api/settings/ai/key', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ api_key: key }),
-        });
+        const r = await window.Sautium.auth.boxed('/api/settings/ai/key', { api_key: key },
+                                                  { method: 'PUT', password: word.password });
         if (!r.ok) {
           msg.style.color = 'var(--color-negative)';
-          msg.textContent = (await r.text()) || 'Save failed.';
+          msg.textContent = r.error || 'Save failed.';
+          if (r.stepUp) field.refused(overlay);
           return;
         }
         close();
@@ -14044,7 +14974,9 @@
       }
     };
     overlay.querySelector('[data-save]').addEventListener('click', submit);
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    for (const el of [input, overlay.querySelector('[data-step-up]')].filter(Boolean)) {
+      el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    }
   }
 
   /* 2×2 stat cell builders for the Library screen. */
@@ -14493,6 +15425,8 @@
     return '';
   }
 
+  const SIGNIN_CODE_ELSEWHERE = 'This sign-in was started on another device, or before this page was opened: ' +
+    'its code shows there only. Cancel it and sign in again here to see the code.';
   function _renderCodexSigninPanel(cx) {
     const sg = cx.signin;
     const link = _signinLink(sg.url, 'Open the sign-in page');
@@ -14502,10 +15436,12 @@
       // polls for the result — nothing comes back through this host.
       body = `
           <div class="row-stack-value" style="${_cliSigninProse}">${link}, sign in to ChatGPT and enter this one-time code:</div>
+          ${sg.code_elsewhere ? `
+          <div class="row-stack-sub">${SIGNIN_CODE_ELSEWHERE}</div>` : `
           <div class="copy-inline">
             <div class="signin-device-code">${sg.code ? escapeProfileHtml(sg.code) : '…'}</div>
             ${sg.code ? copyButtonHtml(`data-copy-text="${escapeProfileHtml(sg.code)}"`, 'Copy') : ''}
-          </div>
+          </div>`}
           <div class="row-stack-sub">The code expires in 15 minutes. Sautium finishes on its own once you enter it.</div>`;
     } else {
       body = `
@@ -15112,6 +16048,7 @@
             <button data-action="remove-hqplayer" data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}"
               data-name="${escapeProfileHtml(h.label || '')}" data-files="${escapeProfileHtml(String(h.files || 0))}"
               data-measured="${escapeProfileHtml(String(h.measured || 0))}"
+              data-compared="${escapeProfileHtml(String(h.compared || 0))}"
               style="background:none;border:none;color:var(--color-text-dim);font-size:calc(15*var(--px));padding:0 calc(4*var(--px));cursor:pointer;line-height:1;"
               title="Forget this HQPlayer">&times;</button>` : '';
       return `
@@ -15406,14 +16343,15 @@
           // goodbye Settings › Library offers, and says so.
           const files = parseInt(el.dataset.files, 10) || 0;
           const measured = parseInt(el.dataset.measured, 10) || 0;
+          const compared = parseInt(el.dataset.compared, 10) || 0;
           const name = el.dataset.name || 'this HQPlayer';
           const ok = await window.confirmDestructive({
             title: files ? `Forget the library of ${escapeProfileHtml(name)}?` : `Forget ${escapeProfileHtml(name)}?`,
             message: files
-              ? 'Every album and track only its library put here goes' + hqpMeasuredGone(measured)
+              ? 'Every album and track only its library put here goes' + hqpMeasuredGone(measured, compared)
                 + '. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.'
-              : measured
-                ? `It leaves the list${hqpMeasuredGone(measured)}. A scan or its address brings the HQPlayer back, not what was measured.`
+              : measured || compared
+                ? `It leaves the list${hqpMeasuredGone(measured, compared)}. A scan or its address brings the HQPlayer back, not what was measured.`
                 : 'It leaves the list; a scan or its address brings it back.',
             confirmText: 'Forget',
           });
@@ -16629,12 +17567,53 @@
       renderAI(screenRoot(), { look: false });
     }, (_err) => {});
   }
+  // A sign-in starts on the account's password (askStepUp); the start's
+  // sealed answer carries the grant the rest of that sign-in quotes — the
+  // Claude code pasted in, the Codex device code read out. Kept for the
+  // page's life: a reload, or another device, starts it again.
+  const _signinGrants = {};            // agent → grant
+  async function _startSignin(agent, title, payload) {
+    const res = await askStepUp({
+      title, confirm: 'Continue',
+      text: 'The assistant signs in to the account you choose next, and works through it until you sign it out.',
+    }, (password) => window.Sautium.auth.boxed(`/api/settings/ai/${agent}/signin`, payload, { password }));
+    if (!res) return false;
+    _signinGrants[agent] = res.data.grant;
+    if (agent === 'codex' && res.data.code) _codexCode = { started_at: res.data.started_at, code: res.data.code };
+    return true;
+  }
+  // The Codex device code is a way in — whoever types it first at OpenAI
+  // signs the node into his account — so the state every browser reads in
+  // the clear says only `code_ready`; the browser that started the sign-in
+  // reads the code sealed, with its grant, once per sign-in (its started_at).
+  let _codexCode = null;               // {started_at, code}
   async function _fetchCodexState(look) {
+    let st = null;
     try {
       const r = await fetch('/api/settings/ai/codex/state' + (look ? '?look=1' : ''));
-      if (r.ok) return await r.json();
+      if (r.ok) st = await r.json();
     } catch (_) {}
-    return null;
+    const sg = st && st.signin;
+    if (sg && sg.running && sg.code_ready) {
+      // A read that failed leaves the code to the next render (the stream
+      // wakes it); only a sign-in this page holds no grant for is elsewhere
+      if ((!_codexCode || _codexCode.started_at !== sg.started_at) && _signinGrants.codex) {
+        try {
+          const res = await window.Sautium.auth.boxed('/api/settings/ai/codex/signin/code',
+                                                      { grant: _signinGrants.codex });
+          if (res.ok && res.data.code) _codexCode = { started_at: sg.started_at, code: res.data.code };
+          // Another page's start replaced this page's grant
+          else if (res.status === 403) _codexCode = { started_at: sg.started_at, code: null };
+          else if (!res.ok) console.warn('the device code could not be read:', res.error);
+        } catch (err) {
+          console.warn('the device code could not be read:', err);
+        }
+      }
+      const held = _codexCode && _codexCode.started_at === sg.started_at;
+      if (held && _codexCode.code) sg.code = _codexCode.code;
+      else if (held || !_signinGrants.codex) sg.code_elsewhere = true;
+    }
+    return st;
   }
   // AI-canonization run: same wake-event SSE pattern (server pushes on each
   // batch; client re-fetches /api/settings/ai and re-renders in place).
@@ -16783,16 +17762,21 @@
       return true;
     };
     onAction('[data-action="cc-signin"]', async () => {
-      await _signinCall('Claude Code sign-in failed', '/api/settings/ai/claude/signin', { method: 'POST' });
-      render();
+      if (await _startSignin('claude', 'Sign in to Claude', {})) render();
     });
     onAction('[data-action="cc-signin-code"]', async () => {
       const input = root.querySelector('#ccSigninCode');
       const code = input ? input.value.trim() : '';
       if (!code) { if (input) input.focus(); return; }
-      const ok = await _signinCall('Claude Code sign-in failed', '/api/settings/ai/claude/signin/code', {
-        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
-      if (ok) render();
+      let res;
+      try {
+        res = await window.Sautium.auth.boxed('/api/settings/ai/claude/signin/code',
+                                              { code, grant: _signinGrants.claude || '' });
+      } catch (err) {
+        res = { ok: false, error: 'Could not reach the node — try again.' };
+      }
+      if (!res.ok) { await _ccError('Claude Code sign-in failed', null, res.error); return; }
+      render();
     });
     const ccCode = root.querySelector('#ccSigninCode');
     if (ccCode) {
@@ -16818,9 +17802,7 @@
       render();
     });
     const cxSignin = async (device) => {
-      await _signinCall('Codex sign-in failed', '/api/settings/ai/codex/signin', {
-        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ device }) });
-      render();
+      if (await _startSignin('codex', 'Sign in to ChatGPT', { device })) render();
     };
     onAction('[data-action="cx-signin"]',        () => cxSignin(false));
     onAction('[data-action="cx-signin-device"]', () => cxSignin(true));

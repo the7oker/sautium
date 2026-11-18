@@ -191,6 +191,10 @@ def _hydrate_blocks(blocks: list[dict]) -> list[dict]:
         elif kind == "tracks":
             ids = [it.get("track_id") for it in items if it.get("track_id")]
             hydrated = hydrate_tracks(ids)
+        elif kind == "hqp_ab":
+            # A name, not a row: the sheet it opens checks it against
+            # HQPlayer's list then
+            hydrated = items[:1]
         else:
             continue
         if not hydrated:

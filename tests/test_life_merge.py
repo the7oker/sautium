@@ -332,14 +332,14 @@ def test_two_clones_merge_to_the_union_in_either_order(clones, tmp_path):
     # (the sent invite from before invite ids stays behind: it matches no acceptance)
     assert (m["tokens"], m["invites"], m["settings"], m["profile"], m["rotations"]) == (1, 0, 0, 1, 0)
     assert m["demo_plays"] == 2                          # T3 new, T1 spent earlier on B
-    assert got["waiting"] == {"listens": 1, "tracks": 1, "sessions": 1, "demo_plays": 1}  # T4 is unknown to A
+    assert got["waiting"] == {"listens": 1, "tracks": 1, "sessions": 1, "demo_plays": 1, "comparisons": 0}  # T4 is unknown to A
 
     got_b = _merge(file_a, b)
     mb = got_b["merged"]
     assert (mb["listens"], mb["sessions"], mb["friends"], mb["rights"], mb["messages"]) == (2, 1, 0, 0, 0)
     assert (mb["settings"], mb["profile"]) == (1, 0)                          # carry_limit; profile was set
     assert mb["demo_plays"] == 0                         # A's T1 demo is later: B keeps its own
-    assert got_b["waiting"] == {"listens": 0, "tracks": 0, "sessions": 0, "demo_plays": 0}
+    assert got_b["waiting"] == {"listens": 0, "tracks": 0, "sessions": 0, "demo_plays": 0, "comparisons": 0}
 
     # The union, on what both know; stats recomputed to the same numbers.
     hist = lambda t: set(_rows(t, "SELECT track_id::text, started_at, completed FROM listening_history"))
@@ -583,3 +583,39 @@ def test_witness_records_merge_as_the_recorder_takes_them(clones, tmp_path):
     assert _rows(a, "SELECT subject, via FROM p2p_witness WHERE subject = ANY(%s)",
                  ([failed, carried_banned, carried_failed, carried_honest],)) == [
         (carried_honest, honest_via)]
+
+
+def test_comparisons_by_ear_merge_by_their_hqplayer_and_start_once(clones, tmp_path):
+    """AB-1's record is life data: a sitting and its duels come over under
+    this node's row of the same HQPlayer — the one that reports the same name
+    and product about itself, whatever the person labelled it — keyed by
+    when the sitting began, so a second merge adds nothing. A sitting still
+    going, or one on an HQPlayer this node has no row of, does not come; a
+    merged one owes this HQPlayer no put-back."""
+    a, b = clones["a"], clones["b"]
+    sitting = ("""INSERT INTO hqp_ab_sittings (hqp_endpoint_id, engine, mode, slot, fractional, form, from_s,
+                                               length_s, tolerance_s, champion, picked, started_at, ended_at,
+                                               ended, owed)
+                  VALUES ((SELECT id FROM hqp_endpoints WHERE name = %s), '6.3.3', 'pcm', '1x', FALSE, 'chain',
+                          10, 10, 0.15, 'xla', 'xla', %s, %s, %s, %s) RETURNING id""")
+    _exec(a, [("INSERT INTO hqp_endpoints (name, product, hqp_name) VALUES ('Desk', 'HQPlayer Desktop', 'STUDIO')",
+               None)])
+    _exec(b, [("INSERT INTO hqp_endpoints (name, product, hqp_name) VALUES ('Studio PC', 'HQPlayer Desktop', 'STUDIO')",
+               None),
+              ("INSERT INTO hqp_endpoints (name, product, hqp_name) VALUES ('Elsewhere', 'HQPlayer Embedded', 'BOX')",
+               None),
+              (sitting, ("Studio PC", T0, T0 + timedelta(minutes=3), "done", True)),
+              (sitting, ("Studio PC", T0 + timedelta(hours=1), None, None, False)),        # still going
+              (sitting, ("Elsewhere", T0 + timedelta(hours=2), T0 + timedelta(hours=2), "done", False)),
+              ("""INSERT INTO hqp_ab_duels (sitting_id, n, first_name, second_name, answer, axis)
+                  SELECT id, n, 'xla', 'ext2', 'same', 'phase' FROM hqp_ab_sittings, generate_series(1, 2) n
+                   WHERE started_at = %s""", (T0,))])
+    got = _merge(_backup(b, tmp_path / "b"), a)
+    assert got["merged"]["comparisons"] == 1 and got["merged"]["duels"] == 2
+    assert got["waiting"]["comparisons"] == 1
+    assert _rows(a, """SELECT e.name, s.ended::text, s.owed, s.picked, count(d.n)
+                         FROM hqp_ab_sittings s JOIN hqp_endpoints e ON e.id = s.hqp_endpoint_id
+                         LEFT JOIN hqp_ab_duels d ON d.sitting_id = s.id
+                        GROUP BY 1, 2, 3, 4""") == [("Desk", "done", False, "xla", 2)]
+    again = _merge(_backup(b, tmp_path / "b2"), a)
+    assert again["merged"]["comparisons"] == 0 and again["merged"]["duels"] == 0

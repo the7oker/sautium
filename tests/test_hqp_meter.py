@@ -722,6 +722,35 @@ def test_the_stream_shows_its_sessions_and_its_runs_of_sound(meter, port, monkey
     assert began[1] >= two["start"]
 
 
+def test_a_runs_onset_is_its_first_sounding_frames_own_time_not_its_bursts(meter, port):
+    """AB-1-DESIGN §2.2 item 2: a burst of 160 ms holds seven frames; the
+    run's `start` is the read's arrival, its `onset` the first sounding
+    frame's time — the arrival less the hops of the frames after it. A tap
+    is told of the read itself."""
+    reads = []
+    attachment = meter.attach("127.0.0.1", port.port)
+    assert meter.tap("ab", attachment, lambda at, hop, sounds: reads.append((at, hop, sounds)))
+    port.wait(lambda: port.accepts == 1)
+    _wait(meter.metering)
+    x = np.zeros((7 * HOP, 2))
+    x[3 * HOP:] = 0.1                             # sound from the fourth hop of the burst on
+    blob = burst(x)
+    port.send(blob, chunk=len(blob))              # one burst, as HQPlayer sends it
+    _wait(lambda: meter.seen()["runs"])
+    (run,) = meter.seen()["runs"]
+    hop = HOP / 44100
+    at, read_hop, sounds = next(r for r in reads if any(r[2]))
+    assert read_hop == pytest.approx(hop)
+    first = sounds.index(True)
+    assert run["start"] == at
+    assert run["onset"] == pytest.approx(at - (len(sounds) - 1 - first) * hop)
+    # the frame's own time: before the read's arrival by the frames after it
+    # in the read (all of them, when the burst arrives whole)
+    assert run["onset"] <= run["start"]
+    meter.untap("ab")
+    port.wait(lambda: port.ends == 1)              # nothing else wants the stream
+
+
 def test_a_start_window_does_not_ask_a_port_that_refused_again(meter, loop, monkeypatch):
     dials = []
     real = hqp_meter.open_connection

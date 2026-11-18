@@ -32,6 +32,7 @@ from config import settings as app_settings
 from database import get_db_context
 from db_pool import Listener, db_execute, db_query, db_query_one, get_conn
 from serving import EventStream
+from routers.auth import StepUp, boxed, step_up
 from sql_queries import ARTIST_OWNED
 
 logger = logging.getLogger(__name__)
@@ -709,7 +710,8 @@ def _hqp_library_state() -> Dict[str, Any]:
                (SELECT count(*) FROM album_variants av JOIN hqp_library_files f ON f.album_variant_id = av.id
                  WHERE av.hqp_endpoint_id = e.id) AS files,
                (SELECT count(DISTINCT av.album_id) FROM album_variants av WHERE av.hqp_endpoint_id = e.id) AS albums,
-               (SELECT count(*) FROM hqp_dsp_speed s WHERE s.hqp_endpoint_id = e.id) AS measured
+               (SELECT count(*) FROM hqp_dsp_speed s WHERE s.hqp_endpoint_id = e.id) AS measured,
+               (SELECT count(*) FROM hqp_ab_sittings a WHERE a.hqp_endpoint_id = e.id) AS compared
         FROM hqp_endpoints e
         ORDER BY (e.host = %(h)s AND e.port = %(p)s) DESC, e.id
     """, {"h": host, "p": port})
@@ -724,6 +726,8 @@ def _hqp_library_state() -> Dict[str, Any]:
                   # DSP settings measured on it (playback.hqp_load): they go
                   # with the row when it is forgotten
                   "measured": int(r["measured"] or 0),
+                  # the person's comparisons by ear on it (AB-1 Q15): they go too
+                  "compared": int(r["compared"] or 0),
                   "configured": bool(host and r["host"]
                                      and hqp_library.address_key(r["host"], r["port"]) == hqp_library.address_key(host, port))}
                  for r in rows]
@@ -749,10 +753,11 @@ def _hqp_library_state() -> Dict[str, Any]:
                      files=configured["files"] if configured else 0,
                      albums=configured["albums"] if configured else 0,
                      measured=configured["measured"] if configured else 0,
+                     compared=configured["compared"] if configured else 0,
                      synced=bool(configured and configured["synced"]))
     else:
         state.update(endpoint=None, name=None, label=None, product=None, own_library=None,
-                     last_synced_at=None, files=0, albums=0, measured=0, synced=False)
+                     last_synced_at=None, files=0, albums=0, measured=0, compared=0, synced=False)
     state["endpoints"] = endpoints
     return state
 
@@ -1224,7 +1229,7 @@ def _notices_state() -> Dict[str, Any]:
                       if not (it["key"] in _REPORTS and it["seen"])]}
 
 
-_REPORTS = ("hqplayer.run_restored", "auth.login_failures")
+_REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures")
 
 
 def _login_failures_notice() -> Optional[Dict[str, Any]]:
@@ -1363,6 +1368,14 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": "hqplayer.run_left", "kind": "warning",
                       "since": left["since"].isoformat(), "until": None,
                       "data": {"items": left["items"]}})
+    # A comparison's put-back HQPlayer refused twice alike, left to the
+    # owner (AB-1-DESIGN §17): a report, dropped once seen
+    from playback import hqp_ab
+    ab_refused = hqp_ab.refused_notice()
+    if ab_refused is not None:
+        items.append({"key": "hqplayer.ab_refused", "kind": "warning",
+                      "since": ab_refused["since"].isoformat(), "until": None,
+                      "data": ab_refused["data"]})
     # One put back after HQPlayer went away under it: a report, dropped once
     # seen (_notices_state)
     restored = hqp_benchmark.restored_notice()
@@ -1565,8 +1578,9 @@ class AiModelUpdate(BaseModel):
     model: str = Field(..., max_length=80)
 
 
-class AiKeyUpdate(BaseModel):
-    api_key: Optional[str] = Field(default=None, max_length=300)
+class AiKeySubmit(StepUp):
+    # Clearing is DELETE /ai/key, on the token: a deletion lets nobody in
+    api_key: str = Field(min_length=1, max_length=300)
 
 
 def _canon_provider(p: Optional[str]) -> Optional[str]:
@@ -1652,14 +1666,7 @@ def _apply_api_key_to_runtime(key: Optional[str]) -> None:
         pass
 
 
-@router.put("/ai/key")
-def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
-    """Set or clear the user-supplied API key. Validation against the
-    provider's API is deferred — the UI's chat surface will surface
-    auth errors on first call. Empty/null clears the key. Also stored
-    under `ai.<provider>.api_key` so the next provider switch preserves
-    it for restoration."""
-    key = (req.api_key or "").strip() or None
+def _store_ai_key(key: Optional[str]) -> Dict[str, Any]:
     _write("ai.api_key", key)
     provider = _canon_provider(_read("ai.provider"))
     if provider:
@@ -1668,14 +1675,27 @@ def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
     return _ai_state()
 
 
+@router.put("/ai/key")
+async def put_ai_key(opened=boxed(AiKeySubmit)) -> Dict[str, Any]:
+    """Set the user-supplied API key. It rides the credential box — the Web
+    UI is plain HTTP on the LAN — and takes the account's password
+    (routers/auth.step_up): the owner's assistant traffic through another
+    account outlasts "Sign out everywhere". The answer, sealed, shows the
+    key masked. Validation against the provider's API is deferred — the
+    UI's chat surface will surface auth errors on first call. Also stored
+    under `ai.<provider>.api_key` so the next provider switch preserves it
+    for restoration."""
+    req, reply = opened
+    key = req.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=422, detail="Paste a key first")
+    await step_up(req)
+    return reply(await asyncio.to_thread(_store_ai_key, key))
+
+
 @router.delete("/ai/key")
 def delete_ai_key() -> Dict[str, Any]:
-    _write("ai.api_key", None)
-    provider = _canon_provider(_read("ai.provider"))
-    if provider:
-        _write(f"ai.{provider}.api_key", None)
-    _apply_api_key_to_runtime(None)
-    return _ai_state()
+    return _store_ai_key(None)
 
 
 class AiCanonUpdate(BaseModel):
@@ -1914,17 +1934,39 @@ def post_claude_install() -> Dict[str, Any]:
     return dict(_claude_install_state)
 
 
-class SigninCodeRequest(BaseModel):
-    code: str
+# An agent's sign-in is the owner's assistant traffic through whichever
+# account it signs into, and it outlasts "Sign out everywhere": it starts on
+# the account's password (routers/auth.step_up), and the start's sealed reply
+# carries the grant (device_auth "grants") the rest of that sign-in quotes —
+# the Claude code pasted in, the Codex device code read out — for as long as
+# the CLI waits.
+def _signin_grant(agent: str) -> str:
+    from desktop.agent_login import DEADLINE_SECONDS
+    return device_auth.grant(f"signin.{agent}", DEADLINE_SECONDS)
 
 
-@router.post("/ai/claude/signin")
-def post_claude_signin() -> Dict[str, Any]:
-    """Start the headless `claude auth login` (desktop/agent_login.py).
-    Returns the sign-in snapshot; every later change — the link and the
-    paste prompt, the exit — wakes /ai/claude/stream. Idempotent while a
-    sign-in runs."""
-    import claude_code
+def _signin_granted(agent: str, grant: str) -> None:
+    if not device_auth.grant_holds(f"signin.{agent}", grant):
+        raise HTTPException(status_code=403,
+                            detail="This sign-in was started elsewhere, or has ended: start it again here",
+                            headers={"X-Sautium-Auth-Error": "grant"})
+
+
+class SigninStart(StepUp):
+    # Codex's device-code flow: for a browser that cannot reach this host's
+    # localhost:1455 (a phone). Forced inside a container.
+    device: bool = False
+
+
+class SigninGrant(BaseModel):
+    grant: str = Field(max_length=64)
+
+
+class SigninCode(SigninGrant):
+    code: str = Field(max_length=512)
+
+
+def _start_claude_signin() -> Dict[str, Any]:
     if claude_code.get_claude_executable() is None:
         raise HTTPException(status_code=400, detail="Claude Code is not installed.")
     snap = claude_code.start_signin(lambda s: _signin_changed("claude", s))
@@ -1932,17 +1974,33 @@ def post_claude_signin() -> Dict[str, Any]:
     return snap
 
 
+@router.post("/ai/claude/signin")
+async def post_claude_signin(opened=boxed(StepUp)) -> Dict[str, Any]:
+    """Start the headless `claude auth login` (desktop/agent_login.py), on
+    the account's password. Returns, sealed, the sign-in snapshot and the
+    grant its pasted code is quoted with; every later change — the link and
+    the paste prompt, the exit — wakes /ai/claude/stream. Idempotent while a
+    sign-in runs (a new grant replaces the one before)."""
+    req, reply = opened
+    await step_up(req)
+    snap = await asyncio.to_thread(_start_claude_signin)
+    return reply({**snap, "grant": _signin_grant("claude")})
+
+
 @router.post("/ai/claude/signin/code")
-def post_claude_signin_code(req: SigninCodeRequest) -> Dict[str, Any]:
+async def post_claude_signin_code(opened=boxed(SigninCode)) -> Dict[str, Any]:
     """The code the platform page showed (a browser that could not reach
-    the CLI's localhost callback), into the CLI's stdin."""
-    import claude_code
+    the CLI's localhost callback), into the CLI's stdin — sealed, with the
+    grant the start handed this browser."""
+    req, reply = opened
+    _signin_granted("claude", req.grant)
     try:
-        return claude_code.submit_signin_code(req.code)
+        snap = await asyncio.to_thread(claude_code.submit_signin_code, req.code)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    return reply(snap)
 
 
 @router.delete("/ai/claude/signin")
@@ -2014,7 +2072,7 @@ def get_codex_state(look: bool = False) -> Dict[str, Any]:
         "codex_path":     str(codex) if codex else None,
         "auth_method":    codex_cli.codex_auth_method(),
         "install":        dict(_codex_install_state),
-        "signin":         codex_cli.signin_snapshot(),
+        "signin":         _public_signin(codex_cli.signin_snapshot()),
         "auth":           codex_cli.auth.verdict() if codex else None,
     }
 
@@ -2064,22 +2122,43 @@ def post_codex_install() -> Dict[str, Any]:
     return dict(_codex_install_state)
 
 
-class CodexSigninRequest(BaseModel):
-    # The device-code flow: for a browser that cannot reach this host's
-    # localhost:1455 (a phone). Forced inside a container.
-    device: bool = False
+def _public_signin(snap: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A Codex sign-in as the state shows it to every signed-in browser, in
+    the clear: the device code is a way in — whoever types it first at
+    OpenAI signs this node into his account, and nothing comes back through
+    the node — so the state says only that there is one; the browser that
+    started the sign-in reads it sealed (POST /ai/codex/signin/code)."""
+    if snap is None:
+        return None
+    return {**snap, "code": None, "code_ready": bool(snap.get("code"))}
+
+
+def _start_codex_signin(device: bool) -> Dict[str, Any]:
+    if codex_cli.get_codex_executable() is None:
+        raise HTTPException(status_code=400, detail="Codex is not installed.")
+    snap = codex_cli.start_signin(lambda s: _signin_changed("codex", s), device=device)
+    _diag_signin_opened("codex", codex_cli.get_state(), snap["flow"])
+    return snap
 
 
 @router.post("/ai/codex/signin")
-def post_codex_signin(req: Optional[CodexSigninRequest] = None) -> Dict[str, Any]:
-    """Start the headless `codex login` — mirror of /ai/claude/signin."""
-    import codex_cli
-    if codex_cli.get_codex_executable() is None:
-        raise HTTPException(status_code=400, detail="Codex is not installed.")
-    snap = codex_cli.start_signin(lambda s: _signin_changed("codex", s),
-                                  device=bool(req and req.device))
-    _diag_signin_opened("codex", codex_cli.get_state(), snap["flow"])
-    return snap
+async def post_codex_signin(opened=boxed(SigninStart)) -> Dict[str, Any]:
+    """Start the headless `codex login` — mirror of /ai/claude/signin: on the
+    account's password, the snapshot and the grant sealed in the reply."""
+    req, reply = opened
+    await step_up(req)
+    snap = await asyncio.to_thread(_start_codex_signin, req.device)
+    return reply({**snap, "grant": _signin_grant("codex")})
+
+
+@router.post("/ai/codex/signin/code")
+async def post_codex_signin_code(opened=boxed(SigninGrant)) -> Dict[str, Any]:
+    """The device code of the sign-in this browser started, sealed to it —
+    the code the public state leaves out (_public_signin)."""
+    req, reply = opened
+    _signin_granted("codex", req.grant)
+    snap = codex_cli.signin_snapshot()
+    return reply({"code": snap.get("code") if snap and snap["running"] else None})
 
 
 @router.delete("/ai/codex/signin")
@@ -2178,6 +2257,8 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
         # Another HQPlayer chosen: a run cut short on the one before owes
         # its put-back no more
         hqp_benchmark.left_by_person(before.host, before.port, "another HQPlayer was chosen")
+        from playback import hqp_ab
+        hqp_ab.left_by_person(before.host, before.port)
 
 
 @router.put("/hqplayer")
@@ -2806,6 +2887,11 @@ def forget_hqp_library(endpoint_id: int) -> Dict[str, Any]:
     if job["running"] and job["endpoint_id"] == endpoint_id:
         raise HTTPException(status_code=409, detail="The benchmark is measuring this HQPlayer — "
                                                     "cancel it first")
+    from playback import hqp_ab
+    sitting = hqp_ab.current()          # read once: a close between two reads leaves None
+    if sitting is not None and hqp_ab.running() and sitting.ep["id"] == endpoint_id:
+        raise HTTPException(status_code=409, detail="A comparison by ear is going on with this "
+                                                    "HQPlayer — stop it first")
     if not db_query_one("SELECT 1 AS ok FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id}):
         raise HTTPException(status_code=404, detail="No such HQPlayer library")
     driven = hqp_library.endpoint_by_address(app_settings.hqplayer_host, app_settings.hqplayer_port)

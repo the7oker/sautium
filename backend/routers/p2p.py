@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 import psycopg2
 import psycopg2.extensions
 from config import settings
+import device_auth
+from routers.auth import StepUp, boxed, step_up
 from db_pool import Listener, db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute, get_conn as _get_conn
 
 logger = logging.getLogger(__name__)
@@ -50,13 +52,26 @@ class InviteByEmailRequest(BaseModel):
     message: str = Field(default="", max_length=500)
 
 
+# The account email acts at the Worker and outlasts "Sign out everywhere": a
+# token holder's own mailbox there would take the node's invite and
+# acceptance mails. So the flow — the address set, its code sent, the code
+# verified — takes the account's password at its first step (routers/auth.
+# step_up), whose sealed reply carries the grant the later steps quote; the
+# grant lives as long as the Worker's code does.
+EMAIL_FLOW_SECONDS = 15 * 60
+
+
+class SetEmailRequest(StepUp):
+    email: str = Field(..., min_length=3, max_length=320)
+
+
+class SendCodeRequest(StepUp):
+    grant: str = Field(default="", max_length=64)
+
+
 class VerifyCodeRequest(BaseModel):
     code: str = Field(..., min_length=1, max_length=10)
-    message: str = Field(default="", max_length=500)
-
-
-class SetEmailRequest(BaseModel):
-    email: str = Field(..., min_length=3, max_length=320)
+    grant: str = Field(default="", max_length=64)
 
 
 # -- Chat SSE infrastructure --------------------------------------------------
@@ -248,11 +263,13 @@ async def get_account() -> Dict[str, Any]:
 
 
 @router.put("/account/email")
-async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
-    """Set or change the account email. Persisted to node_info.json
-    (desktop mode only) and resets user_profile.email_verified — both
-    a new email and changing an existing one invalidate the Worker's
+async def set_account_email(opened=boxed(SetEmailRequest)) -> Dict[str, Any]:
+    """Set or change the account email, on the account's password; the
+    sealed answer carries the grant its code steps quote. Persisted to
+    node_info.json (desktop mode only) and resets user_profile.email_verified
+    — both a new email and changing an existing one invalidate the Worker's
     `invite_code → email` mapping for this identity."""
+    req, reply = opened
     email = req.email.strip()
     if "@" not in email or "." not in email.split("@", 1)[1]:
         raise HTTPException(400, "Invalid email address")
@@ -269,6 +286,7 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
     info_path = Path(settings.p2p_identity_dir) / "node_info.json"
     if not info_path.exists():
         raise HTTPException(500, "node_info.json is missing")
+    await step_up(req)
     try:
         data = json.loads(info_path.read_text(encoding="utf-8"))
     except Exception as e:
@@ -298,7 +316,8 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
         info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
 
-    return {"email": email, "email_verified": verified}
+    return reply({"email": email, "email_verified": verified,
+                  "grant": None if verified else device_auth.grant("email", EMAIL_FLOW_SECONDS)})
 
 
 # One server-side truth for "online" — imported by routers/settings.py's
@@ -427,7 +446,15 @@ async def list_friends(cursor: str = "", limit: int = 50,
 
 
 @router.post("/friends/add")
-async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
+async def add_friend(opened=boxed(AddFriendRequest)) -> Dict[str, Any]:
+    """The pasted share string rides the credential box: an invite link or a
+    mailed invite carries another node's bearer token, which a LAN reader
+    could spend first; the answer comes back sealed (add_share_string)."""
+    req, reply = opened
+    return reply(await add_share_string(req.invite_code))
+
+
+async def add_share_string(string: str) -> Dict[str, Any]:
     """Add a friend by share string (chat_wire.parse_share): a code, short
     or long, an invite link (`…#<token-uuid>`) or a mailed invite
     (`…#i-<token>`).
@@ -449,7 +476,7 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
     from desktop.p2p import chat_wire
 
     try:
-        share = chat_wire.parse_share(req.invite_code)
+        share = chat_wire.parse_share(string)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid invite code")
     return await _add_share(share, tell=True)
@@ -687,7 +714,7 @@ async def delete_friend(friend_id: int) -> Dict[str, Any]:
 
 # -- Invite tokens (issuer-side management) -----------------------------------
 
-class TokenCreate(BaseModel):
+class TokenCreate(StepUp):
     label: str = Field(default="", max_length=128)
     rights: List[str] = Field(default_factory=lambda: ["can_message"])
     max_uses: Optional[int] = Field(default=None, ge=1)
@@ -698,7 +725,7 @@ class TokenCreate(BaseModel):
     id: Optional[str] = None
 
 
-class TokenPatch(BaseModel):
+class TokenPatch(StepUp):
     label: Optional[str] = Field(default=None, max_length=128)
     rights: Optional[List[str]] = None
     max_uses: Optional[int] = Field(default=None, ge=1)
@@ -737,8 +764,40 @@ async def list_tokens() -> List[Dict[str, Any]]:
     return rows
 
 
+# A token with rights is spent later by whoever holds its link, and outlasts
+# "Sign out everywhere": minting one, or widening any link — a right added,
+# more uses, a later expiry or none — takes the account's password
+# (routers/auth.step_up): a link widened without rights now would carry the
+# reach nobody approved into the rights its owner adds later. Minting a link
+# without rights is a friend's add, which stays on the device token;
+# narrowing is never asked.
+_TOKEN_TERMS = """
+    SELECT t.max_uses, t.expires_at,
+           ARRAY(SELECT p2p_right::text FROM invite_token_rights
+                 WHERE token_id = t.id ORDER BY 1) AS rights,
+           (%(expires)s IS NOT NULL AND t.expires_at IS NOT NULL
+            AND (NULLIF(%(expires)s, '') IS NULL
+                 OR NULLIF(%(expires)s, '')::timestamptz > t.expires_at)) AS extends
+    FROM invite_tokens t WHERE t.id = %(id)s
+"""
+
+
+def _widens(terms: Dict[str, Any], req: "TokenPatch", rights: Optional[List[str]]) -> bool:
+    """Whether the patch leaves the token reaching further than before: a
+    right added, more uses, a later expiry or none."""
+    before = set(terms["rights"])
+    after = before if rights is None else set(rights)
+    more_uses = (req.max_uses is not None and terms["max_uses"] is not None
+                 and req.max_uses > terms["max_uses"])
+    return bool(after - before) or more_uses or bool(terms["extends"])
+
+
 @router.post("/tokens")
-async def create_token(req: TokenCreate) -> Dict[str, Any]:
+async def create_token(opened=boxed(TokenCreate)) -> Dict[str, Any]:
+    """Mint an invite link; with any right, on the account's password. The
+    body rides the box (a custom id is typed from an old share string) and
+    the share string comes back sealed."""
+    req, reply = opened
     rights = _validate_rights(req.rights)
     token_id = str(uuid.uuid4())
     if req.id:
@@ -746,6 +805,8 @@ async def create_token(req: TokenCreate) -> Dict[str, Any]:
             token_id = str(uuid.UUID(req.id.strip()))
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid token id")
+    if rights:
+        await step_up(req)
     try:
         _db_execute("""
             INSERT INTO invite_tokens (id, label, max_uses, expires_at,
@@ -765,13 +826,28 @@ async def create_token(req: TokenCreate) -> Dict[str, Any]:
         share = f"{chat_wire.long_code(identity['username'], identity['public_key_hex'])}#{token_id}"
     else:
         share = token_id
-    return {"id": token_id, "share_string": share, "rights": rights}
+    return reply({"id": token_id, "share_string": share, "rights": rights})
 
 
 @router.patch("/tokens/{token_id}")
-async def patch_token(token_id: str, req: TokenPatch) -> Dict[str, Any]:
+async def patch_token(token_id: str, opened=boxed(TokenPatch)) -> Dict[str, Any]:
     """Edits affect FUTURE uses only — existing friendships keep their
-    rights snapshot."""
+    rights snapshot. A patch that widens the token (_widens) takes the
+    account's password, and lands only on the token as it was when the
+    password was asked for: under the row's lock, with the edit, a vouched
+    patch finds the terms it was judged on (another edit during the
+    derivation is a 409, asked again), an unvouched one is judged again."""
+    import psycopg2.extras
+    from db_pool import transaction
+    req, reply = opened
+    rights = _validate_rights(req.rights) if req.rights is not None else None
+    terms_args = {"id": token_id, "expires": req.expires_at}
+    terms = _db_query_one(_TOKEN_TERMS, terms_args)
+    if not terms:
+        raise HTTPException(status_code=404, detail="Token not found")
+    judged, vouched = terms, _widens(terms, req, rights)
+    if vouched:
+        await step_up(req)
     sets, params = [], []
     if req.label is not None:
         sets.append("label = %s")
@@ -785,21 +861,28 @@ async def patch_token(token_id: str, req: TokenPatch) -> Dict[str, Any]:
     if req.welcome_message is not None:
         sets.append("welcome_message = %s")
         params.append(req.welcome_message)
-    if sets:
-        row = _db_execute(
-            f"UPDATE invite_tokens SET {', '.join(sets)}"
-            " WHERE id = %s RETURNING id", params + [token_id])
-        if not row:
+    with transaction(psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(_TOKEN_TERMS + " FOR UPDATE OF t", terms_args)
+        terms = cur.fetchone()
+        if not terms:
             raise HTTPException(status_code=404, detail="Token not found")
-    if req.rights is not None:
-        rights = _validate_rights(req.rights)
-        _db_execute("DELETE FROM invite_token_rights WHERE token_id = %s",
-                    (token_id,))
-        for r in rights:
-            _db_execute(
-                "INSERT INTO invite_token_rights (token_id, p2p_right)"
-                " VALUES (%s, %s) ON CONFLICT DO NOTHING", (token_id, r))
-    return {"ok": True}
+        if vouched and terms != judged:
+            raise HTTPException(status_code=409,
+                                detail="This link changed meanwhile: open it again and save")
+        if not vouched and _widens(terms, req, rights):
+            raise HTTPException(status_code=403,
+                                detail="This link changed meanwhile, and the change now widens it: "
+                                       "type the account's password",
+                                headers={"X-Sautium-Auth-Error": "step-up"})
+        if sets:
+            cur.execute(f"UPDATE invite_tokens SET {', '.join(sets)} WHERE id = %s",
+                        params + [token_id])
+        if rights is not None:
+            cur.execute("DELETE FROM invite_token_rights WHERE token_id = %s", (token_id,))
+            for r in rights:
+                cur.execute("INSERT INTO invite_token_rights (token_id, p2p_right)"
+                            " VALUES (%s, %s) ON CONFLICT DO NOTHING", (token_id, r))
+    return reply({"ok": True})
 
 
 @router.post("/tokens/{token_id}/revoke")
@@ -1395,14 +1478,20 @@ async def email_status() -> Dict[str, Any]:
 
 
 @router.post("/email/send-code")
-async def email_send_code() -> Dict[str, Any]:
-    """Ask the Worker to generate and email a verification code.
+async def email_send_code(opened=boxed(SendCodeRequest)) -> Dict[str, Any]:
+    """Ask the Worker to generate and email a verification code — on the
+    grant the address's own setting handed this browser, or the account's
+    password (the Verify row of an address set earlier); the sealed answer
+    carries a grant for the code's own lifetime.
 
     The code exists only on the Worker (hash, 15 min TTL) — mailbox
     ownership is proven server-side at /email/verify-code."""
+    req, reply = opened
     identity = _get_identity()
     if not identity or not identity.get("email"):
         raise HTTPException(400, "No email configured (set P2P_EMAIL in .env)")
+    if not device_auth.grant_holds("email", req.grant):
+        await step_up(req)
 
     if not await _born():
         raise HTTPException(502, "Birth certificate unavailable")
@@ -1423,14 +1512,21 @@ async def email_send_code() -> Dict[str, Any]:
     if not result or result.get("status") != "sent":
         raise HTTPException(502, "Failed to send verification email")
 
-    return {"status": "sent", "email": email}
+    return reply({"status": "sent", "email": email,
+                  "grant": device_auth.grant("email", EMAIL_FLOW_SECONDS)})
 
 
 @router.post("/email/verify-code")
-async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
+async def email_verify_code(opened=boxed(VerifyCodeRequest)) -> Dict[str, Any]:
     """Register the email on the Worker: it checks the entered code against
     its stored hash and requires this node's birth certificate (the verified
-    record then carries born_at)."""
+    record then carries born_at). The code rides the box, with the grant its
+    send handed this browser; a verified address spends the grant."""
+    req, reply = opened
+    if not device_auth.grant_holds("email", req.grant):
+        raise HTTPException(status_code=403, detail="Send the code again from here: this one was not "
+                                                    "asked for by this page, or its time is up",
+                            headers={"X-Sautium-Auth-Error": "grant"})
     identity = _get_identity()
     if not identity or not identity.get("email"):
         raise HTTPException(400, "No email configured")
@@ -1455,7 +1551,7 @@ async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
     })
 
     if not result or result.get("status") != "registered":
-        return {"verified": False, "error": "Invalid or expired code"}
+        return reply({"verified": False, "error": "Invalid or expired code"})
 
     changed = False
     if result.get("birth_cert") and result["birth_cert"] != cert:
@@ -1466,9 +1562,10 @@ async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
     # Worker round-trip. Email-change and password-change flows (when
     # they land) must clear this flag.
     _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    device_auth.drop_grant("email")
     if changed:
         _certificate_changed()
-    return {"verified": True, "email": email}
+    return reply({"verified": True, "email": email})
 
 
 @router.post("/chat/wake")

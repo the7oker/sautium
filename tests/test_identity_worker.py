@@ -187,6 +187,7 @@ def node(scratch_dsn, tmp_path, monkeypatch):
     monkeypatch.setattr(device_auth, "_setup_code", None)
     monkeypatch.setattr(device_auth, "_identity_missing", False)
     monkeypatch.setattr(device_auth, "_epoch_cache", None)
+    monkeypatch.setattr(device_auth, "_grants", {})
 
     async def nothing():
         return None
@@ -448,11 +449,17 @@ def test_an_email_verified_ends_the_mining_and_says_ready(node, scratch_dsn, mon
             await p2p_router.start_identity_worker()
             mining = p2p_router._identity_worker
             await asyncio.to_thread(_await_identity, scratch_dsn, lambda s: s.get("status") == "mining")
+            # The routes as their box opens them (routers/auth.boxed): the
+            # payload, and a reply that seals nothing here
             if how == "verify-code":
-                answer = await p2p_router.email_verify_code(p2p_router.VerifyCodeRequest(code="ABC123"))
+                grant = device_auth.grant("email", 60)
+                answer = await p2p_router.email_verify_code(opened=(
+                    p2p_router.VerifyCodeRequest(code="ABC123", grant=grant), lambda body: body))
                 assert answer["verified"]
             else:
-                answer = await p2p_router.set_account_email(p2p_router.SetEmailRequest(email="owner@example.org"))
+                answer = await p2p_router.set_account_email(opened=(
+                    p2p_router.SetEmailRequest(email="owner@example.org", password="a password"),
+                    lambda body: body))
                 assert answer["email_verified"]
             await asyncio.to_thread(_await_identity, scratch_dsn,
                                     lambda s: _ready(s) and s["detail"] == "email")
