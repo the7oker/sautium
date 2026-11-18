@@ -9535,8 +9535,13 @@
 
   // What forgetting an HQPlayer also takes: the DSP load measured on it is
   // that box's, and goes with its row.
-  function hqpMeasuredGone(measured) {
-    return measured ? `, and with it the DSP load measured on it (${measured} setting${measured === 1 ? '' : 's'})` : '';
+  function hqpMeasuredGone(measured, compared) {
+    // What goes with its row: the DSP load measured on it, and the person's
+    // own comparisons by ear made on it (AB-1 Q15)
+    const what = [];
+    if (measured) what.push(`the DSP load measured on it (${measured} setting${measured === 1 ? '' : 's'})`);
+    if (compared) what.push(`your comparisons by ear made on it (${compared})`);
+    return what.length ? `, and with it ${what.join(' and ')}` : '';
   }
   const HQP_BENCH_OUTCOME = { done: 'finished', cancelled: 'was cancelled', failed: 'failed',
                               interrupted: 'was cut short' };
@@ -10381,7 +10386,7 @@
         'forget-library': async () => {
           const ok = await window.confirmDestructive({
             title: `Forget the library of ${escapeProfileHtml(s.label || 'this HQPlayer')}?`,
-            message: 'Every album and track only its library put here goes' + hqpMeasuredGone(lib.measured)
+            message: 'Every album and track only its library put here goes' + hqpMeasuredGone(lib.measured, lib.compared)
               + '. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.',
             confirmText: 'Forget',
           });
@@ -10785,8 +10790,10 @@
       ab.held = true;
       const seq = hold.progress ? hold.progress.seq : null;
       if (seq !== ab.heldSeq) { ab.heldSeq = seq; abRefresh(ab); }
-    } else if (ab.held) {
-      // The hold is over: the result, the break or the end is in the view
+    } else if (ab.held || (ab.view && ab.view.phase === 'warming')) {
+      // The hold is over — or never began (the backend announces a sitting
+      // that could not take the output with a status of no hold): the
+      // result, the break or the end is in the view
       ab.held = false;
       abRefresh(ab);
     }
@@ -15864,6 +15871,7 @@
             <button data-action="remove-hqplayer" data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}"
               data-name="${escapeProfileHtml(h.label || '')}" data-files="${escapeProfileHtml(String(h.files || 0))}"
               data-measured="${escapeProfileHtml(String(h.measured || 0))}"
+              data-compared="${escapeProfileHtml(String(h.compared || 0))}"
               style="background:none;border:none;color:var(--color-text-dim);font-size:calc(15*var(--px));padding:0 calc(4*var(--px));cursor:pointer;line-height:1;"
               title="Forget this HQPlayer">&times;</button>` : '';
       return `
@@ -16158,14 +16166,15 @@
           // goodbye Settings › Library offers, and says so.
           const files = parseInt(el.dataset.files, 10) || 0;
           const measured = parseInt(el.dataset.measured, 10) || 0;
+          const compared = parseInt(el.dataset.compared, 10) || 0;
           const name = el.dataset.name || 'this HQPlayer';
           const ok = await window.confirmDestructive({
             title: files ? `Forget the library of ${escapeProfileHtml(name)}?` : `Forget ${escapeProfileHtml(name)}?`,
             message: files
-              ? 'Every album and track only its library put here goes' + hqpMeasuredGone(measured)
+              ? 'Every album and track only its library put here goes' + hqpMeasuredGone(measured, compared)
                 + '. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.'
-              : measured
-                ? `It leaves the list${hqpMeasuredGone(measured)}. A scan or its address brings the HQPlayer back, not what was measured.`
+              : measured || compared
+                ? `It leaves the list${hqpMeasuredGone(measured, compared)}. A scan or its address brings the HQPlayer back, not what was measured.`
                 : 'It leaves the list; a scan or its address brings it back.',
             confirmText: 'Forget',
           });

@@ -586,6 +586,76 @@ def test_the_app_stopping_mid_sitting_puts_hqplayer_back(ab):
     assert ab.q("SELECT ended::text, owed FROM hqp_ab_sittings") == [("failed", False)]
 
 
+def test_the_track_the_person_was_hearing_tails_out_before_the_warm_up(ab):
+    """Review round 1, H1: the person taps Compare while listening. HQPlayer
+    sends all-zero frames through its output delay after the Stop; taken
+    for the first warm-up play's own, they would pause it before it began."""
+    fake = ab.fake
+    assert _wait(lambda: fake.playlist, 10)                 # the queue mirrored at the attach
+    with fake._lock:
+        now = time.time()
+        f = Params(d=1.5, extra=1.0)
+        fake.entry = (fake.playlist[0], 0.0, 300.0)
+        fake.stream0 = now
+        fake.seg.append((now, "play", 10.0, f, fake.entry))
+        fake._ends(now, 10.0, f)
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    s = hqp_ab._sitting
+    assert s.slipped == 0 and s.lead_s < 0.8, (s.lead_s, s.timings)
+
+
+def test_a_warm_up_pause_in_the_music_plays_it_again_on_a_longer_lead(ab, monkeypatch):
+    """Review round 1, M1 (§16): the warm-up's pause landing too near the
+    music lengthens the lead and plays that filter again — never a slip,
+    never the sitting's end."""
+    monkeypatch.setattr(S, "LEAD_MIN_S", 0.2)
+    hqp_ab.open_sitting("pair", "ext2")
+    v = ab.wait_phase("ready")
+    s = hqp_ab._sitting
+    assert v["ended"] is None and s.warm_lead > 0.2
+    assert s.lead_s >= max(t.p for t in s.timings.values()) + S.LEAD_ABOVE_S - 1e-9
+
+
+def test_a_pair_switched_to_find_my_filter_leaves_out_one_at_another_rate(ab):
+    """Review round 1, M2: the chain's pool warmed up from a pair loses a
+    filter at another output rate, whichever form asked."""
+    ab.fake.params["ringy"] = Params(rate=768000)
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    hqp_ab.command("form", form="chain")
+    assert _wait(lambda: hqp_ab.view()["form"] == "chain" and hqp_ab.view()["phase"] == "ready", 60)
+    s = hqp_ab._sitting
+    assert "ringy" not in s.pool and "ringy" not in s.search.pool
+    ab.begin()
+    for a in ("same", "same", "same"):
+        if ab.phase() != "testing":
+            break
+        ab.answer(a)
+    v = ab.wait_phase("result", "ended")
+    assert v["ended"] in ("done", None) or v["phase"] == "result", v
+
+
+def test_an_answer_is_taken_once_while_one_is_awaited_and_only_in_its_form(ab):
+    """Review round 1, M8: an answer before the step is heard, a second one
+    for the same step, and another form's answer are refused."""
+    hqp_ab.open_sitting("chain")
+    ab.wait_phase("ready")
+    ab.begin()
+    with pytest.raises(hqp_ab.Refused):
+        hqp_ab.command("answer", answer="same")             # the fragments still play
+    with pytest.raises(hqp_ab.Refused):
+        hqp_ab.command("answer", answer="1")                # the pair's
+    assert _wait(lambda: (hqp_ab.view().get("step") or {}).get("answerable"), 60)
+    hqp_ab.command("answer", answer="same")
+    with pytest.raises(hqp_ab.Refused):
+        hqp_ab.command("answer", answer="same")             # a second device's, a duplicate
+    assert _wait(lambda: ab.q("SELECT count(*) FROM hqp_ab_duels")[0][0] == 1, 10)
+    hqp_ab.command("stop")
+    ab.wait_phase("result", "ended")
+    assert ab.q("SELECT count(*) FROM hqp_ab_duels")[0][0] == 1
+
+
 # -- swaps and put back (tests 6, 13) --------------------------------------------------------------
 
 def test_a_better_writes_the_slot_at_once_and_stop_puts_back_the_champion(ab):
@@ -668,6 +738,18 @@ def test_a_person_s_dsp_change_closes_a_sitting_cut_short_as_left(ab):
     assert hqp_ab.owed(ab.endpoint_id) is None
 
 
+def test_a_database_failing_costs_the_left_record_never_the_persons_change(ab, monkeypatch, caplog):
+    # Called beside hqp_benchmark.left_by_person inside the person's DSP
+    # change and their switch away: a raise there would undo what they did
+    import psycopg2
+
+    def down(*a, **k):
+        raise psycopg2.OperationalError("server closed the connection unexpectedly")
+    monkeypatch.setattr(hqp_ab, "db_execute", down)
+    hqp_ab.left_by_person("127.0.0.1", ab.fake.port)
+    assert "not recorded as left" in caplog.text
+
+
 # -- hidden, no listen, refused (tests 12, 15, 16) ------------------------------------------------
 
 def test_while_it_sits_no_surface_names_a_filter_and_nothing_is_a_listen(ab, monkeypatch):
@@ -700,6 +782,7 @@ def test_a_track_from_a_stream_or_the_hqplayers_library_is_refused_in_words():
                        ({"kind": "proxy", "token": "t"}, "a stream")):
         class M:
             latest_status = {"track_index": 1}
+            spot = staticmethod(lambda: None)
 
             class queue:
                 @staticmethod

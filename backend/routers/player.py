@@ -331,7 +331,8 @@ def _hqplayer_entries() -> list:
         SELECT e.id, e.name, e.host, e.port, e.product, e.library_hash IS NOT NULL AS synced,
                (SELECT count(*) FROM album_variants av JOIN hqp_library_files f ON f.album_variant_id = av.id
                  WHERE av.hqp_endpoint_id = e.id) AS files,
-               (SELECT count(*) FROM hqp_dsp_speed s WHERE s.hqp_endpoint_id = e.id) AS measured
+               (SELECT count(*) FROM hqp_dsp_speed s WHERE s.hqp_endpoint_id = e.id) AS measured,
+               (SELECT count(*) FROM hqp_ab_sittings a WHERE a.hqp_endpoint_id = e.id) AS compared
           FROM hqp_endpoints e WHERE e.host IS NOT NULL ORDER BY e.id"""):
         entries[_hqp_key(r["host"], r["port"])] = {
             "endpoint_id": r["id"], "name": r["name"], "host": r["host"], "port": int(r["port"]),
@@ -339,7 +340,8 @@ def _hqplayer_entries() -> list:
             "embedded": hqp_library.is_embedded(r["product"]) if r["product"] else None,
             "here": is_own_address(r["host"]), "known": True, "seen": False, "control": None,
             "synced": bool(r["synced"]), "files": int(r["files"] or 0),
-            "measured": int(r["measured"] or 0), "configured": False}
+            "measured": int(r["measured"] or 0), "compared": int(r["compared"] or 0),
+            "configured": False}
     for (host, port), d in _hqp_discovered.items():
         key = _hqp_key(host, port)
         e = entries.get(key)
@@ -347,7 +349,8 @@ def _hqplayer_entries() -> list:
             entries[key] = {"endpoint_id": d.get("endpoint_id"), "name": d["name"], "host": host, "port": port,
                             "product": d["product"], "embedded": hqp_library.is_embedded(d["product"]),
                             "here": key[0] == "here", "known": False, "seen": True, "control": d["control"],
-                            "synced": False, "files": 0, "measured": 0, "configured": False}
+                            "synced": False, "files": 0, "measured": 0, "compared": 0,
+                            "configured": False}
         else:
             e["seen"] = True
             e["control"] = d["control"]
@@ -364,7 +367,7 @@ def _hqplayer_entries() -> list:
             entries[key] = {"endpoint_id": None, "name": None, "host": host, "port": port, "product": None,
                             "embedded": None, "here": key[0] == "here", "known": False, "seen": False,
                             "control": None, "synced": False, "files": 0, "measured": 0,
-                            "configured": True}
+                            "compared": 0, "configured": True}
         else:
             e["configured"] = True
     for e in entries.values():

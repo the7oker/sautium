@@ -161,7 +161,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     from routers.settings import _hqp_library_state
     lib = _hqp_library_state()
     response["library"] = {k: lib.get(k) for k in ("own_library", "synced", "files", "albums",
-                                                   "measured", "running", "cancel_requested",
+                                                   "measured", "compared", "running", "cancel_requested",
                                                    "progress", "last_synced_at")}
     if dsp:
         # The job and the last run whether or not HQPlayer answers now: a

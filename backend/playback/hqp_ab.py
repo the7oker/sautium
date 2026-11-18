@@ -76,6 +76,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import psycopg2
+
 from db_pool import db_execute, db_query, db_query_one
 from hqp_rate_check import BASE_LIMIT, mode_kind, reaches, same_family
 
@@ -101,9 +103,19 @@ SOUND_S = 15.0
 END_S = 90.0
 DELAY_S = 15.0
 STATUS_TICK_S = 0.25
+# A step whose silence missed this often in a row is not played again: the
+# sitting ends (what grows P after a miss converges in a step or two)
+SLIPS_A_STEP = 3
+# A warm-up play whose pause landed in the music is tried again on a longer
+# lead this often
+WARM_TRIES = 3
+# A sitting waiting this long for the person (a tab closed, a phone asleep)
+# gives the output back: it never holds listening hostage
+IDLE_S = 20 * 60
 _DB_EPS = 0.05
 
 WORDS = {
+    "late": "HQPlayer starts it too late here to compare it",
     "not_measured_here": "Not measured on this computer · The Benchmark measures them",   # W16
     "too_slow": "Too slow here: {speed}×",
     "rate": "It would make HQPlayer stop on this track: it does not convert {src} to {out}",
@@ -133,6 +145,15 @@ class _Left(Exception):
 
 class _Slip(Exception):
     """A fragment missed its silence (§2.5 step 5)."""
+
+
+class _WarmLate(Exception):
+    """A warm-up play's pause landed with the music near or past (§16):
+    played again on a longer lead."""
+
+    def __init__(self, p: float):
+        super().__init__(p)
+        self.p = p
 
 
 @dataclass
@@ -223,7 +244,11 @@ def command(name: str, **args) -> Dict[str, Any]:
         raise Refused("No comparison is going on")
     if name == "close":
         return close()
-    s.ask(name, args)
+    if name == "answer" and args.get("answer") not in (("1", "2", "same") if s.form == "pair"
+                                                      else ("better", "worse", "same")):
+        raise Refused("That answer is not one of this form's")
+    if not s.ask(name, args):
+        raise Refused("Not now: the comparison is not waiting for that")
     return s.view()
 
 
@@ -286,6 +311,12 @@ class Sitting:
         self.link = None
         self._halt = threading.Event()
         self._tokens: Tuple[str, ...] = ()
+        # What the sitting waits for an answer to: one answer (or cost
+        # sheet's decision) a window, taken under the condition (ask)
+        self._open_for: Optional[str] = None
+        # The warm-up's cut's lead; one whose pause landed late grows it
+        self.warm_lead = search.LEAD_MIN_S
+        self.left_rates: Dict[str, int] = {}
 
     # -- reading the door -------------------------------------------------------------
 
@@ -346,7 +377,7 @@ class Sitting:
                           "then compare")
         s.vr, s.volume = vr, st["volume"]
         s.mute = _mute_level(vr, st["volume"])
-        if s.mute is None and not fixed_volume_ok:
+        if (vr is None or not vr["enabled"]) and not fixed_volume_ok:
             raise Refused("HQPlayer's volume is fixed, so you will hear short bursts while "
                           "it gets ready.", code="fixed_volume")      # W5
         s.state, s.lists = st, {"filters": filters, "shapers": shapers, "rates": rates, "modes": modes}
@@ -402,12 +433,20 @@ class Sitting:
         self.thread = threading.Thread(target=self._run, daemon=True, name="hqp-ab")
         self.thread.start()
 
-    def ask(self, name: str, args: Dict[str, Any]) -> None:
+    def ask(self, name: str, args: Dict[str, Any]) -> bool:
+        """Hand a tap to the thread. An answer or a decision is taken only
+        while the sitting waits for one, and only one: a second device's,
+        or a late duplicate, never answers a step it did not hear."""
         with self._cv:
+            if name in ("answer", "decide"):
+                if self._open_for != name:
+                    return False
+                self._open_for = None
             if name == "stop":
                 self._stopping = True
             self._asks.append((name, args))
             self._cv.notify_all()
+            return True
         # A Stop never interrupts the link: a command it cut would have gone
         # out unanswered (a Play HQPlayer carries out, unpaused, while the
         # put-back reconnects), and every wait of the sitting wakes on it
@@ -458,11 +497,13 @@ class Sitting:
                     logger.exception("Comparison failed")
                     ended, note = "failed", f"{type(e).__name__}: {e}"
                 finally:
-                    hqp_meter.meter.untap(self)
-                    put = ended != "left" and self._put_back()
-                    self._close_row(ended, put)
-                    self.link = None
-                    link.close()
+                    try:
+                        hqp_meter.meter.untap(self)
+                        put = ended != "left" and self._put_back()
+                        self._close_row(ended, put)
+                    finally:
+                        self.link = None
+                        link.close()
                 self._finish(ended, note)
         except Exception as e:              # the output could not be lent
             logger.warning("Comparison did not start: %s", e)
@@ -509,17 +550,33 @@ class Sitting:
 
     # -- what the person asked ------------------------------------------------------------
 
-    def _take(self, wanted: Sequence[str]) -> Tuple[str, Dict[str, Any]]:
-        """The next tap among `wanted`, waited for; Stop at any moment."""
+    def _open(self, kind: str) -> None:
+        """An answer (or the cost sheet's decision) is taken from now — set
+        before the sheet is told, so the first tap it allows is never refused."""
         with self._cv:
-            while True:
-                if self._stopping:
-                    raise _Stopped()
-                while self._asks:
-                    name, args = self._asks.popleft()
-                    if name in wanted:
-                        return name, args
-                self._cv.wait()
+            self._open_for = kind
+
+    def _take(self, wanted: Sequence[str]) -> Tuple[str, Dict[str, Any]]:
+        """The next tap among `wanted`, waited for; Stop at any moment, and
+        IDLE_S with none ends the sitting as stopped."""
+        idle = time.monotonic() + IDLE_S
+        with self._cv:
+            try:
+                while True:
+                    if self._stopping:
+                        raise _Stopped()
+                    while self._asks:
+                        name, args = self._asks.popleft()
+                        if name in wanted:
+                            return name, args
+                    left = idle - time.monotonic()
+                    if left <= 0:
+                        self._stopping = True
+                        self.note = "left waiting"
+                        raise _Stopped()
+                    self._cv.wait(left)
+            finally:
+                self._open_for = None
 
     # -- the sitting --------------------------------------------------------------------
 
@@ -527,6 +584,9 @@ class Sitting:
         link = self.link
         link("stop")
         self._cut()
+        # What the person was listening to plays out its tail first: its
+        # all-zero frames would be taken for the first warm-up play's own
+        self._end(theirs=True)
         names = [self.yours] + (self.pool if self.form == "chain"
                                 else [self.second] if self.second else [])
         self._warm(names)
@@ -565,7 +625,7 @@ class Sitting:
         self.cut = _signal_uri(_path(transcode.flac_fragment_path_for_file(
             t["path"], at, self.length_s, lead=self.lead_s, fade=FADE_S, bits=t["bits"])))
         self.warm_cut = _signal_uri(_path(transcode.flac_fragment_path_for_file(
-            t["path"], at, min(WARM_S, self.length_s), lead=search.LEAD_MIN_S, fade=FADE_S,
+            t["path"], at, min(WARM_S, self.length_s), lead=self.warm_lead, fade=FADE_S,
             bits=t["bits"])))
         # How HQPlayer's Status names them: by the proxy token, the URL's last part
         self._tokens = tuple(u.rsplit("/", 1)[-1] for u in (self.cut, self.warm_cut))
@@ -579,17 +639,32 @@ class Sitting:
         self._note_row(from_s=self.from_s, length_s=self.length_s)
 
     def _form(self, form: str, second: Optional[str]) -> None:
+        """Another form, or another second: what it plays is warmed up first.
+        A refusal on the way — the chain's, the warm-up's — leaves the
+        sitting as it was."""
+        had = (self.form, self.second, self.__dict__.get("pool"), self.__dict__.get("search"))
         self.learned = 0
-        if form == "chain":
-            if not hasattr(self, "pool"):
-                self._chain_pool()
-                self._warm([n for n in self.pool if n not in self.timings])
-            self.form = "chain"
-            return
-        self._choose_second(second)
-        self.form = "pair"
-        if self.second is not None and self.second not in self.timings:
-            self._warm([self.second])
+        try:
+            if form == "chain":
+                fresh = "pool" not in self.__dict__
+                if fresh:
+                    self._chain_pool()
+                self.form = "chain"
+                if fresh:
+                    self._warm([n for n in self.pool if n not in self.timings])
+                return
+            self._choose_second(second)
+            self.form = "pair"
+            if self.second is not None and self.second not in self.timings:
+                self._warm([self.second])
+        except Refused:
+            self.form, self.second = had[0], had[1]
+            for key, value in (("pool", had[2]), ("search", had[3])):
+                if value is None:
+                    self.__dict__.pop(key, None)
+                else:
+                    setattr(self, key, value)
+            raise
 
     # -- the warm-up --------------------------------------------------------------------
 
@@ -599,33 +674,59 @@ class Sitting:
         are set from every timing so far."""
         if not names:
             return
+        # In a drawn order, theirs first: the order of the candidates is the
+        # search's, and with a fixed volume the person hears the warm-up
+        others = [n for n in names if n != self.yours]
+        names = [n for n in names if n == self.yours] + random.sample(others, len(others))
         phase, self.phase = self.phase, "warming"
         self.warmed = (0, len(names))
         self._publish()
         if self.mute is not None:
             self._volume(self.mute)
+        done = False
         try:
             ended = time.time()
             for i, name in enumerate(names):
-                played = self._fragment(name, None, warm=True, since=ended)
+                for _ in range(WARM_TRIES):
+                    try:
+                        played = self._fragment(name, None, warm=True, since=ended)
+                        break
+                    except _WarmLate as e:
+                        ended = time.time()
+                        self.warm_lead = max(self.warm_lead + 0.5, e.p + search.LEAD_ABOVE_S)
+                        self._cut()
+                else:
+                    if name == self.yours:
+                        raise Refused("HQPlayer starts your filter too late here to compare it")
+                    self._leave("late", name)
+                    continue
                 ended = played.ended
                 self.timings[name] = played.timing
                 self.warmed = (i + 1, len(names))
                 self._publish()
+            done = True
         finally:
+            if not done:
+                # Cut short: what still plays stops before the volume comes back
+                self.link("stop")
             if self.mute is not None:
                 self._volume(self.volume)
+            self.phase = phase if phase != "warming" else "ready"
         own = self.timings[self.yours].rate
         for name in names:
-            if self.timings[name].rate != own:
-                self._leave("other_rate", name, rate=self.timings.pop(name).rate)
+            if name in self.timings and self.timings[name].rate != own:
+                rate = self.timings.pop(name).rate
+                self.left_rates[name] = rate
+                self._leave("other_rate", name, rate=rate)
         self._settle()
-        self.phase = phase if phase != "warming" else "ready"
 
     def _leave(self, reason: str, name: str, **kw) -> None:
-        self.screened.leave(reason, name)
-        self.second_list.leave(reason, name)
-        if self.form == "chain" and name in getattr(self, "pool", []):
+        """Out of the sitting, whichever form asked for it, said with its reason."""
+        for screened in (self.screened, self.second_list):
+            if name not in sum(screened.left_out.values(), []):
+                screened.leave(reason, name)
+            screened.candidates = [f for f in screened.candidates if f.name != name]
+        if name in self.__dict__.get("pool", []):
             self.pool.remove(name)
             self.search = self.search.copy(self.pool)
         if self.second == name:
@@ -664,6 +765,7 @@ class Sitting:
         self._set(name)
         with self._cv:
             self._reads = []
+        lead = self.warm_lead if warm else self.lead_s
         link("playlist_add", self.warm_cut if warm else self.cut, clear=True)
         played_at = time.time()
         if not link("play"):
@@ -674,18 +776,26 @@ class Sitting:
         p = self._frames_until(landed)
         h = landed - began
         if warm:
+            if p > lead - search.LEAD_SLIP_S:
+                self._stop_out()
+                raise _WarmLate(p)
             d, rate = self._delay()
             resume = time.time()
         else:
             d, rate = timing.d, timing.rate
-            resume = anchor + self.silence_s - (timing.r + self.lead_s - search.LEAD_MIN_S)
-            if landed > resume or p > self.lead_s - search.LEAD_SLIP_S:
-                self._slipped(name, h=h, p=p)
+            resume = anchor + self.silence_s - (timing.r + lead - search.LEAD_MIN_S)
+            if landed > resume:
+                self._slipped(name, h=h, late=landed - resume)
+            if p > lead - search.LEAD_SLIP_S:
+                self._slipped(name, p=p)
             self._sleep_until(resume, label)
         resumed = time.time()
         link("play")
         if self._sounded_before(resumed):
-            self._slipped(name, h=h, p=self.lead_s)
+            if warm:
+                self._stop_out()
+                raise _WarmLate(lead)
+            self._slipped(name, p=lead)
         onset = self._wait(lambda: self._onset(resumed), SOUND_S + self.lead_s, "sound of the passage")
         out_onset = onset + d
         if not warm:
@@ -694,23 +804,35 @@ class Sitting:
             self._publish()
             realised = out_onset - anchor
             if abs(realised - self.silence_s) > self.tolerance:
-                self._slipped(name, h=h, p=p, r=out_onset - resumed)
+                self._slipped(name, r=out_onset - resumed)
         last, ended = self._end()
         end_out = last + d
         self.sounding = None
-        t = search.Timing(d=d, h=h, r=out_onset - resumed, p=p, tail=max(ended - end_out, 0.0),
-                          rate=rate)
+        # `r` on the minimum lead: the silence's arithmetic adds the lead played over it
+        t = search.Timing(d=d, h=h, r=out_onset - resumed - (lead - search.LEAD_MIN_S), p=p,
+                          tail=max(ended - end_out, 0.0), rate=rate)
         return Played(out_onset, end_out, ended, t)
 
-    def _slipped(self, name: str, *, h: float, p: float, r: Optional[float] = None) -> None:
-        """A silence missed: stopped, waited out, P grown from what was seen."""
+    def _stop_out(self) -> None:
         self.link("stop")
         self._end()
         self.sounding = None
+
+    def _slipped(self, name: str, *, h: float = 0.0, p: float = 0.0, r: Optional[float] = None,
+                 late: float = 0.0) -> None:
+        """A silence missed: stopped, waited out, and what was seen taken in —
+        a pause that landed `late` after its resume was due grows P by that
+        (the end before it, or its start, took longer than the warm-up
+        saw); one too near the music grows the lead; a sound that left the
+        output early or late replaces the resume's way there `r`. P never
+        shrinks."""
+        self._stop_out()
         old = self.timings[name]
-        self.timings[name] = search.Timing(d=old.d, h=max(old.h, h), p=max(old.p, p),
-                                           r=old.r if r is None else max(old.r, r - (self.lead_s - search.LEAD_MIN_S)),
-                                           tail=old.tail, rate=old.rate)
+        self.timings[name] = search.Timing(
+            d=old.d, h=max(old.h, h), p=max(old.p, p),
+            r=old.r if r is None else r - (self.lead_s - search.LEAD_MIN_S), tail=old.tail, rate=old.rate)
+        if late:
+            self.silence_s += late + 0.1
         self.slipped += 1
         self._settle()
         self._note_row(slipped=self.slipped)
@@ -733,6 +855,7 @@ class Sitting:
             if not link("set_filter", nx, x1 if x1 is not None and x1 >= 0 else None):
                 raise Refused(f"HQPlayer refused the filter ({link.refusal()})")
         self.set_now = name
+        self._note_row(last_set=name)
 
     def _slots(self, name: str) -> Tuple[int, int]:
         i = self.index[name]
@@ -750,7 +873,7 @@ class Sitting:
                 raise Refused("HQPlayer did not report its output delay (HQPlayer 6 does)")
             self._pause(STATUS_TICK_S)
 
-    def _end(self) -> Tuple[float, float]:
+    def _end(self, theirs: bool = False) -> Tuple[float, float]:
         """The fragment's end: its last sounding frame's own time, and when
         the end showed — the meter quiet for QUIET_S and Status stopped.
         Status is read at every second of the wait as well: an entry that is
@@ -764,8 +887,8 @@ class Sitting:
                 with self._cv:
                     last = self._last_sound()
                 return (last if last is not None else time.time()), time.time()
-            if (status is not None and status.state != PlaybackState.STOPPED and status.uri
-                    and not any(t in status.uri for t in self._tokens)):
+            if (not theirs and status is not None and status.state != PlaybackState.STOPPED
+                    and status.uri and not any(t in status.uri for t in self._tokens)):
                 raise _Left("another controller is playing through HQPlayer")
             if time.monotonic() > deadline:
                 raise Refused("HQPlayer did not finish the passage")
@@ -870,7 +993,7 @@ class Sitting:
     def _step(self, plays: List[str], anchor: float, labels: List[str]) -> float:
         """One step's fragments in order, each P after the one before; a
         slip plays the whole step again. Returns where its last sound ended."""
-        while True:
+        for _ in range(SLIPS_A_STEP):
             at = anchor
             try:
                 for name, label in zip(plays, labels):
@@ -879,6 +1002,7 @@ class Sitting:
                 return at
             except _Slip:
                 anchor = time.time()
+        raise Refused("The timing kept slipping, so the comparison stops here.")
 
     def _test_chain(self) -> Tuple[str, Optional[str]]:
         chain = self.chain = search.Chain(self.search, self.champion)
@@ -894,6 +1018,7 @@ class Sitting:
                               "of": min(search.CHAIN_STEPS, len(self.pool)), "answerable": False}
             self._publish()
             self._step(step.plays, anchor, labels)
+            self._open("answer")
             self.step_view["answerable"] = True
             self._publish()
             _, args = self._take(("answer",))
@@ -903,6 +1028,7 @@ class Sitting:
             self._duel(duel)
             if chain.deciding is not None:
                 self.say = {"cost": chain.note}
+                self._open("decide")
                 self._publish()
                 _, args = self._take(("decide",))
                 duel = chain.decide(bool(args.get("make")))
@@ -932,10 +1058,12 @@ class Sitting:
                               "answerable": False}
             self._publish()
             self._step(list(order), anchor, ["1", "2"])
+            self._open("answer")
             self.step_view["answerable"] = True
             self._publish()
             _, args = self._take(("answer",))
             anchor = time.time()
+            self.step_view["answerable"] = False
             answer = {"1": "first", "2": "second", "same": "same"}[args["answer"]]
             self._duel(pair.answer(answer))
         self.result = self._pair_result(pair)
@@ -999,7 +1127,7 @@ class Sitting:
 
     _COLUMNS = {"form": "%s::hqp_ab_form", "from_s": "%s", "length_s": "%s", "lead_s": "%s",
                 "silence_s": "%s", "slipped": "%s", "learn_plays": "%s", "champion": "%s",
-                "picked": "%s"}
+                "picked": "%s", "last_set": "%s"}
 
     def _note_row(self, **cols) -> None:
         if self.row is None:
@@ -1011,7 +1139,7 @@ class Sitting:
         if self.row is None:
             return
         picked = None
-        if self.chain is not None and ended in ("done", "stopped"):
+        if self.chain is not None and ended in ("done", "stopped") and self.chain.duels:
             picked = self.chain.champion
         elif self.pair is not None and ended == "done":
             picked = self.pair.winner()
@@ -1058,8 +1186,8 @@ class Sitting:
                                     rate=rate_name(kw.get("rate") or self.ctx["rate_out"]))
 
     def _left_out(self, screened: search.Screened) -> List[Dict[str, str]]:
-        return [{"name": n, "why": self._reason_words(r, n)}
-                for r, names in screened.left_out.items() for n in names]
+        return [{"name": n, "why": self._reason_words(r, n, rate=self.left_rates.get(n))}
+                for r, names in list(screened.left_out.items()) for n in list(names)]
 
     def view(self) -> Dict[str, Any]:
         """The sheet's state (GET /api/hqplayer/ab), read whole at every
@@ -1159,7 +1287,9 @@ def _track(manager) -> Dict[str, Any]:
     rate and depth."""
     from pathlib import Path
     from config import settings
-    item = manager.queue.item_at(manager.latest_status.get("track_index") or 1)
+    here = manager.spot()
+    item = manager.queue.item_at(here.slot if here is not None
+                                 else manager.latest_status.get("track_index") or 1)
     if item is None:
         raise Refused("Play a track first: comparing plays a passage of it")
     src = item.opener()
@@ -1258,7 +1388,7 @@ def owed(endpoint_id: int) -> Optional[dict]:
     """, {"e": endpoint_id})
 
 
-def recover(endpoint_id: int, link) -> None:
+def recover(endpoint_id: int, link, again: Callable[[], None] = lambda: None) -> None:
     """A sitting cut short left HQPlayer on a candidate, maybe lowered: put
     back on the playback link the next time HQPlayer answers (the attach),
     on a thread of its own so the attach never waits for it — their volume
@@ -1270,10 +1400,11 @@ def recover(endpoint_id: int, link) -> None:
     row = owed(endpoint_id)
     if row is None:
         return
-    threading.Thread(target=_recover, args=(row, link), daemon=True, name="hqp-ab-recover").start()
+    threading.Thread(target=_recover, args=(row, link, again), daemon=True,
+                     name="hqp-ab-recover").start()
 
 
-def _recover(row: dict, link) -> None:
+def _recover(row: dict, link, again: Callable[[], None]) -> None:
     try:
         with link.command(item=link.item("dsp_knob", link.accept("dsp"))):
             c = link.client
@@ -1284,14 +1415,19 @@ def _recover(row: dict, link) -> None:
                     and abs(st["volume"] - float(row["muted_to"])) <= _DB_EPS):
                 c.set_volume(float(row["before_volume"]))
             index = {f["name"]: f["index"] for f in filters}
+            names = {i: n for n, i in index.items()}
+            holds = names.get(st["filter1x"] if row["slot"] == "1x" else st["filterNx"])
             want = index.get(row["champion"] if row["form"] == "chain" else
                              (row["before_filter_1x"] if row["slot"] == "1x" else row["before_filter_nx"]))
-            if want is not None:
+            # Only over the sitting's own mark: a slot holding something else
+            # than what it set last is the person's since (HQPlayer's window)
+            if want is not None and (row["last_set"] is None or holds == row["last_set"]):
                 nx, x1 = ((st["filterNx"], want) if row["slot"] == "1x" else (want, st["filter1x"]))
                 if (st["filterNx"], st["filter1x"]) != (nx, x1):
                     c.set_filter(nx, x1 if x1 is not None and x1 >= 0 else None)
-    except Exception as e:      # the thread's boundary: tried again at the next attach
+    except Exception as e:      # the thread's boundary: tried again at HQPlayer's next answer
         logger.warning("Comparison %s not put back yet: %s", row["id"], e)
+        again()
         return
     db_execute(f"""UPDATE hqp_ab_sittings
                     SET ended = coalesce(ended, 'failed'), ended_at = coalesce(ended_at, now()),
@@ -1303,17 +1439,21 @@ def _recover(row: dict, link) -> None:
 def left_by_person(host: str, port: int) -> None:
     """A person's DSP change or switch away supersedes what a sitting cut
     short still owes: its row closes as left, and nothing is put back over
-    what they set. A sitting going in this process owes nothing yet."""
+    what they set. A sitting going in this process owes nothing yet. The
+    database failing costs that record, never the person's change."""
     if running():
         return
     import hqp_library
-    ep = hqp_library.endpoint_by_address(host, port)
-    if ep is None:
-        return
-    db_execute(f"""UPDATE hqp_ab_sittings
-                    SET ended = coalesce(ended, 'left'), ended_at = coalesce(ended_at, now()),
-                        owed = FALSE
-                  WHERE hqp_endpoint_id = %(e)s AND {_OWED}""", {"e": ep["id"]})
+    try:
+        ep = hqp_library.endpoint_by_address(host, port)
+        if ep is None:
+            return
+        db_execute(f"""UPDATE hqp_ab_sittings
+                        SET ended = coalesce(ended, 'left'), ended_at = coalesce(ended_at, now()),
+                            owed = FALSE
+                      WHERE hqp_endpoint_id = %(e)s AND {_OWED}""", {"e": ep["id"]})
+    except psycopg2.Error as e:
+        logger.warning("HQPlayer A/B: a sitting cut short not recorded as left to the owner: %s", e)
 
 
 def adopt() -> Dict[str, Any]:
@@ -1321,6 +1461,8 @@ def adopt() -> Dict[str, Any]:
     context's slot, through the one DSP change path (the hold is over)."""
     from playback.hqp_backend import change_dsp
     s = _sitting
+    if s is not None and s.thread is not None:
+        s.thread.join(15)          # the result shows a moment before the hold is let go
     if s is None or s.pair is None or s.result is None or not s.result.get("make") or running():
         raise Refused("Nothing to make your filter now")
     knobs = ({"filter": s.before["nx"], "filter1x": s.pair.other} if s.ctx["slot"] == "1x"

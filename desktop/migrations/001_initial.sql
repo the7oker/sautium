@@ -599,6 +599,7 @@ CREATE TABLE IF NOT EXISTS hqp_ab_sittings (
     before_filter_1x TEXT,
     before_volume NUMERIC(6,2),
     muted_to NUMERIC(6,2),
+    last_set TEXT,                          -- the filter it set last: its mark, which a put-back after a crash stands on
     champion TEXT,                          -- the chain's champion now; the pair's: their own filter
     picked TEXT,                            -- the chain's champion at its end, the pair's winner; NULL: none
     started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
