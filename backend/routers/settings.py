@@ -2813,7 +2813,8 @@ def forget_hqp_library(endpoint_id: int) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail="The benchmark is measuring this HQPlayer — "
                                                     "cancel it first")
     from playback import hqp_ab
-    if hqp_ab.running() and hqp_ab.current().ep["id"] == endpoint_id:
+    sitting = hqp_ab.current()          # read once: a close between two reads leaves None
+    if sitting is not None and hqp_ab.running() and sitting.ep["id"] == endpoint_id:
         raise HTTPException(status_code=409, detail="A comparison by ear is going on with this "
                                                     "HQPlayer — stop it first")
     if not db_query_one("SELECT 1 AS ok FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id}):

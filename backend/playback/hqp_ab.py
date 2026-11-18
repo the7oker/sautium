@@ -220,7 +220,7 @@ def picks(endpoint_id: int, engine: str, ctx: Dict[str, Any]) -> Dict[str, int]:
         SELECT picked, count(*)::int AS n FROM hqp_ab_sittings
          WHERE hqp_endpoint_id = %(e)s AND engine = %(g)s AND mode = %(m)s::hqp_ab_mode
            AND slot = %(s)s::hqp_ab_slot AND fractional = %(f)s
-           AND ended IN ('done', 'stopped') AND picked IS NOT NULL
+           AND ended IN ('done', 'stopped', 'left') AND picked IS NOT NULL
          GROUP BY picked
     """, {"e": endpoint_id, "g": engine, "m": ctx["mode"], "s": ctx["slot"], "f": ctx["fractional"]})
     return {r["picked"]: r["n"] for r in rows}
@@ -268,9 +268,10 @@ def close(sitting: Optional[str] = None) -> Dict[str, Any]:
     s = _sitting
     if s is not None and sitting is not None and sitting != s.key:
         return {"phase": "idle"}
-    if s is not None and running():
-        s.ask("stop", {})
-        s.thread.join(30)
+    if s is not None and s.thread is not None and s.thread.is_alive():
+        if running():
+            s.ask("stop", {})
+        s.thread.join(30)       # through its hold's release: the door opens again after it
     with _lock:
         if _sitting is s and not running():
             _sitting = None
@@ -297,6 +298,7 @@ class Sitting:
         self.thread: Optional[threading.Thread] = None
         self.key = uuid.uuid4().hex
         self.was_playing = False
+        self.tapped_at = 0.0
         self._cv = threading.Condition()
         self._asks: deque = deque()
         self._stopping = False
@@ -321,6 +323,7 @@ class Sitting:
         self.pair: Optional[search.Pair] = None
         self.step_view: Optional[Dict[str, Any]] = None
         self.set_now: Optional[str] = None
+        self.sending: Optional[str] = None
         self.link = None
         self._halt = threading.Event()
         self._tokens: Tuple[str, ...] = ()
@@ -349,6 +352,16 @@ class Sitting:
         busy = link.busy()
         if busy is not None:
             raise Refused(f"{busy}. Compare once it answers again.")
+        ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+        if ep is None:
+            raise Refused("This HQPlayer is not registered yet — try again once it has played")
+        # What it reads may be the last sitting's candidate, lowered: that is
+        # put back first, never taken for the person's own — asked before
+        # anything is read, so a put-back under way is never read half done
+        if owed(ep["id"]) is not None:
+            recover(ep["id"], link, foreign=b.reads_foreign)
+            raise Refused("Sautium is still putting HQPlayer back from the last comparison — "
+                          "compare again in a moment")
         try:
             with link.asking() as c:
                 info, st, status = c.get_info(), c.get_state(), c.get_status()
@@ -365,15 +378,7 @@ class Sitting:
                           "Sautium is its source again")
         s = cls()
         s.form = form
-        s.ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
-        if s.ep is None:
-            raise Refused("This HQPlayer is not registered yet — try again once it has played")
-        # What it reads now may be the last sitting's candidate, lowered: that
-        # is put back first, never taken for the person's own
-        if owed(s.ep["id"]) is not None:
-            recover(s.ep["id"], link)
-            raise Refused("Sautium is still putting HQPlayer back from the last comparison — "
-                          "compare again in a moment")
+        s.ep = ep
         s.engine = s.ep.get("hqp_engine") or info.get("engine") or ""
         s.track = _track(manager)
         s.was_at = min(max(float(manager.latest_status.get("position") or 0.0), 0.0),
@@ -569,6 +574,7 @@ class Sitting:
         """The meter of the HQPlayer it drives, attached for the sitting:
         the hold detached the backend's (hqp_meter.detach), whose next
         attach takes it back."""
+        self.tapped_at = time.time()
         att = hqp_meter.meter.attach(link.c.host, link.c.port + 1)
         hqp_meter.meter.tap(self, att, self._on_read)
 
@@ -893,9 +899,10 @@ class Sitting:
             raise _Left("a DSP change came from elsewhere")
         nx, x1 = self._slots(name)
         if (st["filterNx"], st["filter1x"]) != (nx, x1):
+            self.sending = name         # the put-back's own, should its answer be lost
             if not link("set_filter", nx, x1 if x1 is not None and x1 >= 0 else None):
                 raise Refused(f"HQPlayer refused the filter ({link.refusal()})")
-        self.set_now = name
+        self.set_now, self.sending = name, None
         self._note_row(last_set=name)
 
     def _slots(self, name: str) -> Tuple[int, int]:
@@ -921,8 +928,8 @@ class Sitting:
         not the sitting's playing is another controller's."""
         from hqplayer_client import PlaybackState
         deadline = time.monotonic() + END_S
-        # What the person heard sends frames through its tail: no read yet
-        # after the tap is the meter not delivering, not quiet
+        # What the person heard sends frames through its tail: before the
+        # tap's session opened, no read is the meter not there yet, not quiet
         heard = theirs and self.was_playing
         while True:
             quiet = self._quiet(1.0, heard=heard)
@@ -941,18 +948,21 @@ class Sitting:
 
     def _quiet(self, most: float, heard: bool = False) -> bool:
         """Whether the meter has been quiet for QUIET_S, waited for at most
-        `most` seconds — `heard`: only after it delivered a read."""
+        `most` seconds — `heard`: with no read yet, counted from the tap's
+        session's open (a tail over before it connected sends nothing), and
+        not before it opened."""
         until = time.time() + most
+        opened = self._session_opened() if heard else 0.0
         with self._cv:
             while True:
                 if self._stopping:
                     raise _Stopped()
-                if heard and not self._reads:
+                if not self._reads and opened is None:
                     if time.time() >= until:
                         return False
                     self._cv.wait(until - time.time())
                     continue
-                last_read = self._reads[-1][0] if self._reads else 0.0
+                last_read = self._reads[-1][0] if self._reads else opened
                 quiet_at = last_read + QUIET_S
                 now = time.time()
                 if now >= quiet_at:
@@ -962,6 +972,11 @@ class Sitting:
                 self._cv.wait(min(quiet_at, until) - now)
 
     # -- the meter's reads ----------------------------------------------------------------
+
+    def _session_opened(self) -> Optional[float]:
+        """When the meter's connection opened since the tap, or None."""
+        return next((x["open"] for x in reversed(hqp_meter.meter.seen()["sessions"])
+                     if x["open"] >= self.tapped_at), None)
 
     def _first_frame(self, after: float) -> Optional[float]:
         return next((at for at, _, _ in self._reads if at > after), None)
@@ -1146,11 +1161,16 @@ class Sitting:
         from hqplayer_client import PlaybackState
         from playback.hqp_benchmark import _again, _Lost
         link = self.link
+        if not self._tokens:
+            return True         # ended before its first Stop: it changed nothing to put back
         want = self.chain.champion if self.chain is not None else self.yours
         nx, x1 = self._slots(want)
-        # Slots the sitting may have set: any filter it warmed (a SetFilter
-        # whose answer was lost included), or the person's own before it
-        own = {self._slots(n) for n in self.timings} | {(self.before_nx, self.before_x1), (nx, x1)}
+        # Slots the sitting set: the filter it set last, or the one it was
+        # setting (a SetFilter whose answer was lost) — whatever phase it was
+        # in — or the person's own before it. Any other is a change made in
+        # HQPlayer's window, a warmed candidate included.
+        own = {(self.before_nx, self.before_x1), (nx, x1)} | {
+            self._slots(n) for n in (self.set_now, self.sending) if n is not None}
 
         def once() -> bool:
             st, status = link("get_state"), link("get_status")
@@ -1460,7 +1480,8 @@ def owed(endpoint_id: int) -> Optional[dict]:
     """, {"e": endpoint_id})
 
 
-def recover(endpoint_id: int, link, again: Callable[[], None] = lambda: None) -> None:
+def recover(endpoint_id: int, link, again: Callable[[], None] = lambda: None,
+            foreign: Callable[[Any], bool] = lambda status: False) -> None:
     """A sitting cut short left HQPlayer on a candidate, maybe lowered: put
     back on the playback link the next time HQPlayer answers (the attach),
     on a thread of its own so the attach never waits for it — their volume
@@ -1472,14 +1493,20 @@ def recover(endpoint_id: int, link, again: Callable[[], None] = lambda: None) ->
     row = owed(endpoint_id)
     if row is None:
         return
-    threading.Thread(target=_recover, args=(row, link, again), daemon=True,
+    threading.Thread(target=_recover, args=(row, link, again, foreign), daemon=True,
                      name="hqp-ab-recover").start()
 
 
-def _recover(row: dict, link, again: Callable[[], None]) -> None:
+def _recover(row: dict, link, again: Callable[[], None], foreign: Callable[[Any], bool]) -> None:
     try:
         with link.command(item=link.item("dsp_knob", link.accept("dsp"))):
             c = link.client
+            status = c.get_status()
+            if status is not None and foreign(status):
+                # Another controller plays through HQPlayer: it is theirs now
+                # (§2.4), as a DSP change of the person's leaves it
+                _close_left(row["id"])
+                return
             st, filters = c.get_state(), c.get_filters()
             if st is None or filters is None:
                 again()
@@ -1517,6 +1544,13 @@ def _recover(row: dict, link, again: Callable[[], None]) -> None:
                         owed = FALSE
                   WHERE id = %(id)s AND {_OWED}""", {"id": row["id"]})
     logger.info("Comparison %s, cut short, put back", row["id"])
+
+
+def _close_left(row_id: int) -> None:
+    db_execute(f"""UPDATE hqp_ab_sittings
+                    SET ended = coalesce(ended, 'left'), ended_at = coalesce(ended_at, now()),
+                        owed = FALSE
+                  WHERE id = %(id)s AND {_OWED}""", {"id": row_id})
 
 
 def left_by_person(host: str, port: int) -> None:

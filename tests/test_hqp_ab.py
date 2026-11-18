@@ -855,6 +855,27 @@ def test_a_filter_at_another_output_rate_is_left_out_with_its_reason(ab):
     v = ab.wait_phase("ready")
     assert v["second"] is None
     assert any(x["name"] == "ringy" and "plays at" in x["why"] for x in v["seconds"]["left_out"])
+    # the slot held it last, left out or not: Stop puts the person's own back
+    yours = hqp_ab._sitting.yours
+    hqp_ab.command("stop")
+    ab.wait_phase("ended")
+    assert _wait(lambda: ab.mgr.held is None, 20)
+    assert hqp_ab.view()["ended"] == "stopped" and ab.fake.FILTERS[ab.fake.slots["x1"]] == yours
+
+
+def test_a_stop_while_a_candidate_warms_puts_the_persons_filter_back(ab):
+    fake = ab.fake
+    yours = fake.FILTERS[fake.slots["x1"]]
+    before = fake.volume
+    hqp_ab.open_sitting("chain")
+    assert _wait(lambda: (hqp_ab.view().get("warm") or {}).get("done", 0) >= 2, 60), hqp_ab.view()
+    assert hqp_ab._sitting.set_now != yours         # a candidate in the slot, mid warm-up
+    hqp_ab.command("stop")
+    ab.wait_phase("ended")
+    assert _wait(lambda: ab.mgr.held is None, 20)
+    assert hqp_ab.view()["ended"] == "stopped", hqp_ab.view()
+    assert fake.FILTERS[fake.slots["x1"]] == yours and fake.volume == before
+    assert ab.q("SELECT ended::text, owed FROM hqp_ab_sittings") == [("stopped", False)]
 
 
 def test_a_track_from_a_stream_or_the_hqplayers_library_is_refused_in_words():
