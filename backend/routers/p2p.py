@@ -174,7 +174,8 @@ def _busy(resp) -> HTTPException:
         when = f"in about {round(wait / 60)} minutes"
     else:
         when = f"in about {round(wait / 3600)} hours"
-    return HTTPException(429, f"The verification service is busy — please try again {when}.")
+    return HTTPException(429, f"The verification service is busy — please try again {when}.",
+                         headers={"Retry-After": str(wait)} if wait else None)
 
 
 async def _worker_post(path: str, payload: dict) -> Optional[dict]:
@@ -1097,8 +1098,8 @@ async def _get_own_birth_cert(refresh: bool = False) -> Optional[dict]:
             "signature": signature,
         })
     if cert and cert.get("pubkey") == pubkey and verify_certificate(cert):
-        p2p_identity.save_certificate(settings, cert)
-        _certificate_stored()
+        if p2p_identity.save_certificate(settings, cert):
+            _certificate_stored()
         return cert
     return None
 
@@ -1167,6 +1168,7 @@ class _IdentityWorker:
 
 _identity_worker: Optional[_IdentityWorker] = None
 _identity_worker_lock = asyncio.Lock()
+_identity_worker_closed = False
 
 
 async def start_identity_worker() -> None:
@@ -1176,12 +1178,14 @@ async def start_identity_worker() -> None:
         await _start_worker()
 
 
-async def stop_identity_worker() -> None:
-    """Stop the worker and wait for it. Its Worker requests are cancelled
-    (they publish nothing); its mining thread is waited for, and returns
-    between two attempts (one Argon2 call at most) — nothing of it publishes
-    or saves after."""
+async def close_identity_worker() -> None:
+    """At the backend's stop: the worker stopped and waited for — its Worker
+    requests cancelled (they publish nothing), its mining thread returning
+    between two attempts (one Argon2 call at most) — and none started after,
+    by a start or a restart that waited on the lock meanwhile."""
+    global _identity_worker_closed
     async with _identity_worker_lock:
+        _identity_worker_closed = True
         await _stop_worker()
 
 
@@ -1196,7 +1200,7 @@ async def restart_identity_worker() -> None:
 
 async def _start_worker() -> None:
     global _identity_worker
-    if _identity_worker is not None:
+    if _identity_worker is not None or _identity_worker_closed:
         return
     if not settings.serves_peer_surface:
         if settings.p2p_enabled:
@@ -1222,10 +1226,10 @@ async def _stop_worker() -> None:
     if worker is None:
         return
     worker.stop.set()
-    worker.task.cancel()
+    cancelled = worker.task.cancel()
     await asyncio.gather(worker.task, return_exceptions=True)
-    if worker.mining is not None and not worker.mining.done():
-        # Cancelled, the task will not see how its thread ends: said here
+    if worker.mining is not None and cancelled:
+        # Cancelled, the task does not see how its thread ends: said here
         try:
             await worker.mining
         except Exception:
@@ -1259,26 +1263,40 @@ def _publish_identity_state(state: dict) -> None:
 
 async def _worker_certificate() -> tuple[Optional[dict], Optional[int]]:
     """(the certificate, None), or (None, the wait the Worker asked for) when
-    it refused for volume (429): the worker's own Worker reads."""
+    it refused for volume (429) with none held: the worker's own Worker reads.
+    A refusal of a read that only checks a certificate held for a newer one
+    leaves the one held standing."""
     try:
         cert = await _get_own_birth_cert()
-        if cert is not None and cert["method"] == "pow":
-            # Portable identity: the email upgrade may have happened on
-            # another device holding the same key — one Worker read before
-            # committing minutes of mining to a possibly superseded cert.
-            cert = await _get_own_birth_cert(refresh=True) or cert
-        if cert is not None and cert["method"] != "email":
-            row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
-            if row and row.get("email_verified"):
-                result = await _worker_check_email(_get_identity() or {})
-                if result and result.get("birth_cert"):
-                    cert = result["birth_cert"]
-        return cert, None
     except HTTPException as e:
         if e.status_code != 429:
             raise
         retry = (e.headers or {}).get("Retry-After", "")
         return None, int(retry) if retry.isdigit() else None
+    if cert is not None and cert["method"] == "pow":
+        # Portable identity: the email upgrade may have happened on
+        # another device holding the same key — one Worker read before
+        # committing minutes of mining to a possibly superseded cert.
+        cert = await _unless_braked(_get_own_birth_cert(refresh=True)) or cert
+    if cert is not None and cert["method"] != "email":
+        row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+        if row and row.get("email_verified"):
+            result = await _unless_braked(_worker_check_email(_get_identity() or {}))
+            if result and result.get("birth_cert"):
+                cert = result["birth_cert"]
+    return cert, None
+
+
+async def _unless_braked(read):
+    """A Worker read the worker can do without: None when the Worker asks it
+    to wait (429)."""
+    try:
+        return await read
+    except HTTPException as e:
+        if e.status_code != 429:
+            raise
+        logger.info(f"identity worker: the Worker asks to wait — the certificate held stands ({e.detail})")
+        return None
 
 
 async def identity_proof_task(worker: _IdentityWorker) -> None:

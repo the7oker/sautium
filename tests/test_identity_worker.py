@@ -76,6 +76,8 @@ class _Worker:
         self.difficulty: dict = {}           # pubkey -> difficulty, else EASY
         self.calls: list = []                # (method, path, pubkey)
         self.brake = 0                       # issuances refused for volume (429) before one is made
+        self.read_brake = 0                  # certificate reads refused so
+        self.retry_after = "60"
         self.stall = threading.Event()       # set: reads hang until `unstall`
         self.unstall = threading.Event()
         self.verified_email: set = set()     # pubkeys whose address the Worker holds verified
@@ -93,6 +95,12 @@ class _Worker:
                 self.end_headers()
                 self.wfile.write(raw)
 
+            def _refuse(self):
+                self.send_response(429)
+                self.send_header("Retry-After", worker.retry_after)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_GET(self):
                 url = urlparse(self.path)
                 query = parse_qs(url.query)
@@ -100,6 +108,9 @@ class _Worker:
                 worker.calls.append(("GET", url.path, pubkey))
                 if worker.stall.is_set():
                     worker.unstall.wait(30)
+                if url.path == "/birth-certificate" and worker.read_brake:
+                    worker.read_brake -= 1
+                    return self._refuse()
                 if url.path == "/birth-certificate":
                     cert = worker.issued.get(pubkey)
                     return self._answer(200, cert) if cert else self._answer(404)
@@ -117,11 +128,7 @@ class _Worker:
                 if self.path == "/birth-certificate":
                     if worker.brake:
                         worker.brake -= 1
-                        self.send_response(429)
-                        self.send_header("Retry-After", "60")
-                        self.send_header("Content-Length", "0")
-                        self.end_headers()
-                        return
+                        return self._refuse()
                     Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey)).verify(
                         bytes.fromhex(body["signature"]), f"birth:{pubkey}".encode())
                     cert = worker.issued.setdefault(pubkey, _issue(
@@ -173,6 +180,7 @@ def node(scratch_dsn, tmp_path, monkeypatch):
     worker = _Worker()
     monkeypatch.setattr(p2p_router, "VERIFY_WORKER_URL", worker.url)
     monkeypatch.setattr(p2p_router, "_identity_worker", None)
+    monkeypatch.setattr(p2p_router, "_identity_worker_closed", False)
     monkeypatch.setattr(p2p_router, "_identity_worker_lock", asyncio.Lock())
     monkeypatch.setattr(p2p_router, "_cached_private_key", None)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
@@ -318,10 +326,13 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
         real(state)
     monkeypatch.setattr(p2p_router, "_publish_identity_state", publish)
 
+    workers = []
+
     async def scene():
         try:
             await p2p_router.start_identity_worker()
             first = p2p_router._identity_worker
+            workers.append(first)
             await asyncio.to_thread(_await_identity, scratch_dsn, lambda s: s.get("attempts", 0) > 2)
             rotating.set()
             info = await device_auth.rotate_identity("second", "second password", "first password")
@@ -333,7 +344,11 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
                                     lambda s: _ready(s) and s["difficulty"] == EASY)
             return first, info, held
         finally:
+            # A failure here leaves no miner on: asyncio.run waits for its thread
             release.set()
+            for worker in workers + [p2p_router._identity_worker]:
+                if worker is not None:
+                    worker.stop.set()
     first, info, held = asyncio.run(scene())
     assert held == (False, False, False)                # nothing of the new key while the old ran
     assert first.task.done() and first.stop.is_set() and first.mining.done()
@@ -345,12 +360,16 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
     assert published[olds[-1]]["status"] == "stopped" and olds[-1] < news[0]
 
 
-def test_a_worker_braked_by_the_worker_goes_on_when_a_route_stores_the_certificate(node, scratch_dsn):
-    """A 429 at the issuance is the Worker's word to wait, not the worker's
-    end; a certificate a route stores meanwhile (Friends' pickup, an invite)
-    ends the wait."""
+@pytest.mark.parametrize("retry_after", [60, 7200])
+def test_a_worker_braked_by_the_worker_goes_on_when_a_route_stores_the_certificate(node, scratch_dsn,
+                                                                                  caplog, retry_after):
+    """A 429 at the issuance is the Worker's word to wait — as long as it
+    says, the backoff at least — not the worker's end; a certificate a route
+    stores meanwhile (Friends' pickup, an invite) ends the wait."""
     _account(node)
     node.worker.brake = 1
+    node.worker.retry_after = str(retry_after)
+    caplog.set_level("WARNING", logger="routers.p2p")
 
     async def scene():
         await p2p_router.start_identity_worker()
@@ -364,6 +383,23 @@ def test_a_worker_braked_by_the_worker_goes_on_when_a_route_stores_the_certifica
         assert (await p2p_router._get_own_birth_cert())["method"] == "pow"   # a route asks
         await asyncio.wait_for(worker.task, 30)
     asyncio.run(scene())
+    assert f"retry in {max(retry_after, 300)}s" in caplog.text
+    assert _ready(_state(node.conn))
+    _proof_binds_its_certificate(node)
+
+
+def test_a_brake_on_a_check_of_the_certificate_held_leaves_it_standing(node):
+    """The refresh of a pow certificate held only looks for a newer one: the
+    Worker's 429 there is no reason to wait, the mining goes on."""
+    _account(node)
+    assert asyncio.run(p2p_router._get_own_birth_cert())["method"] == "pow"
+    node.worker.read_brake = 1
+
+    async def scene():
+        await p2p_router.start_identity_worker()
+        await asyncio.wait_for(p2p_router._identity_worker.task, 30)
+    asyncio.run(scene())
+    assert node.worker.read_brake == 0                       # it was asked, and braked
     assert _ready(_state(node.conn))
     _proof_binds_its_certificate(node)
 
@@ -381,7 +417,7 @@ def test_a_stop_does_not_wait_out_the_workers_requests(node):
             assert time.monotonic() < deadline
             await asyncio.sleep(0.05)
         began = time.monotonic()
-        await p2p_router.stop_identity_worker()
+        await p2p_router.close_identity_worker()
         return time.monotonic() - began
     assert asyncio.run(scene()) < 2
     assert p2p_router._identity_worker is None and _state(node.conn) == {}
@@ -435,27 +471,31 @@ def test_an_email_verified_ends_the_mining_and_says_ready(node, scratch_dsn, mon
 # ---------------------------------------------------------------------------
 
 def test_two_workers_over_one_identity_folder_make_one_proof(tmp_path):
+    """The first holds the folder through its whole run: the second, started
+    while it mines, stands down at once, having published nothing."""
     cert = _issue(os.urandom(32).hex(), "pow", EASY)
     path = tmp_path / identity_proof.PROOF_FILENAME
-    states: dict = {0: [], 1: []}
-    proofs: dict = {}
-    gate = threading.Barrier(2)
+    first_states, second_states = [], []
+    mining, second_done = threading.Event(), threading.Event()
 
-    def run(i):
-        gate.wait()
-        proofs[i] = identity_proof.ensure_identity_proof(
-            cert, path, stop=threading.Event(), on_state=states[i].append, params=TEST_PARAMS,
-            mem_available_kib=lambda: 10 ** 9, pause_seconds=0.01)
-    threads = [threading.Thread(target=run, args=(i,)) for i in (0, 1)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(60)
-    mined = [i for i in (0, 1) if proofs[i] is not None]
-    assert len(mined) == 1
-    stood_down = 1 - mined[0]
-    assert states[stood_down] == []                        # it published nothing
-    assert identity_proof.load_proof(path) == proofs[mined[0]]
+    def first_state(state):
+        first_states.append(state)
+        mining.set()
+        second_done.wait(30)                               # held in its run until the second ends
+
+    def run(on_state, out):
+        out.append(identity_proof.ensure_identity_proof(
+            cert, path, stop=threading.Event(), on_state=on_state, params=TEST_PARAMS,
+            mem_available_kib=lambda: 10 ** 9, pause_seconds=0.01))
+    first, second = [], []
+    t1 = threading.Thread(target=run, args=(first_state, first))
+    t1.start()
+    assert mining.wait(30)
+    run(second_states.append, second)
+    second_done.set()
+    t1.join(60)
+    assert second == [None] and second_states == []
+    assert first[0] is not None and identity_proof.load_proof(path) == first[0]
 
 
 def test_a_worker_in_another_process_holds_the_folder(tmp_path):

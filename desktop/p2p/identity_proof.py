@@ -199,13 +199,15 @@ def worker_lock(folder: Path):
                            "not enforced here", folder, e)
         yield True
     finally:
-        if locked and sys.platform == "win32":
-            # Released by the close only "depending on available system
-            # resources" (msvcrt): a restart relocks at once
-            import msvcrt
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        os.close(fd)
+        try:
+            if locked and sys.platform == "win32":
+                # Released by the close only "depending on available system
+                # resources" (msvcrt): a restart relocks at once
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(fd)
 
 
 def ensure_identity_proof(

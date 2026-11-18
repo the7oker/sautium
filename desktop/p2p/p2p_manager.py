@@ -40,6 +40,12 @@ from desktop.p2p.upnp_service import UPnPService
 logger = logging.getLogger(__name__)
 
 
+def _said_if_failed(future) -> None:
+    """The end of a job the LISTEN loop handed its executor, said if it failed."""
+    if not future.cancelled() and future.exception() is not None:
+        logger.error("identity worker restart failed", exc_info=future.exception())
+
+
 class P2PManager:
     """Orchestrates P2P sync server + DHT + LAN discovery + UPnP."""
 
@@ -1103,8 +1109,11 @@ class P2PManager:
                             and self._on_identity_rotated_cb):
                         self._on_identity_rotated_cb()
                     if "sautium_identity_cert" in channels:
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, self._restart_identity_proof_worker)
+                        # Not awaited: the join of an Argon2 attempt holds no
+                        # other notice of this loop back
+                        asyncio.get_event_loop().run_in_executor(
+                            None, self._restart_identity_proof_worker
+                        ).add_done_callback(_said_if_failed)
             except Exception as e:
                 logger.debug(f"DB LISTEN error: {e}")
                 await asyncio.sleep(5)

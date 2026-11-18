@@ -1202,8 +1202,8 @@ async def lifespan(app: FastAPI):
         notary.stop_witness_listener)]
     if _mailbox_stop:
         _mailbox_stop.set()
-    from routers.p2p import stop_identity_worker
-    await stop_identity_worker()
+    from routers.p2p import close_identity_worker
+    await close_identity_worker()
     if _mailbox_task:
         _mailbox_task.cancel()
         try:
