@@ -3,7 +3,10 @@ sent (P2P_NETWORK.md § "Support diagnostics"): a per-node overview, event
 reports, warrant issue + dispatch, bundle open / delete. HMAC like
 everything on 8800, and 404 unless this node IS the shipped master, so
 the routes are inert on every other node. Consumed by
-mcp/support_server.py — the maintainer works the desk from Claude Code.
+mcp/support_server.py (reading) and mcp/support_act_server.py (acting) —
+the maintainer works the desk from Claude Code. An answer here carries a
+node's text as stored; the MCP servers mark it as data
+(mcp/support_desk.py node_text), so no error detail may embed it unmarked.
 
 A bundle is stored as received (boxed); `open` decrypts it with the
 master's own key and unpacks it under SUPPORT_DIR — a bind mount, so the
@@ -302,7 +305,11 @@ def _unpack(plain: bytes, dest: Path) -> None:
             with tarfile.open(fileobj=stream, mode="r:") as tar:
                 _safe_extract(tar, dest)
         except tarfile.TarError as e:
-            raise HTTPException(status_code=422, detail=f"bundle is no tar archive: {e}") from e
+            # tar's own words may quote a member's name — the node's text,
+            # which the desk's answer never carries (SEC-S3)
+            logger.warning("support: bundle in %s is no tar archive: %.300r", dest.name, str(e))
+            raise HTTPException(status_code=422,
+                                detail=f"bundle is no tar archive ({type(e).__name__})") from e
 
 
 def _unpacked_tar(plain: bytes):
@@ -319,7 +326,9 @@ def _unpacked_tar(plain: bytes):
                 try:
                     chunk = packed.read(1024 * 1024)
                 except (OSError, EOFError, zlib.error) as e:
-                    raise HTTPException(status_code=422, detail=f"bundle is no gzip stream: {e}") from e
+                    # gzip's words quote the stream's own first bytes
+                    raise HTTPException(status_code=422,
+                                        detail=f"bundle is no gzip stream ({type(e).__name__})") from e
                 if not chunk:
                     break
                 total += len(chunk)
@@ -378,7 +387,13 @@ def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
             raise HTTPException(status_code=422, detail="bundle holds more entries than a bundle has")
         target = (dest / member.name).resolve()
         if not (member.isfile() or member.isdir()) or root not in target.parents and target != root:
-            raise HTTPException(status_code=422, detail=f"bundle entry refused: {member.name}")
+            # by its place in the archive: its name is the node's text,
+            # which the desk's answer never carries (SEC-S3)
+            logger.warning("support: bundle in %s: entry %d refused: %.300r",
+                           dest.name, len(members) + 1, member.name)
+            raise HTTPException(status_code=422, detail=(
+                f"bundle entry {len(members) + 1} refused: "
+                f"{'outside the bundle' if member.isfile() or member.isdir() else 'not a file or folder'}"))
         total += member.size
         if total > _BUNDLE_UNPACKED_BYTES:
             raise HTTPException(status_code=422, detail="bundle unpacks past what a bundle holds")

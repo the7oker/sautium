@@ -330,7 +330,7 @@ def test_the_host_signers_sign_with_a_nonce(monkeypatch):
     first, second = (api_client._sign_headers("POST", "/api/player/next", b"{}") for _ in range(2))
     _verify(first, b"host secret", "POST", "/api/player/next", b"{}")
     assert first["X-Sautium-Nonce"] != second["X-Sautium-Nonce"]
-    for name in ("assistant_server", "support_server"):
+    for name in ("assistant_server", "support_desk"):
         spec = importlib.util.spec_from_file_location(f"_signer_{name}", ROOT / "mcp" / f"{name}.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
