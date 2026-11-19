@@ -275,12 +275,12 @@ def player_state(status: dict, playlist: dict, offset: int = 0, limit: int = 50)
             "playing": row.get("index") == current,
         }
         tracks.append(entry)
-        answer["queue"]["next_offset"] = offset + len(tracks)    # the longest form of the page
+        following = offset + len(tracks)
+        answer["queue"]["next_offset"] = following if following < len(rows) else None
         if len(tracks) > 1 and not answer_fits(mark.dumps(answer)):
             tracks.pop()
+            answer["queue"]["next_offset"] = following - 1     # no more digits than the one measured
             break
-    following = offset + len(tracks)
-    answer["queue"]["next_offset"] = following if following < len(rows) else None
     return mark.dumps(answer)
 
 

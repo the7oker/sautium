@@ -330,7 +330,9 @@ def test_a_turn_dropped_mid_answer_leaves_no_file(claude_turn, monkeypatch):
     monkeypatch.setattr(runner, "_spawn_claude", lambda cmd, stdin, **_: started)
     stream = chat._build_provider_stream("claude_code", 1, "hi", [], None)
     assert next(stream).text == "hi"
-    assert [p.name[:7] for p in workdir.iterdir()] == ["system-"]   # the message has no path
+    # the message has no path on POSIX; on Windows it keeps one until its last handle closes
+    assert sorted(p.name[:7] for p in workdir.iterdir()) == (
+        ["message", "system-"] if sys.platform == "win32" else ["system-"])
     stream.close()
     assert started.ended and list(workdir.iterdir()) == []
 
@@ -395,7 +397,13 @@ def test_a_call_whose_file_cannot_be_removed_keeps_its_answer(claude_turn, monke
     holds on Windows) leaves a file behind, never a good call reported as a
     failed one."""
     turn, _ = claude_turn
-    monkeypatch.setattr(os, "unlink", lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "in use")))
+    unlink = os.unlink
+
+    def held(path, *args, **kwargs):
+        if Path(path).name.startswith("system-"):
+            raise PermissionError(13, "in use")
+        return unlink(path, *args, **kwargs)
+    monkeypatch.setattr(os, "unlink", held)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
         a, 0, json.dumps({"result": "ok", "session_id": "s", "is_error": False}).encode(), b""))
     monkeypatch.setattr(runner.claude_code.auth, "authenticated", lambda: None)
