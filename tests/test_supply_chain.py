@@ -534,7 +534,8 @@ def test_the_arm64_compose_files_are_the_release_file_but_for_what_their_host_ne
     # The Linux file runs the backend on the host's network (its own ports,
     # its own port for the Web UI, nothing published) and mounts the host
     # agent's requests folder
-    host_network = ({"UVICORN_PORT", "SAUTIUM_HOST_NETWORK"}, {"/run/sautium/requests"}, set())
+    host_network = ({"UVICORN_PORT", "SAUTIUM_HOST_NETWORK", "SAUTIUM_BIRTH_PRESET"},
+                    {"/run/sautium/requests"}, set())
     for name, other_mounts, (more_env, more_mounts, their_published) in (
             ("docker-compose.mac.yml", set(), (set(), set(), ports)),
             ("docker-compose.pi.yml", {"/home/agent/.claude/projects"}, host_network)):

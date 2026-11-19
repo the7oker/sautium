@@ -118,7 +118,7 @@ STATE_MAX = 64 * 1024
 VERIFY_MAX = 1024 * 1024
 # The setup code a node logs at each start until its account exists
 # (backend/device_auth._SETUP_CODE_FORM): never in a diagnostics report
-SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){2}")
+SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){1}")
 
 UNIT = "sautium-host-agent"
 STARTER_NAME = "sautium-host-agent"
@@ -847,7 +847,7 @@ def resume(state: dict, now: float, root: Path = None) -> Optional[Tuple[str, st
 
 
 def _scrub(text: str) -> str:
-    return SETUP_CODE.sub("XXXX-XXXX-XXXX", text)
+    return SETUP_CODE.sub("XXXX-XXXX", text)
 
 
 def verb_diagnostics(state: dict, now: float, root: Path = None) -> Tuple[str, str, Optional[str], Optional[str]]:

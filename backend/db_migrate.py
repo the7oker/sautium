@@ -163,6 +163,9 @@ def _apply_birth_preset(conn) -> dict:
                         "ON CONFLICT (key) DO NOTHING RETURNING key", (key, json.dumps(value)))
             if cur.fetchone():
                 written.append(key)
+        # The fact itself, for the Web UI's one-time "this node" mark
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('node.birth_preset', %s::jsonb) "
+                    "ON CONFLICT (key) DO NOTHING", (json.dumps(name),))
     conn.commit()
     return {"preset": name, "written": written}
 

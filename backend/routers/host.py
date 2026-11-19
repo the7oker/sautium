@@ -40,7 +40,64 @@ async def host_state() -> dict:
     rows = db_query("SELECT verb::text, asked_at, outcome::text, detail, release, report IS NOT NULL AS has_report, "
                     "answered_at FROM host_requests ORDER BY verb")
     return {"available": host_channel.available(),
-            "requests": {row.pop("verb"): row for row in rows}}
+            "requests": {row.pop("verb"): row for row in rows},
+            # The release a check offered while this node still runs an older one
+            "offered": (offered_release() or {}).get("release")}
+
+
+def offered_release() -> Optional[dict]:
+    """The release the agent's last check offered, while this node still
+    runs an older one: {release, since}. None once the tree states that
+    version (an update that moved the node leaves the check's row as it
+    was until the next check)."""
+    if not host_channel.available():
+        return None
+    row = db_query("SELECT release, answered_at FROM host_requests "
+                   "WHERE verb = 'check' AND outcome = 'offered' AND release IS NOT NULL")
+    if not row:
+        return None
+    from desktop import release_verify, updater
+    offered = release_verify.parse_version(row[0]["release"])
+    if offered is None or offered <= updater.installer_version():
+        return None
+    return {"release": row[0]["release"], "since": row[0]["answered_at"].isoformat()}
+
+
+def update_report() -> Optional[dict]:
+    """How the last update asked from here ended, where it moved the node
+    or was taken back: a report for the notices (said once, then dropped) —
+    the page that asked lost its stream when the node stopped."""
+    row = db_query("SELECT outcome::text, release, answered_at FROM host_requests "
+                   "WHERE verb = 'update' AND outcome IN ('updated', 'undone') "
+                   "AND answered_at IS NOT NULL")
+    if not row:
+        return None
+    return {"outcome": row[0]["outcome"], "release": row[0]["release"],
+            "since": row[0]["answered_at"].isoformat()}
+
+
+# The node asks for a check itself when nobody looks: at its start and once
+# a day (the agent's own floor is hourly). No timer of the host's.
+CHECK_EVERY_S = 24 * 3600
+
+
+def check_if_due() -> bool:
+    """Ask the agent for a check unless one was asked within a day: called
+    at the node's start and by the background pass it already runs."""
+    if not host_channel.available():
+        return False
+    row = db_query("SELECT 1 FROM host_requests WHERE verb = 'check' "
+                   "AND asked_at > now() - make_interval(secs => %s)", (CHECK_EVERY_S,))
+    if row:
+        return False
+    try:
+        host_channel.ask("check")
+    except host_channel.NoChannel as e:
+        logger.warning("the daily check for updates was not asked: %s", e)
+        return False
+    db_execute("INSERT INTO host_requests (verb, asked_at) VALUES ('check', now()) "
+               "ON CONFLICT (verb) DO UPDATE SET asked_at = EXCLUDED.asked_at")
+    return True
 
 
 @router.get("/diagnostics/report")
@@ -68,6 +125,10 @@ async def answer(body: Answer, request: Request) -> dict:
     logger.info("the host agent answered %s: %s", body.verb, body.outcome)
     from routers.settings import notify_library_subscribers
     notify_library_subscribers()
+    if body.verb in ("check", "update"):
+        # A release offered, or no longer; an update's end: the notices
+        # update.available and update.result
+        db_execute("NOTIFY sautium_notices")
     return {"ok": True}
 
 

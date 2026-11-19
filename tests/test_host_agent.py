@@ -370,8 +370,9 @@ def test_a_check_answers_what_the_survey_found(monkeypatch):
 
 
 def test_a_diagnostics_report_carries_no_setup_code():
-    text = "setup code: K7QM-ZP4X-9HTR\nnot one: K7QM-ZP4X\n"
-    assert ha._scrub(text) == "setup code: XXXX-XXXX-XXXX\nnot one: K7QM-ZP4X\n"
+    # A code of before 2026-11-19 had three groups: scrubbed too, as two of them and a tail
+    text = "setup code: K7QM-ZP4X\nan older one: K7QM-ZP4X-9HTR\nnot one: K7QM ZP4X\n"
+    assert ha._scrub(text) == "setup code: XXXX-XXXX\nan older one: XXXX-XXXX-9HTR\nnot one: K7QM ZP4X\n"
     sys.path.insert(0, str(REPO / "backend"))
     import device_auth
     assert ha.SETUP_CODE.pattern == device_auth._SETUP_CODE_FORM.pattern

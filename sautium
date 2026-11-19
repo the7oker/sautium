@@ -1,0 +1,6 @@
+#!/bin/sh
+# Sautium on this machine: ./sautium [setup|status|pair|update|remove]
+# (scripts/setup.py — one file of standard-library Python, run isolated).
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+command -v python3 >/dev/null 2>&1 || { echo "./sautium: python3 is not installed (sudo apt install python3)" >&2; exit 1; }
+exec python3 -I "$here/scripts/setup.py" "$@"

@@ -101,7 +101,7 @@ def test_a_node_born_nano_gets_its_switches_before_the_seed_and_downloads_none(d
         "compute.models", "discovery.phantom_layer", "sync.pass_on"]}
     assert out["seed"] == {"complete": False, "skipped": "phantom_layer_off"}
     assert _settings(db) == {"compute.models": False, "discovery.phantom_layer": False,
-                             "sync.pass_on": False}
+                             "sync.pass_on": False, "node.birth_preset": "nano"}
     assert hardware_profile.models_switch() is False
 
     # The owner turns the models on; no later start writes the preset again

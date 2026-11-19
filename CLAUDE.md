@@ -99,7 +99,11 @@ See:
   controls end-to-end. Change it, migrate the data, move on.
 - **A hardware profile governs compute, never retention.** `full/standard/
   lite` decides what the node derives locally (analysis, pre-warm, thread
-  caps); it never decides what the node stores. Rows the owner can see are
+  caps); it never decides what the node stores. The model axis is the
+  owner's switch since 2026-11-19 (`compute.models`, "AI models on this
+  machine": `hardware_profile.models` is `on`, `off` or `absent`, read once
+  a process before anything imports torch; lite with no model is "Nano") —
+  off, nothing stored is removed. Rows the owner can see are
   deleted only by an explicit, confirmed user action (Settings › Library ›
   "Remove phantom layer", Rescan's question, the Away row — a copy whose
   files a Rescan did not find is away, never gone, since 2026-11-09) — no
@@ -426,6 +430,11 @@ See:
   share one traversal lane in `dht_service` — one initiation per ≥3 s,
   alternating. Without a gate every hop multiplies by ~50 Last.fm entries
   and the pipeline walks all recorded music.
+- **Streaming follows the streaming library's switch** (since 2026-11-19):
+  `streaming.service.follow_switch` brings the providers, yt-dlp's build and
+  its refresh loop up and down with `discovery.phantom_layer`, at the start
+  and when the switch moves; `STREAMING_PREVIEW_ENABLED=false` is a
+  deployment's own off, never a second switch for a person.
 - **Streaming is a demo channel, and an excerpt is nothing.** The core
   provider (YouTube, `manifest.demo_limited`) streams a track in full at
   most ONCE — the listen is spent past 90 % (`demo_plays`, life data;
@@ -438,7 +447,12 @@ See:
   no listen, no scrobble. The ledger has no settings toggle — it is the
   product's legal posture, not a preference.
 - **P2P-facing settings** (all in `user_settings`, defaults in
-  `backend/routers/settings.py` `_DEFAULTS`): `sync.announce_limit` (rare
+  `backend/routers/settings.py` `_DEFAULTS`): `sync.pass_on` ("Pass on what
+  this node holds", since 2026-11-19 — the serving side of sharing, split
+  from the taking side: off, the node still asks and takes, and answers no
+  peer sync route, says `sharing: false` in `/health`, beacons and announces
+  no tail and offers no carrier anything; default on, off in a node born
+  Nano; shown only where it is off or the node is Nano), `sync.announce_limit` (rare
   artist DHT tail; 150 = half the traversal lane, announced only under the
   computed `p2p.rare_mode`), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
   each), `p2p.relay_enabled` (relay role), `enrichment.reanalyze_imported`
@@ -552,6 +566,19 @@ See:
   HQPlayer's own log there, and the DSP measurements its CUDA offload
   (`settings.xml` + `HQPlayer*Desktop.log`, nothing else); unset, an empty
   folder and the diagnostics say where the log is.
+- **A node the console setup made reads its music under roots** (since
+  2026-11-19; `./sautium` → `scripts/setup.py`, `backend/library_root.py`):
+  the setup's compose override `./host/compose.roots.yml` (named in `.env`'s
+  `COMPOSE_FILE`; `./host/` is bound into no container) binds each root —
+  a folder named with `--music`, the automount's `/media/sautium` — read-only
+  at its own host path, `rslave`, and lists them in `SAUTIUM_LIBRARY_ROOTS`;
+  the owner picks the library's folder under them in the Web UI (a row of
+  `library_roots`), and `MUSIC_LIBRARY_PATH` then names an empty folder. A
+  path a page names is resolved and must stay under a root; under roots the
+  scanner follows no link out of them. A disk plugged in later is seen by a
+  `poll()` on the mount table (`backend/mount_watch.py`), never a timer. The
+  setup never runs `sudo`: it prints root steps. `SAUTIUM_BIRTH_PRESET`
+  (`nano`) is read once per database (`db_migrate`, `birth_preset_v1`).
 - Build identity: `./.git` → `/checkout/.git:ro` in every compose file
   (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`
   names it). `config.build_identity()` is the one reader — `/config`,
@@ -809,6 +836,9 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
+| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `pair`, `update`, `remove`): standard library, never root, root steps printed and never run |
+| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing, the stored choice) and the mount table's wake for a disk plugged in later |
+| `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, the password through the credential box and the signed door, the file kept on the node — no route serves it |
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
 | `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides; `step_up` (the password, or an anonymous account's host code) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8) |
 | `desktop/agent_login.py` | Headless CLI sign-in driver (`claude auth login`, `codex login [--device-auth]` over pipes) shared by the wizard and the backend's `/api/settings/ai/<agent>/signin` — no console, completion is an event |
@@ -825,7 +855,7 @@ toast takes no pointer events and never blocks the user (see
 | `backend/assistant_queries.py` | Catalog queries + result formatting SHARED by both assistant tool surfaces (MCP + `backend/tools/definitions.py`) — one copy, so neither drifts owned-only |
 | `backend/notary.py` + `backend/sign_audio.py` | The sealing owner (one thread, woken by every producer of signable state) and its two stages: `sign()` author-signs at once, `stamp()` Merkle-batches + Worker-timestamps on the notary's cadence |
 | `desktop/node_backup.py` | Node backup format v1 (`.sbk`: Argon2id KEK in its own salt domain, per-file data key, chunked XChaCha20-Poly1305 with the header as AAD, framed members) + `pg_dump`/`pg_restore` drivers, staged restore, identity write, selftest — shared by launcher and backend (`docs/design/BACKUP.md`) |
-| `backend/backup.py` | The node binding and the ONE "make a backup": `python -m backup create\|inspect\|restore\|selftest\|export\|import\|merge` on either interpreter (loads `<data_dir>/backend.env` under the launcher), password check via `device_auth.verify_password`, the playback signal as a PostgreSQL session advisory lock (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the job). The weekly task calls `create --password-env P2P_PASSWORD` — a contract. No Web UI |
+| `backend/backup.py` | The node binding and the ONE "make a backup": `python -m backup create\|inspect\|restore\|selftest\|export\|import\|merge` on either interpreter (loads `<data_dir>/backend.env` under the launcher), password check via `device_auth.verify_password`, the playback signal as a PostgreSQL session advisory lock (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the job). The weekly task calls `create --password-env P2P_PASSWORD` — a contract. The Web UI makes one and downloads none (`backend/backup_job.py`, since 2026-11-19) |
 | `backend/share.py` | Share export/import (BACKUP.md Product B): gzip'd JSON lines with a signed trailer, streamed both ways; every sealed record the node holds under its author's seal, structural rows from the seed builders; import through `SyncClient._import_items` (the gate) after a verify pass, default (add phantoms) or `--existing-only` (create no artist/album/track) |
 | `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, comparisons by ear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
 | `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place. Also the one "same listen" rule (`same_listen`, `LISTENS_LOCK_KEY`) and the repair of pre-2026-09-24 naive listen starts |

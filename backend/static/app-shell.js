@@ -851,7 +851,8 @@
      element carrying `data-guide="<id>"` — the More tab, the drawer row,
      the control itself — so the user follows one mark down to the button
      instead of hunting for it. `data-guide="*"` stands for any open task,
-     which is what the tab bar can honestly say from outside the drawer.
+     which is what the tab bar can honestly say from outside the drawer; a
+     row several tasks pass through names them all, space-separated.
 
      A guided control that also carries `data-guide-scroll` gets the puck
      below: the mark is useless on a control that sits past the fold. */
@@ -862,7 +863,7 @@
 
     paint() {
       document.querySelectorAll('[data-guide]').forEach(el => {
-        const on = this.has(el.dataset.guide);
+        const on = el.dataset.guide.split(' ').some(id => this.has(id));
         el.classList.toggle('is-guided', on);
         if (el.hasAttribute('data-guide-scroll')) {
           if (on) attachGuidePuck(el); else detachGuidePuck(el);
@@ -8021,7 +8022,7 @@
     // the list's head; gone at `ready`
     const identityEl = screen.querySelector('#friendsIdentity');
     const verifyBtn = identityEl.querySelector('[data-action="verify-email"]');
-    verifyBtn.addEventListener('click', () => navigate('profile'));
+    verifyBtn.addEventListener('click', () => navigate('more/profile'));
     function paintIdentity() {
       const text = nodeIdentity.line();
       identityEl.hidden = !text;
@@ -9108,13 +9109,13 @@
               <span class="more-hint" id="outputHint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/profile">
+            <button class="more-row" type="button" data-go="more/profile" data-guide="verify_email this_node">
               <span class="more-icon">${ICON_PROFILE}</span>
               <span class="more-label">Profile</span>
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/library" data-guide="analyse_library">
+            <button class="more-row" type="button" data-go="more/library" data-guide="analyse_library music_folder">
               <span class="more-icon">${ICON_LIBRARY}</span>
               <span class="more-label">Library</span>
               <span class="more-hint"></span>
@@ -12067,7 +12068,7 @@
     const email = (emailStatus && emailStatus.email) || (account && account.email) || '';
     if (!email) {
       return `
-        <div class="form-row is-clickable" data-action="set-email" data-row="email">
+        <div class="form-row is-clickable" data-action="set-email" data-row="email" data-guide="verify_email">
           <span class="form-label">Email</span>
           <span class="form-actions">
             <span class="form-value action">Add</span>
@@ -12097,7 +12098,7 @@
         </div>`;
     }
     return `
-      <div class="form-row is-clickable" data-action="verify-email" data-row="email">
+      <div class="form-row is-clickable" data-action="verify-email" data-row="email" data-guide="verify_email">
         <span class="form-label">Email</span>
         <span class="form-actions">
           <span class="form-value">${escapeProfileHtml(email)}</span>
@@ -12128,6 +12129,26 @@
     if (verifyRow) verifyRow.addEventListener('click', () => openEmailVerifyFlow());
     const setRow = root.querySelector('[data-action="set-email"]');
     if (setRow) setRow.addEventListener('click', () => openSetEmailFlow((data && data.email) || ''));
+    paintEmailLine(root, data);
+    guide.paint();
+  }
+
+  // What a node without a verified email cannot do, beside the row (B-96):
+  // one line, and on a node that runs no model — it never earns its identity
+  // by computing — the heavier one. Gone once the address is verified.
+  // Draft words for the owner's words review.
+  function paintEmailLine(root, emailStatus) {
+    const line = root.querySelector('[data-email-line]');
+    if (!line) return;
+    const verified = !!(emailStatus && emailStatus.verified);
+    line.hidden = verified || emailStatus === null;
+    if (line.hidden) return;
+    line.querySelector('.row-stack-sub').textContent = line.dataset.nano === '1'
+      ? 'Not verified. This node has no network identity yet: no Support, no connections from '
+        + 'outside your network, no invites by email.'
+      // (a second sentence, of small nodes that cannot check an identity
+      // earned by computing, waits for the measurement that names their size)
+      : 'Not verified. Needed to invite friends by email.';
   }
 
   /* ------------------------------------------------------------------
@@ -12685,10 +12706,26 @@
         <div class="profile-group-label">Account</div>
         <div class="form-group">
           ${emailRowHTML(account, emailStatus)}
+          <div class="form-row stacked" data-email-line data-nano="0" hidden><div class="row-stack-sub"></div></div>
           <div class="form-row is-clickable" data-action="change-identity">
             <span class="form-label">Nickname &amp; password</span>
             <span class="form-actions">
               <span class="form-value action">Change</span>
+              <span class="link-chev">${PROFILE_ICONS.chev}</span>
+            </span>
+          </div>
+          <div class="form-row is-clickable" data-action="backup">
+            <span class="form-label">Backup</span>
+            <span class="form-actions">
+              <span class="form-value" data-backup-line>…</span>
+              <span class="form-value action">Back up now</span>
+              <span class="link-chev">${PROFILE_ICONS.chev}</span>
+            </span>
+          </div>
+          <div class="form-row is-clickable" data-action="add-device">
+            <span class="form-label">Add a device</span>
+            <span class="form-actions">
+              <span class="form-value action">Show</span>
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
             </span>
           </div>
@@ -12795,6 +12832,14 @@
 
     const identityRow = root.querySelector('[data-action="change-identity"]');
     if (identityRow) identityRow.addEventListener('click', () => openChangeIdentityFlow(account, authStatus));
+
+    const backupRow = root.querySelector('[data-action="backup"]');
+    if (backupRow) {
+      backupRow.addEventListener('click', () => openBackupSheet());
+      paintBackupLine(root);
+    }
+    const deviceRow = root.querySelector('[data-action="add-device"]');
+    if (deviceRow) deviceRow.addEventListener('click', () => openAddDeviceSheet());
 
     const signOutRow = root.querySelector('[data-action="logout-all"]');
     if (signOutRow) signOutRow.addEventListener('click', () => onceInFlight(signOutRow, async () => {
@@ -13304,6 +13349,23 @@
     text: 'This machine\'s supply dropped under its voltage: under load it can switch off, ' +
           'and a disk can lose what it was writing. Use the board\'s official power supply.',
   });
+  // A signed release newer than the one this node runs, found by the host
+  // agent's check (backend/routers/host.py), and how the last update ended
+  // (a report, gone once seen). Draft words for the owner's words review.
+  NOTICE_COPY['update.available'] = n => {
+    const release = escapeHtml(String((n.data && n.data.release) || '').replace(/^v/, ''));
+    return { title: `Sautium ${release} is available`,
+             text: 'Update from More › Profile › Hardware profile.',
+             action: { label: 'Update', run: () => navigate('more/profile') } };
+  };
+  NOTICE_COPY['update.result'] = n => {
+    const d = n.data || {};
+    const release = escapeHtml(String(d.release || '').replace(/^v/, ''));
+    return d.outcome === 'updated'
+      ? { title: `Updated to ${release}`, text: '' }
+      : { title: `The update to ${release} did not start`,
+          text: `Sautium is back on ${escapeHtml(d.running || 'the release before')}, with its data as before.` };
+  };
   // Raised only while the assistant runs on Codex (backend/codex_cli.py).
   NOTICE_COPY['codex.signed_out'] = () => ({
     title: 'Codex is signed out',
@@ -14074,11 +14136,23 @@
       if (!result.ok) { confirmBtn.disabled = false; return fail(result.error); }
       close();
       if (result.restart_required) {
-        await notifyDialog({
-          title: 'Restart the backend',
-          kind: 'info',
-          message: 'The identity is changed. Peers see the new key once the backend restarts.',
-        });
+        // Where the node's image holds it, the restart is one tap here
+        let restartable = false;
+        try { restartable = !!(await (await fetch('/api/settings/hardware')).json()).restartable; } catch (_) {}
+        if (restartable) {
+          const now = await confirmDestructive({
+            title: 'Restart Sautium?',
+            message: 'The identity is changed. Peers see the new key once Sautium restarts. Music stops for about a minute.',
+            confirmText: 'Restart', cancelText: 'Later', confirmKind: 'primary',
+          });
+          if (now) await restartNode();
+        } else {
+          await notifyDialog({
+            title: 'Restart the backend',
+            kind: 'info',
+            message: 'The identity is changed. Peers see the new key once the backend restarts.',
+          });
+        }
       }
       // The Worker knew the old invite code — the mailbox is verified again
       // from the new key, which is what records the succession.
@@ -15816,7 +15890,23 @@
           ${waiting
             ? `<button class="btn-link" type="button" data-action="review-support">${escapeProfileHtml(supportLabel(sync.support))}</button>`
             : `<span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>`}
-        </div>`;
+        </div>
+        ${sync.host_agent ? `<div class="form-row">
+          <span class="form-label"></span>
+          <button class="btn-link" type="button" data-action="host-diagnostics">Diagnostics from this machine</button>
+        </div>` : ''}`;
+
+    // "Pass on what this node holds": the serving side of sharing, a switch
+    // of its own on a node born small — shown only where it is off or the
+    // node is Nano, so no other node's screen grows a row. Draft words.
+    const passOnRow = (sync.pass_on && !sync.nano) ? '' : `
+        <div class="form-row">
+          <span class="form-label">Pass on what this node holds</span>
+          <button class="toggle ${sync.pass_on ? 'on' : ''}" data-action="toggle-pass-on"><span class="knob"></span></button>
+        </div>
+        <div class="form-row stacked"><div class="row-stack-sub">${sync.pass_on
+          ? 'This node answers other Sautium nodes that ask for what it holds.'
+          : 'Off: this node asks other nodes and takes what they hold, and answers none of them.'}</div></div>`;
 
     if (!on) {
       // Sharing OFF — consolidated explainer in place of the three
@@ -15854,6 +15944,7 @@
           <button class="toggle on" data-action="toggle-p2p"><span class="knob"></span></button>
         </div>
         <div class="form-row stacked"><div class="row-stack-sub">${escapeProfileHtml(SHARING_ON_LINE)}</div></div>
+        ${passOnRow}
         <div class="form-row">
           <span class="form-label">Auto-sync interval</span>
           <button class="select-trigger" data-action="pick-interval">
@@ -15943,7 +16034,9 @@
   }
   function supportDetail(s) {
     if (!s) return '';
-    const parts = [s.enabled
+    const parts = [s.enabled && !s.sends_reports
+      ? 'This node keeps its event reports; they are sent when Support asks'
+      : s.enabled
       ? 'Event reports are sent on their own, and so is a request from Sautium support for facts about this node; a request that also asks for your conversations, logs or playback traces waits — all of it — until you review it, and those go only if you tick them'
       : 'Nothing is sent to Sautium support'];
     if (s.pending_events) parts.push(`${fmtNum(s.pending_events)} event${s.pending_events === 1 ? '' : 's'} waiting`);
@@ -16024,6 +16117,261 @@
         msg.textContent = String(err);
       }
     }));
+  }
+
+  /* "Back up now" (backend/backup_job.py): the making only. The account's
+     password rides the credential box; the file stays on the node — said
+     where it is, with what that means — and nothing here downloads it. The
+     job's progress follows the Library stream. Old backups are counted, and
+     "Keep the newest" is the owner's confirmed act, never the node's rule.
+     Draft words for the owner's words review. */
+  function backupLine(b) {
+    if (!b) return '—';
+    if (b.job.running) return 'running…';
+    if (!b.newest) return 'none yet';
+    return `${fmtRelative(b.newest.at)} · ${fmtBytes(b.newest.size)}`;
+  }
+  async function paintBackupLine(root) {
+    const line = root.querySelector('[data-backup-line]');
+    if (!line) return;
+    try {
+      const r = await fetch('/api/backup');
+      if (r.ok) line.textContent = backupLine(await r.json());
+    } catch (_) { /* the row keeps its last line */ }
+  }
+  const BACKUP_PHASES = { starting: 'Checking the password…', counting: 'Counting what there is…',
+                          dumping: 'Writing the database…', identity: 'Adding the identity…',
+                          paused: 'Paused while music plays…' };
+  function backupJobLine(job) {
+    const phase = BACKUP_PHASES[job.phase] || 'Working…';
+    return job.bytes ? `${phase} ${fmtBytes(job.bytes)}${job.total ? ` of ${fmtBytes(job.total)}` : ''}` : phase;
+  }
+  function openBackupSheet() {
+    if (document.querySelector('[data-backup-sheet]')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.dataset.backupSheet = '';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Backup</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            A backup holds your library's records, your listening history and this node's identity, encrypted with your account password.
+          </p>
+          <div data-state style="font-size:calc(13*var(--px));color:var(--color-text);line-height:1.5;"></div>
+          <button class="profile-btn primary" data-start>Back up now</button>
+          <button class="profile-btn secondary" data-stop hidden>Cancel</button>
+          <button class="profile-btn secondary" data-keep hidden></button>
+          <div data-msg style="font-size:calc(12*var(--px));color:var(--color-negative);min-height:calc(16*var(--px));"></div>
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">
+            A backup on the same disk does not survive that disk. Copy the file to another machine or a USB disk: Sautium does not send it anywhere, and this page cannot download it.
+          </p>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const stateEl = overlay.querySelector('[data-state]');
+    const start = overlay.querySelector('[data-start]');
+    const stop = overlay.querySelector('[data-stop]');
+    const keep = overlay.querySelector('[data-keep]');
+    const msg = overlay.querySelector('[data-msg]');
+    function paint(b) {
+      const job = b.job;
+      start.hidden = job.running;
+      stop.hidden = !job.running;
+      stop.disabled = !!job.cancel_requested;
+      keep.hidden = job.running || b.count <= b.keep_newest;
+      keep.textContent = `Keep the newest ${b.keep_newest}`;
+      if (job.running) {
+        stateEl.textContent = job.cancel_requested ? 'Cancelling…' : backupJobLine(job);
+      } else if (b.newest) {
+        stateEl.textContent = `Saved on this node · ${b.folder}/${b.newest.name} · ${fmtBytes(b.newest.size)}`
+          + (b.count > 1 ? ` — ${fmtNum(b.count)} backups · ${fmtBytes(b.bytes)}` : '');
+      } else {
+        stateEl.textContent = 'No backup yet.';
+      }
+      if (!job.running && job.error) msg.textContent = job.error;
+    }
+    async function refresh() {
+      try {
+        const r = await fetch('/api/backup');
+        if (r.ok) paint(await r.json());
+      } catch (_) { /* the sheet keeps what it shows */ }
+    }
+    const sub = libraryWake.on(refresh);
+    const close = () => { sub.abort(); overlay.remove(); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    start.addEventListener('click', () => onceInFlight(start, async () => {
+      msg.textContent = '';
+      const res = await askStepUp({
+        title: 'Back up now', confirm: 'Back up',
+        text: 'Your account password encrypts the backup. Without it the file cannot be opened.',
+      }, password => window.Sautium.auth.boxed('/api/backup', {}, { password }));
+      if (res && res.ok) paint(res.data);
+    }));
+    stop.addEventListener('click', () => onceInFlight(stop, async () => {
+      const r = await fetch('/api/backup/cancel', { method: 'POST' });
+      if (r.ok) paint(await r.json());
+    }));
+    keep.addEventListener('click', () => onceInFlight(keep, async () => {
+      const b = await (await fetch('/api/backup')).json();
+      const ok = await confirmDestructive({
+        title: `Keep the newest ${b.keep_newest} backups?`,
+        message: `${fmtNum(b.count - b.keep_newest)} older backup${b.count - b.keep_newest === 1 ? ' is' : 's are'} `
+               + 'deleted from this node for good. Copies you made elsewhere are not touched.',
+        confirmText: 'Delete the older ones',
+      });
+      if (!ok) return;
+      const r = await fetch('/api/backup/keep-newest', { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) paint(data); else msg.textContent = typeof data.detail === 'string' ? data.detail : 'Not removed.';
+    }));
+    refresh();
+  }
+
+  /* "Add a device" (backend/device_links.py): this node's own addresses as
+     QR codes — the other device opens one and signs in with the account's
+     nickname and password. Nothing is minted here. The codes are drawn as
+     inline SVG from the matrix the node sends: no image is fetched. Draft
+     words for the owner's words review. */
+  function qrSvg(rows) {
+    const n = rows.length, quiet = 4, size = n + 2 * quiet;
+    let d = '';
+    rows.forEach((row, y) => {
+      for (let x = 0; x < row.length; x++) {
+        if (row[x] === '1') d += `M${x + quiet} ${y + quiet}h1v1h-1z`;
+      }
+    });
+    // Dark on white whatever the theme: a camera reads contrast, not tokens
+    return `<svg viewBox="0 0 ${size} ${size}" width="100%" role="img" aria-label="QR code" `
+      + `shape-rendering="crispEdges" style="max-width:calc(220*var(--px));display:block;margin:0 auto;">`
+      + `<rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+  }
+  function openAddDeviceSheet() {
+    if (document.querySelector('[data-device-sheet]')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.dataset.deviceSheet = '';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Add a device</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row" data-links>
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));">…</p>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const p = text => `<p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">${text}</p>`;
+    fetch('/api/auth/device-links').then(r => r.ok ? r.json() : { links: [] }).then(data => {
+      const links = data.links || [];
+      const block = (link, label) => `
+        <div style="font-size:calc(13*var(--px));color:var(--color-text);">${label}</div>
+        ${qrSvg(link.qr)}
+        <div class="mono" style="text-align:center;font-size:calc(12.5*var(--px));color:var(--color-text);">${escapeProfileHtml(link.url)}</div>`;
+      const lan = links.filter(l => l.kind === 'lan');
+      const tailnet = links.filter(l => l.kind === 'tailnet');
+      overlay.querySelector('[data-links]').innerHTML = !links.length
+        ? p('This node does not know an address another device could open. Use the address this page was opened at.')
+        : lan.map(l => block(l, 'In this network')).join('')
+          + (lan.length ? p('Open the address on the other device and sign in with your nickname and password. '
+              + 'If the page does not open: the device must be on the same Wi-Fi, and a VPN on it must allow local network access or be off.') : '')
+          + tailnet.map(l => block(l, 'From anywhere (Tailscale)')).join('')
+          + (tailnet.length ? p('Tailscale must be on on that device; a phone runs one VPN at a time. '
+              + 'It is a separate address: sign in there once more.') : '');
+    }).catch(() => {
+      overlay.querySelector('[data-links]').innerHTML = p('Could not read this node\'s addresses.');
+    });
+  }
+
+  /* The host's diagnostics (a node with a host agent): what the machine
+     knows that the node cannot read for itself — versions, the power flag,
+     the disk, the containers' last lines, the agent's own log (setup codes
+     scrubbed by the agent). "Collect" asks the agent; its report comes back
+     as text, shown as text and never parsed — part of it is what a
+     container logged — with Copy, to paste into a message to Support.
+     Draft words for the owner's words review. */
+  function openHostDiagnosticsSheet() {
+    if (document.querySelector('[data-host-diag-sheet]')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.dataset.hostDiagSheet = '';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Diagnostics from this machine</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            Versions, the power supply's flag, the disk, the last lines of Sautium's logs. Nothing is sent anywhere: the report is shown here.
+          </p>
+          <button class="profile-btn primary" data-collect>Collect</button>
+          <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+          <div data-report hidden>
+            <div data-report-box>
+              <pre data-report-text style="margin:0;max-height:40vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:calc(11*var(--px));color:var(--color-text);"></pre>
+              <div class="copy-line" data-copy-skip>${copyButtonHtml('data-copy-from="[data-report-box]"', 'Copy')}</div>
+            </div>
+            <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">Paste it into your message to Support.</p>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const msg = overlay.querySelector('[data-msg]');
+    const collect = overlay.querySelector('[data-collect]');
+    const box = overlay.querySelector('[data-report]');
+    let asked = false;
+    async function paint() {
+      let host;
+      try { host = await (await fetch('/api/host')).json(); } catch (_) { return; }
+      const d = (host.requests && host.requests.diagnostics) || {};
+      const waits = d.asked_at && (!d.answered_at || d.answered_at < d.asked_at);
+      collect.disabled = !!waits;
+      collect.textContent = waits ? 'Collecting…' : 'Collect';
+      if (!waits && asked && d.outcome && d.outcome !== 'done') {
+        msg.textContent = d.outcome === 'floor'
+          ? 'Collected less than ten minutes ago: this is that report.'
+          : `Not collected: ${d.detail || d.outcome}`;
+      }
+      if (d.has_report && !waits) {
+        try {
+          const r = await fetch('/api/host/diagnostics/report');
+          if (r.ok) {
+            const report = await r.json();
+            overlay.querySelector('[data-report-text]').textContent = report.report;
+            box.hidden = false;
+            if (!msg.textContent) msg.textContent = `Collected ${fmtRelative(report.answered_at)}.`;
+          }
+        } catch (_) { /* the last report stays */ }
+      }
+    }
+    const sub = libraryWake.on(paint);
+    const close = () => { sub.abort(); overlay.remove(); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    collect.addEventListener('click', () => onceInFlight(collect, async () => {
+      msg.textContent = '';
+      asked = true;
+      const r = await fetch('/api/host/diagnostics', { method: 'POST' });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        msg.textContent = typeof data.detail === 'string' ? data.detail : 'The host agent could not be asked.';
+        return;
+      }
+      await paint();
+    }));
+    paint();
   }
 
   // Identity certificate + proof state published by the node's proof worker
@@ -16905,22 +17253,218 @@
     return parts.join(' · ');
   }
 
+  // The profile's name as a person meets it: the tier, or "Nano" where the
+  // tier is lite and no model runs (the owner, 2026-11-18).
+  function hwProfileName(hw) {
+    return hw.nano ? 'Nano' : (PROFILE_DISPLAY_NAMES[hw.profile] || hw.profile || '?');
+  }
+
+  // The "AI models" row: the owner's switch, or why there is none to move.
+  // Draft words for the owner's words review.
+  function hwModelsRow(hw) {
+    if (hw.models === 'absent') {
+      const why = hw.restartable
+        ? 'Off — this install was set up without the models. On the machine, run: ./sautium setup --preset full'
+        : 'Not available: no AI models exist for this machine.';
+      return `<div class="form-row stacked"><div class="row-stack"><span class="row-stack-label">AI models</span></div>
+        <div class="row-stack-sub">${escapeProfileHtml(why)}</div></div>`;
+    }
+    const on = !!hw.models_switch;
+    const pending = hw.restart_required
+      ? `<div class="row-stack-sub">${on ? 'On' : 'Off'} from the next start of Sautium.</div>` : '';
+    return `<div class="form-row stacked">
+        <div class="row-stack">
+          <span class="row-stack-label">AI models</span>
+          <span class="form-value">${hw.models === 'on' ? 'On' : 'Off on this machine'}</span>
+          <button class="profile-btn secondary" type="button" data-action="models-switch" data-on="${on ? '0' : '1'}">${on ? 'Turn off' : 'Turn on'}</button>
+        </div>${pending}</div>`;
+  }
+
+  // The "Sautium" row: what runs here, and the one control the host agent's
+  // last answers leave (backend/routers/host.py). Its sentences for a
+  // refusal are the agent's own, shown as text. Draft words for the review.
+  function hwSoftwareRow(hw, host) {
+    const sw = hw.software || {};
+    const what = [sw.version, sw.commit || sw.build].filter(Boolean).join(' · ') || '—';
+    let control = '', sub = '';
+    if (hw.restartable && !host.available) {
+      sub = 'Updates: on the machine, run ./sautium update';
+    } else if (host.available) {
+      const check = host.requests.check || {};
+      const update = host.requests.update || {};
+      const waits = r => r.asked_at && (!r.answered_at || r.answered_at < r.asked_at);
+      const offered = host.offered ? host.offered.replace(/^v/, '') : null;
+      if (waits(update)) {
+        sub = 'Updating… Sautium will stop and come back.';
+      } else {
+        control = offered
+          ? `<button class="profile-btn primary" type="button" data-action="host-update" data-release="${escapeProfileHtml(offered)}">Update to ${escapeProfileHtml(offered)}</button>`
+          : `<button class="profile-btn secondary" type="button" data-action="host-check"${waits(check) ? ' disabled' : ''}>${waits(check) ? 'Checking…' : 'Check for updates'}</button>`;
+        const newest = [check, update].filter(r => r.answered_at)
+          .sort((a, b) => (a.answered_at < b.answered_at ? 1 : -1))[0];
+        if (newest === update && ['refused', 'failed', 'floor'].includes(update.outcome)) {
+          sub = `The update did not run: ${update.detail || update.outcome}`;
+        } else if (!offered && check.answered_at) {
+          sub = {
+            current: `Up to date · checked ${fmtRelative(check.answered_at)}`,
+            floor: 'Checked less than an hour ago.',
+            rewrite: 'A newer release cannot be reached from this install. A fresh install moves to it.',
+            refused: 'A release offered to this node is not signed by a Sautium release key. Nothing was changed.',
+            failed: `The check did not run: ${check.detail || ''}`,
+          }[check.outcome] || '';
+        }
+      }
+    }
+    return `<div class="form-row stacked">
+        <div class="row-stack">
+          <span class="row-stack-label">Sautium</span>
+          <span class="form-value mono">${escapeProfileHtml(what)}</span>
+          ${control}
+        </div>${sub ? `<div class="row-stack-sub">${escapeProfileHtml(sub)}</div>` : ''}</div>`;
+  }
+
+  /* Hardware profile block (Profile screen): this node's tier — automatic,
+     SAUTIUM_PROFILE env its only override, for diagnostics — the owner's
+     model switch, what it runs, and on a node its image holds the update
+     (through the host agent) and the restart. Loads itself after render and
+     follows the host agent's answers over the Library stream. */
+  let _hwBlockSub = null;
   async function _loadHwBlock(root) {
     const holder = root.querySelector('[data-hw-block]');
     if (!holder) return;
-    let hw = null;
-    try {
-      const r = await fetch('/api/settings/hardware');
-      if (r.ok) hw = await r.json();
-    } catch (_) {}
-    if (!hw) { holder.innerHTML = ''; return; }
-    const d = hw.detected || {};
-    holder.innerHTML = `
-      <div class="profile-group-label">Hardware profile</div>
-      <div class="form-group">
-        <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(PROFILE_DISPLAY_NAMES[hw.profile] || hw.profile || '?')}${hw.source === 'env' ? ' · env override' : ''}</span></div>
-        <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(_hwMachineLine(d))}. Scales analysis, model pre-warm and background load.</div></div>
-      </div>`;
+    if (_hwBlockSub) _hwBlockSub.abort();
+    _hwBlockSub = libraryWake.on(() => {
+      if (!document.contains(holder)) { _hwBlockSub.abort(); _hwBlockSub = null; return; }
+      paint();
+    });
+
+    async function paint() {
+      let hw = null, host = { available: false, requests: {}, offered: null };
+      try {
+        const [rh, ro] = await Promise.all([fetch('/api/settings/hardware'), fetch('/api/host')]);
+        if (rh.ok) hw = await rh.json();
+        if (ro.ok) host = await ro.json();
+      } catch (_) {}
+      if (!hw) { holder.innerHTML = ''; return; }
+      const d = hw.detected || {};
+      const cache = hw.models_cache_bytes || 0;
+      holder.innerHTML = `
+        <div class="profile-group-label">Hardware profile</div>
+        <div class="form-group" data-guide="this_node">
+          <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(hwProfileName(hw))}${hw.source === 'env' ? ' · env override' : ''}</span></div>
+          <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(_hwMachineLine(d))}. ${hw.nano
+            ? 'Nothing is analysed here: sound features arrive from other Sautium nodes.'
+            : 'Scales analysis, model pre-warm and background load.'}</div></div>
+          ${hwModelsRow(hw)}
+          ${cache ? `<div class="form-row">
+            <span class="form-label">Downloaded models</span>
+            <span class="form-value mono">${escapeProfileHtml(fmtBytes(cache))}</span>
+            <button class="profile-btn secondary" type="button" data-action="models-cache-remove">Remove</button>
+          </div>` : ''}
+          ${hwSoftwareRow(hw, host)}
+          ${hw.restartable ? `<div class="form-row">
+            <span class="form-label">This machine</span>
+            <span class="form-value">${escapeProfileHtml(hw.machine || '—')}</span>
+            <button class="profile-btn secondary" type="button" data-action="restart-node">Restart Sautium</button>
+          </div>` : ''}
+        </div>`;
+      wire(hw);
+      // Shown: the one-time mark of a node born with a preset is retired,
+      // and the Email row's line knows which node this is
+      guide.paint();
+      guide.seen('this_node');
+      const emailLine = root.querySelector('[data-email-line]');
+      if (emailLine && emailLine.dataset.nano !== (hw.nano ? '1' : '0')) {
+        emailLine.dataset.nano = hw.nano ? '1' : '0';
+        if (!emailLine.hidden) paintEmailLine(root, { verified: false });
+      }
+    }
+
+    const act = (sel, fn) => {
+      const el = holder.querySelector(sel);
+      if (el) el.addEventListener('click', () => onceInFlight(el, () => fn(el)));
+    };
+    function wire(hw) {
+      act('[data-action="models-switch"]', async el => {
+        const on = el.dataset.on === '1';
+        const ok = await confirmDestructive(on ? {
+          title: 'Turn the AI models on?',
+          message: 'Your library is then analysed here: about a day for 5 000 tracks on a small machine. '
+                 + 'Models download on first use, about 4 GB. Sautium restarts.',
+          confirmText: 'Turn on', confirmKind: 'primary',
+        } : {
+          title: 'Turn the AI models off?',
+          message: 'Nothing stored is removed: what this node analysed stays. It stops analysing music '
+                 + 'and searching by sound; sound features then arrive from other Sautium nodes. Sautium restarts.',
+          confirmText: 'Turn off',
+        });
+        if (!ok) return;
+        const r = await fetch('/api/settings/hardware/models', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ on }),
+        });
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          notices.toast({ kind: 'error', title: 'Not changed', text: escapeHtml(data.detail || `HTTP ${r.status}`) });
+          return;
+        }
+        if (hw.restartable) return restartNode();
+        await notifyDialog({ title: 'Restart Sautium', kind: 'info',
+                             message: 'The change applies when Sautium starts again: quit it from its launcher and start it.' });
+        paint();
+      });
+      act('[data-action="models-cache-remove"]', async () => {
+        const ok = await confirmDestructive({
+          title: 'Remove the downloaded models?',
+          message: 'The model files this node downloaded are deleted from its disk. Nothing of your library '
+                 + 'or its analysis goes. Turning the models on again downloads them again.',
+        });
+        if (!ok) return;
+        const r = await fetch('/api/settings/hardware/models/cache', { method: 'DELETE' });
+        const data = await r.json().catch(() => ({}));
+        notices.toast(r.ok
+          ? { kind: 'success', title: 'Models removed', text: `${escapeHtml(fmtBytes(data.freed_bytes || 0))} freed.` }
+          : { kind: 'error', title: 'Not removed', text: escapeHtml(data.detail || `HTTP ${r.status}`) });
+        paint();
+      });
+      act('[data-action="host-check"]', async () => {
+        await fetch('/api/host/check', { method: 'POST' });
+        paint();
+      });
+      act('[data-action="host-update"]', async el => {
+        const release = el.dataset.release;
+        const ok = await confirmDestructive({
+          title: `Update to ${release}?`,
+          message: `Sautium stops for a few minutes and restarts on ${escapeProfileHtml(release)}. Music stops.`,
+          confirmText: 'Update', confirmKind: 'primary',
+        });
+        if (!ok) return;
+        await fetch('/api/host/update', { method: 'POST' });
+        paint();
+      });
+      act('[data-action="restart-node"]', async () => {
+        const ok = await confirmDestructive({
+          title: 'Restart Sautium?',
+          message: 'Sautium stops and starts again in about a minute. Music stops.',
+          confirmText: 'Restart', confirmKind: 'primary',
+        });
+        if (ok) await restartNode();
+      });
+    }
+    await paint();
+  }
+
+  // "Restart Sautium" on a node its image holds: the backend ends its own
+  // process and the container's policy starts it; this page's stream
+  // reconnects by itself.
+  async function restartNode() {
+    const r = await fetch('/api/settings/restart', { method: 'POST' });
+    if (r.ok) {
+      notices.toast({ kind: 'info', title: 'Restarting Sautium',
+                      text: 'This page reconnects by itself when it is back.' });
+    } else {
+      const data = await r.json().catch(() => ({}));
+      notices.toast({ kind: 'error', title: 'Not restarted', text: escapeHtml(data.detail || `HTTP ${r.status}`) });
+    }
   }
 
   /* Last.fm listening history (Profile screen, when Last.fm is connected).
@@ -18186,6 +18730,8 @@
     toggle('[data-action="toggle-reanalyze"]', 'reanalyze_imported');
     toggle('[data-action="toggle-relay"]',     'relay_enabled');
     toggle('[data-action="toggle-support"]',   'diagnostics_enabled');
+    toggle('[data-action="toggle-pass-on"]',   'pass_on');
+    onAction('[data-action="host-diagnostics"]', () => openHostDiagnosticsSheet());
     onAction('[data-action="review-support"]', () => {
       openSupportRequestSheet(sync.support.requests[0]);
     });
@@ -18288,6 +18834,11 @@
     // Notices ride /api/events (player.js re-dispatches the snapshot); the
     // link state comes from the same stream's transport.
     window.addEventListener('sautium:notice', e => notices.apply(e.detail || {}));
+    // The email typed on the first-run form: its code was asked for as the
+    // account was made, and this is the page that loads next — the code's
+    // dialog opens here, with no second tap (auth.js rememberEmail)
+    const firstRunGrant = window.Sautium.auth.takeFirstRunEmailGrant();
+    if (firstRunGrant) openEmailVerifyFlow(firstRunGrant);
     // Registered before any screen's own listener: Friends and a chat
     // header repaint from the state this one has already taken
     window.addEventListener('sautium:identity', e => nodeIdentity.apply(e.detail || {}));

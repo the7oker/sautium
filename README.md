@@ -246,6 +246,17 @@ docker compose -f docker-compose.mac.yml up -d --build
 docker compose -f docker-compose.pi.yml up -d --build
 ```
 
+On such a Linux machine `./sautium` does all of it from the clone (since
+2026-11-19; `scripts/setup.py`, standard-library Python, run as yourself):
+it checks the machine, writes `.env`, builds the image, installs the host
+agent, starts the node and prints its address with the setup code and a QR.
+It reads how much the machine can carry and makes a small board a **Nano**
+node — nothing analysed there, sound features taken from other nodes. It
+never calls `sudo`: a step that needs root (lingering, mounting plugged
+disks read-only) is printed whole for you to paste. The music folder, the
+assistant and the output are then chosen in the Web UI. `./sautium status`,
+`pair`, `update` and `remove` are its other commands.
+
 The CPU image (`backend/Dockerfile.mac`) takes three build arguments, read
 from `.env` by `docker-compose.pi.yml` and by the host agent's update:
 `SAUTIUM_IMAGE_MODELS=0` leaves the model stack out (the node then analyses
@@ -291,7 +302,11 @@ The first visit sets the node up: a nickname, a password, and the setup code
 the backend writes at each start to its log (`docker compose logs backend |
 grep "setup code"` — the last one is the live one) and to `setup_code.txt` in
 the node's identity folder: `data/node_identity` (under
-`docker-compose.wsl.yml`, `backend/data/node_identity`). The code dies with the account's creation. To
+`docker-compose.wsl.yml`, `backend/data/node_identity`). It is eight characters, taken in any case
+and with or without its hyphen (the last screen of `./sautium` shows it, with a QR that carries it);
+past five wrong tries the form waits out a growing delay, and the code stays the same. The form's
+optional email, once verified, gives the node its network identity at once — the only way to one
+on a Nano node, which never earns it by computing. The code dies with the account's creation. To
 start over, stop the stack, empty that folder and start it again: the node
 writes a new code. A node whose database names the key it signed with —
 every node that started with one — then asks for that identity's nickname and

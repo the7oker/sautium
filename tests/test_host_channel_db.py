@@ -86,7 +86,7 @@ def test_a_node_without_an_agent_says_so_and_writes_nothing(node, monkeypatch):
     assert _signed(client, "/api/host/check", {}, TOKEN.encode()).status_code == 409
     assert list(requests.iterdir()) == []
     state = client.get("/api/host", headers=_get_headers("/api/host"))
-    assert state.json() == {"available": False, "requests": {}}
+    assert state.json() == {"available": False, "requests": {}, "offered": None}
 
 
 def _get_headers(path: str) -> dict:

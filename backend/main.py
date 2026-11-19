@@ -668,6 +668,12 @@ async def lifespan(app: FastAPI):
     from playback.manager import start_files_listener, stop_files_listener
     start_files_listener()
 
+    # A node with a host agent asks it for newer releases at its start and
+    # once a day (the background pass asks again), so an update is offered
+    # though nobody opened the screen
+    from routers import host as host_router
+    await asyncio.to_thread(host_router.check_if_due)
+
     # A disk plugged in after this start, on a node that reads under roots
     import mount_watch
     mount_watch.start()
@@ -2681,6 +2687,10 @@ app.include_router(support_router)
 
 from routers.host import router as host_router
 app.include_router(host_router)
+
+# "Back up now": the making only — no route serves a backup's file
+from routers.backup import router as backup_router
+app.include_router(backup_router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

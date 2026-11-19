@@ -783,6 +783,9 @@ def _loop() -> None:
             backlog = False
             db_ran = False
             try:
+                # Once a day, on a node with a host agent: newer releases
+                from routers import host as host_router
+                host_router.check_if_due()
                 batch, backlog = _run_network_steps()
                 # After the network steps, so a bio or lyric fetched in this
                 # pass is embedded in this pass.

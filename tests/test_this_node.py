@@ -1,0 +1,439 @@
+""""This node" in the Web UI (PI-NODE-2B §4.4–§4.5): what the Hardware
+profile block reads and does on 2A's interfaces.
+
+- The state: what the install carries, the machine's name, the version the
+  tree states; the downloaded models' size on a node that runs none.
+- The restart: only where a restart policy holds the node, and only after
+  the answer has been sent.
+- The downloaded models' removal: the owner's act, refused while a model
+  can still load.
+- The host agent: the release a check offered while the node runs an older
+  one, the daily check asked once a day, the notices `update.available` and
+  `update.result`.
+- The block's words, app-shell.js's own functions under Node: the name
+  "Nano", the model switch's row, and every outcome of `check` and `update`
+  to its sentence — a refusal's detail (the host's words, an HTML string
+  among them) escaped.
+On a real PostgreSQL where a row is read; skipped without one.
+"""
+
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+BACKEND = REPO / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+psycopg2 = pytest.importorskip("psycopg2")
+import psycopg2.pool  # noqa: E402
+
+import hardware_profile  # noqa: E402
+import host_channel  # noqa: E402
+
+NODE = shutil.which("node")
+SOURCE = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
+
+
+def _profile(models: str, name: str = "lite"):
+    return hardware_profile.HardwareProfile(
+        name=name, source="auto", device="cpu", accel_name=None, accel_memory_gb=4.0,
+        ram_gb=4.0, cores=4, models=models)
+
+
+@pytest.fixture
+def db(scratch_dsn, monkeypatch):
+    import db_pool
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 3, dsn=scratch_dsn, options="-c timezone=UTC")
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    conn = psycopg2.connect(scratch_dsn)
+    conn.autocommit = True
+    with conn.cursor() as c:
+        c.execute("TRUNCATE host_requests")
+        c.execute("DELETE FROM user_settings")
+        yield c
+    conn.close()
+    pool.closeall()
+
+
+# -- the state ---------------------------------------------------------------------------------
+
+def test_the_block_reads_what_the_install_carries_and_what_runs(db, tmp_path, monkeypatch):
+    settings_router = pytest.importorskip("routers.settings")
+    import claude_code_runner
+    import model_cache
+    from desktop import updater
+    from streaming import service as streaming_service
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("off"))
+    monkeypatch.setattr(settings_router.shutil, "which", lambda name: None)
+    monkeypatch.setattr(streaming_service, "demo_runtime", lambda: False)
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", True)
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 0))
+    monkeypatch.setattr(model_cache, "store_bytes", lambda: 4_200_000_000)
+    cpuinfo = tmp_path / "cpuinfo"
+    cpuinfo.write_text("processor\t: 0\nBogoMIPS\t: 108.00\n\nRevision\t: d04170\n"
+                       "Model\t\t: Raspberry Pi 5 Model B Rev 1.0\n")
+    monkeypatch.setattr(settings_router, "_CPUINFO", str(cpuinfo))
+    db.execute("INSERT INTO user_settings (key, value) VALUES ('compute.models', 'false')")
+    state = settings_router.get_hardware_profile()
+    assert (state["nano"], state["models"], state["restart_required"]) == (True, "off", False)
+    assert state["image"] == {"models": True, "assistant_cli": False, "streaming": False}
+    assert state["machine"] == "Raspberry Pi 5 Model B Rev 1.0"
+    assert state["software"]["version"] == "0.3.0" and "commit" in state["software"]
+    assert state["models_cache_bytes"] == 4_200_000_000 and state["restartable"] is True
+    # A node whose models run is told no cache size: nothing there is its owner's to remove
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("on", name="standard"))
+    monkeypatch.setattr(settings_router, "_CPUINFO", str(tmp_path / "none"))
+    state = settings_router.get_hardware_profile()
+    assert "models_cache_bytes" not in state and state["machine"] is None
+    assert state["restart_required"] is True          # the switch says off: applied at the next start
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("absent"))
+    assert settings_router.get_hardware_profile()["image"]["models"] is False
+
+
+# -- the restart ---------------------------------------------------------------------------------
+
+def test_a_restart_ends_the_process_only_after_its_answer_and_only_in_the_image(monkeypatch):
+    settings_router = pytest.importorskip("routers.settings")
+    import claude_code_runner
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+    app.include_router(settings_router.router)
+    killed = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", False)
+    with TestClient(app) as web:
+        refused = web.post("/api/settings/restart")
+        assert refused.status_code == 409 and "launcher" in refused.json()["detail"] and killed == []
+        monkeypatch.setattr(claude_code_runner, "IN_DOCKER", True)
+        answer = web.post("/api/settings/restart")
+        assert answer.status_code == 200 and answer.json() == {"restarting": True}
+    assert killed == [(os.getpid(), signal.SIGTERM)]
+
+
+# -- the downloaded models -------------------------------------------------------------------------
+
+def test_the_downloaded_models_are_counted_once_and_removed_by_the_owner_alone(tmp_path, monkeypatch):
+    settings_router = pytest.importorskip("routers.settings")
+    import model_cache
+    from fastapi import HTTPException
+    hub = tmp_path / "cache" / "huggingface" / "hub"
+    blobs = hub / "models--laion--clap" / "blobs"
+    blobs.mkdir(parents=True)
+    (blobs / "abc").write_bytes(b"w" * 1000)
+    snapshot = hub / "models--laion--clap" / "snapshots" / "r1"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.safetensors").symlink_to(blobs / "abc")       # the hub's links: not counted twice
+    (tmp_path / "cache" / "sautium-ct2" / "madlad").mkdir(parents=True)
+    (tmp_path / "cache" / "sautium-ct2" / "madlad" / "model.bin").write_bytes(b"m" * 500)
+    kept = tmp_path / "cache" / "sautium" / "yt-dlp"
+    kept.mkdir(parents=True)
+    (kept / "build").write_bytes(b"not a model")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "cache" / "huggingface"))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    assert model_cache.store_bytes() == 1500
+
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("on"))
+    with pytest.raises(HTTPException) as refused:
+        settings_router.delete_models_cache()
+    assert refused.value.status_code == 409 and model_cache.store_bytes() == 1500
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("off"))
+    assert settings_router.delete_models_cache() == {"freed_bytes": 1500}
+    assert model_cache.store_bytes() == 0 and not (tmp_path / "cache" / "huggingface").exists()
+    assert (kept / "build").read_bytes() == b"not a model"           # another cache is not its to take
+    assert settings_router.delete_models_cache() == {"freed_bytes": 0}
+
+
+# -- the host agent ---------------------------------------------------------------------------------
+
+@pytest.fixture
+def agent(db, tmp_path, monkeypatch):
+    from desktop import updater
+    requests = tmp_path / "requests"
+    requests.mkdir()
+    monkeypatch.setattr(host_channel, "REQUESTS_DIR", requests)
+    monkeypatch.setattr(host_channel, "_KEY", b"cd" * 32)
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 0))
+    return db, requests
+
+
+def _answered(c, verb, outcome, release=None, detail=""):
+    c.execute("""INSERT INTO host_requests (verb, asked_at, outcome, release, detail, answered_at)
+                 VALUES (%s, now() - interval '1 minute', %s, %s, %s, now())
+                 ON CONFLICT (verb) DO UPDATE SET outcome = EXCLUDED.outcome, release = EXCLUDED.release,
+                     detail = EXCLUDED.detail, answered_at = EXCLUDED.answered_at""",
+              (verb, outcome, release, detail))
+
+
+def test_a_release_is_offered_only_while_the_node_runs_an_older_one(agent, monkeypatch):
+    host = pytest.importorskip("routers.host")
+    c, _ = agent
+    assert host.offered_release() is None
+    _answered(c, "check", "offered", "v0.3.1")
+    offered = host.offered_release()
+    assert offered["release"] == "v0.3.1" and offered["since"]
+    # The update moved the node: the check's row is unchanged, the offer is over
+    from desktop import updater
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 1))
+    assert host.offered_release() is None
+    monkeypatch.setattr(updater, "installer_version", lambda: (0, 3, 0))
+    for outcome, release in (("current", "v0.3.0"), ("rewrite", "v0.4.0"), ("offered", "not-a-version")):
+        _answered(c, "check", outcome, release)
+        assert host.offered_release() is None, outcome
+    _answered(c, "check", "offered", "v0.3.1")
+    monkeypatch.setattr(host_channel, "_KEY", None)                  # no agent: nothing to offer
+    assert host.offered_release() is None
+
+
+def test_the_node_asks_for_a_check_once_a_day_by_itself(agent, monkeypatch):
+    host = pytest.importorskip("routers.host")
+    c, requests = agent
+    assert host.check_if_due() is True
+    assert [p.name for p in requests.iterdir()] == ["check"]
+    (requests / "check").unlink()                                    # the agent took it
+    assert host.check_if_due() is False and list(requests.iterdir()) == []
+    c.execute("UPDATE host_requests SET asked_at = now() - interval '25 hours'")
+    assert host.check_if_due() is True
+    monkeypatch.setattr(host_channel, "_KEY", None)
+    c.execute("UPDATE host_requests SET asked_at = now() - interval '25 hours'")
+    assert host.check_if_due() is False
+
+
+def test_an_offered_release_and_an_updates_end_are_notices(agent, monkeypatch):
+    settings_router = pytest.importorskip("routers.settings")
+    c, _ = agent
+
+    def notices() -> dict:
+        return {n["key"]: n for n in settings_router._notices_state()["items"]
+                if n["key"].startswith("update.")}
+    assert notices() == {}
+    _answered(c, "check", "offered", "v0.3.1")
+    offered = notices()
+    assert list(offered) == ["update.available"]
+    assert offered["update.available"]["data"] == {"release": "v0.3.1"}
+    for outcome, kind in (("updated", "info"), ("undone", "warning")):
+        _answered(c, "update", outcome, "v0.3.1")
+        result = notices()["update.result"]
+        assert (result["kind"], result["data"]["outcome"], result["data"]["release"]) == (
+            kind, outcome, "v0.3.1")
+        assert result["data"]["running"] == "0.3.0"
+    # A report: dropped once the owner has seen it
+    assert "update.result" in settings_router._REPORTS
+    c.execute("INSERT INTO user_settings (key, value) VALUES ('notice.seen', %s::jsonb)",
+              (json.dumps({"update.result": result["since"]}),))
+    assert "update.result" not in notices()
+    # A refusal is the block's line, never a notice
+    _answered(c, "update", "refused", "v0.3.1", "the checkout has local changes")
+    assert "update.result" not in notices()
+
+
+# -- the block's words --------------------------------------------------------------------------------
+
+def _block(head: str, end: str = "\n  }\n") -> str:
+    start = SOURCE.index(f"\n  {head}") + 1
+    return SOURCE[start:SOURCE.index(end, start) + len(end)]
+
+
+DRIVER = r"""
+'use strict';
+const PROFILE_DISPLAY_NAMES = { full: 'Curator', standard: 'Standard', lite: 'Lite' };
+const escapeProfileHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const fmtRelative = iso => '2 h ago';
+%(fns)s
+const text = html => html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+const out = { names: [], models: {}, software: {} };
+for (const hw of %(profiles)s) out.names.push(hwProfileName(hw));
+for (const [name, hw] of Object.entries(%(models)s)) out.models[name] = text(hwModelsRow(hw));
+for (const [name, c] of Object.entries(%(cases)s)) {
+  const html = hwSoftwareRow(c.hw, c.host);
+  out.software[name] = { text: text(html), raw: html };
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+HW = {"software": {"version": "0.3.0", "commit": "4f2a91c0e7b3"}, "restartable": True}
+T0, T1, T2 = "2026-11-19T10:00:00+00:00", "2026-11-19T10:05:00+00:00", "2026-11-19T10:10:00+00:00"
+
+
+def _host(check=None, update=None, offered=None, available=True) -> dict:
+    return {"available": available, "offered": offered,
+            "requests": {k: v for k, v in (("check", check), ("update", update)) if v}}
+
+
+CASES = {
+    "no agent": {"hw": HW, "host": _host(available=False)},
+    "a launcher's": {"hw": {**HW, "restartable": False}, "host": _host(available=False)},
+    "never checked": {"hw": HW, "host": _host()},
+    "checking": {"hw": HW, "host": _host(check={"asked_at": T1})},
+    "current": {"hw": HW, "host": _host(check={"asked_at": T0, "answered_at": T1, "outcome": "current"})},
+    "offered": {"hw": HW, "host": _host(offered="v0.3.1", check={
+        "asked_at": T0, "answered_at": T1, "outcome": "offered", "release": "v0.3.1"})},
+    "floor": {"hw": HW, "host": _host(check={"asked_at": T0, "answered_at": T1, "outcome": "floor"})},
+    "rewrite": {"hw": HW, "host": _host(check={"asked_at": T0, "answered_at": T1, "outcome": "rewrite"})},
+    "refused": {"hw": HW, "host": _host(check={"asked_at": T0, "answered_at": T1, "outcome": "refused"})},
+    "updating": {"hw": HW, "host": _host(offered="v0.3.1", update={"asked_at": T1}, check={
+        "asked_at": T0, "answered_at": T0, "outcome": "offered"})},
+    "update refused": {"hw": HW, "host": _host(offered="v0.3.1", check={
+        "asked_at": T0, "answered_at": T1, "outcome": "offered"}, update={
+        "asked_at": T1, "answered_at": T2, "outcome": "refused",
+        "detail": "the checkout has <b>local</b> changes"})},
+}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_blocks_rows_say_each_state_in_its_words():
+    fns = "\n".join(_block(head) for head in (
+        "function hwProfileName(hw) {", "function hwModelsRow(hw) {", "function hwSoftwareRow(hw, host) {"))
+    profiles = [{"nano": True, "profile": "lite"}, {"nano": False, "profile": "lite"},
+                {"nano": False, "profile": "full"}]
+    models = {
+        "on": {"models": "on", "models_switch": True, "restart_required": False},
+        "off": {"models": "off", "models_switch": False, "restart_required": False},
+        "turned on, not restarted": {"models": "off", "models_switch": True, "restart_required": True},
+        "absent in an image": {"models": "absent", "restartable": True},
+        "absent on a machine": {"models": "absent", "restartable": False},
+    }
+    driver = DRIVER % {"fns": fns, "profiles": json.dumps(profiles), "models": json.dumps(models),
+                       "cases": json.dumps(CASES)}
+    proc = subprocess.run([NODE, "-e", driver], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["names"] == ["Nano", "Lite", "Curator"]
+    assert out["models"] == {
+        "on": "AI models On Turn off",
+        "off": "AI models Off on this machine Turn on",
+        "turned on, not restarted": "AI models Off on this machine Turn off On from the next start of Sautium.",
+        "absent in an image": ("AI models Off — this install was set up without the models. "
+                               "On the machine, run: ./sautium setup --preset full"),
+        "absent on a machine": "AI models Not available: no AI models exist for this machine.",
+    }
+    said = {name: case["text"] for name, case in out["software"].items()}
+    head = "Sautium 0.3.0 · 4f2a91c0e7b3"
+    assert said == {
+        "no agent": f"{head} Updates: on the machine, run ./sautium update",
+        "a launcher's": head,
+        "never checked": f"{head} Check for updates",
+        "checking": f"{head} Checking…",
+        "current": f"{head} Check for updates Up to date · checked 2 h ago",
+        "offered": f"{head} Update to 0.3.1",
+        "floor": f"{head} Check for updates Checked less than an hour ago.",
+        "rewrite": (f"{head} Check for updates A newer release cannot be reached from this install. "
+                    "A fresh install moves to it."),
+        "refused": (f"{head} Check for updates A release offered to this node is not signed by a "
+                    "Sautium release key. Nothing was changed."),
+        "updating": f"{head} Updating… Sautium will stop and come back.",
+        "update refused": (f"{head} Update to 0.3.1 The update did not run: the checkout has "
+                           "&lt;b&gt;local&lt;/b&gt; changes"),
+    }
+    # The host's own sentence never becomes markup, and no button is offered mid-update
+    assert "<b>local</b>" not in out["software"]["update refused"]["raw"]
+    assert "<button" not in out["software"]["updating"]["raw"]
+    assert 'data-action="host-check" disabled' in out["software"]["checking"]["raw"]
+
+
+# -- the trail's three new marks (§4.1) ---------------------------------------------------------
+
+@pytest.fixture
+def trail(db, monkeypatch):
+    """The guidance rules over an account, with no scan, no notice and no
+    output question in the way."""
+    settings_router = pytest.importorskip("routers.settings")
+    monkeypatch.chdir(BACKEND)                 # main mounts static/ relative to its directory
+    import device_auth
+    import library_root
+    import main  # noqa: F401 — the trail reads its workers' state
+    from config import settings
+    account = {"yes": True}
+    monkeypatch.setattr(device_auth, "account_configured", lambda: account["yes"])
+    monkeypatch.setattr(settings_router, "_notices_state", lambda: {"items": []})
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("on", name="standard"))
+    monkeypatch.setattr(settings, "sautium_library_roots", "")
+    db.execute("INSERT INTO user_settings (key, value) VALUES ('output.type', '\"browser\"')")
+    db.execute("""INSERT INTO user_profile (id, email_verified) VALUES (1, FALSE)
+                  ON CONFLICT (id) DO UPDATE SET email_verified = FALSE""")
+
+    def tasks() -> list:
+        return [t for t in settings_router._guidance_state()["tasks"] if t != "analyse_library"]
+    return type("Trail", (), {"tasks": staticmethod(tasks), "db": db, "account": account,
+                              "router": settings_router, "settings": settings, "roots": library_root})
+
+
+def test_an_unverified_email_is_on_the_trail_until_it_is_verified(trail, monkeypatch):
+    assert trail.tasks() == ["verify_email"]
+    trail.db.execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    assert trail.tasks() == []                         # a state, never a visit
+    assert "verify_email" not in trail.router._GUIDANCE_DISMISSIBLE
+    trail.db.execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
+    trail.account["yes"] = False                       # no account yet: nothing to verify
+    assert trail.tasks() == []
+
+
+def test_on_a_node_that_runs_no_model_the_email_leads_the_trail(trail, monkeypatch, tmp_path):
+    trail.db.execute("DELETE FROM user_settings WHERE key = 'output.type'")
+    assert trail.tasks() == ["audio_output", "verify_email"]
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("off"))
+    assert trail.tasks() == ["verify_email", "audio_output"]
+
+
+def test_a_node_that_picks_its_folder_is_led_to_choose_one(trail, monkeypatch, tmp_path):
+    trail.db.execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    monkeypatch.setattr(trail.settings, "sautium_library_roots", str(tmp_path))
+    monkeypatch.setattr(trail.settings, "music_library_path", "")
+    assert trail.tasks() == ["music_folder"]
+    monkeypatch.setattr(trail.settings, "music_library_path", str(tmp_path))
+    assert trail.tasks() == []                         # cleared by the choice
+    assert "music_folder" not in trail.router._GUIDANCE_DISMISSIBLE
+
+
+def test_a_node_born_with_a_preset_is_shown_its_block_once(trail):
+    trail.db.execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    assert trail.tasks() == []                         # born with none: nothing to show
+    trail.db.execute("INSERT INTO user_settings (key, value) VALUES ('node.birth_preset', '\"nano\"')")
+    assert trail.tasks() == ["this_node"]
+    assert trail.router.post_guidance_seen("this_node")["tasks"] is not None
+    assert trail.tasks() == []                         # the visit retires it, for good
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_row_several_tasks_pass_through_is_marked_for_any_of_them():
+    driver = r"""
+'use strict';
+const els = %s.map(g => ({ dataset: { guide: g }, on: false, hasAttribute: () => false,
+                           classList: { toggle(_c, on) { this.el.on = on; } } }));
+els.forEach(el => { el.classList.el = el; });
+const document = { querySelectorAll: () => els };
+const attachGuidePuck = () => {}, detachGuidePuck = () => {};
+%s
+const out = {};
+for (const tasks of [[], ['verify_email'], ['this_node'], ['music_folder'], ['notices']]) {
+  guide._apply(tasks);
+  out[tasks.join() || 'none'] = els.map(el => el.on);
+}
+process.stdout.write(JSON.stringify(out));
+"""
+    start = SOURCE.index("\n  const guide = {") + 1
+    guide = SOURCE[start:SOURCE.index("\n  };\n", start) + len("\n  };\n")]
+    marks = ["*", "verify_email this_node", "analyse_library music_folder", "verify_email"]
+    proc = subprocess.run([NODE, "-e", driver % (json.dumps(marks), guide)],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "none": [False, False, False, False],
+        "verify_email": [True, True, False, True],
+        "this_node": [True, True, False, False],
+        "music_folder": [True, False, True, False],
+        "notices": [True, False, False, False]}
+    # The drawer's rows and the controls carry the marks
+    assert 'data-go="more/profile" data-guide="verify_email this_node"' in SOURCE
+    assert 'data-go="more/library" data-guide="analyse_library music_folder"' in SOURCE
+    assert 'data-action="choose-folder" data-guide="music_folder"' in SOURCE
+    assert '<div class="form-group" data-guide="this_node">' in SOURCE
+    assert SOURCE.count('data-row="email" data-guide="verify_email"') == 2

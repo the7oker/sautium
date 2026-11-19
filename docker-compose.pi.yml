@@ -11,7 +11,9 @@
 #   - the assistant's sessions inside ./data/claude (no ./data/claude_sessions
 #     over projects/: a Pi node never kept them apart);
 #   - the music folder is named in .env, MUSIC_LIBRARY_PATH — there is no
-#     default to guess on Linux;
+#     default to guess on Linux — or, on a node ./sautium set up, chosen in
+#     the Web UI under the roots its override mounts (host/compose.roots.yml,
+#     named in .env's COMPOSE_FILE; MUSIC_LIBRARY_PATH is then an empty folder);
 #   - PostgreSQL sized for a 16 GB board with an NVMe disk (below);
 #   - the backend on the host's own network (network_mode: host, since
 #     2026-11-15): it sees this machine's addresses as a launcher node does —
@@ -256,6 +258,11 @@ services:
       # map turns 8000 into 8800.
       UVICORN_PORT: 8800
       SAUTIUM_HOST_NETWORK: "1"
+      # What a node is born with on this machine (./sautium reads the machine
+      # and writes it to .env; backend/db_migrate.py reads it once, at the
+      # database's first migration pass): "nano" — no models, no streaming
+      # library, nothing passed on. Each is a switch in the Web UI afterwards.
+      SAUTIUM_BIRTH_PRESET: ${SAUTIUM_BIRTH_PRESET:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: http://127.0.0.1:8800
       # The checkout's .git, mounted beside the code (below)

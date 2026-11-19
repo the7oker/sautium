@@ -27,6 +27,7 @@ import claude_code
 import codex_cli
 import device_auth
 import gear_research_worker
+import host_channel
 import library_watch
 from config import settings as app_settings
 from database import get_db_context
@@ -427,6 +428,11 @@ _DEFAULTS: Dict[str, Any] = {
     # Guidance trail (see _guidance_state): set once the owner has been
     # taken to the Audio output picker, whatever they chose there.
     "guidance.audio_output_seen": False,
+    "guidance.this_node_seen":    False,
+    # The preset a node was born with (db_migrate._apply_birth_preset), a
+    # fact kept for the trail's one-time "this node" mark; None on a node
+    # born with none
+    "node.birth_preset":          None,
     "guidance.hqp_library_seen":  None,    # the HQPlayer address whose library block was shown
 }
 
@@ -993,6 +999,12 @@ def _sync_state() -> Dict[str, Any]:
     return {
         "p2p_enabled":             bool(_read("sync.p2p_enabled")),
         "pass_on":                 bool(_read("sync.pass_on")),
+        # The pass-on switch is shown where it matters: off, or on a node
+        # that was born small (hardware_profile.nano)
+        "nano":                    _nano(),
+        # This node has a host agent: its machine's diagnostics can be
+        # collected from the Support row (routers/host.py)
+        "host_agent":              host_channel.available(),
         "auto_interval_min":       _read("sync.auto_interval_min"),
         "announce_limit":          _read("sync.announce_limit"),
         "carry_limit":             _read("sync.carry_limit"),
@@ -1020,6 +1032,11 @@ def _sync_state() -> Dict[str, Any]:
     }
 
 
+def _nano() -> bool:
+    import hardware_profile
+    return hardware_profile.resolve().nano
+
+
 def _support_state() -> Dict[str, Any]:
     from desktop.p2p import diag_events
     with get_conn() as conn:
@@ -1027,6 +1044,9 @@ def _support_state() -> Dict[str, Any]:
         requests = diag_events.waiting_warrants(conn)
     return {
         "enabled":        bool(_read("support.diagnostics_enabled")),
+        # Only a launcher sends its event reports on its own; a Docker node
+        # keeps them until Support asks (P2P_NETWORK.md § Support diagnostics)
+        "sends_reports":  claude_code.is_launcher_mode(),
         "last_report_at": _read("support.last_report_at"),
         "last_bundle_at": _read("support.last_bundle_at"),
         "pending_events": pending,
@@ -1159,7 +1179,7 @@ def _audio_output_state() -> Dict[str, Any]:
 # control itself) and a trail whose steps disagree points nowhere.
 # The client owns only the route each id maps to.
 
-_GUIDANCE_DISMISSIBLE = {"audio_output", "notices", "hqp_library"}
+_GUIDANCE_DISMISSIBLE = {"audio_output", "notices", "hqp_library", "this_node"}
 _SIGNIN_NOTICES = {"claude_code.signed_out", "codex.signed_out"}
 
 
@@ -1223,6 +1243,27 @@ def _guidance_state() -> Dict[str, Any]:
 
     tasks: List[str] = []
 
+    # The account has no verified email (B-96): on a node that never earns
+    # its identity by computing it is the way to one, so it leads the trail
+    # there; on every other node it follows the rest. More tab, the Profile
+    # row, the Email row. Cleared by the verification — a state, never a
+    # visit.
+    unverified = _email_unverified()
+    if unverified and _nano():
+        tasks.append("verify_email")
+
+    # A node whose owner picks the music folder here has none yet: More tab,
+    # the Library row, the Music path row's Choose. Cleared by the choice.
+    import library_root
+    if library_root.picks() and not app_settings.music_library_path:
+        tasks.append("music_folder")
+
+    # A node born with a preset (db_migrate): its owner is shown, once, what
+    # the setup chose for the machine and where to change it — More tab, the
+    # Profile row, the Hardware profile block. Cleared by the visit.
+    if _read("node.birth_preset") and not _read("guidance.this_node_seen"):
+        tasks.append("this_node")
+
     # Nothing plays until an output is picked, and the picker is two
     # levels down. Cleared by VISITING it: an owner who looked and kept
     # what was there has decided, and a node that keeps nagging after
@@ -1268,7 +1309,18 @@ def _guidance_state() -> Dict[str, Any]:
                     and _read("guidance.hqp_library_seen") != f"{host}:{port}"):
                 tasks.append("hqp_library")
 
+    if unverified and "verify_email" not in tasks:
+        tasks.append("verify_email")
+
     return {"tasks": tasks}
+
+
+def _email_unverified() -> bool:
+    """This node has an account whose email is not verified (or has none)."""
+    if not device_auth.account_configured():
+        return False
+    row = db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+    return not (row and row.get("email_verified"))
 
 
 # Conditions with no ledger of their own (a vanished music folder, a missing
@@ -1299,7 +1351,7 @@ def _notices_state() -> Dict[str, Any]:
 
 
 _REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures",
-            "power.undervoltage")
+            "power.undervoltage", "update.result")
 
 
 def _login_failures_notice() -> Optional[Dict[str, Any]]:
@@ -1516,6 +1568,23 @@ def _notice_items() -> List[Dict[str, Any]]:
     login_failures = _login_failures_notice()
     if login_failures is not None:
         items.append(login_failures)
+    # A signed release newer than the one this node runs, as the host
+    # agent's last check found it (routers/host.py): the Update is one tap,
+    # in Profile's Hardware profile block
+    from routers import host as host_router
+    offered = host_router.offered_release()
+    if offered is not None:
+        items.append({"key": "update.available", "kind": "info", "since": offered["since"],
+                      "until": None, "data": {"release": offered["release"]}})
+    # How the last update ended (the node on the new release, or back on the
+    # one before): a report, dropped once seen
+    updated = host_router.update_report()
+    if updated is not None:
+        items.append({"key": "update.result",
+                      "kind": "info" if updated["outcome"] == "updated" else "warning",
+                      "since": updated["since"], "until": None,
+                      "data": {"outcome": updated["outcome"], "release": updated["release"],
+                               "running": _software()["version"]}})
     # A Raspberry Pi's supply dropped under its voltage since this start
     # (power_watch): a report, dropped once seen
     import power_watch
@@ -2287,7 +2356,50 @@ def _hardware_state() -> Dict[str, Any]:
     wanted = hardware_profile.models_switch()
     state["models_switch"] = wanted
     state["restart_required"] = profile.models != "absent" and wanted != profile.ml_available
+    # What this install carries beside the models (an image's build
+    # arguments, backend/Dockerfile.mac): a screen that would offer one says
+    # "set up without it" instead
+    from streaming import service as streaming_service
+    state["image"] = {"models": profile.models != "absent",
+                      "assistant_cli": shutil.which("claude") is not None,
+                      "streaming": streaming_service.demo_runtime()}
+    # The downloaded models on a node that runs none: its owner may remove them
+    if not profile.ml_available:
+        import model_cache
+        state["models_cache_bytes"] = model_cache.store_bytes()
+    state["machine"] = _machine_name()
+    state["software"] = _software()
+    # A node a restart policy holds (the image) can be restarted from here
+    from claude_code_runner import IN_DOCKER
+    state["restartable"] = IN_DOCKER
     return state
+
+
+_CPUINFO = "/proc/cpuinfo"
+
+
+def _machine_name() -> Optional[str]:
+    """The board as its kernel names it (a Raspberry Pi's "Model" line —
+    /proc/device-tree is masked in a container, /proc/cpuinfo is not); None
+    where the kernel names none."""
+    try:
+        with open(_CPUINFO, encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("Model"):
+                    return line.partition(":")[2].strip()[:80] or None
+    except OSError:
+        pass
+    return None
+
+
+def _software() -> Dict[str, Any]:
+    """What this node runs: the version its tree states (the release it was
+    cut for, desktop/build_common.py) and the checkout's commit."""
+    from config import build_identity
+    from desktop import updater
+    version = updater.installer_version()
+    return {"version": ".".join(map(str, version)) if version != (0, 0, 0) else None,
+            **build_identity()}
 
 
 @router.get("/hardware")
@@ -2315,6 +2427,39 @@ def put_models_switch(req: ModelsPrefs) -> Dict[str, Any]:
                             detail="This install was set up without the AI models")
     _write(hardware_profile.MODELS_SETTING, bool(req.on))
     return _hardware_state()
+
+
+@router.delete("/hardware/models/cache")
+def delete_models_cache() -> Dict[str, Any]:
+    """"Downloaded models · Remove", on a node that runs none: its owner's
+    explicit act on files in the node's own cache folder. Refused while a
+    model can still be loaded from them."""
+    import hardware_profile
+    import model_cache
+    if hardware_profile.resolve().ml_available:
+        raise HTTPException(status_code=409,
+                            detail="The models are in use: turn them off and restart Sautium first")
+    return {"freed_bytes": model_cache.remove_store()}
+
+
+@router.post("/restart")
+async def post_restart():
+    """"Restart Sautium": the backend ends its own process as a stop does —
+    its shutdown runs — and the container's restart policy starts it again.
+    Only where such a policy holds the node (the image); a launcher's
+    backend is the launcher's to restart. Any signed-in device may ask: it
+    can already do everything a signed-in device can."""
+    import os
+    import signal
+    from claude_code_runner import IN_DOCKER
+    if not IN_DOCKER:
+        raise HTTPException(status_code=409, detail="This node is restarted from its launcher")
+    from starlette.background import BackgroundTask
+    from starlette.responses import JSONResponse
+    logger.info("restart asked from the Web UI")
+    # Run once this answer has been sent: the stop closes every connection
+    return JSONResponse({"restarting": True},
+                        background=BackgroundTask(os.kill, os.getpid(), signal.SIGTERM))
 
 
 # ============================================================

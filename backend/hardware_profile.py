@@ -275,15 +275,9 @@ def _detect_hardware() -> tuple:
 
 
 def _auto_tier(device: str, accel_gb: float, ram_gb: float) -> str:
-    if device == "cuda":
-        tier = "full" if accel_gb >= 7.5 else "standard" if accel_gb >= 5.5 else "lite"
-    elif device == "mps":
-        tier = "full" if accel_gb >= 23 else "standard" if accel_gb >= 15 else "lite"
-    else:
-        tier = "lite"
-    if ram_gb < 12 and tier != "lite":
-        tier = PROFILES[PROFILES.index(tier) + 1]
-    return tier
+    """The one rule, shared with the launcher's wizard and the console setup."""
+    from desktop.machine_tier import auto_tier
+    return auto_tier(device, accel_gb, ram_gb)
 
 
 def _configured_profile() -> tuple:

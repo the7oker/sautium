@@ -35,9 +35,12 @@ and the job waits on that lock between reads (PlaybackHold) —
 wait is an event, not a poll, and a backend that dies takes its lock with
 it, so the job can never hang on a stale flag.
 
-There is deliberately no Web UI surface (removed 2026-09-14): a browser
-cannot receive a 3 GB file, and the password that keys it is typed where the
-file lands — the launcher, or the shell that owns the node.
+The Web UI makes a backup and never hands one over (since 2026-11-19,
+backend/backup_job.py: this same CLI as a child of the backend, the password
+through the credential box): the file stays in the node's backup folder and
+leaves by a disk or a share. There is deliberately no download (the surface
+of before was removed 2026-09-14): a browser cannot receive a 3 GB file, and
+the file holds the node's identity under the password's strength alone.
 """
 
 import argparse
