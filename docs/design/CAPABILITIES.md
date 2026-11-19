@@ -175,12 +175,12 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 ## 7. Assistant and MCP tools
 
 - [UI] Two selectable agents, Claude Code and OpenAI Codex, each driving the same MCP servers; API providers (Anthropic, OpenAI, an OpenAI-compatible endpoint) as the alternative — `claude_code_runner.py`; `codex_runner.py`; `providers/__init__.py: _init_providers`
-- **47 MCP tools** — `mcp/assistant_server.py`: 41 functions (`grep -c '^@mcp.tool'` → 41) and the six rows of `hqp_assistant.TOOLS`, registered from that table:
+- **48 MCP tools** — `mcp/assistant_server.py`: 42 functions (`grep -c '^@mcp.tool'` → 42) and the six rows of `hqp_assistant.TOOLS`, registered from that table:
 
 | Area | Tools |
 |---|---|
 | Search (7) | `search_tracks`, `search_similar`, `search_semantic`, `search_lyrics`, `search_artists`, `search_albums`, `search_genres` |
-| Catalogue (2) | `get_track_info`, `get_lyrics` |
+| Catalogue and player (3) | `get_track_info`, `get_lyrics`, `get_player_state` |
 | MusicBrainz and dumps (5) | `mb_resolve`, `mb_dump_status`, `mb_dump_download`, `lb_dump_status`, `lb_dump_download` |
 | Playback on the chosen output (6) | `play_track`, `play_album`, `play_similar`, `play_all`, `build_playlist`, `add_to_queue` |
 | HQPlayer transport (9) | `hqplayer_play`, `_pause`, `_stop`, `_next`, `_previous`, `_get_status`, `_volume_up`, `_volume_down`, `_set_volume` |
@@ -190,14 +190,14 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 | Gear (3) | `gear_advisor_report`, `gear_system_report`, `gear_add_candidate` |
 
 - [auto] A second, read-only PostgreSQL MCP server gives the agent the database. It, the assistant's own server and the API providers' `execute_query` log in as a role that reads the catalogue and nothing else — no settings, keys, conversations, friends or P2P ledgers — writes no table and creates nothing, on the launcher and on Docker; the backend ends the role's sessions when the agents' turns are over and at every start, and cancels `execute_query` at its deadline — `desktop/db_init.py: ASSISTANT_READS`; `desktop/config_manager.py: mcp_servers`, `generate_mcp_config`; `claude_code_runner.py: write_docker_mcp_config`, `library_turn`
-- [auto] The API providers get 40 tools of their own, `execute_query` among them — `tools/definitions.py`
+- [auto] The API providers get 41 tools of their own, `execute_query` among them — `tools/definitions.py`
 - [auto] Play tools take track UUIDs, so a phantom plays through them; `build_playlist` assembles a queue without starting it — `mcp/assistant_server.py: play_all`, `build_playlist`
 - [auto] The `hqplayer_*` tools refuse while another output is selected and while the benchmark holds HQPlayer; a transport or DSP tool also while its link refuses people — a build, one it did not finish, a silence — in the link's own words, and a reading tool that asks HQPlayer while HQPlayer builds (one that reads the state route also through a build it did not finish). They read HQPlayer and command it through the backend's routes, so the MCP server keeps no connection of its own — `mcp/assistant_server.py: _hqp_gate`, `_hqp_state`, `_hqp_transport`; the six filter and modulator tools through one route of their own, which refuses while HQPlayer builds and reads on through a silence or a build it did not finish — `routers/hqplayer.py: _assistant_read`
 - [auto] The six filter and modulator tools say what HQPlayer lists and what Sautium published of its measurements (the shipped atlas file, an entry once its release has a date — never the node's own copy), side by side and never ranked, and how each runs on this HQPlayer as measured here; both surfaces call one route — `hqp_assistant.py`; `routers/hqplayer.py: assistant`
 - [UI] Chat: sessions, a streamed reply that survives a dropped connection, tiles and track rows in replies that open and play — `POST /api/chat/sessions/{id}/messages`, `GET …/stream`; `static/app-shell.js` (blocks `artist`, `album`, `tracks`)
-- [auto] The assistant is told what is playing; it is not told which screen is open — `routers/chat.py: _get_player_context`
+- [auto] The assistant asks what is playing — the selected output, the track, a page of the queue — with `get_player_state`, whose names and titles come marked as data; no prompt carries them (since 2026-11-19). It is not told which screen is open — `assistant_queries.py: player_state`; `outside_text.py`
 - [auto] A turn is capped at 150 s. A Claude Code turn may use the assistant's own MCP servers and nothing else: no built-in tool exists, the user's own servers and connectors never load, and a tool outside that list is refused — `claude_code_runner.py: _tool_flags`. A Codex turn runs in a read-only sandbox with approvals refused, only the assistant's servers pre-approved, its shell and web tools off — `codex_runner.py: _base_flags`, `_DISABLED_FEATURES`
-- [auto] Chat titles, mix names and the AI canon tier are text in, text out: Claude Code and the API providers offer the model no tool; Codex offers no MCP server, shell or web, and keeps only the tools its harness cannot drop, inside its read-only sandbox; the canon tier never runs on Codex. A Claude Code call carries the data in its system prompt, where the CLI reads no file it names. A mix is named only by the provider the owner picked, so with no pick it stays "Mix" — `providers/__init__.py: complete_text`; `claude_code_runner.py: call_claude_code`; `routers/chat.py: picked_provider`
+- [auto] Chat titles, mix names and the AI canon tier are text in, text out: Claude Code and the API providers offer the model no tool; Codex offers no MCP server, shell or web, and keeps only the tools its harness cannot drop, inside its read-only sandbox; the canon tier never runs on Codex. A Claude Code call carries the data in its system prompt, where the CLI reads no file it names; every Claude Code call reads its system prompt from a file and a chat turn's message from stdin, so no text rides the command line (since 2026-11-19; Windows caps it at 32,767 characters, which the prompt alone had passed). A mix is named only by the provider the owner picked, so with no pick it stays "Mix" — `providers/__init__.py: complete_text`; `claude_code_runner.py: call_claude_code`; `routers/chat.py: picked_provider`
 - [UI][L] Agent sign-in without a console, from the Web UI or the wizard — `desktop/agent_login.py: AgentLogin`; `POST /api/settings/ai/claude/signin`, `/ai/codex/signin`
 
 ## 8. Gear advisor

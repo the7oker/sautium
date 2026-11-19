@@ -35,7 +35,7 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   owned files and phantom rows are corpus layers of the same query.
 - **AI assistant** — natural-language music discovery through an agent CLI
   (Claude Code or OpenAI Codex, selectable) driving two MCP servers: Sautium's
-  own (47 tools — search, playback, queue, HQPlayer DSP and its filters and
+  own (48 tools — search, playback, queue, HQPlayer DSP and its filters and
   modulators, gear, dump control)
   and a read-only PostgreSQL one, instead of a custom RAG pipeline. Pluggable
   LLM providers for the non-agent paths (Claude API, OpenAI,
@@ -121,7 +121,7 @@ Sautium node
 │   ├── canon/             identity, normalization and MusicBrainz-anchored canon
 │   ├── static/            Web UI (index.html + app-shell.js + player.js + tokens.css)
 │   └── p2p_app.py         the peer surface (own TLS, pinned to the node key)
-├── MCP servers            assistant (47 tools) + a read-only postgres one,
+├── MCP servers            assistant (48 tools) + a read-only postgres one,
 │                          spawned by the agent CLI beside the backend
 ├── Desktop launcher       CustomTkinter; owns UPnP + DHT for P2P
 │   └── p2p/               sync server, DHT, chat, NAT traversal, account identity,
@@ -483,7 +483,7 @@ sautium/
 │   ├── windows/, macos/            # first-run bootstraps of the two packages
 │   └── p2p/                        # sync server, DHT, chat, NAT traversal
 ├── mcp/
-│   ├── assistant_server.py         # MCP server (47 tools for the agent CLI)
+│   ├── assistant_server.py         # MCP server (48 tools for the agent CLI)
 │   ├── support_server.py           # support desk, reading tools (node text marked as data)
 │   ├── support_act_server.py       # support desk, acting tools — a server of their own
 │   └── support_desk.py             # what the two share: signed HTTP, node_text

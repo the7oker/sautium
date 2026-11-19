@@ -125,6 +125,14 @@ secret); a compromised build of the client. Exposure beyond the LAN — a
 "headless" mode, multiple users — is outside this model: it would need real
 per-user credentials, not only a TLS front.
 
+The assistant's instructions hold the product's own text alone (since
+2026-11-19): the names and titles it reads — a file's tags, a catalogue slice
+a stranger's node brought, a device's own name — reach the model only in a
+tool's answer, marked as data. That narrows what such text can make a model
+do; it does not make a model immune, which is why the assistant's tools are
+bounded as well: a fixed list per call, and a database role that reads the
+catalogue and nothing else.
+
 ## Secrets
 
 The node's Ed25519 identity and the API signing secret live in the identity

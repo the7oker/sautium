@@ -985,7 +985,7 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 |-------|------------|-----------|
 | Chat sessions | chat persistence behind `/api/chat/*` (`routers/chat.py`), rendered by `app-shell.js` | + named sessions, search history |
 | Message stream | existing AI provider (Claude / OpenAI) | — |
-| Invisible context payload | not built: the request is `{message}` and the server adds what is playing (`chat._get_player_context`) | + `{screen, entity_type, entity_id, route_hash}`, recent listening, current queue summary |
+| Invisible context payload | not built: the request is `{message}`; what is playing the assistant asks itself (`get_player_state`, since 2026-11-19) | + `{screen, entity_type, entity_id, route_hash}`, recent listening, current queue summary |
 | Provider selector | existing | — |
 
 ### Backend work required (summary)

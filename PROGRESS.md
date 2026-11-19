@@ -13,7 +13,7 @@ implementation details live in the code, DB and git history.
 | **P2** | Last.fm enrichment (bios, tags, similar; the album wiki fetch was removed 2026-06-09), text embeddings (BGE-M3), enhanced RAG | DONE |
 | **P3.1** | Audio feature extraction (librosa + CLAP zero-shot, no essentia) | DONE |
 | **P3.2** | HQPlayer control via XML protocol (port 4321) | DONE |
-| **P3.3** | MCP server for HQPlayer + PostgreSQL + search + gear (47 tools) | DONE |
+| **P3.3** | MCP server for HQPlayer + PostgreSQL + search + gear (48 tools) | DONE |
 | **P3.4** | Desktop launcher (CustomTkinter; Windows installer + macOS bundle as carriers) | DONE |
 | **P2P-P0..P4** | Launcher↔backend bridge, UUID v5 refactor, P2P sync, NAT traversal, account system, E2E chat, email CA | DONE — see `P2P_NETWORK.md` |
 
@@ -762,7 +762,9 @@ implementation details live in the code, DB and git history.
   built-in coding-agent prompt (the `--system-prompt` analog) and is
   re-read on every spawn, `exec resume` included (measured 2026-08-25);
   volatile player context prefixes the user message so the instructions
-  prefix stays cacheable. Until 2026-08-25 the prompt rode as AGENTS.md
+  prefix stays cacheable (until 2026-11-19: since then what plays is the
+  answer of the assistant tool `get_player_state`, in no prompt and no
+  message, SEC-S4). Until 2026-08-25 the prompt rode as AGENTS.md
   and every turn after the first ran WITHOUT it: `exec resume` takes no
   `--cd`, the process cwd fell back to the backend's (the repo, on the
   launcher), and codex told the model the AGENTS.md instructions "no

@@ -16,6 +16,7 @@ the id of a FILE and appears only where a file is the subject.
 import os
 import uuid as _uuid
 
+import outside_text
 from ensemble_instruments import present_instruments
 from hqplayer_client import format_time
 from sql_queries import best_rip_order, owned_rank
@@ -178,6 +179,89 @@ def hqp_transport_text(command: str, outcome: dict, **values) -> str:
     if outcome.get("ok"):
         return done.format(**values)
     return f"Failed to {failed}: {outcome.get('refusal') or 'HQPlayer did not confirm it'}"
+
+
+# What the node says of its outputs and its player (playback backends' `id`,
+# playback.base.PlayerStatus.state): its own words. Anything else is marked.
+_OUTPUT_TYPES = frozenset({"hqplayer", "dlna", "local", "browser"})
+_PLAYER_STATES = frozenset({"stopped", "paused", "playing", "stopping", "unknown", "disconnected"})
+QUEUE_PAGE_MAX = 200
+PLAYER_STATE_DOC = (
+    "What the user's player is doing: the selected audio output (and whether the hqplayer_* tools "
+    "work on it), the track playing and its position, and a page of the queue with each slot's "
+    "track UUID. Nothing else tells you what plays — call this whenever the answer depends on it "
+    "('this track', 'the queue', why playback does not start). Names and titles come marked as "
+    "data. queue_offset and queue_limit (1..200, default 50) page through a long queue.")
+
+
+def _uuid_or_none(value) -> str | None:
+    return next(iter(valid_uuids([value])), None)
+
+
+def player_state(status: dict, playlist: dict, offset: int = 0, limit: int = 50) -> str:
+    """get_player_state's answer from /api/player/status and /api/player/playlist:
+    the selected output, what plays and a page of the queue, as JSON — what the
+    node makes or checks plain, every name and title from outside marked
+    (outside_text). The output comes first because it decides which tools work
+    at all: the hqplayer_* family commands the HQPlayer device and refuses while
+    the sound goes elsewhere. The status names the selected output attached or
+    not (PlaybackManager.output_info) — the model needs it precisely when a
+    sleeping renderer or a stalled HQPlayer is why playback will not start."""
+    mark = outside_text.Answer()
+    out = status.get("output") or {}
+    otype = out.get("type")
+    state = status.get("state")
+    reporting = state not in ("disconnected", None)
+    answer = {
+        "notice": outside_text.NOTICE,
+        "output": {
+            "type": otype if otype is None or otype in _OUTPUT_TYPES else mark(otype),
+            "label": mark(out.get("label")),
+            "attached": bool(out.get("attached", reporting)),
+            "reporting": reporting,
+            "tools": ("HQPlayer transport/DSP tools are available." if otype == "hqplayer" else
+                      "hqplayer_* tools will refuse — use play_track / play_album / play_similar / "
+                      "add_to_queue, which follow this output."),
+        },
+    }
+    if not reporting:
+        return mark.dumps(answer)
+
+    slot = status.get("track_index")
+    current = slot - 1 if isinstance(slot, int) and slot >= 1 else None
+    answer["state"] = state if state in _PLAYER_STATES else mark(state)
+    answer["now_playing"] = None
+    if status.get("song"):
+        answer["now_playing"] = {
+            "track_id": _uuid_or_none(status.get("track_id")),
+            "title": mark(status["song"]),
+            "artist": mark(status.get("artist")),
+            "album": mark(status.get("album")),
+            "genre": mark(status.get("genre")),
+            "position": format_time(status.get("position") or 0),
+            "length": format_time(status.get("length") or 0),
+            "queue_index": current,
+        }
+
+    rows = playlist.get("tracks") or []
+    offset = max(0, int(offset))
+    limit = min(max(1, int(limit)), QUEUE_PAGE_MAX)
+    page = rows[offset:offset + limit]
+    answer["queue"] = {
+        "count": len(rows),
+        "offset": offset,
+        "more": offset + len(page) < len(rows),
+        "tracks": [{
+            "index": row.get("index"),
+            "track_id": _uuid_or_none(row.get("track_id")),
+            "artist": mark(row.get("artist")),
+            "title": mark(row.get("title")),
+            "album": mark(row.get("album")),
+            "duration_seconds": row.get("duration_seconds"),
+            "playing": row.get("index") == current,
+        } for row in page],
+    }
+    return mark.dumps(answer)
 
 
 _PH_LATERAL = """
