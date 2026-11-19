@@ -51,7 +51,7 @@ class PlaybackStatus:
     own metadata, process_speed) that the manager folds into the SSE
     payload; backends without authoritative metadata leave it empty and
     the queue item supplies the fields."""
-    state: str                          # stopped|paused|playing|stopping|unknown|disconnected
+    state: str                          # stopped|paused|playing|stopping|loading|unknown|disconnected
     position: float = 0.0
     length: float = 0.0
     queue_index: Optional[int] = None   # 1-based slot in the canonical queue

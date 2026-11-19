@@ -11,6 +11,7 @@ FileNotFoundError to Python)."""
 
 import importlib.util
 import io
+import os
 import json
 import re
 import subprocess
@@ -139,22 +140,28 @@ def test_a_long_queue_comes_in_pages_that_cover_it_whole():
     assert seen == list(range(500))
 
 
-# Measured 2026-11-19: Claude Code hands the model a stub past ~46,000 characters,
-# Codex cuts an answer of its model's 10,000-token policy in the middle.
-_WHOLE_ON_BOTH_CLIS = 20_000
+# Measured 2026-11-19: Claude Code stubs an answer whose JSON string passes
+# ~46,000 characters, Codex cuts one past ~46,000 UTF-8 bytes in the middle.
+_WHOLE_ON_BOTH_CLIS = 46_000
 
 
 @pytest.mark.parametrize("value", [
     "\U000e0041" * 500,             # tag characters: ten characters each once escaped
+    "\\" * 500,                       # a backslash: eight characters by Claude Code's measure
+    '"' * 500,
+    "\U0001F3B5" * 500,             # four bytes each, not escaped
+    "漢字" * 250,
     "x" * 58_000,                     # a file's tag has no length limit
     "Ordinary Title Of A Song",
-])
+], ids=["tags", "backslashes", "quotes", "emoji", "cjk", "long", "ordinary"])
 def test_no_outside_text_makes_the_answer_too_long_to_arrive_whole(value):
     status = {**_status(300, title=value, label=value), "artist": value, "album": value, "genre": value}
     rows = {"tracks": [{"index": i, "track_id": TRACK, "title": value, "artist": value, "album": value,
                         "duration_seconds": 1} for i in range(300)]}
     text = aq.player_state(status, rows, 0, 100)
-    assert len(text) < _WHOLE_ON_BOTH_CLIS
+    assert len(json.dumps(text, ensure_ascii=False)) < _WHOLE_ON_BOTH_CLIS
+    assert len(text.encode("utf-8")) < _WHOLE_ON_BOTH_CLIS
+    assert aq.answer_fits(text)
     answer = json.loads(text)
     assert answer["queue"]["tracks"] and answer["queue"]["next_offset"]
     title = answer["now_playing"]["title"]
@@ -298,7 +305,7 @@ def test_a_turn_with_a_long_queue_and_a_long_message_fits_a_windows_command_line
     assert "get_player_state" in prompt and b"\r\n" not in spawned["prompt"]
     assert not _leaks(prompt) and not _leaks(line)
     assert spawned["stdin"].closed
-    assert list(workdir.iterdir()) == []               # the prompt and message files went with the turn
+    assert list(workdir.iterdir()) == []               # the prompt file went with the turn
 
 
 class _Speaking(_Exited):
@@ -323,7 +330,7 @@ def test_a_turn_dropped_mid_answer_leaves_no_file(claude_turn, monkeypatch):
     monkeypatch.setattr(runner, "_spawn_claude", lambda cmd, stdin, **_: started)
     stream = chat._build_provider_stream("claude_code", 1, "hi", [], None)
     assert next(stream).text == "hi"
-    assert len(list(workdir.iterdir())) == 2            # the prompt and the message, while it runs
+    assert [p.name[:7] for p in workdir.iterdir()] == ["system-"]   # the message has no path
     stream.close()
     assert started.ended and list(workdir.iterdir()) == []
 
@@ -388,8 +395,7 @@ def test_a_call_whose_file_cannot_be_removed_keeps_its_answer(claude_turn, monke
     holds on Windows) leaves a file behind, never a good call reported as a
     failed one."""
     turn, _ = claude_turn
-    monkeypatch.setattr(runner.Path, "unlink", lambda self, missing_ok=False: (_ for _ in ()).throw(
-        PermissionError(13, "in use")))
+    monkeypatch.setattr(os, "unlink", lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "in use")))
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
         a, 0, json.dumps({"result": "ok", "session_id": "s", "is_error": False}).encode(), b""))
     monkeypatch.setattr(runner.claude_code.auth, "authenticated", lambda: None)

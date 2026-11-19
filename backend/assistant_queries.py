@@ -13,6 +13,7 @@ which owned rows and not-owned (streamable) rows both carry. `media_files.id` is
 the id of a FILE and appears only where a file is the subject.
 """
 
+import json
 import os
 import uuid as _uuid
 
@@ -187,14 +188,14 @@ _OUTPUT_TYPES = frozenset({"hqplayer", "dlna", "local", "browser"})
 _PLAYER_STATES = frozenset({"stopped", "paused", "playing", "stopping", "loading", "unknown",
                             "disconnected"})
 QUEUE_PAGE_MAX = 100
-# get_player_state's answer stays whole on both CLIs: Claude Code hands the
-# model a stub past ~46,000 characters and an error past ~65,000; Codex cuts
-# a tool answer to its model's 10,000-token policy in the middle (measured
-# 2026-11-19 on 2.1.241-2.1.316 and 0.149). An outside value can escape to ten
-# characters each, so each is cut, and the queue page ends at the budget.
+# get_player_state's answer stays whole on both CLIs, each by its own measure
+# (2026-11-19, 2.1.241-2.1.316 and codex 0.149): Claude Code stubs a tool
+# answer whose JSON string — the answer stringified once more, a backslash in
+# a title eight characters by then — passes ~46,000 characters; Codex cuts one
+# past ~46,000 UTF-8 bytes in the middle. Each outside value is cut, and a
+# queue page ends before either measure of the whole answer passes the budget.
 OUTSIDE_CUT = 200
-ANSWER_BUDGET = 16_000
-_ROW_FRAME = 140          # a queue row's keys, index, UUID, duration, flag
+ANSWER_BUDGET = 32_000
 PLAYER_STATE_DOC = (
     "What the user's player is doing: the selected audio output (and whether the hqplayer_* tools "
     "work on it), the track playing and its position, and a page of the queue with each slot's "
@@ -206,6 +207,12 @@ PLAYER_STATE_DOC = (
 
 def _uuid_or_none(value) -> str | None:
     return next(iter(valid_uuids([value])), None)
+
+
+def answer_fits(text: str) -> bool:
+    """`text` within ANSWER_BUDGET by both CLIs' measures (above)."""
+    return (len(json.dumps(text, ensure_ascii=False)) <= ANSWER_BUDGET
+            and len(text.encode("utf-8")) <= ANSWER_BUDGET)
 
 
 def player_state(status: dict, playlist: dict, offset: int = 0, limit: int = 50) -> str:
@@ -255,8 +262,8 @@ def player_state(status: dict, playlist: dict, offset: int = 0, limit: int = 50)
     rows = playlist.get("tracks") or []
     offset = max(0, int(offset))
     limit = min(max(1, int(limit)), QUEUE_PAGE_MAX)
-    spent = len(outside_text.NOTICE) + 700 + mark.cost(label, *(answer["now_playing"] or {}).values())
     tracks = []
+    answer["queue"] = {"count": len(rows), "offset": offset, "tracks": tracks, "next_offset": None}
     for row in rows[offset:offset + limit]:
         entry = {
             "index": row.get("index"),
@@ -267,13 +274,13 @@ def player_state(status: dict, playlist: dict, offset: int = 0, limit: int = 50)
             "duration_seconds": row.get("duration_seconds"),
             "playing": row.get("index") == current,
         }
-        spent += _ROW_FRAME + mark.cost(entry["artist"], entry["title"], entry["album"])
-        if tracks and spent > ANSWER_BUDGET:
-            break
         tracks.append(entry)
+        answer["queue"]["next_offset"] = offset + len(tracks)    # the longest form of the page
+        if len(tracks) > 1 and not answer_fits(mark.dumps(answer)):
+            tracks.pop()
+            break
     following = offset + len(tracks)
-    answer["queue"] = {"count": len(rows), "offset": offset, "tracks": tracks,
-                       "next_offset": following if following < len(rows) else None}
+    answer["queue"]["next_offset"] = following if following < len(rows) else None
     return mark.dumps(answer)
 
 

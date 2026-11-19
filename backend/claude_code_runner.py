@@ -386,20 +386,18 @@ def _system_prompt_file(text: str):
 def _turn_input(text: str):
     """A chat turn's message as the CLI's stdin (`-p` with no text reads it
     there): a file the child inherits open, so the account it runs as needs
-    no right to it. Not a pipe: the CLI gives up on stdin 3 s after it
-    starts if nothing has arrived, which a feeder held up that long would
-    miss (measured on 2.1.241-2.1.316); a file has its bytes there from the
-    start. Written as bytes — a text-mode pipe or file on Windows writes
-    "\n" as CRLF."""
-    fd, path = tempfile.mkstemp(prefix="message-", suffix=".txt",
-                                dir=agent_workdir("claude-agent"))
-    try:
-        with os.fdopen(fd, "w+b") as f:
-            f.write(text.encode("utf-8"))
-            f.seek(0)
-            yield f
-    finally:
-        _remove(path)
+    no right to it, and one the OS removes with its last handle — at once on
+    POSIX, at the close of the last handle on Windows (a child of the CLI
+    that inherited it included) — so no path is left to clean up, not even
+    by a crash. Not a pipe: the CLI gives up on stdin 3 s after it starts if
+    nothing has arrived, which a feeder held up that long would miss
+    (measured on 2.1.241-2.1.316); a file has its bytes there from the
+    start. Written as bytes — a text-mode file on Windows writes "\n" as
+    CRLF."""
+    with tempfile.TemporaryFile(prefix="message-", dir=agent_workdir("claude-agent")) as f:
+        f.write(text.encode("utf-8"))
+        f.seek(0)
+        yield f
 
 
 def call_claude_code(

@@ -77,10 +77,6 @@ class _Slot:
         self.index = index
 
 
-# A block's delimiters around its body: two marks of the form ⟦outside-text #<16 hex>⟧
-_MARKUP = 2 * (len(OPEN) + len(OUTSIDE) + len(" #") + 16 + len(CLOSE)) + 1
-
-
 class Answer:
     """One tool answer's outside values: `answer(value)` stands for a value
     in the structure being built, and `dumps` writes the structure as JSON
@@ -103,11 +99,6 @@ class Answer:
         self._bodies.append(escape(text[:self._cut]))
         self._dropped.append(max(0, len(text) - self._cut))
         return _Slot(len(self._bodies) - 1)
-
-    def cost(self, *values) -> int:
-        """About how many characters `values` take in the answer once written."""
-        return sum(len(self._bodies[v.index]) + _MARKUP + (40 if self._dropped[v.index] else 0)
-                   for v in values if isinstance(v, _Slot))
 
     def dumps(self, structure) -> str:
         tag = draw_tag(*self._bodies)
