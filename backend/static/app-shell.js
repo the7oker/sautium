@@ -15578,7 +15578,7 @@
             <span></span>
           </div>
           <div class="row-stack-value" style="${_cliSigninProse}">
-            Claude Code is not installed in this container. Rebuild the Sautium image (it bakes the CLI in), or use the <b>Sautium Desktop Launcher</b>.
+            This install was set up without Claude Code. On the machine, run <b>./sautium setup --assistant claude</b> (or rebuild the Sautium image, which bakes the CLI in), or use the <b>Sautium Desktop Launcher</b>.
           </div>
         </div>`;
     }
@@ -17661,7 +17661,8 @@
         <div class="form-row stacked"><div class="row-stack-sub">Albums and tracks you don't have — MusicBrainz discographies and Last.fm neighbours — browsable and streamable next to your library. Grows with what you listen to; never removed on its own.</div></div>
         <div class="form-row"><span class="form-label">Storage</span><span class="form-value mono">${empty ? 'Empty' : escapeProfileHtml(fmtBytes(ph.size_bytes))}</span></div>
         <div class="form-row"><span class="form-label">Discover new</span><button class="toggle ${ph.enabled ? 'on' : ''}" data-action="phantom-toggle" aria-pressed="${ph.enabled ? 'true' : 'false'}"><span class="knob"></span></button></div>
-        <div class="form-row stacked"><div class="row-stack-sub">Off: nothing new is added; what is here stays until you remove it.</div></div>
+        <div class="form-row stacked"><div class="row-stack-sub">Off: nothing new is added and nothing streams; what is here stays until you remove it.</div></div>
+        ${ph.demo_runtime === false ? `<div class="form-row stacked"><div class="row-stack-sub">This install was set up without the full-length channel's runtime: tracks stream as 30-second excerpts. On the machine, run ./sautium setup --preset full</div></div>` : ''}
       </div>
       <div data-phantom-actions>${actions}</div>`;
   }
