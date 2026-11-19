@@ -312,6 +312,20 @@ def test_the_hosts_request_is_signed_as_the_nodes_door_checks_it(checkout, monke
     assert setup.signed_get("/api/auth/pin") is None                   # no secret: nothing is sent unsigned
 
 
+def test_a_tailnets_funnel_and_key_are_read_from_tailscales_own_answers():
+    assert setup.funnel_on('{"AllowFunnel": {"node.example.ts.net:443": true}}', "")
+    assert not setup.funnel_on('{"TCP": {"443": {"HTTPS": true}}}', "")           # served on the tailnet only
+    assert not setup.funnel_on('{"AllowFunnel": {"node.example.ts.net:443": false}}', "")
+    assert not setup.funnel_on("{}", "") and not setup.funnel_on("null", "No serve config")
+    # A CLI that prints no JSON: the words of its status
+    assert setup.funnel_on("", "# Funnel on:\n#     - https://node.example.ts.net")
+    assert not setup.funnel_on("", "No serve config")
+    assert setup.key_expiry('{"Self": {"KeyExpiry": "2027-05-17T09:30:00Z"}}') == "2027-05-17"
+    assert setup.key_expiry('{"Self": {"KeyExpiry": "2027-05-17T09:30:00.123456789+02:00"}}') == "2027-05-17"
+    for none in ('{"Self": {}}', "{}", "", "[]", '{"Self": {"KeyExpiry": "\u001b[31msoon"}}'):
+        assert setup.key_expiry(none) is None, none
+
+
 # -- root ------------------------------------------------------------------------------------
 
 def test_the_setup_refuses_root_and_runs_no_sudo(monkeypatch, capsys):
@@ -546,6 +560,23 @@ def test_the_data_goes_only_after_the_nodes_nickname(installed, monkeypatch, cap
     assert not (installed.root / "data").exists() and not (installed.root / ".env").exists()
     assert installed.root.exists()                                     # the folder itself is the person's to delete
     assert "rm -rf " in capsys.readouterr().out
+
+
+def test_status_says_what_is_there_and_changes_nothing(installed, monkeypatch, capsys):
+    monkeypatch.setattr(setup, "docker_state", lambda: ("ok", "Docker 29.1 with Compose 2.40."))
+    monkeypatch.setattr(setup.agent, "head", lambda root: "c" * 40)
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:local")
+    monkeypatch.setattr(setup, "tailnet_address", lambda: "100.64.0.10")
+    monkeypatch.setattr(setup, "undervoltage_now", lambda: False)
+    (installed.root / "host" / "compose.roots.yml").write_text(setup.roots_override([str(installed.root.parent)]))
+    before = sorted(p.name for p in (installed.root / "host").iterdir())
+    assert setup.main(["status"]) == 0
+    said = capsys.readouterr().out
+    assert f"Music root: {installed.root.parent}  there" in said
+    assert "Tailscale: this machine is 100.64.0.10" in said and "Funnel is on" not in said
+    assert sorted(p.name for p in (installed.root / "host").iterdir()) == before
+    asked = [" ".join(a) for a in installed.asked]
+    assert not any(word in line for line in asked for word in (" up", " down", " stop", " rm", "sudo")), asked
 
 
 def test_the_wrapper_runs_the_setup_isolated():

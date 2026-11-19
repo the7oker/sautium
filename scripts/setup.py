@@ -36,7 +36,6 @@ import secrets
 import shlex
 import shutil
 import socket
-import stat
 import subprocess
 import sys
 import time
@@ -699,6 +698,27 @@ def tailnet_address() -> Optional[str]:
     return None
 
 
+def funnel_on(serve_json: str, status_text: str) -> bool:
+    """Whether Tailscale Funnel publishes anything of this machine: its
+    serve configuration's AllowFunnel map, else the words of its status."""
+    try:
+        allowed = json.loads(serve_json).get("AllowFunnel")
+    except (ValueError, AttributeError):
+        return "Funnel on" in status_text
+    return isinstance(allowed, dict) and any(allowed.values())
+
+
+def key_expiry(status_json: str) -> Optional[str]:
+    """The day this machine's tailnet key expires, where Tailscale names one
+    (a key with expiry disabled has none)."""
+    try:
+        expiry = json.loads(status_json)["Self"]["KeyExpiry"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})T[0-9:.]+(?:Z|[+-]\d{2}:\d{2})", str(expiry))
+    return match.group(1) if match else None
+
+
 def read_small(path: Path) -> Optional[bytes]:
     """A file a container wrote, as a stranger's bytes: no link followed, a
     regular file only, bounded; None for anything else."""
@@ -973,19 +993,21 @@ def cmd_status(args) -> int:
         say("  " + line)
     say(f"Host agent: {'installed' if (agent.host_dir(ROOT) / 'bin' / 'sautium-host-agent').exists() else 'not installed'}"
         f" · lingering {'on' if lingering() else 'off (updates run only while you are signed in)'}")
-    env = agent.read_env(ROOT / ".env")
-    roots = [r for r in env.get("SAUTIUM_SETUP_ROOTS", "").split(":") if r] + (
-        [AUTOMOUNT_BASE] if automount_installed() else [])
-    for root in roots:
+    for root in held_roots(ROOT / ROOTS_OVERRIDE):
         say(f"Music root: {root}  {'there' if os.path.isdir(root) else 'NOT THERE'}")
     for line in out(run(["findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS", "-R", AUTOMOUNT_BASE])).splitlines():
         say("  mounted: " + line)
     tailnet = tailnet_address()
     if tailnet:
         say(f"Tailscale: this machine is {tailnet} on a tailnet; Sautium answers there too.")
-        if "Funnel on" in out(run(["tailscale", "funnel", "status"])):
+        if funnel_on(out(run(["tailscale", "funnel", "status", "--json"])),
+                     out(run(["tailscale", "funnel", "status"]))):
             say("  WARNING: Tailscale Funnel is on. Sautium must never be reachable from the open "
                 "internet: turn Funnel off (tailscale funnel reset).")
+        expiry = key_expiry(out(run(["tailscale", "status", "--json"])))
+        if expiry:
+            say(f"  This machine's Tailscale key expires {expiry}: sign it in again before then, "
+                "or the address stops answering.")
     low = undervoltage_now()
     if low:
         say("Power: the supply is under its voltage right now.")

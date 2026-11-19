@@ -25,7 +25,6 @@ Every other node — a launcher's, a Docker node whose folder is named in .env
 
 import logging
 import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from config import settings
