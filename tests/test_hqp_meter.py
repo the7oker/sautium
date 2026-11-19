@@ -553,6 +553,7 @@ def test_the_event_stream_says_hello_first_and_carries_the_meter_to_its_page(mon
     from routers import player as player_router
     from routers import settings as settings_router
     monkeypatch.setattr(settings_router, "_notices_state", lambda: {})
+    monkeypatch.setattr(settings_router, "identity_event", lambda: {"status": None})
     hqp_meter.meter.detach()                     # no HQPlayer attached in this process
 
     async def run():
@@ -560,6 +561,7 @@ def test_the_event_stream_says_hello_first_and_carries_the_meter_to_its_page(mon
         assert await stream.__anext__() == 'data: {"t": "hello"}\n\n'
         assert json.loads((await stream.__anext__())[6:])["t"] == "status"
         assert json.loads((await stream.__anext__())[6:])["t"] == "notice"
+        assert json.loads((await stream.__anext__())[6:])["t"] == "identity"
         assert hqp_meter.meter.want("page-1", True, 1)
         msg = json.loads((await asyncio.wait_for(stream.__anext__(), 3))[6:])
         assert msg == {"t": "meter", "d": {"state": "waiting"}}     # no HQPlayer attached here
