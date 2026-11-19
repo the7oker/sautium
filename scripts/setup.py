@@ -964,6 +964,19 @@ def boot_mount_block(music: str, found: dict) -> None:
     say()
 
 
+def mounted_outside_fstab(real: str) -> Optional[str]:
+    """The mount point of the disk `real` lies on, where that disk is not the
+    system's own and no line of /etc/fstab mounts it: after a restart of the
+    machine the folder is not there until someone mounts the disk again, and
+    the node — which is given the folder itself — does not start without it."""
+    target = out(run(["findmnt", "-n", "-o", "TARGET", "-T", real])).splitlines()
+    if not target or target[0] in ("", "/"):
+        return None
+    if run(["findmnt", "--fstab", "-n", target[0]]).returncode == 0:
+        return None
+    return target[0]
+
+
 def desktop_mounted(real: str) -> bool:
     """A folder on a disk the desktop mounts for the person signed in to it:
     under /media/<user>/ or /run/media/<user>/."""
@@ -1073,6 +1086,10 @@ def cmd_setup(args) -> int:
 
     if not by_line:
         roots = chosen_roots(args.music, held_roots(ROOT / ROOTS_OVERRIDE), m.get("docker_root"))
+        loose = mounted_outside_fstab(os.path.realpath(args.music)) if args.music else None
+        if loose:
+            say(f"Note: {args.music} is on a disk mounted at {printable(loose)}, which no line of /etc/fstab mounts.")
+            say("After a restart of this machine Sautium starts only once that disk is mounted again.")
         agent._write_private(ROOT / ROOTS_OVERRIDE, roots_override(roots).encode(), 0o644)
         (ROOT / "data" / "no-library").mkdir(parents=True, exist_ok=True)
     assistant = args.assistant or ("claude" if held.get("SAUTIUM_IMAGE_ASSISTANT_CLI") == "1" else "none")

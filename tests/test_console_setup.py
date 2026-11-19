@@ -216,6 +216,28 @@ def test_a_first_run_makes_a_node_that_picks_its_folder(machine_ready, tmp_path)
     assert setup.load_state()["done"] is True
 
 
+def test_a_folder_on_a_disk_no_fstab_line_mounts_is_said(machine_ready, monkeypatch, tmp_path, capsys):
+    music = tmp_path / "Music"
+    music.mkdir()
+    answers = {("findmnt", "-n", "-o", "TARGET", "-T"): (0, b"/mnt/usb\n"), ("findmnt", "--fstab", "-n"): (1, b"")}
+
+    def run(args, **kw):
+        code, said = next((v for k, v in answers.items() if tuple(args[:len(k)]) == k), (0, b""))
+        return subprocess.CompletedProcess(args, code, said, b"")
+    monkeypatch.setattr(setup, "run", run)
+    assert setup.mounted_outside_fstab(str(music)) == "/mnt/usb"
+    assert setup.main(["--music", str(music), "--yes"]) == 0
+    assert "is on a disk mounted at /mnt/usb, which no line of /etc/fstab mounts" in capsys.readouterr().out
+    # The system's own disk, or one fstab mounts: nothing to say
+    answers[("findmnt", "--fstab", "-n")] = (0, b"/mnt/usb /dev/sda1 ext4\n")
+    assert setup.mounted_outside_fstab(str(music)) is None
+    answers[("findmnt", "-n", "-o", "TARGET", "-T")] = (0, b"/\n")
+    answers[("findmnt", "--fstab", "-n")] = (1, b"")
+    assert setup.mounted_outside_fstab(str(music)) is None
+    assert setup.main(["--music", str(music), "--yes"]) == 0
+    assert "no line of /etc/fstab" not in capsys.readouterr().out
+
+
 def test_an_install_made_by_hand_keeps_its_music_line(machine_ready, monkeypatch, tmp_path, capsys):
     """Its files keep their paths: the setup gives it no roots, no folder to
     pick and no automount, and --music is refused with the way to change over."""
